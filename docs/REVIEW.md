@@ -1,10 +1,27 @@
 # Review and validation — 2026-10-10
 
 The adapter now uses one page-map implementation: an adaptive-height, 256-way
-radix tree with its root embedded in the snapshot head. Backend mutations run one
-at a time; independent reads can overlap. The caller drives the engine directly,
-without a worker thread. This is an author review supported by
-executed tests, not an independent audit.
+radix tree with its root embedded in the snapshot head. Save phases are ordered;
+mutations within a phase run concurrently. An optional object cache is shared
+across sessions. The caller drives the engine directly, without a worker thread.
+This is an author review supported by executed tests, not an independent audit.
+
+## Concurrent phases and object cache
+
+- Object puts, retirement deletes and recovery deletes run concurrently within
+  their phase, at most 16 at a time, so latency grows with ⌈objects/16⌉ instead
+  of the object count. Phases stay ordered. After the first error no mutation
+  starts and running ones are drained; same-key requests never overlap.
+- `ObjectCache` is an optional byte-bounded LRU of encoded committed objects,
+  shared by successive sessions of one namespace. It caches values read through
+  a recovered head and a save's objects once its head put is acknowledged, and
+  never objects of an unacknowledged attempt, whose IDs recovery may reuse. A
+  test reuses such IDs from a session without the cache and fails if
+  uncommitted objects are cached.
+- Code cleanup: typed object kinds replace strings, the snapshot keeps its
+  decoded `Head`, mutations are plain data applied by one function (keeping
+  futures `Send`), block-splitting loops and yield helpers are shared, and
+  simulator counters derivable from per-kind traffic were removed.
 
 ## Map decision
 
@@ -33,16 +50,16 @@ No real-backend latency improvement is claimed by these simulator measurements.
   by a different retry. Sparse growth, collapse and exact reclamation remain tested.
 - Added head validation coverage for truncation, malformed roots, inconsistent
   heights, trailing data and out-of-range object IDs.
-- Removed the write-concurrency option. Intent, object and head puts and all
-  cleanup/recovery deletes are serial, stopping at the first error. The complete
-  intent permits recovery to delete even planned objects that were never written.
+- Removed the write-concurrency option. The complete intent permits recovery to
+  delete even planned objects that were never written.
 - Read head and intent together during quiescent open. The engine I/O pump runs
   adjacent queued reads in batches of at most 16; writes, truncation and sync are
   ordering barriers. Dependent map traversal within one read remains sequential.
 - Added gated-backend tests for overlapping reads, barrier ordering, draining
   after an ordinary error and retiring completions on cancellation, including a
-  dequeued future that is never polled. Serial-mutation tests cover both aborted
-  allocation cleanup and successful retirement with exact orphan accounting.
+  dequeued future that is never polled. Phase tests cover bounded overlap,
+  phase ordering, draining after an object error, aborted allocation cleanup
+  and retirement with exact orphan accounting.
 - Added module/type/method rustdoc covering binary layouts, overlay state, caches,
   allocation and retirement, publication durability, uncertain outcomes and host
   ownership. The crate overview explains immutable pages plus a radix map against
@@ -92,8 +109,8 @@ Rust/Cargo 1.90.0, locked dependencies, Linux x86_64.
 
 | Check | Outcome |
 |---|---|
-| `cargo test --locked --no-default-features` | 8 tests and one compile-checked rustdoc example pass |
-| `cargo test --locked --features simulation` | 54 tests pass: 33 unit, 20 integration, one public API; one rustdoc example also passes |
+| `cargo test --locked --no-default-features` | 10 tests and one compile-checked rustdoc example pass |
+| `cargo test --locked --features simulation` | 59 tests pass: 36 unit, 22 integration, one public API; one rustdoc example also passes |
 | Interruption campaigns | 1355 cases across the one supported map |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
@@ -104,9 +121,9 @@ Rust/Cargo 1.90.0, locked dependencies, Linux x86_64.
 | Both benchmark analyzers | Pass on current-format evidence |
 
 The interruption total includes 28 checkpoint, 48 tree-rewrite, 380 read,
-9 serial-object-error, 16 recovery-read, 10 repeated-cleanup, 468 publication
-and 396 interrupted-recovery cases. The former write-concurrency settings no
-longer multiply the same object-error campaign; the only supported value is one.
+9 object-error, 16 recovery-read, 10 repeated-cleanup, 468 publication
+and 396 interrupted-recovery cases. The object-error campaign checks that a failed
+phase drains and that object puts overlap.
 
 ## Remaining limits
 

@@ -2,7 +2,7 @@ use crate::io::BLOCK_SIZE;
 async fn assert_no_orphans(store: Arc<MemoryKv>) -> io::Result<()> {
     let snapshot = Snapshot::open(store.clone()).await?;
     let mut expected = snapshot.reachable().await?;
-    if snapshot.original_head.is_some() {
+    if snapshot.head_bytes.is_some() {
         expected.insert(HEAD.to_owned());
     }
     assert_eq!(store.keys(), expected, "untracked objects remain");
@@ -10,7 +10,7 @@ async fn assert_no_orphans(store: Arc<MemoryKv>) -> io::Result<()> {
 }
 
 use super::*;
-use crate::simulation::{MemoryKv, yield_once};
+use crate::{pending::MAX_MUTATIONS_IN_FLIGHT, simulation::MemoryKv, yield_now};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn options() -> StorageOptions {
@@ -28,8 +28,9 @@ fn mixed_page_codecs_survive_policy_changes_and_reclamation() -> io::Result<()> 
         let store = Arc::new(MemoryKv::default());
         let raw = StorageOptions {
             page_compression: PageCompression::Raw,
+            ..StorageOptions::default()
         };
-        Snapshot::open_with_options(store.clone(), raw)
+        Snapshot::open_with_options(store.clone(), raw.clone())
             .await?
             .publish(
                 Changes::from([(0, Some(page(1))), (1, Some(page(2)))]),
@@ -38,7 +39,7 @@ fn mixed_page_codecs_survive_policy_changes_and_reclamation() -> io::Result<()> 
             .await?;
         let snapshot = Snapshot::open_with_options(store.clone(), options()).await?;
         let raw_id = snapshot.block_id(0).await?.unwrap();
-        assert_eq!(store.get(&key("block", &raw_id)).await?.unwrap()[0], 0);
+        assert_eq!(store.get(&Kind::Block.key(raw_id)).await?.unwrap()[0], 0);
         snapshot
             .publish(
                 Changes::from([(1, Some(page(3))), (2, Some(page(4)))]),
@@ -46,17 +47,17 @@ fn mixed_page_codecs_survive_policy_changes_and_reclamation() -> io::Result<()> 
             )
             .await?;
         store.crash(&[]);
-        let snapshot = Snapshot::open_with_options(store.clone(), raw).await?;
+        let snapshot = Snapshot::open_with_options(store.clone(), raw.clone()).await?;
         let compressed_id = snapshot.block_id(1).await?.unwrap();
         assert_eq!(
-            store.get(&key("block", &compressed_id)).await?.unwrap()[0],
+            store.get(&Kind::Block.key(compressed_id)).await?.unwrap()[0],
             1
         );
         for (index, n) in [(0, 1), (1, 3), (2, 4)] {
             assert_eq!(snapshot.block(index).await?, Some(page(n)));
         }
         store.reset_stats();
-        snapshot.publish(Changes::new(), snapshot.size).await?;
+        snapshot.publish(Changes::new(), snapshot.head.size).await?;
         assert_eq!(
             store.stats().puts + store.stats().deletes,
             0,
@@ -96,7 +97,7 @@ fn failed_page_decode_is_not_cached_and_invalid_save_has_no_mutations() -> io::R
             .publish(Changes::from([(0, Some(page(1)))]), 4096)
             .await?;
         let snapshot = Snapshot::open(store.clone()).await?;
-        let k = key("block", &snapshot.block_id(0).await?.unwrap());
+        let k = Kind::Block.key(snapshot.block_id(0).await?.unwrap());
         let valid = store.get(&k).await?.unwrap();
         assert_eq!(valid[0], 1);
         // A structurally valid compressed stream with the wrong decoded size.
@@ -146,7 +147,7 @@ fn missing_and_malformed_pages_are_not_cached() -> io::Result<()> {
             .publish(Changes::from([(0, Some(page(1)))]), 4096)
             .await?;
         let snapshot = Snapshot::open(store.clone()).await?;
-        let block_key = key("block", &snapshot.block_id(0).await?.unwrap());
+        let block_key = Kind::Block.key(snapshot.block_id(0).await?.unwrap());
         // Deliberately violate immutability to simulate a repaired failed read.
         store.delete(&block_key).await?;
         assert!(snapshot.block(0).await.is_err());
@@ -232,7 +233,7 @@ fn changed_paths_reuse_untouched_objects() -> io::Result<()> {
                         .iter()
                         .map(|i| (*i, Some(page(i + 10000))))
                         .collect(),
-                    snapshot.size,
+                    snapshot.head.size,
                 )
                 .await?;
             let stats = store.stats();
@@ -304,14 +305,14 @@ fn sparse_growth_deletion_and_empty_reuse_leave_no_orphans() -> io::Result<()> {
             assert_eq!(snapshot.block(*i).await?, Some(p.clone()));
         }
         assert!(snapshot.block(63).await?.is_none());
-        let counter = snapshot.last_id;
+        let counter = snapshot.head.last_id;
         // Empty snapshot still carries counter. Save removes every object.
         snapshot
             .publish(expected.keys().map(|i| (*i, None)).collect(), 0)
             .await?;
         let empty = Snapshot::open(store.clone()).await?;
-        assert!(empty.last_id >= counter);
-        let old_counter = empty.last_id;
+        assert!(empty.head.last_id >= counter);
+        let old_counter = empty.head.last_id;
         drop(empty);
         assert_no_orphans(store.clone()).await?;
         assert_eq!(store.block_count(), 0);
@@ -321,7 +322,7 @@ fn sparse_growth_deletion_and_empty_reuse_leave_no_orphans() -> io::Result<()> {
             .await?;
         store.crash(&[]);
         let restored = Snapshot::open(store).await?;
-        assert!(restored.last_id > old_counter);
+        assert!(restored.head.last_id > old_counter);
         assert_eq!(restored.block(0).await?, Some(page(902)));
         Ok(())
     })
@@ -337,26 +338,26 @@ fn orphan_ids_are_reused_and_exhaustion_precedes_all_mutations() -> io::Result<(
             .await?;
         let committed = store.get(HEAD).await?.unwrap();
         let snapshot = Snapshot::open(store.clone()).await?;
-        let high = snapshot.last_id;
+        let high = snapshot.head.last_id;
         // Interrupted attempt: intent is durable before either new object.
         let mut attempted_head = committed.clone();
         attempted_head[12..20].copy_from_slice(&(high + 2).to_le_bytes());
         let intent = PendingSave {
             old_head: Some(committed.clone()),
             new_head: attempted_head,
-            created: Objects::from([("block", high + 1), ("block", high + 2)]),
+            created: Objects::from([(Kind::Block, high + 1), (Kind::Block, high + 2)]),
             retired: Objects::new(),
         };
         store.put(PENDING, intent.encode()?).await?;
         store
             .put(
-                &key("block", &(high + 1)),
+                &Kind::Block.key(high + 1),
                 page_codec::encode(&page(999), PageCompression::Lz4)?,
             )
             .await?;
         store
             .put(
-                &key("block", &(high + 2)),
+                &Kind::Block.key(high + 2),
                 page_codec::encode(&page(998), PageCompression::Lz4)?,
             )
             .await?;
@@ -367,7 +368,7 @@ fn orphan_ids_are_reused_and_exhaustion_precedes_all_mutations() -> io::Result<(
             .publish(Changes::from([(0, Some(page(2)))]), 4096)
             .await?;
         assert_eq!(
-            page_codec::decode(&store.get(&key("block", &(high + 1))).await?.unwrap())?,
+            page_codec::decode(&store.get(&Kind::Block.key(high + 1)).await?.unwrap())?,
             page(2)
         );
         store.crash(&[]);
@@ -391,107 +392,146 @@ fn orphan_ids_are_reused_and_exhaustion_precedes_all_mutations() -> io::Result<(
     })
 }
 
-struct SerialKv {
+/// Records mutation overlap and the phase ordering of one save.
+struct PhaseKv {
     inner: MemoryKv,
-    active: AtomicUsize,
+    active: Mutex<BTreeSet<String>>,
     maximum: AtomicUsize,
-    finished: Mutex<Vec<u64>>,
+    /// Keys in acknowledgement order.
+    finished: Mutex<Vec<String>>,
+    started: AtomicUsize,
+    /// Mutations started when the injected error was returned.
+    started_at_error: AtomicUsize,
     fail_id: Option<u64>,
 }
-struct Active<'a>(&'a AtomicUsize);
+struct Active<'a>(&'a PhaseKv, String);
 impl Drop for Active<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.0.active.lock().unwrap().remove(&self.1);
     }
 }
-impl SerialKv {
-    fn mutation(&self) -> Active<'_> {
-        let n = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-        assert_eq!(n, 1, "overlapping backend mutations");
-        self.maximum.fetch_max(n, Ordering::SeqCst);
-        Active(&self.active)
+impl PhaseKv {
+    fn new(fail_id: Option<u64>) -> Self {
+        Self {
+            inner: MemoryKv::default(),
+            active: Mutex::default(),
+            maximum: AtomicUsize::new(0),
+            finished: Mutex::default(),
+            started: AtomicUsize::new(0),
+            started_at_error: AtomicUsize::new(0),
+            fail_id,
+        }
+    }
+    fn mutation(&self, key: &str) -> Active<'_> {
+        let mut active = self.active.lock().unwrap();
+        assert!(
+            active.insert(key.to_owned()),
+            "overlapping mutations of {key}"
+        );
+        self.started.fetch_add(1, Ordering::SeqCst);
+        self.maximum.fetch_max(active.len(), Ordering::SeqCst);
+        Active(self, key.to_owned())
+    }
+    fn finished(&self) -> Vec<String> {
+        self.finished.lock().unwrap().clone()
     }
 }
-impl KvStore for SerialKv {
+impl KvStore for PhaseKv {
     fn get<'a>(&'a self, k: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
         self.inner.get(k)
     }
     fn delete<'a>(&'a self, k: &'a str) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move {
-            let _active = self.mutation();
-            yield_once().await;
-            self.inner.delete(k).await
+            let _active = self.mutation(k);
+            yield_now().await;
+            self.inner.delete(k).await?;
+            self.finished.lock().unwrap().push(k.to_owned());
+            Ok(())
         })
     }
     fn put<'a>(&'a self, k: &'a str, v: Vec<u8>) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move {
-            let _active = self.mutation();
-            if k == HEAD || k == PENDING {
-                yield_once().await;
-                return self.inner.put(k, v).await;
-            }
-            let id = u64::from_str_radix(k.rsplit('/').next().unwrap(), 16).unwrap();
-            for _ in 0..(1 + (17 - id % 17)) {
-                yield_once().await;
-            }
-            if self.fail_id == Some(id) {
-                return Err(io::Error::other("injected object failure"));
+            let _active = self.mutation(k);
+            if let Some(id) = k.strip_prefix(Kind::Block.prefix()) {
+                // Uneven delays reorder completions within the phase.
+                let id = u64::from_str_radix(id, 16).unwrap();
+                for _ in 0..(1 + (17 - id % 17)) {
+                    yield_now().await;
+                }
+                if self.fail_id == Some(id) {
+                    let started = self.started.load(Ordering::SeqCst);
+                    self.started_at_error.store(started, Ordering::SeqCst);
+                    return Err(io::Error::other("injected object failure"));
+                }
+            } else {
+                yield_now().await;
             }
             self.inner.put(k, v).await?;
-            self.finished.lock().unwrap().push(id);
+            self.finished.lock().unwrap().push(k.to_owned());
             Ok(())
         })
     }
 }
 #[test]
-fn puts_and_cleanup_are_serial_and_stop_on_error() -> io::Result<()> {
+fn phase_mutations_overlap_but_phases_are_ordered() -> io::Result<()> {
     futures::executor::block_on(async {
-        for fail_id in [None, Some(3)] {
-            let store = Arc::new(SerialKv {
-                inner: MemoryKv::default(),
-                active: AtomicUsize::new(0),
-                maximum: AtomicUsize::new(0),
-                finished: Mutex::default(),
-                fail_id,
-            });
-            let snapshot = Snapshot::open_with_options(store.clone(), options()).await?;
-            let result = snapshot
-                .publish((0..40).map(|i| (i, Some(page(i)))).collect(), 40 * 4096)
-                .await;
-            assert_eq!(store.active.load(Ordering::SeqCst), 0);
-            assert_eq!(store.maximum.load(Ordering::SeqCst), 1);
-            let expected: Vec<_> = if fail_id.is_some() {
-                (1..3).collect()
-            } else {
-                (1..=40).collect()
-            };
-            assert_eq!(*store.finished.lock().unwrap(), expected);
-            if fail_id.is_some() {
-                assert!(result.is_err());
-                assert!(store.inner.get(HEAD).await?.is_none());
-                store.inner.crash(&[]);
-                drop(Snapshot::open(store.clone()).await?);
-                assert!(store.inner.keys().is_empty());
-            } else {
-                result?;
-                store.inner.crash(&[]);
-                let snapshot = Snapshot::open(store.clone()).await?;
-                for i in 0..40 {
-                    assert_eq!(snapshot.block(i).await?, Some(page(i)));
-                }
-                snapshot
-                    .publish(
-                        Changes::from([(0, Some(page(99))), (1, None)]),
-                        snapshot.size,
-                    )
-                    .await?;
-                let snapshot = Snapshot::open(store.clone()).await?;
-                let mut expected = snapshot.reachable().await?;
-                expected.insert(HEAD.to_owned());
-                assert_eq!(store.inner.keys(), expected, "untracked objects remain");
-                assert_eq!(store.maximum.load(Ordering::SeqCst), 1);
-            }
-        }
+        let store = Arc::new(PhaseKv::new(None));
+        let snapshot = Snapshot::open_with_options(store.clone(), options()).await?;
+        snapshot
+            .publish((0..40).map(|i| (i, Some(page(i)))).collect(), 40 * 4096)
+            .await?;
+        let maximum = store.maximum.load(Ordering::SeqCst);
+        assert!(
+            (2..=MAX_MUTATIONS_IN_FLIGHT).contains(&maximum),
+            "{maximum}"
+        );
+        let finished = store.finished();
+        let head = finished.iter().position(|k| k == HEAD).unwrap();
+        assert_eq!(finished[0], PENDING);
+        assert_eq!(finished[1..head].len(), 40);
+        assert_eq!(finished[head + 1..], [PENDING], "nothing to retire");
+
+        // Retirement deletes overlap too, after the head and before the intent.
+        store.finished.lock().unwrap().clear();
+        store.maximum.store(0, Ordering::SeqCst);
+        let snapshot = Snapshot::open(store.clone()).await?;
+        snapshot
+            .publish(
+                (0..40).map(|i| (i, Some(page(i + 100)))).collect(),
+                snapshot.head.size,
+            )
+            .await?;
+        let finished = store.finished();
+        let head = finished.iter().position(|k| k == HEAD).unwrap();
+        assert_eq!(finished.first().map(String::as_str), Some(PENDING));
+        assert_eq!(finished.last().map(String::as_str), Some(PENDING));
+        assert_eq!(finished[head + 1..finished.len() - 1].len(), 40);
+        assert!(store.maximum.load(Ordering::SeqCst) >= 2);
+        store.inner.crash(&[]);
+        assert_no_orphans(Arc::new(store.inner.clone())).await
+    })
+}
+#[test]
+fn object_error_drains_the_phase_and_never_publishes() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(PhaseKv::new(Some(3)));
+        let snapshot = Snapshot::open_with_options(store.clone(), options()).await?;
+        let result = snapshot
+            .publish((0..40).map(|i| (i, Some(page(i)))).collect(), 40 * 4096)
+            .await;
+        assert!(result.is_err());
+        assert!(store.active.lock().unwrap().is_empty(), "phase not drained");
+        let finished = store.finished();
+        assert!(!finished.contains(&HEAD.to_owned()));
+        // Running mutations finish, but the error stops further submissions
+        // well before the 40 planned object puts have all started.
+        let started = store.started.load(Ordering::SeqCst);
+        let at_error = store.started_at_error.load(Ordering::SeqCst);
+        assert!(started - at_error < MAX_MUTATIONS_IN_FLIGHT);
+        assert!(started < 1 + 40, "{started}");
+        store.inner.crash(&[]);
+        drop(Snapshot::open(store.clone()).await?);
+        assert!(store.inner.keys().is_empty());
         Ok(())
     })
 }

@@ -50,10 +50,10 @@ fn print_row(
         s.deletes,
         s.bytes_read,
         s.bytes_written,
-        s.block_bytes_written,
-        s.node_bytes_written,
-        s.head_bytes_written,
-        s.intent_bytes_written
+        s.kind("block").bytes_written,
+        s.kind("node").bytes_written,
+        s.kind("head").bytes_written,
+        s.kind("intent").bytes_written
     );
 }
 async fn run(case: Case, repeats: usize) -> Result<()> {

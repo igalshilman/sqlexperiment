@@ -1,6 +1,7 @@
 //! Deterministic simulator failpoints. Not a production backend or remote fencing.
-use super::{MemoryKv, yield_once};
+use super::MemoryKv;
 use crate::kv::KvStore;
+use crate::yield_now;
 use futures::{channel::oneshot, future::BoxFuture};
 use std::{io, sync::Mutex};
 
@@ -134,7 +135,7 @@ impl FaultKv {
             n.wrapping_mul(31).wrapping_add(b as u64)
         });
         for _ in 0..if self.seed == 0 { 0 } else { 1 + hash % 11 } {
-            yield_once().await;
+            yield_now().await;
         }
         let mut result = None;
         match plan.as_ref().map(|p| p.effect) {

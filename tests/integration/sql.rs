@@ -100,7 +100,6 @@ fn cold_indexed_lookup_is_lazy() -> Result<()> {
         assert!(stats.by_kind["block"].gets < store.block_count() as u64 / 10);
         assert!(stats.bytes_read < total as u64 / 10, "{stats:?}");
         assert!(stats.gets > 0);
-        assert_eq!(stats.gets, stats.async_yields);
         store.reset_stats();
         db.query(sql).await?;
         assert_eq!(

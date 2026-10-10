@@ -11,7 +11,8 @@
 //! truncation and sync serialize the queue into ordered phases. Within a read batch,
 //! completion order may differ from submission order. Map traversal within one read
 //! still follows dependent pointers; a single multi-page file read fetches its pages
-//! sequentially. No speculative prefetch or global cross-session cache is provided.
+//! sequentially. There is no speculative prefetch; cross-session reuse comes from
+//! the optional [`crate::ObjectCache`].
 //!
 //! Read buffers are staged privately until the read succeeds. `Completing` retires
 //! in-flight accounting and aborts incomplete engine callbacks even if a dequeued
@@ -52,7 +53,7 @@ pub const BLOCK_SIZE: usize = 4096;
 pub const DB_PATH: &str = "object.db";
 /// Engine-visible private WAL name; this file is never fetched from KV.
 pub const WAL_PATH: &str = "object.db-wal";
-/// Internal read-batch cap; never used to permit concurrent backend mutations.
+/// Maximum number of engine reads driven concurrently.
 const MAX_READS_IN_FLIGHT: usize = 16;
 const FILES: [&str; 2] = [DB_PATH, WAL_PATH];
 
@@ -62,6 +63,23 @@ fn invalid(message: impl Into<String>) -> io::Error {
 fn engine_error(message: impl Into<String>) -> LimboError {
     LimboError::InternalError(message.into())
 }
+/// Split `len` bytes at `pos` into per-block pieces:
+/// `(block index, offset in block, offset in buffer, piece length)`.
+fn blocks(pos: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize, usize)> {
+    let mut done = 0;
+    std::iter::from_fn(move || {
+        if done == len {
+            return None;
+        }
+        let offset = pos + done as u64;
+        let start = (offset % BLOCK_SIZE as u64) as usize;
+        let piece = (BLOCK_SIZE - start).min(len - done);
+        let item = (offset / BLOCK_SIZE as u64, start, done, piece);
+        done += piece;
+        Some(item)
+    })
+}
+
 /// Mutable session overlay indexed by `(file number, logical block number)`.
 /// File 0 is the database and file 1 is its private WAL. A missing entry falls
 /// through to the snapshot for file 0; `Some(None)` is an explicit zero-filled
@@ -150,7 +168,7 @@ impl KvIo {
     ) -> io::Result<Arc<Self>> {
         let snapshot = Snapshot::open_with_options(store, options).await?;
         let state = State {
-            sizes: [snapshot.size, 0],
+            sizes: [snapshot.head.size, 0],
             ..State::default()
         };
         Ok(Arc::new(Self {
@@ -252,51 +270,37 @@ impl KvIo {
     /// Synchronous engine helpers may only consume data already in this view.
     /// A cache miss never starts or polls a backend request from `IO::step`.
     fn read_resident(&self, file: usize, pos: u64, output: &mut [u8]) -> Option<usize> {
-        output.fill(0);
-        let size = self.state.lock().unwrap().sizes[file];
-        let count = size.saturating_sub(pos).min(output.len() as u64) as usize;
-        let mut done = 0;
-        while done < count {
-            let offset = pos + done as u64;
-            let index = offset / BLOCK_SIZE as u64;
-            let start = (offset % BLOCK_SIZE as u64) as usize;
-            let len = (BLOCK_SIZE - start).min(count - done);
+        let count = self.readable(file, pos, output);
+        for (index, start, done, len) in blocks(pos, count) {
             let block = self.resident_block(file, index)?;
             output[done..done + len].copy_from_slice(&block[start..start + len]);
-            done += len;
         }
         Some(count)
     }
 
     async fn read(&self, file: usize, pos: u64, output: &mut [u8]) -> io::Result<usize> {
-        output.fill(0);
-        let size = self.state.lock().unwrap().sizes[file];
-        let count = size.saturating_sub(pos).min(output.len() as u64) as usize;
-        let mut done = 0;
-        while done < count {
-            let offset = pos + done as u64;
-            let index = offset / BLOCK_SIZE as u64;
-            let start = (offset % BLOCK_SIZE as u64) as usize;
-            let len = (BLOCK_SIZE - start).min(count - done);
+        let count = self.readable(file, pos, output);
+        for (index, start, done, len) in blocks(pos, count) {
             let block = self.block(file, index).await?;
             output[done..done + len].copy_from_slice(&block[start..start + len]);
-            done += len;
         }
         Ok(count)
+    }
+
+    /// Zero `output` and return how many of its bytes lie inside the file.
+    fn readable(&self, file: usize, pos: u64, output: &mut [u8]) -> usize {
+        output.fill(0);
+        let size = self.state.lock().unwrap().sizes[file];
+        size.saturating_sub(pos).min(output.len() as u64) as usize
     }
 
     async fn write(&self, file: usize, pos: u64, bytes: &[u8]) -> io::Result<usize> {
         let end = pos
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| invalid("offset overflow"))?;
-        let mut done = 0;
-        while done < bytes.len() {
-            let offset = pos + done as u64;
-            let index = offset / BLOCK_SIZE as u64;
-            let start = (offset % BLOCK_SIZE as u64) as usize;
-            let len = (BLOCK_SIZE - start).min(bytes.len() - done);
+        for (index, start, done, len) in blocks(pos, bytes.len()) {
             // Full blocks do not require a read before overwrite.
-            let mut block = if start == 0 && len == BLOCK_SIZE {
+            let mut block = if len == BLOCK_SIZE {
                 vec![0; BLOCK_SIZE]
             } else {
                 self.block(file, index).await?
@@ -307,7 +311,6 @@ impl KvIo {
                 .unwrap()
                 .dirty
                 .insert((file, index), Some(block));
-            done += len;
         }
         if !bytes.is_empty() {
             let mut state = self.state.lock().unwrap();
@@ -408,7 +411,7 @@ impl KvIo {
                 return Ok(0);
             }
             #[cfg(feature = "simulation")]
-            crate::simulation::yield_once().await;
+            crate::yield_now().await;
             #[cfg(all(test, feature = "simulation"))]
             let fault_operation = self.fault_operation();
             #[cfg(all(test, feature = "simulation"))]
@@ -417,17 +420,13 @@ impl KvIo {
                 Operation::Read { file, pos } => {
                     // Keep the engine's buffer untouched across await and cancellation.
                     let mut bytes = vec![0; completion.as_read().buf().len()];
-                    match self.read(file, pos, &mut bytes).await {
-                        Ok(n) => {
-                            completion
-                                .as_read()
-                                .buf()
-                                .as_mut_slice()
-                                .copy_from_slice(&bytes);
-                            Ok(n)
-                        }
-                        Err(e) => Err(e),
-                    }
+                    self.read(file, pos, &mut bytes).await.inspect(|_| {
+                        completion
+                            .as_read()
+                            .buf()
+                            .as_mut_slice()
+                            .copy_from_slice(&bytes)
+                    })
                 }
                 Operation::Write { file, pos, bytes } => self.write(file, pos, &bytes).await,
                 Operation::Truncate { file, len } => self.truncate_file(file, len).await.map(|_| 0),

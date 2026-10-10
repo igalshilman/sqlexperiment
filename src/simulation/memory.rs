@@ -1,27 +1,15 @@
 //! In-memory visibility/durability model and exact logical traffic counters.
-use crate::kv::KvStore;
-use futures::future::{BoxFuture, poll_fn};
+use crate::{
+    format::{HEAD, Kind, PENDING},
+    kv::KvStore,
+    yield_now,
+};
+use futures::future::BoxFuture;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     sync::{Arc, Mutex},
-    task::Poll,
 };
-
-/// Returns Pending at least once, including on an otherwise immediately-ready backend.
-pub(crate) async fn yield_once() {
-    let mut yielded = false;
-    poll_fn(move |cx| {
-        if yielded {
-            Poll::Ready(())
-        } else {
-            yielded = true;
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        }
-    })
-    .await
-}
 
 /// Simulator traffic for one object class. Bytes are exact logical key/value
 /// lengths; deletes carry only the key. `bytes_deleted` is reclaimed value size,
@@ -40,14 +28,15 @@ pub struct Traffic {
     pub delete_key_bytes: u64,
 }
 
+/// Object class of a key, used to split traffic counters.
 pub fn object_kind(key: &str) -> &'static str {
-    if key.starts_with("v10/block/") {
+    if key.starts_with(Kind::Block.prefix()) {
         "block"
-    } else if key.starts_with("v10/node/") {
+    } else if key.starts_with(Kind::Node.prefix()) {
         "node"
-    } else if key == "v10/head" {
+    } else if key == HEAD {
         "head"
-    } else if key == "v10/pending_save" {
+    } else if key == PENDING {
         "intent"
     } else {
         "other"
@@ -61,15 +50,17 @@ pub struct Stats {
     pub deletes: u64,
     pub bytes_read: u64,
     pub bytes_written: u64,
-    pub block_bytes_written: u64,
-    pub node_bytes_written: u64,
-    pub head_bytes_written: u64,
-    pub intent_bytes_written: u64,
-    pub async_yields: u64,
     pub read_keys: BTreeSet<String>,
     pub write_keys: BTreeSet<String>,
     pub delete_keys: BTreeSet<String>,
     pub by_kind: BTreeMap<&'static str, Traffic>,
+}
+
+impl Stats {
+    /// Traffic of one [`object_kind`] class, zero when absent.
+    pub fn kind(&self, kind: &str) -> Traffic {
+        self.by_kind.get(kind).cloned().unwrap_or_default()
+    }
 }
 
 #[derive(Default)]
@@ -158,7 +149,7 @@ impl MemoryKv {
             .sum()
     }
     pub fn block_count(&self) -> usize {
-        let prefix = "v10/block/";
+        let prefix = Kind::Block.prefix();
         self.inner
             .lock()
             .unwrap()
@@ -172,11 +163,10 @@ impl MemoryKv {
 impl KvStore for MemoryKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
         Box::pin(async move {
-            yield_once().await;
+            yield_now().await;
             let mut inner = self.inner.lock().unwrap();
             let value = inner.values.get(key).cloned();
             inner.stats.gets += 1;
-            inner.stats.async_yields += 1;
             inner.stats.bytes_read += value.as_ref().map_or(0, |v| v.len() as u64);
             inner.stats.read_keys.insert(key.to_owned());
             let traffic = inner.stats.by_kind.entry(object_kind(key)).or_default();
@@ -189,21 +179,11 @@ impl KvStore for MemoryKv {
     }
     fn put<'a>(&'a self, key: &'a str, value: Vec<u8>) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move {
-            yield_once().await;
+            yield_now().await;
             let mut inner = self.inner.lock().unwrap();
-            inner.stats.puts += 1;
-            inner.stats.async_yields += 1;
-            inner.stats.bytes_written += value.len() as u64;
             let bytes = value.len() as u64;
-            if key.starts_with("v10/block/") {
-                inner.stats.block_bytes_written += bytes;
-            } else if key.starts_with("v10/node/") {
-                inner.stats.node_bytes_written += bytes;
-            } else if key == "v10/head" {
-                inner.stats.head_bytes_written += bytes;
-            } else if key == "v10/pending_save" {
-                inner.stats.intent_bytes_written += bytes;
-            }
+            inner.stats.puts += 1;
+            inner.stats.bytes_written += bytes;
             inner.stats.write_keys.insert(key.to_owned());
             let traffic = inner.stats.by_kind.entry(object_kind(key)).or_default();
             traffic.puts += 1;
@@ -216,10 +196,9 @@ impl KvStore for MemoryKv {
     }
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move {
-            yield_once().await;
+            yield_now().await;
             let mut inner = self.inner.lock().unwrap();
             inner.stats.deletes += 1;
-            inner.stats.async_yields += 1;
             inner.durable.remove(key);
             let removed = inner.values.remove(key);
             inner.stats.delete_keys.insert(key.to_owned());

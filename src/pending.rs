@@ -1,122 +1,112 @@
 //! Write-ahead publication intent and idempotent reclamation, without key scanning.
 //!
-//! The pending record is durable before any new object is written. It contains the
-//! exact old/new heads and two complete ID lists: objects allocated by the attempt
-//! and committed objects retired by it. Payload bytes are not duplicated in this
-//! record. At most one intent exists in an exclusively owned namespace.
+//! The intent is durable before any new object is written. It holds the exact
+//! old/new heads and two complete ID lists: objects allocated by the attempt and
+//! committed objects it retires. A save runs these phases, each fully
+//! acknowledged before the next starts:
 //!
-//! # Ordering and commit
+//! 1. put intent;
+//! 2. put new objects (concurrently);
+//! 3. put head: the commit point;
+//! 4. delete retired objects (concurrently);
+//! 5. delete intent.
 //!
-//! Save awaits, in order: intent put; each new-object put; head put; each retired
-//! object delete; intent delete. **One backend mutation is active at a time.** The
-//! head put's durable acknowledgement commits the snapshot. An error stops the
-//! phase immediately. Until the final intent deletion takes effect, the complete
-//! record remains available for recovery, including IDs never written.
+//! Mutations inside a phase target distinct keys. After an error no further
+//! mutation starts, and those already started are awaited before returning, so the
+//! same key is never mutated by overlapping requests of one attempt.
 //!
-//! # Recovery of uncertain outcomes
-//!
-//! Open reads intent and head concurrently while ownership is quiescent. A head
-//! matching the new bytes selects commit; one matching the old bytes (including
-//! absence) selects abort. Any other value fails before mutation. Recovery first
-//! confirms its choice durably by putting the selected head, or deleting an absent
-//! head. Only then does it delete retired or created objects and finally the intent.
-//!
-//! Confirmation matters when a failed head put was visible but not durable: deleting
-//! objects based solely on that read could otherwise destroy the state a crash later
-//! restores. Selecting a visible new head is safe because all its objects had already
-//! acknowledged durability before the original head put began. Deleting a missing
-//! object succeeds, so partial cleanup and aborted allocations are retryable.
-//!
-//! Cancellation still requires host settlement of remote work before recovery. This
-//! protocol has no lock/fencing token and cannot prevent a late old head put from
-//! arriving after a new owner starts.
+//! Open reads intent and head together. A head equal to the new head selects
+//! commit; one equal to the old head (including absence) selects abort; anything
+//! else fails before mutation. Recovery first makes the selected head durable,
+//! because a failed head put may be visible without being durable, then deletes
+//! the retired (commit) or created (abort) set and finally the intent. Deleting a
+//! missing key succeeds, so every step is retryable. See `docs/PROTOCOL.md`.
 use crate::{
-    format::{HEAD, PENDING, PENDING_MAGIC, key},
+    format::{HEAD, Id, Kind, PENDING, PENDING_MAGIC},
     kv::KvStore,
-    snapshot::Snapshot,
+    snapshot::Head,
 };
-use std::{collections::BTreeSet, io, sync::Arc};
+use futures::{StreamExt, stream::FuturesUnordered};
+use std::{collections::BTreeSet, io};
 
-/// Prototype limit: fail before any mutation rather than silently splitting an
-/// atomic record. A backend must accept values this large (pages use at most 4099 bytes).
+/// Prototype limit: fail before any mutation rather than splitting the record.
+/// The backend must accept values this large.
 pub const MAX_PENDING_BYTES: usize = 1024 * 1024;
-/// Sorted `(kind, ID)` pairs; block and node identities are recorded explicitly.
-pub(crate) type Objects = BTreeSet<(&'static str, u64)>;
+/// Upper bound on concurrent backend mutations within one save phase.
+pub(crate) const MAX_MUTATIONS_IN_FLIGHT: usize = 16;
+/// Fixed prefix: magic plus four u32 lengths.
+const PREFIX: usize = 20;
+/// One `(kind u8, ID u64 LE)` entry.
+const ENTRY: usize = 9;
 
-/// Ok means publication was durably acknowledged. A cleanup error is maintenance
-/// debt, never a reason to replay already committed SQL. Open retries cleanup.
+/// Sorted object identities; the order is the encoded order.
+pub(crate) type Objects = BTreeSet<(Kind, Id)>;
+
+/// `Ok` means publication was durably acknowledged. A cleanup error is
+/// maintenance debt, never a reason to replay committed SQL; open retries it.
 #[derive(Debug, Default)]
 pub struct SaveReport {
     /// Objects scheduled for retirement, not a count of confirmed deletions.
     pub retired_objects: usize,
-    /// Publication committed, but reclamation needs retry on open. Do not replay SQL.
+    /// Publication committed, but reclamation needs a retry on open.
     pub cleanup_error: Option<io::Error>,
 }
 
-/// One complete allocation/retirement plan, encoded atomically at `pending_save`.
+/// One complete allocation/retirement plan, stored at `pending_save`.
 ///
-/// Layout: `SP10`; four u32 LE lengths/counts (old head, new head, created, retired);
-/// exact old/new head bytes; then created and retired `(kind u8, ID u64 LE)` entries.
-/// Old-head length zero denotes an absent old head. Lists are strictly sorted and
-/// unique. Created IDs exceed the old counter and do not exceed the new counter;
-/// retired IDs are nonzero and no greater than the old counter. The record is
-/// capped at [`MAX_PENDING_BYTES`] and validated before the first mutation.
+/// Layout: `SP10`; u32 LE lengths of old head, new head, created and retired
+/// lists; old and new head bytes; then created and retired `(kind u8, ID u64 LE)`
+/// entries. Old-head length zero means no old head. Created IDs lie above the old
+/// counter and at most the new one; retired IDs are nonzero and at most the old one.
 pub(crate) struct PendingSave {
-    /// Exact previously committed head, or absence for first publication.
     pub old_head: Option<Vec<u8>>,
-    /// Exact candidate head whose publication commits this attempt.
     pub new_head: Vec<u8>,
-    /// Complete new-object set, including objects a failed attempt never uploaded.
+    /// Every object of the attempt, including ones a failed attempt never wrote.
     pub created: Objects,
-    /// Committed objects made unreachable by the new root.
+    /// Committed objects unreachable from the new head.
     pub retired: Objects,
 }
+
 fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid pending-save record")
 }
+
 impl PendingSave {
     fn validate(&self) -> io::Result<()> {
-        let old_high = self
-            .old_head
-            .as_deref()
-            .map(Snapshot::validate_head)
-            .transpose()?
-            .unwrap_or(0);
-        let new_high = Snapshot::validate_head(&self.new_head)?;
-        if self.old_head.as_ref() == Some(&self.new_head)
-            || new_high < old_high
-            || self.created.iter().any(|(kind, id)| {
-                !matches!(*kind, "block" | "node") || *id <= old_high || *id > new_high
-            })
-            || self
+        let old_high = match &self.old_head {
+            Some(bytes) => Head::decode(bytes)?.last_id,
+            None => 0,
+        };
+        let new_high = Head::decode(&self.new_head)?.last_id;
+        let valid = self.old_head.as_ref() != Some(&self.new_head)
+            && new_high >= old_high
+            && self
+                .created
+                .iter()
+                .all(|&(_, id)| id > old_high && id <= new_high)
+            && self
                 .retired
                 .iter()
-                .any(|(kind, id)| !matches!(*kind, "block" | "node") || *id == 0 || *id > old_high)
-        {
-            return Err(invalid());
-        }
-        Ok(())
+                .all(|&(_, id)| id != 0 && id <= old_high);
+        if valid { Ok(()) } else { Err(invalid()) }
     }
-    /// Validate the full plan and serialize it without performing any backend mutation.
+
+    /// Validate the plan and serialize it; no backend mutation happens here.
     pub(crate) fn encode(&self) -> io::Result<Vec<u8>> {
         self.validate()?;
         let old = self.old_head.as_deref().unwrap_or_default();
-        let size = 20usize
-            .checked_add(old.len())
-            .and_then(|n| n.checked_add(self.new_head.len()))
-            .and_then(|n| {
-                (self.created.len() + self.retired.len())
-                    .checked_mul(9)
-                    .and_then(|m| n.checked_add(m))
-            })
-            .ok_or_else(invalid)?;
+        let size = PREFIX
+            + old.len()
+            + self.new_head.len()
+            + ENTRY * (self.created.len() + self.retired.len());
         if size > MAX_PENDING_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "pending-save record exceeds 1 MiB limit; use smaller saves",
             ));
         }
-        let mut bytes = PENDING_MAGIC.to_vec();
+        let mut bytes = Vec::with_capacity(size);
+        bytes.extend_from_slice(PENDING_MAGIC);
         for n in [
             old.len(),
             self.new_head.len(),
@@ -127,77 +117,112 @@ impl PendingSave {
         }
         bytes.extend_from_slice(old);
         bytes.extend_from_slice(&self.new_head);
-        for entries in [&self.created, &self.retired] {
-            for (kind, id) in entries {
-                bytes.push(if *kind == "block" { 0 } else { 1 });
-                bytes.extend_from_slice(&id.to_le_bytes());
-            }
+        for &(kind, id) in self.created.iter().chain(&self.retired) {
+            bytes.push(kind as u8);
+            bytes.extend_from_slice(&id.to_le_bytes());
         }
         Ok(bytes)
     }
-    /// Validate lengths, ID ranges and canonical list ordering before permitting cleanup.
+
+    /// Validate lengths, ID ranges and strict list ordering before any cleanup.
     pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() < 20 || bytes.len() > MAX_PENDING_BYTES || &bytes[..4] != PENDING_MAGIC {
+        if bytes.len() < PREFIX || bytes.len() > MAX_PENDING_BYTES || &bytes[..4] != PENDING_MAGIC {
             return Err(invalid());
         }
-        let [old_len, new_len, created_len, retired_len] = [4, 8, 12, 16].map(|offset| {
-            u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
-        });
-        // Bounded input first; checked u64 arithmetic also works on 32-bit hosts.
-        let expected =
-            20u64 + old_len as u64 + new_len as u64 + 9 * (created_len as u64 + retired_len as u64);
+        let [old_len, new_len, created_len, retired_len] = [4, 8, 12, 16]
+            .map(|at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize);
+        // u64 arithmetic cannot overflow for u32 inputs, even on 32-bit hosts.
+        let expected = (PREFIX + old_len + new_len) as u64
+            + ENTRY as u64 * (created_len as u64 + retired_len as u64);
         if expected != bytes.len() as u64 {
             return Err(invalid());
         }
-        let mut offset = 20 + old_len + new_len;
-        let mut read_entries = |count: usize| -> io::Result<Objects> {
-            let mut entries = Objects::new();
-            let mut previous = None;
-            for entry in bytes[offset..offset + count * 9].as_chunks::<9>().0 {
-                let kind = match entry[0] {
-                    0 => "block",
-                    1 => "node",
-                    _ => return Err(invalid()),
-                };
-                let id = u64::from_le_bytes(entry[1..].try_into().unwrap());
-                if previous.is_some_and(|p| p >= (kind, id)) {
-                    return Err(invalid());
-                }
-                entries.insert((kind, id));
-                previous = Some((kind, id));
-            }
-            offset += count * 9;
-            Ok(entries)
-        };
+        let (heads, entries) = bytes[PREFIX..].split_at(old_len + new_len);
+        let (created, retired) = entries.split_at(ENTRY * created_len);
         let result = Self {
-            old_head: (old_len != 0).then(|| bytes[20..20 + old_len].to_vec()),
-            new_head: bytes[20 + old_len..20 + old_len + new_len].to_vec(),
-            created: read_entries(created_len)?,
-            retired: read_entries(retired_len)?,
+            old_head: (old_len != 0).then(|| heads[..old_len].to_vec()),
+            new_head: heads[old_len..].to_vec(),
+            created: decode_objects(created)?,
+            retired: decode_objects(retired)?,
         };
         result.validate()?;
         Ok(result)
     }
-    /// Delete the unneeded object set serially, then remove the intent last.
-    /// Stops on the first error so the same complete plan remains retryable.
-    pub(crate) async fn finish(&self, store: Arc<dyn KvStore>, committed: bool) -> io::Result<()> {
-        let entries = if committed {
+
+    /// Delete the unneeded object set, then remove the intent last. On error the
+    /// complete intent stays in place, so the same cleanup can be retried.
+    pub(crate) async fn finish(&self, store: &dyn KvStore, committed: bool) -> io::Result<()> {
+        let objects = if committed {
             &self.retired
         } else {
             &self.created
         };
-        for (kind, id) in entries {
-            store.delete(&key(kind, id)).await?;
-        }
+        let deletes = objects
+            .iter()
+            .map(|&(kind, id)| Mutation::Delete(kind.key(id)))
+            .collect();
+        concurrently(store, deletes).await?;
         store.delete(PENDING).await
     }
 }
 
-/// Exclusive ownership, including settlement of prior cancelled requests, is
-/// required. Failure leaves recovery retryable; no session opens until it ends.
-pub(crate) async fn recover(store: Arc<dyn KvStore>) -> io::Result<Option<Vec<u8>>> {
-    // Ownership is quiescent, so these independent reads may overlap. No
-    // mutation is issued until both values have been read and validated.
+fn decode_objects(bytes: &[u8]) -> io::Result<Objects> {
+    let mut objects = Objects::new();
+    for entry in bytes.as_chunks::<ENTRY>().0 {
+        let kind = match entry[0] {
+            0 => Kind::Block,
+            1 => Kind::Node,
+            _ => return Err(invalid()),
+        };
+        let object = (kind, u64::from_le_bytes(entry[1..].try_into().unwrap()));
+        if objects.last().is_some_and(|last| *last >= object) {
+            return Err(invalid());
+        }
+        objects.insert(object);
+    }
+    Ok(objects)
+}
+
+/// One backend mutation of a save phase.
+pub(crate) enum Mutation {
+    Put(String, Vec<u8>),
+    Delete(String),
+}
+
+async fn apply(store: &dyn KvStore, mutation: Mutation) -> io::Result<()> {
+    match mutation {
+        Mutation::Put(key, value) => store.put(&key, value).await,
+        Mutation::Delete(key) => store.delete(&key).await,
+    }
+}
+
+/// Apply mutations of distinct keys, at most [`MAX_MUTATIONS_IN_FLIGHT`] at once.
+/// After the first error no new mutation starts; those already running are
+/// awaited, so nothing from this phase is outstanding when it returns.
+pub(crate) async fn concurrently(store: &dyn KvStore, mutations: Vec<Mutation>) -> io::Result<()> {
+    let mut queued = mutations.into_iter();
+    let mut running = FuturesUnordered::new();
+    let mut error = None;
+    loop {
+        while error.is_none() && running.len() < MAX_MUTATIONS_IN_FLIGHT {
+            let Some(mutation) = queued.next() else { break };
+            running.push(apply(store, mutation));
+        }
+        match running.next().await {
+            Some(Ok(())) => {}
+            Some(Err(e)) => {
+                error.get_or_insert(e);
+            }
+            None => return error.map_or(Ok(()), Err),
+        }
+    }
+}
+
+/// Settle an interrupted save and return the committed head bytes.
+///
+/// Requires exclusive ownership, with every request of a previous owner settled.
+/// On failure no session opens; retrying is safe.
+pub(crate) async fn recover(store: &dyn KvStore) -> io::Result<Option<Vec<u8>>> {
     let (pending, head) = futures::try_join!(store.get(PENDING), store.get(HEAD))?;
     let Some(bytes) = pending else {
         return Ok(head);
@@ -213,8 +238,8 @@ pub(crate) async fn recover(store: Arc<dyn KvStore>) -> io::Result<Option<Vec<u8
             "head does not match pending save",
         ));
     };
-    // Persist our decision before deleting either set. In particular a failed
-    // publication may be visible but not durable. Absence is confirmed too.
+    // Make the decision durable before deleting either set: the visible head may
+    // come from a failed, not yet durable put. Absence is confirmed the same way.
     match &head {
         Some(bytes) => store.put(HEAD, bytes.clone()).await?,
         None => store.delete(HEAD).await?,
