@@ -14,7 +14,7 @@ fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {
         assert!(db.io_stats().private_wal_bytes_written > 0);
         assert_eq!(store.stats().puts, 0, "local WAL must not reach backend");
         db.save().await?;
-        assert!(store.block_count() > 0);
+        assert_eq!(store.stats().puts, 1, "a save is one log append");
         store.crash(&[]); // every acknowledged put survives
 
         let mut reopened = Session::open(store.clone()).await?;
@@ -86,7 +86,8 @@ fn cold_indexed_lookup_is_lazy() -> Result<()> {
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, label TEXT, payload TEXT)")
             .await?;
         db.execute("CREATE INDEX t_label ON t(label)").await?;
-        db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4000) INSERT INTO t SELECT x, printf('label-%06d',x), printf('%0400d',x) FROM n").await?;
+        // Incompressible payloads make this a large save, which checkpoints itself.
+        db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4000) INSERT INTO t SELECT x, printf('label-%06d',x), randomblob(400) FROM n").await?;
         db.checkpoint().await?;
         db.save().await?;
         let total = store.stored_bytes();
@@ -96,8 +97,11 @@ fn cold_indexed_lookup_is_lazy() -> Result<()> {
         let rows = db.query(sql).await?;
         assert_eq!(rows[0][0].to_string(), "2341");
         let stats = store.stats();
-        assert!(store.block_count() * 4096 > 1_000_000);
-        assert!(stats.by_kind["block"].gets < store.block_count() as u64 / 10);
+        assert!(
+            store.page_count() * 4096 > 1_000_000,
+            "a large save checkpoints itself"
+        );
+        assert!(stats.by_kind["page"].gets < store.page_count() as u64 / 10);
         assert!(stats.bytes_read < total as u64 / 10, "{stats:?}");
         assert!(stats.gets > 0);
         store.reset_stats();
@@ -137,12 +141,9 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
         let database_len = db.io_stats().database_len;
         db.save().await?;
         let stats = store.stats();
-        let block_puts = stats
-            .write_keys
-            .iter()
-            .filter(|k| k.contains("/block/"))
-            .count();
-        assert_eq!(block_puts as u64, database_len.div_ceil(4096));
+        // One log segment carrying each final page once.
+        assert_eq!(stats.puts, 1);
+        assert!(database_len.div_ceil(4096) >= 2);
         assert!(stats.bytes_written < wal / 10);
         store.crash(&[]);
         let mut db = Session::open(store).await?;
@@ -152,7 +153,7 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
             "ok"
         );
         println!(
-            "100 updates: {wal} local WAL bytes, {} backend bytes, {block_puts} final blocks",
+            "100 updates: {wal} local WAL bytes, {} backend bytes in one segment",
             stats.bytes_written
         );
         Ok(())

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Summarize benches/results/log-shipping.csv into a summary CSV and Markdown tables.
+"""Compare the WAL-native store (v12) with the previous design (v11).
 
-Checks that every repeat produced identical counters, then reports, per database
-case, object-cache setting and log policy: critical-path round trips for read and
-write sessions, the save tail, mutations, bytes written and final stored bytes.
+Reads benches/results/log-shipping.csv (v12) and log-shipping-v11.csv (v11,
+publish-every-save and its delta-log variant), checks that repeats agree, writes
+log-shipping-summary.csv and prints Markdown tables of critical-path round trips,
+mutations, bytes and storage per database case.
 """
 import csv
 import statistics
@@ -12,52 +13,49 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RAW = ROOT / "results" / "log-shipping.csv"
-SUMMARY = ROOT / "results" / "log-shipping-summary.csv"
+RESULTS = ROOT / "results"
 RTT_MS = 5
 COUNTERS = ["round_trips", "gets", "puts", "deletes", "bytes_read", "bytes_written",
             "log_segments", "stored_bytes"]
 
 
-def load():
-    rows = list(csv.DictReader(RAW.open()))
-    by_run = defaultdict(list)
-    for row in rows:
-        key = tuple(row[k] for k in ["rows", "payload_bytes", "indexes",
-                                     "max_log_segments", "cache", "run"])
-        by_run[key].append(row)
-    groups = defaultdict(list)
-    for key, run_rows in by_run.items():
-        groups[key[:-1]].append(run_rows)
-    for key, runs in groups.items():
-        first = [[r[c] for c in COUNTERS] for r in runs[0]]
-        for other in runs[1:]:
-            if [[r[c] for c in COUNTERS] for r in other] != first:
-                sys.exit(f"repeats disagree for {key}")
-    return {key: runs[0] for key, runs in groups.items()}, len(next(iter(groups.values())))
+def configurations():
+    """Yield (case, design label, backend, cache, rows of one run)."""
+    sources = [
+        ("log-shipping-v11.csv", "max_log_segments", lambda p: "v11: publish every save"
+         if p == "0" else f"v11: map + log of {p}"),
+        ("log-shipping.csv", "checkpoint_after", lambda p: f"v12: checkpoint after {p}"),
+    ]
+    for name, policy, label in sources:
+        runs = defaultdict(lambda: defaultdict(list))
+        for row in csv.DictReader((RESULTS / name).open()):
+            key = (row["rows"], row["payload_bytes"], row["indexes"], row[policy],
+                   row.get("backend", "weak"), row["cache"])
+            runs[key][row["run"]].append(row)
+        for key, by_run in runs.items():
+            copies = list(by_run.values())
+            first = [[r[c] for c in COUNTERS] for r in copies[0]]
+            if any([[r[c] for c in COUNTERS] for r in other] != first for other in copies[1:]):
+                sys.exit(f"repeats disagree in {name} for {key}")
+            yield key[:3], label(key[3]), key[4], key[5], copies[0], len(copies)
 
 
 def sessions(rows):
-    """Group phase rows into sessions keyed by (iteration, workload)."""
     out = defaultdict(dict)
     for row in rows:
         out[(int(row["iteration"]), row["workload"])][row["phase"]] = row
     return out
 
 
-def total(phases, column, names=("open", "query", "save")):
-    return sum(int(phases[n][column]) for n in names if n in phases)
-
-
-def percentile(values, q):
-    values = sorted(values)
-    return values[min(len(values) - 1, int(q * len(values)))]
+def total(phases, column):
+    return sum(int(p[column]) for p in phases.values())
 
 
 def summarize(rows):
-    reads, writes, saves = [], [], []
-    write_bytes, write_puts, write_deletes, read_gets = [], [], [], []
+    reads, writes, saves, opens = [], [], [], []
+    write_bytes, write_mutations, read_gets = [], [], []
     for (_, workload), phases in sessions(rows).items():
+        opens.append(int(phases["open"]["round_trips"]))
         if workload == "read_pk":
             reads.append(total(phases, "round_trips"))
             read_gets.append(total(phases, "gets"))
@@ -65,54 +63,53 @@ def summarize(rows):
             writes.append(total(phases, "round_trips"))
             saves.append(int(phases["save"]["round_trips"]))
             write_bytes.append(total(phases, "bytes_written"))
-            write_puts.append(total(phases, "puts"))
-            write_deletes.append(total(phases, "deletes"))
-    mean = statistics.mean
+            write_mutations.append(total(phases, "puts") + total(phases, "deletes"))
+    saves.sort()
     return {
-        "read_rt": mean(reads),
-        "read_gets": mean(read_gets),
-        "write_rt": mean(writes),
-        "save_rt": mean(saves),
-        "save_p95": percentile(saves, 0.95),
-        "save_max": max(saves),
-        "write_puts": mean(write_puts),
-        "write_deletes": mean(write_deletes),
-        "write_bytes": mean(write_bytes),
+        "open_rt": statistics.mean(opens),
+        "read_rt": statistics.mean(reads),
+        "write_rt": statistics.mean(writes),
+        "save_rt": statistics.mean(saves),
+        "save_p95": saves[int(0.95 * (len(saves) - 1))],
+        "save_max": saves[-1],
+        "write_mutations": statistics.mean(write_mutations),
+        "write_bytes": statistics.mean(write_bytes),
+        "read_gets": statistics.mean(read_gets),
         "stored_bytes": int(rows[-1]["stored_bytes"]),
     }
 
 
 def main():
-    data, repeats = load()
-    results = {key: summarize(rows) for key, rows in data.items()}
-    fields = ["rows", "payload_bytes", "indexes", "max_log_segments", "cache"]
-    with SUMMARY.open("w", newline="") as f:
+    results, repeats = {}, set()
+    for case, label, backend, cache, rows, n in configurations():
+        results[(case, label, backend, cache)] = summarize(rows)
+        repeats.add(n)
+    with (RESULTS / "log-shipping-summary.csv").open("w", newline="") as f:
         writer = csv.writer(f)
-        metrics = list(next(iter(results.values())).keys())
-        writer.writerow(fields + metrics)
-        for key in sorted(results, key=lambda k: (int(k[0]), k[4], int(k[3]))):
-            writer.writerow(list(key) + [round(v, 3) for v in results[key].values()])
+        metrics = list(next(iter(results.values())))
+        writer.writerow(["rows", "payload_bytes", "indexes", "design", "backend", "cache", *metrics])
+        for (case, label, backend, cache), r in sorted(results.items()):
+            writer.writerow([*case, label, backend, cache, *(round(v, 3) for v in r.values())])
 
-    sessions_per_run = len(sessions(next(iter(data.values()))))
-    print(f"Generated by `benches/scripts/analyze_log.py` from {repeats} identical "
-          f"repeats; {len(results)} configurations, {sessions_per_run} sessions each.\n")
-    cases = sorted({k[:3] for k in results}, key=lambda c: int(c[0]))
-    for rows, payload, indexes in cases:
+    print(f"Generated by `benches/scripts/analyze_log.py`; every configuration has "
+          f"{'/'.join(map(str, sorted(repeats)))} identical repeats and 128 sessions.\n")
+    for case in sorted({k[0] for k in results}, key=lambda c: int(c[0])):
+        rows, payload, indexes = case
         print(f"### {int(rows):,} rows, {payload}-byte payload, {indexes} secondary index\n")
-        print("| Cache | Policy | Read session RT | Write session RT | Save RT mean / p95 / max "
-              f"| Write session @ {RTT_MS} ms | Puts + deletes / write | Bytes written / write "
-              "| Gets / read | Stored bytes |")
-        print("|---|---|---|---|---|---|---|---|---|---|")
-        for cache in ["false", "true"]:
-            for policy in ["0", "4", "16"]:
-                r = results[(rows, payload, indexes, policy, cache)]
-                name = "publish every save" if policy == "0" else f"log, {policy} segments"
-                print(f"| {'yes' if cache == 'true' else 'no'} | {name} | {r['read_rt']:.2f} "
-                      f"| {r['write_rt']:.2f} | {r['save_rt']:.2f} / {r['save_p95']} / "
-                      f"{r['save_max']} | {r['write_rt'] * RTT_MS:.0f} ms "
-                      f"| {r['write_puts'] + r['write_deletes']:.1f} "
-                      f"| {r['write_bytes']:,.0f} | {r['read_gets']:.1f} "
-                      f"| {r['stored_bytes']:,} |")
+        print("| Design | Backend | Cache | Open RT | Read session RT | Write session RT "
+              f"| Save RT mean / p95 / max | Write session @ {RTT_MS} ms | Mutations / write "
+              "| Bytes written / write | Gets / read | Stored bytes |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|---|")
+        order = sorted((k for k in results if k[0] == case),
+                       key=lambda k: (k[1].startswith("v12"), k[3], k[2], k[1]))
+        for key in order:
+            _, label, backend, cache = key
+            r = results[key]
+            print(f"| {label} | {backend} | {'yes' if cache == 'true' else 'no'} "
+                  f"| {r['open_rt']:.2f} | {r['read_rt']:.2f} | {r['write_rt']:.2f} "
+                  f"| {r['save_rt']:.2f} / {r['save_p95']} / {r['save_max']} "
+                  f"| {r['write_rt'] * RTT_MS:.0f} ms | {r['write_mutations']:.1f} "
+                  f"| {r['write_bytes']:,.0f} | {r['read_gets']:.1f} | {r['stored_bytes']:,} |")
         print()
 
 

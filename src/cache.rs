@@ -1,105 +1,151 @@
-//! Optional least-recently-used cache of encoded immutable objects, shared by
-//! successive sessions of one namespace.
+//! Optional owner-process state shared by successive sessions of one namespace:
+//! a byte-bounded LRU of checkpointed page values plus what this owner knows to
+//! be durable.
 //!
-//! Committed objects never change: published IDs are not reused, so an entry can
-//! never become stale and needs no invalidation. Only objects known to be
-//! committed are inserted: values read through a recovered head, and the objects
-//! of a save after its head put was acknowledged. Objects of an unacknowledged
-//! attempt are never cached, because recovery may delete them and a later attempt
-//! may reuse their IDs.
+//! Pages are overwritten in place, so cached values can go stale. Only the
+//! process that writes them through stays coherent. The cache therefore
+//! remembers the exact `meta` bytes it last read or wrote. If open reads anything
+//! else, another writer checkpointed, and the cache drops everything. Without a
+//! `meta` change, every page another writer could have rewritten still has a newer
+//! image in the log, which overrides the cache.
 //!
-//! Entries are keyed by `(kind, ID)` only, so one cache must serve exactly one
-//! namespace. Sharing it between databases returns wrong pages.
+//! The owner also remembers facts that would otherwise cost round trips:
+//! - the commit it last had acknowledged, so open need not re-put that tail;
+//! - a checkpoint claim: pages through some log position were acknowledged, so the
+//!   next save can advance `meta` in the same round trip as its commit, and
+//!   replay can start there.
 //!
-//! The cache also remembers the last delta-log start it saw, a hint that lets
-//! open probe the log in the same round trip as the head. A wrong hint costs
-//! only the speculative reads.
-use crate::format::{Id, Kind};
+//! One cache must serve exactly one namespace; sharing it returns wrong pages.
+use crate::log::Meta;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
 };
 
-/// A byte-bounded object cache; clones share the same entries.
+/// Owner-process state; clones share it.
 #[derive(Clone)]
-pub struct ObjectCache(Arc<Mutex<Lru>>);
+pub struct PageCache(Arc<Mutex<State>>);
 
-type Object = (Kind, Id);
-
-struct Lru {
+struct State {
     capacity: usize,
     bytes: usize,
     clock: u64,
-    /// Value and last-use time.
-    entries: HashMap<Object, (Arc<[u8]>, u64)>,
-    /// Last-use time to entry, oldest first.
-    order: BTreeMap<u64, Object>,
-    /// Last observed head `log_start`; zero when unknown or disabled.
-    log_start: u64,
+    /// Encoded value and last-use time by page number.
+    entries: HashMap<u64, (Arc<[u8]>, u64)>,
+    /// Last-use time to page, oldest first.
+    order: BTreeMap<u64, u64>,
+    /// `meta` bytes as last read or written by this owner; `None` when absent.
+    meta: Option<Vec<u8>>,
+    /// A durable checkpoint this owner may record in `meta`.
+    claim: Option<Meta>,
+    /// One past this owner's last acknowledged commit.
+    committed: Option<u64>,
 }
 
-impl ObjectCache {
-    /// Create a cache holding at most `capacity` bytes of encoded values.
+impl PageCache {
+    /// Create a cache holding at most `capacity` bytes of encoded pages.
     pub fn new(capacity: usize) -> Self {
-        Self(Arc::new(Mutex::new(Lru {
+        Self(Arc::new(Mutex::new(State {
             capacity,
             bytes: 0,
             clock: 0,
             entries: HashMap::new(),
             order: BTreeMap::new(),
-            log_start: 0,
+            meta: None,
+            claim: None,
+            committed: None,
         })))
     }
 
-    /// Total bytes of the cached values.
+    /// Total bytes of the cached page values.
     pub fn bytes(&self) -> usize {
         self.0.lock().unwrap().bytes
     }
 
-    pub(crate) fn log_start(&self) -> u64 {
-        self.0.lock().unwrap().log_start
+    /// Where this owner expects the log to start, for a speculative probe.
+    pub(crate) fn expected_start(&self) -> Option<u64> {
+        let state = self.0.lock().unwrap();
+        let meta = match &state.meta {
+            Some(bytes) => Meta::decode(bytes).ok()?,
+            None => Meta::default(),
+        };
+        Some(state.claim.map_or(meta.log_start, |claim| claim.log_start))
     }
 
-    pub(crate) fn set_log_start(&self, start: u64) {
-        self.0.lock().unwrap().log_start = start;
+    /// If `meta` is the durable record this owner last saw, return the claim and
+    /// acknowledged commit that remain valid. Otherwise drop everything; the
+    /// caller records the new `meta` once it knows it is durable.
+    pub(crate) fn validate(&self, meta: Option<&[u8]>) -> Option<(Option<Meta>, Option<u64>)> {
+        let mut state = self.0.lock().unwrap();
+        if state.meta.as_deref() == meta {
+            return Some((state.claim, state.committed));
+        }
+        state.entries.clear();
+        state.order.clear();
+        state.bytes = 0;
+        state.forget();
+        None
     }
 
-    pub(crate) fn get(&self, object: Object) -> Option<Arc<[u8]>> {
-        let mut lru = self.0.lock().unwrap();
-        lru.clock += 1;
-        let now = lru.clock;
-        let (bytes, used) = lru.entries.get_mut(&object)?;
+    /// Record durable `meta` bytes, a claim beyond them, and the acknowledged commit.
+    pub(crate) fn record(&self, meta: Option<Vec<u8>>, claim: Option<Meta>, committed: u64) {
+        let mut state = self.0.lock().unwrap();
+        state.meta = meta;
+        state.claim = claim;
+        state.committed = Some(committed);
+    }
+
+    /// Forget durability knowledge after a save with an unknown outcome; the next
+    /// open then resets the pages too.
+    pub(crate) fn forget(&self) {
+        self.0.lock().unwrap().forget();
+    }
+
+    pub(crate) fn get(&self, index: u64) -> Option<Arc<[u8]>> {
+        let mut state = self.0.lock().unwrap();
+        state.clock += 1;
+        let now = state.clock;
+        let (bytes, used) = state.entries.get_mut(&index)?;
         let (bytes, previous) = (bytes.clone(), std::mem::replace(used, now));
-        lru.order.remove(&previous);
-        lru.order.insert(now, object);
+        state.order.remove(&previous);
+        state.order.insert(now, index);
         Some(bytes)
     }
 
-    pub(crate) fn insert(&self, object: Object, bytes: Arc<[u8]>) {
-        let mut lru = self.0.lock().unwrap();
-        if bytes.len() > lru.capacity {
+    pub(crate) fn insert(&self, index: u64, bytes: Arc<[u8]>) {
+        let mut state = self.0.lock().unwrap();
+        state.remove(index);
+        if bytes.len() > state.capacity {
             return;
         }
-        lru.remove(object);
-        lru.clock += 1;
-        let now = lru.clock;
-        lru.bytes += bytes.len();
-        lru.entries.insert(object, (bytes, now));
-        lru.order.insert(now, object);
-        while lru.bytes > lru.capacity {
-            let (_, oldest) = lru.order.pop_first().expect("nonempty when over capacity");
-            lru.remove(oldest);
+        state.clock += 1;
+        let now = state.clock;
+        state.bytes += bytes.len();
+        state.entries.insert(index, (bytes, now));
+        state.order.insert(now, index);
+        while state.bytes > state.capacity {
+            let (_, oldest) = state
+                .order
+                .pop_first()
+                .expect("nonempty when over capacity");
+            state.remove(oldest);
         }
     }
 
-    pub(crate) fn remove(&self, object: Object) {
-        self.0.lock().unwrap().remove(object);
+    pub(crate) fn remove(&self, index: u64) {
+        self.0.lock().unwrap().remove(index);
     }
 }
 
-impl Lru {
-    fn remove(&mut self, object: Object) {
-        if let Some((bytes, used)) = self.entries.remove(&object) {
+impl State {
+    fn forget(&mut self) {
+        self.meta = Some(Vec::new()); // matches no real record
+        self.claim = None;
+        self.committed = None;
+    }
+
+    fn remove(&mut self, index: u64) {
+        if let Some((bytes, used)) = self.entries.remove(&index) {
             self.bytes -= bytes.len();
             self.order.remove(&used);
         }

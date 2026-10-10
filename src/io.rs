@@ -1,4 +1,4 @@
-//! Bridge between engine byte-addressed files and immutable KV snapshots.
+//! Bridge between engine byte-addressed files and the committed KV state.
 //!
 //! The engine sees two virtual files: [`DB_PATH`] and [`WAL_PATH`]. The database
 //! starts from a recovered snapshot; its dirty pages and the entire WAL live in
@@ -12,7 +12,7 @@
 //! completion order may differ from submission order. Map traversal within one read
 //! still follows dependent pointers; a single multi-page file read fetches its pages
 //! sequentially. There is no speculative prefetch; cross-session reuse comes from
-//! the optional [`crate::ObjectCache`].
+//! the optional [`crate::PageCache`].
 //!
 //! Read buffers are staged privately until the read succeeds. `Completing` retires
 //! in-flight accounting and aborts incomplete engine callbacks even if a dequeued
@@ -31,11 +31,11 @@
 //! or spinning. Normal engine I/O is driven by the asynchronous pump.
 //!
 //! File sync is only a private-overlay ordering barrier. Durable KV mutations happen
-//! later in snapshot publication, after a complete checkpoint and connection drop.
+//! later when the save commits, after a complete checkpoint and connection drop.
 //! The engine WAL never becomes a durable KV object.
 use crate::kv::KvStore;
 use crate::snapshot::{Snapshot, StorageOptions};
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::future::join_all;
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
@@ -366,8 +366,7 @@ impl KvIo {
                 break;
             };
             if matches!(pending.op, Operation::Read { .. }) {
-                let mut reads = FuturesUnordered::new();
-                reads.push(self.perform(pending));
+                let mut reads = vec![self.perform(pending)];
                 {
                     let mut queue = self.queue.lock().unwrap();
                     while reads.len() < MAX_READS_IN_FLIGHT
@@ -378,8 +377,10 @@ impl KvIo {
                         reads.push(self.perform(queue.pop_front().unwrap()));
                     }
                 }
+                // `join_all` polls every read in each pass, so all of them are
+                // issued at once; the whole batch is drained even after an error.
                 let mut error = None;
-                while let Some(result) = reads.next().await {
+                for result in join_all(reads).await {
                     match result {
                         Ok(n) => completed += n,
                         Err(e) => {

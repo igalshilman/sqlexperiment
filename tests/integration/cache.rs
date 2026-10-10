@@ -1,11 +1,11 @@
 use sqlite_kv::{
-    ObjectCache, Result, Session, StorageOptions,
+    PageCache, Result, Session, StorageOptions,
     kv::KvStore,
-    simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
+    simulation::{LatencyKv, MemoryKv},
 };
 use std::sync::Arc;
 
-fn cached(cache: &ObjectCache) -> StorageOptions {
+fn cached(cache: &PageCache) -> StorageOptions {
     StorageOptions {
         cache: Some(cache.clone()),
         ..StorageOptions::default()
@@ -16,7 +16,8 @@ async fn create(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<()> 
     let mut db = Session::open_with_options(store, options).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT)")
         .await?;
-    db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<200) INSERT INTO t SELECT x,printf('%0900d',x) FROM n").await?;
+    // Incompressible: a large save that checkpoints itself through the cache.
+    db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<400) INSERT INTO t SELECT x,randomblob(900) FROM n").await?;
     db.save().await?;
     Ok(())
 }
@@ -28,66 +29,55 @@ async fn payload_sum(store: Arc<dyn KvStore>, options: StorageOptions) -> Result
 }
 
 #[test]
-fn shared_cache_serves_reopened_sessions_without_object_gets() -> Result<()> {
+fn an_owner_cache_serves_reopened_sessions_in_one_round_trip() -> Result<()> {
     futures::executor::block_on(async {
-        let store = MemoryKv::default();
-        let cache = ObjectCache::new(64 << 20);
-        create(Arc::new(store.clone()), cached(&cache)).await?;
-        assert!(cache.bytes() > 0, "a committed save populates the cache");
+        let store = Arc::new(LatencyKv::new(MemoryKv::default()));
+        let cache = PageCache::new(64 << 20);
+        create(store.clone(), cached(&cache)).await?;
+        assert!(cache.bytes() > 0, "a checkpoint writes through the cache");
+        let expected = 400 * 900 + 400 * 401 / 2;
+        // The first session confirms nothing it wrote; it reads the full table.
+        store.reset();
+        store.inner.reset_stats();
+        assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
+        let stats = store.inner.stats();
+        assert_eq!(store.round_trips(), 1, "meta and probe together: {stats:?}");
+        assert_eq!((stats.kind("page").gets, stats.puts), (0, 0));
 
-        store.reset_stats();
-        let expected = 200 * 900 + 200 * 201 / 2;
+        store.inner.reset_stats();
         assert_eq!(
-            payload_sum(Arc::new(store.clone()), cached(&cache)).await?,
+            payload_sum(store.clone(), StorageOptions::default()).await?,
             expected
         );
-        let stats = store.stats();
-        assert_eq!(stats.gets, 2, "only head and intent: {stats:?}");
-
-        store.reset_stats();
-        assert_eq!(
-            payload_sum(Arc::new(store.clone()), StorageOptions::default()).await?,
-            expected
-        );
-        assert!(store.stats().kind("block").gets > 0);
+        assert!(store.inner.stats().kind("page").gets > 0);
         Ok(())
     })
 }
 
+/// Another writer that checkpoints changes `meta`, which resets the owner's
+/// cache; one that only appends is overridden by the log.
 #[test]
-fn aborted_objects_are_never_cached_when_ids_are_reused() -> Result<()> {
+fn other_writers_never_leave_the_cache_stale() -> Result<()> {
     futures::executor::block_on(async {
-        let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
-        let cache = ObjectCache::new(64 << 20);
+        let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
+        let cache = PageCache::new(64 << 20);
         create(store.clone(), cached(&cache)).await?;
-
-        // An attempt whose head put fails allocates IDs that recovery deletes.
-        let mut db = Session::open_with_options(store.clone(), cached(&cache)).await?;
-        db.execute("UPDATE t SET payload = printf('%0900d', 0)")
-            .await?;
-        let _gate = store.arm(Failpoint {
-            operation: Operation::Put,
-            key_prefix: "v11/head".into(),
-            nth: 1,
-            effect: Effect::None,
-            cancel: false,
-        });
-        assert!(db.save().await.is_err());
-        store.disarm();
-
-        // A retry by a session without this cache reuses those IDs for different
-        // pages, so a stale entry for them could never be overwritten.
-        let mut db = Session::open(store.clone()).await?;
-        db.execute("UPDATE t SET payload = printf('%0800d', id)")
-            .await?;
-        db.save().await?;
-
-        let expected = 200 * 800 + 200 * 201 / 2;
+        let mut expected = 400 * 900 + 400 * 401 / 2;
         assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
-        assert_eq!(
-            payload_sum(store, StorageOptions::default()).await?,
-            expected
-        );
+        for (round, checkpoint_after) in [(0, 0), (1, 100), (2, 100), (3, 0)] {
+            let other = StorageOptions {
+                checkpoint_after,
+                ..StorageOptions::default()
+            };
+            let mut db = Session::open_with_options(store.clone(), other).await?;
+            db.execute(&format!(
+                "UPDATE t SET payload = printf('%0800d', id) WHERE id % 4 = {round}"
+            ))
+            .await?;
+            db.save().await?;
+            expected -= 100 * 100;
+            assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
+        }
         Ok(())
     })
 }

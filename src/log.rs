@@ -1,127 +1,212 @@
-//! Durable delta log: a save can commit with one put instead of a full publication.
+//! The durable log: commit records, replay and the checkpoint record.
 //!
-//! When [`crate::StorageOptions::max_log_segments`] is nonzero and the head has the
-//! log enabled (`log_start != 0`), a save writes the pages it changed as one
-//! segment at the next sequence number `log/<start + count>`. That single atomic,
-//! durable put is the commit point; no intent, map node or head is written.
-//! Segments are page images after the private engine checkpoint, so each changed
-//! page appears once per save, which is equivalent to shipping the deduplicated
-//! committed WAL frames.
+//! A save is one transaction of page images, taken after the private engine
+//! checkpoint, so each changed page appears once: the deduplicated committed WAL
+//! frames. A transaction occupies consecutive segments `log/<first>…log/<last>`.
+//! Each segment records `first`, and only the last carries the commit flag. Parts
+//! before the last are written concurrently; the commit part is written after
+//! they are acknowledged, and its acknowledgement commits the save.
 //!
-//! Open loads the head, then reads `log/<start>`, `log/<start + 1>`, … concurrently
-//! in batches until the first absent key, and replays the segments over the
-//! snapshot in sequence order. A key present after an absent one is rejected.
-//! With an [`crate::ObjectCache`], the first batch is read speculatively together
-//! with the head at the last `log_start` the cache saw; it is discarded if the
-//! head disagrees.
-//! Before exposing any page, open re-puts the last segment: an append that failed
-//! may be visible without being durable, and a later segment must never build on
-//! one that a crash could still remove. Every earlier segment was confirmed this
-//! way, or acknowledged, before its successor was written.
+//! Replay starts at the checkpointed log start and reads segments concurrently in
+//! batches. It applies a transaction when it reaches its commit part, and stops at
+//! the first absent key or at a segment that does not continue the current
+//! transaction. Anything after that point is debris from a failed save: the next
+//! save overwrites it from [`Log::next`], and ignoring it is safe because a commit
+//! part is only written after its earlier parts were acknowledged.
 //!
-//! When the log holds `max_log_segments` segments, or a segment would exceed
-//! [`MAX_SEGMENT_BYTES`], the save folds instead: it publishes log and session
-//! pages through the ordinary intent/objects/head protocol and retires the
-//! segments in the same intent. A session with the log disabled folds any existing
-//! segments and writes `log_start = 0`, so the head says whether to probe at all.
-//!
-//! Segment encoding: `SL11`, sequence u64 LE, database size u64 LE, entry count
-//! u32 LE, then per entry in ascending page order: page index u64 LE, encoded length
-//! u16 LE (zero for a hole) and the [`crate::page_codec`] value.
+//! Segment encoding: `SL12`, sequence u64 LE, first sequence of its transaction
+//! u64 LE, flags u8 (bit 0: commit), database size u64 LE, entry count u32 LE, then
+//! per entry in ascending page order: page index u64 LE, encoded length u16 LE
+//! (zero for a hole) and the [`crate::page_codec`] value.
 use crate::{
-    format::Kind,
+    format::{LOG_MAGIC, META_MAGIC, log_key},
     kv::KvStore,
-    page_codec::{self, PageCompression},
 };
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, io};
 
-/// Largest segment value; a larger save folds instead of appending.
+/// Largest segment value; larger transactions span several segments.
 pub const MAX_SEGMENT_BYTES: usize = 1024 * 1024;
-const MAGIC: &[u8; 4] = b"SL11";
-const PREFIX: usize = 24;
+const PREFIX: usize = 33;
+const ENTRY_HEADER: usize = 10;
 /// Upper bound on concurrent probe gets.
-const MAX_PROBE: usize = 16;
+const MAX_PROBE: u64 = 16;
 
-/// Logical page replacements; `None` is a hole.
-pub(crate) type Pages = BTreeMap<u64, Option<Vec<u8>>>;
+/// Encoded page images by page number; `None` is a hole.
+pub(crate) type Images = BTreeMap<u64, Option<Vec<u8>>>;
 
-fn invalid() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "invalid log segment")
+fn invalid(what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("invalid {what}"))
 }
 
-pub(crate) fn encode(
-    seq: u64,
-    size: u64,
-    pages: &Pages,
-    compression: PageCompression,
-) -> io::Result<Vec<u8>> {
-    let mut out = MAGIC.to_vec();
-    out.extend_from_slice(&seq.to_le_bytes());
-    out.extend_from_slice(&size.to_le_bytes());
-    out.extend_from_slice(&(pages.len() as u32).to_le_bytes());
-    for (index, page) in pages {
-        let encoded = match page {
-            Some(page) => page_codec::encode(page, compression)?,
-            None => Vec::new(),
-        };
-        out.extend_from_slice(&index.to_le_bytes());
-        out.extend_from_slice(&(encoded.len() as u16).to_le_bytes());
-        out.extend_from_slice(&encoded);
+/// One decoded segment.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Segment {
+    pub first: u64,
+    pub commit: bool,
+    pub size: u64,
+    pub images: Images,
+}
+
+/// Split a transaction's images into encoded segments starting at `first`.
+pub(crate) fn encode_transaction(first: u64, size: u64, images: &Images) -> Vec<Vec<u8>> {
+    let mut parts: Vec<Vec<(u64, &[u8])>> = vec![Vec::new()];
+    let mut bytes = PREFIX;
+    for (&index, image) in images {
+        let image = image.as_deref().unwrap_or_default();
+        let entry = ENTRY_HEADER + image.len();
+        if bytes + entry > MAX_SEGMENT_BYTES && !parts.last().unwrap().is_empty() {
+            parts.push(Vec::new());
+            bytes = PREFIX;
+        }
+        parts.last_mut().unwrap().push((index, image));
+        bytes += entry;
     }
-    Ok(out)
+    let last = parts.len() - 1;
+    parts
+        .iter()
+        .enumerate()
+        .map(|(n, entries)| {
+            let mut out = Vec::with_capacity(PREFIX + entries.len() * 4096);
+            out.extend_from_slice(LOG_MAGIC);
+            out.extend_from_slice(&(first + n as u64).to_le_bytes());
+            out.extend_from_slice(&first.to_le_bytes());
+            out.push(u8::from(n == last));
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+            for (index, image) in entries {
+                out.extend_from_slice(&index.to_le_bytes());
+                out.extend_from_slice(&(image.len() as u16).to_le_bytes());
+                out.extend_from_slice(image);
+            }
+            out
+        })
+        .collect()
 }
 
 /// Decode a segment and check that it carries the sequence number of its key.
-pub(crate) fn decode(bytes: &[u8], seq: u64) -> io::Result<(u64, Pages)> {
-    if bytes.len() < PREFIX || bytes.len() > MAX_SEGMENT_BYTES || &bytes[..4] != MAGIC {
-        return Err(invalid());
+/// Page images are validated by decoding them.
+pub(crate) fn decode(bytes: &[u8], seq: u64) -> io::Result<Segment> {
+    let segment = || invalid("log segment");
+    if bytes.len() < PREFIX || bytes.len() > MAX_SEGMENT_BYTES || &bytes[..4] != LOG_MAGIC {
+        return Err(segment());
     }
     let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
-    if u64_at(4) != seq {
-        return Err(invalid());
+    let first = u64_at(12);
+    if u64_at(4) != seq || first > seq || bytes[20] > 1 {
+        return Err(segment());
     }
-    let size = u64_at(12);
-    let count = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
+    let count = u32::from_le_bytes(bytes[29..33].try_into().unwrap());
     let mut input = &bytes[PREFIX..];
-    let mut pages = Pages::new();
+    let mut images = Images::new();
     for _ in 0..count {
-        let (header, rest) = input.split_at_checked(10).ok_or_else(invalid)?;
+        let (header, rest) = input.split_at_checked(ENTRY_HEADER).ok_or_else(segment)?;
         let index = u64::from_le_bytes(header[..8].try_into().unwrap());
         let len = u16::from_le_bytes([header[8], header[9]]) as usize;
-        let (encoded, rest) = rest.split_at_checked(len).ok_or_else(invalid)?;
-        if pages
+        let (image, rest) = rest.split_at_checked(len).ok_or_else(segment)?;
+        if images
             .last_key_value()
             .is_some_and(|(&last, _)| last >= index)
         {
-            return Err(invalid());
+            return Err(segment());
         }
-        let page = (len != 0)
-            .then(|| page_codec::decode(encoded))
-            .transpose()?;
-        pages.insert(index, page);
+        if len != 0 {
+            crate::page_codec::decode(image)?;
+        }
+        images.insert(index, (len != 0).then(|| image.to_vec()));
         input = rest;
     }
     if !input.is_empty() {
-        return Err(invalid());
+        return Err(segment());
     }
-    Ok((size, pages))
+    Ok(Segment {
+        first,
+        commit: bytes[20] == 1,
+        size: u64_at(21),
+        images,
+    })
 }
 
-/// Segments replayed over a snapshot.
-#[derive(Default)]
+/// The checkpoint record at `meta`.
+///
+/// Encoding: `SM12`, log start u64 LE, deleted-below u64 LE, size u64 LE. Segments
+/// before `log_start` are checkpointed into pages; those before `deleted_below`
+/// are also deleted. `size` is the database size at `log_start`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Meta {
+    pub log_start: u64,
+    pub deleted_below: u64,
+    pub size: u64,
+}
+
+impl Default for Meta {
+    fn default() -> Self {
+        Self {
+            log_start: 1,
+            deleted_below: 1,
+            size: 0,
+        }
+    }
+}
+
+impl Meta {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut out = META_MAGIC.to_vec();
+        for n in [self.log_start, self.deleted_below, self.size] {
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        out
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
+        if bytes.len() != 28 || &bytes[..4] != META_MAGIC {
+            return Err(invalid("checkpoint record"));
+        }
+        let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        let meta = Self {
+            log_start: u64_at(4),
+            deleted_below: u64_at(12),
+            size: u64_at(20),
+        };
+        if meta.deleted_below == 0 || meta.deleted_below > meta.log_start {
+            return Err(invalid("checkpoint record"));
+        }
+        Ok(meta)
+    }
+}
+
+/// A committed transaction found by replay.
+pub(crate) struct Transaction {
+    /// One past its commit part.
+    pub end: u64,
+    /// Database size after it.
+    pub size: u64,
+    /// Pages it changed.
+    pub pages: Vec<u64>,
+}
+
+/// Committed transactions replayed from a log start.
 pub(crate) struct Log {
-    /// Number of segments found from the head's `log_start`.
-    pub count: u64,
-    /// Latest page images; they override the snapshot map.
-    pub pages: Pages,
-    /// Database size recorded by the last segment.
-    pub size: Option<u64>,
+    pub transactions: Vec<Transaction>,
+    /// Latest committed image of every page the log changes.
+    pub images: Images,
+    /// Sequence number for the next transaction: one past the last commit.
+    pub next: u64,
+    /// The last commit part, for confirmation on weak backends.
+    pub tail: Option<Vec<u8>>,
+    /// Encoded bytes of the committed segments.
+    pub bytes: usize,
 }
 
-/// Probe batch size for an anticipated segment count; one batch covers it.
-pub(crate) fn batch(expected: usize) -> u64 {
-    (expected + 1).clamp(1, MAX_PROBE) as u64
+impl Log {
+    pub(crate) fn size(&self) -> Option<u64> {
+        self.transactions.last().map(|t| t.size)
+    }
+}
+
+/// Probe batch size for an anticipated number of segments.
+pub(crate) fn batch(expected: u64) -> u64 {
+    (expected + 2).clamp(2, MAX_PROBE)
 }
 
 /// Read `batch` consecutive segment keys from `first` concurrently.
@@ -130,54 +215,59 @@ pub(crate) async fn probe(
     first: u64,
     batch: u64,
 ) -> io::Result<Vec<Option<Vec<u8>>>> {
-    let keys: Vec<_> = (first..first + batch)
-        .map(|seq| Kind::Log.key(seq))
-        .collect();
+    let keys: Vec<_> = (first..first + batch).map(log_key).collect();
     try_join_all(keys.iter().map(|key| store.get(key))).await
 }
 
-/// Read and replay the log from `start`, then confirm its last segment durably.
-/// `prefetched` is an already completed first probe batch at `start`.
-pub(crate) async fn load(
+/// Replay committed transactions from `start`. `prefetched` is an already read
+/// first probe batch at `start`.
+pub(crate) async fn replay(
     store: &dyn KvStore,
     start: u64,
-    expected: usize,
+    batch: u64,
     prefetched: Option<Vec<Option<Vec<u8>>>>,
 ) -> io::Result<Log> {
-    let mut log = Log::default();
-    if start == 0 {
-        return Ok(log);
-    }
+    let mut log = Log {
+        transactions: Vec::new(),
+        images: Images::new(),
+        next: start,
+        tail: None,
+        bytes: 0,
+    };
+    let mut pending_bytes = 0;
+    let mut seq = start;
+    let mut pending: Vec<Images> = Vec::new();
     let mut next = prefetched;
-    let mut last = None;
-    loop {
+    'probe: loop {
         let values = match next.take() {
             Some(values) => values,
-            None => probe(store, start + log.count, batch(expected)).await?,
+            None => probe(store, seq, batch).await?,
         };
-        let found = values.iter().take_while(|v| v.is_some()).count();
-        if values[found..].iter().any(Option::is_some) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "gap in delta log",
-            ));
+        for value in values {
+            let Some(bytes) = value else { break 'probe };
+            let segment = decode(&bytes, seq)?;
+            if segment.first != log.next {
+                break 'probe; // debris of a failed save
+            }
+            seq += 1;
+            pending_bytes += bytes.len();
+            pending.push(segment.images);
+            if segment.commit {
+                let mut pages = Vec::new();
+                for images in pending.drain(..) {
+                    pages.extend(images.keys());
+                    log.images.extend(images);
+                }
+                log.transactions.push(Transaction {
+                    end: seq,
+                    size: segment.size,
+                    pages,
+                });
+                log.next = seq;
+                log.bytes += std::mem::take(&mut pending_bytes);
+                log.tail = Some(bytes);
+            }
         }
-        let complete = found == values.len();
-        for bytes in values.into_iter().flatten() {
-            let (size, pages) = decode(&bytes, start + log.count)?;
-            log.pages.extend(pages);
-            log.size = Some(size);
-            log.count += 1;
-            last = Some(bytes);
-        }
-        if !complete {
-            break;
-        }
-    }
-    if let Some(bytes) = last {
-        store
-            .put(&Kind::Log.key(start + log.count - 1), bytes)
-            .await?;
     }
     Ok(log)
 }

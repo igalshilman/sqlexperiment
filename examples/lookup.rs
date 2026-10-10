@@ -25,7 +25,7 @@ fn main() -> Result<()> {
         );
         println!("Durable publication puts: {}", publication.puts);
 
-        let db_blocks = store.block_count();
+        let db_blocks = store.page_count();
         let stored_bytes = store.stored_bytes();
         store.reset_stats();
         // New engine, pager, file handles and I/O adapter; only KV bytes survive.
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
         let blocks_read = stats
             .read_keys
             .iter()
-            .filter(|k| k.contains("/block/"))
+            .filter(|k| k.contains("/page/"))
             .count();
         assert!(db_blocks > 100);
         assert!(

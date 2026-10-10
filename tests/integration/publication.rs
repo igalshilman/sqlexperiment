@@ -1,298 +1,109 @@
-use futures::{
-    FutureExt,
-    channel::oneshot,
-    future::{BoxFuture, Either, select},
+//! End-to-end SQL campaign: every backend mutation of a save fails in every
+//! outcome, with and without a crash and an owner cache. The save is atomic, the
+//! database stays consistent and the next save works.
+use sqlite_kv::{
+    PageCache, Result, Session, StorageOptions,
+    simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
-use sqlite_kv::{Result, Session, StorageOptions, kv::KvStore, simulation::MemoryKv};
-use std::{
-    io,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::sync::Arc;
 
-struct FaultKv {
-    inner: MemoryKv,
-    calls: AtomicUsize,
-    fail_at: usize,
-    effect: u8, // 0: absent, 1: visible only, 2: durable before interruption
-    cancel: bool,
-    reached: Mutex<Option<oneshot::Sender<()>>>,
-    keys: Mutex<Vec<String>>,
-}
-impl FaultKv {
-    async fn interrupt(&self) -> io::Result<()> {
-        if self.cancel {
-            let signal = self.reached.lock().unwrap().take().unwrap();
-            let _ = signal.send(());
-            futures::future::pending::<()>().await;
-        }
-        Err(io::Error::other("injected publication failure"))
-    }
-}
-impl KvStore for FaultKv {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
-        self.inner.get(key)
-    }
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            self.keys.lock().unwrap().push(format!("delete:{key}"));
-            let fail = call == self.fail_at;
-            if fail && self.effect == 1 {
-                self.inner.simulate_unacknowledged_delete(key);
-            } else if !fail || self.effect == 2 {
-                self.inner.delete(key).await?;
-            }
-            if fail {
-                self.interrupt().await?;
-            }
-            Ok(())
-        })
-    }
-    fn put<'a>(&'a self, key: &'a str, value: Vec<u8>) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            self.keys.lock().unwrap().push(key.to_owned());
-            let fail = call == self.fail_at;
-            if !fail || self.effect > 0 {
-                if key.starts_with("v11/block/") || key.starts_with("v11/node/") {
-                    let id = u64::from_str_radix(key.rsplit('/').next().unwrap(), 16).unwrap();
-                    let high = self
-                        .inner
-                        .get("v11/head")
-                        .await?
-                        .map(|v| u64::from_le_bytes(v[12..20].try_into().unwrap()))
-                        .unwrap_or(0);
-                    assert!(id > high, "overwrote committed range: {id} <= {high}");
-                }
-                if fail && self.effect == 1 {
-                    self.inner.simulate_unacknowledged_put(key, value);
-                } else {
-                    self.inner.put(key, value).await?;
-                }
-            }
-            if fail {
-                return self.interrupt().await;
-            }
-            Ok(())
-        })
+fn options(cache: Option<&PageCache>) -> StorageOptions {
+    StorageOptions {
+        cache: cache.cloned(),
+        checkpoint_after: 1,
+        ..StorageOptions::default()
     }
 }
 
-async fn baseline() -> Result<MemoryKv> {
+/// Saves leave the log one transaction long, so the next save checkpoints.
+async fn baseline(cache: Option<&PageCache>) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db =
-        Session::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
-    populate(&mut db).await?;
-    // save itself checkpoints: the durable baseline has no WAL.
+    let kv = Arc::new(store.clone());
+    let mut db = Session::open_with_options(kv.clone(), options(cache)).await?;
+    db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
+        .await?;
+    db.execute("CREATE INDEX by_n ON t(n)").await?;
+    db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<40) INSERT INTO t SELECT x,x,printf('%0300d',x) FROM n").await?;
+    db.save().await?;
+    let mut db = Session::open_with_options(kv, options(cache)).await?;
+    db.execute("UPDATE t SET n = n + 100 WHERE id % 3 = 0")
+        .await?;
     db.save().await?;
     Ok(store)
 }
 
-async fn populate(db: &mut Session) -> Result<()> {
-    db.execute("CREATE TABLE balances(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
+/// Returns whether the update `n = 7000` is visible; it must be all or nothing.
+async fn changed(store: Arc<FaultKv>, options: StorageOptions) -> Result<bool> {
+    let mut db = Session::open_with_options(store, options).await?;
+    let rows = db
+        .query("SELECT count(*), sum(n = 7000), sum(length(payload)) FROM t")
         .await?;
-    db.execute("CREATE INDEX by_n ON balances(n)").await?;
-    db.execute("CREATE TABLE audit(n INTEGER)").await?;
-    db.execute("INSERT INTO balances VALUES(1, 10, printf('%09000d',1))")
-        .await?;
-    db.execute("INSERT INTO audit VALUES(10)").await?;
-    Ok(())
-}
-
-async fn changed(store: Arc<dyn KvStore>, checkpoint: bool) -> Result<Session> {
-    let mut db = Session::open_with_options(store, StorageOptions::default()).await?;
-    if db
-        .query("SELECT count(*) FROM sqlite_master WHERE name='balances'")
-        .await?[0][0]
-        .to_string()
-        == "0"
-    {
-        populate(&mut db).await?;
-    }
-    db.execute("BEGIN").await?;
-    db.execute("UPDATE balances SET n=20, payload=printf('%09000d',2)")
-        .await?;
-    db.execute("UPDATE audit SET n=20").await?;
-    db.execute("COMMIT").await?;
-    if checkpoint {
-        db.checkpoint().await?;
-    }
-    Ok(db)
-}
-
-async fn check(store: Arc<dyn KvStore>, expected: i32) -> Result<()> {
-    let mut db = Session::open(store).await?;
-    if expected == 0 {
-        assert_eq!(
-            db.query("SELECT count(*) FROM sqlite_master").await?[0][0].to_string(),
-            "0"
-        );
-        return Ok(());
-    }
-    let row = db
-        .query(
-            "SELECT balances.n, audit.n, substr(payload,-1), length(payload) FROM balances, audit",
-        )
-        .await?;
-    assert_eq!(row[0][0].to_string(), expected.to_string());
-    assert_eq!(row[0][1].to_string(), expected.to_string());
-    assert_eq!(row[0][2].to_string(), (expected / 10).to_string());
-    assert_eq!(row[0][3].to_string(), "9000");
+    let (count, sevens) = (rows[0][0].as_int().unwrap(), rows[0][1].as_int().unwrap());
+    assert_eq!(count, 40);
+    assert_eq!(rows[0][2].as_int(), Some(40 * 300));
+    assert!(sevens == 0 || sevens == 40, "torn save: {sevens} rows");
     assert_eq!(
         db.query("PRAGMA integrity_check").await?[0][0].to_string(),
         "ok"
     );
-    Ok(())
+    Ok(sevens == 40)
 }
 
-async fn exercise(checkpoint: bool, empty: bool) -> Result<()> {
-    let base = if empty {
-        MemoryKv::default()
-    } else {
-        baseline().await?
-    };
-    let probe = Arc::new(FaultKv {
-        inner: base.fork(),
-        calls: AtomicUsize::new(0),
-        fail_at: usize::MAX,
-        effect: 0,
-        cancel: false,
-        reached: Mutex::new(None),
-        keys: Mutex::default(),
-    });
-    changed(probe.clone(), checkpoint).await?.save().await?;
-    check(probe.clone(), 20).await?;
-    let writes = probe.calls.load(Ordering::SeqCst);
-    let keys = probe.keys.lock().unwrap().clone();
-    assert_eq!(keys.first().unwrap(), "v11/pending_save");
-    assert_eq!(keys.last().unwrap(), "delete:v11/pending_save");
-    let commit_at = keys.iter().position(|k| k == "v11/head").unwrap() + 1;
-    probe.inner.crash(&[]);
-    check(Arc::new(probe.inner.clone()), 20).await?;
-    assert!(writes > 1);
-    for fail_at in 1..=writes {
-        for effect in 0..3 {
-            for cancel in [false, true] {
-                for persist_failed in [false, true] {
-                    let (reached, gate) = oneshot::channel();
-                    let store = Arc::new(FaultKv {
-                        inner: base.fork(),
-                        calls: AtomicUsize::new(0),
-                        fail_at,
-                        effect,
-                        cancel,
-                        reached: Mutex::new(Some(reached)),
-                        keys: Mutex::default(),
-                    });
-                    let db = changed(store.clone(), checkpoint).await?;
-                    if cancel {
-                        match select(db.save().boxed(), gate).await {
-                            Either::Left(_) => panic!("save did not reach injected cancellation"),
-                            Either::Right((signal, pending)) => {
-                                signal?;
-                                drop(pending);
+#[test]
+fn every_save_mutation_fails_atomically() -> Result<()> {
+    futures::executor::block_on(async {
+        let mut cases = 0;
+        for cached in [false, true] {
+            for operation in [Operation::Put, Operation::Delete] {
+                'ordinal: for nth in 1.. {
+                    for effect in [Effect::None, Effect::Visible, Effect::After] {
+                        for crash in [false, true] {
+                            let cache = cached.then(|| PageCache::new(1 << 20));
+                            let base = baseline(cache.as_ref()).await?;
+                            let store = Arc::new(FaultKv::new(base, nth as u64));
+                            let mut db =
+                                Session::open_with_options(store.clone(), options(cache.as_ref()))
+                                    .await?;
+                            db.execute("UPDATE t SET n = 7000").await?;
+                            let _gate = store.arm(Failpoint {
+                                operation,
+                                key_prefix: String::new(),
+                                nth,
+                                effect,
+                                cancel: false,
+                            });
+                            let result = db.save().await;
+                            let faulted = store.events().iter().any(|e| e.faulted);
+                            store.disarm();
+                            if !faulted {
+                                result?;
+                                break 'ordinal;
                             }
-                        }
-                    } else {
-                        let result = db.save().await;
-                        if fail_at <= commit_at {
-                            assert!(
-                                result
-                                    .unwrap_err()
-                                    .to_string()
-                                    .contains("injected publication failure")
-                            );
-                        } else {
-                            assert!(
-                                result?
-                                    .cleanup_error
-                                    .unwrap()
-                                    .to_string()
-                                    .contains("injected publication failure")
-                            );
+                            cases += 1;
+                            let mut cache = cache;
+                            if crash {
+                                store.inner.crash(&[]);
+                                cache = cached.then(|| PageCache::new(1 << 20));
+                            }
+                            let committed = changed(store.clone(), options(cache.as_ref())).await?;
+                            if result.is_ok() {
+                                assert!(committed, "acknowledged save was lost");
+                            }
+                            // The next save works and survives a crash.
+                            let mut db =
+                                Session::open_with_options(store.clone(), options(cache.as_ref()))
+                                    .await?;
+                            db.execute("UPDATE t SET n = 7000").await?;
+                            db.save().await?;
+                            store.inner.crash(&[]);
+                            assert!(changed(store.clone(), options(None)).await?);
                         }
                     }
-                    // A visible-only failed mutation may either survive or disappear.
-                    // All acknowledged mutations must survive both crash variants.
-                    let extra = if persist_failed {
-                        vec![
-                            keys[fail_at - 1]
-                                .strip_prefix("delete:")
-                                .unwrap_or(&keys[fail_at - 1])
-                                .to_owned(),
-                        ]
-                    } else {
-                        Vec::new()
-                    };
-                    store.inner.crash(&extra);
-                    let published = fail_at > commit_at
-                        || (fail_at == commit_at
-                            && (effect == 2 || (effect == 1 && persist_failed)));
-                    let expected = if published {
-                        20
-                    } else if empty {
-                        0
-                    } else {
-                        10
-                    };
-                    // Fresh engine and metadata cache; only backend bytes survive.
-                    check(store.clone(), expected).await?;
-                    assert_eq!(
-                        store.inner.keys(),
-                        if published {
-                            probe.inner.keys()
-                        } else {
-                            base.keys()
-                        },
-                        "recovery leaked objects"
-                    );
-                    // A later acknowledged save must succeed after every interruption.
-                    let high = store
-                        .inner
-                        .get("v11/head")
-                        .await?
-                        .map(|v| u64::from_le_bytes(v[12..20].try_into().unwrap()))
-                        .unwrap_or(0);
-                    store.keys.lock().unwrap().clear();
-                    changed(store.clone(), checkpoint).await?.save().await?;
-                    for key in store
-                        .keys
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|k| k.starts_with("v11/block/") || k.starts_with("v11/node/"))
-                    {
-                        let id = u64::from_str_radix(key.rsplit('/').next().unwrap(), 16).unwrap();
-                        assert!(
-                            id > high,
-                            "allocation overwrote committed range: {id} <= {high}"
-                        );
-                    }
-                    store.inner.crash(&[]);
-                    check(Arc::new(store.inner.clone()), 20).await?;
                 }
             }
         }
-    }
-    println!(
-        "checkpoint={checkpoint}, empty={empty}: {} crash/reopen cases across {writes} mutations",
-        writes * 12
-    );
-    Ok(())
-}
-
-#[test]
-fn every_publication_put_with_automatic_checkpoint() -> Result<()> {
-    futures::executor::block_on(exercise(false, false))
-}
-#[test]
-fn every_publication_put_after_explicit_checkpoint() -> Result<()> {
-    futures::executor::block_on(exercise(true, false))
-}
-#[test]
-fn every_first_publication_put() -> Result<()> {
-    futures::executor::block_on(exercise(false, true))
+        assert!(cases > 40, "{cases}");
+        println!("SQL save failpoints: {cases} cases");
+        Ok(())
+    })
 }

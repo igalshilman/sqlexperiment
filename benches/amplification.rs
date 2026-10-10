@@ -24,7 +24,7 @@ struct Sample {
 impl Sample {
     fn emit(&self, phase: &str, store: &MemoryKv, local_db: u64, local_wal: u64) {
         let s = store.stats();
-        for kind in ["all", "block", "node", "head", "intent", "other"] {
+        for kind in ["all", "page", "log", "meta", "other"] {
             let t = if kind == "all" {
                 sum(&s)
             } else {
@@ -103,8 +103,18 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x%10, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
     assert!(db.save().await?.cleanup_error.is_none());
+    // Steady state: a later save checkpoints the bulk load into page keys.
+    let mut db = Session::open_with_options(Arc::new(store.clone()), checkpoint_all()).await?;
+    db.execute("CREATE TABLE other(x)").await?;
+    assert!(db.save().await?.cleanup_error.is_none());
     store.crash(&[]);
     Ok(store)
+}
+fn checkpoint_all() -> StorageOptions {
+    StorageOptions {
+        checkpoint_after: 0,
+        ..StorageOptions::default()
+    }
 }
 
 fn read_query(op: &str, case: Case) -> String {
@@ -150,7 +160,7 @@ async fn reads(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_read: 0,
             logical_write: 0,
             logical_delete: 0,
-            db_pages: base.block_count(),
+            db_pages: base.page_count(),
         };
         let mut db = Session::open(store.clone()).await?;
         sample.emit("open", &store, 0, 0);
@@ -210,7 +220,7 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_read: 0,
             logical_write: 0,
             logical_delete: 0,
-            db_pages: base.block_count(),
+            db_pages: base.page_count(),
         };
         let mut db = Session::open(store.clone()).await?;
         sample.emit("open", &store, 0, 0);
@@ -323,7 +333,6 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
         );
-        assert!(!store.keys().contains("v11/pending_save"));
         if matches!(op, "read_only_save" | "rollback") {
             assert_eq!(store.keys(), base.keys());
             assert_eq!(store.stored_bytes(), base.stored_bytes());
@@ -332,39 +341,36 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     Ok(())
 }
 
+/// Interrupt a save at its commit or its checkpoint, crash, then measure the
+/// open that follows. A save opened with `checkpoint_after = 0` checkpoints the
+/// logged transaction while committing, then writes meta.
 async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     for (op, operation, prefix, effect, committed) in [
         (
-            "abort_before_head",
+            "commit_lost",
             Operation::Put,
-            "v11/head",
+            "v12/log/",
             Effect::None,
             false,
         ),
         (
-            "head_ack_lost",
+            "commit_ack_lost",
             Operation::Put,
-            "v11/head",
+            "v12/log/",
             Effect::After,
             true,
         ),
         (
-            "cleanup_error",
-            Operation::Delete,
-            "v11/block/",
+            "checkpoint_error",
+            Operation::Put,
+            "v12/page/",
             Effect::None,
             true,
         ),
-        (
-            "intent_delete_error",
-            Operation::Delete,
-            "v11/pending_save",
-            Effect::None,
-            true,
-        ),
+        ("meta_error", Operation::Put, "v12/meta", Effect::None, true),
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
-        let mut db = Session::open(store.clone()).await?;
+        let mut db = Session::open_with_options(store.clone(), checkpoint_all()).await?;
         db.execute(&format!(
             "UPDATE t SET payload=printf('%0{}d',0) WHERE id={}",
             case.payload,
@@ -381,10 +387,10 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
         let result = db.save().await;
         let hit = store.events().iter().any(|e| e.faulted);
         assert!(hit, "recovery failpoint was not reached");
-        if operation == Operation::Delete {
-            assert!(result?.cleanup_error.is_some());
-        } else {
+        if prefix == "v12/log/" {
             assert!(result.is_err());
+        } else {
+            assert!(result?.cleanup_error.is_some());
         }
         store.disarm();
         store.inner.crash(&[]);
@@ -397,7 +403,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_read: 0,
             logical_write: 0,
             logical_delete: 0,
-            db_pages: base.block_count(),
+            db_pages: base.page_count(),
         };
         let mut db = Session::open(store.clone()).await?;
         sample.emit("recovery_open", &store.inner, 0, 0);
@@ -417,11 +423,6 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
         );
-        assert!(!store.inner.keys().contains("v11/pending_save"));
-        if !committed {
-            assert_eq!(store.inner.keys(), base.keys());
-            assert_eq!(store.inner.stored_bytes(), base.stored_bytes());
-        }
     }
     Ok(())
 }

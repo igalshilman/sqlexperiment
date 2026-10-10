@@ -18,7 +18,17 @@ async fn baseline() -> Result<MemoryKv> {
     db.execute("CREATE INDEX by_n ON t(n)").await?;
     db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30) INSERT INTO t SELECT x,x,printf('%09000d',x) FROM n").await?;
     assert!(db.save().await?.cleanup_error.is_none());
+    // Checkpoint `t` so that queries read its pages from the backend.
+    let mut db = Session::open_with_options(Arc::new(store.clone()), all()).await?;
+    db.execute("CREATE TABLE other(x)").await?;
+    assert!(db.save().await?.checkpointed_pages > 0);
     Ok(store)
+}
+fn all() -> StorageOptions {
+    StorageOptions {
+        checkpoint_after: 0,
+        ..StorageOptions::default()
+    }
 }
 fn plan(operation: Operation, prefix: &str, nth: usize, effect: Effect, cancel: bool) -> Failpoint {
     Failpoint {
@@ -147,130 +157,103 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
     })
 }
 
+/// A failed commit changes nothing; a failed checkpoint after an acknowledged
+/// commit only reports a cleanup error. Either way the failed phase drains.
 #[test]
-fn object_errors_stop_before_publication() -> Result<()> {
+fn commit_and_checkpoint_errors_drain_and_keep_the_outcome() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
-        for seed in [1, 7, 31] {
+        for (prefix, nth) in [("v12/log/", 1), ("v12/page/", 1)] {
             for effect in [Effect::None, Effect::Visible, Effect::After] {
-                let store = Arc::new(FaultKv::new(base.fork(), seed));
-                let mut db =
-                    Session::open_with_options(store.clone(), StorageOptions::default()).await?;
+                let store = Arc::new(FaultKv::new(base.fork(), 7));
+                // The save checkpoints the previous transaction while committing.
+                let mut db = Session::open_with_options(store.clone(), all()).await?;
                 db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
                     .await?;
-                let _gate = store.arm(plan(Operation::Put, "v11/block/", 3, effect, false));
-                assert!(db.save().await.is_err());
+                let _gate = store.arm(plan(Operation::Put, prefix, nth, effect, false));
+                let result = db.save().await;
                 assert_eq!(store.active(), 0, "the failed phase must drain");
-                assert!(
-                    (2..=16).contains(&store.max_active()),
-                    "object puts overlap"
-                );
-                assert!(
-                    !store
-                        .events()
-                        .iter()
-                        .any(|e| e.operation == Operation::Put && e.key == "v11/head")
-                );
                 store.disarm();
+                if prefix == "v12/page/" {
+                    assert!(result?.cleanup_error.is_some());
+                    assert!((2..=16).contains(&store.max_active()), "page puts overlap");
+                } else {
+                    assert!(result.is_err());
+                }
                 store.inner.crash(&[]);
-                check(store.clone(), false).await?;
-                assert_eq!(store.inner.keys(), base.keys());
-                assert_eq!(store.inner.stored_bytes(), base.stored_bytes());
+                let committed = prefix == "v12/page/" || matches!(effect, Effect::After);
+                check(store.clone(), committed).await?;
                 cases += 1;
             }
         }
-        println!("object errors: {cases} cases (3 schedules, 3 outcomes)");
+        println!("commit and checkpoint errors: {cases} cases");
         Ok(())
     })
 }
 
+/// Open only reads until it confirms what it found: read failures mutate
+/// nothing, and failed confirmations can be retried.
 #[test]
-fn recovery_read_failures_do_not_mutate_and_repeated_cleanup_failures_are_retryable() -> Result<()>
-{
+fn open_read_and_confirmation_failures_are_retryable() -> Result<()> {
     futures::executor::block_on(async {
         let mut read_cases = 0;
-        let mut cleanup_cases = 0;
+        let mut confirm_cases = 0;
         let base = baseline().await?;
-        for committed in [false, true] {
-            let pending = Arc::new(FaultKv::new(base.fork(), 7));
-            let mut db = Session::open(pending.clone()).await?;
-            db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
-                .await?;
-            let _gate = pending.arm(plan(
-                Operation::Put,
-                "v11/head",
-                1,
-                if committed {
-                    Effect::After
-                } else {
-                    Effect::None
-                },
-                false,
-            ));
-            assert!(db.save().await.is_err());
-            pending.disarm();
-            pending.inner.crash(&[]);
-            for nth in [1, 2] {
-                for effect in [Effect::None, Effect::After] {
-                    for cancel in [false, true] {
-                        let store = Arc::new(FaultKv::new(pending.inner.fork(), 31));
-                        let gate = store.arm(plan(Operation::Get, "", nth, effect, cancel));
-                        let future = Session::open(store.clone()).boxed();
-                        if cancel {
-                            match select(future, gate).await {
-                                Either::Left(_) => {
-                                    panic!("recovery read failpoint not reached")
-                                }
-                                Either::Right((signal, pending)) => {
-                                    signal?;
-                                    drop(pending);
-                                }
+        let reads = {
+            let probe = Arc::new(FaultKv::new(base.fork(), 0));
+            let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
+            drop(Session::open(probe.clone()).await?);
+            probe.disarm();
+            probe
+                .events()
+                .iter()
+                .take_while(|e| e.operation == Operation::Get)
+                .count()
+        };
+        assert!(reads >= 2, "meta and a probe batch");
+        for nth in 1..=reads {
+            for effect in [Effect::None, Effect::After] {
+                for cancel in [false, true] {
+                    let store = Arc::new(FaultKv::new(base.fork(), 31));
+                    let gate = store.arm(plan(Operation::Get, "", nth, effect, cancel));
+                    let future = Session::open(store.clone()).boxed();
+                    if cancel {
+                        match select(future, gate).await {
+                            Either::Left(_) => panic!("open read failpoint not reached"),
+                            Either::Right((signal, pending)) => {
+                                signal?;
+                                drop(pending);
                             }
-                        } else {
-                            assert!(future.await.is_err());
                         }
-                        assert_eq!(store.active(), 0);
-                        assert_eq!(
-                            (store.inner.stats().puts, store.inner.stats().deletes),
-                            (0, 0)
-                        );
-                        store.disarm();
-                        check(store, committed).await?;
-                        read_cases += 1;
+                    } else {
+                        assert!(future.await.is_err());
                     }
+                    assert_eq!(store.active(), 0);
+                    assert_eq!(
+                        (store.inner.stats().puts, store.inner.stats().deletes),
+                        (0, 0)
+                    );
+                    store.disarm();
+                    check(store, false).await?;
+                    read_cases += 1;
                 }
             }
-            // Interrupt successive recoveries, including an acknowledged
-            // deletion whose response is lost. Every retry may delete absent keys.
-            for attempt in 0..5 {
-                let _gate = pending.arm(plan(
-                    Operation::Delete,
-                    "v11/block/",
-                    1,
-                    if attempt % 2 == 0 {
-                        Effect::After
-                    } else {
-                        Effect::Visible
-                    },
-                    false,
-                ));
-                assert!(Session::open(pending.clone()).await.is_err());
-                assert_eq!(pending.active(), 0);
-                assert!(pending.inner.keys().contains("v11/pending_save"));
-                pending.disarm();
-                pending.inner.crash(&[]);
-                cleanup_cases += 1;
-            }
-            check(pending.clone(), committed).await?;
-            assert!(!pending.inner.keys().contains("v11/pending_save"));
-            if !committed {
-                assert_eq!(pending.inner.keys(), base.keys());
-                assert_eq!(pending.inner.stored_bytes(), base.stored_bytes());
-            }
         }
+        // A fresh owner on a weak backend confirms the log tail; interrupt that.
+        let store = Arc::new(FaultKv::new(base.fork(), 3));
+        for attempt in 0..4 {
+            let effect = [Effect::None, Effect::Visible, Effect::After][attempt % 3];
+            let _gate = store.arm(plan(Operation::Put, "v12/", 1, effect, false));
+            assert!(Session::open(store.clone()).await.is_err());
+            assert_eq!(store.active(), 0);
+            store.disarm();
+            store.inner.crash(&[]);
+            confirm_cases += 1;
+        }
+        check(store, false).await?;
         println!(
-            "recovery read failpoints: {read_cases} cases; repeated cleanup interruptions: {cleanup_cases}"
+            "open read failpoints: {read_cases} cases; interrupted confirmations: {confirm_cases}"
         );
         Ok(())
     })
@@ -280,7 +263,7 @@ fn recovery_read_failures_do_not_mutate_and_repeated_cleanup_failures_are_retrya
 fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let key = "v11/block/0000000000000001";
+        let key = "v12/page/0000000000000001";
         assert!(store.get(key).await?.is_none());
         store.put(key, vec![1; 4096]).await?;
         store.get(key).await?;
@@ -288,7 +271,7 @@ fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<(
         store.delete(key).await?;
         store.delete(key).await?;
         let s = store.stats();
-        let t = &s.by_kind["block"];
+        let t = &s.by_kind["page"];
         assert_eq!((t.gets, t.misses, t.puts, t.deletes), (3, 1, 1, 2));
         assert_eq!(
             (t.bytes_read, t.bytes_written, t.bytes_deleted),
