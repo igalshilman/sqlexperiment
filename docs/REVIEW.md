@@ -3,8 +3,34 @@
 The adapter now uses one page-map implementation: an adaptive-height, 256-way
 radix tree with its root embedded in the snapshot head. Save phases are ordered;
 mutations within a phase run concurrently. An optional object cache is shared
-across sessions. The caller drives the engine directly, without a worker thread.
-This is an author review supported by executed tests, not an independent audit.
+across sessions. An optional durable delta log commits a save with one put. The
+caller drives the engine directly, without a worker thread. This is an author
+review supported by executed tests, not an independent audit.
+
+## Durable delta log (format v11)
+
+- `StorageOptions::max_log_segments` enables appending a save's changed pages
+  as one segment, a single put that commits it. Every `max + 1` saves, or for an
+  oversized segment, the save folds the log into the map through the intent
+  protocol, retiring the segments. Policy zero, the default, publishes every
+  save as before and folds any existing log.
+- The head gained `log_start` (zero disables probing), giving format v11
+  (`SK11`/`SP11`/`SL11`). The intent can retire log segments (kind 2), validated
+  against the old and new log starts.
+- Open re-puts the last segment before exposing pages, so a later save never
+  builds on a segment that is visible but not durable. A campaign showed that
+  removing this step breaks the crash checks. With an object cache, the first
+  probe batch shares the head's round trip; stale hints are discarded.
+- `simulation::LatencyKv` measures critical-path round trips on a virtual clock.
+  `benches/log_shipping.rs` compares the policies with and without a cache; see
+  [LOG_RESULTS.md](../benches/LOG_RESULTS.md). In short: saves go from 5–7 RT to
+  1 RT for appends, write sessions get 9–45% faster, opens cost about 1 RT more,
+  folds form the save tail, and roughly twice the bytes are written.
+- Tests cover the segment codec and malformed segments, append/fold accounting,
+  policy switches, oversized segments, confirmation of visible segments, log
+  gaps, stale cache hints, SQL sessions across 15 appends and 4 folds, and
+  60 interrupted append/fold cases with and without crashes. Every case checks
+  atomicity, the next save and exact orphan accounting.
 
 ## Concurrent phases and object cache
 
@@ -41,9 +67,9 @@ No real-backend latency improvement is claimed by these simulator measurements.
 - Removed the public map enum, options field, layout dispatch and CLI selector.
 - Removed external-root publication, head overrides, tombstones and deferred folds.
   Deleting a page removes its tree edge during the same save.
-- Simplified the head to a 21-byte prefix followed by one encoded root. There are
+- Simplified the head to a fixed prefix followed by one encoded root. There are
   no layout tags, root-length fields, override counts or alternate decoders.
-- The single current format is v10 (`SK10`/`SP10`). Use a fresh namespace; no
+- There is a single current format (now v11). Use a fresh namespace; no
   migration or compatibility code is included.
 - Reduced benchmark and test matrices to the fixed map. The interrupted-fold
   campaign now tests ordinary tree rewrites, including abandoned writes followed
@@ -105,20 +131,21 @@ checkpoint injection is test-only. Benchmarks, analyzers and results are under
 
 ## Executed validation
 
-Rust/Cargo 1.90.0, locked dependencies, Linux x86_64.
+Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 
 | Check | Outcome |
 |---|---|
-| `cargo test --locked --no-default-features` | 10 tests and one compile-checked rustdoc example pass |
-| `cargo test --locked --features simulation` | 59 tests pass: 36 unit, 22 integration, one public API; one rustdoc example also passes |
-| Interruption campaigns | 1355 cases across the one supported map |
+| `cargo test --locked --no-default-features` | 12 tests and one compile-checked rustdoc example pass |
+| `cargo test --locked --features simulation` | 69 tests pass: 45 unit, 23 integration, one public API; one rustdoc example also passes |
+| Interruption campaigns | 1355 publication cases plus 60 delta-log cases |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
 | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps --all-features --document-private-items` | Pass |
 | Amplification benchmark, three repeats | 4104 observations / 684 phases / 104 configurations; counters reconcile |
 | Page-compression benchmark, three repeats | 504 SQL observations / 84 Raw-LZ4 pairs / 72 codec timing samples; traffic agrees |
 | Small-database benchmark, three repeats | 495 observations; SQL/reopen checks pass |
-| Both benchmark analyzers | Pass on current-format evidence |
+| Delta-log benchmark, two repeats | 12 configurations × 128 sessions; repeats identical; final reads verify every write |
+| All three benchmark analyzers | Pass on v11 evidence |
 
 The interruption total includes 28 checkpoint, 48 tree-rewrite, 380 read,
 9 object-error, 16 recovery-read, 10 repeated-cleanup, 468 publication

@@ -54,10 +54,11 @@ pub struct SaveReport {
 
 /// One complete allocation/retirement plan, stored at `pending_save`.
 ///
-/// Layout: `SP10`; u32 LE lengths of old head, new head, created and retired
+/// Layout: `SP11`; u32 LE lengths of old head, new head, created and retired
 /// lists; old and new head bytes; then created and retired `(kind u8, ID u64 LE)`
 /// entries. Old-head length zero means no old head. Created IDs lie above the old
 /// counter and at most the new one; retired IDs are nonzero and at most the old one.
+/// Retired log segments (kind 2) lie between the old and new `log_start`.
 pub(crate) struct PendingSave {
     pub old_head: Option<Vec<u8>>,
     pub new_head: Vec<u8>,
@@ -73,21 +74,27 @@ fn invalid() -> io::Error {
 
 impl PendingSave {
     fn validate(&self) -> io::Result<()> {
-        let old_high = match &self.old_head {
-            Some(bytes) => Head::decode(bytes)?.last_id,
-            None => 0,
+        let old = match &self.old_head {
+            Some(bytes) => Head::decode(bytes)?,
+            None => Head::default(),
         };
-        let new_high = Head::decode(&self.new_head)?.last_id;
+        let new = Head::decode(&self.new_head)?;
+        // Retired segments lie in the old log and before the new one, if any.
+        let retired_log = |seq: u64| {
+            old.log_start != 0
+                && seq >= old.log_start
+                && (new.log_start == 0 || seq < new.log_start)
+        };
         let valid = self.old_head.as_ref() != Some(&self.new_head)
-            && new_high >= old_high
+            && new.last_id >= old.last_id
             && self
                 .created
                 .iter()
-                .all(|&(_, id)| id > old_high && id <= new_high)
-            && self
-                .retired
-                .iter()
-                .all(|&(_, id)| id != 0 && id <= old_high);
+                .all(|&(kind, id)| kind != Kind::Log && id > old.last_id && id <= new.last_id)
+            && self.retired.iter().all(|&(kind, id)| match kind {
+                Kind::Log => retired_log(id),
+                _ => id != 0 && id <= old.last_id,
+            });
         if valid { Ok(()) } else { Err(invalid()) }
     }
 
@@ -172,6 +179,7 @@ fn decode_objects(bytes: &[u8]) -> io::Result<Objects> {
         let kind = match entry[0] {
             0 => Kind::Block,
             1 => Kind::Node,
+            2 => Kind::Log,
             _ => return Err(invalid()),
         };
         let object = (kind, u64::from_le_bytes(entry[1..].try_into().unwrap()));

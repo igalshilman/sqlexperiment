@@ -24,6 +24,7 @@ use crate::{
     cache::ObjectCache,
     format::{HEAD, HEAD_MAGIC, Id, Kind, PENDING},
     kv::KvStore,
+    log::{self, Log, MAX_SEGMENT_BYTES, Pages},
     map_codec::{self, Node},
     page_codec::{self, PageCompression},
     pending::{Mutation, Objects, PendingSave, SaveReport, concurrently, recover},
@@ -36,7 +37,7 @@ use std::{
 };
 
 /// Logical page replacements; `None` removes a page (a sparse hole).
-type Changes = BTreeMap<u64, Option<Vec<u8>>>;
+type Changes = Pages;
 /// The same changes after page bytes have received object IDs.
 type Refs = BTreeMap<u64, Option<Id>>;
 
@@ -47,6 +48,9 @@ pub struct StorageOptions {
     pub page_compression: PageCompression,
     /// Cross-session object cache. It must be dedicated to this namespace.
     pub cache: Option<ObjectCache>,
+    /// Durable delta-log segments a save may append before folding them into a
+    /// full publication; zero publishes on every save. See [`crate::log`].
+    pub max_log_segments: u32,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -81,9 +85,10 @@ impl Build {
 
 /// The snapshot selection stored at the head key.
 ///
-/// Encoding: `SK10`, database size (u64 LE), allocation counter (u64 LE), height
-/// (u8), then the encoded root filling the rest. Height is zero iff the root is
-/// empty. Root children are bounded by the allocation counter.
+/// Encoding: `SK11`, database size (u64 LE), allocation counter (u64 LE), height
+/// (u8), first delta-log sequence number (u64 LE, zero when the log is disabled),
+/// then the encoded root filling the rest. Height is zero iff the root is empty.
+/// Root children are bounded by the allocation counter.
 #[derive(Default)]
 pub(crate) struct Head {
     /// First radix level.
@@ -94,15 +99,18 @@ pub(crate) struct Head {
     pub last_id: Id,
     /// Logical database length in bytes, including sparse holes.
     pub size: u64,
+    /// First delta-log sequence number to replay, or zero when the log is disabled.
+    pub log_start: u64,
 }
 impl Head {
-    const PREFIX: usize = 21;
+    const PREFIX: usize = 29;
 
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = HEAD_MAGIC.to_vec();
         out.extend_from_slice(&self.size.to_le_bytes());
         out.extend_from_slice(&self.last_id.to_le_bytes());
         out.push(self.height);
+        out.extend_from_slice(&self.log_start.to_le_bytes());
         out.extend(map_codec::encode(&self.root));
         out
     }
@@ -113,6 +121,7 @@ impl Head {
         let size = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
         let last_id = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
         let height = bytes[20];
+        let log_start = u64::from_le_bytes(bytes[21..29].try_into().unwrap());
         let root = map_codec::decode(&bytes[Self::PREFIX..], last_id, true)?;
         if height > 8 || root.is_empty() != (height == 0) {
             return Err(invalid("invalid root height"));
@@ -122,6 +131,7 @@ impl Head {
             height,
             last_id,
             size,
+            log_start,
         })
     }
 }
@@ -133,29 +143,57 @@ pub(crate) struct Snapshot {
     /// Exact committed bytes; the next save records them as its old head.
     head_bytes: Option<Vec<u8>>,
     pub head: Head,
+    /// Delta-log segments replayed over the head.
+    log: Log,
     nodes: Mutex<BTreeMap<Id, Node>>,
     page: Mutex<Option<(Id, Vec<u8>)>>,
 }
 
 impl Snapshot {
-    /// Settle any pending save, then load the committed head.
+    /// Settle any pending save, then load the committed head and its delta log.
     pub async fn open_with_options(
         store: Arc<dyn KvStore>,
         options: StorageOptions,
     ) -> io::Result<Self> {
-        let head_bytes = recover(&*store).await?;
+        let expected = options.max_log_segments as usize;
+        let hint = options.cache.as_ref().map_or(0, ObjectCache::log_start);
+        // Probe the log speculatively alongside recovery when the cache knows
+        // where it starts. Recovery never mutates segments at or after that start.
+        let (head_bytes, prefetched) = if hint != 0 {
+            let (head, probe) = futures::join!(
+                recover(&*store),
+                log::probe(&*store, hint, log::batch(expected))
+            );
+            (head?, Some(probe))
+        } else {
+            (recover(&*store).await?, None)
+        };
         let head = match &head_bytes {
             Some(bytes) => Head::decode(bytes)?,
             None => Head::default(),
         };
+        let prefetched = match prefetched {
+            Some(probe) if hint == head.log_start => Some(probe?),
+            _ => None,
+        };
+        let log = log::load(&*store, head.log_start, expected, prefetched).await?;
+        if let Some(cache) = &options.cache {
+            cache.set_log_start(head.log_start);
+        }
         Ok(Self {
             store,
             options,
             head_bytes,
             head,
+            log,
             nodes: Mutex::default(),
             page: Mutex::default(),
         })
+    }
+
+    /// Logical database size after replaying the log.
+    pub fn size(&self) -> u64 {
+        self.log.size.unwrap_or(self.head.size)
     }
 
     /// Fetch a committed object, through the shared cache when configured.
@@ -194,7 +232,7 @@ impl Snapshot {
         {
             return match kind {
                 Kind::Node => map_codec::decode(bytes, id - 1, false),
-                Kind::Block => Err(invalid("expected index node")),
+                Kind::Block | Kind::Log => Err(invalid("expected index node")),
             };
         }
         self.node(id).await
@@ -217,6 +255,9 @@ impl Snapshot {
 
     /// Resolve a logical page and decode it; `None` means a hole.
     pub async fn block(&self, index: u64) -> io::Result<Option<Vec<u8>>> {
+        if let Some(page) = self.log.pages.get(&index) {
+            return Ok(page.clone());
+        }
         let Some(id) = self.block_id(index).await? else {
             return Ok(None);
         };
@@ -334,11 +375,39 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Plan and publish `dirty` pages as the next snapshot.
+    /// Commit `dirty` pages, by appending a log segment when the policy allows,
+    /// otherwise by a full publication that also folds the log.
     ///
     /// Requires exclusive ownership until every request settles, even on
     /// cancellation. After an error, reopen; never reuse this snapshot for writes.
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
+        if dirty.is_empty() && size == self.size() {
+            return Ok(SaveReport::default());
+        }
+        let max = u64::from(self.options.max_log_segments);
+        if self.head.log_start != 0 && self.log.count < max {
+            let seq = self.head.log_start + self.log.count;
+            let segment = log::encode(seq, size, &dirty, self.options.page_compression)?;
+            if segment.len() <= MAX_SEGMENT_BYTES {
+                // One durable put commits the save.
+                self.store.put(&Kind::Log.key(seq), segment).await?;
+                return Ok(SaveReport::default());
+            }
+        }
+        let mut changes = self.log.pages.clone();
+        changes.extend(dirty);
+        self.fold(changes, size).await
+    }
+
+    /// Publish all log and session pages through the intent protocol, retiring
+    /// the log segments. The new head enables the log only when the policy does.
+    async fn fold(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
+        let log_end = self.head.log_start + self.log.count;
+        let log_start = match (self.options.max_log_segments, self.head.log_start) {
+            (0, _) => 0,
+            (_, 0) => 1,
+            _ => log_end,
+        };
         let mut build = Build {
             last_id: self.head.last_id,
             objects: BTreeMap::new(),
@@ -361,11 +430,16 @@ impl Snapshot {
             self.rewrite_map(&mut build, changes).await?
         };
         self.finalize_plan(&mut build, &root, height)?;
+        if self.head.log_start != 0 {
+            let segments = self.head.log_start..log_end;
+            build.retired.extend(segments.map(|seq| (Kind::Log, seq)));
+        }
         let head = Head {
             root,
             height,
             last_id: build.last_id,
             size,
+            log_start,
         }
         .encode();
         if self.head_bytes.as_ref() == Some(&head)
@@ -407,6 +481,7 @@ impl Snapshot {
         store.put(HEAD, head).await?;
 
         if let Some(cache) = &self.options.cache {
+            cache.set_log_start(log_start);
             for (object, bytes) in cached {
                 cache.insert(object, bytes);
             }
@@ -428,6 +503,10 @@ mod tests;
 #[cfg(all(test, feature = "simulation"))]
 #[path = "../tests/unit/snapshot_properties.rs"]
 mod properties;
+
+#[cfg(all(test, feature = "simulation"))]
+#[path = "../tests/unit/snapshot_log.rs"]
+mod log_tests;
 
 #[cfg(all(test, feature = "simulation"))]
 #[path = "../tests/unit/snapshot_support.rs"]

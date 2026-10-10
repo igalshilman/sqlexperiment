@@ -10,8 +10,10 @@ Run from the repository root:
 cargo bench --locked --features simulation --bench amplification -- 3 > benches/results/amplification.csv
 cargo bench --locked --features simulation --bench page_compression -- 3 > benches/results/page-compression.csv
 cargo bench --locked --features simulation --bench small_databases -- 3 > benches/results/small_databases.csv
+cargo bench --locked --features simulation --bench log_shipping -- 2 > benches/results/log-shipping.csv
 python3 benches/scripts/analyze_amplification.py
 python3 benches/scripts/analyze_compression.py
+python3 benches/scripts/analyze_log.py
 ```
 
 The positional argument is the repeat count; the default is three. The paired
@@ -26,6 +28,7 @@ filtered by each custom entry point. The page compression target also writes
 | `amplification` | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes | [AMPLIFICATION_RESULTS.md](AMPLIFICATION_RESULTS.md) |
 | `page_compression` | Paired Raw/LZ4 on repetitive, JSON and random payloads; isolated codec timing | [COMPRESSION_RESULTS.md](COMPRESSION_RESULTS.md) |
 | `small_databases` | Tiny databases, index counts, save grouping and a larger control | `results/small_databases.csv` |
+| `log_shipping` | Publish-every-save versus the delta log, with and without an object cache, in critical-path round trips | [LOG_RESULTS.md](LOG_RESULTS.md) |
 
 All SQL result checks remain active in release builds. Successful writes are
 reopened and verified. The analyzers check repeat agreement, complete workload

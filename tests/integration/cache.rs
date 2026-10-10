@@ -67,7 +67,7 @@ fn aborted_objects_are_never_cached_when_ids_are_reused() -> Result<()> {
             .await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v10/head".into(),
+            key_prefix: "v11/head".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,

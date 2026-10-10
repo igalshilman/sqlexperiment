@@ -31,6 +31,10 @@ impl Snapshot {
                 }
             }
         }
+        if self.head.log_start != 0 {
+            let segments = self.head.log_start..self.head.log_start + self.log.count;
+            live.extend(segments.map(|seq| Kind::Log.key(seq)));
+        }
         Ok(live)
     }
 }

@@ -159,7 +159,7 @@ fn object_errors_stop_before_publication() -> Result<()> {
                     Session::open_with_options(store.clone(), StorageOptions::default()).await?;
                 db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
                     .await?;
-                let _gate = store.arm(plan(Operation::Put, "v10/block/", 3, effect, false));
+                let _gate = store.arm(plan(Operation::Put, "v11/block/", 3, effect, false));
                 assert!(db.save().await.is_err());
                 assert_eq!(store.active(), 0, "the failed phase must drain");
                 assert!(
@@ -170,7 +170,7 @@ fn object_errors_stop_before_publication() -> Result<()> {
                     !store
                         .events()
                         .iter()
-                        .any(|e| e.operation == Operation::Put && e.key == "v10/head")
+                        .any(|e| e.operation == Operation::Put && e.key == "v11/head")
                 );
                 store.disarm();
                 store.inner.crash(&[]);
@@ -199,7 +199,7 @@ fn recovery_read_failures_do_not_mutate_and_repeated_cleanup_failures_are_retrya
                 .await?;
             let _gate = pending.arm(plan(
                 Operation::Put,
-                "v10/head",
+                "v11/head",
                 1,
                 if committed {
                     Effect::After
@@ -246,7 +246,7 @@ fn recovery_read_failures_do_not_mutate_and_repeated_cleanup_failures_are_retrya
             for attempt in 0..5 {
                 let _gate = pending.arm(plan(
                     Operation::Delete,
-                    "v10/block/",
+                    "v11/block/",
                     1,
                     if attempt % 2 == 0 {
                         Effect::After
@@ -257,13 +257,13 @@ fn recovery_read_failures_do_not_mutate_and_repeated_cleanup_failures_are_retrya
                 ));
                 assert!(Session::open(pending.clone()).await.is_err());
                 assert_eq!(pending.active(), 0);
-                assert!(pending.inner.keys().contains("v10/pending_save"));
+                assert!(pending.inner.keys().contains("v11/pending_save"));
                 pending.disarm();
                 pending.inner.crash(&[]);
                 cleanup_cases += 1;
             }
             check(pending.clone(), committed).await?;
-            assert!(!pending.inner.keys().contains("v10/pending_save"));
+            assert!(!pending.inner.keys().contains("v11/pending_save"));
             if !committed {
                 assert_eq!(pending.inner.keys(), base.keys());
                 assert_eq!(pending.inner.stored_bytes(), base.stored_bytes());
@@ -280,7 +280,7 @@ fn recovery_read_failures_do_not_mutate_and_repeated_cleanup_failures_are_retrya
 fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let key = "v10/block/0000000000000001";
+        let key = "v11/block/0000000000000001";
         assert!(store.get(key).await?.is_none());
         store.put(key, vec![1; 4096]).await?;
         store.get(key).await?;

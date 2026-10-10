@@ -58,7 +58,7 @@ fn print_row(
 }
 async fn run(case: Case, repeats: usize) -> Result<()> {
     let base = baseline(case).await?;
-    let head = base.get("v10/head").await?.unwrap();
+    let head = base.get("v11/head").await?.unwrap();
     let db_bytes = u64::from_le_bytes(head[4..12].try_into().unwrap());
     let before = base.stored_bytes();
     let id = case.rows / 2;
@@ -183,7 +183,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
                 reopened.query("PRAGMA integrity_check").await?[0][0].to_string(),
                 "ok"
             );
-            assert!(store.get("v10/pending_save").await?.is_none());
+            assert!(store.get("v11/pending_save").await?.is_none());
         }
     }
     Ok(())

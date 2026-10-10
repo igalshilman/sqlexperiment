@@ -49,3 +49,8 @@ required-features = ["simulation"]
 name = "small_databases"
 harness = false
 required-features = ["simulation"]
+
+[[bench]]
+name = "log_shipping"
+harness = false
+required-features = ["simulation"]

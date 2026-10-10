@@ -10,6 +10,10 @@
 //!
 //! Entries are keyed by `(kind, ID)` only, so one cache must serve exactly one
 //! namespace. Sharing it between databases returns wrong pages.
+//!
+//! The cache also remembers the last delta-log start it saw, a hint that lets
+//! open probe the log in the same round trip as the head. A wrong hint costs
+//! only the speculative reads.
 use crate::format::{Id, Kind};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -30,6 +34,8 @@ struct Lru {
     entries: HashMap<Object, (Arc<[u8]>, u64)>,
     /// Last-use time to entry, oldest first.
     order: BTreeMap<u64, Object>,
+    /// Last observed head `log_start`; zero when unknown or disabled.
+    log_start: u64,
 }
 
 impl ObjectCache {
@@ -41,12 +47,21 @@ impl ObjectCache {
             clock: 0,
             entries: HashMap::new(),
             order: BTreeMap::new(),
+            log_start: 0,
         })))
     }
 
     /// Total bytes of the cached values.
     pub fn bytes(&self) -> usize {
         self.0.lock().unwrap().bytes
+    }
+
+    pub(crate) fn log_start(&self) -> u64 {
+        self.0.lock().unwrap().log_start
+    }
+
+    pub(crate) fn set_log_start(&self, start: u64) {
+        self.0.lock().unwrap().log_start = start;
     }
 
     pub(crate) fn get(&self, object: Object) -> Option<Arc<[u8]>> {

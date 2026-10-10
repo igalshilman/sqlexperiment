@@ -3,10 +3,11 @@ use crate::simulation::MemoryKv;
 use std::sync::Arc;
 
 fn head(high: u64) -> Vec<u8> {
-    let mut h = b"SK10".to_vec();
+    let mut h = b"SK11".to_vec();
     h.extend(0u64.to_le_bytes());
     h.extend(high.to_le_bytes());
     h.push(0);
+    h.extend(0u64.to_le_bytes());
     h
 }
 #[test]

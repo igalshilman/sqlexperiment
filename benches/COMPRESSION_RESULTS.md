@@ -1,6 +1,6 @@
 # Page compression experiment — 2026-10-10
 
-Crate **0.11.0**, storage format **v10**, SQLite-compatible engine `turso_core` **0.8.2**.
+Crate **0.11.0**, storage format **v11**, SQLite-compatible engine `turso_core` **0.8.2**.
 
 Adaptive LZ4 materially reduces the bytes in this experiment's repetitive and
 synthetic JSON workloads. It offers little benefit for random row payloads and
@@ -29,7 +29,7 @@ workloads where attempting compression is not useful.
 - `StorageOptions::page_compression` selects new writes only. Raw and compressed
   pages coexist; a different policy on reopen does not require rewriting them.
   Switching policy and performing a read-only save causes no mutations.
-- Namespace keys and metadata magic are v10/`SK10`/`SP10`. Start with a fresh
+- Namespace keys and metadata magic are v11/`SK11`/`SP11`. Start with a fresh
   namespace. Only this format is supported; there are no compatibility probes.
 
 ## Paired workload results
@@ -59,12 +59,12 @@ policy, verify the changed payloads and row count, and run `integrity_check`.
 
 | Rows | Payload bytes | Payload family | Raw | Adaptive LZ4 | Reduction |
 |---:|---:|---|---:|---:|---:|
-| 100 | 64 | Repetitive | 4,334 | 969 | 77.6% |
-| 100 | 64 | JSON | 4,334 | 1,865 | 57.0% |
-| 100 | 64 | Random | 4,334 | 4,269 | 1.5% |
-| 10,000 | 256 | Repetitive | 4,815 | 977 | 79.7% |
-| 10,000 | 256 | JSON | 4,815 | 2,298 | 52.3% |
-| 10,000 | 256 | Random | 4,815 | 4,768 | 1.0% |
+| 100 | 64 | Repetitive | 4,358 | 993 | 77.2% |
+| 100 | 64 | JSON | 4,358 | 1,889 | 56.7% |
+| 100 | 64 | Random | 4,358 | 4,293 | 1.5% |
+| 10,000 | 256 | Repetitive | 4,839 | 1,001 | 79.3% |
+| 10,000 | 256 | JSON | 4,839 | 2,322 | 52.0% |
+| 10,000 | 256 | Random | 4,839 | 4,792 | 1.0% |
 
 All 84 pairs have identical get/put/delete counts, page counts, map write bytes,
 head/intent bytes and stored key bytes. Encoded reads, mutations and stored values
@@ -75,8 +75,8 @@ The unit tests separately exercise fully random 4096-byte pages and verify the
 4099-byte fallback bound.
 
 For the 10,000-row JSON cold PK lookup, read key/value traffic fell from
-**17,749 to 10,521 bytes (40.7%)**, and stored value bytes from 2,854,054 to
-1,119,416 (60.8%). The workload still performs the same dependent KV gets.
+**17,757 to 10,529 bytes (40.7%)**, and stored value bytes from 2,854,062 to
+1,119,424 (60.8%). The workload still performs the same dependent KV gets.
 
 ## Amplification matrix
 
@@ -88,7 +88,7 @@ Page-to-KV amplification divides encoded put bytes by **4096 × page puts**.
 
 ## Codec time
 
-Release build, Rust **1.90.0**, Linux x86_64, reported CPU **AMD EPYC 9V74**.
+Release build, Rust **1.97.0**, Linux x86_64, reported CPU **Intel Xeon @ 2.10GHz**.
 The harness samples up to 64 evenly spaced actual SQL pages per dataset, with
 five warm-up passes and 200 measured passes per repeat. It alternates policy
 order, uses `black_box`, includes codec allocations and validates round trips.
@@ -98,9 +98,9 @@ Median time per page for the 10,000-row / 256-byte datasets:
 
 | Payload | Raw encode | LZ4 encode | Raw decode | Adaptive decode |
 |---|---:|---:|---:|---:|
-| Repetitive | 0.10 µs | 1.09 µs | 0.12 µs | 0.44 µs |
-| JSON | 0.10 µs | 4.57 µs | 0.12 µs | 1.80 µs |
-| Random | 0.10 µs | 1.20 µs | 0.12 µs | 0.34 µs |
+| Repetitive | 0.11 µs | 1.29 µs | 0.11 µs | 0.41 µs |
+| JSON | 0.12 µs | 6.33 µs | 0.11 µs | 2.15 µs |
+| Random | 0.11 µs | 1.86 µs | 0.11 µs | 0.33 µs |
 
 These are elapsed times in isolated codec loops on this shared host, not remote
 request timings or a production speedup. Min/median/max are retained. Raw SQL
@@ -129,8 +129,9 @@ The paired target also writes `benches/results/page-codec.csv` (optional second
 argument selects another path). Raw observations and generated summaries are kept
 under `benches/results/`. Benchmark targets are separate from `cargo test`.
 
-Next: measure dependent round trips with configurable KV latency, then validate
-against a real host backend. Compression reduces bytes but does not reduce calls.
+Compression reduces bytes but does not reduce calls. Round-trip latency is
+measured separately in [LOG_RESULTS.md](LOG_RESULTS.md); validating against a
+real host backend remains future work.
 
 Codec references: [lz4_flex 0.14.0](https://docs.rs/lz4_flex/0.14.0/lz4_flex/),
 [LZ4 block format](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md).
