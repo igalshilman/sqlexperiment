@@ -98,13 +98,13 @@ Median time per page for the 10,000-row / 256-byte datasets:
 
 | Payload | Raw encode | LZ4 encode | Raw decode | Adaptive decode |
 |---|---:|---:|---:|---:|
-| Repetitive | 0.15 µs | 1.20 µs | 0.11 µs | 0.46 µs |
-| JSON | 0.12 µs | 4.94 µs | 0.13 µs | 1.90 µs |
-| Random | 0.18 µs | 1.36 µs | 0.16 µs | 0.37 µs |
+| Repetitive | 0.10 µs | 1.09 µs | 0.12 µs | 0.44 µs |
+| JSON | 0.10 µs | 4.57 µs | 0.12 µs | 1.80 µs |
+| Random | 0.10 µs | 1.20 µs | 0.12 µs | 0.34 µs |
 
 These are elapsed times in isolated codec loops on this shared host, not remote
 request timings or a production speedup. Min/median/max are retained. Raw SQL
-elapsed observations include the worker, SQL parsing and payload generation;
+elapsed observations include host-driven execution, SQL parsing and payload generation;
 their three repeats are not a latency distribution. No p95/p99 claim is made.
 
 ## Validation

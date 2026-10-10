@@ -1443,6 +1443,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
 
 [[package]]
+name = "sqlite-kv"
+version = "0.11.0"
+dependencies = [
+ "futures",
+ "lz4_flex",
+ "parking_lot",
+ "turso_core",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1627,15 +1637,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "sqlite-kv"
-version = "0.11.0"
-dependencies = [
- "futures",
- "lz4_flex",
- "turso_core",
 ]
 
 [[package]]

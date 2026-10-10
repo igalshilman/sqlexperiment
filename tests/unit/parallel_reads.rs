@@ -1,7 +1,7 @@
 use super::*;
 use crate::{kv::KvStore, simulation::MemoryKv};
 use futures::{channel::oneshot, future::BoxFuture};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct GatedReads {
     inner: MemoryKv,

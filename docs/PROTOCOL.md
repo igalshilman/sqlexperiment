@@ -44,7 +44,7 @@ Validation detects malformed records, not all valid-looking storage corruption.
 
 ## Ordered save
 
-1. Finish SQL work and checkpoint locally; stop the engine.
+1. Finish SQL work and checkpoint locally; drop the engine connection.
 2. Construct the complete new-object and retirement plan.
 3. Put intent and await durability.
 4. Put new objects, awaiting every successful durable acknowledgment.

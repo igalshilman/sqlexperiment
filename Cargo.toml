@@ -15,6 +15,9 @@ bench = false
 [dependencies]
 turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
 futures = "0.3"
+# The engine retains an owned schema lock across open-time I/O. Allow that
+# guard to move with the host future between executor threads, without a worker.
+parking_lot = { version = "0.12", features = ["send_guard"] }
 lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 
 [profile.dev]

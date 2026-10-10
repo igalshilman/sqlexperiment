@@ -56,9 +56,22 @@
 //! reads may overlap: open reads head and intent together, and the I/O pump batches
 //! adjacent file reads without crossing write, truncate or sync barriers.
 //!
-//! One native worker thread drives the engine's blocking API; KV futures are polled
-//! by the async caller. Queries run sequentially on a session, even though their
-//! independent I/O can overlap. No executor-specific spawning is required.
+//! The caller's task drives nonblocking engine open/connect state machines and
+//! statement steps, awaits queued KV work, then resumes the engine. Completions run
+//! on that task. No worker thread, command channel or background task is created.
+//! Cached queries yield to the executor after 64 steps; an individual engine call
+//! is not preemptible. Queries on a session remain sequential.
+//!
+//! The pinned engine also has synchronous metadata helpers. Open asynchronously
+//! retains page zero for these reads; dirty overlay bytes always take priority.
+//! `IO::step` serves only resident reads and local sync barriers. A synchronous
+//! nonresident read or file mutation fails explicitly, without starting backend I/O.
+//! Such an engine path cannot be suspended by this adapter; the session must be
+//! discarded. Async query/checkpoint paths continue through the host I/O pump.
+//!
+//! The engine holds an owned schema lock across open-time I/O. The `parking_lot`
+//! `send_guard` feature keeps the open future `Send` when the executor moves it
+//! between threads. No unsafe future wrapper or engine-source patch is used.
 //!
 //! # Example
 //!
@@ -100,46 +113,57 @@ pub use snapshot::StorageOptions;
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use crate::kv::KvStore;
-use futures::{
-    FutureExt, StreamExt,
-    channel::{mpsc, oneshot},
-};
-use std::{
-    sync::{Arc, mpsc as commands},
-    thread,
-};
+use std::{future::poll_fn, sync::Arc, task::Poll};
 use turso_core::storage::database::DatabaseFile;
 use turso_core::{
-    Connection, Database, IO, OpenFlags, OpenOptions, SqliteDialect, StepResult, TempStore, Value,
+    ConnectAsyncState, Connection, Database, IO, IOResult, OpenFlags, OpenOptions, SqliteDialect,
+    StepResult, TempStore, Value,
 };
 
-/// Adapter, engine and backend errors, safe to carry across the engine-worker boundary.
+/// Adapter, engine and backend errors returned to the host task.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type Rows = Vec<Vec<Value>>;
 
-/// Commands sent from the async session owner to its single engine thread.
-/// Replies carry SQL results or a lifecycle barrier; storage futures stay on the caller.
-enum Command {
-    Query(String, oneshot::Sender<Result<Rows>>),
-    CanSave(oneshot::Sender<Result<()>>),
-    Stop(oneshot::Sender<()>),
+/// One private SQL view, driven entirely by the caller's async task.
+///
+/// The host advances engine state machines, awaits queued KV I/O and resumes the
+/// engine on the same task. No worker thread or background task is created.
+/// Queries require exclusive access to this handle. An error or cancellation
+/// poisons the view; discard it and reopen after settling backend requests.
+/// [`Self::save`] consumes the handle; dropping it never implicitly saves.
+pub struct Session {
+    connection: Option<Arc<Connection>>,
+    io: Arc<KvIo>,
+    poisoned: bool,
 }
 
-/// One private SQL working view over a recovered, committed snapshot.
-///
-/// Queries and checkpoints require exclusive access to this handle. A query error
-/// or cancellation poisons it: discard it and reopen after settling backend work.
-/// [`Self::save`] consumes the handle; dropping it never implicitly saves.
-///
-/// The host must exclude other sessions and old snapshot readers from the same
-/// namespace. The worker-thread handle is detached on drop so cancellation does
-/// not block the caller on an executing SQL statement.
-pub struct Session {
-    commands: commands::Sender<Command>,
-    worker: Option<thread::JoinHandle<()>>,
-    io: Arc<KvIo>,
-    events: mpsc::UnboundedReceiver<()>,
-    poisoned: bool,
+/// Abort queued requests before a suspended statement is destroyed. This guard
+/// is created after the statement so cancellation retires completions first.
+struct Running<'a> {
+    io: &'a KvIo,
+    complete: bool,
+}
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.io.shutdown();
+        }
+    }
+}
+
+/// Cooperatively return to any host executor, including with immediately-ready KV.
+async fn yield_to_host() {
+    let mut yielded = false;
+    poll_fn(move |cx| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 impl Session {
@@ -153,6 +177,7 @@ impl Session {
     ///
     /// Acquire exclusive ownership and settle the preceding owner's requests first.
     /// Recovery may perform serial mutations before the session becomes usable.
+    /// The returned future is `Send`; all work is polled by the caller's executor.
     pub async fn open(store: Arc<dyn KvStore>) -> Result<Self> {
         Self::open_with_options(store, StorageOptions::default()).await
     }
@@ -165,55 +190,29 @@ impl Session {
         options: StorageOptions,
     ) -> Result<Self> {
         let io = KvIo::mount_with_options(store, options).await?;
-        io.use_worker_completions();
-        let events = io.take_events();
-        let (commands, receiver) = commands::channel();
-        let (ready, started) = oneshot::channel();
-        let engine_io = io.clone();
-        let worker = thread::Builder::new()
-            .name("sqlite-kv-engine".into())
-            .spawn(move || {
-                engine_worker(engine_io, receiver, ready);
-            })?;
-        // Construct before awaiting: cancellation drops Session and wakes the worker.
         let mut session = Self {
-            commands,
-            worker: Some(worker),
+            connection: None,
             io,
-            events,
             poisoned: true,
         };
-        session.drive_until(started).await??;
+        session.io.prepare_engine().await?;
+        session.connection = Some(open_engine(&session.io).await?);
         session.poisoned = false;
         Ok(session)
-    }
-
-    async fn drive_until<T>(&mut self, result: oneshot::Receiver<T>) -> Result<T> {
-        let result = result.fuse();
-        futures::pin_mut!(result);
-        loop {
-            futures::select! {
-                value = result => return value.map_err(|_| "engine worker stopped unexpectedly".into()),
-                event = self.events.next().fuse() => {
-                    if event.is_none() { return Err("engine I/O channel closed".into()); }
-                    self.io.drive().await?;
-                }
-            }
-        }
     }
 
     /// Execute one SQL statement and collect all result rows in memory.
     ///
     /// There is no result byte limit or streaming cursor. SQL writes remain private
     /// until [`Self::save`]. Errors and cancellation poison this session.
+    /// Cached execution yields every 64 steps; one engine call cannot be preempted.
+    /// An engine helper requiring synchronous nonresident I/O returns an error.
     pub async fn query(&mut self, sql: &str) -> Result<Rows> {
         if self.poisoned {
             return Err("session is poisoned; discard and reopen".into());
         }
         self.poisoned = true; // cancellation/error requires discarding the session
-        let (tx, rx) = oneshot::channel();
-        self.commands.send(Command::Query(sql.to_owned(), tx))?;
-        let rows = self.drive_until(rx).await??;
+        let rows = query_engine(self.connection.as_ref().unwrap(), &self.io, sql).await?;
         self.poisoned = false;
         Ok(rows)
     }
@@ -253,91 +252,80 @@ impl Session {
         if self.poisoned {
             return Err("cannot save a poisoned session".into());
         }
-        let (tx, rx) = oneshot::channel();
-        self.commands.send(Command::CanSave(tx))?;
-        self.drive_until(rx).await??;
-        self.checkpoint().await?;
-        let (tx, rx) = oneshot::channel();
-        self.commands.send(Command::Stop(tx))?;
-        self.drive_until(rx).await?;
-        if let Some(worker) = self.worker.take() {
-            worker.join().map_err(|_| "engine worker panicked")?;
+        if !self.connection.as_ref().unwrap().get_auto_commit() {
+            return Err("cannot save an open SQL transaction".into());
         }
+        self.checkpoint().await?;
+        // Drop releases engine state without checkpointing or hidden file I/O.
+        drop(self.connection.take());
         Ok(self.io.publish().await?)
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Never block the host on an active query. Wake any engine I/O wait and
-        // detach the thread; it exits after unwinding the current command.
         self.io.shutdown();
-        let (tx, _) = oneshot::channel();
-        let _ = self.commands.send(Command::Stop(tx));
+        drop(self.connection.take());
     }
 }
 
-fn open_engine(io: Arc<KvIo>) -> Result<Arc<Connection>> {
-    let mounted: Arc<dyn IO> = Arc::new(MountedIo(io));
+/// Resume an engine completion only after the host has driven all submitted I/O.
+async fn drive_completion(io: &KvIo, completion: turso_core::types::IOCompletions) -> Result<()> {
+    if completion.is_explicit_yield() {
+        yield_to_host().await;
+    } else {
+        io.drive().await?;
+        if !completion.finished() {
+            return Err("engine completion has no queued I/O".into());
+        }
+        if let Some(error) = completion.get_error() {
+            return Err(turso_core::LimboError::from(error).into());
+        }
+    }
+    Ok(())
+}
+
+async fn open_engine(io: &Arc<KvIo>) -> Result<Arc<Connection>> {
+    let mounted: Arc<dyn IO> = Arc::new(MountedIo(io.clone()));
     let file = mounted.open_file(DB_PATH, OpenFlags::Create, false)?;
     let options =
         OpenOptions::new(Arc::new(SqliteDialect)).storage(Arc::new(DatabaseFile::new(file)));
-    // Bypass the global registry: reopening must construct a genuinely cold engine.
+    // Bypass the global registry: reopening constructs a cold engine.
     let mut state = turso_core::OpenDbAsyncState::new();
     let db = loop {
         match Database::do_open_async(&mut state, mounted.clone(), DB_PATH, &options)? {
-            turso_core::IOResult::Done(db) => break db,
-            turso_core::IOResult::IO(completion) => completion.wait(&*mounted)?,
+            IOResult::Done(db) => break db,
+            IOResult::IO(completion) => drive_completion(io, completion).await?,
         }
     };
-    let connection = db.connect()?;
+    let mut state = ConnectAsyncState::default();
+    let connection = loop {
+        match db.connect_async(&mut state)? {
+            IOResult::Done(connection) => break connection,
+            IOResult::IO(completion) => drive_completion(io, completion).await?,
+        }
+    };
     connection.wal_auto_actions_disable();
     connection.set_temp_store(TempStore::Memory);
     Ok(connection)
 }
 
-fn engine_worker(
-    io: Arc<KvIo>,
-    commands: commands::Receiver<Command>,
-    ready: oneshot::Sender<Result<()>>,
-) {
-    let connection = match open_engine(io.clone()) {
-        Ok(connection) => connection,
-        Err(e) => {
-            let _ = ready.send(Err(e));
-            return;
-        }
-    };
-    if ready.send(Ok(())).is_err() {
-        return;
-    }
-    while let Ok(command) = commands.recv() {
-        match command {
-            Command::Query(sql, response) => {
-                let _ = response.send(query_engine(&connection, &io, &sql));
-            }
-            Command::CanSave(response) => {
-                let result = if connection.get_auto_commit() {
-                    Ok(())
-                } else {
-                    Err("cannot save an open SQL transaction".into())
-                };
-                let _ = response.send(result);
-            }
-            Command::Stop(response) => {
-                // Drop releases locks without a hidden checkpoint or file I/O.
-                drop(connection);
-                let _ = response.send(());
-                return;
-            }
-        }
-    }
-}
-
-fn query_engine(connection: &Arc<Connection>, io: &Arc<KvIo>, sql: &str) -> Result<Rows> {
+async fn query_engine(connection: &Arc<Connection>, io: &KvIo, sql: &str) -> Result<Rows> {
     let mut statement = connection.prepare(sql)?;
+    let mut running = Running {
+        io,
+        complete: false,
+    };
     let mut rows = Vec::new();
+    let mut steps = 0;
     loop {
+        // Bound work between host yields even when all pages are already cached.
+        // A single engine step is not preemptible by this adapter.
+        if steps == 64 {
+            yield_to_host().await;
+            steps = 0;
+        }
+        steps += 1;
         match statement.step()? {
             StepResult::Row => rows.push(
                 statement
@@ -347,9 +335,17 @@ fn query_engine(connection: &Arc<Connection>, io: &Arc<KvIo>, sql: &str) -> Resu
                     .cloned()
                     .collect(),
             ),
-            StepResult::Done => return Ok(rows),
-            StepResult::IO => io.step()?,
-            StepResult::Yield => thread::yield_now(),
+            StepResult::Done => {
+                running.complete = true;
+                return Ok(rows);
+            }
+            StepResult::IO => {
+                let completion = statement
+                    .take_io_completions()
+                    .ok_or("engine yielded I/O without a completion")?;
+                drive_completion(io, completion).await?;
+            }
+            StepResult::Yield => yield_to_host().await,
             StepResult::Busy | StepResult::Sleep { .. } => {
                 return Err("unexpected contention in single-owner session".into());
             }

@@ -33,7 +33,10 @@ impl KvStore for Store {
 fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(Store::default());
-        let mut db = Session::open(store.clone()).await?;
+        fn require_send<T: Send>(value: T) -> T {
+            value
+        }
+        let mut db = require_send(Session::open(store.clone())).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         db.execute("INSERT INTO t VALUES (1, 'hello')").await?;

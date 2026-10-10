@@ -2,7 +2,8 @@
 
 The adapter now uses one page-map implementation: an adaptive-height, 256-way
 radix tree with its root embedded in the snapshot head. Backend mutations run one
-at a time; independent reads can overlap. This is an author review supported by
+at a time; independent reads can overlap. The caller drives the engine directly,
+without a worker thread. This is an author review supported by
 executed tests, not an independent audit.
 
 ## Map decision
@@ -49,6 +50,34 @@ No real-backend latency improvement is claimed by these simulator measurements.
 - Regenerated all current benchmark evidence and removed the layout dimension
   from CSVs, analyzers, examples and documentation.
 
+## Host-driven execution
+
+`Session` owns the engine connection directly. Open/connect resume their engine
+state machines after awaiting queued KV work. Queries step the engine, drive
+reported I/O asynchronously and resume; checkpoint follows the same path. Save
+drops the checkpointed connection before publication. The command/result/event
+channels, worker thread, condition variable and worker-ready queue are removed.
+
+The host runs completion callbacks. A statement cancellation guard aborts queued
+requests before statement destruction, and the session remains poisoned. Cached
+queries return to the executor after 64 steps; a single engine call is not
+preemptible. The open future remains `Send`: the engine's owned schema guard uses
+`parking_lot`'s supported `send_guard` feature, enabled in Cargo without adding a
+new resolved crate or changing the engine source.
+
+The pinned engine still calls synchronous metadata helpers. Open asynchronously
+loads page zero and retains it; dirty overlay entries override that original
+header. Synchronous `IO::step` serves resident reads and private sync barriers
+only. Nonresident reads, file mutations or waits without queued work fail
+explicitly, without polling KV or blocking the host. Such a synchronous engine
+path requires a nonblocking upstream implementation to become supported; it is
+not retried by replaying SQL. An error poisons the session.
+
+Regression checks cover host-side callbacks, cached-query scheduling and
+cancellation, `Send` open futures, multi-page cold schemas, ANALYZE statistics,
+cache eviction, schema changes and synchronous-I/O rejection. Header cache tests
+verify that overlay writes, WAL bytes and truncation retain precedence.
+
 ## Boundaries
 
 The default library contains the KV contract, engine adapter, codecs and one
@@ -64,7 +93,7 @@ Rust/Cargo 1.90.0, locked dependencies, Linux x86_64.
 | Check | Outcome |
 |---|---|
 | `cargo test --locked --no-default-features` | 8 tests and one compile-checked rustdoc example pass |
-| `cargo test --locked --features simulation` | 51 tests pass: 30 unit, 20 integration, one public API; one rustdoc example also passes |
+| `cargo test --locked --features simulation` | 54 tests pass: 33 unit, 20 integration, one public API; one rustdoc example also passes |
 | Interruption campaigns | 1355 cases across the one supported map |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |

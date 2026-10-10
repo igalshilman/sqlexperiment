@@ -50,14 +50,14 @@ Observed (block gets, distinct blocks) during open: (1, 1).
 
 | Operation | Gets | Pages put | Puts | Deletes | Put value bytes | Mutation bytes + keys | App write amp | Page→KV amp |
 |---|---|---|---|---|---|---|---|---|
-| read_only_save | 5 | 0 | 0 | 0 | 0 | 0 | — | — |
-| rollback | 6 | 0 | 0 | 0 | 0 | 0 | — | — |
-| replace_payload | 6 | 1 | 3 | 2 | 886 | 978 | 15.28× | 0.22× |
-| update_index | 7 | 2 | 4 | 3 | 1,608 | 1,752 | 219.00× | 0.20× |
-| insert | 7 | 2 | 4 | 3 | 1,497 | 1,641 | 20.51× | 0.18× |
-| delete | 7 | 2 | 4 | 3 | 1,601 | 1,745 | — | 0.20× |
-| ten_adjacent | 6 | 1 | 3 | 2 | 863 | 955 | 1.49× | 0.21× |
-| ten_scattered | 7 | 2 | 4 | 3 | 1,479 | 1,623 | 2.54× | 0.18× |
+| read_only_save | 4 | 0 | 0 | 0 | 0 | 0 | — | — |
+| rollback | 5 | 0 | 0 | 0 | 0 | 0 | — | — |
+| replace_payload | 5 | 1 | 3 | 2 | 886 | 978 | 15.28× | 0.22× |
+| update_index | 6 | 2 | 4 | 3 | 1,608 | 1,752 | 219.00× | 0.20× |
+| insert | 6 | 2 | 4 | 3 | 1,497 | 1,641 | 20.51× | 0.18× |
+| delete | 6 | 2 | 4 | 3 | 1,601 | 1,745 | — | 0.20× |
+| ten_adjacent | 5 | 1 | 3 | 2 | 863 | 955 | 1.49× | 0.21× |
+| ten_scattered | 6 | 2 | 4 | 3 | 1,479 | 1,623 | 2.54× | 0.18× |
 
 ## Update locality: 10,000 rows, 256-byte payload
 

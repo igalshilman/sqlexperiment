@@ -57,6 +57,6 @@ policies are compared on identical decoded SQL pages. Codec timing samples up to
 64 actual pages per dataset, with five warm-up passes and 200 measured passes;
 policy order alternates between repeats.
 
-Elapsed timings include simulator scheduling and, for SQL, worker and parsing
-costs. Three observations do not establish a latency distribution. Wire framing,
+Elapsed timings include simulator scheduling and, for SQL, host-driven engine
+execution and parsing costs. Three observations do not establish a latency distribution. Wire framing,
 replication, disk writes, backend compression and compaction are not measured.

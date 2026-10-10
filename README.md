@@ -34,6 +34,13 @@ adaptive LZ4), applied only to new pages; stored tags determine decoding.
 Independent head/intent reads overlap during open. The engine I/O pump overlaps
 adjacent reads in batches of up to 16, with write/truncate/sync barriers.
 
+The host task drives engine open/connect, SQL steps and async KV I/O directly.
+There are no worker threads or background tasks. Cached queries yield every 64
+engine steps. The header page is loaded asynchronously and retained for the
+engine's synchronous metadata reads. Other synchronous reads requiring KV or
+synchronous file mutations return an error; the caller must discard that session.
+The normal query and checkpoint paths use asynchronous I/O.
+
 SQL COMMIT and `checkpoint()` affect the private view. `save()` consumes the
 session and is the durability boundary. Dropping a session discards unsaved work.
 Query errors and cancellation poison the session. `Ok(SaveReport)` confirms
@@ -90,7 +97,7 @@ cargo bench --locked --features simulation --bench page_compression -- 3
 
 Logical pages are 4096 bytes. Encoded page objects use adaptive LZ4 with a raw
 fallback, at most 4099 bytes including the header. A snapshot-local cache retains
-one decoded page. The map uses compact radix nodes; unchanged subtrees are reused.
+one decoded page, alongside the retained header page. The map uses compact radix nodes; unchanged subtrees are reused.
 Only the current format is supported, with no probing or handling of other formats.
 
 The embedded root removes a separate map fetch from cold reads and avoids writing
@@ -115,8 +122,7 @@ and `src/map_codec.rs`, and the commit/recovery contract in `src/pending.rs` and
 The pending record is limited to 1 MiB; an oversized save fails before mutations.
 The backend must accept that value size and page objects up to 4099 bytes. Dirty
 pages, private WAL, map cache, write plans and collected query results have no byte
-budgets. There is one native engine worker per session. Queries are not sandboxed
-or forcibly preempted. There is no payload checksum, corruption repair,
+budgets. One engine step is not forcibly preemptible, and queries are not sandboxed. There is no payload checksum, corruption repair,
 cross-session cache, attached-database guarantee, or process-kill/power-loss test.
 
 Measurements use an in-memory simulator. They count logical KV traffic and isolated

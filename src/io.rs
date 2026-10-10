@@ -19,25 +19,26 @@
 //! aborts the dequeued batch. A [`crate::Session`] treats either as fatal and drops
 //! its private view.
 //!
-//! In session mode the host queues successful completions, and the engine worker
-//! runs their callbacks from `IO::step`; callbacks may touch engine-thread state.
-//! The condition variable bridges the engine's blocking waits to host async I/O.
-//! Standalone low-level drivers complete directly. `pending_count` includes queued,
-//! executing and worker-ready completions, so publication cannot race them.
+//! The host task runs both engine steps and completion callbacks, separated by
+//! async backend waits. There is no cross-thread completion queue. `pending_count`
+//! includes queued and executing requests, so publication cannot race them.
+//!
+//! Session open preloads the database header page asynchronously. The engine's
+//! synchronous metadata helpers may then read resident header/overlay/WAL bytes
+//! through `IO::step`. That method never polls KV futures: a nonresident read,
+//! file mutation or wait with no queued work returns an error instead of blocking
+//! or spinning. Normal engine I/O is driven by the asynchronous pump.
 //!
 //! File sync is only a private-overlay ordering barrier. Durable KV mutations happen
-//! later in snapshot publication, after a complete checkpoint and worker shutdown.
+//! later in snapshot publication, after a complete checkpoint and connection drop.
 //! The engine WAL never becomes a durable KV object.
 use crate::kv::KvStore;
 use crate::snapshot::{Snapshot, StorageOptions};
-use futures::{StreamExt, channel::mpsc, stream::FuturesUnordered};
+use futures::{StreamExt, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
-    sync::{
-        Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 use turso_core::io::{FileId, FileSyncType, clock::DefaultClock};
 use turso_core::{
@@ -68,6 +69,9 @@ fn engine_error(message: impl Into<String>) -> LimboError {
 #[derive(Default)]
 struct State {
     sizes: [u64; 2],
+    /// Original page zero retained for synchronous engine metadata reads.
+    /// Overlay entries, including explicit holes, always override these bytes.
+    header: Option<Vec<u8>>,
     dirty: BTreeMap<(usize, u64), Option<Vec<u8>>>,
     #[cfg(feature = "simulation")]
     written: [u64; 2],
@@ -96,33 +100,26 @@ struct Pending {
     completion: Completion,
 }
 
-/// Cross-thread wakeup generation, lifecycle flag and all unfinished completions.
+/// Lifecycle flag and count of queued/executing completions.
 #[derive(Default)]
 struct Progress {
-    generation: u64,
     inflight: usize,
     stopped: bool,
 }
 
 /// Cancellation guard for a dequeued request, created before its future is polled.
-/// Ownership transfers to the ready queue only when worker-side delivery is required.
+/// Retires accounting and aborts incomplete callbacks when the host cancels work.
 struct Completing<'a> {
     io: &'a KvIo,
     completion: Completion,
-    transferred: bool,
 }
 impl Drop for Completing<'_> {
     fn drop(&mut self) {
-        if self.transferred {
-            return;
-        }
         if !self.completion.finished() {
             self.completion.abort();
         }
         let mut progress = self.io.progress.lock().unwrap();
         progress.inflight -= 1;
-        progress.generation += 1;
-        self.io.wake.notify_all();
     }
 }
 
@@ -135,12 +132,7 @@ pub struct KvIo {
     state: Mutex<State>,
     queue: Mutex<VecDeque<Pending>>,
     driver: futures::lock::Mutex<()>,
-    worker_completions: AtomicBool,
-    ready: Mutex<VecDeque<(Completion, i32)>>,
-    events: mpsc::UnboundedSender<()>,
-    event_receiver: Mutex<Option<mpsc::UnboundedReceiver<()>>>,
     progress: Mutex<Progress>,
-    wake: Condvar,
     #[cfg(all(test, feature = "simulation"))]
     fault: Mutex<Option<test_faults::Fault>>,
 }
@@ -161,27 +153,24 @@ impl KvIo {
             sizes: [snapshot.size, 0],
             ..State::default()
         };
-        let (events, event_receiver) = mpsc::unbounded();
         Ok(Arc::new(Self {
             snapshot,
             state: Mutex::new(state),
             queue: Mutex::default(),
             driver: futures::lock::Mutex::new(()),
-            worker_completions: AtomicBool::new(false),
-            ready: Mutex::default(),
-            events,
-            event_receiver: Mutex::new(Some(event_receiver)),
             progress: Mutex::default(),
-            wake: Condvar::new(),
             #[cfg(all(test, feature = "simulation"))]
             fault: Mutex::new(None),
         }))
     }
 
-    /// Engine success callbacks run only from IO::step on the engine worker.
-    /// Standalone drivers can complete directly; Session selects worker delivery.
-    pub(crate) fn use_worker_completions(&self) {
-        self.worker_completions.store(true, Ordering::SeqCst);
+    /// Keep the database header page resident for the engine's synchronous
+    /// metadata reads during connection setup and SQL preparation. Fetching it
+    /// happens asynchronously before entering the engine; dirty pages take priority.
+    pub(crate) async fn prepare_engine(&self) -> io::Result<()> {
+        let header = self.block(0, 0).await?;
+        self.state.lock().unwrap().header = Some(header);
+        Ok(())
     }
 
     /// Snapshot local database/WAL traffic counters; these are not durable KV bytes.
@@ -210,61 +199,47 @@ impl KvIo {
             op,
             completion: completion.clone(),
         });
-        let _ = self.events.unbounded_send(());
         Ok(completion)
-    }
-
-    pub(crate) fn take_events(&self) -> mpsc::UnboundedReceiver<()> {
-        self.event_receiver
-            .lock()
-            .unwrap()
-            .take()
-            .expect("one host driver")
     }
 
     pub(crate) fn shutdown(&self) {
         {
             let mut progress = self.progress.lock().unwrap();
             progress.stopped = true;
-            self.wake.notify_all();
         }
         let pending: Vec<_> = self.queue.lock().unwrap().drain(..).collect();
         for request in pending {
             drop(Completing {
                 io: self,
                 completion: request.completion,
-                transferred: false,
-            });
-        }
-        let ready: Vec<_> = self.ready.lock().unwrap().drain(..).collect();
-        for (completion, _) in ready {
-            drop(Completing {
-                io: self,
-                completion,
-                transferred: false,
             });
         }
     }
 
-    /// Count unfinished queued, executing and worker-ready engine requests.
+    /// Count unfinished queued and executing engine requests.
     pub fn pending_count(&self) -> usize {
         self.progress.lock().unwrap().inflight
     }
 
+    fn resident_block(&self, file: usize, index: u64) -> Option<Vec<u8>> {
+        let state = self.state.lock().unwrap();
+        if let Some(bytes) = state.dirty.get(&(file, index)) {
+            return Some(bytes.clone().unwrap_or_else(|| vec![0; BLOCK_SIZE]));
+        }
+        if file == 1 {
+            return Some(vec![0; BLOCK_SIZE]);
+        }
+        if index == 0 {
+            return state.header.clone();
+        }
+        None
+    }
+
     async fn block(&self, file: usize, index: u64) -> io::Result<Vec<u8>> {
-        let staged = self
-            .state
-            .lock()
-            .unwrap()
-            .dirty
-            .get(&(file, index))
-            .cloned();
-        let block = match staged {
-            Some(value) => value,
-            None if file == 0 => self.snapshot.block(index).await?,
-            None => None, // WAL is always session-local; never fetch it from KV
-        };
-        match block {
+        if let Some(bytes) = self.resident_block(file, index) {
+            return Ok(bytes);
+        }
+        match self.snapshot.block(index).await? {
             Some(bytes) if bytes.len() == BLOCK_SIZE => Ok(bytes),
             Some(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -272,6 +247,25 @@ impl KvIo {
             )),
             None => Ok(vec![0; BLOCK_SIZE]), // sparse-file hole
         }
+    }
+
+    /// Synchronous engine helpers may only consume data already in this view.
+    /// A cache miss never starts or polls a backend request from `IO::step`.
+    fn read_resident(&self, file: usize, pos: u64, output: &mut [u8]) -> Option<usize> {
+        output.fill(0);
+        let size = self.state.lock().unwrap().sizes[file];
+        let count = size.saturating_sub(pos).min(output.len() as u64) as usize;
+        let mut done = 0;
+        while done < count {
+            let offset = pos + done as u64;
+            let index = offset / BLOCK_SIZE as u64;
+            let start = (offset % BLOCK_SIZE as u64) as usize;
+            let len = (BLOCK_SIZE - start).min(count - done);
+            let block = self.resident_block(file, index)?;
+            output[done..done + len].copy_from_slice(&block[start..start + len]);
+            done += len;
+        }
+        Some(count)
     }
 
     async fn read(&self, file: usize, pos: u64, output: &mut [u8]) -> io::Result<usize> {
@@ -407,11 +401,9 @@ impl KvIo {
         let finishing = Completing {
             io: self,
             completion: completion.clone(),
-            transferred: false,
         };
         async move {
-            // Capture the whole guard, not just its Copy `transferred` field.
-            let mut finishing = finishing;
+            let _finishing = finishing;
             if completion.finished() {
                 return Ok(0);
             }
@@ -446,20 +438,7 @@ impl KvIo {
             match result {
                 Ok(n) => {
                     let n = i32::try_from(n).map_err(|_| invalid("I/O too large"))?;
-                    if self.worker_completions.load(Ordering::SeqCst) {
-                        let mut progress = self.progress.lock().unwrap();
-                        if !progress.stopped {
-                            self.ready
-                                .lock()
-                                .unwrap()
-                                .push_back((completion.clone(), n));
-                            finishing.transferred = true;
-                            progress.generation += 1;
-                            self.wake.notify_all();
-                        }
-                    } else {
-                        completion.complete(n);
-                    }
+                    completion.complete(n);
                 }
                 Err(e) => {
                     completion.error(CompletionError::IOError(e.kind(), "KV I/O"));
@@ -470,7 +449,7 @@ impl KvIo {
         }
     }
 
-    /// Publish after the engine has stopped and no SQL transaction remains.
+    /// Publish after the engine connection is dropped and no SQL transaction remains.
     pub(crate) async fn publish(&self) -> io::Result<crate::SaveReport> {
         if self.pending_count() != 0 {
             return Err(invalid("cannot save with pending I/O"));
@@ -513,45 +492,52 @@ impl IO for KvIo {
         Err(engine_error("dynamic files are out of scope"))
     }
     fn step(&self) -> turso_core::Result<()> {
-        if self.worker_completions.load(Ordering::SeqCst) {
-            loop {
-                let ready: Vec<_> = self.ready.lock().unwrap().drain(..).collect();
-                if !ready.is_empty() {
-                    for (completion, n) in ready {
-                        let _finishing = Completing {
-                            io: self,
-                            completion: completion.clone(),
-                            transferred: false,
-                        };
-                        completion.complete(n);
-                    }
-                    return Ok(());
+        // Synchronous engine helpers may read resident metadata, but they must
+        // never wait for async KV. Unknown blocking paths fail explicitly.
+        let _driver = self
+            .driver
+            .try_lock()
+            .ok_or_else(|| engine_error("I/O driver is active"))?;
+        let mut progressed = false;
+        loop {
+            let pending = self.queue.lock().unwrap().pop_front();
+            let Some(Pending { op, completion }) = pending else {
+                return if progressed {
+                    Ok(())
+                } else {
+                    Err(engine_error(
+                        "engine attempted a synchronous wait without queued I/O",
+                    ))
+                };
+            };
+            let _finishing = Completing {
+                io: self,
+                completion: completion.clone(),
+            };
+            progressed = true;
+            if completion.finished() {
+                continue;
+            }
+            match op {
+                Operation::Read { file, pos } => {
+                    let mut bytes = vec![0; completion.as_read().buf().len()];
+                    let Some(n) = self.read_resident(file, pos, &mut bytes) else {
+                        return Err(engine_error(
+                            "engine attempted synchronous I/O for a nonresident page",
+                        ));
+                    };
+                    completion
+                        .as_read()
+                        .buf()
+                        .as_mut_slice()
+                        .copy_from_slice(&bytes);
+                    completion
+                        .complete(i32::try_from(n).map_err(|_| engine_error("I/O too large"))?);
                 }
-                let mut progress = self.progress.lock().unwrap();
-                if progress.stopped {
-                    return Err(engine_error("adapter stopped"));
-                }
-                if progress.inflight == 0 {
-                    return Ok(());
-                }
-                // Both scheduling and this check take progress before ready,
-                // preventing a missed wake between the empty check and wait.
-                if self.ready.lock().unwrap().is_empty() {
-                    progress = self.wake.wait(progress).unwrap();
-                }
-                drop(progress);
+                Operation::Sync => completion.complete(0),
+                _ => return Err(engine_error("engine attempted a synchronous file mutation")),
             }
         }
-        // Only the dedicated engine thread blocks here. The host completes I/O.
-        let mut progress = self.progress.lock().unwrap();
-        let generation = progress.generation;
-        while progress.inflight > 0 && progress.generation == generation && !progress.stopped {
-            progress = self.wake.wait(progress).unwrap();
-        }
-        if progress.stopped {
-            return Err(engine_error("adapter stopped"));
-        }
-        Ok(())
     }
     fn file_id(&self, path: &str) -> turso_core::Result<FileId> {
         Ok(FileId::from_path_hash(path))
