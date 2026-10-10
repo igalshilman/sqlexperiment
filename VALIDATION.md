@@ -1,6 +1,10 @@
 # Validation — failpoints and amplification, 2026-10-10
 
-## Current 0.9.0 run
+Current 0.10.0 verification and baseline comparison are recorded in
+`OPTIMIZATION_RESULTS.md` and `results/tests-optimization.log`. The runs below
+are historical checkpoints; their numeric claims are not v8 measurements.
+
+## Historical 0.9.0 run
 
 Storage format remains v7 and Turso remains pinned to unmodified 0.8.2. The current
 run uses Rust/Cargo 1.90.0 on Linux x86_64. `cargo fmt --check` and all-target Clippy

@@ -1,6 +1,6 @@
 # Recovery through one pending-save record
 
-Implemented in crate 0.8.0, format v7. This supersedes the retirement-only proposal
+Introduced in crate 0.8.0; retained in crate 0.10.0 with format v8. This supersedes the retirement-only proposal
 and the old full-store GC. Production code requires only get/put/delete.
 
 ## Invariant
@@ -19,11 +19,11 @@ walk the full old map. Test-only reachability checks verify exact object account
 
 ## Persistent record
 
-`v7/pending_save` contains:
+`v8/pending_save` contains:
 
 | Field | Encoding |
 |---|---|
-| Magic | 4 bytes, `TKP7` |
+| Magic | 4 bytes, `TKP8` |
 | Old head length, new head length | Two u32 LE lengths; zero old length means no old head |
 | Created count, retired count | Two u32 LE counts |
 | Old head, new head | Exact head byte strings |
@@ -110,5 +110,5 @@ of the resulting immutable objects, storing IDs and head metadata only. A durabl
 engine WAL/database VFS would be another valid design with different page-write
 costs; this implementation keeps the single-copy immutable payload approach.
 
-Old v6 objects and independently injected garbage are outside this v7 protocol.
+Old v6 objects and independently injected garbage are outside this v8 protocol.
 Use a fresh namespace; no migration or generic repair collector is supplied.

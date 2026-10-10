@@ -2,6 +2,7 @@
 use crate::{
     io::BLOCK_SIZE,
     kv::KvStore,
+    map_codec::{Node, decode as decode_node, encode as encode_node},
     pending::{Objects, PENDING, PendingSave, SaveReport, recover},
 };
 use futures::{StreamExt, future::BoxFuture, stream};
@@ -11,10 +12,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub const HEAD: &str = "v7/head";
+pub const HEAD: &str = "v8/head";
 const OVERRIDE_LIMIT: usize = 64;
 type Id = u64;
-type Node = BTreeMap<u8, Id>;
 type Changes = BTreeMap<u64, Option<Vec<u8>>>;
 type Refs = BTreeMap<u64, Option<Id>>;
 
@@ -47,7 +47,7 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 pub(crate) fn key(kind: &str, id: &Id) -> String {
-    format!("v7/{kind}/{id:016x}")
+    format!("v8/{kind}/{id:016x}")
 }
 fn height_for(index: u64) -> u8 {
     ((64 - index.leading_zeros()).max(1).div_ceil(8)) as u8
@@ -55,32 +55,6 @@ fn height_for(index: u64) -> u8 {
 fn digit(index: u64, level: u8) -> u8 {
     (index >> (8 * (level - 1))) as u8
 }
-fn encode_node(node: &Node) -> Vec<u8> {
-    let mut out = Vec::with_capacity(node.len() * 9);
-    for (edge, id) in node {
-        out.push(*edge);
-        out.extend_from_slice(&id.to_le_bytes());
-    }
-    out
-}
-fn decode_node(bytes: &[u8], max_id: Id, allow_empty: bool) -> io::Result<Node> {
-    if (!allow_empty && bytes.is_empty()) || !bytes.len().is_multiple_of(9) || bytes.len() > 256 * 9
-    {
-        return Err(invalid("invalid radix node"));
-    }
-    let mut node = Node::new();
-    let mut previous = None;
-    for entry in bytes.as_chunks::<9>().0 {
-        let child = u64::from_le_bytes(entry[1..].try_into().unwrap());
-        if child == 0 || child > max_id || previous.is_some_and(|edge| edge >= entry[0]) {
-            return Err(invalid("invalid radix edge/child ID"));
-        }
-        node.insert(entry[0], child);
-        previous = Some(entry[0]);
-    }
-    Ok(node)
-}
-
 /// Entire write plan is constructed before any mutations. IDs above the old
 /// head's counter can be reused after recovery has removed an aborted attempt.
 struct Build {
@@ -112,7 +86,7 @@ struct Head {
 impl Head {
     fn decode(bytes: &[u8]) -> io::Result<Self> {
         let mut result = Self::default();
-        if bytes.len() < 26 || &bytes[..4] != b"TKV7" {
+        if bytes.len() < 26 || &bytes[..4] != b"TKV8" {
             return Err(invalid("invalid snapshot head"));
         }
         result.size = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
@@ -176,6 +150,8 @@ pub(crate) struct Snapshot {
     concurrency: usize,
     pub size: u64,
     nodes: Mutex<BTreeMap<Id, Node>>,
+    // One validated immutable page, scoped to this snapshot. No lock across await.
+    block_cache: Mutex<Option<(Id, Vec<u8>)>>,
 }
 
 impl Snapshot {
@@ -202,6 +178,7 @@ impl Snapshot {
             concurrency: options.write_concurrency,
             size: 0,
             nodes: Mutex::default(),
+            block_cache: Mutex::default(),
         };
         let bytes = recover(result.store.clone(), result.concurrency).await?;
         if let Some(bytes) = bytes {
@@ -209,6 +186,8 @@ impl Snapshot {
             result.original_head = Some(bytes);
         } else {
             for legacy in [
+                "v7/head",
+                "v7/pending_save",
                 "v6/head",
                 "v5/head",
                 "v5/allocated",
@@ -255,7 +234,7 @@ impl Snapshot {
         } else {
             root.unwrap_or(0).to_le_bytes().to_vec()
         };
-        let mut out = b"TKV7".to_vec();
+        let mut out = b"TKV8".to_vec();
         out.extend_from_slice(&size.to_le_bytes());
         out.extend_from_slice(&last_id.to_le_bytes());
         out.push(height);
@@ -328,10 +307,16 @@ impl Snapshot {
         let Some(id) = self.block_id(index).await? else {
             return Ok(None);
         };
+        if let Some((cached_id, bytes)) = self.block_cache.lock().unwrap().as_ref()
+            && *cached_id == id
+        {
+            return Ok(Some(bytes.clone()));
+        }
         let bytes = self.fetch("block", id).await?;
         if bytes.len() != BLOCK_SIZE {
             return Err(invalid("invalid block length"));
         }
+        *self.block_cache.lock().unwrap() = Some((id, bytes.clone()));
         Ok(Some(bytes))
     }
     fn rewrite<'a>(

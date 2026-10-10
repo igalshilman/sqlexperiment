@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on build directory
+   Compiling turso-lazy-kv v0.10.0 (/workspace/scratch/cfed9c46d853/recovered/turso-lazy-kv)
+    Finished `release` profile [optimized] target(s) in 1m 04s
+     Running `/workspace/scratch/cfed9c46d853/baseline/target/release/examples/amplification 3`

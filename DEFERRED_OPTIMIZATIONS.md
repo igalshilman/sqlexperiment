@@ -1,11 +1,13 @@
 # Deferred map, compression and cache experiments
 
-Status: design notes only, deliberately not implemented. SQL pages and K/V blocks
-remain 4096 bytes. The next measurement work uses the existing three layouts.
+Status: crate 0.10.0 implements the one-page snapshot cache and adaptive
+bitmap/frame-of-reference map codec below. SQL pages and K/V blocks remain 4096
+bytes. The remaining proposals, especially cross-session caches and page
+compression, are still deferred. See `OPTIMIZATION_RESULTS.md`.
 
 ## Measured priorities from 0.9.0
 
-`AMPLIFICATION_RESULTS.md` adds evidence without implementing these proposals:
+The saved 0.9.0 baseline identified these targets:
 
 - Every measured cold open fetched one block five times. A byte-bounded cache
   scoped to one mounted snapshot could first target four redundant reads and
@@ -91,7 +93,7 @@ Backend compression after replication does not necessarily reduce replicated byt
 
 Measure map bytes, metadata puts/gets, CPU decode cost, cold versus cross-session
 warm reads, cache bytes/hit rates, and scan pollution on actual small schemas and
-a large-database control. None of these proposals is currently selected as a default.
+a large-database control. Only the snapshot-local one-page cache and compact wire codec are implemented.
 
 References:
 - https://github.com/RoaringBitmap/RoaringFormatSpec

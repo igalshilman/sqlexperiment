@@ -6,7 +6,7 @@ use crate::{
 use futures::{StreamExt, future::BoxFuture, stream};
 use std::{collections::BTreeSet, io, sync::Arc};
 
-pub(crate) const PENDING: &str = "v7/pending_save";
+pub(crate) const PENDING: &str = "v8/pending_save";
 /// Prototype limit: fail before any mutation rather than silently splitting an
 /// atomic record. A backend must accept values this large (plus 4 KiB pages).
 pub const MAX_PENDING_BYTES: usize = 1024 * 1024;
@@ -70,7 +70,7 @@ impl PendingSave {
                 "pending-save record exceeds 1 MiB limit; use smaller saves",
             ));
         }
-        let mut bytes = b"TKP7".to_vec();
+        let mut bytes = b"TKP8".to_vec();
         for n in [
             old.len(),
             self.new_head.len(),
@@ -90,7 +90,7 @@ impl PendingSave {
         Ok(bytes)
     }
     pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() < 20 || bytes.len() > MAX_PENDING_BYTES || &bytes[..4] != b"TKP7" {
+        if bytes.len() < 20 || bytes.len() > MAX_PENDING_BYTES || &bytes[..4] != b"TKP8" {
             return Err(invalid());
         }
         let lengths: Vec<_> = bytes[4..20]
@@ -209,7 +209,7 @@ mod tests {
     use crate::kv::MemoryKv;
 
     fn head(high: u64) -> Vec<u8> {
-        let mut h = b"TKV7".to_vec();
+        let mut h = b"TKV8".to_vec();
         h.extend(0u64.to_le_bytes());
         h.extend(high.to_le_bytes());
         h.extend([0, 0]);

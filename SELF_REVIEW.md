@@ -1,5 +1,8 @@
 # Author self-review — 2026-10-10
 
+This section preserves the historical 0.9.0 review. The reconstructed 0.10.0
+changes and their validation are documented in `OPTIMIZATION_RESULTS.md`.
+
 Scope: fixed-key pending-save protocol, retirement planning, recovery, engine I/O,
 36 passing tests, and the small-database/amplification benchmarks. This is an author review,
 not an independent production audit. Compression/cache experiments remain deferred.
@@ -89,8 +92,6 @@ delete traffic. `AMPLIFICATION.md` defines all denominators and exclusions.
 
 ## Publishing
 
-Prepared for publication to https://github.com/igalshilman/sqlexperiment,
-branch `main`. Publication is blocked: GitHub rejected file creation with
-`403 Resource not accessible by integration`. Nothing has been pushed.
-The prepared source includes tests, design notes and raw benchmark results.
-Build artifacts and the distribution ZIP are excluded.
+Target: https://github.com/igalshilman/sqlexperiment, branch `main`.
+Source, tests, design notes and raw benchmark results are included. Build
+artifacts and distribution archives are excluded.

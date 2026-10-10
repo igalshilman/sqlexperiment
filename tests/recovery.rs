@@ -15,8 +15,8 @@ use turso_lazy_kv::{
     kv::{KvStore, MemoryKv},
 };
 
-const HEAD: &str = "v7/head";
-const PENDING: &str = "v7/pending_save";
+const HEAD: &str = "v8/head";
+const PENDING: &str = "v8/pending_save";
 struct FaultKv {
     inner: MemoryKv,
     calls: AtomicUsize,

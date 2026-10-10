@@ -60,11 +60,11 @@ impl KvStore for FaultKv {
             self.keys.lock().unwrap().push(key.to_owned());
             let fail = call == self.fail_at;
             if !fail || self.effect > 0 {
-                if key.starts_with("v7/block/") || key.starts_with("v7/node/") {
+                if key.starts_with("v8/block/") || key.starts_with("v8/node/") {
                     let id = u64::from_str_radix(key.rsplit('/').next().unwrap(), 16).unwrap();
                     let high = self
                         .inner
-                        .get("v7/head")
+                        .get("v8/head")
                         .await?
                         .map(|v| u64::from_le_bytes(v[12..20].try_into().unwrap()))
                         .unwrap_or(0);
@@ -186,9 +186,9 @@ async fn exercise(checkpoint: bool, empty: bool, layout: MapLayout) -> Result<()
     check(probe.clone(), 20).await?;
     let writes = probe.calls.load(Ordering::SeqCst);
     let keys = probe.keys.lock().unwrap().clone();
-    assert_eq!(keys.first().unwrap(), "v7/pending_save");
-    assert_eq!(keys.last().unwrap(), "delete:v7/pending_save");
-    let commit_at = keys.iter().position(|k| k == "v7/head").unwrap() + 1;
+    assert_eq!(keys.first().unwrap(), "v8/pending_save");
+    assert_eq!(keys.last().unwrap(), "delete:v8/pending_save");
+    let commit_at = keys.iter().position(|k| k == "v8/head").unwrap() + 1;
     probe.inner.crash(&[]);
     check(Arc::new(probe.inner.clone()), 20).await?;
     assert!(writes > 1);
@@ -271,7 +271,7 @@ async fn exercise(checkpoint: bool, empty: bool, layout: MapLayout) -> Result<()
                     // A later acknowledged save must succeed after every interruption.
                     let high = store
                         .inner
-                        .get("v7/head")
+                        .get("v8/head")
                         .await?
                         .map(|v| u64::from_le_bytes(v[12..20].try_into().unwrap()))
                         .unwrap_or(0);
@@ -285,7 +285,7 @@ async fn exercise(checkpoint: bool, empty: bool, layout: MapLayout) -> Result<()
                         .lock()
                         .unwrap()
                         .iter()
-                        .filter(|k| k.starts_with("v7/block/") || k.starts_with("v7/node/"))
+                        .filter(|k| k.starts_with("v8/block/") || k.starts_with("v8/node/"))
                     {
                         let id = u64::from_str_radix(key.rsplit('/').next().unwrap(), 16).unwrap();
                         assert!(

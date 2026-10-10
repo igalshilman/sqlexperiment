@@ -25,6 +25,77 @@ fn page(n: u64) -> Vec<u8> {
 }
 
 #[test]
+fn one_page_cache_hits_evicts_and_does_not_cross_snapshots() -> io::Result<()> {
+    futures::executor::block_on(async {
+        for layout in [
+            MapLayout::Radix,
+            MapLayout::InlineRoot,
+            MapLayout::HeadOverrides,
+        ] {
+            let store = Arc::new(MemoryKv::default());
+            Snapshot::open_with_options(store.clone(), options(layout))
+                .await?
+                .publish(
+                    Changes::from([(0, Some(page(1))), (1, Some(page(2)))]),
+                    8192,
+                )
+                .await?;
+            let snapshot = Snapshot::open(store.clone()).await?;
+            store.reset_stats();
+            for _ in 0..5 {
+                assert_eq!(snapshot.block(0).await?, Some(page(1)));
+            }
+            assert_eq!(store.stats().by_kind["block"].gets, 1);
+            assert_eq!(snapshot.block(1).await?, Some(page(2)));
+            assert_eq!(snapshot.block(0).await?, Some(page(1)));
+            assert_eq!(store.stats().by_kind["block"].gets, 3);
+            let fresh = Snapshot::open(store.clone()).await?;
+            assert_eq!(fresh.block(0).await?, Some(page(1)));
+            assert_eq!(store.stats().by_kind["block"].gets, 4);
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn missing_and_malformed_pages_are_not_cached() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        Snapshot::open(store.clone())
+            .await?
+            .publish(Changes::from([(0, Some(page(1)))]), 4096)
+            .await?;
+        let snapshot = Snapshot::open(store.clone()).await?;
+        let block_key = key("block", &snapshot.block_id(0).await?.unwrap());
+        // Deliberately violate immutability to simulate a repaired failed read.
+        store.delete(&block_key).await?;
+        assert!(snapshot.block(0).await.is_err());
+        store.put(&block_key, vec![0; BLOCK_SIZE - 1]).await?;
+        assert!(snapshot.block(0).await.is_err());
+        store.put(&block_key, page(1)).await?;
+        assert_eq!(snapshot.block(0).await?, Some(page(1)));
+        store.reset_stats();
+        assert_eq!(snapshot.block(0).await?, Some(page(1)));
+        assert_eq!(store.stats().gets, 0);
+        Ok(())
+    })
+}
+
+#[test]
+fn v7_head_or_pending_record_is_rejected_without_mutation() -> io::Result<()> {
+    futures::executor::block_on(async {
+        for old_key in ["v7/head", "v7/pending_save"] {
+            let store = Arc::new(MemoryKv::default());
+            store.put(old_key, vec![1]).await?;
+            store.reset_stats();
+            assert!(Snapshot::open(store.clone()).await.is_err());
+            assert_eq!(store.stats().puts + store.stats().deletes, 0);
+        }
+        Ok(())
+    })
+}
+
+#[test]
 fn repeated_sparse_rewrites_leave_exactly_the_current_structural_objects() -> io::Result<()> {
     futures::executor::block_on(async {
         for layout in [

@@ -6,80 +6,78 @@ See [AMPLIFICATION.md](AMPLIFICATION.md) for workload definitions and denominato
 
 ## Cold-open baseline
 
-Observed (block gets, distinct blocks) during open: (5, 1).
-
-All configurations read one block five times during open: 20,480 value bytes for one distinct 4 KiB block. Four redundant fetches account for 16 KiB before query work. This is a candidate for a bounded session-local cache; that optimization is not implemented in these results.
+Observed (block gets, distinct blocks) during open: (1, 1).
 
 ## Radix reads: 100 rows, 64-byte payload
 
 | Operation | DB pages | Open gets | Query page gets | Distinct query pages | Total gets | Read bytes + keys | Read amp |
 |---|---|---|---|---|---|---|---|
-| pk_hit | 5 | 8 | 2 | 2 | 10 | 28,972 | 452.69× |
-| pk_miss | 5 | 8 | 2 | 2 | 10 | 28,972 | — |
-| range_10 | 5 | 8 | 3 | 3 | 11 | 33,093 | 51.71× |
-| covering_index | 5 | 8 | 1 | 1 | 9 | 24,851 | 310.64× |
-| secondary_rows | 5 | 8 | 4 | 4 | 12 | 37,214 | 58.15× |
-| unindexed_filter | 5 | 8 | 3 | 3 | 11 | 33,093 | 517.08× |
-| full_scan | 5 | 8 | 3 | 3 | 11 | 33,093 | 5.17× |
+| pk_hit | 5 | 4 | 2 | 2 | 6 | 12,457 | 194.64× |
+| pk_miss | 5 | 4 | 2 | 2 | 6 | 12,457 | — |
+| range_10 | 5 | 4 | 3 | 3 | 7 | 16,578 | 25.90× |
+| covering_index | 5 | 4 | 1 | 1 | 5 | 8,336 | 104.20× |
+| secondary_rows | 5 | 4 | 4 | 4 | 8 | 20,699 | 32.34× |
+| unindexed_filter | 5 | 4 | 3 | 3 | 7 | 16,578 | 259.03× |
+| full_scan | 5 | 4 | 3 | 3 | 7 | 16,578 | 2.59× |
 
 ## Radix reads: 10,000 rows, 256-byte payload
 
 | Operation | DB pages | Open gets | Query page gets | Distinct query pages | Total gets | Read bytes + keys | Read amp |
 |---|---|---|---|---|---|---|---|
-| pk_hit | 696 | 9 | 3 | 3 | 14 | 39,411 | 153.95× |
-| pk_miss | 696 | 9 | 3 | 3 | 13 | 37,083 | — |
-| range_10 | 696 | 9 | 3 | 3 | 14 | 39,411 | 15.39× |
-| covering_index | 696 | 9 | 4 | 4 | 13 | 39,524 | 4.94× |
-| secondary_rows | 696 | 9 | 674 | 674 | 685 | 2,804,602 | 10.96× |
-| unindexed_filter | 696 | 9 | 670 | 670 | 681 | 2,788,118 | 10,891.09× |
-| full_scan | 696 | 9 | 670 | 670 | 681 | 2,788,118 | 1.09× |
+| pk_hit | 696 | 5 | 3 | 3 | 10 | 17,765 | 69.39× |
+| pk_miss | 696 | 5 | 3 | 3 | 9 | 17,320 | — |
+| range_10 | 696 | 5 | 3 | 3 | 10 | 17,765 | 6.94× |
+| covering_index | 696 | 5 | 4 | 4 | 9 | 21,140 | 2.64× |
+| secondary_rows | 696 | 5 | 674 | 674 | 681 | 2,782,956 | 10.87× |
+| unindexed_filter | 696 | 5 | 670 | 670 | 677 | 2,766,472 | 10,806.53× |
+| full_scan | 696 | 5 | 670 | 670 | 677 | 2,766,472 | 1.08× |
 
 ## Radix reads: 100 rows, 9,000-byte payload
 
 | Operation | DB pages | Open gets | Query page gets | Distinct query pages | Total gets | Read bytes + keys | Read amp |
 |---|---|---|---|---|---|---|---|
-| pk_hit | 228 | 8 | 4 | 4 | 12 | 39,221 | 4.36× |
-| pk_miss | 228 | 8 | 2 | 2 | 10 | 30,979 | — |
-| range_10 | 228 | 8 | 24 | 24 | 32 | 121,641 | 1.35× |
-| covering_index | 228 | 8 | 1 | 1 | 9 | 26,858 | 335.73× |
-| secondary_rows | 228 | 8 | 32 | 32 | 40 | 154,609 | 1.72× |
-| unindexed_filter | 228 | 8 | 226 | 226 | 234 | 954,083 | 106.01× |
-| full_scan | 228 | 8 | 226 | 226 | 234 | 954,083 | 1.06× |
+| pk_hit | 228 | 4 | 4 | 4 | 8 | 21,049 | 2.34× |
+| pk_miss | 228 | 4 | 2 | 2 | 6 | 12,807 | — |
+| range_10 | 228 | 4 | 24 | 24 | 28 | 103,469 | 1.15× |
+| covering_index | 228 | 4 | 1 | 1 | 5 | 8,686 | 108.58× |
+| secondary_rows | 228 | 4 | 32 | 32 | 36 | 136,437 | 1.52× |
+| unindexed_filter | 228 | 4 | 226 | 226 | 230 | 935,911 | 103.99× |
+| full_scan | 228 | 4 | 226 | 226 | 230 | 935,911 | 1.04× |
 
 ## Radix writes: 100 rows, 64-byte payload
 
 | Operation | Gets | Pages put | Puts | Deletes | Put value bytes | Mutation bytes + keys | App write amp | Page→KV amp |
 |---|---|---|---|---|---|---|---|---|
-| read_only_save | 11 | 0 | 0 | 0 | 0 | 0 | — | — |
-| rollback | 12 | 0 | 0 | 0 | 0 | 0 | — | — |
-| replace_payload | 12 | 1 | 4 | 3 | 4,299 | 4,434 | 69.28× | 1.05× |
-| update_index | 13 | 2 | 5 | 4 | 8,413 | 8,598 | 1,074.75× | 1.03× |
-| insert | 13 | 2 | 5 | 4 | 8,413 | 8,598 | 107.47× | 1.03× |
-| delete | 13 | 2 | 5 | 4 | 8,413 | 8,598 | — | 1.03× |
-| ten_adjacent | 12 | 1 | 4 | 3 | 4,299 | 4,434 | 6.93× | 1.05× |
-| ten_scattered | 13 | 2 | 5 | 4 | 8,413 | 8,598 | 13.43× | 1.03× |
+| read_only_save | 6 | 0 | 0 | 0 | 0 | 0 | — | — |
+| rollback | 7 | 0 | 0 | 0 | 0 | 0 | — | — |
+| replace_payload | 7 | 1 | 4 | 3 | 4,268 | 4,403 | 68.80× | 1.04× |
+| update_index | 8 | 2 | 5 | 4 | 8,382 | 8,567 | 1,070.88× | 1.02× |
+| insert | 8 | 2 | 5 | 4 | 8,382 | 8,567 | 107.09× | 1.02× |
+| delete | 8 | 2 | 5 | 4 | 8,382 | 8,567 | — | 1.02× |
+| ten_adjacent | 7 | 1 | 4 | 3 | 4,268 | 4,403 | 6.88× | 1.04× |
+| ten_scattered | 8 | 2 | 5 | 4 | 8,382 | 8,567 | 13.39× | 1.02× |
 
 ## Locality and map layout: 10,000 rows, 256-byte payload
 
 | Layout | Operation | Pages put | Page bytes | Map bytes | Head bytes | Intent bytes | App write amp | Page→KV amp | Stored values/DB |
 |---|---|---|---|---|---|---|---|---|---|
-| Radix | replace_payload | 1 | 4,096 | 2,331 | 34 | 142 | 26.51× | 1.61× | 1.00× |
-| Radix | ten_adjacent | 1 | 4,096 | 2,331 | 34 | 142 | 2.65× | 1.61× | 1.00× |
-| Radix | ten_scattered | 10 | 40,960 | 6,291 | 34 | 340 | 18.89× | 1.16× | 1.00× |
-| InlineRoot | replace_payload | 1 | 4,096 | 2,304 | 53 | 162 | 26.37× | 1.61× | 1.00× |
-| InlineRoot | ten_adjacent | 1 | 4,096 | 2,304 | 53 | 162 | 2.64× | 1.61× | 1.00× |
-| InlineRoot | ten_scattered | 10 | 40,960 | 6,264 | 53 | 360 | 18.87× | 1.16× | 1.00× |
+| Radix | replace_payload | 1 | 4,096 | 433 | 34 | 142 | 19.09× | 1.15× | 1.00× |
+| Radix | ten_adjacent | 1 | 4,096 | 432 | 34 | 142 | 1.91× | 1.15× | 1.00× |
+| Radix | ten_scattered | 10 | 40,960 | 1,134 | 34 | 340 | 16.87× | 1.04× | 1.00× |
+| InlineRoot | replace_payload | 1 | 4,096 | 422 | 37 | 130 | 18.83× | 1.14× | 1.00× |
+| InlineRoot | ten_adjacent | 1 | 4,096 | 421 | 37 | 130 | 1.88× | 1.14× | 1.00× |
+| InlineRoot | ten_scattered | 10 | 40,960 | 1,123 | 37 | 328 | 16.85× | 1.04× | 1.00× |
 | HeadOverrides | replace_payload | 1 | 4,096 | 0 | 50 | 113 | 16.88× | 1.04× | 1.00× |
 | HeadOverrides | ten_adjacent | 1 | 4,096 | 0 | 50 | 113 | 1.69× | 1.04× | 1.00× |
-| HeadOverrides | ten_scattered | 10 | 40,960 | 0 | 194 | 338 | 16.32× | 1.01× | 1.02× |
+| HeadOverrides | ten_scattered | 10 | 40,960 | 0 | 194 | 338 | 16.32× | 1.01× | 1.01× |
 
 ## Recovery cost: Radix, 100 rows, 64-byte payload
 
 | Interruption | Gets | Puts | Deletes | Read bytes + keys | Mutation bytes + keys | Reclaimed value bytes |
 |---|---|---|---|---|---|---|
-| abort_before_head | 8 | 1 | 3 | 20,854 | 105 | 4,265 |
-| head_ack_lost | 8 | 1 | 3 | 20,854 | 105 | 4,265 |
-| cleanup_error | 8 | 1 | 3 | 20,854 | 105 | 4,220 |
-| intent_delete_error | 8 | 1 | 3 | 20,854 | 105 | 124 |
+| abort_before_head | 4 | 1 | 3 | 4,339 | 105 | 4,234 |
+| head_ack_lost | 4 | 1 | 3 | 4,339 | 105 | 4,234 |
+| cleanup_error | 4 | 1 | 3 | 4,339 | 105 | 4,220 |
+| intent_delete_error | 4 | 1 | 3 | 4,339 | 105 | 124 |
 
 Same-session warm queries: 84/84 configurations issued zero gets. The raw files retain all layouts, wide rows, phase splits, local WAL writes, key lengths, reclaimed bytes and retained storage.

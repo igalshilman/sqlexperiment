@@ -333,7 +333,7 @@ async fn writes(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) -> R
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
         );
-        assert!(!store.keys().contains("v7/pending_save"));
+        assert!(!store.keys().contains("v8/pending_save"));
         if matches!(op, "read_only_save" | "rollback") {
             assert_eq!(store.keys(), base.keys());
             assert_eq!(store.stored_bytes(), base.stored_bytes());
@@ -347,28 +347,28 @@ async fn recovery(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) ->
         (
             "abort_before_head",
             Operation::Put,
-            "v7/head",
+            "v8/head",
             Effect::None,
             false,
         ),
         (
             "head_ack_lost",
             Operation::Put,
-            "v7/head",
+            "v8/head",
             Effect::After,
             true,
         ),
         (
             "cleanup_error",
             Operation::Delete,
-            "v7/block/",
+            "v8/block/",
             Effect::None,
             true,
         ),
         (
             "intent_delete_error",
             Operation::Delete,
-            "v7/pending_save",
+            "v8/pending_save",
             Effect::None,
             true,
         ),
@@ -434,7 +434,7 @@ async fn recovery(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) ->
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
         );
-        assert!(!store.inner.keys().contains("v7/pending_save"));
+        assert!(!store.inner.keys().contains("v8/pending_save"));
         if !committed {
             assert_eq!(store.inner.keys(), base.keys());
             assert_eq!(store.inner.stored_bytes(), base.stored_bytes());

@@ -1,10 +1,9 @@
 # Turso over lazy K/V — single pending-save record
 
-This initial repository import is the saved 0.9.0 benchmark/failpoint checkpoint
-(storage format v7). The later experimental v8 cache/compact-map optimization
-source could not be recovered for this import and is not included. Test and
-benchmark logs under `results/` are the recorded checkpoint results; they were
-not rerun during import because the import environment had no Rust toolchain.
+Crate 0.10.0 reconstructs the lost optimization work from the saved 0.9.0
+checkpoint. It adds a one-page snapshot cache and adaptive compact radix-node
+encoding. Storage format v8 requires a fresh namespace. See
+[OPTIMIZATION_RESULTS.md](OPTIMIZATION_RESULTS.md) for rerun comparisons.
 
 Unmodified Turso core 0.8.2 over asynchronous lazy K/V, with 4 KiB database pages
 and immutable objects. One owner serializes sessions per namespace. The engine's
@@ -100,11 +99,21 @@ See [GC_DESIGN.md](GC_DESIGN.md) for the crash table, metadata format and costs.
 
 ## Storage format and limits
 
-Format v7 uses `v7/head`, `v7/pending_save`, `v7/node/<u64-hex>` and
-`v7/block/<u64-hex>`. Block objects are 4096 bytes; external radix nodes are sorted
-one-byte edge/eight-byte child-ID pairs (9 bytes each, at most 2304 bytes).
+Format v8 uses `v8/head`, `v8/pending_save`, `v8/node/<u64-hex>` and
+`v8/block/<u64-hex>`. Block objects are 4096 bytes. Map nodes use the smaller of:
 
-The head starts with `TKV7`, database byte length (u64 LE), last allocated ID
+- Tag 0: sorted one-byte edge/eight-byte ID entries.
+- Tag 1: a u16 entry count, sorted edge bytes for at most 32 entries (otherwise a
+  32-byte bitmap), a minimum ID encoded as unsigned LEB128, then unsigned LEB128
+  offsets from that minimum in edge order.
+
+Empty inline roots have zero bytes. External nodes must be nonempty. Decoding
+validates lengths, edge ordering/bitmap counts, minimal varints, arithmetic
+bounds, nonzero IDs and parent allocation limits. Full u64 IDs are preserved;
+no adjacent-ID ordering assumption is made. A node is at most 2305 bytes; a dense
+node containing IDs 1 through 256 takes 420 bytes instead of 2304.
+
+The head starts with `TKV8`, database byte length (u64 LE), last allocated ID
 (u64 LE), height (u8), layout (u8), root-section length (u16 LE), and override count
 (u16 LE): 26 bytes. An external root section is an 8-byte ID (zero means empty).
 InlineRoot embeds node entries. Each override is a logical block number (u64) and
@@ -113,21 +122,22 @@ object ID (u64); zero means a tombstone. No pending-deletion list lives in the h
 IDs are incrementing u64 values shared by page and map-node objects, never hashes.
 IDs above the recovered committed counter may be reused **after aborted-attempt
 cleanup**. Published IDs are not reused. Planning gaps are allowed. Overflow fails
-before any backend mutation. Older persisted formats, including v6, require a
-fresh namespace; migration and cleanup of pre-v7 leaks are not implemented.
+before any backend mutation. Older persisted formats, including v7, require a
+fresh namespace; migration and cleanup of older-format leaks are not implemented.
 
 A pending record is limited to **1 MiB**, exposed as `MAX_PENDING_BYTES`. An
 oversized save fails before its first mutation. Backend values must support that
 limit plus 4 KiB pages. There is no record chunking. This limits changed-object
 metadata per save, not total database size. The private WAL, dirty overlay, plan,
-query rows and caches remain without byte budgets.
+query rows and decoded-node caches remain without byte budgets. The added clean
+page cache retains at most one 4096-byte payload per snapshot, plus bookkeeping.
 
 ## Existing map alternatives
 
 | Layout | Structure | Main tradeoff |
 |---|---|---|
 | Radix (default) | External adaptive-height 256-way tree; 34-byte head | Rewrites affected paths; unchanged subtrees reused |
-| InlineRoot | Top node embedded in head, at most 2330 bytes | Saves root get/put but larger head is also copied into intent |
+| InlineRoot | Top node embedded in head, at most 2331 bytes | Saves root get/put but larger head is also copied into intent |
 | HeadOverrides | External base plus at most 64 head overrides; head at most 1058 bytes | Avoids map rewrites until a fold; larger head/intent and delayed base-page reclamation |
 
 Radix level one covers 1 MiB of dense addresses, level two 256 MiB, and level three
@@ -155,6 +165,15 @@ before publication succeeds. Engine `File::sync` is a local overlay barrier, not
 backend call. Dropping a session discards its unsaved overlay. Query errors or
 cancellation poison the session. Each open creates a fresh engine/cache.
 
+The adapter also retains the most recently fetched valid immutable page, keyed by
+object ID (an LRU of capacity one). Hits avoid a KV get; fetching another page
+evicts it. Errors and invalid-length pages are never cached. Dirty overlays and
+truncation tombstones take precedence, and WAL reads never consult this cache.
+No entry survives into a new snapshot/session or recovery attempt; aborted ID
+reuse cannot hit an entry from an earlier session. No mutex is held over an await.
+The engine still has its own page cache; this tiny adapter cache targets repeated
+reads of the database header during engine initialization.
+
 ## Evidence and next work
 
 [AMPLIFICATION.md](AMPLIFICATION.md) defines phase/object counters, failpoints,
@@ -164,8 +183,9 @@ reports the extended measurements; raw and summarized CSVs are under `results/`.
 [VALIDATION.md](VALIDATION.md) records executed checks and interruption coverage.
 [BENCHMARKS.md](BENCHMARKS.md) and `results/small_databases.csv` report small SQL
 workloads and a larger control. [SELF_REVIEW.md](SELF_REVIEW.md) records review
-findings and remaining risks. Compression, compact maps and cross-session LRU remain
-notes only in [DEFERRED_OPTIMIZATIONS.md](DEFERRED_OPTIMIZATIONS.md).
+findings and remaining risks. Page compression, further map encodings and
+cross-session caching remain in [DEFERRED_OPTIMIZATIONS.md](DEFERRED_OPTIMIZATIONS.md).
+The older small-database report and CSV are retained as historical v7 measurements.
 [MVCC.md](MVCC.md) preserves a separate deferred design; RocksDB is not assumed.
 
 Next: real host backend and request fencing, network-latency measurements, memory

@@ -1,4 +1,5 @@
 //! Isolated Turso/lazy-KV experiment. No Restate or journal replay.
+mod map_codec;
 mod pending;
 pub use pending::{MAX_PENDING_BYTES, SaveReport};
 pub mod io;
