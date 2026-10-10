@@ -1,5 +1,6 @@
 use super::*;
 use crate::simulation::MemoryKv;
+use std::sync::Arc;
 
 fn head(high: u64) -> Vec<u8> {
     let mut h = b"SK10".to_vec();
@@ -14,8 +15,8 @@ fn malformed_intents_and_unexpected_heads_fail_before_mutation() -> io::Result<(
         let intent = PendingSave {
             old_head: Some(head(10)),
             new_head: head(12),
-            created: Objects::from([("block", 11), ("node", 12)]),
-            retired: Objects::from([("block", 2)]),
+            created: Objects::from([(Kind::Block, 11), (Kind::Node, 12)]),
+            retired: Objects::from([(Kind::Block, 2)]),
         };
         let valid = intent.encode()?;
         let mut bad: Vec<_> = (0..valid.len()).map(|n| valid[..n].to_vec()).collect();
@@ -38,7 +39,7 @@ fn malformed_intents_and_unexpected_heads_fail_before_mutation() -> io::Result<(
             store.put(HEAD, head(10)).await?;
             store.put(PENDING, bytes).await?;
             store.reset_stats();
-            assert!(recover(store.clone()).await.is_err());
+            assert!(recover(&*store).await.is_err());
             assert_eq!(store.stats().puts + store.stats().deletes, 0);
         }
         let store = Arc::new(MemoryKv::default());
@@ -46,7 +47,7 @@ fn malformed_intents_and_unexpected_heads_fail_before_mutation() -> io::Result<(
         store.put(PENDING, valid).await?;
         store.reset_stats();
         assert!(
-            recover(store.clone())
+            recover(&*store)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -61,7 +62,7 @@ fn large_intent_has_an_explicit_limit() {
     let intent = PendingSave {
         old_head: None,
         new_head: head(120000),
-        created: (1..=120000).map(|id| ("block", id)).collect(),
+        created: (1..=120000).map(|id| (Kind::Block, id)).collect(),
         retired: Objects::new(),
     };
     assert!(intent.encode().unwrap_err().to_string().contains("1 MiB"));

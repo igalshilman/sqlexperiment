@@ -47,14 +47,17 @@ Validation detects malformed records, not all valid-looking storage corruption.
 1. Finish SQL work and checkpoint locally; drop the engine connection.
 2. Construct the complete new-object and retirement plan.
 3. Put intent and await durability.
-4. Put new objects, awaiting every successful durable acknowledgment.
+4. Put new objects concurrently, awaiting every durable acknowledgment.
 5. Put the new head and await durability: commit.
-6. Delete retired objects, await every durable acknowledgment.
+6. Delete retired objects concurrently, awaiting every durable acknowledgment.
 7. Delete intent and await durability.
 
-Every put and delete is awaited before issuing the next mutation, including
-object writes, retirement and recovery. The first mutation error stops the phase;
-there are no sibling writes to drain. Until the final intent deletion takes effect,
+Mutations within one phase target distinct keys and run concurrently, at most 16
+at a time; each phase is fully acknowledged before the next starts. After the
+first error no further mutation starts, and those already running are awaited
+before the save returns, so no request of the attempt is left outstanding and no
+key is ever mutated by two overlapping requests. Recovery deletes use the same
+rule. Until the final intent deletion takes effect,
 the complete intent remains available for recovery. Cancellation or an unknown
 remote outcome still requires host settlement. A new session cannot start until
 open has completed recovery. Same-key mutations from different attempts cannot overlap.
@@ -97,8 +100,9 @@ A no-op save with an identical head and empty object lists performs no mutations
 
 Cold open adds one get for the pending key alongside the head get. Interrupted-save
 recovery adds one head confirmation, C or R idempotent deletes, and intent deletion.
-These are operation counts, not measured network round trips. The two initial reads
-can overlap; recovery mutations are serial. Logical durable deletion does not imply immediate physical
+These are operation counts, not network round trips: a save needs about
+4 + ⌈C/16⌉ + ⌈R/16⌉ sequential round trips. The two initial reads overlap;
+recovery deletes run concurrently after the head confirmation. Logical durable deletion does not imply immediate physical
 space return by the backend or its replication layer.
 
 The radix root is embedded in the head. Replaced pages and external child nodes

@@ -51,10 +51,16 @@
 //!
 //! The host grants one owner exclusive use of a namespace, including settlement
 //! of cancelled requests before reopening or handing ownership to another session.
-//! There is no distributed lock or fence here. Every backend put/delete is awaited
-//! before the next mutation starts, including recovery and cleanup. Independent
-//! reads may overlap: open reads head and intent together, and the I/O pump batches
-//! adjacent file reads without crossing write, truncate or sync barriers.
+//! There is no distributed lock or fence here. A save runs ordered phases (intent,
+//! new objects, head, retired objects, intent removal); puts or deletes within one
+//! phase target distinct keys and run concurrently, and each phase is fully
+//! acknowledged before the next starts. Open reads head and intent together, and the
+//! I/O pump batches adjacent file reads without crossing write, truncate or sync
+//! barriers.
+//!
+//! [`StorageOptions::cache`] can hold an [`ObjectCache`] shared by successive
+//! sessions of one namespace. Objects are immutable, so cached entries never need
+//! invalidation; a warm reopen then fetches only the head and intent.
 //!
 //! The caller's task drives nonblocking engine open/connect state machines and
 //! statement steps, awaits queued KV work, then resumes the engine. Completions run
@@ -98,17 +104,20 @@
 //! has structural validation but no checksum or corruption repair. Use a fresh,
 //! dedicated namespace; no migration or format discovery is implemented. Simulation
 //! and benchmark support require the opt-in `simulation` feature.
+mod cache;
 mod format;
-mod map_codec;
-pub mod page_codec;
-pub use page_codec::PageCompression;
-mod pending;
-pub use pending::{MAX_PENDING_BYTES, SaveReport};
 pub mod io;
 pub mod kv;
+mod map_codec;
+pub mod page_codec;
+mod pending;
 #[cfg(feature = "simulation")]
 pub mod simulation;
 mod snapshot;
+
+pub use cache::ObjectCache;
+pub use page_codec::PageCompression;
+pub use pending::{MAX_PENDING_BYTES, SaveReport};
 pub use snapshot::StorageOptions;
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
@@ -151,8 +160,8 @@ impl Drop for Running<'_> {
     }
 }
 
-/// Cooperatively return to any host executor, including with immediately-ready KV.
-async fn yield_to_host() {
+/// Return to the executor once, even when every awaited future is ready.
+pub(crate) async fn yield_now() {
     let mut yielded = false;
     poll_fn(move |cx| {
         if yielded {
@@ -176,15 +185,14 @@ impl Session {
     /// Recover any pending publication and open a fresh engine with default compression.
     ///
     /// Acquire exclusive ownership and settle the preceding owner's requests first.
-    /// Recovery may perform serial mutations before the session becomes usable.
+    /// Recovery may perform mutations before the session becomes usable.
     /// The returned future is `Send`; all work is polled by the caller's executor.
     pub async fn open(store: Arc<dyn KvStore>) -> Result<Self> {
         Self::open_with_options(store, StorageOptions::default()).await
     }
 
-    /// Open with a page-encoding policy for future saves.
-    /// Existing page tags determine decoding; changing policy requires no migration.
-    /// Map representation and single-mutation ordering are fixed.
+    /// Open with explicit [`StorageOptions`]. Options never change the stored
+    /// format: existing page tags determine decoding.
     pub async fn open_with_options(
         store: Arc<dyn KvStore>,
         options: StorageOptions,
@@ -272,7 +280,7 @@ impl Drop for Session {
 /// Resume an engine completion only after the host has driven all submitted I/O.
 async fn drive_completion(io: &KvIo, completion: turso_core::types::IOCompletions) -> Result<()> {
     if completion.is_explicit_yield() {
-        yield_to_host().await;
+        yield_now().await;
     } else {
         io.drive().await?;
         if !completion.finished() {
@@ -322,7 +330,7 @@ async fn query_engine(connection: &Arc<Connection>, io: &KvIo, sql: &str) -> Res
         // Bound work between host yields even when all pages are already cached.
         // A single engine step is not preemptible by this adapter.
         if steps == 64 {
-            yield_to_host().await;
+            yield_now().await;
             steps = 0;
         }
         steps += 1;
@@ -345,7 +353,7 @@ async fn query_engine(connection: &Arc<Connection>, io: &KvIo, sql: &str) -> Res
                     .ok_or("engine yielded I/O without a completion")?;
                 drive_completion(io, completion).await?;
             }
-            StepResult::Yield => yield_to_host().await,
+            StepResult::Yield => yield_now().await,
             StepResult::Busy | StepResult::Sleep { .. } => {
                 return Err("unexpected contention in single-owner session".into());
             }

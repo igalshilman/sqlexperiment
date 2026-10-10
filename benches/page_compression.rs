@@ -79,7 +79,10 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 fn options(page_compression: PageCompression) -> StorageOptions {
-    StorageOptions { page_compression }
+    StorageOptions {
+        page_compression,
+        ..StorageOptions::default()
+    }
 }
 async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     let store = MemoryKv::default();
@@ -126,7 +129,7 @@ impl Sample {
             .values()
             .map(|t| t.put_key_bytes + t.delete_key_bytes)
             .sum();
-        let block = stats.by_kind.get("block").cloned().unwrap_or_default();
+        let block = stats.kind("block");
         let block_gets = block.gets;
         let block_puts = block.puts;
         println!(
@@ -144,10 +147,10 @@ impl Sample {
             stats.bytes_read + read_keys,
             stats.bytes_written + write_keys,
             stats.bytes_written,
-            stats.block_bytes_written,
-            stats.node_bytes_written,
-            stats.head_bytes_written,
-            stats.intent_bytes_written,
+            stats.kind("block").bytes_written,
+            stats.kind("node").bytes_written,
+            stats.kind("head").bytes_written,
+            stats.kind("intent").bytes_written,
             block_gets,
             block_puts,
             store.stored_bytes(),

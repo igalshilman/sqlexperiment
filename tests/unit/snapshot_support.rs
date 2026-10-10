@@ -9,8 +9,8 @@ impl Snapshot {
         let mut live = BTreeSet::new();
         let mut visited = BTreeSet::new();
         let mut pending = Vec::new();
-        if self.height > 0 {
-            pending.push((None, self.height));
+        if self.head.height > 0 {
+            pending.push((None, self.head.height));
         }
         while let Some((id, level)) = pending.pop() {
             if !visited.insert((id, level)) {
@@ -18,14 +18,14 @@ impl Snapshot {
             }
             let node = match id {
                 Some(id) => {
-                    live.insert(key("node", &id));
+                    live.insert(Kind::Node.key(id));
                     self.node(Some(id)).await?
                 }
-                None => self.root.clone(),
+                None => self.head.root.clone(),
             };
             for child in node.into_values() {
                 if level == 1 {
-                    live.insert(key("block", &child));
+                    live.insert(Kind::Block.key(child));
                 } else {
                     pending.push((Some(child), level - 1));
                 }

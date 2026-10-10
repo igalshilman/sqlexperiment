@@ -54,8 +54,8 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
             let store = Arc::new(GatedReads {
                 inner: base.fork(),
                 gates: Mutex::new(BTreeMap::from([
-                    (crate::format::key("block", &1), recv_a),
-                    (crate::format::key("block", &2), recv_b),
+                    (crate::format::Kind::Block.key(1), recv_a),
+                    (crate::format::Kind::Block.key(2), recv_b),
                 ])),
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),

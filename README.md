@@ -28,9 +28,14 @@ if let Some(error) = saved.cleanup_error {
 ```
 
 The page map is a radix tree with its root embedded in the snapshot head.
-There is no map selection or write-concurrency option. Backend puts and deletes
-run one at a time. `StorageOptions` selects `PageCompression::{Lz4, Raw}` (default
-adaptive LZ4), applied only to new pages; stored tags determine decoding.
+There is no map selection option. A save runs ordered phases; puts or deletes
+within one phase target distinct keys and run concurrently (up to 16), and each
+phase is fully acknowledged before the next. `StorageOptions` selects
+`PageCompression::{Lz4, Raw}` (default adaptive LZ4), applied only to new pages;
+stored tags determine decoding. `StorageOptions::cache` takes an optional
+`ObjectCache`, a byte-bounded LRU of committed objects shared by successive
+sessions of one namespace. Objects are immutable, so entries never go stale; a
+warm reopen fetches only the head and intent.
 Independent head/intent reads overlap during open. The engine I/O pump overlaps
 adjacent reads in batches of up to 16, with write/truncate/sync barriers.
 
@@ -123,7 +128,8 @@ The pending record is limited to 1 MiB; an oversized save fails before mutations
 The backend must accept that value size and page objects up to 4099 bytes. Dirty
 pages, private WAL, map cache, write plans and collected query results have no byte
 budgets. One engine step is not forcibly preemptible, and queries are not sandboxed. There is no payload checksum, corruption repair,
-cross-session cache, attached-database guarantee, or process-kill/power-loss test.
+attached-database guarantee, or process-kill/power-loss test. An `ObjectCache`
+must not be shared between namespaces: entries are keyed by object ID only.
 
 Measurements use an in-memory simulator. They count logical KV traffic and isolated
 codec time, without modeling real backend latency, replication or physical storage.

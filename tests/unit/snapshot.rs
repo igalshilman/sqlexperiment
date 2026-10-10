@@ -16,7 +16,7 @@ fn height_grows_shrinks_and_small_reads_need_no_external_map_node() -> io::Resul
             )
             .await?;
         let mut snapshot = Snapshot::open(store.clone()).await?;
-        assert_eq!(snapshot.height, 1);
+        assert_eq!(snapshot.head.height, 1);
         for (index, expected) in [(256, 2), (65536, 3), (1 << 40, 6)] {
             assert!(snapshot.block(index).await?.is_none());
             snapshot
@@ -26,7 +26,7 @@ fn height_grows_shrinks_and_small_reads_need_no_external_map_node() -> io::Resul
                 )
                 .await?;
             snapshot = Snapshot::open(store.clone()).await?;
-            assert_eq!(snapshot.height, expected);
+            assert_eq!(snapshot.head.height, expected);
             assert_eq!(snapshot.block(index).await?, Some(vec![7; BLOCK_SIZE]));
             assert_eq!(snapshot.block(0).await?, Some(vec![1; BLOCK_SIZE]));
             assert!(snapshot.block(index + 1).await?.is_none());
@@ -39,7 +39,7 @@ fn height_grows_shrinks_and_small_reads_need_no_external_map_node() -> io::Resul
             .await?;
         store.reset_stats();
         let snapshot = Snapshot::open(store.clone()).await?;
-        assert_eq!(snapshot.height, 1);
+        assert_eq!(snapshot.head.height, 1);
         assert_eq!(snapshot.block(255).await?, Some(vec![2; BLOCK_SIZE]));
         assert_eq!(
             store.stats().gets,
@@ -52,8 +52,8 @@ fn height_grows_shrinks_and_small_reads_need_no_external_map_node() -> io::Resul
             .publish(BTreeMap::from([(0, None), (255, None)]), 0)
             .await?;
         let empty = Snapshot::open(store).await?;
-        assert_eq!(empty.height, 0);
-        assert!(empty.root.is_empty());
+        assert_eq!(empty.head.height, 0);
+        assert!(empty.head.root.is_empty());
         Ok(())
     })
 }
@@ -83,7 +83,7 @@ fn persistent_tree_sparse_paths_updates_and_deletions() -> io::Result<()> {
         dirty.insert(256, None);
         dirty.insert(255, Some(vec![99; BLOCK_SIZE]));
         dirty.insert(258, Some(vec![42; BLOCK_SIZE]));
-        snapshot.publish(dirty, snapshot.size).await?;
+        snapshot.publish(dirty, snapshot.head.size).await?;
         let updated = Snapshot::open(store.clone()).await?;
         assert!(updated.block(256).await?.is_none());
         assert_eq!(updated.block(255).await?.unwrap(), vec![99; BLOCK_SIZE]);
@@ -94,8 +94,8 @@ fn persistent_tree_sparse_paths_updates_and_deletions() -> io::Result<()> {
         dirty.insert(258, None);
         updated.publish(dirty, 0).await?;
         let empty = Snapshot::open(store).await?;
-        assert!(empty.root.is_empty());
-        assert_eq!(empty.size, 0);
+        assert!(empty.head.root.is_empty());
+        assert_eq!(empty.head.size, 0);
         Ok(())
     })
 }
@@ -112,7 +112,7 @@ fn referenced_objects_must_exist_and_have_valid_structure() -> io::Result<()> {
                 257 * BLOCK_SIZE as u64,
             )
             .await?;
-        let block_key = key("block", &1);
+        let block_key = Kind::Block.key(1);
         store.delete(&block_key).await?;
         let snapshot = Snapshot::open(store.clone()).await?;
         assert!(
@@ -132,7 +132,7 @@ fn referenced_objects_must_exist_and_have_valid_structure() -> io::Result<()> {
                 .to_string()
                 .contains("invalid")
         );
-        let root_key = key("node", &snapshot.root[&0]);
+        let root_key = Kind::Node.key(snapshot.head.root[&0]);
         store.put(&root_key, vec![0; 9]).await?;
         let snapshot = Snapshot::open(store.clone()).await?;
         assert!(

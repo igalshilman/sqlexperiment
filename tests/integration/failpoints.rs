@@ -148,7 +148,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
 }
 
 #[test]
-fn serial_object_errors_stop_before_publication() -> Result<()> {
+fn object_errors_stop_before_publication() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
@@ -161,8 +161,11 @@ fn serial_object_errors_stop_before_publication() -> Result<()> {
                     .await?;
                 let _gate = store.arm(plan(Operation::Put, "v10/block/", 3, effect, false));
                 assert!(db.save().await.is_err());
-                assert_eq!(store.active(), 0);
-                assert_eq!(store.max_active(), 1);
+                assert_eq!(store.active(), 0, "the failed phase must drain");
+                assert!(
+                    (2..=16).contains(&store.max_active()),
+                    "object puts overlap"
+                );
                 assert!(
                     !store
                         .events()
@@ -177,7 +180,7 @@ fn serial_object_errors_stop_before_publication() -> Result<()> {
                 cases += 1;
             }
         }
-        println!("serial object errors: {cases} cases (3 schedules, 3 outcomes)");
+        println!("object errors: {cases} cases (3 schedules, 3 outcomes)");
         Ok(())
     })
 }

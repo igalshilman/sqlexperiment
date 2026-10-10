@@ -57,7 +57,6 @@ fn main() -> Result<()> {
         println!("Cold open + query KV gets: {}", stats.gets);
         println!("Distinct blocks fetched: {blocks_read}");
         println!("KV bytes fetched: {}", stats.bytes_read);
-        println!("Forced async KV yields: {}", stats.async_yields);
         println!("Result: id={}, payload length={}", rows[0][0], rows[0][1]);
         for row in plan {
             println!(
