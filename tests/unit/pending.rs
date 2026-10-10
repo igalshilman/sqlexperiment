@@ -2,13 +2,10 @@ use super::*;
 use crate::simulation::MemoryKv;
 
 fn head(high: u64) -> Vec<u8> {
-    let mut h = b"TKV9".to_vec();
+    let mut h = b"SK10".to_vec();
     h.extend(0u64.to_le_bytes());
     h.extend(high.to_le_bytes());
-    h.extend([0, 0]);
-    h.extend(8u16.to_le_bytes());
-    h.extend(0u16.to_le_bytes());
-    h.extend(0u64.to_le_bytes());
+    h.push(0);
     h
 }
 #[test]
@@ -26,10 +23,11 @@ fn malformed_intents_and_unexpected_heads_fail_before_mutation() -> io::Result<(
         b[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
         bad.push(b);
         let mut b = valid.clone();
-        b[20 + 68] = 9;
+        b[20 + head(10).len() + head(12).len()] = 9;
         bad.push(b); // invalid object kind
         let mut b = valid.clone();
-        b[20 + 68 + 1..20 + 68 + 9].copy_from_slice(&1u64.to_le_bytes());
+        b[20 + head(10).len() + head(12).len() + 1..20 + head(10).len() + head(12).len() + 9]
+            .copy_from_slice(&1u64.to_le_bytes());
         bad.push(b); // created ID in committed range
         let mut b = valid.clone();
         let n = b.len();
@@ -40,7 +38,7 @@ fn malformed_intents_and_unexpected_heads_fail_before_mutation() -> io::Result<(
             store.put(HEAD, head(10)).await?;
             store.put(PENDING, bytes).await?;
             store.reset_stats();
-            assert!(recover(store.clone(), 8).await.is_err());
+            assert!(recover(store.clone()).await.is_err());
             assert_eq!(store.stats().puts + store.stats().deletes, 0);
         }
         let store = Arc::new(MemoryKv::default());
@@ -48,7 +46,7 @@ fn malformed_intents_and_unexpected_heads_fail_before_mutation() -> io::Result<(
         store.put(PENDING, valid).await?;
         store.reset_stats();
         assert!(
-            recover(store.clone(), 8)
+            recover(store.clone())
                 .await
                 .unwrap_err()
                 .to_string()

@@ -12,7 +12,7 @@ parser.add_argument("--summary", default="benches/results/amplification_summary.
 parser.add_argument("--report", default="benches/AMPLIFICATION_RESULTS.md")
 args = parser.parse_args()
 rows = list(csv.DictReader((ROOT / args.input).open()))
-DIMENSIONS = ["layout", "rows", "payload_bytes", "operation", "cache", "run", "phase", "kind"]
+DIMENSIONS = ["rows", "payload_bytes", "operation", "cache", "run", "phase", "kind"]
 for row in rows:
     for key in row.keys() - set(DIMENSIONS):
         row[key] = int(row[key])
@@ -43,7 +43,7 @@ for key, objects in phases.items():
 groups = defaultdict(list)
 for row in rows:
     if row["run"] == "0":
-        groups[tuple(row[k] for k in DIMENSIONS[:5])].append(row)
+        groups[tuple(row[k] for k in DIMENSIONS[:4])].append(row)
 
 summaries = []
 def ratio(n, d):
@@ -53,7 +53,7 @@ for key, group in groups.items():
     total = [r for r in group if r["kind"] == "all"]
     blocks = [r for r in group if r["kind"] == "block"]
     query_blocks = [r for r in blocks if r["phase"] == "query"]
-    summary = dict(zip(DIMENSIONS[:5], key))
+    summary = dict(zip(DIMENSIONS[:4], key))
     # Unique-key counts are meaningful per phase; never sum them across phases.
     summary.update({f: sum(r[f] for r in total) for f in TRAFFIC if not f.startswith("unique_")})
     summary["page_gets"] = sum(r["gets"] for r in blocks)
@@ -114,38 +114,38 @@ report += ["## Cold-open baseline", "",
            "Observed (block gets, distinct blocks) during open: " + ", ".join(map(str, sorted(open_shapes))) + ".", ""]
 
 for count, payload in [(100, 64), (10000, 256), (100, 9000)]:
-    report += [f"## Radix reads: {count:,} rows, {payload:,}-byte payload", ""]
-    selected = [s for s in summaries if s["layout"] == "Radix" and s["rows"] == str(count)
+    report += [f"## Reads: {count:,} rows, {payload:,}-byte payload", ""]
+    selected = [s for s in summaries if s["rows"] == str(count)
                 and s["payload_bytes"] == str(payload) and s["cache"] == "cold" and s["operation"] in
                 ["pk_hit", "pk_miss", "range_10", "covering_index", "secondary_rows", "unindexed_filter", "full_scan"]]
     report += [table(selected, [("operation", "Operation"), ("db_pages", "DB pages"), ("open_gets", "Open gets"),
                 ("query_page_gets", "Query page gets"), ("query_unique_pages", "Distinct query pages"),
                 ("gets", "Total gets"), ("read_key_value_bytes", "Read bytes + keys"), ("read_amplification", "Read amp")]), ""]
 
-report += ["## Radix writes: 100 rows, 64-byte payload", ""]
-selected = [s for s in summaries if s["layout"] == "Radix" and s["rows"] == "100" and s["payload_bytes"] == "64"
+report += ["## Writes: 100 rows, 64-byte payload", ""]
+selected = [s for s in summaries if s["rows"] == "100" and s["payload_bytes"] == "64"
             and s["operation"] in ["read_only_save", "rollback", "replace_payload", "update_index", "insert", "delete", "ten_adjacent", "ten_scattered"]]
 report += [table(selected, [("operation", "Operation"), ("gets", "Gets"), ("page_puts", "Pages put"),
             ("puts", "Puts"), ("deletes", "Deletes"), ("write_value_bytes", "Put value bytes"),
             ("mutation_key_value_bytes", "Mutation bytes + keys"), ("write_amplification", "App write amp"),
             ("page_write_amplification", "Page→KV amp")]), ""]
 
-report += ["## Locality and map layout: 10,000 rows, 256-byte payload", ""]
+report += ["## Update locality: 10,000 rows, 256-byte payload", ""]
 selected = [s for s in summaries if s["rows"] == "10000" and s["operation"] in ["replace_payload", "ten_adjacent", "ten_scattered"]]
-report += [table(selected, [("layout", "Layout"), ("operation", "Operation"), ("page_puts", "Pages put"),
+report += [table(selected, [("operation", "Operation"), ("page_puts", "Pages put"),
             ("block_write_bytes", "Encoded page bytes"), ("node_write_bytes", "Map bytes"), ("head_write_bytes", "Head bytes"),
             ("intent_write_bytes", "Intent bytes"), ("write_amplification", "App write amp"),
             ("page_write_amplification", "Page→KV amp"), ("storage_vs_db", "Stored values/DB")]), ""]
 
-report += ["## Recovery cost: Radix, 100 rows, 64-byte payload", ""]
-selected = [s for s in summaries if s["layout"] == "Radix" and s["rows"] == "100" and s["payload_bytes"] == "64"
+report += ["## Recovery cost: 100 rows, 64-byte payload", ""]
+selected = [s for s in summaries if s["rows"] == "100" and s["payload_bytes"] == "64"
             and s["operation"] in ["abort_before_head", "head_ack_lost", "cleanup_error", "intent_delete_error"]]
 report += [table(selected, [("operation", "Interruption"), ("gets", "Gets"), ("puts", "Puts"), ("deletes", "Deletes"),
             ("read_key_value_bytes", "Read bytes + keys"), ("mutation_key_value_bytes", "Mutation bytes + keys"),
             ("reclaimed_value_bytes", "Reclaimed value bytes")]), ""]
 warm = [s for s in summaries if s["cache"] == "warm"]
 report += [f"Same-session warm queries: {sum(s['gets'] == 0 for s in warm)}/{len(warm)} configurations issued zero gets. "
-           "The raw files retain all layouts, wide rows, phase splits, local WAL writes, key lengths, "
+           "The raw files retain wide rows, phase splits, local WAL writes, key lengths, "
            "reclaimed bytes and retained storage.", ""]
 (ROOT / args.report).write_text("\n".join(report))
 print(f"Validated {len(rows)} rows, {len(phases)} phases, {len(summaries)} configurations; repeats={repeats}")

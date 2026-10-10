@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RESULTS = ROOT / "benches/results"
-DIMS = ["layout", "rows", "payload_bytes", "payload", "codec", "operation"]
+DIMS = ["rows", "payload_bytes", "payload", "codec", "operation"]
 
 
 def read(name):
@@ -29,11 +29,10 @@ for row in rows:
     assert None not in row and None not in row.values(), "malformed CSV"
     groups[tuple(row[k] for k in DIMS)].append(row)
 expected = set(itertools.product(
-    ["Radix", "InlineRoot", "HeadOverrides"],
     [("100", "64"), ("100", "512"), ("100", "9000"), ("10000", "256")],
     ["Repetitive", "Json", "Random"], ["Raw", "Lz4"],
     ["cold_pk", "range_10", "full_scan", "replace_payload", "ten_adjacent", "ten_scattered", "read_only_save"]))
-assert set(groups) == {(layout, *size, payload, codec, op) for layout, size, payload, codec, op in expected}
+assert set(groups) == {(*size, payload, codec, op) for size, payload, codec, op in expected}
 summaries = {}
 for key, copies in groups.items():
     assert {r["run"] for r in copies} == {"0", "1", "2"} and len(copies) == 3, key
@@ -63,7 +62,7 @@ traffic = ["read_key_value_bytes", "mutation_key_value_bytes", "block_write_byte
 for key, raw in summaries.items():
     if raw["codec"] != "Raw":
         continue
-    lz4 = summaries[(*key[:4], "Lz4", key[5])]
+    lz4 = summaries[(*key[:3], "Lz4", key[4])]
     for metric in equal:
         assert raw[metric] == lz4[metric], (key, metric)
     for metric in traffic:
@@ -97,5 +96,5 @@ print(f"Validated {len(rows)} SQL observations, {len(summaries)} configurations,
 print(f"Validated {len(cpu_groups) * 3} CPU samples; identical page selections and sizes across repeats.")
 print("Raw/LZ4 pairs have identical operation counts, maps, head/intent bytes, and logical page counts; no encoded-traffic regressions.")
 for row in comparisons:
-    if row["layout"] == "Radix" and row["operation"] == "replace_payload" and (row["rows"], row["payload_bytes"]) in [("100", "64"), ("10000", "256")]:
+    if row["operation"] == "replace_payload" and (row["rows"], row["payload_bytes"]) in [("100", "64"), ("10000", "256")]:
         print({k: row[k] for k in ["rows", "payload_bytes", "payload", "mutation_key_value_bytes_raw", "mutation_key_value_bytes_lz4", "mutation_key_value_bytes_reduction_pct"]})

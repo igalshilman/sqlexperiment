@@ -2,7 +2,7 @@ use super::*;
 use crate::io::BLOCK_SIZE;
 use crate::simulation::MemoryKv;
 #[test]
-fn height_grows_shrinks_and_small_reads_use_one_index_node() -> io::Result<()> {
+fn height_grows_shrinks_and_small_reads_need_no_external_map_node() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let snapshot = Snapshot::open(store.clone()).await?;
@@ -43,17 +43,17 @@ fn height_grows_shrinks_and_small_reads_use_one_index_node() -> io::Result<()> {
         assert_eq!(snapshot.block(255).await?, Some(vec![2; BLOCK_SIZE]));
         assert_eq!(
             store.stats().gets,
-            4,
-            "pending check + one head + one index node + one block"
+            3,
+            "pending check + head containing root + one block"
         );
         assert!(snapshot.block(256).await?.is_none());
-        assert_eq!(store.stats().gets, 4, "outside tree range requires no read");
+        assert_eq!(store.stats().gets, 3, "outside tree range requires no read");
         snapshot
             .publish(BTreeMap::from([(0, None), (255, None)]), 0)
             .await?;
         let empty = Snapshot::open(store).await?;
         assert_eq!(empty.height, 0);
-        assert!(empty.root.is_none());
+        assert!(empty.root.is_empty());
         Ok(())
     })
 }
@@ -94,7 +94,7 @@ fn persistent_tree_sparse_paths_updates_and_deletions() -> io::Result<()> {
         dirty.insert(258, None);
         updated.publish(dirty, 0).await?;
         let empty = Snapshot::open(store).await?;
-        assert_eq!(empty.root, None);
+        assert!(empty.root.is_empty());
         assert_eq!(empty.size, 0);
         Ok(())
     })
@@ -108,8 +108,8 @@ fn referenced_objects_must_exist_and_have_valid_structure() -> io::Result<()> {
         let bytes = vec![7; BLOCK_SIZE];
         snapshot
             .publish(
-                BTreeMap::from([(0, Some(bytes.clone()))]),
-                BLOCK_SIZE as u64,
+                BTreeMap::from([(0, Some(bytes.clone())), (256, Some(bytes.clone()))]),
+                257 * BLOCK_SIZE as u64,
             )
             .await?;
         let block_key = key("block", &1);
@@ -132,7 +132,7 @@ fn referenced_objects_must_exist_and_have_valid_structure() -> io::Result<()> {
                 .to_string()
                 .contains("invalid")
         );
-        let root_key = key("node", &snapshot.root.unwrap());
+        let root_key = key("node", &snapshot.root[&0]);
         store.put(&root_key, vec![0; 9]).await?;
         let snapshot = Snapshot::open(store.clone()).await?;
         assert!(

@@ -1,47 +1,61 @@
-# Self-review and cleanup — 2026-10-10
+# Review and validation — 2026-10-10
 
-Scope: the complete adapter and the pending page-compression work, with emphasis
-on module boundaries, code clarity, test isolation and removal of obsolete paths.
-This is an author review supported by executed tests, not an independent audit.
+The adapter now uses one page-map implementation: an adaptive-height, 256-way
+radix tree with its root embedded in the snapshot head. Backend mutations run one
+at a time; independent reads can overlap. This is an author review supported by
+executed tests, not an independent audit.
 
-## Findings and changes
+## Map decision
 
-| Finding | Change |
-|---|---|
-| The KV contract module also shipped the in-memory durability model and traffic counters | `src/kv.rs` now contains only the backend trait. MemoryKv, failpoints and counters live under `src/simulation/`, gated by the opt-in `simulation` feature. |
-| The normal I/O pump forced a yield for every operation, and updated measurement counters | Forced yields, byte counters, `IoStats` and `Session::io_stats` are compiled only with simulation. A default-feature public API test exercises an immediately-ready backend. |
-| Test bodies and test-only helper implementations obscured production files | Every test and helper implementation now lives under `tests/`. Unit module declarations retain `cfg(test)` and private access; simulation-backed suites additionally require the feature. |
-| Benchmarks were exposed as examples and analysis/data were scattered at the root | Three explicit Cargo bench targets, their scripts, current results and methodology now live under `benches/`. `examples/` contains only the lookup usage example. |
-| Empty stores triggered twelve obsolete key probes | Removed discovery/rejection of older formats, the associated compatibility test, and the obsolete-format fixture. Only the current format remains. |
-| Four pending-record length fields allocated a temporary Vec and used an unreachable branch | Decode into a fixed four-element array after checking the input header length. |
-| Publication and cleanup eagerly allocated a Vec of boxed futures for every object | Futures are now constructed lazily through a bounded stream. Ordinary failures still drain work before returning, and cleanup still retains the pending record on failure. |
-| Format literals and documentation could drift independently | Key/magic constants are centralized in `src/format.rs`; corrected the stale pending-record magic in the protocol description. |
-| Historical reports, comparison tooling, logs and deferred designs dominated the project | Removed superseded artifacts and format comparisons. Kept only current source, focused documentation and reproducible current benchmark evidence. |
+The original layout options supported comparison experiments. Those experiments
+are complete; callers no longer select an internal representation. The embedded
+root saves a dependent map get on cold reads and avoids writing and retiring a
+separate root object during updates. It retains immediate retirement of replaced
+pages and nodes, and reuses unchanged subtrees.
 
-The map-cost test was reduced to its actual invariant: changed paths reuse
-untouched objects and write the expected object set. It no longer prints a
-benchmark report. Failure campaign output still reports the exercised cases.
+This does not minimize every byte count. A large embedded root is included in
+both the head and pending intent, so it can cost more write bytes than an external
+root. The choice favors fewer requests and one simple, predictable lifecycle.
+No real-backend latency improvement is claimed by these simulator measurements.
 
-The lazy mutation streams retain boxing at the stream boundary so save/recovery
-futures remain `Send` on the pinned toolchain. This removes the eager collection,
-not every per-request allocation. Concurrency and ordinary-error draining semantics
-are unchanged and covered by the reordered-completion campaigns.
+## Changes
 
-## Resulting boundaries
+- Removed the public map enum, options field, layout dispatch and CLI selector.
+- Removed external-root publication, head overrides, tombstones and deferred folds.
+  Deleting a page removes its tree edge during the same save.
+- Simplified the head to a 21-byte prefix followed by one encoded root. There are
+  no layout tags, root-length fields, override counts or alternate decoders.
+- The single current format is v10 (`SK10`/`SP10`). Use a fresh namespace; no
+  migration or compatibility code is included.
+- Reduced benchmark and test matrices to the fixed map. The interrupted-fold
+  campaign now tests ordinary tree rewrites, including abandoned writes followed
+  by a different retry. Sparse growth, collapse and exact reclamation remain tested.
+- Added head validation coverage for truncation, malformed roots, inconsistent
+  heights, trailing data and out-of-range object IDs.
+- Removed the write-concurrency option. Intent, object and head puts and all
+  cleanup/recovery deletes are serial, stopping at the first error. The complete
+  intent permits recovery to delete even planned objects that were never written.
+- Read head and intent together during quiescent open. The engine I/O pump runs
+  adjacent queued reads in batches of at most 16; writes, truncation and sync are
+  ordering barriers. Dependent map traversal within one read remains sequential.
+- Added gated-backend tests for overlapping reads, barrier ordering, draining
+  after an ordinary error and retiring completions on cancellation, including a
+  dequeued future that is never polled. Serial-mutation tests cover both aborted
+  allocation cleanup and successful retirement with exact orphan accounting.
+- Added module/type/method rustdoc covering binary layouts, overlay state, caches,
+  allocation and retirement, publication durability, uncertain outcomes and host
+  ownership. The crate overview explains immutable pages plus a radix map against
+  in-place updates, a whole-database value and a durable engine WAL.
+- Regenerated all current benchmark evidence and removed the layout dimension
+  from CSVs, analyzers, examples and documentation.
 
-- Default library: backend contract, engine adapter, page/map codecs and the
-  single save/recovery protocol. No simulator, fault backend or traffic counters.
-- `simulation` feature: in-memory visibility/durability model, delayed/failing
-  requests, metrics and deliberate scheduling yields.
-- Test builds: private unit suites and checkpoint injection under `tests/unit/`;
-  public API tests under `tests/public_api.rs`; feature-gated storage campaigns
-  under `tests/integration/`. No public internals were added just to move tests.
-- Benchmark builds: explicit `harness = false` targets requiring `simulation`.
-  Benchmarks are not executed by the ordinary test command.
+## Boundaries
 
-Raw page fallback and all three map layouts remain: they are active parts of the
-current experiment, not compatibility implementations. There are no format probes,
-older-format decoders, migrations or historical benchmark branches in the code.
+The default library contains the KV contract, engine adapter, codecs and one
+save/recovery protocol. In-memory durability simulation, failpoints, counters and
+artificial yields require `simulation`. Test bodies and helpers are under `tests/`;
+checkpoint injection is test-only. Benchmarks, analyzers and results are under
+`benches/`, with explicit Cargo bench targets separate from normal test commands.
 
 ## Executed validation
 
@@ -49,28 +63,28 @@ Rust/Cargo 1.90.0, locked dependencies, Linux x86_64.
 
 | Check | Outcome |
 |---|---|
-| `cargo test --locked --no-default-features` | 7 tests pass: six codec tests plus save/reopen/discard with an immediately-ready backend |
-| `cargo test --locked --features simulation` | 48 tests pass: 27 unit, 20 integration, one public API |
-| Interruption campaigns | 4107 cases, unchanged coverage |
+| `cargo test --locked --no-default-features` | 8 tests and one compile-checked rustdoc example pass |
+| `cargo test --locked --features simulation` | 51 tests pass: 30 unit, 20 integration, one public API; one rustdoc example also passes |
+| Interruption campaigns | 1355 cases across the one supported map |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
-| `cargo bench --locked --features simulation --bench amplification -- 3` | 12,258 observations / 2043 phases / 309 configurations; repeated counters reconcile |
-| `cargo bench --locked --features simulation --bench page_compression -- 3` | 1512 SQL observations, 252 paired workloads and 72 codec timing samples; repeated traffic agrees |
-| `cargo bench --locked --features simulation --bench small_databases -- 3` | 1485 observations; SQL/reopen checks pass |
-| Both benchmark analyzers | Pass with only current-format input and paths |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps --all-features --document-private-items` | Pass |
+| Amplification benchmark, three repeats | 4104 observations / 684 phases / 104 configurations; counters reconcile |
+| Page-compression benchmark, three repeats | 504 SQL observations / 84 Raw-LZ4 pairs / 72 codec timing samples; traffic agrees |
+| Small-database benchmark, three repeats | 495 observations; SQL/reopen checks pass |
+| Both benchmark analyzers | Pass on current-format evidence |
 
-One obsolete-format test was removed and one default-build public API test was
-added, keeping the full test count at 48. Test-only checkpoint hooks, decoded-page
-cache checks, mixed compression policies, folds, cancellation, unknown publication
-outcomes and exact orphan accounting remain covered.
+The interruption total includes 28 checkpoint, 48 tree-rewrite, 380 read,
+9 serial-object-error, 16 recovery-read, 10 repeated-cleanup, 468 publication
+and 396 interrupted-recovery cases. The former write-concurrency settings no
+longer multiply the same object-error campaign; the only supported value is one.
 
-## Remaining design limits
+## Remaining limits
 
-No storage correctness defect was reproduced by this review. The existing host
-contract remains essential: one owner and settlement of outstanding requests.
-Memory budgets, request fencing, real-backend latency and process-crash/power-loss
-validation remain future work. The refactor does not claim to address these.
+Exclusive ownership and settlement of outstanding requests remain host
+requirements. Memory budgets, request fencing, real-backend latency and process
+crash/power-loss validation remain future work. No storage correctness defect was
+reproduced in the supported map by this review.
 
-Current benchmark methodology and raw evidence are under
-[benches/](../benches/README.md); the format and commit protocol are documented in
-[FORMAT.md](FORMAT.md) and [PROTOCOL.md](PROTOCOL.md).
+See [format](FORMAT.md), [protocol](PROTOCOL.md), and
+[benchmark methodology and evidence](../benches/README.md).

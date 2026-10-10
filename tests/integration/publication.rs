@@ -3,7 +3,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either, select},
 };
-use sqlite_kv::{MapLayout, Result, Session, StorageOptions, kv::KvStore, simulation::MemoryKv};
+use sqlite_kv::{Result, Session, StorageOptions, kv::KvStore, simulation::MemoryKv};
 use std::{
     io,
     sync::{
@@ -57,11 +57,11 @@ impl KvStore for FaultKv {
             self.keys.lock().unwrap().push(key.to_owned());
             let fail = call == self.fail_at;
             if !fail || self.effect > 0 {
-                if key.starts_with("v9/block/") || key.starts_with("v9/node/") {
+                if key.starts_with("v10/block/") || key.starts_with("v10/node/") {
                     let id = u64::from_str_radix(key.rsplit('/').next().unwrap(), 16).unwrap();
                     let high = self
                         .inner
-                        .get("v9/head")
+                        .get("v10/head")
                         .await?
                         .map(|v| u64::from_le_bytes(v[12..20].try_into().unwrap()))
                         .unwrap_or(0);
@@ -81,16 +81,10 @@ impl KvStore for FaultKv {
     }
 }
 
-async fn baseline(layout: MapLayout) -> Result<MemoryKv> {
+async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Session::open_with_options(
-        Arc::new(store.clone()),
-        StorageOptions {
-            layout,
-            ..StorageOptions::default()
-        },
-    )
-    .await?;
+    let mut db =
+        Session::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
     populate(&mut db).await?;
     // save itself checkpoints: the durable baseline has no WAL.
     db.save().await?;
@@ -108,15 +102,8 @@ async fn populate(db: &mut Session) -> Result<()> {
     Ok(())
 }
 
-async fn changed(store: Arc<dyn KvStore>, checkpoint: bool, layout: MapLayout) -> Result<Session> {
-    let mut db = Session::open_with_options(
-        store,
-        StorageOptions {
-            layout,
-            ..StorageOptions::default()
-        },
-    )
-    .await?;
+async fn changed(store: Arc<dyn KvStore>, checkpoint: bool) -> Result<Session> {
+    let mut db = Session::open_with_options(store, StorageOptions::default()).await?;
     if db
         .query("SELECT count(*) FROM sqlite_master WHERE name='balances'")
         .await?[0][0]
@@ -161,11 +148,11 @@ async fn check(store: Arc<dyn KvStore>, expected: i32) -> Result<()> {
     Ok(())
 }
 
-async fn exercise(checkpoint: bool, empty: bool, layout: MapLayout) -> Result<()> {
+async fn exercise(checkpoint: bool, empty: bool) -> Result<()> {
     let base = if empty {
         MemoryKv::default()
     } else {
-        baseline(layout).await?
+        baseline().await?
     };
     let probe = Arc::new(FaultKv {
         inner: base.fork(),
@@ -176,16 +163,13 @@ async fn exercise(checkpoint: bool, empty: bool, layout: MapLayout) -> Result<()
         reached: Mutex::new(None),
         keys: Mutex::default(),
     });
-    changed(probe.clone(), checkpoint, layout)
-        .await?
-        .save()
-        .await?;
+    changed(probe.clone(), checkpoint).await?.save().await?;
     check(probe.clone(), 20).await?;
     let writes = probe.calls.load(Ordering::SeqCst);
     let keys = probe.keys.lock().unwrap().clone();
-    assert_eq!(keys.first().unwrap(), "v9/pending_save");
-    assert_eq!(keys.last().unwrap(), "delete:v9/pending_save");
-    let commit_at = keys.iter().position(|k| k == "v9/head").unwrap() + 1;
+    assert_eq!(keys.first().unwrap(), "v10/pending_save");
+    assert_eq!(keys.last().unwrap(), "delete:v10/pending_save");
+    let commit_at = keys.iter().position(|k| k == "v10/head").unwrap() + 1;
     probe.inner.crash(&[]);
     check(Arc::new(probe.inner.clone()), 20).await?;
     assert!(writes > 1);
@@ -203,7 +187,7 @@ async fn exercise(checkpoint: bool, empty: bool, layout: MapLayout) -> Result<()
                         reached: Mutex::new(Some(reached)),
                         keys: Mutex::default(),
                     });
-                    let db = changed(store.clone(), checkpoint, layout).await?;
+                    let db = changed(store.clone(), checkpoint).await?;
                     if cancel {
                         match select(db.save().boxed(), gate).await {
                             Either::Left(_) => panic!("save did not reach injected cancellation"),
@@ -268,21 +252,18 @@ async fn exercise(checkpoint: bool, empty: bool, layout: MapLayout) -> Result<()
                     // A later acknowledged save must succeed after every interruption.
                     let high = store
                         .inner
-                        .get("v9/head")
+                        .get("v10/head")
                         .await?
                         .map(|v| u64::from_le_bytes(v[12..20].try_into().unwrap()))
                         .unwrap_or(0);
                     store.keys.lock().unwrap().clear();
-                    changed(store.clone(), checkpoint, layout)
-                        .await?
-                        .save()
-                        .await?;
+                    changed(store.clone(), checkpoint).await?.save().await?;
                     for key in store
                         .keys
                         .lock()
                         .unwrap()
                         .iter()
-                        .filter(|k| k.starts_with("v9/block/") || k.starts_with("v9/node/"))
+                        .filter(|k| k.starts_with("v10/block/") || k.starts_with("v10/node/"))
                     {
                         let id = u64::from_str_radix(key.rsplit('/').next().unwrap(), 16).unwrap();
                         assert!(
@@ -297,31 +278,21 @@ async fn exercise(checkpoint: bool, empty: bool, layout: MapLayout) -> Result<()
         }
     }
     println!(
-        "layout={layout:?}, checkpoint={checkpoint}, empty={empty}: {} crash/reopen cases across {writes} mutations",
+        "checkpoint={checkpoint}, empty={empty}: {} crash/reopen cases across {writes} mutations",
         writes * 12
     );
     Ok(())
 }
 
-async fn all_layouts(checkpoint: bool, empty: bool) -> Result<()> {
-    for layout in [
-        MapLayout::Radix,
-        MapLayout::InlineRoot,
-        MapLayout::HeadOverrides,
-    ] {
-        exercise(checkpoint, empty, layout).await?;
-    }
-    Ok(())
-}
 #[test]
 fn every_publication_put_with_automatic_checkpoint() -> Result<()> {
-    futures::executor::block_on(all_layouts(false, false))
+    futures::executor::block_on(exercise(false, false))
 }
 #[test]
 fn every_publication_put_after_explicit_checkpoint() -> Result<()> {
-    futures::executor::block_on(all_layouts(true, false))
+    futures::executor::block_on(exercise(true, false))
 }
 #[test]
 fn every_first_publication_put() -> Result<()> {
-    futures::executor::block_on(all_layouts(false, true))
+    futures::executor::block_on(exercise(false, true))
 }

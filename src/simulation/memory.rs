@@ -41,13 +41,13 @@ pub struct Traffic {
 }
 
 pub fn object_kind(key: &str) -> &'static str {
-    if key.starts_with("v9/block/") {
+    if key.starts_with("v10/block/") {
         "block"
-    } else if key.starts_with("v9/node/") {
+    } else if key.starts_with("v10/node/") {
         "node"
-    } else if key == "v9/head" {
+    } else if key == "v10/head" {
         "head"
-    } else if key == "v9/pending_save" {
+    } else if key == "v10/pending_save" {
         "intent"
     } else {
         "other"
@@ -158,7 +158,7 @@ impl MemoryKv {
             .sum()
     }
     pub fn block_count(&self) -> usize {
-        let prefix = "v9/block/";
+        let prefix = "v10/block/";
         self.inner
             .lock()
             .unwrap()
@@ -195,13 +195,13 @@ impl KvStore for MemoryKv {
             inner.stats.async_yields += 1;
             inner.stats.bytes_written += value.len() as u64;
             let bytes = value.len() as u64;
-            if key.starts_with("v9/block/") {
+            if key.starts_with("v10/block/") {
                 inner.stats.block_bytes_written += bytes;
-            } else if key.starts_with("v9/node/") {
+            } else if key.starts_with("v10/node/") {
                 inner.stats.node_bytes_written += bytes;
-            } else if key == "v9/head" {
+            } else if key == "v10/head" {
                 inner.stats.head_bytes_written += bytes;
-            } else if key == "v9/pending_save" {
+            } else if key == "v10/pending_save" {
                 inner.stats.intent_bytes_written += bytes;
             }
             inner.stats.write_keys.insert(key.to_owned());

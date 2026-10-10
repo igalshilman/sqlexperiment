@@ -1,6 +1,6 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
 use sqlite_kv::{
-    MapLayout, Result, Session, StorageOptions,
+    Result, Session, StorageOptions,
     kv::KvStore,
     simulation::{MemoryKv, Stats},
 };
@@ -15,17 +15,10 @@ struct Case {
     payload: usize,
     indexes: usize,
 }
-async fn baseline(case: Case, layout: MapLayout) -> Result<MemoryKv> {
+async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Session::open_with_options(
-        Arc::new(store.clone()),
-        StorageOptions {
-            layout,
-            write_concurrency: 16,
-            ..StorageOptions::default()
-        },
-    )
-    .await?;
+    let mut db =
+        Session::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER, note INTEGER, payload TEXT)").await?;
     for column in ["a", "b", "c"].into_iter().take(case.indexes) {
         db.execute(&format!("CREATE INDEX by_{column} ON t({column})"))
@@ -38,7 +31,7 @@ async fn baseline(case: Case, layout: MapLayout) -> Result<MemoryKv> {
 }
 fn print_row(
     case: Case,
-    layout: MapLayout,
+
     op: &str,
     run: usize,
     sizes: (u64, usize, usize),
@@ -47,7 +40,7 @@ fn print_row(
 ) {
     let (db_bytes, before, after) = sizes;
     println!(
-        "{layout:?},{},{},{},{op},{run},{db_bytes},{before},{after},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{op},{run},{db_bytes},{before},{after},{},{},{},{},{},{},{},{},{},{}",
         case.rows,
         case.payload,
         case.indexes,
@@ -63,9 +56,9 @@ fn print_row(
         s.intent_bytes_written
     );
 }
-async fn run(case: Case, layout: MapLayout, repeats: usize) -> Result<()> {
-    let base = baseline(case, layout).await?;
-    let head = base.get("v9/head").await?.unwrap();
+async fn run(case: Case, repeats: usize) -> Result<()> {
+    let base = baseline(case).await?;
+    let head = base.get("v10/head").await?.unwrap();
     let db_bytes = u64::from_le_bytes(head[4..12].try_into().unwrap());
     let before = base.stored_bytes();
     let id = case.rows / 2;
@@ -112,7 +105,6 @@ async fn run(case: Case, layout: MapLayout, repeats: usize) -> Result<()> {
                     let elapsed = start.elapsed();
                     print_row(
                         case,
-                        layout,
                         op,
                         repeat,
                         (db_bytes, before, store.stored_bytes()),
@@ -157,7 +149,6 @@ async fn run(case: Case, layout: MapLayout, repeats: usize) -> Result<()> {
             let stats = store.stats();
             print_row(
                 case,
-                layout,
                 op,
                 repeat,
                 (db_bytes, before, store.stored_bytes()),
@@ -192,7 +183,7 @@ async fn run(case: Case, layout: MapLayout, repeats: usize) -> Result<()> {
                 reopened.query("PRAGMA integrity_check").await?[0][0].to_string(),
                 "ok"
             );
-            assert!(store.get("v9/pending_save").await?.is_none());
+            assert!(store.get("v10/pending_save").await?.is_none());
         }
     }
     Ok(())
@@ -208,41 +199,33 @@ fn main() -> Result<()> {
         return Err("repeats must be positive".into());
     }
     println!(
-        "layout,rows,payload_bytes,indexes,operation,run,db_bytes,stored_before,stored_after,elapsed_us,gets,puts,deletes,bytes_read,bytes_written,block_bytes,node_bytes,head_bytes,intent_bytes"
+        "rows,payload_bytes,indexes,operation,run,db_bytes,stored_before,stored_after,elapsed_us,gets,puts,deletes,bytes_read,bytes_written,block_bytes,node_bytes,head_bytes,intent_bytes"
     );
     futures::executor::block_on(async {
-        for layout in [
-            MapLayout::Radix,
-            MapLayout::InlineRoot,
-            MapLayout::HeadOverrides,
-        ] {
-            for rows in [10, 100, 300] {
-                for payload in [64, 1024] {
-                    for indexes in [0, 1, 3] {
-                        run(
-                            Case {
-                                rows,
-                                payload,
-                                indexes,
-                            },
-                            layout,
-                            repeats,
-                        )
-                        .await?;
-                    }
+        for rows in [10, 100, 300] {
+            for payload in [64, 1024] {
+                for indexes in [0, 1, 3] {
+                    run(
+                        Case {
+                            rows,
+                            payload,
+                            indexes,
+                        },
+                        repeats,
+                    )
+                    .await?;
                 }
             }
-            run(
-                Case {
-                    rows: 10000,
-                    payload: 256,
-                    indexes: 1,
-                },
-                layout,
-                repeats,
-            )
-            .await?;
         }
+        run(
+            Case {
+                rows: 10000,
+                payload: 256,
+                indexes: 1,
+            },
+            repeats,
+        )
+        .await?;
         Ok(())
     })
 }

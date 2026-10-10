@@ -1,6 +1,6 @@
 # Recovery through one pending-save record
 
-The storage protocol requires only atomic, durable get/put/delete operations.
+The storage protocol requires whole-value reads and atomic, durable puts/deletes.
 A single pending record tracks allocation and reclamation without scanning GC.
 
 ## Invariant
@@ -19,11 +19,11 @@ walk the full old map. Test-only reachability checks verify exact object account
 
 ## Persistent record
 
-`v9/pending_save` contains:
+`v10/pending_save` contains:
 
 | Field | Encoding |
 |---|---|
-| Magic | 4 bytes, `TKP9` |
+| Magic | 4 bytes, `SP10` |
 | Old head length, new head length | Two u32 LE lengths; zero old length means no old head |
 | Created count, retired count | Two u32 LE counts |
 | Old head, new head | Exact head byte strings |
@@ -52,10 +52,12 @@ Validation detects malformed records, not all valid-looking storage corruption.
 6. Delete retired objects, await every durable acknowledgment.
 7. Delete intent and await durability.
 
-Object puts and retired deletes each use bounded concurrency. The intent put, head
-put, and final intent delete are ordered stages. Ordinary errors drain the active
-phase; cancellation requires host settlement. A new session cannot start until open
-has completed recovery. Same-key mutations from different attempts cannot overlap.
+Every put and delete is awaited before issuing the next mutation, including
+object writes, retirement and recovery. The first mutation error stops the phase;
+there are no sibling writes to drain. Until the final intent deletion takes effect,
+the complete intent remains available for recovery. Cancellation or an unknown
+remote outcome still requires host settlement. A new session cannot start until
+open has completed recovery. Same-key mutations from different attempts cannot overlap.
 
 ## Crash and recovery cases
 
@@ -72,8 +74,9 @@ performs no object deletion. Recovering a visible new head commits that choice:
 all its new objects had acknowledged durability before its original head put began.
 A head matching neither recorded value causes an error before any mutation.
 
-Open checks the pending key before returning a usable session. A recovery failure
-keeps the namespace unavailable to new SQL work until retry succeeds. Recovery
+Open fetches pending and head concurrently under quiescent ownership. Both reads
+must succeed and validate before any recovery mutation or usable session. A recovery
+failure keeps the namespace unavailable to new SQL work until retry succeeds. Recovery
 reads no database payloads and does not fetch map nodes: the ID lists are sufficient.
 
 The record is not removed on a precommit error merely because publication failed:
@@ -94,13 +97,13 @@ A no-op save with an identical head and empty object lists performs no mutations
 
 Cold open adds one get for the pending key alongside the head get. Interrupted-save
 recovery adds one head confirmation, C or R idempotent deletes, and intent deletion.
-These are operation counts, not guaranteed network round trips. Concurrency may
-need multiple waves. Logical durable deletion does not imply immediate physical
+These are operation counts, not measured network round trips. The two initial reads
+can overlap; recovery mutations are serial. Logical durable deletion does not imply immediate physical
 space return by the backend or its replication layer.
 
-For HeadOverrides, shadowed base blocks remain until a fold removes structural
-references; at most 64 pages are shadowed. Superseded overrides are reclaimed on
-each save. Radix and InlineRoot retire replaced pages and nodes immediately.
+The radix root is embedded in the head. Replaced pages and external child nodes
+are retired by the same save; unchanged subtrees remain shared. No deferred
+folding or shadowed base pages need a separate lifecycle.
 
 ## Why the engine WAL is separate
 

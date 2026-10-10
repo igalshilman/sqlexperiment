@@ -27,11 +27,12 @@ if let Some(error) = saved.cleanup_error {
 }
 ```
 
-`StorageOptions` selects `MapLayout::{Radix, InlineRoot, HeadOverrides}`, bounded
-write concurrency, and `PageCompression::{Lz4, Raw}`. Defaults are Radix, 16
-concurrent object mutations and adaptive LZ4. Existing heads select their stored
-map layout. The compression policy applies only to new pages; each stored page
-carries its own codec tag.
+The page map is a radix tree with its root embedded in the snapshot head.
+There is no map selection or write-concurrency option. Backend puts and deletes
+run one at a time. `StorageOptions` selects `PageCompression::{Lz4, Raw}` (default
+adaptive LZ4), applied only to new pages; stored tags determine decoding.
+Independent head/intent reads overlap during open. The engine I/O pump overlaps
+adjacent reads in batches of up to 16, with write/truncate/sync barriers.
 
 SQL COMMIT and `checkpoint()` affect the private view. `save()` consumes the
 session and is the durability boundary. Dropping a session discards unsaved work.
@@ -62,6 +63,7 @@ cargo test --locked
 cargo test --locked --features simulation
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
+cargo doc --locked --no-deps --document-private-items
 ```
 
 | Location / target | Purpose | Feature |
@@ -80,7 +82,7 @@ builds. Default tests exercise the codec and public API without enabling simulat
 Benchmarks are run separately; see [benches/README.md](benches/README.md).
 
 ```sh
-cargo run --locked --features simulation --example lookup -- radix
+cargo run --locked --features simulation --example lookup
 cargo bench --locked --features simulation --bench page_compression -- 3
 ```
 
@@ -91,11 +93,11 @@ fallback, at most 4099 bytes including the header. A snapshot-local cache retain
 one decoded page. The map uses compact radix nodes; unchanged subtrees are reused.
 Only the current format is supported, with no probing or handling of other formats.
 
-| Map layout | Structure | Tradeoff |
-|---|---|---|
-| Radix | External adaptive-height 256-way tree | Rewrites affected paths |
-| InlineRoot | Top node embedded in head | Saves a root request; enlarges head and intent |
-| HeadOverrides | External tree plus at most 64 overrides | Defers map rewrites and retains up to 64 shadowed base pages |
+The embedded root removes a separate map fetch from cold reads and avoids writing
+and retiring a separate root object. Changed paths are rewritten immediately;
+unchanged subtrees are reused and replaced objects are reclaimed after publication.
+There are no override lists or deferred folds. A large root increases the bytes
+in the head and intent; the design favors fewer requests and one simple lifecycle.
 
 A fixed pending-save record lists created and retired object IDs before any object
 writes. Save waits for new objects to be durable, replaces the head, then deletes
@@ -103,7 +105,10 @@ retired objects and the intent. Open settles an interrupted save by matching the
 head against the intent's exact old/new heads. There is no scan-based GC.
 
 See [storage format](docs/FORMAT.md), [save/recovery protocol](docs/PROTOCOL.md),
-and [self-review](docs/REVIEW.md).
+and [self-review](docs/REVIEW.md). In-source rustdoc explains the architecture
+and alternatives in `src/lib.rs`, the structures and layout in `src/snapshot.rs`
+and `src/map_codec.rs`, and the commit/recovery contract in `src/pending.rs` and
+`src/kv.rs`.
 
 ## Limits
 

@@ -13,12 +13,8 @@ use super::*;
 use crate::simulation::{MemoryKv, yield_once};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn options(layout: MapLayout) -> StorageOptions {
-    StorageOptions {
-        layout,
-        write_concurrency: 8,
-        ..StorageOptions::default()
-    }
+fn options() -> StorageOptions {
+    StorageOptions::default()
 }
 fn page(n: u64) -> Vec<u8> {
     let mut p = vec![0; BLOCK_SIZE];
@@ -29,60 +25,53 @@ fn page(n: u64) -> Vec<u8> {
 #[test]
 fn mixed_page_codecs_survive_policy_changes_and_reclamation() -> io::Result<()> {
     futures::executor::block_on(async {
-        for layout in [
-            MapLayout::Radix,
-            MapLayout::InlineRoot,
-            MapLayout::HeadOverrides,
-        ] {
-            let store = Arc::new(MemoryKv::default());
-            let raw = StorageOptions {
-                page_compression: PageCompression::Raw,
-                ..options(layout)
-            };
-            Snapshot::open_with_options(store.clone(), raw)
-                .await?
-                .publish(
-                    Changes::from([(0, Some(page(1))), (1, Some(page(2)))]),
-                    8192,
-                )
-                .await?;
-            let snapshot = Snapshot::open_with_options(store.clone(), options(layout)).await?;
-            let raw_id = snapshot.block_id(0).await?.unwrap();
-            assert_eq!(store.get(&key("block", &raw_id)).await?.unwrap()[0], 0);
-            snapshot
-                .publish(
-                    Changes::from([(1, Some(page(3))), (2, Some(page(4)))]),
-                    12288,
-                )
-                .await?;
-            store.crash(&[]);
-            let snapshot = Snapshot::open_with_options(store.clone(), raw).await?;
-            let compressed_id = snapshot.block_id(1).await?.unwrap();
-            assert_eq!(
-                store.get(&key("block", &compressed_id)).await?.unwrap()[0],
-                1
-            );
-            for (index, n) in [(0, 1), (1, 3), (2, 4)] {
-                assert_eq!(snapshot.block(index).await?, Some(page(n)));
-            }
-            store.reset_stats();
-            snapshot.publish(Changes::new(), snapshot.size).await?;
-            assert_eq!(
-                store.stats().puts + store.stats().deletes,
-                0,
-                "policy alone must not rewrite pages"
-            );
-            Snapshot::open_with_options(store.clone(), raw)
-                .await?
-                .publish(Changes::from([(1, Some(page(5))), (2, None)]), 8192)
-                .await?;
-            store.crash(&[]);
-            let snapshot = Snapshot::open(store.clone()).await?;
-            assert_eq!(snapshot.block(0).await?, Some(page(1)));
-            assert_eq!(snapshot.block(1).await?, Some(page(5)));
-            assert_eq!(snapshot.block(2).await?, None);
-            assert_no_orphans(store).await?;
+        let store = Arc::new(MemoryKv::default());
+        let raw = StorageOptions {
+            page_compression: PageCompression::Raw,
+        };
+        Snapshot::open_with_options(store.clone(), raw)
+            .await?
+            .publish(
+                Changes::from([(0, Some(page(1))), (1, Some(page(2)))]),
+                8192,
+            )
+            .await?;
+        let snapshot = Snapshot::open_with_options(store.clone(), options()).await?;
+        let raw_id = snapshot.block_id(0).await?.unwrap();
+        assert_eq!(store.get(&key("block", &raw_id)).await?.unwrap()[0], 0);
+        snapshot
+            .publish(
+                Changes::from([(1, Some(page(3))), (2, Some(page(4)))]),
+                12288,
+            )
+            .await?;
+        store.crash(&[]);
+        let snapshot = Snapshot::open_with_options(store.clone(), raw).await?;
+        let compressed_id = snapshot.block_id(1).await?.unwrap();
+        assert_eq!(
+            store.get(&key("block", &compressed_id)).await?.unwrap()[0],
+            1
+        );
+        for (index, n) in [(0, 1), (1, 3), (2, 4)] {
+            assert_eq!(snapshot.block(index).await?, Some(page(n)));
         }
+        store.reset_stats();
+        snapshot.publish(Changes::new(), snapshot.size).await?;
+        assert_eq!(
+            store.stats().puts + store.stats().deletes,
+            0,
+            "policy alone must not rewrite pages"
+        );
+        Snapshot::open_with_options(store.clone(), raw)
+            .await?
+            .publish(Changes::from([(1, Some(page(5))), (2, None)]), 8192)
+            .await?;
+        store.crash(&[]);
+        let snapshot = Snapshot::open(store.clone()).await?;
+        assert_eq!(snapshot.block(0).await?, Some(page(1)));
+        assert_eq!(snapshot.block(1).await?, Some(page(5)));
+        assert_eq!(snapshot.block(2).await?, None);
+        assert_no_orphans(store).await?;
         Ok(())
     })
 }
@@ -124,32 +113,26 @@ fn failed_page_decode_is_not_cached_and_invalid_save_has_no_mutations() -> io::R
 #[test]
 fn one_page_cache_hits_evicts_and_does_not_cross_snapshots() -> io::Result<()> {
     futures::executor::block_on(async {
-        for layout in [
-            MapLayout::Radix,
-            MapLayout::InlineRoot,
-            MapLayout::HeadOverrides,
-        ] {
-            let store = Arc::new(MemoryKv::default());
-            Snapshot::open_with_options(store.clone(), options(layout))
-                .await?
-                .publish(
-                    Changes::from([(0, Some(page(1))), (1, Some(page(2)))]),
-                    8192,
-                )
-                .await?;
-            let snapshot = Snapshot::open(store.clone()).await?;
-            store.reset_stats();
-            for _ in 0..5 {
-                assert_eq!(snapshot.block(0).await?, Some(page(1)));
-            }
-            assert_eq!(store.stats().by_kind["block"].gets, 1);
-            assert_eq!(snapshot.block(1).await?, Some(page(2)));
+        let store = Arc::new(MemoryKv::default());
+        Snapshot::open_with_options(store.clone(), options())
+            .await?
+            .publish(
+                Changes::from([(0, Some(page(1))), (1, Some(page(2)))]),
+                8192,
+            )
+            .await?;
+        let snapshot = Snapshot::open(store.clone()).await?;
+        store.reset_stats();
+        for _ in 0..5 {
             assert_eq!(snapshot.block(0).await?, Some(page(1)));
-            assert_eq!(store.stats().by_kind["block"].gets, 3);
-            let fresh = Snapshot::open(store.clone()).await?;
-            assert_eq!(fresh.block(0).await?, Some(page(1)));
-            assert_eq!(store.stats().by_kind["block"].gets, 4);
         }
+        assert_eq!(store.stats().by_kind["block"].gets, 1);
+        assert_eq!(snapshot.block(1).await?, Some(page(2)));
+        assert_eq!(snapshot.block(0).await?, Some(page(1)));
+        assert_eq!(store.stats().by_kind["block"].gets, 3);
+        let fresh = Snapshot::open(store.clone()).await?;
+        assert_eq!(fresh.block(0).await?, Some(page(1)));
+        assert_eq!(store.stats().by_kind["block"].gets, 4);
         Ok(())
     })
 }
@@ -186,45 +169,39 @@ fn missing_and_malformed_pages_are_not_cached() -> io::Result<()> {
 #[test]
 fn repeated_sparse_rewrites_leave_exactly_the_current_structural_objects() -> io::Result<()> {
     futures::executor::block_on(async {
-        for layout in [
-            MapLayout::Radix,
-            MapLayout::InlineRoot,
-            MapLayout::HeadOverrides,
-        ] {
-            let store = Arc::new(MemoryKv::default());
-            let mut expected = BTreeMap::new();
-            let mut rng = 17u64;
-            let addresses = [0, 1, 255, 256, 257, 65535, 65536, 65537, 1 << 24, 1 << 40];
-            for round in 0..150 {
-                let snapshot = Snapshot::open_with_options(store.clone(), options(layout)).await?;
-                let mut dirty = Changes::new();
-                for _ in 0..7 {
-                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    let index = addresses[((rng >> 32) % addresses.len() as u64) as usize];
-                    let value = (rng & 3 != 0).then(|| page(round));
-                    if let Some(value) = &value {
-                        expected.insert(index, value.clone());
-                    } else {
-                        expected.remove(&index);
-                    }
-                    dirty.insert(index, value);
+        let store = Arc::new(MemoryKv::default());
+        let mut expected = BTreeMap::new();
+        let mut rng = 17u64;
+        let addresses = [0, 1, 255, 256, 257, 65535, 65536, 65537, 1 << 24, 1 << 40];
+        for round in 0..150 {
+            let snapshot = Snapshot::open_with_options(store.clone(), options()).await?;
+            let mut dirty = Changes::new();
+            for _ in 0..7 {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let index = addresses[((rng >> 32) % addresses.len() as u64) as usize];
+                let value = (rng & 3 != 0).then(|| page(round));
+                if let Some(value) = &value {
+                    expected.insert(index, value.clone());
+                } else {
+                    expected.remove(&index);
                 }
-                let size = expected.last_key_value().map_or(0, |(i, _)| (i + 1) * 4096);
-                assert!(snapshot.publish(dirty, size).await?.cleanup_error.is_none());
-                store.crash(&[]);
-                let current = Snapshot::open(store.clone()).await?;
-                for index in addresses {
-                    assert_eq!(current.block(index).await?, expected.get(&index).cloned());
-                }
-                assert_no_orphans(store.clone()).await?;
+                dirty.insert(index, value);
             }
+            let size = expected.last_key_value().map_or(0, |(i, _)| (i + 1) * 4096);
+            assert!(snapshot.publish(dirty, size).await?.cleanup_error.is_none());
+            store.crash(&[]);
             let current = Snapshot::open(store.clone()).await?;
-            current
-                .publish(expected.keys().map(|i| (*i, None)).collect(), 0)
-                .await?;
+            for index in addresses {
+                assert_eq!(current.block(index).await?, expected.get(&index).cloned());
+            }
             assert_no_orphans(store.clone()).await?;
-            assert_eq!(store.keys(), BTreeSet::from([HEAD.to_owned()]));
         }
+        let current = Snapshot::open(store.clone()).await?;
+        current
+            .publish(expected.keys().map(|i| (*i, None)).collect(), 0)
+            .await?;
+        assert_no_orphans(store.clone()).await?;
+        assert_eq!(store.keys(), BTreeSet::from([HEAD.to_owned()]));
         Ok(())
     })
 }
@@ -232,136 +209,120 @@ fn repeated_sparse_rewrites_leave_exactly_the_current_structural_objects() -> io
 #[test]
 fn changed_paths_reuse_untouched_objects() -> io::Result<()> {
     futures::executor::block_on(async {
-        for layout in [
-            MapLayout::Radix,
-            MapLayout::InlineRoot,
-            MapLayout::HeadOverrides,
+        let base = Arc::new(MemoryKv::default());
+        let snapshot = Snapshot::open_with_options(base.clone(), options()).await?;
+        snapshot
+            .publish(
+                (0..4096).map(|i| (i, Some(page(i)))).collect(),
+                16 * 1024 * 1024,
+            )
+            .await?;
+        for (indexes, expected_puts) in [
+            (vec![42], 4),
+            ((0..10).collect(), 13),
+            ((0..10).map(|i| i * 256).collect(), 22),
+            ((0..65).collect(), 68),
         ] {
-            let base = Arc::new(MemoryKv::default());
-            let snapshot = Snapshot::open_with_options(base.clone(), options(layout)).await?;
+            let store = Arc::new(base.fork());
+            let snapshot = Snapshot::open(store.clone()).await?;
+            store.reset_stats();
             snapshot
                 .publish(
-                    (0..4096).map(|i| (i, Some(page(i)))).collect(),
-                    16 * 1024 * 1024,
+                    indexes
+                        .iter()
+                        .map(|i| (*i, Some(page(i + 10000))))
+                        .collect(),
+                    snapshot.size,
                 )
                 .await?;
-            for (indexes, expected_puts) in [
-                (vec![42], [5, 4, 3]),
-                ((0..10).collect(), [14, 13, 12]),
-                ((0..10).map(|i| i * 256).collect(), [23, 22, 12]),
-                ((0..65).collect(), [69, 68, 69]),
-            ] {
-                let store = Arc::new(base.fork());
-                let snapshot = Snapshot::open(store.clone()).await?;
-                store.reset_stats();
-                snapshot
-                    .publish(
-                        indexes
-                            .iter()
-                            .map(|i| (*i, Some(page(i + 10000))))
-                            .collect(),
-                        snapshot.size,
-                    )
-                    .await?;
-                let stats = store.stats();
-                assert_eq!(stats.puts, expected_puts[layout as usize]);
-                assert_eq!(
-                    stats
-                        .write_keys
-                        .iter()
-                        .filter(|k| k.contains("/block/"))
-                        .count(),
-                    indexes.len()
-                );
-                store.crash(&[]);
-                store.reset_stats();
-                let reopened = Snapshot::open(store.clone()).await?;
-                assert_eq!(
-                    reopened.block(indexes[0]).await?,
-                    Some(page(indexes[0] + 10000))
-                );
-                for i in indexes {
-                    assert_eq!(reopened.block(i).await?, Some(page(i + 10000)));
-                }
-                assert_eq!(reopened.block(4095).await?, Some(page(4095)));
+            let stats = store.stats();
+            assert_eq!(stats.puts, expected_puts);
+            assert_eq!(
+                stats
+                    .write_keys
+                    .iter()
+                    .filter(|k| k.contains("/block/"))
+                    .count(),
+                indexes.len()
+            );
+            store.crash(&[]);
+            store.reset_stats();
+            let reopened = Snapshot::open(store.clone()).await?;
+            assert_eq!(
+                reopened.block(indexes[0]).await?,
+                Some(page(indexes[0] + 10000))
+            );
+            for i in indexes {
+                assert_eq!(reopened.block(i).await?, Some(page(i + 10000)));
             }
+            assert_eq!(reopened.block(4095).await?, Some(page(4095)));
         }
         Ok(())
     })
 }
 
 #[test]
-fn layouts_preserve_sparse_paths_fold_tombstones_without_gc() -> io::Result<()> {
+fn sparse_growth_deletion_and_empty_reuse_leave_no_orphans() -> io::Result<()> {
     futures::executor::block_on(async {
-        for layout in [
-            MapLayout::Radix,
-            MapLayout::InlineRoot,
-            MapLayout::HeadOverrides,
-        ] {
-            let store = Arc::new(MemoryKv::default());
-            let mut snapshot = Snapshot::open_with_options(store.clone(), options(layout)).await?;
-            let mut expected: BTreeMap<u64, Vec<u8>> = (0..70).map(|i| (i, page(i))).collect();
-            snapshot
-                .publish(
-                    expected
-                        .iter()
-                        .map(|(i, p)| (*i, Some(p.clone())))
-                        .collect(),
-                    70 * 4096,
-                )
-                .await?;
-            snapshot = Snapshot::open(store.clone()).await?;
-            let mut changes = Changes::new();
-            // 64 head entries exactly: deletion, replacement and sparse growth.
-            for i in 0..62 {
-                changes.insert(i, Some(page(i + 100)));
-                expected.insert(i, page(i + 100));
-            }
-            changes.insert(63, None);
-            expected.remove(&63);
-            changes.insert(1 << 40, Some(page(900)));
-            expected.insert(1 << 40, page(900));
-            let large = ((1 << 40) + 1) * 4096;
-            snapshot.publish(changes, large).await?;
-            snapshot = Snapshot::open(store.clone()).await?;
-            if layout == MapLayout::HeadOverrides {
-                assert_eq!(snapshot.overrides.len(), 64);
-            }
-            drop(snapshot);
-            assert_no_orphans(store.clone()).await?;
-            snapshot = Snapshot::open(store.clone()).await?;
-            // New logical address is the 65th override and forces a fold.
-            snapshot
-                .publish(Changes::from([(256, Some(page(901)))]), large)
-                .await?;
-            expected.insert(256, page(901));
-            store.crash(&[]);
-            snapshot = Snapshot::open(store.clone()).await?;
-            assert!(snapshot.overrides.is_empty());
-            for (i, p) in &expected {
-                assert_eq!(snapshot.block(*i).await?, Some(p.clone()));
-            }
-            assert!(snapshot.block(63).await?.is_none());
-            let counter = snapshot.last_id;
-            // Empty snapshot still carries counter. Save removes every object.
-            snapshot
-                .publish(expected.keys().map(|i| (*i, None)).collect(), 0)
-                .await?;
-            let empty = Snapshot::open(store.clone()).await?;
-            assert!(empty.last_id >= counter);
-            let old_counter = empty.last_id;
-            drop(empty);
-            assert_no_orphans(store.clone()).await?;
-            assert_eq!(store.block_count(), 0);
-            Snapshot::open(store.clone())
-                .await?
-                .publish(Changes::from([(0, Some(page(902)))]), 4096)
-                .await?;
-            store.crash(&[]);
-            let restored = Snapshot::open(store).await?;
-            assert!(restored.last_id > old_counter);
-            assert_eq!(restored.block(0).await?, Some(page(902)));
+        let store = Arc::new(MemoryKv::default());
+        let mut snapshot = Snapshot::open_with_options(store.clone(), options()).await?;
+        let mut expected: BTreeMap<u64, Vec<u8>> = (0..70).map(|i| (i, page(i))).collect();
+        snapshot
+            .publish(
+                expected
+                    .iter()
+                    .map(|(i, p)| (*i, Some(p.clone())))
+                    .collect(),
+                70 * 4096,
+            )
+            .await?;
+        snapshot = Snapshot::open(store.clone()).await?;
+        let mut changes = Changes::new();
+        // Mix deletion, replacement and growth across several radix levels.
+        for i in 0..62 {
+            changes.insert(i, Some(page(i + 100)));
+            expected.insert(i, page(i + 100));
         }
+        changes.insert(63, None);
+        expected.remove(&63);
+        changes.insert(1 << 40, Some(page(900)));
+        expected.insert(1 << 40, page(900));
+        let large = ((1 << 40) + 1) * 4096;
+        snapshot.publish(changes, large).await?;
+        snapshot = Snapshot::open(store.clone()).await?;
+        drop(snapshot);
+        assert_no_orphans(store.clone()).await?;
+        snapshot = Snapshot::open(store.clone()).await?;
+        // Insert another sparse address while retaining the distant branch.
+        snapshot
+            .publish(Changes::from([(256, Some(page(901)))]), large)
+            .await?;
+        expected.insert(256, page(901));
+        store.crash(&[]);
+        snapshot = Snapshot::open(store.clone()).await?;
+        for (i, p) in &expected {
+            assert_eq!(snapshot.block(*i).await?, Some(p.clone()));
+        }
+        assert!(snapshot.block(63).await?.is_none());
+        let counter = snapshot.last_id;
+        // Empty snapshot still carries counter. Save removes every object.
+        snapshot
+            .publish(expected.keys().map(|i| (*i, None)).collect(), 0)
+            .await?;
+        let empty = Snapshot::open(store.clone()).await?;
+        assert!(empty.last_id >= counter);
+        let old_counter = empty.last_id;
+        drop(empty);
+        assert_no_orphans(store.clone()).await?;
+        assert_eq!(store.block_count(), 0);
+        Snapshot::open(store.clone())
+            .await?
+            .publish(Changes::from([(0, Some(page(902)))]), 4096)
+            .await?;
+        store.crash(&[]);
+        let restored = Snapshot::open(store).await?;
+        assert!(restored.last_id > old_counter);
+        assert_eq!(restored.block(0).await?, Some(page(902)));
         Ok(())
     })
 }
@@ -369,74 +330,68 @@ fn layouts_preserve_sparse_paths_fold_tombstones_without_gc() -> io::Result<()> 
 #[test]
 fn orphan_ids_are_reused_and_exhaustion_precedes_all_mutations() -> io::Result<()> {
     futures::executor::block_on(async {
-        for layout in [
-            MapLayout::Radix,
-            MapLayout::InlineRoot,
-            MapLayout::HeadOverrides,
-        ] {
-            let store = Arc::new(MemoryKv::default());
-            let snapshot = Snapshot::open_with_options(store.clone(), options(layout)).await?;
-            snapshot
-                .publish(Changes::from([(0, Some(page(1)))]), 4096)
-                .await?;
-            let committed = store.get(HEAD).await?.unwrap();
-            let snapshot = Snapshot::open(store.clone()).await?;
-            let high = snapshot.last_id;
-            // Interrupted attempt: intent is durable before either new object.
-            let mut attempted_head = committed.clone();
-            attempted_head[12..20].copy_from_slice(&(high + 2).to_le_bytes());
-            let intent = PendingSave {
-                old_head: Some(committed.clone()),
-                new_head: attempted_head,
-                created: Objects::from([("block", high + 1), ("block", high + 2)]),
-                retired: Objects::new(),
-            };
-            store.put(PENDING, intent.encode()?).await?;
-            store
-                .put(
-                    &key("block", &(high + 1)),
-                    page_codec::encode(&page(999), PageCompression::Lz4)?,
-                )
-                .await?;
-            store
-                .put(
-                    &key("block", &(high + 2)),
-                    page_codec::encode(&page(998), PageCompression::Lz4)?,
-                )
-                .await?;
-            store.crash(&[]);
-            assert_eq!(store.get(HEAD).await?, Some(committed));
-            let snapshot = Snapshot::open(store.clone()).await?;
-            snapshot
-                .publish(Changes::from([(0, Some(page(2)))]), 4096)
-                .await?;
-            assert_eq!(
-                page_codec::decode(&store.get(&key("block", &(high + 1))).await?.unwrap())?,
-                page(2)
-            );
-            store.crash(&[]);
-            assert_eq!(
-                Snapshot::open(store.clone()).await?.block(0).await?,
-                Some(page(2))
-            );
-            let mut head = store.get(HEAD).await?.unwrap();
-            head[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
-            store.put(HEAD, head).await?;
-            store.reset_stats();
-            assert!(
-                Snapshot::open(store.clone())
-                    .await?
-                    .publish(Changes::from([(0, Some(page(3)))]), 4096)
-                    .await
-                    .is_err()
-            );
-            assert_eq!(store.stats().puts, 0);
-        }
+        let store = Arc::new(MemoryKv::default());
+        let snapshot = Snapshot::open_with_options(store.clone(), options()).await?;
+        snapshot
+            .publish(Changes::from([(0, Some(page(1)))]), 4096)
+            .await?;
+        let committed = store.get(HEAD).await?.unwrap();
+        let snapshot = Snapshot::open(store.clone()).await?;
+        let high = snapshot.last_id;
+        // Interrupted attempt: intent is durable before either new object.
+        let mut attempted_head = committed.clone();
+        attempted_head[12..20].copy_from_slice(&(high + 2).to_le_bytes());
+        let intent = PendingSave {
+            old_head: Some(committed.clone()),
+            new_head: attempted_head,
+            created: Objects::from([("block", high + 1), ("block", high + 2)]),
+            retired: Objects::new(),
+        };
+        store.put(PENDING, intent.encode()?).await?;
+        store
+            .put(
+                &key("block", &(high + 1)),
+                page_codec::encode(&page(999), PageCompression::Lz4)?,
+            )
+            .await?;
+        store
+            .put(
+                &key("block", &(high + 2)),
+                page_codec::encode(&page(998), PageCompression::Lz4)?,
+            )
+            .await?;
+        store.crash(&[]);
+        assert_eq!(store.get(HEAD).await?, Some(committed));
+        let snapshot = Snapshot::open(store.clone()).await?;
+        snapshot
+            .publish(Changes::from([(0, Some(page(2)))]), 4096)
+            .await?;
+        assert_eq!(
+            page_codec::decode(&store.get(&key("block", &(high + 1))).await?.unwrap())?,
+            page(2)
+        );
+        store.crash(&[]);
+        assert_eq!(
+            Snapshot::open(store.clone()).await?.block(0).await?,
+            Some(page(2))
+        );
+        let mut head = store.get(HEAD).await?.unwrap();
+        head[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
+        store.put(HEAD, head).await?;
+        store.reset_stats();
+        assert!(
+            Snapshot::open(store.clone())
+                .await?
+                .publish(Changes::from([(0, Some(page(3)))]), 4096)
+                .await
+                .is_err()
+        );
+        assert_eq!(store.stats().puts, 0);
         Ok(())
     })
 }
 
-struct ReorderingKv {
+struct SerialKv {
     inner: MemoryKv,
     active: AtomicUsize,
     maximum: AtomicUsize,
@@ -449,22 +404,32 @@ impl Drop for Active<'_> {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
-impl KvStore for ReorderingKv {
+impl SerialKv {
+    fn mutation(&self) -> Active<'_> {
+        let n = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        assert_eq!(n, 1, "overlapping backend mutations");
+        self.maximum.fetch_max(n, Ordering::SeqCst);
+        Active(&self.active)
+    }
+}
+impl KvStore for SerialKv {
     fn get<'a>(&'a self, k: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
         self.inner.get(k)
     }
     fn delete<'a>(&'a self, k: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        self.inner.delete(k)
+        Box::pin(async move {
+            let _active = self.mutation();
+            yield_once().await;
+            self.inner.delete(k).await
+        })
     }
     fn put<'a>(&'a self, k: &'a str, v: Vec<u8>) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move {
+            let _active = self.mutation();
             if k == HEAD || k == PENDING {
-                assert_eq!(self.active.load(Ordering::SeqCst), 0);
+                yield_once().await;
                 return self.inner.put(k, v).await;
             }
-            let n = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-            let _active = Active(&self.active);
-            self.maximum.fetch_max(n, Ordering::SeqCst);
             let id = u64::from_str_radix(k.rsplit('/').next().unwrap(), 16).unwrap();
             for _ in 0..(1 + (17 - id % 17)) {
                 yield_once().await;
@@ -479,41 +444,52 @@ impl KvStore for ReorderingKv {
     }
 }
 #[test]
-fn concurrent_puts_reorder_are_bounded_and_drain_on_error() -> io::Result<()> {
+fn puts_and_cleanup_are_serial_and_stop_on_error() -> io::Result<()> {
     futures::executor::block_on(async {
         for fail_id in [None, Some(3)] {
-            let store = Arc::new(ReorderingKv {
+            let store = Arc::new(SerialKv {
                 inner: MemoryKv::default(),
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),
                 finished: Mutex::default(),
                 fail_id,
             });
-            let snapshot =
-                Snapshot::open_with_options(store.clone(), options(MapLayout::Radix)).await?;
+            let snapshot = Snapshot::open_with_options(store.clone(), options()).await?;
             let result = snapshot
                 .publish((0..40).map(|i| (i, Some(page(i)))).collect(), 40 * 4096)
                 .await;
             assert_eq!(store.active.load(Ordering::SeqCst), 0);
-            assert_eq!(store.maximum.load(Ordering::SeqCst), 8);
-            assert!(
-                store
-                    .finished
-                    .lock()
-                    .unwrap()
-                    .windows(2)
-                    .any(|w| w[0] > w[1])
-            );
+            assert_eq!(store.maximum.load(Ordering::SeqCst), 1);
+            let expected: Vec<_> = if fail_id.is_some() {
+                (1..3).collect()
+            } else {
+                (1..=40).collect()
+            };
+            assert_eq!(*store.finished.lock().unwrap(), expected);
             if fail_id.is_some() {
                 assert!(result.is_err());
                 assert!(store.inner.get(HEAD).await?.is_none());
+                store.inner.crash(&[]);
+                drop(Snapshot::open(store.clone()).await?);
+                assert!(store.inner.keys().is_empty());
             } else {
                 result?;
                 store.inner.crash(&[]);
-                let snapshot = Snapshot::open(store).await?;
+                let snapshot = Snapshot::open(store.clone()).await?;
                 for i in 0..40 {
                     assert_eq!(snapshot.block(i).await?, Some(page(i)));
                 }
+                snapshot
+                    .publish(
+                        Changes::from([(0, Some(page(99))), (1, None)]),
+                        snapshot.size,
+                    )
+                    .await?;
+                let snapshot = Snapshot::open(store.clone()).await?;
+                let mut expected = snapshot.reachable().await?;
+                expected.insert(HEAD.to_owned());
+                assert_eq!(store.inner.keys(), expected, "untracked objects remain");
+                assert_eq!(store.maximum.load(Ordering::SeqCst), 1);
             }
         }
         Ok(())
@@ -534,7 +510,7 @@ impl InterruptKv {
             let _ = self.reached.lock().unwrap().take().unwrap().send(());
             futures::future::pending::<()>().await;
         }
-        Err(io::Error::other("injected fold failure"))
+        Err(io::Error::other("injected tree rewrite failure"))
     }
 }
 impl KvStore for InterruptKv {
@@ -561,7 +537,7 @@ impl KvStore for InterruptKv {
 }
 
 #[test]
-fn every_override_fold_put_recovers_without_resurrecting_abandoned_changes() -> io::Result<()> {
+fn every_tree_rewrite_put_recovers_without_resurrecting_abandoned_changes() -> io::Result<()> {
     use futures::{
         FutureExt,
         channel::oneshot,
@@ -569,7 +545,7 @@ fn every_override_fold_put_recovers_without_resurrecting_abandoned_changes() -> 
     };
     futures::executor::block_on(async {
         let base = Arc::new(MemoryKv::default());
-        Snapshot::open_with_options(base.clone(), options(MapLayout::HeadOverrides))
+        Snapshot::open_with_options(base.clone(), options())
             .await?
             .publish((0..300).map(|i| (i, Some(page(i)))).collect(), 300 * 4096)
             .await?;
@@ -581,7 +557,6 @@ fn every_override_fold_put_recovers_without_resurrecting_abandoned_changes() -> 
             )
             .await?;
         let old_head = base.get(HEAD).await?.unwrap();
-        assert_eq!(Snapshot::open(base.clone()).await?.overrides.len(), 64);
         let probe = Arc::new(InterruptKv {
             inner: base.fork(),
             calls: AtomicUsize::new(0),
@@ -615,7 +590,7 @@ fn every_override_fold_put_recovers_without_resurrecting_abandoned_changes() -> 
                             snapshot.publish(Changes::from([(256, Some(page(900)))]), 300 * 4096);
                         if cancel {
                             match select(future.boxed(), rx).await {
-                                Either::Left(_) => panic!("missed fold cancellation"),
+                                Either::Left(_) => panic!("missed tree rewrite cancellation"),
                                 Either::Right((signal, pending)) => {
                                     signal.unwrap();
                                     drop(pending);
@@ -677,7 +652,7 @@ fn every_override_fold_put_recovers_without_resurrecting_abandoned_changes() -> 
             }
         }
         println!(
-            "FOLD: {} crash/reopen cases across {count} puts",
+            "tree rewrite: {} crash/reopen cases across {count} puts",
             count * 12
         );
         Ok(())

@@ -1,7 +1,7 @@
 # Benchmarks
 
 These are standalone Cargo bench targets (`harness = false`), separate from tests
-and examples. All require the opt-in `simulation` feature. They count logical KV
+and examples. All use the fixed embedded-root radix map and require the opt-in `simulation` feature. They count logical KV
 operations and bytes in MemoryKv; they do not model a real remote backend.
 
 Run from the repository root:
@@ -23,7 +23,7 @@ filtered by each custom entry point. The page compression target also writes
 
 | Target | Coverage | Evidence |
 |---|---|---|
-| `amplification` | PK/range/index/scan reads, mutations, rollback, recovery; three layouts and four database sizes | [AMPLIFICATION_RESULTS.md](AMPLIFICATION_RESULTS.md) |
+| `amplification` | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes | [AMPLIFICATION_RESULTS.md](AMPLIFICATION_RESULTS.md) |
 | `page_compression` | Paired Raw/LZ4 on repetitive, JSON and random payloads; isolated codec timing | [COMPRESSION_RESULTS.md](COMPRESSION_RESULTS.md) |
 | `small_databases` | Tiny databases, index counts, save grouping and a larger control | `results/small_databases.csv` |
 

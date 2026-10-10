@@ -3,28 +3,16 @@ use futures::{
     future::{Either, select},
 };
 use sqlite_kv::{
-    MapLayout, Result, Session, StorageOptions,
+    Result, Session, StorageOptions,
     kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
 use std::sync::Arc;
 
-const LAYOUTS: [MapLayout; 3] = [
-    MapLayout::Radix,
-    MapLayout::InlineRoot,
-    MapLayout::HeadOverrides,
-];
-async fn baseline(layout: MapLayout) -> Result<MemoryKv> {
+async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Session::open_with_options(
-        Arc::new(store.clone()),
-        StorageOptions {
-            layout,
-            write_concurrency: 8,
-            ..StorageOptions::default()
-        },
-    )
-    .await?;
+    let mut db =
+        Session::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -74,142 +62,122 @@ async fn check(store: Arc<dyn KvStore>, changed: bool) -> Result<()> {
 fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
-        for layout in LAYOUTS {
-            let base = baseline(layout).await?;
-            for sql in [
-                None,
-                Some("SELECT payload FROM t WHERE id=15"),
-                Some("SELECT payload FROM t WHERE id BETWEEN 13 AND 17"),
-                Some("SELECT id FROM t INDEXED BY by_n WHERE n BETWEEN 10 AND 20"),
-                Some("SELECT payload FROM t NOT INDEXED ORDER BY id"),
-                Some("UPDATE t SET n=99 WHERE id=15"),
-            ] {
-                let probe = Arc::new(FaultKv::new(base.fork(), 7));
-                if let Some(sql) = sql {
-                    let mut db = Session::open(probe.clone()).await?;
-                    let _gate =
-                        probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
-                    db.query(sql).await?;
-                } else {
-                    let _gate =
-                        probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
-                    drop(Session::open(probe.clone()).await?);
-                }
-                let count = probe
-                    .events()
-                    .iter()
-                    .filter(|e| e.operation == Operation::Get)
-                    .count();
-                assert!(count > 0);
-                for nth in 1..=count {
-                    for effect in [Effect::None, Effect::After] {
-                        for cancel in [false, true] {
-                            let store = Arc::new(FaultKv::new(base.fork(), nth as u64));
-                            let mut session = if sql.is_some() {
-                                Some(Session::open(store.clone()).await?)
-                            } else {
-                                None
-                            };
-                            store.inner.reset_stats();
-                            let gate = store.arm(plan(Operation::Get, "", nth, effect, cancel));
-                            let future = async {
-                                if let Some(sql) = sql {
-                                    session.as_mut().unwrap().query(sql).await.map(|_| ())
-                                } else {
-                                    Session::open(store.clone()).await.map(drop)
-                                }
-                            }
-                            .boxed();
-                            if cancel {
-                                match select(future, gate).await {
-                                    Either::Left(_) => panic!("read failpoint not reached"),
-                                    Either::Right((signal, pending)) => {
-                                        signal?;
-                                        drop(pending);
-                                    }
-                                }
-                            } else {
-                                assert!(future.await.is_err());
-                            }
-                            if let Some(mut db) = session {
-                                assert!(
-                                    db.query("SELECT 1")
-                                        .await
-                                        .unwrap_err()
-                                        .to_string()
-                                        .contains("poisoned")
-                                );
-                                drop(db);
-                            }
-                            assert_eq!(store.active(), 0);
-                            assert_eq!(store.events().iter().filter(|e| e.faulted).count(), 1);
-                            assert_eq!(
-                                (store.inner.stats().puts, store.inner.stats().deletes),
-                                (0, 0)
-                            );
-                            store.disarm();
-                            store.inner.crash(&[]);
-                            assert_eq!(store.inner.keys(), base.keys());
-                            assert_eq!(store.inner.stored_bytes(), base.stored_bytes());
-                            check(store, false).await?;
-                            cases += 1;
-                        }
-                    }
-                }
+        let base = baseline().await?;
+        for sql in [
+            None,
+            Some("SELECT payload FROM t WHERE id=15"),
+            Some("SELECT payload FROM t WHERE id BETWEEN 13 AND 17"),
+            Some("SELECT id FROM t INDEXED BY by_n WHERE n BETWEEN 10 AND 20"),
+            Some("SELECT payload FROM t NOT INDEXED ORDER BY id"),
+            Some("UPDATE t SET n=99 WHERE id=15"),
+        ] {
+            let probe = Arc::new(FaultKv::new(base.fork(), 7));
+            if let Some(sql) = sql {
+                let mut db = Session::open(probe.clone()).await?;
+                let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
+                db.query(sql).await?;
+            } else {
+                let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
+                drop(Session::open(probe.clone()).await?);
             }
-        }
-        println!("read failpoints: {cases} cases (all observed gets; 3 layouts, 6 workloads)");
-        Ok(())
-    })
-}
-
-#[test]
-fn reordered_object_errors_drain_before_recovery() -> Result<()> {
-    futures::executor::block_on(async {
-        let mut cases = 0;
-        for layout in LAYOUTS {
-            let base = baseline(layout).await?;
-            for concurrency in [1, 2, 8] {
-                for seed in [1, 7, 31] {
-                    for effect in [Effect::None, Effect::Visible, Effect::After] {
-                        let store = Arc::new(FaultKv::new(base.fork(), seed));
-                        let mut db = Session::open_with_options(
-                            store.clone(),
-                            StorageOptions {
-                                layout,
-                                write_concurrency: concurrency,
-                                ..StorageOptions::default()
-                            },
-                        )
-                        .await?;
-                        db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
-                            .await?;
-                        let _gate = store.arm(plan(Operation::Put, "v9/block/", 3, effect, false));
-                        assert!(db.save().await.is_err());
-                        assert_eq!(store.active(), 0);
-                        assert!(store.max_active() <= concurrency);
-                        if concurrency > 1 {
-                            assert!(store.max_active() > 1);
+            let count = probe
+                .events()
+                .iter()
+                .filter(|e| e.operation == Operation::Get)
+                .count();
+            assert!(count > 0);
+            for nth in 1..=count {
+                for effect in [Effect::None, Effect::After] {
+                    for cancel in [false, true] {
+                        let store = Arc::new(FaultKv::new(base.fork(), nth as u64));
+                        let mut session = if sql.is_some() {
+                            Some(Session::open(store.clone()).await?)
+                        } else {
+                            None
+                        };
+                        store.inner.reset_stats();
+                        let gate = store.arm(plan(Operation::Get, "", nth, effect, cancel));
+                        let future = async {
+                            if let Some(sql) = sql {
+                                session.as_mut().unwrap().query(sql).await.map(|_| ())
+                            } else {
+                                Session::open(store.clone()).await.map(drop)
+                            }
                         }
-                        assert!(
-                            !store
-                                .events()
-                                .iter()
-                                .any(|e| e.operation == Operation::Put && e.key == "v9/head")
+                        .boxed();
+                        if cancel {
+                            match select(future, gate).await {
+                                Either::Left(_) => panic!("read failpoint not reached"),
+                                Either::Right((signal, pending)) => {
+                                    signal?;
+                                    drop(pending);
+                                }
+                            }
+                        } else {
+                            assert!(future.await.is_err());
+                        }
+                        if let Some(mut db) = session {
+                            assert!(
+                                db.query("SELECT 1")
+                                    .await
+                                    .unwrap_err()
+                                    .to_string()
+                                    .contains("poisoned")
+                            );
+                            drop(db);
+                        }
+                        assert_eq!(store.active(), 0);
+                        assert_eq!(store.events().iter().filter(|e| e.faulted).count(), 1);
+                        assert_eq!(
+                            (store.inner.stats().puts, store.inner.stats().deletes),
+                            (0, 0)
                         );
                         store.disarm();
                         store.inner.crash(&[]);
-                        check(store.clone(), false).await?;
                         assert_eq!(store.inner.keys(), base.keys());
                         assert_eq!(store.inner.stored_bytes(), base.stored_bytes());
+                        check(store, false).await?;
                         cases += 1;
                     }
                 }
             }
         }
-        println!(
-            "reordered object errors: {cases} cases (3 layouts, concurrency 1/2/8, 3 schedules, 3 outcomes)"
-        );
+        println!("read failpoints: {cases} cases (all observed gets; 6 workloads)");
+        Ok(())
+    })
+}
+
+#[test]
+fn serial_object_errors_stop_before_publication() -> Result<()> {
+    futures::executor::block_on(async {
+        let mut cases = 0;
+        let base = baseline().await?;
+        for seed in [1, 7, 31] {
+            for effect in [Effect::None, Effect::Visible, Effect::After] {
+                let store = Arc::new(FaultKv::new(base.fork(), seed));
+                let mut db =
+                    Session::open_with_options(store.clone(), StorageOptions::default()).await?;
+                db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
+                    .await?;
+                let _gate = store.arm(plan(Operation::Put, "v10/block/", 3, effect, false));
+                assert!(db.save().await.is_err());
+                assert_eq!(store.active(), 0);
+                assert_eq!(store.max_active(), 1);
+                assert!(
+                    !store
+                        .events()
+                        .iter()
+                        .any(|e| e.operation == Operation::Put && e.key == "v10/head")
+                );
+                store.disarm();
+                store.inner.crash(&[]);
+                check(store.clone(), false).await?;
+                assert_eq!(store.inner.keys(), base.keys());
+                assert_eq!(store.inner.stored_bytes(), base.stored_bytes());
+                cases += 1;
+            }
+        }
+        println!("serial object errors: {cases} cases (3 schedules, 3 outcomes)");
         Ok(())
     })
 }
@@ -220,84 +188,82 @@ fn recovery_read_failures_do_not_mutate_and_repeated_cleanup_failures_are_retrya
     futures::executor::block_on(async {
         let mut read_cases = 0;
         let mut cleanup_cases = 0;
-        for layout in LAYOUTS {
-            let base = baseline(layout).await?;
-            for committed in [false, true] {
-                let pending = Arc::new(FaultKv::new(base.fork(), 7));
-                let mut db = Session::open(pending.clone()).await?;
-                db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
-                    .await?;
+        let base = baseline().await?;
+        for committed in [false, true] {
+            let pending = Arc::new(FaultKv::new(base.fork(), 7));
+            let mut db = Session::open(pending.clone()).await?;
+            db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
+                .await?;
+            let _gate = pending.arm(plan(
+                Operation::Put,
+                "v10/head",
+                1,
+                if committed {
+                    Effect::After
+                } else {
+                    Effect::None
+                },
+                false,
+            ));
+            assert!(db.save().await.is_err());
+            pending.disarm();
+            pending.inner.crash(&[]);
+            for nth in [1, 2] {
+                for effect in [Effect::None, Effect::After] {
+                    for cancel in [false, true] {
+                        let store = Arc::new(FaultKv::new(pending.inner.fork(), 31));
+                        let gate = store.arm(plan(Operation::Get, "", nth, effect, cancel));
+                        let future = Session::open(store.clone()).boxed();
+                        if cancel {
+                            match select(future, gate).await {
+                                Either::Left(_) => {
+                                    panic!("recovery read failpoint not reached")
+                                }
+                                Either::Right((signal, pending)) => {
+                                    signal?;
+                                    drop(pending);
+                                }
+                            }
+                        } else {
+                            assert!(future.await.is_err());
+                        }
+                        assert_eq!(store.active(), 0);
+                        assert_eq!(
+                            (store.inner.stats().puts, store.inner.stats().deletes),
+                            (0, 0)
+                        );
+                        store.disarm();
+                        check(store, committed).await?;
+                        read_cases += 1;
+                    }
+                }
+            }
+            // Interrupt successive recoveries, including an acknowledged
+            // deletion whose response is lost. Every retry may delete absent keys.
+            for attempt in 0..5 {
                 let _gate = pending.arm(plan(
-                    Operation::Put,
-                    "v9/head",
+                    Operation::Delete,
+                    "v10/block/",
                     1,
-                    if committed {
+                    if attempt % 2 == 0 {
                         Effect::After
                     } else {
-                        Effect::None
+                        Effect::Visible
                     },
                     false,
                 ));
-                assert!(db.save().await.is_err());
+                assert!(Session::open(pending.clone()).await.is_err());
+                assert_eq!(pending.active(), 0);
+                assert!(pending.inner.keys().contains("v10/pending_save"));
                 pending.disarm();
                 pending.inner.crash(&[]);
-                for nth in [1, 2] {
-                    for effect in [Effect::None, Effect::After] {
-                        for cancel in [false, true] {
-                            let store = Arc::new(FaultKv::new(pending.inner.fork(), 31));
-                            let gate = store.arm(plan(Operation::Get, "", nth, effect, cancel));
-                            let future = Session::open(store.clone()).boxed();
-                            if cancel {
-                                match select(future, gate).await {
-                                    Either::Left(_) => {
-                                        panic!("recovery read failpoint not reached")
-                                    }
-                                    Either::Right((signal, pending)) => {
-                                        signal?;
-                                        drop(pending);
-                                    }
-                                }
-                            } else {
-                                assert!(future.await.is_err());
-                            }
-                            assert_eq!(store.active(), 0);
-                            assert_eq!(
-                                (store.inner.stats().puts, store.inner.stats().deletes),
-                                (0, 0)
-                            );
-                            store.disarm();
-                            check(store, committed).await?;
-                            read_cases += 1;
-                        }
-                    }
-                }
-                // Interrupt successive recoveries, including an acknowledged
-                // deletion whose response is lost. Every retry may delete absent keys.
-                for attempt in 0..5 {
-                    let _gate = pending.arm(plan(
-                        Operation::Delete,
-                        "v9/block/",
-                        1,
-                        if attempt % 2 == 0 {
-                            Effect::After
-                        } else {
-                            Effect::Visible
-                        },
-                        false,
-                    ));
-                    assert!(Session::open(pending.clone()).await.is_err());
-                    assert_eq!(pending.active(), 0);
-                    assert!(pending.inner.keys().contains("v9/pending_save"));
-                    pending.disarm();
-                    pending.inner.crash(&[]);
-                    cleanup_cases += 1;
-                }
-                check(pending.clone(), committed).await?;
-                assert!(!pending.inner.keys().contains("v9/pending_save"));
-                if !committed {
-                    assert_eq!(pending.inner.keys(), base.keys());
-                    assert_eq!(pending.inner.stored_bytes(), base.stored_bytes());
-                }
+                cleanup_cases += 1;
+            }
+            check(pending.clone(), committed).await?;
+            assert!(!pending.inner.keys().contains("v10/pending_save"));
+            if !committed {
+                assert_eq!(pending.inner.keys(), base.keys());
+                assert_eq!(pending.inner.stored_bytes(), base.stored_bytes());
             }
         }
         println!(
@@ -311,7 +277,7 @@ fn recovery_read_failures_do_not_mutate_and_repeated_cleanup_failures_are_retrya
 fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let key = "v9/block/0000000000000001";
+        let key = "v10/block/0000000000000001";
         assert!(store.get(key).await?.is_none());
         store.put(key, vec![1; 4096]).await?;
         store.get(key).await?;
@@ -327,7 +293,7 @@ fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<(
         );
         assert_eq!(
             (t.get_key_bytes, t.put_key_bytes, t.delete_key_bytes),
-            (75, 25, 50)
+            (3 * key.len() as u64, key.len() as u64, 2 * key.len() as u64)
         );
         assert_eq!(
             (s.read_keys.len(), s.write_keys.len(), s.delete_keys.len()),

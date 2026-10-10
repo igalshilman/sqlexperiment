@@ -5,10 +5,10 @@ construction live in `src/format.rs`; there is no migration or format discovery.
 
 | Key | Value |
 |---|---|
-| `v9/head` | Current snapshot head |
-| `v9/pending_save` | Pending publication and reclamation record |
-| `v9/node/<16-digit hex ID>` | Immutable map node |
-| `v9/block/<16-digit hex ID>` | Immutable encoded 4096-byte page |
+| `v10/head` | Current snapshot head |
+| `v10/pending_save` | Pending publication and reclamation record |
+| `v10/node/<16-digit hex ID>` | Immutable map node |
+| `v10/block/<16-digit hex ID>` | Immutable encoded 4096-byte page |
 
 Object IDs are incrementing u64 values shared by pages and nodes, not hashes.
 Published IDs are never reused. IDs above the recovered committed counter can be
@@ -42,21 +42,17 @@ maximum encoded node is 2305 bytes.
 
 | Field | Encoding |
 |---|---|
-| Magic | `TKV9` |
+| Magic | `SK10` |
 | Database byte length | u64 LE |
 | Last allocated object ID | u64 LE |
 | Radix height | u8, at most 8 |
-| Layout | u8: 0 Radix, 1 InlineRoot, 2 HeadOverrides |
-| Root section length | u16 LE |
-| Override count | u16 LE, at most 64 |
-| Root section | External root ID u64 LE, or encoded inline node |
-| Overrides | Logical page u64 LE + object ID u64 LE, sorted by page |
+| Root | Encoded radix node occupying the remainder of the value |
 
-The fixed prefix is 26 bytes. External root ID zero means empty; an override ID
-zero is a tombstone. HeadOverrides folds into the base tree on the 65th distinct
-override or database shrink. InlineRoot embeds the top node; other layouts use an
-external root. Layout is selected when a namespace is created and retained by the
-head. Compression policy is per-write and does not change the head.
+The fixed prefix is 21 bytes. The root is always embedded in the head. Height
+zero requires an empty root; nonzero height requires a nonempty root. The same
+node decoder bounds the root to 2305 bytes, so a head is at most 2326 bytes.
+There is no layout selector, root-length field, override list or separate root
+object. Compression policy is per-write and does not change the head.
 
-The pending record uses `TKP9`. Its exact schema and commit/recovery ordering are
+The pending record uses `SP10`. Its exact schema and commit/recovery ordering are
 documented in [PROTOCOL.md](PROTOCOL.md).

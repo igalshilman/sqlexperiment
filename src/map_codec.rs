@@ -1,7 +1,28 @@
-//! Adaptive radix-node encoding. Dense nodes use a bitmap and IDs relative to
-//! their minimum; scattered IDs fall back to fixed-width entries if smaller.
+//! Compact encoding of one 256-way radix node, also used for the embedded root.
+//!
+//! [`Node`] maps a byte-sized edge to an immutable child ID. The tree's height tells
+//! the reader whether children are pages or lower map nodes; that level is not
+//! repeated in every node. This codec describes references, not database payloads.
+//!
+//! | Tag | Encoding after the tag |
+//! |---|---|
+//! | 0 | Strictly sorted `(edge u8, ID u64 LE)` entries |
+//! | 1 | Count u16 LE; edge list (count <= 32) or 32-byte bitmap; minimum ID as unsigned LEB128; then ID-minus-minimum varints in edge order |
+//!
+//! The encoder chooses whichever representation is smaller. This is automatic
+//! encoding selection within one map layout, not a configurable storage algorithm.
+//! The raw bound is 1 + 256 * 9 = 2305 bytes. Only an empty embedded root may use
+//! zero bytes; external nodes must contain at least one edge.
+//!
+//! Decoding checks exact consumption, edge ordering, bitmap population, minimal
+//! varints, overflow and nonzero IDs. External children must have smaller IDs than
+//! their parent; root children are bounded by the head's allocation counter. These
+//! checks reject malformed structure but are not a payload checksum.
 use std::{collections::BTreeMap, io};
 
+/// Sparse edge-to-object references. BTreeMap gives deterministic edge order for
+/// encoding and rewrite grouping without allocating a 256-entry array per node.
+/// This in-memory container is separate from the persisted radix-tree structure.
 pub(crate) type Node = BTreeMap<u8, u64>;
 
 fn invalid() -> io::Error {
@@ -35,6 +56,7 @@ fn read_varint(input: &mut &[u8]) -> io::Result<u64> {
     Err(invalid())
 }
 
+/// Choose the smaller raw or delta encoding; empty input encodes only an empty root.
 pub(crate) fn encode(node: &Node) -> Vec<u8> {
     if node.is_empty() {
         return Vec::new(); // only valid for an empty inline root
@@ -69,6 +91,7 @@ pub(crate) fn encode(node: &Node) -> Vec<u8> {
     }
 }
 
+/// Decode a complete node with an inclusive child-ID bound and explicit empty-root permission.
 pub(crate) fn decode(bytes: &[u8], max_id: u64, allow_empty: bool) -> io::Result<Node> {
     if bytes.is_empty() {
         return if allow_empty {

@@ -30,15 +30,23 @@ impl KvIo {
         self.fault.lock().unwrap().as_ref().unwrap().seen
     }
 
-    pub(super) async fn fault_point(&self, after: bool) -> io::Result<()> {
+    pub(super) fn fault_operation(&self) -> usize {
+        let mut guard = self.fault.lock().unwrap();
+        match guard.as_mut() {
+            Some(fault) => {
+                fault.seen += 1;
+                fault.seen
+            }
+            None => 0,
+        }
+    }
+
+    pub(super) async fn fault_point(&self, operation: usize, after: bool) -> io::Result<()> {
         let action = {
             let mut guard = self.fault.lock().unwrap();
             match guard.as_mut() {
                 Some(fault) => {
-                    if !after {
-                        fault.seen += 1;
-                    }
-                    if fault.seen == fault.at && fault.after == after {
+                    if operation == fault.at && fault.after == after {
                         Some((fault.cancel, fault.reached.take()))
                     } else {
                         None

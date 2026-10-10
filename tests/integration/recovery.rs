@@ -3,7 +3,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either, select},
 };
-use sqlite_kv::{MapLayout, Result, Session, StorageOptions, kv::KvStore, simulation::MemoryKv};
+use sqlite_kv::{Result, Session, StorageOptions, kv::KvStore, simulation::MemoryKv};
 use std::{
     io,
     sync::{
@@ -12,8 +12,8 @@ use std::{
     },
 };
 
-const HEAD: &str = "v9/head";
-const PENDING: &str = "v9/pending_save";
+const HEAD: &str = "v10/head";
+const PENDING: &str = "v10/pending_save";
 struct FaultKv {
     inner: MemoryKv,
     calls: AtomicUsize,
@@ -79,16 +79,8 @@ impl KvStore for FaultKv {
         Box::pin(self.mutate(k, None))
     }
 }
-async fn changed(store: Arc<dyn KvStore>, layout: MapLayout, empty: bool) -> Result<Session> {
-    let mut db = Session::open_with_options(
-        store,
-        StorageOptions {
-            layout,
-            write_concurrency: 8,
-            ..StorageOptions::default()
-        },
-    )
-    .await?;
+async fn changed(store: Arc<dyn KvStore>, empty: bool) -> Result<Session> {
+    let mut db = Session::open_with_options(store, StorageOptions::default()).await?;
     if empty {
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
             .await?;
@@ -124,150 +116,134 @@ async fn check(store: Arc<MemoryKv>, expected: i32) -> Result<()> {
 fn every_recovery_mutation_is_restartable_for_abort_and_commit() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
-        for layout in [
-            MapLayout::Radix,
-            MapLayout::InlineRoot,
-            MapLayout::HeadOverrides,
-        ] {
-            for empty in [false, true] {
-                let base = MemoryKv::default();
-                if !empty {
-                    let mut db = changed(Arc::new(base.clone()), layout, true).await?;
-                    db.execute("UPDATE t SET n=10").await?;
-                    db.save().await?;
+        for empty in [false, true] {
+            let base = MemoryKv::default();
+            if !empty {
+                let mut db = changed(Arc::new(base.clone()), true).await?;
+                db.execute("UPDATE t SET n=10").await?;
+                db.save().await?;
+            }
+            let (probe, _) = FaultKv::new(base.fork(), usize::MAX, 0, false);
+            changed(probe.clone(), empty).await?.save().await?;
+            let commit_at = probe
+                .keys
+                .lock()
+                .unwrap()
+                .iter()
+                .position(|k| k == HEAD)
+                .unwrap()
+                + 1;
+            let final_keys = probe.inner.keys();
+            let final_bytes = probe.inner.stored_bytes();
+            // Abort before publication, visible-but-unconfirmed commit,
+            // and acknowledged commit interrupted during cleanup.
+            for (stage, at, effect) in [
+                ("abort", 2, 1),
+                ("uncertain", commit_at, 1),
+                ("committed", commit_at + 1, 0),
+            ] {
+                let (interrupted, _) = FaultKv::new(base.fork(), at, effect, false);
+                let result = changed(interrupted.clone(), empty).await?.save().await;
+                if stage == "committed" {
+                    assert!(result?.cleanup_error.is_some());
+                } else {
+                    assert!(result.is_err());
                 }
-                let (probe, _) = FaultKv::new(base.fork(), usize::MAX, 0, false);
-                changed(probe.clone(), layout, empty).await?.save().await?;
-                let commit_at = probe
-                    .keys
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .position(|k| k == HEAD)
-                    .unwrap()
-                    + 1;
-                let final_keys = probe.inner.keys();
-                let final_bytes = probe.inner.stored_bytes();
-                // Abort before publication, visible-but-unconfirmed commit,
-                // and acknowledged commit interrupted during cleanup.
-                for (stage, at, effect) in [
-                    ("abort", 2, 1),
-                    ("uncertain", commit_at, 1),
-                    ("committed", commit_at + 1, 0),
-                ] {
-                    let (interrupted, _) = FaultKv::new(base.fork(), at, effect, false);
-                    let result = changed(interrupted.clone(), layout, empty)
-                        .await?
-                        .save()
-                        .await;
-                    if stage == "committed" {
-                        assert!(result?.cleanup_error.is_some());
-                    } else {
-                        assert!(result.is_err());
-                    }
-                    let pending_base = interrupted.inner.clone();
-                    let (recovery_probe, _) =
-                        FaultKv::new(pending_base.fork(), usize::MAX, 0, false);
-                    drop(Session::open(recovery_probe.clone()).await?);
-                    let count = recovery_probe.calls.load(Ordering::SeqCst);
-                    assert!(count >= 2);
-                    let keys = recovery_probe.keys.lock().unwrap().clone();
-                    assert_eq!(keys[0], HEAD);
-                    assert_eq!(keys.last().unwrap(), PENDING);
-                    for fail_at in 1..=count {
-                        for effect in 0..3 {
-                            for cancel in [false, true] {
-                                for persist in [false, true] {
-                                    let (fault, gate) =
-                                        FaultKv::new(pending_base.fork(), fail_at, effect, cancel);
-                                    if cancel {
-                                        match select(Session::open(fault.clone()).boxed(), gate)
-                                            .await
-                                        {
-                                            Either::Left(_) => {
-                                                panic!("missed recovery cancellation")
-                                            }
-                                            Either::Right((signal, future)) => {
-                                                signal?;
-                                                drop(future);
-                                            }
+                let pending_base = interrupted.inner.clone();
+                let (recovery_probe, _) = FaultKv::new(pending_base.fork(), usize::MAX, 0, false);
+                drop(Session::open(recovery_probe.clone()).await?);
+                let count = recovery_probe.calls.load(Ordering::SeqCst);
+                assert!(count >= 2);
+                let keys = recovery_probe.keys.lock().unwrap().clone();
+                assert_eq!(keys[0], HEAD);
+                assert_eq!(keys.last().unwrap(), PENDING);
+                for fail_at in 1..=count {
+                    for effect in 0..3 {
+                        for cancel in [false, true] {
+                            for persist in [false, true] {
+                                let (fault, gate) =
+                                    FaultKv::new(pending_base.fork(), fail_at, effect, cancel);
+                                if cancel {
+                                    match select(Session::open(fault.clone()).boxed(), gate).await {
+                                        Either::Left(_) => {
+                                            panic!("missed recovery cancellation")
                                         }
-                                    } else {
-                                        assert!(Session::open(fault.clone()).await.is_err());
-                                    }
-                                    if fail_at == 1 {
-                                        assert_eq!(
-                                            fault.keys.lock().unwrap().len(),
-                                            1,
-                                            "deleted before head confirmation"
-                                        );
-                                    }
-                                    // Include the original uncertain publication too, not
-                                    // just the recovery operation that was interrupted.
-                                    let extra = if persist {
-                                        let mut e = keys.clone();
-                                        e.push(HEAD.into());
-                                        e
-                                    } else {
-                                        vec![]
-                                    };
-                                    fault.inner.crash(&extra);
-                                    let committed = stage == "committed"
-                                        || (stage == "uncertain"
-                                            && (fail_at > 1 || effect == 2 || persist));
-                                    check(
-                                        Arc::new(fault.inner.clone()),
-                                        if committed {
-                                            20
-                                        } else if empty {
-                                            0
-                                        } else {
-                                            10
-                                        },
-                                    )
-                                    .await?;
-                                    assert_eq!(
-                                        fault.inner.keys(),
-                                        if committed {
-                                            final_keys.clone()
-                                        } else {
-                                            base.keys()
-                                        },
-                                        "leaked objects after {stage} recovery"
-                                    );
-                                    assert_eq!(
-                                        fault.inner.stored_bytes(),
-                                        if committed {
-                                            final_bytes
-                                        } else {
-                                            base.stored_bytes()
+                                        Either::Right((signal, future)) => {
+                                            signal?;
+                                            drop(future);
                                         }
+                                    }
+                                } else {
+                                    assert!(Session::open(fault.clone()).await.is_err());
+                                }
+                                if fail_at == 1 {
+                                    assert_eq!(
+                                        fault.keys.lock().unwrap().len(),
+                                        1,
+                                        "deleted before head confirmation"
                                     );
-                                    fault.inner.crash(&[]);
-                                    check(
-                                        Arc::new(fault.inner.clone()),
-                                        if committed {
-                                            20
-                                        } else if empty {
-                                            0
-                                        } else {
-                                            10
-                                        },
-                                    )
-                                    .await?;
-                                    // A retry can use the same IDs only after this recovery.
-                                    changed(
-                                        Arc::new(fault.inner.clone()),
-                                        layout,
-                                        empty && !committed,
-                                    )
+                                }
+                                // Include the original uncertain publication too, not
+                                // just the recovery operation that was interrupted.
+                                let extra = if persist {
+                                    let mut e = keys.clone();
+                                    e.push(HEAD.into());
+                                    e
+                                } else {
+                                    vec![]
+                                };
+                                fault.inner.crash(&extra);
+                                let committed = stage == "committed"
+                                    || (stage == "uncertain"
+                                        && (fail_at > 1 || effect == 2 || persist));
+                                check(
+                                    Arc::new(fault.inner.clone()),
+                                    if committed {
+                                        20
+                                    } else if empty {
+                                        0
+                                    } else {
+                                        10
+                                    },
+                                )
+                                .await?;
+                                assert_eq!(
+                                    fault.inner.keys(),
+                                    if committed {
+                                        final_keys.clone()
+                                    } else {
+                                        base.keys()
+                                    },
+                                    "leaked objects after {stage} recovery"
+                                );
+                                assert_eq!(
+                                    fault.inner.stored_bytes(),
+                                    if committed {
+                                        final_bytes
+                                    } else {
+                                        base.stored_bytes()
+                                    }
+                                );
+                                fault.inner.crash(&[]);
+                                check(
+                                    Arc::new(fault.inner.clone()),
+                                    if committed {
+                                        20
+                                    } else if empty {
+                                        0
+                                    } else {
+                                        10
+                                    },
+                                )
+                                .await?;
+                                // A retry can use the same IDs only after this recovery.
+                                changed(Arc::new(fault.inner.clone()), empty && !committed)
                                     .await?
                                     .save()
                                     .await?;
-                                    fault.inner.crash(&[]);
-                                    check(Arc::new(fault.inner.clone()), 20).await?;
-                                    cases += 1;
-                                }
+                                fault.inner.crash(&[]);
+                                check(Arc::new(fault.inner.clone()), 20).await?;
+                                cases += 1;
                             }
                         }
                     }
@@ -283,14 +259,11 @@ fn every_recovery_mutation_is_restartable_for_abort_and_commit() -> Result<()> {
 fn uncertain_intent_deletion_can_be_replaced_by_next_save_without_a_crash() -> Result<()> {
     futures::executor::block_on(async {
         let (probe, _) = FaultKv::new(MemoryKv::default(), usize::MAX, 0, false);
-        changed(probe.clone(), MapLayout::Radix, true)
-            .await?
-            .save()
-            .await?;
+        changed(probe.clone(), true).await?.save().await?;
         let last = probe.calls.load(Ordering::SeqCst);
         let (fault, _) = FaultKv::new(MemoryKv::default(), last, 1, false);
         assert!(
-            changed(fault.clone(), MapLayout::Radix, true)
+            changed(fault.clone(), true)
                 .await?
                 .save()
                 .await?

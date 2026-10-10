@@ -1,6 +1,6 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
 use sqlite_kv::{
-    MapLayout, Result, Session, StorageOptions,
+    Result, Session, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
 };
 use std::sync::Arc;
@@ -12,7 +12,7 @@ struct Case {
 }
 struct Sample {
     case: Case,
-    layout: MapLayout,
+
     operation: &'static str,
     cache: &'static str,
     run: usize,
@@ -36,8 +36,7 @@ impl Sample {
                     .count()
             };
             println!(
-                "{:?},{},{},{},{},{},{phase},{kind},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-                self.layout,
+                "{},{},{},{},{},{phase},{kind},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 self.case.rows,
                 self.case.payload,
                 self.operation,
@@ -95,17 +94,10 @@ fn sum(s: &Stats) -> Traffic {
     );
     out
 }
-async fn baseline(case: Case, layout: MapLayout) -> Result<MemoryKv> {
+async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Session::open_with_options(
-        Arc::new(store.clone()),
-        StorageOptions {
-            layout,
-            write_concurrency: 8,
-            ..StorageOptions::default()
-        },
-    )
-    .await?;
+    let mut db =
+        Session::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
@@ -139,7 +131,7 @@ fn read_query(op: &str, case: Case) -> String {
         _ => unreachable!(),
     }
 }
-async fn reads(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) -> Result<()> {
+async fn reads(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     for op in [
         "pk_hit",
         "pk_miss",
@@ -152,7 +144,6 @@ async fn reads(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) -> Re
         let store = Arc::new(base.fork());
         let mut sample = Sample {
             case,
-            layout,
             operation: op,
             cache: "cold",
             run,
@@ -199,7 +190,7 @@ async fn reads(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) -> Re
     Ok(())
 }
 
-async fn writes(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) -> Result<()> {
+async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     for op in [
         "read_only_save",
         "rollback",
@@ -213,7 +204,6 @@ async fn writes(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) -> R
         let store = Arc::new(base.fork());
         let mut sample = Sample {
             case,
-            layout,
             operation: op,
             cache: "cold",
             run,
@@ -333,7 +323,7 @@ async fn writes(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) -> R
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
         );
-        assert!(!store.keys().contains("v9/pending_save"));
+        assert!(!store.keys().contains("v10/pending_save"));
         if matches!(op, "read_only_save" | "rollback") {
             assert_eq!(store.keys(), base.keys());
             assert_eq!(store.stored_bytes(), base.stored_bytes());
@@ -342,33 +332,33 @@ async fn writes(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) -> R
     Ok(())
 }
 
-async fn recovery(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) -> Result<()> {
+async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     for (op, operation, prefix, effect, committed) in [
         (
             "abort_before_head",
             Operation::Put,
-            "v9/head",
+            "v10/head",
             Effect::None,
             false,
         ),
         (
             "head_ack_lost",
             Operation::Put,
-            "v9/head",
+            "v10/head",
             Effect::After,
             true,
         ),
         (
             "cleanup_error",
             Operation::Delete,
-            "v9/block/",
+            "v10/block/",
             Effect::None,
             true,
         ),
         (
             "intent_delete_error",
             Operation::Delete,
-            "v9/pending_save",
+            "v10/pending_save",
             Effect::None,
             true,
         ),
@@ -390,13 +380,7 @@ async fn recovery(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) ->
         });
         let result = db.save().await;
         let hit = store.events().iter().any(|e| e.faulted);
-        // A first HeadOverrides replacement can retain its base page until fold,
-        // so a block-delete failpoint may not be reached. Report only actual faults.
-        if !hit {
-            assert!(op == "cleanup_error");
-            assert!(result?.cleanup_error.is_none());
-            continue;
-        }
+        assert!(hit, "recovery failpoint was not reached");
         if operation == Operation::Delete {
             assert!(result?.cleanup_error.is_some());
         } else {
@@ -407,7 +391,6 @@ async fn recovery(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) ->
         store.inner.reset_stats();
         let sample = Sample {
             case,
-            layout,
             operation: op,
             cache: "cold",
             run,
@@ -434,7 +417,7 @@ async fn recovery(base: &MemoryKv, case: Case, layout: MapLayout, run: usize) ->
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
         );
-        assert!(!store.inner.keys().contains("v9/pending_save"));
+        assert!(!store.inner.keys().contains("v10/pending_save"));
         if !committed {
             assert_eq!(store.inner.keys(), base.keys());
             assert_eq!(store.inner.stored_bytes(), base.stored_bytes());
@@ -453,38 +436,32 @@ fn main() -> Result<()> {
         return Err("repeats must be positive".into());
     }
     println!(
-        "layout,rows,payload_bytes,operation,cache,run,phase,kind,gets,misses,unique_read_keys,puts,unique_write_keys,deletes,unique_delete_keys,read_value_bytes,write_value_bytes,reclaimed_value_bytes,get_key_bytes,put_key_bytes,delete_key_bytes,logical_read_bytes,logical_write_bytes,logical_delete_bytes,db_pages,stored_value_bytes,stored_key_bytes,local_db_write_bytes,local_wal_write_bytes"
+        "rows,payload_bytes,operation,cache,run,phase,kind,gets,misses,unique_read_keys,puts,unique_write_keys,deletes,unique_delete_keys,read_value_bytes,write_value_bytes,reclaimed_value_bytes,get_key_bytes,put_key_bytes,delete_key_bytes,logical_read_bytes,logical_write_bytes,logical_delete_bytes,db_pages,stored_value_bytes,stored_key_bytes,local_db_write_bytes,local_wal_write_bytes"
     );
     futures::executor::block_on(async {
-        for layout in [
-            MapLayout::Radix,
-            MapLayout::InlineRoot,
-            MapLayout::HeadOverrides,
+        for case in [
+            Case {
+                rows: 100,
+                payload: 64,
+            },
+            Case {
+                rows: 300,
+                payload: 1024,
+            },
+            Case {
+                rows: 100,
+                payload: 9000,
+            },
+            Case {
+                rows: 10000,
+                payload: 256,
+            },
         ] {
-            for case in [
-                Case {
-                    rows: 100,
-                    payload: 64,
-                },
-                Case {
-                    rows: 300,
-                    payload: 1024,
-                },
-                Case {
-                    rows: 100,
-                    payload: 9000,
-                },
-                Case {
-                    rows: 10000,
-                    payload: 256,
-                },
-            ] {
-                let base = baseline(case, layout).await?;
-                for run in 0..repeats {
-                    reads(&base, case, layout, run).await?;
-                    writes(&base, case, layout, run).await?;
-                    recovery(&base, case, layout, run).await?;
-                }
+            let base = baseline(case).await?;
+            for run in 0..repeats {
+                reads(&base, case, run).await?;
+                writes(&base, case, run).await?;
+                recovery(&base, case, run).await?;
             }
         }
         Ok(())

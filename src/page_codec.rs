@@ -1,15 +1,31 @@
-//! Experimental v9 immutable-page envelope. Logical pages remain 4096 bytes.
-//! Raw and LZ4 objects may coexist; the write policy is not a read requirement.
+//! Independent immutable-page envelopes; logical pages remain 4096 bytes.
+//!
+//! The value starts with a codec tag (u8) and logical size (u16 LE, always 4096),
+//! followed by raw bytes (tag 0) or one LZ4 block (tag 1). Compression is retained only
+//! when its payload is smaller than the raw page. Incompressible pages therefore use
+//! 4099 bytes including the header, even under the LZ4 policy.
+//!
+//! Raw and compressed pages can coexist. Write policy is per session, while stored
+//! tags determine decoding; no dictionary, neighboring page, frame stream or policy
+//! setting is needed to read an object. Dirty pages and the engine WAL are not encoded.
+//!
+//! Decode allocates exactly one logical page, never a stored-length-sized buffer.
+//! Bounds, tag, logical size and LZ4 expansion are validated before a decoded page
+//! enters the snapshot cache. A valid-looking bit change can remain undetected:
+//! there is no checksum or corruption repair.
 use crate::io::BLOCK_SIZE;
 use std::io;
 
 const HEADER: usize = 3;
+/// Largest valid encoded value: a three-byte envelope plus one raw logical page.
 pub const MAX_ENCODED_PAGE: usize = HEADER + BLOCK_SIZE;
 
 /// Per-session write policy. Both policies can read either encoded form.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PageCompression {
+    /// Store every new page verbatim behind the envelope; useful for CPU/traffic comparisons.
     Raw,
+    /// Try an independent LZ4 block, falling back to raw if compression would not shrink it.
     #[default]
     Lz4,
 }

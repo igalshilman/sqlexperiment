@@ -1,7 +1,7 @@
 //! Paired raw/LZ4 SQL traffic and isolated codec CPU measurements.
 //! All payloads are deterministic synthetic data; no network or replication model.
 use sqlite_kv::{
-    MapLayout, PageCompression, Result, Session, StorageOptions,
+    PageCompression, Result, Session, StorageOptions,
     kv::KvStore,
     page_codec,
     simulation::{MemoryKv, Stats},
@@ -78,17 +78,12 @@ fn hex(bytes: &[u8]) -> String {
     }
     s
 }
-fn options(layout: MapLayout, page_compression: PageCompression) -> StorageOptions {
-    StorageOptions {
-        layout,
-        write_concurrency: 8,
-        page_compression,
-    }
+fn options(page_compression: PageCompression) -> StorageOptions {
+    StorageOptions { page_compression }
 }
-async fn baseline(case: Case, layout: MapLayout, codec: PageCompression) -> Result<MemoryKv> {
+async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db =
-        Session::open_with_options(Arc::new(store.clone()), options(layout, codec)).await?;
+    let mut db = Session::open_with_options(Arc::new(store.clone()), options(codec)).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload BLOB)")
         .await?;
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
@@ -111,7 +106,7 @@ async fn baseline(case: Case, layout: MapLayout, codec: PageCompression) -> Resu
 
 struct Sample {
     case: Case,
-    layout: MapLayout,
+
     codec: PageCompression,
     run: usize,
     operation: &'static str,
@@ -135,8 +130,7 @@ impl Sample {
         let block_gets = block.gets;
         let block_puts = block.puts;
         println!(
-            "{:?},{},{},{:?},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            self.layout,
+            "{},{},{:?},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.case.rows,
             self.case.bytes,
             self.case.payload,
@@ -170,8 +164,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
     let case = sample.case;
     let store = Arc::new(base.fork());
     let start = Instant::now();
-    let mut db =
-        Session::open_with_options(store.clone(), options(sample.layout, sample.codec)).await?;
+    let mut db = Session::open_with_options(store.clone(), options(sample.codec)).await?;
     let middle = case.rows / 2;
     let read_ids: Vec<_> = match sample.operation {
         "cold_pk" => vec![middle],
@@ -235,8 +228,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
         } else {
             PageCompression::Raw
         };
-        let mut db =
-            Session::open_with_options(store.clone(), options(sample.layout, other)).await?;
+        let mut db = Session::open_with_options(store.clone(), options(other)).await?;
         assert_eq!(
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
@@ -259,7 +251,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
 
 async fn pages(store: &MemoryKv) -> Result<Vec<Vec<u8>>> {
     let mut pages = Vec::new();
-    for key in store.keys().iter().filter(|k| k.starts_with("v9/block/")) {
+    for key in store.keys().iter().filter(|k| k.starts_with("v10/block/")) {
         pages.push(page_codec::decode(&store.get(key).await?.unwrap())?);
     }
     Ok(pages)
@@ -339,7 +331,7 @@ fn main() -> Result<()> {
         "rows,payload_bytes,payload,codec,run,sample_pages,iterations,encoded_bytes,compressed_pages,encode_ns,decode_ns"
     )?;
     println!(
-        "layout,rows,payload_bytes,payload,codec,run,operation,db_pages,gets,puts,deletes,read_key_value_bytes,mutation_key_value_bytes,put_value_bytes,block_write_bytes,node_write_bytes,head_write_bytes,intent_write_bytes,block_gets,block_puts,stored_value_bytes,stored_key_bytes,app_read_bytes,app_write_bytes,elapsed_ns,block_read_bytes"
+        "rows,payload_bytes,payload,codec,run,operation,db_pages,gets,puts,deletes,read_key_value_bytes,mutation_key_value_bytes,put_value_bytes,block_write_bytes,node_write_bytes,head_write_bytes,intent_write_bytes,block_gets,block_puts,stored_value_bytes,stored_key_bytes,app_read_bytes,app_write_bytes,elapsed_ns,block_read_bytes"
     );
     futures::executor::block_on(async {
         for (rows, bytes) in [(100, 64), (100, 512), (100, 9000), (10_000, 256)] {
@@ -349,56 +341,47 @@ fn main() -> Result<()> {
                     bytes,
                     payload: kind,
                 };
-                for layout in [
-                    MapLayout::Radix,
-                    MapLayout::InlineRoot,
-                    MapLayout::HeadOverrides,
-                ] {
-                    eprintln!("compression: {layout:?} {rows} rows / {bytes} bytes / {kind:?}");
-                    let raw = baseline(case, layout, PageCompression::Raw).await?;
-                    let compressed = baseline(case, layout, PageCompression::Lz4).await?;
-                    let raw_pages = pages(&raw).await?;
-                    assert_eq!(
-                        raw_pages,
-                        pages(&compressed).await?,
-                        "codec changed logical SQL pages"
-                    );
-                    for run in 0..repeats {
-                        if layout == MapLayout::Radix {
-                            codec_bench(&mut cpu, case, &raw_pages, run)?;
-                        }
-                        let policies = if run.is_multiple_of(2) {
-                            [PageCompression::Raw, PageCompression::Lz4]
+                eprintln!("compression: {rows} rows / {bytes} bytes / {kind:?}");
+                let raw = baseline(case, PageCompression::Raw).await?;
+                let compressed = baseline(case, PageCompression::Lz4).await?;
+                let raw_pages = pages(&raw).await?;
+                assert_eq!(
+                    raw_pages,
+                    pages(&compressed).await?,
+                    "codec changed logical SQL pages"
+                );
+                for run in 0..repeats {
+                    codec_bench(&mut cpu, case, &raw_pages, run)?;
+                    let policies = if run.is_multiple_of(2) {
+                        [PageCompression::Raw, PageCompression::Lz4]
+                    } else {
+                        [PageCompression::Lz4, PageCompression::Raw]
+                    };
+                    for codec in policies {
+                        let base = if codec == PageCompression::Raw {
+                            &raw
                         } else {
-                            [PageCompression::Lz4, PageCompression::Raw]
+                            &compressed
                         };
-                        for codec in policies {
-                            let base = if codec == PageCompression::Raw {
-                                &raw
-                            } else {
-                                &compressed
-                            };
-                            for operation in [
-                                "cold_pk",
-                                "range_10",
-                                "full_scan",
-                                "replace_payload",
-                                "ten_adjacent",
-                                "ten_scattered",
-                                "read_only_save",
-                            ] {
-                                workload(
-                                    base,
-                                    Sample {
-                                        case,
-                                        layout,
-                                        codec,
-                                        run,
-                                        operation,
-                                    },
-                                )
-                                .await?;
-                            }
+                        for operation in [
+                            "cold_pk",
+                            "range_10",
+                            "full_scan",
+                            "replace_payload",
+                            "ten_adjacent",
+                            "ten_scattered",
+                            "read_only_save",
+                        ] {
+                            workload(
+                                base,
+                                Sample {
+                                    case,
+                                    codec,
+                                    run,
+                                    operation,
+                                },
+                            )
+                            .await?;
                         }
                     }
                 }

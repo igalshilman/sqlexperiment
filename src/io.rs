@@ -1,10 +1,36 @@
-//! Byte-addressed SQLite engine files over on-demand 4 KiB KV blocks.
+//! Bridge between engine byte-addressed files and immutable KV snapshots.
 //!
-//! All writes are private until atomic snapshot publication. sync() is an
-//! overlay barrier; Session::save is the backing-store durability boundary.
+//! The engine sees two virtual files: [`DB_PATH`] and [`WAL_PATH`]. The database
+//! starts from a recovered snapshot; its dirty pages and the entire WAL live in
+//! `State`. Full-page writes avoid a backing read; partial writes merge with the
+//! visible page. Truncation records explicit holes and clears a partial tail so
+//! regrowing a file never exposes bytes from the old snapshot.
+//!
+//! File methods enqueue work without calling KV. [`KvIo::drive`] polls backend
+//! futures on the host executor. Adjacent reads overlap in bounded batches; writes,
+//! truncation and sync serialize the queue into ordered phases. Within a read batch,
+//! completion order may differ from submission order. Map traversal within one read
+//! still follows dependent pointers; a single multi-page file read fetches its pages
+//! sequentially. No speculative prefetch or global cross-session cache is provided.
+//!
+//! Read buffers are staged privately until the read succeeds. `Completing` retires
+//! in-flight accounting and aborts incomplete engine callbacks even if a dequeued
+//! future is never polled. Ordinary read errors drain their batch; cancellation
+//! aborts the dequeued batch. A [`crate::Session`] treats either as fatal and drops
+//! its private view.
+//!
+//! In session mode the host queues successful completions, and the engine worker
+//! runs their callbacks from `IO::step`; callbacks may touch engine-thread state.
+//! The condition variable bridges the engine's blocking waits to host async I/O.
+//! Standalone low-level drivers complete directly. `pending_count` includes queued,
+//! executing and worker-ready completions, so publication cannot race them.
+//!
+//! File sync is only a private-overlay ordering barrier. Durable KV mutations happen
+//! later in snapshot publication, after a complete checkpoint and worker shutdown.
+//! The engine WAL never becomes a durable KV object.
 use crate::kv::KvStore;
 use crate::snapshot::{Snapshot, StorageOptions};
-use futures::channel::mpsc;
+use futures::{StreamExt, channel::mpsc, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
@@ -19,9 +45,14 @@ use turso_core::{
     WallClockInstant,
 };
 
+/// Logical database-page and overlay-block size; encoded KV values may be smaller.
 pub const BLOCK_SIZE: usize = 4096;
+/// Engine-visible virtual database name, not a filesystem or KV key.
 pub const DB_PATH: &str = "object.db";
+/// Engine-visible private WAL name; this file is never fetched from KV.
 pub const WAL_PATH: &str = "object.db-wal";
+/// Internal read-batch cap; never used to permit concurrent backend mutations.
+const MAX_READS_IN_FLIGHT: usize = 16;
 const FILES: [&str; 2] = [DB_PATH, WAL_PATH];
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -30,6 +61,10 @@ fn invalid(message: impl Into<String>) -> io::Error {
 fn engine_error(message: impl Into<String>) -> LimboError {
     LimboError::InternalError(message.into())
 }
+/// Mutable session overlay indexed by `(file number, logical block number)`.
+/// File 0 is the database and file 1 is its private WAL. A missing entry falls
+/// through to the snapshot for file 0; `Some(None)` is an explicit zero-filled
+/// hole that masks old data after truncation. Sizes track the private view.
 #[derive(Default)]
 struct State {
     sizes: [u64; 2],
@@ -38,6 +73,7 @@ struct State {
     written: [u64; 2],
 }
 
+/// One queued engine file operation; mutations are barriers between read batches.
 enum Operation {
     Read {
         file: usize,
@@ -54,11 +90,13 @@ enum Operation {
     },
     Sync,
 }
+/// Owned operation and engine completion, retained until execution or shutdown.
 struct Pending {
     op: Operation,
     completion: Completion,
 }
 
+/// Cross-thread wakeup generation, lifecycle flag and all unfinished completions.
 #[derive(Default)]
 struct Progress {
     generation: u64,
@@ -66,6 +104,8 @@ struct Progress {
     stopped: bool,
 }
 
+/// Cancellation guard for a dequeued request, created before its future is polled.
+/// Ownership transfers to the ready queue only when worker-side delivery is required.
 struct Completing<'a> {
     io: &'a KvIo,
     completion: Completion,
@@ -86,6 +126,10 @@ impl Drop for Completing<'_> {
     }
 }
 
+/// Shared virtual-file adapter; prefer [`crate::Session`] for SQL and durability.
+///
+/// Mount performs recovery and requires exclusive namespace ownership. The queue
+/// lock orders engine mutations; it does not implement a distributed ownership lock.
 pub struct KvIo {
     snapshot: Snapshot,
     state: Mutex<State>,
@@ -107,6 +151,7 @@ impl KvIo {
         Self::mount_with_options(store, StorageOptions::default()).await
     }
 
+    /// Mount with an encoding policy for new pages; existing page tags control reads.
     pub async fn mount_with_options(
         store: Arc<dyn KvStore>,
         options: StorageOptions,
@@ -139,6 +184,7 @@ impl KvIo {
         self.worker_completions.store(true, Ordering::SeqCst);
     }
 
+    /// Snapshot local database/WAL traffic counters; these are not durable KV bytes.
     #[cfg(feature = "simulation")]
     pub fn stats(&self) -> crate::simulation::IoStats {
         let state = self.state.lock().unwrap();
@@ -200,6 +246,7 @@ impl KvIo {
         }
     }
 
+    /// Count unfinished queued, executing and worker-ready engine requests.
     pub fn pending_count(&self) -> usize {
         self.progress.lock().unwrap().inflight
     }
@@ -304,29 +351,76 @@ impl KvIo {
         Ok(())
     }
 
-    /// Host-owned async I/O pump. No backend access happens in File::pread itself.
+    /// Drain queued engine I/O on the caller's async executor.
+    ///
+    /// Adjacent reads overlap in batches of at most 16 requests. Writes,
+    /// truncation and sync are barriers: all preceding reads finish before a
+    /// mutation, and subsequent reads observe its result. Concurrent drivers
+    /// share one queue-order lock. These are private file mutations, not KV puts.
+    ///
+    /// A read error drains the already submitted batch before returning. Cancelling
+    /// the pump aborts every dequeued completion; the session must be discarded.
     pub async fn drive(&self) -> io::Result<usize> {
-        // Keep submission order across awaits even if low-level callers drive
-        // the adapter concurrently. Session normally has only one caller.
         let _driver = self.driver.lock().await;
         let mut completed = 0;
         loop {
             let pending = self.queue.lock().unwrap().pop_front();
-            let Some(Pending { op, completion }) = pending else {
+            let Some(pending) = pending else {
                 break;
             };
-            let mut finishing = Completing {
-                io: self,
-                completion: completion.clone(),
-                transferred: false,
-            };
+            if matches!(pending.op, Operation::Read { .. }) {
+                let mut reads = FuturesUnordered::new();
+                reads.push(self.perform(pending));
+                {
+                    let mut queue = self.queue.lock().unwrap();
+                    while reads.len() < MAX_READS_IN_FLIGHT
+                        && queue
+                            .front()
+                            .is_some_and(|p| matches!(p.op, Operation::Read { .. }))
+                    {
+                        reads.push(self.perform(queue.pop_front().unwrap()));
+                    }
+                }
+                let mut error = None;
+                while let Some(result) = reads.next().await {
+                    match result {
+                        Ok(n) => completed += n,
+                        Err(e) => {
+                            error.get_or_insert(e);
+                        }
+                    }
+                }
+                if let Some(error) = error {
+                    return Err(error);
+                }
+            } else {
+                completed += self.perform(pending).await?;
+            }
+        }
+        Ok(completed)
+    }
+
+    // Construct the completion guard before constructing the future: even a
+    // dequeued request whose future was never polled must retire on cancellation.
+    fn perform(&self, pending: Pending) -> impl Future<Output = io::Result<usize>> + '_ {
+        let Pending { op, completion } = pending;
+        let finishing = Completing {
+            io: self,
+            completion: completion.clone(),
+            transferred: false,
+        };
+        async move {
+            // Capture the whole guard, not just its Copy `transferred` field.
+            let mut finishing = finishing;
             if completion.finished() {
-                continue;
+                return Ok(0);
             }
             #[cfg(feature = "simulation")]
             crate::simulation::yield_once().await;
             #[cfg(all(test, feature = "simulation"))]
-            self.fault_point(false).await?;
+            let fault_operation = self.fault_operation();
+            #[cfg(all(test, feature = "simulation"))]
+            self.fault_point(fault_operation, false).await?;
             let result = match op {
                 Operation::Read { file, pos } => {
                     // Keep the engine's buffer untouched across await and cancellation.
@@ -348,7 +442,7 @@ impl KvIo {
                 Operation::Sync => Ok(0),
             };
             #[cfg(all(test, feature = "simulation"))]
-            self.fault_point(true).await?;
+            self.fault_point(fault_operation, true).await?;
             match result {
                 Ok(n) => {
                     let n = i32::try_from(n).map_err(|_| invalid("I/O too large"))?;
@@ -372,9 +466,8 @@ impl KvIo {
                     return Err(e);
                 }
             }
-            completed += 1;
+            Ok(1)
         }
-        Ok(completed)
     }
 
     /// Publish after the engine has stopped and no SQL transaction remains.
@@ -466,6 +559,8 @@ impl IO for KvIo {
 }
 
 /// Thin Arc holder, avoiding self-referential backend/file ownership.
+/// Engine `IO` facade that opens virtual handles sharing the same adapter.
+/// The wrapped adapter owns queue ordering, private bytes and snapshot access.
 pub struct MountedIo(pub Arc<KvIo>);
 impl Clock for MountedIo {
     fn current_time_monotonic(&self) -> MonotonicInstant {
@@ -497,6 +592,7 @@ impl IO for MountedIo {
     }
 }
 
+/// Virtual database/WAL handle retaining the shared adapter and file selector.
 struct KvFile {
     io: Arc<KvIo>,
     file: usize,
@@ -578,3 +674,7 @@ mod completion_tests;
 #[cfg(all(test, feature = "simulation"))]
 #[path = "../tests/unit/io_faults.rs"]
 mod test_faults;
+
+#[cfg(all(test, feature = "simulation"))]
+#[path = "../tests/unit/parallel_reads.rs"]
+mod parallel_reads;

@@ -1,4 +1,36 @@
-//! Immutable pages with durable head publication and selectable map layouts.
+//! Immutable pages and a persistent radix map, published through one durable head.
+//!
+//! Logical page numbers are u64 addresses. A tree level consumes one byte of the
+//! address, most significant relevant byte first; leaves map to encoded page IDs,
+//! while internal edges point to immutable node IDs. Height grows only as needed
+//! and collapses through a sole zero edge when high pages disappear. An absent edge
+//! represents a zero-filled hole, not an object to fetch.
+//!
+//! Radix addressing fits fixed-width integer page numbers: it needs no separator
+//! keys, node splits or balancing, and has at most eight levels. A height-one map
+//! covers 256 pages with no external nodes. A flat page-ID array would rewrite
+//! metadata proportional to the database size; path copying limits updates to
+//! touched branches. SQLite's own table/index B-trees remain inside the pages;
+//! this outer map only translates page numbers to immutable object IDs.
+//!
+//! The root is always embedded in [`Head`]. Only lower nodes occupy separate KV
+//! objects. [`rewrite`](Snapshot::rewrite) copies touched paths and records replaced
+//! edges; [`finalize_plan`](Snapshot::finalize_plan) walks newly staged objects only,
+//! prunes temporary wrappers and protects reused old references from retirement.
+//! Old subtrees are shared without a whole-tree scan.
+//!
+//! [`Build`] allocates from one monotonic counter shared by pages and nodes. The
+//! plan's metadata is validated against the pending-record limit before mutation;
+//! staged payloads have no separate byte budget.
+//! Save then writes intent, new objects, head, retired-object deletes and intent
+//! removal, awaiting each mutation separately. The head put is the commit point;
+//! cleanup failure does not undo it. See [`crate::pending`] for unknown outcomes.
+//!
+//! A snapshot has a decoded-node cache and one decoded-page cache, both scoped to
+//! that snapshot. Locks are released before backend awaits. Immutable bytes make
+//! concurrent reads safe; concurrent cache misses may perform duplicate gets. Old
+//! snapshot readers must stop before save retires replaced objects: structural
+//! sharing here is an update optimization, not historical-reader support.
 use crate::{
     format::{HEAD, HEAD_MAGIC, PENDING, key},
     kv::KvStore,
@@ -6,41 +38,30 @@ use crate::{
     page_codec::{self, PageCompression},
     pending::{Objects, PendingSave, SaveReport, recover},
 };
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
+use futures::future::BoxFuture;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     sync::{Arc, Mutex},
 };
 
-const OVERRIDE_LIMIT: usize = 64;
+/// Immutable object identity; shared allocation space for map nodes and pages.
 type Id = u64;
+/// Logical page replacements; `None` removes a page edge (a sparse hole).
 type Changes = BTreeMap<u64, Option<Vec<u8>>>;
+/// The same changes after page bytes have received immutable object IDs.
 type Refs = BTreeMap<u64, Option<Id>>;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(u8)]
-pub enum MapLayout {
-    #[default]
-    Radix = 0,
-    InlineRoot = 1,
-    HeadOverrides = 2,
-}
-
+/// Encoding policy for newly written pages; layout and mutation ordering are fixed.
+/// Both raw and compressed pages remain readable under either policy.
 #[derive(Clone, Copy, Debug)]
 pub struct StorageOptions {
-    /// Used for a new store. An existing head selects its own persisted layout.
-    pub layout: MapLayout,
-    /// Bounds outstanding object puts/deletes, including recovery. Head publication remains ordered.
-    pub write_concurrency: usize,
     /// Encoding for newly written pages. Existing pages carry their own codec tag.
     pub page_compression: PageCompression,
 }
 impl Default for StorageOptions {
     fn default() -> Self {
         Self {
-            layout: MapLayout::Radix,
-            write_concurrency: 16,
             page_compression: PageCompression::Lz4,
         }
     }
@@ -58,8 +79,11 @@ fn digit(index: u64, level: u8) -> u8 {
 /// Entire write plan is constructed before any mutations. IDs above the old
 /// head's counter can be reused after recovery has removed an aborted attempt.
 struct Build {
+    /// High-water mark, including any temporary objects later pruned from the plan.
     last_id: Id,
+    /// New immutable objects keyed by ID; ascending order writes children before parents.
     objects: BTreeMap<Id, (&'static str, Vec<u8>)>,
+    /// Replaced committed objects, filtered against references retained by the new root.
     retired: Objects,
 }
 impl Build {
@@ -73,81 +97,61 @@ impl Build {
     }
 }
 
+/// Complete snapshot selection stored at the head key.
+///
+/// Encoding: magic `SK10` (4 bytes), database size (u64 LE), allocation counter
+/// (u64 LE), height (u8), then the encoded root. The prefix is 21 bytes; the root
+/// is at most 2305 bytes. Height zero iff the root is empty. There is no separate
+/// root ID, layout tag, root length or override list. The node codec validates
+/// the entire remainder, including child IDs bounded by the allocation counter.
 #[derive(Default)]
 struct Head {
-    root: Option<Id>,
-    inline: Node,
-    overrides: Refs,
+    /// First radix level; edge targets are pages at height one, nodes above it.
+    root: Node,
+    /// Number of byte-sized address digits, or zero for an empty page map.
     height: u8,
+    /// Committed allocation high-water mark shared by node and page objects.
     last_id: Id,
-    layout: MapLayout,
+    /// Logical database length in bytes; sparse holes still contribute to this size.
     size: u64,
 }
 impl Head {
+    fn encode(&self) -> Vec<u8> {
+        let mut out = HEAD_MAGIC.to_vec();
+        out.extend_from_slice(&self.size.to_le_bytes());
+        out.extend_from_slice(&self.last_id.to_le_bytes());
+        out.push(self.height);
+        out.extend(encode_node(&self.root));
+        out
+    }
     fn decode(bytes: &[u8]) -> io::Result<Self> {
-        let mut result = Self::default();
-        if bytes.len() < 26 || &bytes[..4] != HEAD_MAGIC {
+        if bytes.len() < 21 || &bytes[..4] != HEAD_MAGIC {
             return Err(invalid("invalid snapshot head"));
         }
-        result.size = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
-        result.last_id = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
-        result.height = bytes[20];
-        result.layout = match bytes[21] {
-            0 => MapLayout::Radix,
-            1 => MapLayout::InlineRoot,
-            2 => MapLayout::HeadOverrides,
-            _ => return Err(invalid("invalid map layout")),
-        };
-        let root_len = u16::from_le_bytes(bytes[22..24].try_into().unwrap()) as usize;
-        let count = u16::from_le_bytes(bytes[24..26].try_into().unwrap()) as usize;
-        if result.height > 8 || count > OVERRIDE_LIMIT || bytes.len() != 26 + root_len + count * 16
-        {
-            return Err(invalid("invalid snapshot head lengths"));
+        let size = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+        let last_id = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
+        let height = bytes[20];
+        let root = decode_node(&bytes[21..], last_id, true)?;
+        if height > 8 || root.is_empty() != (height == 0) {
+            return Err(invalid("invalid root height"));
         }
-        let root_bytes = &bytes[26..26 + root_len];
-        if result.layout == MapLayout::InlineRoot {
-            result.inline = decode_node(root_bytes, result.last_id, true)?;
-            if result.inline.is_empty() != (result.height == 0) {
-                return Err(invalid("invalid inline root height"));
-            }
-        } else {
-            if root_len != 8 {
-                return Err(invalid("invalid root ID length"));
-            }
-            let id = u64::from_le_bytes(root_bytes.try_into().unwrap());
-            if id > result.last_id || (id == 0) != (result.height == 0) {
-                return Err(invalid("invalid root ID/height"));
-            }
-            result.root = (id != 0).then_some(id);
-        }
-        if count != 0 && result.layout != MapLayout::HeadOverrides {
-            return Err(invalid("unexpected overrides"));
-        }
-        let mut previous = None;
-        let map_end = 26 + root_len + count * 16;
-        for entry in bytes[26 + root_len..map_end].as_chunks::<16>().0 {
-            let index = u64::from_le_bytes(entry[..8].try_into().unwrap());
-            let id = u64::from_le_bytes(entry[8..].try_into().unwrap());
-            if id > result.last_id || previous.is_some_and(|i| i >= index) {
-                return Err(invalid("invalid override"));
-            }
-            result.overrides.insert(index, (id != 0).then_some(id));
-            previous = Some(index);
-        }
-        Ok(result)
+        Ok(Self {
+            root,
+            height,
+            last_id,
+            size,
+        })
     }
 }
 
+/// A recovered head plus immutable-object access and snapshot-scoped read caches.
+/// `original_head` preserves the exact bytes needed for recovery's old/new comparison.
 pub(crate) struct Snapshot {
     store: Arc<dyn KvStore>,
     original_head: Option<Vec<u8>>,
-    root: Option<Id>,
-    inline: Node,
-    overrides: Refs,
+    root: Node,
     height: u8,
     last_id: Id,
-    layout: MapLayout,
-    concurrency: usize,
     page_compression: PageCompression,
     pub size: u64,
     nodes: Mutex<BTreeMap<Id, Node>>,
@@ -156,29 +160,23 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
+    /// Resolve a pending save before exposing any page from the selected head.
     pub async fn open_with_options(
         store: Arc<dyn KvStore>,
         options: StorageOptions,
     ) -> io::Result<Self> {
-        if options.write_concurrency == 0 {
-            return Err(invalid("zero write concurrency"));
-        }
         let mut result = Self {
             store,
             original_head: None,
-            root: None,
-            inline: Node::new(),
-            overrides: Refs::new(),
+            root: Node::new(),
             height: 0,
             last_id: 0,
-            layout: options.layout,
-            concurrency: options.write_concurrency,
             page_compression: options.page_compression,
             size: 0,
             nodes: Mutex::default(),
             block_cache: Mutex::default(),
         };
-        let bytes = recover(result.store.clone(), result.concurrency).await?;
+        let bytes = recover(result.store.clone()).await?;
         if let Some(bytes) = bytes {
             result.load_head(&bytes)?;
             result.original_head = Some(bytes);
@@ -186,47 +184,17 @@ impl Snapshot {
 
         Ok(result)
     }
+    /// Check structure and references and return the allocation high-water mark.
     pub(crate) fn validate_head(bytes: &[u8]) -> io::Result<u64> {
         Ok(Head::decode(bytes)?.last_id)
     }
     fn load_head(&mut self, bytes: &[u8]) -> io::Result<()> {
         let head = Head::decode(bytes)?;
         self.root = head.root;
-        self.inline = head.inline;
-        self.overrides = head.overrides;
         self.height = head.height;
         self.last_id = head.last_id;
-        self.layout = head.layout;
         self.size = head.size;
         Ok(())
-    }
-    fn head(
-        &self,
-        root: Option<Id>,
-        inline: &Node,
-        overrides: &Refs,
-        height: u8,
-        last_id: Id,
-        size: u64,
-    ) -> Vec<u8> {
-        let root_bytes = if self.layout == MapLayout::InlineRoot {
-            encode_node(inline)
-        } else {
-            root.unwrap_or(0).to_le_bytes().to_vec()
-        };
-        let mut out = HEAD_MAGIC.to_vec();
-        out.extend_from_slice(&size.to_le_bytes());
-        out.extend_from_slice(&last_id.to_le_bytes());
-        out.push(height);
-        out.push(self.layout as u8);
-        out.extend_from_slice(&(root_bytes.len() as u16).to_le_bytes());
-        out.extend_from_slice(&(overrides.len() as u16).to_le_bytes());
-        out.extend(root_bytes);
-        for (index, id) in overrides {
-            out.extend_from_slice(&index.to_le_bytes());
-            out.extend_from_slice(&id.unwrap_or(0).to_le_bytes());
-        }
-        out
     }
     async fn fetch(&self, kind: &str, id: Id) -> io::Result<Vec<u8>> {
         self.store
@@ -256,21 +224,11 @@ impl Snapshot {
         }
         self.node(id).await
     }
-    async fn root_node(&self) -> io::Result<Node> {
-        if self.layout == MapLayout::InlineRoot {
-            Ok(self.inline.clone())
-        } else {
-            self.node(self.root).await
-        }
-    }
     async fn block_id(&self, index: u64) -> io::Result<Option<Id>> {
-        if let Some(id) = self.overrides.get(&index) {
-            return Ok(*id);
-        }
         if height_for(index) > self.height {
             return Ok(None);
         }
-        let mut node = self.root_node().await?;
+        let mut node = self.root.clone();
         for level in (1..=self.height).rev() {
             let id = node.get(&digit(index, level)).copied();
             if level == 1 {
@@ -283,6 +241,7 @@ impl Snapshot {
         }
         Ok(None)
     }
+    /// Resolve a logical page and decode its immutable payload; `None` means a hole.
     pub async fn block(&self, index: u64) -> io::Result<Option<Vec<u8>>> {
         let Some(id) = self.block_id(index).await? else {
             return Ok(None);
@@ -296,6 +255,8 @@ impl Snapshot {
         *self.block_cache.lock().unwrap() = Some((id, bytes.clone()));
         Ok(Some(bytes))
     }
+    /// Group sorted changes by this level's digit, recursively copy only touched
+    /// branches and collect replaced child IDs. Unchanged edges keep their IDs.
     fn rewrite<'a>(
         &'a self,
         build: &'a mut Build,
@@ -347,13 +308,10 @@ impl Snapshot {
             Ok(node)
         })
     }
-    async fn rewrite_map(
-        &self,
-        build: &mut Build,
-        changes: Refs,
-    ) -> io::Result<(Option<Id>, Node, u8)> {
-        let original = self.root_node().await?;
-        let mut node = original.clone();
+    /// Grow with zero-edge wrappers, apply changes, then collapse redundant levels.
+    /// Temporary wrappers are pruned by `finalize_plan` before any object is written.
+    async fn rewrite_map(&self, build: &mut Build, changes: Refs) -> io::Result<(Node, u8)> {
+        let mut node = self.root.clone();
         let mut height = self.height;
         let needed = changes
             .keys()
@@ -361,15 +319,10 @@ impl Snapshot {
             .max()
             .unwrap_or(0)
             .max(height);
-        let mut root_id = self.root;
         while height < needed {
             if !node.is_empty() {
-                let child = match root_id {
-                    Some(id) => id,
-                    None => build.put("node", encode_node(&node))?,
-                };
+                let child = build.put("node", encode_node(&node))?;
                 node = Node::from([(0, child)]);
-                root_id = None;
             }
             height += 1;
         }
@@ -391,45 +344,23 @@ impl Snapshot {
         if node.is_empty() {
             height = 0;
         }
-        if self.layout == MapLayout::InlineRoot {
-            return Ok((None, node, height));
-        }
-        let root = if node.is_empty() {
-            None
-        } else if height == self.height && node == original {
-            self.root
-        } else {
-            Some(build.put("node", encode_node(&node))?)
-        };
-        Ok((root, Node::new(), height))
+        Ok((node, height))
     }
+
     /// Walk only newly staged nodes. Old subtrees are reused without traversal.
-    /// Rewrites retire replaced edges; growth/collapse can still reuse an old
-    /// root, so filter those candidates against references in the final plan.
+    /// Rewrites retire replaced edges; collapse can promote old children, so
+    /// filter those candidates against references in the final plan.
     /// Also discard temporary wrappers that became unreachable during planning.
-    fn finalize_plan(
-        &self,
-        build: &mut Build,
-        root: Option<Id>,
-        inline: &Node,
-        overrides: &Refs,
-        height: u8,
-    ) -> io::Result<()> {
+    fn finalize_plan(&self, build: &mut Build, root: &Node, height: u8) -> io::Result<()> {
         let mut live_new = BTreeSet::new();
         let mut kept_old = BTreeSet::new();
         let mut pending = Vec::new();
-        if let Some(id) = root {
-            pending.push(("node", id, height));
-        }
-        for id in inline.values() {
+        for id in root.values() {
             pending.push((
                 if height == 1 { "block" } else { "node" },
                 *id,
                 height.saturating_sub(1),
             ));
-        }
-        for id in overrides.values().flatten() {
-            pending.push(("block", *id, 0));
         }
         while let Some((kind, id, level)) = pending.pop() {
             if id <= self.last_id {
@@ -470,11 +401,8 @@ impl Snapshot {
             objects: BTreeMap::new(),
             retired: Objects::new(),
         };
-        let mut changes = self.overrides.clone();
+        let mut changes = Refs::new();
         for (index, value) in dirty {
-            if let Some(Some(old)) = self.overrides.get(&index) {
-                build.retired.insert(("block", *old));
-            }
             let id = match value {
                 Some(bytes) => {
                     Some(build.put("block", page_codec::encode(&bytes, self.page_compression)?)?)
@@ -483,23 +411,20 @@ impl Snapshot {
             };
             changes.insert(index, id);
         }
-        let (root, inline, height, overrides) = if self.layout == MapLayout::HeadOverrides
-            && changes.len() <= OVERRIDE_LIMIT
-            && size >= self.size
-        {
-            (self.root, Node::new(), self.height, changes)
-        } else if changes.is_empty() {
-            (self.root, self.inline.clone(), self.height, Refs::new())
+        let (root, height) = if changes.is_empty() {
+            (self.root.clone(), self.height)
         } else {
-            let (root, inline, height) = self.rewrite_map(&mut build, changes).await?;
-            (root, inline, height, Refs::new())
+            self.rewrite_map(&mut build, changes).await?
         };
-        if let Some(old) = self.root {
-            build.retired.insert(("node", old));
-        }
-        self.finalize_plan(&mut build, root, &inline, &overrides, height)?;
+        self.finalize_plan(&mut build, &root, height)?;
         let retired_objects = build.retired.len();
-        let head = self.head(root, &inline, &overrides, height, build.last_id, size);
+        let head = Head {
+            root,
+            height,
+            last_id: build.last_id,
+            size,
+        }
+        .encode();
         if self.original_head.as_ref() == Some(&head)
             && build.objects.is_empty()
             && build.retired.is_empty()
@@ -518,32 +443,15 @@ impl Snapshot {
         };
         let intent = pending.encode()?; // size/shape validation before any mutation
         self.store.put(PENDING, intent).await?;
-        // Parent references are already known; all object puts may overlap.
-        // Drain all futures on ordinary errors. Cancellation still requires host fencing/drain.
-        let jobs = build.objects.into_iter().map(|(id, (kind, bytes))| {
-            let store = self.store.clone();
-            let object_key = key(kind, &id);
-            async move { store.put(&object_key, bytes).await }.boxed()
-        });
-        let mut writes = stream::iter(jobs)
-            .boxed()
-            .buffer_unordered(self.concurrency);
-        let mut error = None;
-        while let Some(result) = writes.next().await {
-            if let Err(e) = result {
-                error.get_or_insert(e);
-            }
-        }
-        if let Some(error) = error {
-            return Err(error);
+        // The backend permits one mutation at a time. On failure leave the
+        // complete intent in place; recovery also deletes never-written IDs.
+        for (id, (kind, bytes)) in build.objects {
+            self.store.put(&key(kind, &id), bytes).await?;
         }
         // Every referenced new object is now durably acknowledged. This atomic,
         // durable head replacement is the only publication point.
         self.store.put(HEAD, head).await?;
-        let cleanup_error = pending
-            .finish(self.store.clone(), true, self.concurrency)
-            .await
-            .err();
+        let cleanup_error = pending.finish(self.store.clone(), true).await.err();
         Ok(SaveReport {
             retired_objects,
             cleanup_error,
@@ -562,3 +470,7 @@ mod properties;
 #[cfg(all(test, feature = "simulation"))]
 #[path = "../tests/unit/snapshot_support.rs"]
 mod test_support;
+
+#[cfg(test)]
+#[path = "../tests/unit/head.rs"]
+mod head_tests;

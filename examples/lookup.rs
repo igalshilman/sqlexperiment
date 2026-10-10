@@ -1,24 +1,10 @@
-use sqlite_kv::{MapLayout, Result, Session, StorageOptions, simulation::MemoryKv};
+use sqlite_kv::{Result, Session, simulation::MemoryKv};
 use std::sync::Arc;
 
 fn main() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let layout = match std::env::args().nth(1).as_deref() {
-            None | Some("radix") => MapLayout::Radix,
-            Some("inline") => MapLayout::InlineRoot,
-            Some("overrides") => MapLayout::HeadOverrides,
-            Some(_) => return Err("expected radix, inline, or overrides".into()),
-        };
-        let mut db = Session::open_with_options(
-            store.clone(),
-            StorageOptions {
-                layout,
-                ..StorageOptions::default()
-            },
-        )
-        .await?;
-        println!("Map layout: {layout:?}");
+        let mut db = Session::open(store.clone()).await?;
         db.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY, email TEXT NOT NULL, payload TEXT NOT NULL)").await?;
         db.execute("CREATE UNIQUE INDEX accounts_email ON accounts(email)")
             .await?;

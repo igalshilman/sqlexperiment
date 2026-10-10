@@ -1,11 +1,11 @@
 # Page compression experiment — 2026-10-10
 
-Crate **0.11.0**, storage format **v9**, SQLite-compatible engine `turso_core` **0.8.2**.
+Crate **0.11.0**, storage format **v10**, SQLite-compatible engine `turso_core` **0.8.2**.
 
 Adaptive LZ4 materially reduces the bytes in this experiment's repetitive and
 synthetic JSON workloads. It offers little benefit for random row payloads and
-adds encoding CPU cost. KV get/put/delete counts are unchanged. LZ4 is the new
-experimental default; `PageCompression::Raw` remains available for comparison or
+adds encoding CPU cost. KV get/put/delete counts are unchanged. LZ4 is the
+default; `PageCompression::Raw` remains available for comparison or
 workloads where attempting compression is not useful.
 
 ## Implementation and boundaries
@@ -29,7 +29,7 @@ workloads where attempting compression is not useful.
 - `StorageOptions::page_compression` selects new writes only. Raw and compressed
   pages coexist; a different policy on reopen does not require rewriting them.
   Switching policy and performing a read-only save causes no mutations.
-- Namespace keys and metadata magic are v9/`TKV9`/`TKP9`. Start with a fresh
+- Namespace keys and metadata magic are v10/`SK10`/`SP10`. Start with a fresh
   namespace. Only this format is supported; there are no compatibility probes.
 
 ## Paired workload results
@@ -37,9 +37,9 @@ workloads where attempting compression is not useful.
 `benches/page_compression.rs` creates identical logical SQL pages with
 Raw and Lz4 policies and checks their decoded equality. Four database/payload
 sizes (100 × 64 B, 100 × 512 B, 100 × 9000 B and 10,000 × 256 B), three payload
-families, all three layouts, seven operations and two policies give **504
-configurations**, repeated three times: **1512 SQL observations**, or **252
-raw/LZ4 workload pairs**. All traffic counters agree exactly across repeats.
+families, seven operations and two policies give **168 configurations**,
+repeated three times: **504 SQL observations**, or **84 raw/LZ4 workload pairs**.
+Every workload uses the embedded-root radix tree. All traffic counters agree exactly across repeats.
 
 Payloads are synthetic and deterministic: zero-padded numeric text, valid JSON
 with varying IDs/versions and a seeded ten-word message vocabulary, and seeded
@@ -55,33 +55,33 @@ observation includes open; updates include SQL, checkpoint, publication and
 cleanup. Correctness checks after measurement reopen with the opposite write
 policy, verify the changed payloads and row count, and run `integrity_check`.
 
-**One-row replacement, Radix, total mutation key + value bytes:**
+**One-row replacement, embedded-root radix tree, total mutation key + value bytes:**
 
-| Rows | Payload bytes | Payload family | Raw v9 | Adaptive LZ4 | Reduction |
+| Rows | Payload bytes | Payload family | Raw | Adaptive LZ4 | Reduction |
 |---:|---:|---|---:|---:|---:|
-| 100 | 64 | Repetitive | 4,406 | 1,041 | 76.4% |
-| 100 | 64 | JSON | 4,406 | 1,937 | 56.0% |
-| 100 | 64 | Random | 4,406 | 4,341 | 1.5% |
-| 10,000 | 256 | Repetitive | 4,891 | 1,053 | 78.5% |
-| 10,000 | 256 | JSON | 4,891 | 2,374 | 51.5% |
-| 10,000 | 256 | Random | 4,891 | 4,844 | 1.0% |
+| 100 | 64 | Repetitive | 4,334 | 969 | 77.6% |
+| 100 | 64 | JSON | 4,334 | 1,865 | 57.0% |
+| 100 | 64 | Random | 4,334 | 4,269 | 1.5% |
+| 10,000 | 256 | Repetitive | 4,815 | 977 | 79.7% |
+| 10,000 | 256 | JSON | 4,815 | 2,298 | 52.3% |
+| 10,000 | 256 | Random | 4,815 | 4,768 | 1.0% |
 
-All 252 pairs have identical get/put/delete counts, page counts, map write bytes,
+All 84 pairs have identical get/put/delete counts, page counts, map write bytes,
 head/intent bytes and stored key bytes. Encoded reads, mutations and stored values
-never increase relative to raw v9. Random row payloads can still leave compressible
+never increase relative to raw pages. Random row payloads can still leave compressible
 SQLite headers and free space, explaining their small improvement. In the codec
 sample for 9000-byte random payloads, **56 of 64 pages used raw fallback**.
 The unit tests separately exercise fully random 4096-byte pages and verify the
 4099-byte fallback bound.
 
 For the 10,000-row JSON cold PK lookup, read key/value traffic fell from
-**17,777 to 10,549 bytes (40.7%)**, and stored value bytes from 2,854,067 to
-1,119,429 (60.8%). The workload still performs the same dependent KV gets.
+**17,749 to 10,521 bytes (40.7%)**, and stored value bytes from 2,854,054 to
+1,119,416 (60.8%). The workload still performs the same dependent KV gets.
 
 ## Amplification matrix
 
-The broader SQL amplification matrix covers **309 configurations**, three repeats,
-**2043 phases / 12,258 class-phase rows**. Its analyzer reconciles object classes
+The broader SQL amplification matrix covers **104 configurations**, three repeats,
+**684 phases / 4104 class-phase rows**. Its analyzer reconciles object classes
 and repeat counters. It adds index queries, rollback, insert/delete and interrupted
 save recovery. See [AMPLIFICATION_RESULTS.md](AMPLIFICATION_RESULTS.md).
 Page-to-KV amplification divides encoded put bytes by **4096 × page puts**.
@@ -98,9 +98,9 @@ Median time per page for the 10,000-row / 256-byte datasets:
 
 | Payload | Raw encode | LZ4 encode | Raw decode | Adaptive decode |
 |---|---:|---:|---:|---:|
-| Repetitive | 0.13 µs | 1.04 µs | 0.12 µs | 0.43 µs |
-| JSON | 0.12 µs | 4.22 µs | 0.12 µs | 1.61 µs |
-| Random | 0.12 µs | 1.28 µs | 0.13 µs | 0.37 µs |
+| Repetitive | 0.15 µs | 1.20 µs | 0.11 µs | 0.46 µs |
+| JSON | 0.12 µs | 4.94 µs | 0.13 µs | 1.90 µs |
+| Random | 0.18 µs | 1.36 µs | 0.16 µs | 0.37 µs |
 
 These are elapsed times in isolated codec loops on this shared host, not remote
 request timings or a production speedup. Min/median/max are retained. Raw SQL
@@ -112,7 +112,7 @@ their three repeats are not a latency distribution. No p95/p99 claim is made.
 Tests live under `tests/`. The codec tests cover malformed input, bounded expansion,
 incompressible fallback and 2000 seeded round trips. Simulator campaigns cover
 mixed policies, cache admission, cancellation, lost acknowledgments, recovery,
-folds and exact orphan accounting. See [review and validation](../docs/REVIEW.md)
+tree rewrites and exact orphan accounting. See [review and validation](../docs/REVIEW.md)
 for the current executed checks. All of these are simulator or in-process checks;
 no real backend or power-loss claim follows.
 
