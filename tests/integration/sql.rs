@@ -1,5 +1,5 @@
+use sqlite_lazy_kv::{Result, Session, simulation::MemoryKv};
 use std::sync::Arc;
-use turso_lazy_kv::{Result, Session, simulation::MemoryKv};
 
 #[test]
 fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {

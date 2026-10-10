@@ -1630,7 +1630,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "turso-lazy-kv"
+name = "sqlite-lazy-kv"
 version = "0.11.0"
 dependencies = [
  "futures",

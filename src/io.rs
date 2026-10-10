@@ -1,4 +1,4 @@
-//! Byte-addressed Turso files over lazy 4 KiB KV blocks.
+//! Byte-addressed SQLite engine files over lazy 4 KiB KV blocks.
 //!
 //! All writes are private until atomic snapshot publication. sync() is an
 //! overlay barrier; Session::save is the backing-store durability boundary.

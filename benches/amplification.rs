@@ -1,9 +1,9 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
-use std::sync::Arc;
-use turso_lazy_kv::{
+use sqlite_lazy_kv::{
     MapLayout, Result, Session, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
 };
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 struct Case {

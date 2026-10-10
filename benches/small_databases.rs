@@ -1,12 +1,12 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use turso_lazy_kv::{
+use sqlite_lazy_kv::{
     MapLayout, Result, Session, StorageOptions,
     kv::KvStore,
     simulation::{MemoryKv, Stats},
+};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Copy)]

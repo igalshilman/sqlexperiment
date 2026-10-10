@@ -1,6 +1,7 @@
-# Turso over asynchronous KV
+# SQLite over asynchronous KV
 
-A Rust experiment running unmodified Turso core 0.8.2 over lazy immutable pages.
+A Rust experiment running SQLite-compatible SQL over lazy immutable pages, using
+the unmodified Rust engine implemented by Turso (`turso_core` 0.8.2).
 One owner serializes sessions in a dedicated namespace. SQL writes and the WAL
 stay private until `Session::save()` checkpoints and publishes a new snapshot
 through one atomic durable head replacement.
@@ -14,7 +15,7 @@ Implement `kv::KvStore` with asynchronous `get`, `put` and `delete`, then pass a
 `Arc<dyn KvStore>` to `Session::open`:
 
 ```rust,ignore
-use turso_lazy_kv::Session;
+use sqlite_lazy_kv::Session;
 
 let mut db = Session::open(store).await?;
 db.execute("CREATE TABLE t(n INTEGER)").await?;

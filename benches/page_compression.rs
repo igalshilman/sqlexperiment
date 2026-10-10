@@ -1,5 +1,11 @@
 //! Paired raw/LZ4 SQL traffic and isolated codec CPU measurements.
 //! All payloads are deterministic synthetic data; no network or replication model.
+use sqlite_lazy_kv::{
+    MapLayout, PageCompression, Result, Session, StorageOptions,
+    kv::KvStore,
+    page_codec,
+    simulation::{MemoryKv, Stats},
+};
 use std::{
     fmt::Write as _,
     fs::File,
@@ -7,12 +13,6 @@ use std::{
     io::{BufWriter, Write},
     sync::Arc,
     time::Instant,
-};
-use turso_lazy_kv::{
-    MapLayout, PageCompression, Result, Session, StorageOptions,
-    kv::KvStore,
-    page_codec,
-    simulation::{MemoryKv, Stats},
 };
 
 #[derive(Clone, Copy, Debug)]

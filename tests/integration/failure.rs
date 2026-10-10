@@ -3,6 +3,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either, select},
 };
+use sqlite_lazy_kv::{Result, Session, kv::KvStore, simulation::MemoryKv};
 use std::{
     io,
     sync::{
@@ -10,7 +11,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use turso_lazy_kv::{Result, Session, kv::KvStore, simulation::MemoryKv};
 
 struct ControlledKv {
     inner: MemoryKv,

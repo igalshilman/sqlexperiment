@@ -2,12 +2,12 @@ use futures::{
     FutureExt,
     future::{Either, select},
 };
-use std::sync::Arc;
-use turso_lazy_kv::{
+use sqlite_lazy_kv::{
     MapLayout, Result, Session, StorageOptions,
     kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
+use std::sync::Arc;
 
 const LAYOUTS: [MapLayout; 3] = [
     MapLayout::Radix,

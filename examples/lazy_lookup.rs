@@ -1,5 +1,5 @@
+use sqlite_lazy_kv::{MapLayout, Result, Session, StorageOptions, simulation::MemoryKv};
 use std::sync::Arc;
-use turso_lazy_kv::{MapLayout, Result, Session, StorageOptions, simulation::MemoryKv};
 
 fn main() -> Result<()> {
     futures::executor::block_on(async {
@@ -64,7 +64,7 @@ fn main() -> Result<()> {
         );
         assert!(stats.bytes_read < stored_bytes as u64 / 10);
 
-        println!("Turso 0.8.2 / asynchronous in-memory KV / no Restate or replay");
+        println!("SQLite / asynchronous in-memory KV / no Restate or replay");
         println!("Rows: 12000");
         println!("Stored bytes (including metadata): {stored_bytes}");
         println!("Stored block objects: {db_blocks} (4096 bytes each)");

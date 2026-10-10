@@ -1,6 +1,6 @@
 # Page compression experiment — 2026-10-10
 
-Crate **0.11.0**, storage format **v9**, unmodified Turso **0.8.2**.
+Crate **0.11.0**, storage format **v9**, SQLite-compatible engine `turso_core` **0.8.2**.
 
 Adaptive LZ4 materially reduces the bytes in this experiment's repetitive and
 synthetic JSON workloads. It offers little benefit for random row payloads and

@@ -1,9 +1,9 @@
 [package]
-name = "turso-lazy-kv"
+name = "sqlite-lazy-kv"
 version = "0.11.0"
 edition = "2024"
 publish = false
-description = "Turso over asynchronous lazy KV with atomic snapshot publication"
+description = "SQLite over asynchronous lazy KV with atomic snapshot publication"
 
 [features]
 default = []

@@ -1,4 +1,4 @@
-//! Turso over asynchronous KV with atomic snapshot publication.
+//! SQLite over asynchronous KV with atomic snapshot publication.
 mod format;
 mod map_codec;
 pub mod page_codec;
@@ -37,7 +37,7 @@ enum Command {
 }
 
 /// Single-owner session. Storage futures always run on the async caller.
-/// A dedicated engine thread accommodates Turso 0.8.2's blocking internals.
+/// A dedicated engine thread accommodates the SQLite engine's blocking internals.
 /// Drop discards the overlay; there is no implicit save.
 pub struct Session {
     commands: commands::Sender<Command>,
@@ -69,7 +69,7 @@ impl Session {
         let (ready, started) = oneshot::channel();
         let engine_io = io.clone();
         let worker = thread::Builder::new()
-            .name("turso-kv-engine".into())
+            .name("sqlite-kv-engine".into())
             .spawn(move || {
                 engine_worker(engine_io, receiver, ready);
             })?;
