@@ -1,0 +1,16 @@
+[package]
+name = "turso-lazy-kv"
+version = "0.9.0"
+edition = "2024"
+publish = false
+description = "Turso over asynchronous lazy KV with atomic snapshot publication"
+
+[dependencies]
+turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
+futures = "0.3"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

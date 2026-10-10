@@ -1,0 +1,101 @@
+   Compiling turso-lazy-kv v0.8.0 (/workspace/scratch/79326ed8eaab/turso-lazy-kv)
+    Finished `test` profile [unoptimized] target(s) in 1.99s
+     Running unittests src/lib.rs (target/debug/deps/turso_lazy_kv-ba893cfd082e0b24)
+
+running 16 tests
+test kv::tests::successful_puts_and_deletes_survive_immediate_crash ... ok
+test kv::tests::unknown_outcomes_are_atomic_and_not_flushed_by_unrelated_success ... ok
+test pending::tests::malformed_intents_and_unexpected_heads_fail_before_mutation ... ok
+test io::completion_tests::engine_callbacks_wait_for_worker_step_and_shutdown_aborts_ready ... ok
+test snapshot::advanced_tests::orphan_ids_are_reused_and_exhaustion_precedes_all_mutations ... ok
+test snapshot::advanced_tests::concurrent_puts_reorder_are_bounded_and_drain_on_error ... ok
+test snapshot::tests::height_grows_shrinks_and_small_reads_use_one_index_node ... ok
+test snapshot::tests::persistent_tree_sparse_paths_updates_and_deletions ... ok
+test snapshot::tests::referenced_objects_must_exist_and_have_valid_structure ... ok
+test checkpoint_tests::publication_rejects_nonempty_private_wal ... ok
+test snapshot::advanced_tests::layouts_preserve_sparse_paths_fold_tombstones_without_gc ... ok
+test pending::tests::large_intent_has_an_explicit_limit ... ok
+MAP Radix one: puts=5 bytes=6720 metadata=2624 head=34 cold_gets=5 cold_bytes=6578
+MAP Radix ten_clustered: puts=14 bytes=43746 metadata=2786 head=34 cold_gets=5 cold_bytes=6578
+MAP Radix ten_scattered: puts=23 bytes=64644 metadata=23684 head=34 cold_gets=5 cold_bytes=6578
+MAP Radix 65_fold: puts=69 bytes=270016 metadata=3776 head=34 cold_gets=5 cold_bytes=6578
+test snapshot::advanced_tests::repeated_sparse_rewrites_leave_exactly_the_current_structural_objects ... ok
+MAP InlineRoot one: puts=4 bytes=6966 metadata=2870 head=170 cold_gets=4 cold_bytes=6570
+MAP InlineRoot ten_clustered: puts=13 bytes=43992 metadata=3032 head=170 cold_gets=4 cold_bytes=6570
+MAP InlineRoot ten_scattered: puts=22 bytes=64890 metadata=23930 head=170 cold_gets=4 cold_bytes=6570
+MAP InlineRoot 65_fold: puts=68 bytes=270262 metadata=4022 head=170 cold_gets=4 cold_bytes=6570
+checkpoint: 28 interruption cases across 7 local I/O operations
+test checkpoint_tests::interrupted_checkpoint_never_publishes ... ok
+FOLD: 72 crash/reopen cases across 6 puts
+test snapshot::advanced_tests::every_override_fold_put_recovers_without_resurrecting_abandoned_changes ... ok
+MAP HeadOverrides one: puts=3 bytes=4259 metadata=163 head=50 cold_gets=3 cold_bytes=4146
+MAP HeadOverrides ten_clustered: puts=12 bytes=41492 metadata=532 head=194 cold_gets=3 cold_bytes=4290
+MAP HeadOverrides ten_scattered: puts=12 bytes=41492 metadata=532 head=194 cold_gets=3 cold_bytes=4290
+MAP HeadOverrides 65_fold: puts=69 bytes=270016 metadata=3776 head=34 cold_gets=5 cold_bytes=6578
+test snapshot::advanced_tests::compare_map_costs_on_dense_16mib_database ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests/block_io.rs (target/debug/deps/block_io-9dd7d6d42eef8ac6)
+
+running 4 tests
+test vectored_write_retains_data_and_completion ... ok
+test concurrent_drivers_preserve_submission_order ... ok
+test pending_count_includes_request_suspended_in_driver ... ok
+test deferred_unaligned_writes_short_reads_and_truncate_regrow ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/failure.rs (target/debug/deps/failure-e579317d2eb995d3)
+
+running 2 tests
+test cancellation_during_pending_kv_read_poison_session_without_publishing ... ok
+test backend_read_error_reaches_caller_and_saved_state_survives ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/integration.rs (target/debug/deps/integration-c1fb7f57b2da244e)
+
+running 5 tests
+test save_rejects_open_transaction ... ok
+test save_checkpoints_private_wal_and_reopens_database_only ... ok
+test dropping_overlay_preserves_saved_state_and_sql_rollback_works ... ok
+100 updates: 428512 local WAL bytes, 8325 backend bytes, 2 final blocks
+test repeated_local_commits_publish_only_final_database_blocks ... ok
+test cold_indexed_lookup_is_lazy ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+
+     Running tests/publication.rs (target/debug/deps/publication-426502c36bca74d0)
+
+running 3 tests
+layout=Radix, checkpoint=false, empty=true: 120 crash/reopen cases across 10 mutations
+layout=Radix, checkpoint=false, empty=false: 204 crash/reopen cases across 17 mutations
+layout=Radix, checkpoint=true, empty=false: 204 crash/reopen cases across 17 mutations
+layout=InlineRoot, checkpoint=false, empty=true: 108 crash/reopen cases across 9 mutations
+layout=InlineRoot, checkpoint=false, empty=false: 180 crash/reopen cases across 15 mutations
+layout=InlineRoot, checkpoint=true, empty=false: 180 crash/reopen cases across 15 mutations
+layout=HeadOverrides, checkpoint=false, empty=true: 108 crash/reopen cases across 9 mutations
+test every_first_publication_put ... ok
+layout=HeadOverrides, checkpoint=false, empty=false: 180 crash/reopen cases across 15 mutations
+test every_publication_put_with_automatic_checkpoint ... ok
+layout=HeadOverrides, checkpoint=true, empty=false: 180 crash/reopen cases across 15 mutations
+test every_publication_put_after_explicit_checkpoint ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.41s
+
+     Running tests/recovery.rs (target/debug/deps/recovery-b350dd00ba1cf314)
+
+running 2 tests
+test uncertain_intent_deletion_can_be_replaced_by_next_save_without_a_crash ... ok
+RECOVERY: 1236 interrupted recovery cases, including interrupted first saves
+test every_recovery_mutation_is_restartable_for_abort_and_commit ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.33s
+
+   Doc-tests turso_lazy_kv
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
