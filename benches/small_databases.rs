@@ -1,5 +1,5 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
-use sqlite_lazy_kv::{
+use sqlite_kv::{
     MapLayout, Result, Session, StorageOptions,
     kv::KvStore,
     simulation::{MemoryKv, Stats},

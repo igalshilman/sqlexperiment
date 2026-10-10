@@ -1,5 +1,5 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
-use sqlite_lazy_kv::{
+use sqlite_kv::{
     MapLayout, Result, Session, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
 };

@@ -1,6 +1,6 @@
-# SQLite over asynchronous KV
+# SQLite KV
 
-A Rust experiment running SQLite-compatible SQL over lazy immutable pages, using
+A Rust experiment running SQLite-compatible SQL over immutable pages fetched on demand, using
 the unmodified Rust engine implemented by Turso (`turso_core` 0.8.2).
 One owner serializes sessions in a dedicated namespace. SQL writes and the WAL
 stay private until `Session::save()` checkpoints and publishes a new snapshot
@@ -15,7 +15,7 @@ Implement `kv::KvStore` with asynchronous `get`, `put` and `delete`, then pass a
 `Arc<dyn KvStore>` to `Session::open`:
 
 ```rust,ignore
-use sqlite_lazy_kv::Session;
+use sqlite_kv::Session;
 
 let mut db = Session::open(store).await?;
 db.execute("CREATE TABLE t(n INTEGER)").await?;
@@ -72,7 +72,7 @@ cargo fmt --check
 | `tests/unit/` | Private implementation tests and test-only helpers | Codec tests: none; storage tests: `simulation` |
 | `tests/integration/` | SQL, block I/O, publication and recovery campaigns | `simulation` |
 | `benches/` | Explicit Cargo bench targets, analysis scripts and results | `simulation` |
-| `examples/lazy_lookup.rs` | Small simulator-backed usage example | `simulation` |
+| `examples/lookup.rs` | Small simulator-backed usage example | `simulation` |
 
 Unit test files are mounted with `#[cfg(test)]` module declarations to retain
 private access. Tests and checkpoint fault hooks are excluded from normal library
@@ -80,7 +80,7 @@ builds. Default tests exercise the codec and public API without enabling simulat
 Benchmarks are run separately; see [benches/README.md](benches/README.md).
 
 ```sh
-cargo run --locked --features simulation --example lazy_lookup -- radix
+cargo run --locked --features simulation --example lookup -- radix
 cargo bench --locked --features simulation --bench page_compression -- 3
 ```
 

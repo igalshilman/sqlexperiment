@@ -1,6 +1,6 @@
 //! Paired raw/LZ4 SQL traffic and isolated codec CPU measurements.
 //! All payloads are deterministic synthetic data; no network or replication model.
-use sqlite_lazy_kv::{
+use sqlite_kv::{
     MapLayout, PageCompression, Result, Session, StorageOptions,
     kv::KvStore,
     page_codec,

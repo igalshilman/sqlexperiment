@@ -1,4 +1,4 @@
-use sqlite_lazy_kv::{MapLayout, Result, Session, StorageOptions, simulation::MemoryKv};
+use sqlite_kv::{MapLayout, Result, Session, StorageOptions, simulation::MemoryKv};
 use std::sync::Arc;
 
 fn main() -> Result<()> {

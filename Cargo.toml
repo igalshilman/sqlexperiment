@@ -1,9 +1,9 @@
 [package]
-name = "sqlite-lazy-kv"
+name = "sqlite-kv"
 version = "0.11.0"
 edition = "2024"
 publish = false
-description = "SQLite over asynchronous lazy KV with atomic snapshot publication"
+description = "SQLite over asynchronous KV with atomic snapshot publication"
 
 [features]
 default = []
@@ -29,7 +29,7 @@ path = "tests/integration/main.rs"
 required-features = ["simulation"]
 
 [[example]]
-name = "lazy_lookup"
+name = "lookup"
 required-features = ["simulation"]
 
 [[bench]]

@@ -1,4 +1,4 @@
-use sqlite_lazy_kv::{
+use sqlite_kv::{
     Result,
     io::{BLOCK_SIZE, DB_PATH, KvIo, MountedIo},
     simulation::MemoryKv,

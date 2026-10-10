@@ -3,7 +3,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either, select},
 };
-use sqlite_lazy_kv::{Result, Session, kv::KvStore, simulation::MemoryKv};
+use sqlite_kv::{Result, Session, kv::KvStore, simulation::MemoryKv};
 use std::{
     io,
     sync::{

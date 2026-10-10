@@ -1,4 +1,4 @@
-//! Byte-addressed SQLite engine files over lazy 4 KiB KV blocks.
+//! Byte-addressed SQLite engine files over on-demand 4 KiB KV blocks.
 //!
 //! All writes are private until atomic snapshot publication. sync() is an
 //! overlay barrier; Session::save is the backing-store durability boundary.
@@ -368,7 +368,7 @@ impl KvIo {
                     }
                 }
                 Err(e) => {
-                    completion.error(CompletionError::IOError(e.kind(), "lazy KV"));
+                    completion.error(CompletionError::IOError(e.kind(), "KV I/O"));
                     return Err(e);
                 }
             }

@@ -1,7 +1,7 @@
 //! Exercises the normal library with an immediately-ready backend: no simulator,
 //! instrumentation, forced yields or checkpoint fault hooks are required.
 use futures::future::BoxFuture;
-use sqlite_lazy_kv::{Result, Session, kv::KvStore};
+use sqlite_kv::{Result, Session, kv::KvStore};
 use std::{
     collections::BTreeMap,
     io,

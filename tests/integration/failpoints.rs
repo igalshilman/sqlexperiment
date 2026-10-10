@@ -2,7 +2,7 @@ use futures::{
     FutureExt,
     future::{Either, select},
 };
-use sqlite_lazy_kv::{
+use sqlite_kv::{
     MapLayout, Result, Session, StorageOptions,
     kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},

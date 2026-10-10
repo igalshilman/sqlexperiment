@@ -1,4 +1,4 @@
-use sqlite_lazy_kv::{Result, Session, simulation::MemoryKv};
+use sqlite_kv::{Result, Session, simulation::MemoryKv};
 use std::sync::Arc;
 
 #[test]
