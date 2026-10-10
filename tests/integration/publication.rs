@@ -57,11 +57,11 @@ impl KvStore for FaultKv {
             self.keys.lock().unwrap().push(key.to_owned());
             let fail = call == self.fail_at;
             if !fail || self.effect > 0 {
-                if key.starts_with("v10/block/") || key.starts_with("v10/node/") {
+                if key.starts_with("v11/block/") || key.starts_with("v11/node/") {
                     let id = u64::from_str_radix(key.rsplit('/').next().unwrap(), 16).unwrap();
                     let high = self
                         .inner
-                        .get("v10/head")
+                        .get("v11/head")
                         .await?
                         .map(|v| u64::from_le_bytes(v[12..20].try_into().unwrap()))
                         .unwrap_or(0);
@@ -167,9 +167,9 @@ async fn exercise(checkpoint: bool, empty: bool) -> Result<()> {
     check(probe.clone(), 20).await?;
     let writes = probe.calls.load(Ordering::SeqCst);
     let keys = probe.keys.lock().unwrap().clone();
-    assert_eq!(keys.first().unwrap(), "v10/pending_save");
-    assert_eq!(keys.last().unwrap(), "delete:v10/pending_save");
-    let commit_at = keys.iter().position(|k| k == "v10/head").unwrap() + 1;
+    assert_eq!(keys.first().unwrap(), "v11/pending_save");
+    assert_eq!(keys.last().unwrap(), "delete:v11/pending_save");
+    let commit_at = keys.iter().position(|k| k == "v11/head").unwrap() + 1;
     probe.inner.crash(&[]);
     check(Arc::new(probe.inner.clone()), 20).await?;
     assert!(writes > 1);
@@ -252,7 +252,7 @@ async fn exercise(checkpoint: bool, empty: bool) -> Result<()> {
                     // A later acknowledged save must succeed after every interruption.
                     let high = store
                         .inner
-                        .get("v10/head")
+                        .get("v11/head")
                         .await?
                         .map(|v| u64::from_le_bytes(v[12..20].try_into().unwrap()))
                         .unwrap_or(0);
@@ -263,7 +263,7 @@ async fn exercise(checkpoint: bool, empty: bool) -> Result<()> {
                         .lock()
                         .unwrap()
                         .iter()
-                        .filter(|k| k.starts_with("v10/block/") || k.starts_with("v10/node/"))
+                        .filter(|k| k.starts_with("v11/block/") || k.starts_with("v11/node/"))
                     {
                         let id = u64::from_str_radix(key.rsplit('/').next().unwrap(), 16).unwrap();
                         assert!(

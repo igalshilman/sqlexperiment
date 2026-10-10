@@ -12,8 +12,8 @@ use std::{
     },
 };
 
-const HEAD: &str = "v10/head";
-const PENDING: &str = "v10/pending_save";
+const HEAD: &str = "v11/head";
+const PENDING: &str = "v11/pending_save";
 struct FaultKv {
     inner: MemoryKv,
     calls: AtomicUsize,

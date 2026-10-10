@@ -34,6 +34,8 @@ pub fn object_kind(key: &str) -> &'static str {
         "block"
     } else if key.starts_with(Kind::Node.prefix()) {
         "node"
+    } else if key.starts_with(Kind::Log.prefix()) {
+        "log"
     } else if key == HEAD {
         "head"
     } else if key == PENDING {

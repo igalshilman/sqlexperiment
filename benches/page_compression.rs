@@ -254,7 +254,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
 
 async fn pages(store: &MemoryKv) -> Result<Vec<Vec<u8>>> {
     let mut pages = Vec::new();
-    for key in store.keys().iter().filter(|k| k.starts_with("v10/block/")) {
+    for key in store.keys().iter().filter(|k| k.starts_with("v11/block/")) {
         pages.push(page_codec::decode(&store.get(key).await?.unwrap())?);
     }
     Ok(pages)

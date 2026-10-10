@@ -108,6 +108,7 @@ mod cache;
 mod format;
 pub mod io;
 pub mod kv;
+pub mod log;
 mod map_codec;
 pub mod page_codec;
 mod pending;

@@ -3,13 +3,14 @@ use super::*;
 #[test]
 fn embedded_root_head_rejects_invalid_shape_and_references() {
     let empty = Head::default().encode();
-    assert_eq!(empty.len(), 21);
+    assert_eq!(empty.len(), 29);
     assert!(Head::decode(&empty).unwrap().root.is_empty());
     let head = Head {
         root: Node::from([(0, 1), (255, 2)]),
         height: 1,
         last_id: 2,
         size: 256 * 4096,
+        log_start: 7,
     };
     let valid = head.encode();
     let decoded = Head::decode(&valid).unwrap();
@@ -17,6 +18,7 @@ fn embedded_root_head_rejects_invalid_shape_and_references() {
     assert_eq!(decoded.size, head.size);
     assert_eq!(decoded.height, head.height);
     assert_eq!(decoded.last_id, head.last_id);
+    assert_eq!(decoded.log_start, head.log_start);
     let mut invalid: Vec<_> = (0..valid.len()).map(|n| valid[..n].to_vec()).collect();
     for height in [0, 9, 255] {
         let mut bytes = valid.clone();

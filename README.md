@@ -36,6 +36,11 @@ stored tags determine decoding. `StorageOptions::cache` takes an optional
 `ObjectCache`, a byte-bounded LRU of committed objects shared by successive
 sessions of one namespace. Objects are immutable, so entries never go stale; a
 warm reopen fetches only the head and intent.
+`StorageOptions::max_log_segments` (default zero) enables a durable delta log:
+a save commits by appending one segment of changed pages, a single put, and
+every `max_log_segments + 1` saves fold the log into the map. Opens then cost
+one extra round trip to confirm the last segment. See the
+[delta-log results](benches/LOG_RESULTS.md) for the trade-off.
 Independent head/intent reads overlap during open. The engine I/O pump overlaps
 adjacent reads in batches of up to 16, with write/truncate/sync barriers.
 

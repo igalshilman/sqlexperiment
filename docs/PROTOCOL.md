@@ -19,19 +19,21 @@ walk the full old map. Test-only reachability checks verify exact object account
 
 ## Persistent record
 
-`v10/pending_save` contains:
+`v11/pending_save` contains:
 
 | Field | Encoding |
 |---|---|
-| Magic | 4 bytes, `SP10` |
+| Magic | 4 bytes, `SP11` |
 | Old head length, new head length | Two u32 LE lengths; zero old length means no old head |
 | Created count, retired count | Two u32 LE counts |
 | Old head, new head | Exact head byte strings |
-| Created entries, then retired entries | Each entry: kind u8 (0 block, 1 node) and ID u64 LE |
+| Created entries, then retired entries | Each entry: kind u8 (0 block, 1 node, 2 log segment) and ID u64 LE |
 
 Entries in each list are strictly sorted by kind and ID, without duplicates.
-Created IDs exceed the old counter and do not exceed the new counter. Retired IDs
-are nonzero and no larger than the old counter. The heads must differ; a truly
+Created IDs exceed the old counter and do not exceed the new counter; created
+entries are never log segments. Retired block and node IDs are nonzero and no
+larger than the old counter. Retired log sequences lie at or after the old head's
+log start and, when the new head keeps the log enabled, before its log start. The heads must differ; a truly
 unchanged save is a no-op. Head structure and exact lengths are validated. Current
 head bytes must match one of the recorded heads. No hashes, generation reservation,
 page payload duplication, external intent object or additional commit flag is used.
@@ -109,13 +111,53 @@ The radix root is embedded in the head. Replaced pages and external child nodes
 are retired by the same save; unchanged subtrees remain shared. No deferred
 folding or shadowed base pages need a separate lifecycle.
 
-## Why the engine WAL is separate
+## Delta log
+
+`StorageOptions::max_log_segments` lets a save commit with **one put** instead of
+the publication above. It ships the save's changed pages after the private
+checkpoint, which amounts to the deduplicated committed WAL frames, as one
+segment. The engine WAL itself stays private.
+
+- **Enabling.** The head's `log_start` is zero when the log is disabled. A save
+  with the log enabled by policy on such a head publishes normally and writes
+  `log_start = 1`. With `log_start != 0`, open probes the log; otherwise it
+  issues no log reads.
+- **Append.** With `count` segments found at open and `count <
+  max_log_segments`, a save puts `log/<log_start + count>`. Its acknowledgement
+  commits; no intent, object or head is written. A segment over 1 MiB publishes
+  instead.
+- **Open.** After intent recovery, read `log/<log_start>…` concurrently in batches
+  of `max_log_segments + 1` (at most 16) until the first absent key; a present
+  key after an absent one is an error. Replay segments in order over the map.
+  Then **re-put the last segment** before exposing any page: a failed append can
+  leave it visible but not durable, and a later append must never build on it.
+  Every earlier segment was acknowledged or confirmed this way before its
+  successor was written. With an object cache, the first batch is read together
+  with the head at the cache's last known `log_start` and discarded if the head
+  disagrees.
+- **Fold.** When the log is full, a segment is too large, or the policy is zero,
+  a save publishes log and session pages through the intent protocol. The intent
+  retires the segments in `[log_start, log_start + count)` with the replaced
+  objects. The new head sets `log_start` to the next sequence number, or to zero
+  when the policy is zero. Interrupted folds recover like any other save.
+- **Uncertain append.** The session is poisoned. The host settles the request
+  and reopens. Open then finds the segment absent (the next save reuses its
+  sequence number) or present (open confirms it and the save is committed).
+
+Costs: an append is 1 put. Open adds the probe, which shares the head's round
+trip when the cache supplies the start, and one confirmation put whenever
+segments exist. A fold costs a normal publication over all logged pages plus one
+delete per segment. Measurements are in
+[LOG_RESULTS.md](../benches/LOG_RESULTS.md).
+
+## Why the engine WAL stays private
 
 The private engine WAL supplies SQL transaction processing and rollback within a
 session. It never reaches durable K/V. The pending-save record covers publication
-of the resulting immutable objects, storing IDs and head metadata only. A durable
-engine WAL/database VFS would be another valid design with different page-write
-costs; this implementation keeps the single-copy immutable payload approach.
+of the resulting immutable objects, storing IDs and head metadata only. The delta
+log above is the durable-log variant. It ships page images after the local
+checkpoint, so recovery needs no WAL frame format, salts or checksums, and each
+page appears once per save.
 
 Use a dedicated namespace. Independently injected garbage is outside the protocol;
 there is no generic repair collector.

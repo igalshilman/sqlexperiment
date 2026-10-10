@@ -3,6 +3,7 @@ mod block_io;
 mod cache;
 mod failpoints;
 mod failure;
+mod log;
 mod publication;
 mod recovery;
 mod sql;

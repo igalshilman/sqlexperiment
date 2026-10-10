@@ -5,10 +5,11 @@ construction live in `src/format.rs`; there is no migration or format discovery.
 
 | Key | Value |
 |---|---|
-| `v10/head` | Current snapshot head |
-| `v10/pending_save` | Pending publication and reclamation record |
-| `v10/node/<16-digit hex ID>` | Immutable map node |
-| `v10/block/<16-digit hex ID>` | Immutable encoded 4096-byte page |
+| `v11/head` | Current snapshot head |
+| `v11/pending_save` | Pending publication and reclamation record |
+| `v11/node/<16-digit hex ID>` | Immutable map node |
+| `v11/block/<16-digit hex ID>` | Immutable encoded 4096-byte page |
+| `v11/log/<16-digit hex sequence>` | Delta-log segment |
 
 Object IDs are incrementing u64 values shared by pages and nodes, not hashes.
 Published IDs are never reused. IDs above the recovered committed counter can be
@@ -42,17 +43,35 @@ maximum encoded node is 2305 bytes.
 
 | Field | Encoding |
 |---|---|
-| Magic | `SK10` |
+| Magic | `SK11` |
 | Database byte length | u64 LE |
 | Last allocated object ID | u64 LE |
 | Radix height | u8, at most 8 |
+| First delta-log sequence | u64 LE; zero when the log is disabled |
 | Root | Encoded radix node occupying the remainder of the value |
 
-The fixed prefix is 21 bytes. The root is always embedded in the head. Height
+The fixed prefix is 29 bytes. The root is always embedded in the head. Height
 zero requires an empty root; nonzero height requires a nonempty root. The same
-node decoder bounds the root to 2305 bytes, so a head is at most 2326 bytes.
+node decoder bounds the root to 2305 bytes, so a head is at most 2334 bytes.
 There is no layout selector, root-length field, override list or separate root
 object. Compression policy is per-write and does not change the head.
 
-The pending record uses `SP10`. Its exact schema and commit/recovery ordering are
-documented in [PROTOCOL.md](PROTOCOL.md).
+The pending record uses `SP11`. Its exact schema and commit/recovery ordering are
+documented in [PROTOCOL.md](PROTOCOL.md). Its object entries use kind 2 for
+retired log segments, whose "ID" is the sequence number.
+
+## Delta-log segments
+
+A segment holds the pages changed by one save, after the private checkpoint:
+
+| Field | Encoding |
+|---|---|
+| Magic | `SL11` |
+| Sequence number | u64 LE; must equal the key's sequence |
+| Database byte length | u64 LE, after this save |
+| Entry count | u32 LE |
+| Entries | Strictly ascending: page index u64 LE, encoded length u16 LE (zero for a hole), page value |
+
+Page values use the page envelope above. A segment is at most 1 MiB; a larger
+save publishes instead. Segments are replayed from the head's first sequence
+until the first absent key. See [PROTOCOL.md](PROTOCOL.md#delta-log).

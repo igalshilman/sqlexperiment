@@ -168,7 +168,7 @@ impl KvIo {
     ) -> io::Result<Arc<Self>> {
         let snapshot = Snapshot::open_with_options(store, options).await?;
         let state = State {
-            sizes: [snapshot.head.size, 0],
+            sizes: [snapshot.size(), 0],
             ..State::default()
         };
         Ok(Arc::new(Self {
