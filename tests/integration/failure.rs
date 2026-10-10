@@ -3,7 +3,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either, select},
 };
-use sqlite_kv::{Result, Session, kv::KvStore, simulation::MemoryKv};
+use sqlite_kv::{Result, Session, StorageOptions, kv::KvStore, simulation::MemoryKv};
 use std::{
     io,
     sync::{
@@ -21,9 +21,9 @@ struct ControlledKv {
 impl KvStore for ControlledKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
         Box::pin(async move {
-            if key.contains("/block/") {
+            if key.contains("/page/") {
                 if self.fail_reads.load(Ordering::SeqCst) {
-                    return Err(io::Error::other("injected block-read failure"));
+                    return Err(io::Error::other("injected page-read failure"));
                 }
                 let signal = self.gate.lock().unwrap().take();
                 if let Some(signal) = signal {
@@ -54,6 +54,15 @@ async fn populated() -> Result<Arc<ControlledKv>> {
     db.execute("INSERT INTO t VALUES(1,10)").await?;
     db.checkpoint().await?;
     db.save().await?;
+    // A save that checkpoints the first and leaves `t` out of the log, so
+    // reading it goes to the backend.
+    let all = StorageOptions {
+        checkpoint_after: 0,
+        ..StorageOptions::default()
+    };
+    let mut db = Session::open_with_options(store.clone(), all).await?;
+    db.execute("CREATE TABLE other(x)").await?;
+    db.save().await?;
     Ok(store)
 }
 
@@ -62,10 +71,12 @@ fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
     futures::executor::block_on(async {
         let store = populated().await?;
         store.fail_reads.store(true, Ordering::SeqCst);
-        match Session::open(store.clone()).await {
+        let mut db = Session::open(store.clone()).await?;
+        match db.query("SELECT n FROM t").await {
             Ok(_) => panic!("expected injected failure"),
-            Err(e) => assert!(e.to_string().contains("injected block-read failure")),
+            Err(e) => assert!(e.to_string().contains("injected page-read failure")),
         }
+        drop(db);
         store.fail_reads.store(false, Ordering::SeqCst);
         let mut db = Session::open(store).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");

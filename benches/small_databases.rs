@@ -1,7 +1,6 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
 use sqlite_kv::{
     Result, Session, StorageOptions,
-    kv::KvStore,
     simulation::{MemoryKv, Stats},
 };
 use std::{
@@ -40,7 +39,7 @@ fn print_row(
 ) {
     let (db_bytes, before, after) = sizes;
     println!(
-        "{},{},{},{op},{run},{db_bytes},{before},{after},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{op},{run},{db_bytes},{before},{after},{},{},{},{},{},{},{},{},{}",
         case.rows,
         case.payload,
         case.indexes,
@@ -50,16 +49,17 @@ fn print_row(
         s.deletes,
         s.bytes_read,
         s.bytes_written,
-        s.kind("block").bytes_written,
-        s.kind("node").bytes_written,
-        s.kind("head").bytes_written,
-        s.kind("intent").bytes_written
+        s.kind("page").bytes_written,
+        s.kind("log").bytes_written,
+        s.kind("meta").bytes_written
     );
 }
 async fn run(case: Case, repeats: usize) -> Result<()> {
     let base = baseline(case).await?;
-    let head = base.get("v11/head").await?.unwrap();
-    let db_bytes = u64::from_le_bytes(head[4..12].try_into().unwrap());
+    let db_bytes = Session::open(Arc::new(base.fork()))
+        .await?
+        .io_stats()
+        .database_len;
     let before = base.stored_bytes();
     let id = case.rows / 2;
     let query = format!("SELECT id, length(payload) FROM t WHERE id={id}");
@@ -183,7 +183,6 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
                 reopened.query("PRAGMA integrity_check").await?[0][0].to_string(),
                 "ok"
             );
-            assert!(store.get("v11/pending_save").await?.is_none());
         }
     }
     Ok(())
@@ -199,7 +198,7 @@ fn main() -> Result<()> {
         return Err("repeats must be positive".into());
     }
     println!(
-        "rows,payload_bytes,indexes,operation,run,db_bytes,stored_before,stored_after,elapsed_us,gets,puts,deletes,bytes_read,bytes_written,block_bytes,node_bytes,head_bytes,intent_bytes"
+        "rows,payload_bytes,indexes,operation,run,db_bytes,stored_before,stored_after,elapsed_us,gets,puts,deletes,bytes_read,bytes_written,page_bytes,log_bytes,meta_bytes"
     );
     futures::executor::block_on(async {
         for rows in [10, 100, 300] {

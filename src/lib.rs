@@ -1,7 +1,7 @@
 //! SQLite-compatible SQL over an asynchronous key/value store.
 //!
 //! The engine is Turso's Rust implementation (`turso_core`); this crate supplies
-//! its file I/O and publishes immutable database snapshots. It requires only
+//! its file I/O and makes the database durable in a KV store. It requires only
 //! [`kv::KvStore::get`], [`kv::KvStore::put`] and [`kv::KvStore::delete`], not a
 //! multi-key transaction, compare-and-swap, listing operation or backend WAL API.
 //!
@@ -9,58 +9,50 @@
 //!
 //! SQL statements, SQL `COMMIT`, file sync and [`Session::checkpoint`] affect a
 //! private in-memory view. They do **not** make changes durable in KV. Dropping a
-//! session discards that view. [`Session::save`] checkpoints, stops the engine,
-//! publishes the snapshot and consumes the session.
+//! session discards that view. [`Session::save`] checkpoints the private WAL,
+//! commits the changed pages and consumes the session.
 //!
 //! | Layer | Representation | Survives dropping the session? |
 //! |---|---|---|
 //! | SQL working state | Dirty 4096-byte pages and private engine WAL | No |
-//! | Committed pages | Immutable encoded page objects | Yes, after acknowledged save |
-//! | Page map | Copy-on-write radix tree; root embedded in the head | Yes |
-//! | Recovery intent | Exact old/new heads and created/retired object IDs | Until cleanup succeeds |
+//! | Log | Segments of committed page images, one transaction per save | Yes, after acknowledged save |
+//! | Pages | `page/<n>`, overwritten in place by checkpoints | Yes |
+//! | Checkpoint record | `meta`: where replay starts and garbage ends | Yes |
 //!
-//! A save with changes commits through one atomic, durable head replacement;
-//! an unchanged save performs no mutations. If its
-//! [`SaveReport::cleanup_error`] is set, the SQL changes **are committed**; reopening
-//! retries reclamation. An error or cancellation can have an unknown commit outcome.
-//! Settle outstanding backend requests and reopen before deciding whether to retry
-//! application work. This crate does not provide application-level exactly-once IDs.
+//! A save commits by appending one log transaction, usually a single put. An
+//! unchanged save performs no mutations. If [`SaveReport::cleanup_error`] is set,
+//! the SQL changes **are committed**; only checkpoint work failed. An error or
+//! cancellation can have an unknown commit outcome. Settle outstanding backend
+//! requests and reopen before deciding whether to retry application work.
 //!
-//! # Why immutable pages and a map?
+//! # Why a log and pages in place?
 //!
-//! SQLite addresses pages by stable page number, while a changed page receives a
-//! new object ID. The radix map connects those two identities. A save rewrites only
-//! changed pages and affected map paths; unchanged subtrees are reused. Publishing
-//! one head switches the entire view, so partially uploaded objects cannot become
-//! visible through the old snapshot.
+//! One put is the only atomic operation the backend offers. A durable log turns
+//! it into a multi-page commit: a transaction is visible once its commit segment
+//! is. Because the log holds every page a checkpoint has not yet recorded in
+//! `meta`, checkpoints may overwrite `page/<n>` in place: replay applies the log
+//! over whatever they left. This is SQLite's own WAL design, applied to KV keys.
+//! There is no page map, no object allocation, no intent and no orphan collection.
+//! See `docs/PROTOCOL.md` and the private `snapshot` and `log` modules.
 //!
-//! Overwriting stable page keys in place would destroy the old view before the
-//! head commit and would need undo/redo logging or a multi-key transaction. A single
-//! whole-database value would make atomic replacement simpler, but every small save
-//! would rewrite the whole database. Persisting the engine WAL is another valid
-//! design, with a different durability boundary and a durable log/checkpoint lifecycle.
-//! Here, the engine WAL stays private and the durable intent stores IDs, not another
-//! copy of page payloads.
-//!
-//! The costs are map lookups, path copying, temporary new objects and explicit
-//! reclamation. The root lives in the head to save a dependent map request; a large
-//! root increases head/intent bytes. There is one fixed map representation. This is
-//! not MVCC: old readers must be gone before replaced objects are deleted.
+//! The costs are writing each page twice (log, then checkpoint) and replaying the
+//! log on open, which checkpoints keep short. This is not MVCC: one owner reads
+//! and writes the namespace.
 //!
 //! # Ownership and concurrency
 //!
 //! The host grants one owner exclusive use of a namespace, including settlement
 //! of cancelled requests before reopening or handing ownership to another session.
-//! There is no distributed lock or fence here. A save runs ordered phases (intent,
-//! new objects, head, retired objects, intent removal); puts or deletes within one
-//! phase target distinct keys and run concurrently, and each phase is fully
-//! acknowledged before the next starts. Open reads head and intent together, and the
-//! I/O pump batches adjacent file reads without crossing write, truncate or sync
-//! barriers.
+//! There is no distributed lock or fence here. A save issues its commit and its
+//! checkpoint slice concurrently, at most 16 mutations of distinct keys at a time
+//! per group. Open reads `meta` and probes the log, together when a
+//! [`PageCache`] knows where the log starts. The I/O pump batches adjacent file
+//! reads without crossing write, truncate or sync barriers.
 //!
-//! [`StorageOptions::cache`] can hold an [`ObjectCache`] shared by successive
-//! sessions of one namespace. Objects are immutable, so cached entries never need
-//! invalidation; a warm reopen then fetches only the head and intent.
+//! [`StorageOptions::cache`] can hold a [`PageCache`]: owner-process state shared
+//! by successive sessions of one namespace. It caches checkpointed pages, resets
+//! itself when another writer changes `meta`, and remembers what this owner has
+//! made durable, so a steady-state open and save are each one round trip.
 //!
 //! The caller's task drives nonblocking engine open/connect state machines and
 //! statement steps, awaits queued KV work, then resumes the engine. Completions run
@@ -99,27 +91,26 @@
 //!
 //! # Limits
 //!
-//! The intent is capped at [`MAX_PENDING_BYTES`]. Dirty pages, private WAL, map
-//! cache, write plans and query results do not have byte budgets. The current format
-//! has structural validation but no checksum or corruption repair. Use a fresh,
-//! dedicated namespace; no migration or format discovery is implemented. Simulation
-//! and benchmark support require the opt-in `simulation` feature.
+//! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
+//! Dirty pages, private WAL, the replayed log and query results do not have byte
+//! budgets. The format has structural validation but no checksum or corruption
+//! repair. Use a fresh, dedicated namespace; no migration or format discovery is
+//! implemented. Simulation and benchmark support require the opt-in `simulation`
+//! feature.
 mod cache;
 mod format;
 pub mod io;
 pub mod kv;
-pub mod log;
-mod map_codec;
+mod log;
 pub mod page_codec;
-mod pending;
 #[cfg(feature = "simulation")]
 pub mod simulation;
 mod snapshot;
 
-pub use cache::ObjectCache;
+pub use cache::PageCache;
+pub use log::MAX_SEGMENT_BYTES;
 pub use page_codec::PageCompression;
-pub use pending::{MAX_PENDING_BYTES, SaveReport};
-pub use snapshot::StorageOptions;
+pub use snapshot::{CHECKPOINT_PAGES, SaveReport, StorageOptions};
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use crate::kv::KvStore;

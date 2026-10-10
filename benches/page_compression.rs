@@ -103,6 +103,14 @@ async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     }
     db.execute("COMMIT").await?;
     assert!(db.save().await?.cleanup_error.is_none());
+    // Steady state: a later save checkpoints the bulk load into page keys.
+    let all = StorageOptions {
+        checkpoint_after: 0,
+        ..options(codec)
+    };
+    let mut db = Session::open_with_options(Arc::new(store.clone()), all).await?;
+    db.execute("CREATE TABLE other(x)").await?;
+    assert!(db.save().await?.cleanup_error.is_none());
     store.crash(&[]);
     Ok(store)
 }
@@ -129,36 +137,33 @@ impl Sample {
             .values()
             .map(|t| t.put_key_bytes + t.delete_key_bytes)
             .sum();
-        let block = stats.kind("block");
-        let block_gets = block.gets;
-        let block_puts = block.puts;
+        let page = stats.kind("page");
         println!(
-            "{},{},{:?},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{:?},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.case.rows,
             self.case.bytes,
             self.case.payload,
             self.codec,
             self.run,
             self.operation,
-            store.block_count(),
+            store.page_count(),
             stats.gets,
             stats.puts,
             stats.deletes,
             stats.bytes_read + read_keys,
             stats.bytes_written + write_keys,
             stats.bytes_written,
-            stats.kind("block").bytes_written,
-            stats.kind("node").bytes_written,
-            stats.kind("head").bytes_written,
-            stats.kind("intent").bytes_written,
-            block_gets,
-            block_puts,
+            page.bytes_written,
+            stats.kind("log").bytes_written,
+            stats.kind("meta").bytes_written,
+            page.gets,
+            page.puts,
             store.stored_bytes(),
             store.stored_key_bytes(),
             app_read,
             app_write,
             elapsed_ns,
-            block.bytes_read
+            page.bytes_read
         );
     }
 }
@@ -254,7 +259,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
 
 async fn pages(store: &MemoryKv) -> Result<Vec<Vec<u8>>> {
     let mut pages = Vec::new();
-    for key in store.keys().iter().filter(|k| k.starts_with("v11/block/")) {
+    for key in store.keys().iter().filter(|k| k.starts_with("v12/page/")) {
         pages.push(page_codec::decode(&store.get(key).await?.unwrap())?);
     }
     Ok(pages)
@@ -334,7 +339,7 @@ fn main() -> Result<()> {
         "rows,payload_bytes,payload,codec,run,sample_pages,iterations,encoded_bytes,compressed_pages,encode_ns,decode_ns"
     )?;
     println!(
-        "rows,payload_bytes,payload,codec,run,operation,db_pages,gets,puts,deletes,read_key_value_bytes,mutation_key_value_bytes,put_value_bytes,block_write_bytes,node_write_bytes,head_write_bytes,intent_write_bytes,block_gets,block_puts,stored_value_bytes,stored_key_bytes,app_read_bytes,app_write_bytes,elapsed_ns,block_read_bytes"
+        "rows,payload_bytes,payload,codec,run,operation,db_pages,gets,puts,deletes,read_key_value_bytes,mutation_key_value_bytes,put_value_bytes,page_write_bytes,log_write_bytes,meta_write_bytes,page_gets,page_puts,stored_value_bytes,stored_key_bytes,app_read_bytes,app_write_bytes,elapsed_ns,page_read_bytes"
     );
     futures::executor::block_on(async {
         for (rows, bytes) in [(100, 64), (100, 512), (100, 9000), (10_000, 256)] {

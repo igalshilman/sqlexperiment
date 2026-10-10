@@ -1,163 +1,109 @@
-# Recovery through one pending-save record
+# Commit, checkpoint and recovery
 
-The storage protocol requires whole-value reads and atomic, durable puts/deletes.
-A single pending record tracks allocation and reclamation without scanning GC.
+The backend offers whole-value gets and atomic, durable single-key puts and
+deletes. A durable log turns one put into a multi-page commit; checkpoints then
+keep pages at stable keys, as SQLite does with its WAL. One owner uses the
+namespace at a time and settles every outstanding request before another opens.
 
-## Invariant
+## Why this shape
 
-At most one save is pending per namespace. Its durable intent exists before any
-new page or map node is written. The intent remains until either aborted new
-objects or committed retired objects have all been durably deleted. No historical
-readers may retain the preceding snapshot. One owner includes outstanding requests:
-a cancelled old request must never arrive during recovery or after a new save.
+Without a log, the only way to commit many pages atomically is to write new
+immutable objects and switch one pointer to them. That needs a page map, object
+allocation, a root pointer and an intent record to reclaim aborted or replaced
+objects. The previous format (v11) did exactly that.
 
-The map planner identifies replaced edges while rewriting touched paths. It retains
-unchanged subtrees without traversing them. It removes unreachable temporary nodes
-from the write plan and filters retirement candidates against references retained
-by the final new nodes/head. The normal path does not enumerate all stored keys or
-walk the full old map. Test-only reachability checks verify exact object accounting.
+With a log, the commit record carries the pages. Pages can then be overwritten in
+place, because until the checkpoint record moves past a transaction, replay
+applies that transaction's images over whatever is stored at `page/<n>`. Nothing
+is allocated, so nothing can leak, and there is no intent or map.
 
-## Persistent record
+## Commit
 
-`v11/pending_save` contains:
+A save encodes its changed pages (after the private engine checkpoint) as one
+transaction at `Log::next`, the sequence after the last committed transaction.
 
-| Field | Encoding |
-|---|---|
-| Magic | 4 bytes, `SP11` |
-| Old head length, new head length | Two u32 LE lengths; zero old length means no old head |
-| Created count, retired count | Two u32 LE counts |
-| Old head, new head | Exact head byte strings |
-| Created entries, then retired entries | Each entry: kind u8 (0 block, 1 node, 2 log segment) and ID u64 LE |
+1. Put every segment but the last, concurrently.
+2. Put the last segment, which carries the commit flag. Its acknowledgement
+   commits the save.
 
-Entries in each list are strictly sorted by kind and ID, without duplicates.
-Created IDs exceed the old counter and do not exceed the new counter; created
-entries are never log segments. Retired block and node IDs are nonzero and no
-larger than the old counter. Retired log sequences lie at or after the old head's
-log start and, when the new head keeps the log enabled, before its log start. The heads must differ; a truly
-unchanged save is a no-op. Head structure and exact lengths are validated. Current
-head bytes must match one of the recorded heads. No hashes, generation reservation,
-page payload duplication, external intent object or additional commit flag is used.
+A transaction of up to 1 MiB of images is a single put.
 
-For C new objects and R retired objects, intent size is
-`20 + old_head_bytes + new_head_bytes + 9*(C+R)` bytes. The 1 MiB limit is checked
-before mutations. Whole-record read/write and in-memory planning are intentional
-prototype limits. Chunking is deferred because it introduces another lifecycle.
-Validation detects malformed records, not all valid-looking storage corruption.
+## Replay
 
-## Ordered save
+Open reads `meta`, then reads `log/<start>`, `log/<start+1>`, … concurrently in
+batches of `checkpoint_after + 2` (at most 16). It applies each transaction when it
+reaches the commit segment, and stops at the first absent key or at the first
+segment whose transaction start is not the expected one. Everything after that
+point is debris from a failed save: a part of an uncommitted transaction, or a
+part left behind when a shorter transaction later reused the sequence. The next
+commit overwrites it from `Log::next`. Ignoring debris is safe because a commit
+segment is only written after its transaction's other segments were acknowledged.
 
-1. Finish SQL work and checkpoint locally; drop the engine connection.
-2. Construct the complete new-object and retirement plan.
-3. Put intent and await durability.
-4. Put new objects concurrently, awaiting every durable acknowledgment.
-5. Put the new head and await durability: commit.
-6. Delete retired objects concurrently, awaiting every durable acknowledgment.
-7. Delete intent and await durability.
+A page reads as its latest image in the replayed log, else `page/<n>`.
 
-Mutations within one phase target distinct keys and run concurrently, at most 16
-at a time; each phase is fully acknowledged before the next starts. After the
-first error no further mutation starts, and those already running are awaited
-before the save returns, so no request of the attempt is left outstanding and no
-key is ever mutated by two overlapping requests. Recovery deletes use the same
-rule. Until the final intent deletion takes effect,
-the complete intent remains available for recovery. Cancellation or an unknown
-remote outcome still requires host settlement. A new session cannot start until
-open has completed recovery. Same-key mutations from different attempts cannot overlap.
+## Checkpoint
 
-## Crash and recovery cases
+Each save may also checkpoint, in the same round trip as its commit:
 
-| Interrupted stage | Durable/visible state | Recovery |
+- **When.** More than `checkpoint_after` transactions, or more than 256 KiB of
+  segments, have been replayed.
+- **What.** Whole transactions from the oldest, until about 12 pages are covered.
+  Each page gets its *latest* committed image from the replayed log. Writing a
+  newer image than the checkpoint boundary is harmless, because the log still
+  replays over it. Holes become deletes. The session's own, not yet committed
+  pages are never written in place.
+- **Recording.** `meta.log_start` may move past a transaction only after all its
+  pages are acknowledged. Without a cache the save writes `meta` in a second round
+  trip. With a `PageCache`, the owner remembers the acknowledged position (a
+  *claim*) and the next save writes `meta` in its first round trip, alongside its
+  own commit.
+- **Garbage.** Segments in `[deleted_below, log_start)` of the durable `meta` are
+  deleted, and the next `meta` records the new `deleted_below`. Deleting segments
+  that a durable `meta` has not passed could make replay start at a missing key
+  and silently skip committed transactions.
+- **Large saves.** A save whose segments exceed 256 KiB checkpoints itself and the
+  rest of the log right after its commit is acknowledged, then writes `meta`. That
+  takes extra round trips once, but later opens do not replay a bulk load.
+
+Every step is idempotent. A crash at any point leaves state that replay reads
+correctly; at worst it replays more of the log or leaves garbage segments for the
+next checkpoint.
+
+## Uncertain outcomes and confirmation
+
+An error or cancellation can leave a put absent, visible but not durable, or
+durable. If a failed commit is visible but not durable, a later commit must not
+build on it, and no reader should observe it. Open therefore re-puts the commit
+segment of the last transaction, and the `meta` it read, before exposing them.
+It skips this when:
+
+- the backend reports `durable_when_visible()`, as most replicated stores do; or
+- the owner's `PageCache` shows that this process wrote that commit or that `meta`
+  and had it acknowledged.
+
+Every earlier commit was acknowledged, or confirmed this way, before its successor
+was written. The earlier segments of a multi-segment transaction were
+acknowledged before its commit segment was written.
+
+| Interrupted step | State after a crash | Recovery |
 |---|---|---|
-| Intent put, before acknowledgment | No object puts have begun | If intent exists, select old head and remove any listed new IDs; missing deletes are harmless |
-| New-object writes | Intent exists, old head selected | Confirm old head, delete every created ID, then delete intent |
-| Head put | Old or new head may be visible; durability uncertain | Confirm the selected head durably before either cleanup branch |
-| Retirement | New head is durable; intent lists old objects | Confirm new head, retry all retired deletes, then delete intent |
-| Intent deletion | Chosen cleanup branch has completed durably | If intent reappears after crash, repeating that branch is safe |
-
-Confirming an absent old head uses durable `delete(head)`. A failed confirmation
-performs no object deletion. Recovering a visible new head commits that choice:
-all its new objects had acknowledged durability before its original head put began.
-A head matching neither recorded value causes an error before any mutation.
-
-Open fetches pending and head concurrently under quiescent ownership. Both reads
-must succeed and validate before any recovery mutation or usable session. A recovery
-failure keeps the namespace unavailable to new SQL work until retry succeeds. Recovery
-reads no database payloads and does not fetch map nodes: the ID lists are sufficient.
-
-The record is not removed on a precommit error merely because publication failed:
-new writes might already be durable. Similarly, an error deleting one old object
-does not erase the intent, even when other deletes have succeeded.
-
-`Ok(SaveReport)` means the head put was acknowledged. `cleanup_error: Some` means
-committed with unfinished maintenance; SQL must not be repeated on that basis.
-An error/cancellation before acknowledgment can have an unknown commit outcome.
+| Non-commit segment | Debris; transaction uncommitted | Ignored by replay; overwritten by the next commit |
+| Commit segment | Absent, or present (then committed) | Replay decides; open confirms a present tail |
+| Checkpoint page put | Old or new committed image at `page/<n>` | Log still replays over it |
+| `meta` put | Old or new record; both are valid | Open confirms what it reads |
+| Garbage delete | Segment present or absent below a durable start | Deleted again by a later checkpoint |
 
 ## Costs
 
-For C created objects and R retired objects, a normal nonempty save performs
-**C+2 puts and R+1 deletes**: objects plus intent/head, retired objects plus intent.
-There is no extra head rewrite to clear cleanup metadata. New stores with no old
-objects still use an intent: a failed initial publication must also be recoverable.
-A no-op save with an identical head and empty object lists performs no mutations.
+| Operation | Round trips | Mutations |
+|---|---|---|
+| Steady-state save (owner with cache) | 1 | 1 commit put, plus checkpoint pages, garbage deletes and a `meta` put when due |
+| Save without cache | 1, or 2 when it checkpoints | Same, with `meta` in the second round trip |
+| Large save | 2 or more | Segments, then all logged pages and `meta` |
+| Open (owner with cache) | 1 | None |
+| Open, fresh owner, weak backend | 2 to 3 | Re-put of the commit tail and `meta` |
+| Cold page read | 1 get | None |
 
-Cold open adds one get for the pending key alongside the head get. Interrupted-save
-recovery adds one head confirmation, C or R idempotent deletes, and intent deletion.
-These are operation counts, not network round trips: a save needs about
-4 + ⌈C/16⌉ + ⌈R/16⌉ sequential round trips. The two initial reads overlap;
-recovery deletes run concurrently after the head confirmation. Logical durable deletion does not imply immediate physical
-space return by the backend or its replication layer.
+Measurements are in [LOG_RESULTS.md](../benches/LOG_RESULTS.md).
 
-The radix root is embedded in the head. Replaced pages and external child nodes
-are retired by the same save; unchanged subtrees remain shared. No deferred
-folding or shadowed base pages need a separate lifecycle.
-
-## Delta log
-
-`StorageOptions::max_log_segments` lets a save commit with **one put** instead of
-the publication above. It ships the save's changed pages after the private
-checkpoint, which amounts to the deduplicated committed WAL frames, as one
-segment. The engine WAL itself stays private.
-
-- **Enabling.** The head's `log_start` is zero when the log is disabled. A save
-  with the log enabled by policy on such a head publishes normally and writes
-  `log_start = 1`. With `log_start != 0`, open probes the log; otherwise it
-  issues no log reads.
-- **Append.** With `count` segments found at open and `count <
-  max_log_segments`, a save puts `log/<log_start + count>`. Its acknowledgement
-  commits; no intent, object or head is written. A segment over 1 MiB publishes
-  instead.
-- **Open.** After intent recovery, read `log/<log_start>…` concurrently in batches
-  of `max_log_segments + 1` (at most 16) until the first absent key; a present
-  key after an absent one is an error. Replay segments in order over the map.
-  Then **re-put the last segment** before exposing any page: a failed append can
-  leave it visible but not durable, and a later append must never build on it.
-  Every earlier segment was acknowledged or confirmed this way before its
-  successor was written. With an object cache, the first batch is read together
-  with the head at the cache's last known `log_start` and discarded if the head
-  disagrees.
-- **Fold.** When the log is full, a segment is too large, or the policy is zero,
-  a save publishes log and session pages through the intent protocol. The intent
-  retires the segments in `[log_start, log_start + count)` with the replaced
-  objects. The new head sets `log_start` to the next sequence number, or to zero
-  when the policy is zero. Interrupted folds recover like any other save.
-- **Uncertain append.** The session is poisoned. The host settles the request
-  and reopens. Open then finds the segment absent (the next save reuses its
-  sequence number) or present (open confirms it and the save is committed).
-
-Costs: an append is 1 put. Open adds the probe, which shares the head's round
-trip when the cache supplies the start, and one confirmation put whenever
-segments exist. A fold costs a normal publication over all logged pages plus one
-delete per segment. Measurements are in
-[LOG_RESULTS.md](../benches/LOG_RESULTS.md).
-
-## Why the engine WAL stays private
-
-The private engine WAL supplies SQL transaction processing and rollback within a
-session. It never reaches durable K/V. The pending-save record covers publication
-of the resulting immutable objects, storing IDs and head metadata only. The delta
-log above is the durable-log variant. It ships page images after the local
-checkpoint, so recovery needs no WAL frame format, salts or checksums, and each
-page appears once per save.
-
-Use a dedicated namespace. Independently injected garbage is outside the protocol;
-there is no generic repair collector.
+Use a dedicated namespace. Independently injected garbage is outside the protocol.

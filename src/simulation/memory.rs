@@ -1,6 +1,6 @@
 //! In-memory visibility/durability model and exact logical traffic counters.
 use crate::{
-    format::{HEAD, Kind, PENDING},
+    format::{LOG_PREFIX, META, PAGE_PREFIX},
     kv::KvStore,
     yield_now,
 };
@@ -28,18 +28,14 @@ pub struct Traffic {
     pub delete_key_bytes: u64,
 }
 
-/// Object class of a key, used to split traffic counters.
+/// Class of a key, used to split traffic counters: `page`, `log`, `meta` or `other`.
 pub fn object_kind(key: &str) -> &'static str {
-    if key.starts_with(Kind::Block.prefix()) {
-        "block"
-    } else if key.starts_with(Kind::Node.prefix()) {
-        "node"
-    } else if key.starts_with(Kind::Log.prefix()) {
+    if key.starts_with(PAGE_PREFIX) {
+        "page"
+    } else if key.starts_with(LOG_PREFIX) {
         "log"
-    } else if key == HEAD {
-        "head"
-    } else if key == PENDING {
-        "intent"
+    } else if key == META {
+        "meta"
     } else {
         "other"
     }
@@ -150,8 +146,9 @@ impl MemoryKv {
             .map(String::len)
             .sum()
     }
-    pub fn block_count(&self) -> usize {
-        let prefix = Kind::Block.prefix();
+    /// Number of checkpointed page objects.
+    pub fn page_count(&self) -> usize {
+        let prefix = PAGE_PREFIX;
         self.inner
             .lock()
             .unwrap()

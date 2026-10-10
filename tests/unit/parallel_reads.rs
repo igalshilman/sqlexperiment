@@ -25,7 +25,7 @@ impl KvStore for GatedReads {
                 let _active = Active(&self.active);
                 self.maximum.fetch_max(n, Ordering::SeqCst);
                 gate.await.map_err(io::Error::other)?;
-                if self.fail_first && key.ends_with("0000000000000001") {
+                if self.fail_first && key == crate::format::page_key(0) {
                     return Err(io::Error::other("injected read error"));
                 }
                 return self.inner.get(key).await;
@@ -46,22 +46,36 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
     futures::executor::block_on(async {
         for mode in ["success", "error", "cancel"] {
             let base = Arc::new(MemoryKv::default());
-            let initial = KvIo::mount(base.clone()).await?;
-            initial.write(0, 0, &vec![7; 2 * BLOCK_SIZE]).await?;
+            // Commit two pages, then checkpoint them so reads reach the backend.
+            let all = crate::StorageOptions {
+                checkpoint_after: 0,
+                ..Default::default()
+            };
+            for _ in 0..2 {
+                let initial = KvIo::mount_with_options(base.clone(), all.clone()).await?;
+                initial.write(0, 0, &vec![7; 2 * BLOCK_SIZE]).await?;
+                initial.publish().await?;
+            }
+            // A third save checkpoints the second and empties the replayed log.
+            let initial = KvIo::mount_with_options(base.clone(), all.clone()).await?;
+            initial
+                .write(0, 2 * BLOCK_SIZE as u64, &vec![1; BLOCK_SIZE])
+                .await?;
+            initial.truncate_file(0, 2 * BLOCK_SIZE as u64).await?;
             initial.publish().await?;
             let (send_a, recv_a) = oneshot::channel();
             let (send_b, recv_b) = oneshot::channel();
             let store = Arc::new(GatedReads {
                 inner: base.fork(),
                 gates: Mutex::new(BTreeMap::from([
-                    (crate::format::Kind::Block.key(1), recv_a),
-                    (crate::format::Kind::Block.key(2), recv_b),
+                    (crate::format::page_key(0), recv_a),
+                    (crate::format::page_key(1), recv_b),
                 ])),
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),
                 fail_first: mode == "error",
             });
-            let io = KvIo::mount(store.clone()).await?;
+            let io = KvIo::mount_with_options(store.clone(), all).await?;
             let file = MountedIo(io.clone()).open_file(DB_PATH, OpenFlags::Create, false)?;
             let outputs: Vec<_> = (0..4)
                 .map(|_| Arc::new(Buffer::new_temporary(BLOCK_SIZE)))

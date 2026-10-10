@@ -1,12 +1,15 @@
-//! Publish-every-save versus the durable delta log, in critical-path round trips.
+//! The WAL-native store in critical-path round trips.
 //!
 //! Each configuration replays the same interleaved session sequence: a point
 //! read, a one-row update, a ten-row update and an insert, 32 times. Every
-//! session reopens; with `cache`, all sessions of a run share one `ObjectCache`
-//! as a long-lived owner process would. Round trips come from `LatencyKv`'s
-//! virtual clock; operation and byte counts from `MemoryKv`. Output is CSV.
+//! session reopens; with `cache`, all sessions of a run share one `PageCache`
+//! as a long-lived owner process would. `backend` is `weak` when a failed put
+//! may be visible without being durable (open confirms what it did not write)
+//! and `strong` otherwise. Round trips come from `LatencyKv`'s virtual clock;
+//! operation and byte counts from `MemoryKv`. Output is CSV, comparable with
+//! `results/log-shipping-v11.csv` from the previous design.
 use sqlite_kv::{
-    ObjectCache, Result, Session, StorageOptions,
+    PageCache, Result, Session, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv},
 };
@@ -30,16 +33,16 @@ const CASES: [Case; 2] = [
         indexes: 1,
     },
 ];
-/// Zero publishes on every save; others allow that many log segments.
-const POLICIES: [u32; 3] = [0, 4, 16];
+/// Transactions kept in the log before saves checkpoint.
+const POLICIES: [u32; 2] = [4, 16];
 const ITERATIONS: u64 = 32;
 const WORKLOADS: [&str; 4] = ["read_pk", "update_1", "update_10", "insert_1"];
 
 type Store = Arc<LatencyKv<MemoryKv>>;
 
-fn options(policy: u32, cache: &Option<ObjectCache>) -> StorageOptions {
+fn options(policy: u32, cache: &Option<PageCache>) -> StorageOptions {
     StorageOptions {
-        max_log_segments: policy,
+        checkpoint_after: policy,
         cache: cache.clone(),
         ..StorageOptions::default()
     }
@@ -47,7 +50,8 @@ fn options(policy: u32, cache: &Option<ObjectCache>) -> StorageOptions {
 
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Session::open(Arc::new(store.clone())).await?;
+    let kv = Arc::new(store.clone());
+    let mut db = Session::open(kv.clone()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, payload TEXT)")
         .await?;
     if case.indexes > 0 {
@@ -60,6 +64,10 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     ))
     .await?;
     db.save().await?;
+    // Steady state: a later save checkpoints the bulk load into page keys.
+    let mut db = Session::open_with_options(kv, options(0, &None)).await?;
+    db.execute("CREATE TABLE other(x)").await?;
+    db.save().await?;
     Ok(store)
 }
 
@@ -71,7 +79,8 @@ fn row(case: Case, iteration: u64, n: u64) -> u64 {
 struct Phase<'a> {
     case: Case,
     policy: u32,
-    cache: &'a Option<ObjectCache>,
+    strong: bool,
+    cache: &'a Option<PageCache>,
     run: usize,
     iteration: u64,
     workload: &'a str,
@@ -86,11 +95,12 @@ impl Phase<'_> {
             .filter(|k| k.contains("/log/"))
             .count();
         println!(
-            "{},{},{},{},{},{},{},{},{phase},{},{},{},{},{},{},{segments},{}",
+            "{},{},{},{},{},{},{},{},{},{phase},{},{},{},{},{},{},{segments},{}",
             self.case.rows,
             self.case.payload,
             self.case.indexes,
             self.policy,
+            if self.strong { "strong" } else { "weak" },
             self.cache.is_some(),
             self.run,
             self.iteration,
@@ -160,10 +170,11 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
     Ok(())
 }
 
-async fn run(case: Case, policy: u32, cached: bool, run: usize) -> Result<()> {
-    let store: Store = Arc::new(LatencyKv::new(baseline(case).await?));
-    let cache = cached.then(|| ObjectCache::new(256 << 20));
-    // Enable the log outside the measurement; the first logged save folds.
+async fn run(case: Case, policy: u32, strong: bool, cached: bool, run: usize) -> Result<()> {
+    let store: Store =
+        Arc::new(LatencyKv::new(baseline(case).await?).with_durable_when_visible(strong));
+    let cache = cached.then(|| PageCache::new(256 << 20));
+    // Warm the owner state outside the measurement.
     let mut db = Session::open_with_options(store.clone(), options(policy, &cache)).await?;
     db.execute("UPDATE t SET a = a WHERE id = 1").await?;
     db.save().await?;
@@ -172,6 +183,7 @@ async fn run(case: Case, policy: u32, cached: bool, run: usize) -> Result<()> {
             let phase = Phase {
                 case,
                 policy,
+                strong,
                 cache: &cache,
                 run,
                 iteration,
@@ -193,14 +205,16 @@ fn main() -> Result<()> {
         .find(|arg| !arg.starts_with('-'))
         .map_or(Ok(1), |arg| arg.parse())?;
     println!(
-        "rows,payload_bytes,indexes,max_log_segments,cache,run,iteration,workload,phase,round_trips,gets,puts,deletes,bytes_read,bytes_written,log_segments,stored_bytes"
+        "rows,payload_bytes,indexes,checkpoint_after,backend,cache,run,iteration,workload,phase,round_trips,gets,puts,deletes,bytes_read,bytes_written,log_segments,stored_bytes"
     );
     futures::executor::block_on(async {
         for case in CASES {
             for policy in POLICIES {
-                for cached in [false, true] {
-                    for repeat in 0..repeats {
-                        run(case, policy, cached, repeat).await?;
+                for strong in [false, true] {
+                    for cached in [false, true] {
+                        for repeat in 0..repeats {
+                            run(case, policy, strong, cached, repeat).await?;
+                        }
                     }
                 }
             }

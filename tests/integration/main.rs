@@ -5,5 +5,4 @@ mod failpoints;
 mod failure;
 mod log;
 mod publication;
-mod recovery;
 mod sql;

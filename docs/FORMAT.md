@@ -1,19 +1,14 @@
 # Current storage format
 
-Only this format is implemented. Use a dedicated namespace. Constants and key
-construction live in `src/format.rs`; there is no migration or format discovery.
+Only this format (v12) is implemented. Use a dedicated namespace. Constants and
+key construction live in `src/format.rs`; there is no migration or format
+discovery.
 
 | Key | Value |
 |---|---|
-| `v11/head` | Current snapshot head |
-| `v11/pending_save` | Pending publication and reclamation record |
-| `v11/node/<16-digit hex ID>` | Immutable map node |
-| `v11/block/<16-digit hex ID>` | Immutable encoded 4096-byte page |
-| `v11/log/<16-digit hex sequence>` | Delta-log segment |
-
-Object IDs are incrementing u64 values shared by pages and nodes, not hashes.
-Published IDs are never reused. IDs above the recovered committed counter can be
-reused only after aborted-attempt cleanup. Overflow fails before any mutation.
+| `v12/meta` | Checkpoint record; absent until the first checkpoint |
+| `v12/log/<16-digit hex sequence>` | Log segment |
+| `v12/page/<16-digit hex page number>` | Checkpointed page, overwritten in place |
 
 ## Pages
 
@@ -23,55 +18,37 @@ decoding must produce exactly 4096 bytes into a fixed-size destination. The enco
 uses raw storage when compression does not shrink the payload. Maximum value:
 4099 bytes. This validates structure and length, without a payload checksum.
 
-## Map nodes
+The same envelope is used for page images inside log segments. An absent
+`page/<n>` is a zero-filled hole.
 
-The map associates logical page numbers with immutable object IDs. A node has up
-to 256 edges. Its encoder chooses the smaller representation:
+## Log segments
 
-- Tag 0: sorted (edge u8, ID u64 LE) entries.
-- Tag 1: count u16 LE; sorted edge bytes for counts up to 32, otherwise a 32-byte
-  bitmap; minimum ID as unsigned LEB128; then LEB128 offsets from that minimum in
-  edge order.
-
-External nodes must be nonempty. Empty inline roots have zero bytes. Decoding
-validates lengths, edge order, bitmap counts, minimal varints, nonzero IDs and
-arithmetic bounds. Every child ID must precede its parent node's ID; inline roots
-are bounded by the head's allocation counter. Full u64 IDs are supported. The
-maximum encoded node is 2305 bytes.
-
-## Head
+A save is one transaction of page images, written to consecutive sequence
+numbers. Only its last segment has the commit flag.
 
 | Field | Encoding |
 |---|---|
-| Magic | `SK11` |
-| Database byte length | u64 LE |
-| Last allocated object ID | u64 LE |
-| Radix height | u8, at most 8 |
-| First delta-log sequence | u64 LE; zero when the log is disabled |
-| Root | Encoded radix node occupying the remainder of the value |
-
-The fixed prefix is 29 bytes. The root is always embedded in the head. Height
-zero requires an empty root; nonzero height requires a nonempty root. The same
-node decoder bounds the root to 2305 bytes, so a head is at most 2334 bytes.
-There is no layout selector, root-length field, override list or separate root
-object. Compression policy is per-write and does not change the head.
-
-The pending record uses `SP11`. Its exact schema and commit/recovery ordering are
-documented in [PROTOCOL.md](PROTOCOL.md). Its object entries use kind 2 for
-retired log segments, whose "ID" is the sequence number.
-
-## Delta-log segments
-
-A segment holds the pages changed by one save, after the private checkpoint:
-
-| Field | Encoding |
-|---|---|
-| Magic | `SL11` |
+| Magic | `SL12` |
 | Sequence number | u64 LE; must equal the key's sequence |
-| Database byte length | u64 LE, after this save |
+| First sequence of the transaction | u64 LE; at most the sequence number |
+| Flags | u8; bit 0 marks the commit segment, other bits must be zero |
+| Database byte length | u64 LE, after the transaction |
 | Entry count | u32 LE |
-| Entries | Strictly ascending: page index u64 LE, encoded length u16 LE (zero for a hole), page value |
+| Entries | Strictly ascending: page index u64 LE, image length u16 LE (zero for a hole), page image |
 
-Page values use the page envelope above. A segment is at most 1 MiB; a larger
-save publishes instead. Segments are replayed from the head's first sequence
-until the first absent key. See [PROTOCOL.md](PROTOCOL.md#delta-log).
+A segment is at most 1 MiB. Every image is decoded when the segment is read.
+
+## Checkpoint record
+
+| Field | Encoding |
+|---|---|
+| Magic | `SM12` |
+| Log start | u64 LE; replay starts here |
+| Deleted below | u64 LE; nonzero and at most the log start |
+| Database byte length | u64 LE, as of the log start |
+
+Segments before the log start are checkpointed into pages; those before
+"deleted below" are deleted too. A missing record means log start 1, deleted
+below 1 and an empty database. The value is exactly 28 bytes.
+
+See [PROTOCOL.md](PROTOCOL.md) for commit, replay, checkpoint and recovery rules.

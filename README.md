@@ -1,10 +1,11 @@
 # SQLite KV
 
-A Rust experiment running SQLite-compatible SQL over immutable pages fetched on demand, using
-the unmodified Rust engine implemented by Turso (`turso_core` 0.8.2).
-One owner serializes sessions in a dedicated namespace. SQL writes and the WAL
-stay private until `Session::save()` checkpoints and publishes a new snapshot
-through one atomic durable head replacement.
+A Rust experiment running SQLite-compatible SQL over an asynchronous key/value
+store, using the unmodified Rust engine implemented by Turso (`turso_core` 0.8.2).
+One owner serializes sessions in a dedicated namespace. SQL writes and the engine
+WAL stay private until `Session::save()` commits the changed pages as one durable
+log transaction, usually a single put. Checkpoints later move pages to stable keys,
+as SQLite does with its WAL.
 
 The default library contains the adapter and storage protocol. Simulation,
 fault injection, counters and artificial scheduling yields are opt-in.
@@ -22,27 +23,26 @@ db.execute("CREATE TABLE t(n INTEGER)").await?;
 db.execute("INSERT INTO t VALUES(1)").await?;
 let saved = db.save().await?;
 if let Some(error) = saved.cleanup_error {
-    // Publication succeeded. Reopen to retry cleanup; do not replay the INSERT.
-    eprintln!("committed; cleanup pending: {error}");
+    // Committed; only checkpoint work failed. Do not replay the INSERT.
+    eprintln!("committed; checkpoint pending: {error}");
 }
 ```
 
-The page map is a radix tree with its root embedded in the snapshot head.
-There is no map selection option. A save runs ordered phases; puts or deletes
-within one phase target distinct keys and run concurrently (up to 16), and each
-phase is fully acknowledged before the next. `StorageOptions` selects
-`PageCompression::{Lz4, Raw}` (default adaptive LZ4), applied only to new pages;
-stored tags determine decoding. `StorageOptions::cache` takes an optional
-`ObjectCache`, a byte-bounded LRU of committed objects shared by successive
-sessions of one namespace. Objects are immutable, so entries never go stale; a
-warm reopen fetches only the head and intent.
-`StorageOptions::max_log_segments` (default zero) enables a durable delta log:
-a save commits by appending one segment of changed pages, a single put, and
-every `max_log_segments + 1` saves fold the log into the map. Opens then cost
-one extra round trip to confirm the last segment. See the
-[delta-log results](benches/LOG_RESULTS.md) for the trade-off.
-Independent head/intent reads overlap during open. The engine I/O pump overlaps
-adjacent reads in batches of up to 16, with write/truncate/sync barriers.
+A save appends its changed pages to the log; the commit segment's put commits it.
+In the same round trip it may checkpoint the oldest logged pages into
+`page/<n>` keys and delete checkpointed segments. Pages are found in the replayed
+log, else at their own key, so a cold read is one get. There is no page map,
+object allocation or intent. `StorageOptions` selects
+`PageCompression::{Lz4, Raw}` (default adaptive LZ4), `checkpoint_after` (logged
+transactions before saves checkpoint, default 4) and an optional `PageCache`:
+owner-process state that caches pages, resets itself when another writer moves
+`meta`, and remembers what this owner made durable. With it, a steady-state open
+and save are one round trip each. Backends whose visible values are always
+durable can say so with `KvStore::durable_when_visible`; otherwise a fresh open
+re-puts the log tail and `meta` it did not write. See
+[the results](benches/LOG_RESULTS.md) for measurements against the previous design.
+The engine I/O pump overlaps adjacent reads in batches of up to 16, with
+write/truncate/sync barriers.
 
 The host task drives engine open/connect, SQL steps and async KV I/O directly.
 There are no worker threads or background tasks. Cached queries yield every 64
@@ -53,9 +53,9 @@ The normal query and checkpoint paths use asynchronous I/O.
 
 SQL COMMIT and `checkpoint()` affect the private view. `save()` consumes the
 session and is the durability boundary. Dropping a session discards unsaved work.
-Query errors and cancellation poison the session. `Ok(SaveReport)` confirms
-publication; its `cleanup_error` reports unfinished reclamation. An ordinary
-error or cancellation can leave an unknown publication outcome. Settle requests
+Query errors and cancellation poison the session. `Ok(SaveReport)` confirms the
+commit; its `cleanup_error` reports failed checkpoint work, which a later save
+retries. An ordinary error or cancellation can leave an unknown commit outcome. Settle requests
 and reopen; application operation IDs can resolve uncertain non-idempotent work.
 
 ## Backend and ownership contract
@@ -65,7 +65,7 @@ and reopen; application operation IDs can resolve uncertain non-idempotent work.
   Deleting a missing key succeeds. No multi-key transaction or sync call is needed.
 - Errors and cancellation may leave no effect, a visible-only effect, or a durable
   effect. No torn values are allowed; success on one key need not flush another.
-- The host enforces exclusive ownership, excludes old snapshot readers, and settles
+- The host enforces exclusive ownership and settles
   every outstanding request before recovery or ownership transfer. Dropping a
   future alone does not fence a remote request.
 
@@ -85,11 +85,11 @@ cargo doc --locked --no-deps --document-private-items
 
 | Location / target | Purpose | Feature |
 |---|---|---|
-| `src/` | Adapter, codecs and publication protocol | None |
-| `src/simulation/` | MemoryKv, fault injection and measurement | `simulation` |
+| `src/` | Adapter, codecs, log and checkpoint protocol | None |
+| `src/simulation/` | MemoryKv, fault injection, latency and measurement | `simulation` |
 | `tests/public_api.rs` | Real adapter with an immediately-ready test backend | None |
 | `tests/unit/` | Private implementation tests and test-only helpers | Codec tests: none; storage tests: `simulation` |
-| `tests/integration/` | SQL, block I/O, publication and recovery campaigns | `simulation` |
+| `tests/integration/` | SQL, block I/O, cache and save/open failure campaigns | `simulation` |
 | `benches/` | Explicit Cargo bench targets, analysis scripts and results | `simulation` |
 | `examples/lookup.rs` | Small simulator-backed usage example | `simulation` |
 
@@ -105,36 +105,32 @@ cargo bench --locked --features simulation --bench page_compression -- 3
 
 ## Storage and recovery
 
-Logical pages are 4096 bytes. Encoded page objects use adaptive LZ4 with a raw
-fallback, at most 4099 bytes including the header. A snapshot-local cache retains
-one decoded page, alongside the retained header page. The map uses compact radix nodes; unchanged subtrees are reused.
-Only the current format is supported, with no probing or handling of other formats.
+Logical pages are 4096 bytes. Encoded pages use adaptive LZ4 with a raw fallback,
+at most 4099 bytes including the header, both inside log segments and at page
+keys. A session keeps one decoded page and the header page. Only the current
+format (v12) is supported, with no probing or handling of other formats.
 
-The embedded root removes a separate map fetch from cold reads and avoids writing
-and retiring a separate root object. Changed paths are rewritten immediately;
-unchanged subtrees are reused and replaced objects are reclaimed after publication.
-There are no override lists or deferred folds. A large root increases the bytes
-in the head and intent; the design favors fewer requests and one simple lifecycle.
+Recovery is replay. Open reads `meta`, replays committed transactions from its
+log start and stops at the first absent key or debris from a failed save; on weak
+backends it confirms the tail it did not write. Checkpoints are idempotent page
+puts; `meta` only moves past a transaction once its pages are acknowledged, and
+segments are only deleted once a durable `meta` has moved past them. A large save
+(over 256 KiB of segments) checkpoints itself right after committing.
 
-A fixed pending-save record lists created and retired object IDs before any object
-writes. Save waits for new objects to be durable, replaces the head, then deletes
-retired objects and the intent. Open settles an interrupted save by matching the
-head against the intent's exact old/new heads. There is no scan-based GC.
-
-See [storage format](docs/FORMAT.md), [save/recovery protocol](docs/PROTOCOL.md),
-and [self-review](docs/REVIEW.md). In-source rustdoc explains the architecture
-and alternatives in `src/lib.rs`, the structures and layout in `src/snapshot.rs`
-and `src/map_codec.rs`, and the commit/recovery contract in `src/pending.rs` and
+See [storage format](docs/FORMAT.md), [commit/checkpoint protocol](docs/PROTOCOL.md)
+and [self-review](docs/REVIEW.md). In-source rustdoc explains the architecture in
+`src/lib.rs`, the commit records in `src/log.rs`, the save pipeline in
+`src/snapshot.rs`, the cache in `src/cache.rs` and the backend contract in
 `src/kv.rs`.
 
 ## Limits
 
-The pending record is limited to 1 MiB; an oversized save fails before mutations.
-The backend must accept that value size and page objects up to 4099 bytes. Dirty
-pages, private WAL, map cache, write plans and collected query results have no byte
-budgets. One engine step is not forcibly preemptible, and queries are not sandboxed. There is no payload checksum, corruption repair,
-attached-database guarantee, or process-kill/power-loss test. An `ObjectCache`
-must not be shared between namespaces: entries are keyed by object ID only.
+Segments are at most 1 MiB; larger saves span several. The backend must accept
+that value size. Dirty pages, private WAL, the replayed log and collected query
+results have no byte budgets. One engine step is not forcibly preemptible, and
+queries are not sandboxed. There is no payload checksum, corruption repair,
+attached-database guarantee, or process-kill/power-loss test. A `PageCache` must
+not be shared between namespaces: entries are keyed by page number only.
 
 Measurements use an in-memory simulator. They count logical KV traffic and isolated
 codec time, without modeling real backend latency, replication or physical storage.
