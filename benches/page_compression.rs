@@ -1,0 +1,409 @@
+//! Paired raw/LZ4 SQL traffic and isolated codec CPU measurements.
+//! All payloads are deterministic synthetic data; no network or replication model.
+use std::{
+    fmt::Write as _,
+    fs::File,
+    hint::black_box,
+    io::{BufWriter, Write},
+    sync::Arc,
+    time::Instant,
+};
+use turso_lazy_kv::{
+    MapLayout, PageCompression, Result, Session, StorageOptions,
+    kv::KvStore,
+    page_codec,
+    simulation::{MemoryKv, Stats},
+};
+
+#[derive(Clone, Copy, Debug)]
+enum Payload {
+    Repetitive,
+    Json,
+    Random,
+}
+#[derive(Clone, Copy)]
+struct Case {
+    rows: usize,
+    bytes: usize,
+    payload: Payload,
+}
+fn random(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+fn payload(case: Case, id: usize, version: usize) -> Vec<u8> {
+    let mut state = 0x619d_46e7_130c_985b ^ (id as u64 * 65537) ^ ((version as u64) << 48);
+    match case.payload {
+        Payload::Repetitive => {
+            format!("{:0width$}", id + version * 100_000, width = case.bytes).into_bytes()
+        }
+        Payload::Random => (0..case.bytes)
+            .map(|_| (random(&mut state) >> 32) as u8)
+            .collect(),
+        Payload::Json => {
+            let mut s = format!("{{\"id\":{id},\"version\":{version},\"message\":\"");
+            let target = case.bytes - 2;
+            let words = [
+                "task",
+                "scheduled",
+                "customer",
+                "payment",
+                "completed",
+                "retry",
+                "Berlin",
+                "worker",
+                "pending",
+                "result",
+            ];
+            while s.len() < target {
+                let word = words[(random(&mut state) as usize) % words.len()];
+                let remaining = target - s.len();
+                s.push_str(&word[..word.len().min(remaining)]);
+                if s.len() < target {
+                    s.push(' ');
+                }
+            }
+            s.push_str("\"}");
+            assert_eq!(s.len(), case.bytes);
+            s.into_bytes()
+        }
+    }
+}
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(s, "{byte:02X}").unwrap();
+    }
+    s
+}
+fn options(layout: MapLayout, page_compression: PageCompression) -> StorageOptions {
+    StorageOptions {
+        layout,
+        write_concurrency: 8,
+        page_compression,
+    }
+}
+async fn baseline(case: Case, layout: MapLayout, codec: PageCompression) -> Result<MemoryKv> {
+    let store = MemoryKv::default();
+    let mut db =
+        Session::open_with_options(Arc::new(store.clone()), options(layout, codec)).await?;
+    db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload BLOB)")
+        .await?;
+    db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
+    db.execute("BEGIN").await?;
+    for start in (1..=case.rows).step_by(100) {
+        let mut sql = String::from("INSERT INTO t VALUES ");
+        for id in start..=(start + 99).min(case.rows) {
+            if id != start {
+                sql.push(',');
+            }
+            write!(sql, "({id},{},X'{}')", id % 10, hex(&payload(case, id, 0))).unwrap();
+        }
+        db.execute(&sql).await?;
+    }
+    db.execute("COMMIT").await?;
+    assert!(db.save().await?.cleanup_error.is_none());
+    store.crash(&[]);
+    Ok(store)
+}
+
+struct Sample {
+    case: Case,
+    layout: MapLayout,
+    codec: PageCompression,
+    run: usize,
+    operation: &'static str,
+}
+impl Sample {
+    fn emit(
+        &self,
+        stats: &Stats,
+        store: &MemoryKv,
+        app_read: usize,
+        app_write: usize,
+        elapsed_ns: u128,
+    ) {
+        let read_keys: u64 = stats.by_kind.values().map(|t| t.get_key_bytes).sum();
+        let write_keys: u64 = stats
+            .by_kind
+            .values()
+            .map(|t| t.put_key_bytes + t.delete_key_bytes)
+            .sum();
+        let block = stats.by_kind.get("block").cloned().unwrap_or_default();
+        let block_gets = block.gets;
+        let block_puts = block.puts;
+        println!(
+            "{:?},{},{},{:?},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            self.layout,
+            self.case.rows,
+            self.case.bytes,
+            self.case.payload,
+            self.codec,
+            self.run,
+            self.operation,
+            store.block_count(),
+            stats.gets,
+            stats.puts,
+            stats.deletes,
+            stats.bytes_read + read_keys,
+            stats.bytes_written + write_keys,
+            stats.bytes_written,
+            stats.block_bytes_written,
+            stats.node_bytes_written,
+            stats.head_bytes_written,
+            stats.intent_bytes_written,
+            block_gets,
+            block_puts,
+            store.stored_bytes(),
+            store.stored_key_bytes(),
+            app_read,
+            app_write,
+            elapsed_ns,
+            block.bytes_read
+        );
+    }
+}
+
+async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
+    let case = sample.case;
+    let store = Arc::new(base.fork());
+    let start = Instant::now();
+    let mut db =
+        Session::open_with_options(store.clone(), options(sample.layout, sample.codec)).await?;
+    let middle = case.rows / 2;
+    let read_ids: Vec<_> = match sample.operation {
+        "cold_pk" => vec![middle],
+        "range_10" => (middle..middle + 10).collect(),
+        "full_scan" => (1..=case.rows).collect(),
+        _ => Vec::new(),
+    };
+    let changed: Vec<_> = match sample.operation {
+        "replace_payload" => vec![middle],
+        "ten_adjacent" => (middle..middle + 10).collect(),
+        "ten_scattered" => (0..10).map(|i| 1 + i * (case.rows - 1) / 9).collect(),
+        _ => Vec::new(),
+    };
+    if !read_ids.is_empty() {
+        // Keep payload verification outside the timed / traffic observation.
+        let rows = db
+            .query(&format!(
+                "SELECT id,hex(payload) FROM t WHERE id BETWEEN {} AND {} ORDER BY id",
+                read_ids[0],
+                read_ids.last().unwrap()
+            ))
+            .await?;
+        let elapsed = start.elapsed().as_nanos();
+        sample.emit(
+            &store.stats(),
+            &store,
+            read_ids.len() * case.bytes,
+            0,
+            elapsed,
+        );
+        assert_eq!(rows.len(), read_ids.len());
+        for (row, id) in rows.iter().zip(&read_ids) {
+            assert_eq!(row[0].as_int(), Some(*id as i64));
+            assert_eq!(row[1].to_string(), hex(&payload(case, *id, 0)));
+        }
+    } else {
+        if !changed.is_empty() {
+            db.execute("BEGIN").await?;
+            for id in &changed {
+                db.execute(&format!(
+                    "UPDATE t SET payload=X'{}' WHERE id={id}",
+                    hex(&payload(case, *id, 1))
+                ))
+                .await?;
+            }
+            db.execute("COMMIT").await?;
+        }
+        assert!(db.save().await?.cleanup_error.is_none());
+        let elapsed = start.elapsed().as_nanos();
+        sample.emit(
+            &store.stats(),
+            &store,
+            0,
+            changed.len() * case.bytes,
+            elapsed,
+        );
+        store.crash(&[]);
+        // Read with the opposite write policy: stored codec tags must decide.
+        let other = if sample.codec == PageCompression::Raw {
+            PageCompression::Lz4
+        } else {
+            PageCompression::Raw
+        };
+        let mut db =
+            Session::open_with_options(store.clone(), options(sample.layout, other)).await?;
+        assert_eq!(
+            db.query("PRAGMA integrity_check").await?[0][0].to_string(),
+            "ok"
+        );
+        for id in &changed {
+            assert_eq!(
+                db.query(&format!("SELECT hex(payload) FROM t WHERE id={id}"))
+                    .await?[0][0]
+                    .to_string(),
+                hex(&payload(case, *id, 1))
+            );
+        }
+        assert_eq!(
+            db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
+            Some(case.rows as i64)
+        );
+    }
+    Ok(())
+}
+
+async fn pages(store: &MemoryKv) -> Result<Vec<Vec<u8>>> {
+    let mut pages = Vec::new();
+    for key in store.keys().iter().filter(|k| k.starts_with("v9/block/")) {
+        pages.push(page_codec::decode(&store.get(key).await?.unwrap())?);
+    }
+    Ok(pages)
+}
+
+fn codec_bench(out: &mut impl Write, case: Case, pages: &[Vec<u8>], run: usize) -> Result<()> {
+    // Evenly spaced, deterministic samples of actual SQL pages, at most 64.
+    let count = pages.len().min(64);
+    let selected: Vec<_> = (0..count)
+        .map(|i| &pages[i * pages.len() / count])
+        .collect();
+    let iterations = 200;
+    // Reverse order on alternate runs to reduce consistent ordering bias.
+    let policies = if run.is_multiple_of(2) {
+        [PageCompression::Raw, PageCompression::Lz4]
+    } else {
+        [PageCompression::Lz4, PageCompression::Raw]
+    };
+    for policy in policies {
+        let encoded: Vec<_> = selected
+            .iter()
+            .map(|p| page_codec::encode(p, policy))
+            .collect::<std::io::Result<_>>()?;
+        for _ in 0..5 {
+            for p in &selected {
+                black_box(page_codec::encode(black_box(p), policy)?);
+            }
+        }
+        let start = Instant::now();
+        for _ in 0..iterations {
+            for p in &selected {
+                black_box(page_codec::encode(black_box(p), policy)?);
+            }
+        }
+        let encode_ns = start.elapsed().as_nanos();
+        for _ in 0..5 {
+            for p in &encoded {
+                black_box(page_codec::decode(black_box(p))?);
+            }
+        }
+        let start = Instant::now();
+        for _ in 0..iterations {
+            for p in &encoded {
+                black_box(page_codec::decode(black_box(p))?);
+            }
+        }
+        let decode_ns = start.elapsed().as_nanos();
+        for (p, encoded) in selected.iter().zip(&encoded) {
+            assert_eq!(&page_codec::decode(encoded)?, *p);
+        }
+        writeln!(
+            out,
+            "{},{},{:?},{policy:?},{run},{count},{iterations},{},{},{encode_ns},{decode_ns}",
+            case.rows,
+            case.bytes,
+            case.payload,
+            encoded.iter().map(Vec::len).sum::<usize>(),
+            encoded.iter().filter(|p| p[0] == 1).count()
+        )?;
+    }
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let args: Vec<_> = std::env::args().filter(|arg| arg != "--bench").collect();
+    let repeats = args.get(1).map_or(Ok(3), |s| s.parse::<usize>())?;
+    if repeats == 0 {
+        return Err("repeats must be positive".into());
+    }
+    let cpu_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("benches/results/page-codec.csv");
+    let mut cpu = BufWriter::new(File::create(cpu_path)?);
+    writeln!(
+        cpu,
+        "rows,payload_bytes,payload,codec,run,sample_pages,iterations,encoded_bytes,compressed_pages,encode_ns,decode_ns"
+    )?;
+    println!(
+        "layout,rows,payload_bytes,payload,codec,run,operation,db_pages,gets,puts,deletes,read_key_value_bytes,mutation_key_value_bytes,put_value_bytes,block_write_bytes,node_write_bytes,head_write_bytes,intent_write_bytes,block_gets,block_puts,stored_value_bytes,stored_key_bytes,app_read_bytes,app_write_bytes,elapsed_ns,block_read_bytes"
+    );
+    futures::executor::block_on(async {
+        for (rows, bytes) in [(100, 64), (100, 512), (100, 9000), (10_000, 256)] {
+            for kind in [Payload::Repetitive, Payload::Json, Payload::Random] {
+                let case = Case {
+                    rows,
+                    bytes,
+                    payload: kind,
+                };
+                for layout in [
+                    MapLayout::Radix,
+                    MapLayout::InlineRoot,
+                    MapLayout::HeadOverrides,
+                ] {
+                    eprintln!("compression: {layout:?} {rows} rows / {bytes} bytes / {kind:?}");
+                    let raw = baseline(case, layout, PageCompression::Raw).await?;
+                    let compressed = baseline(case, layout, PageCompression::Lz4).await?;
+                    let raw_pages = pages(&raw).await?;
+                    assert_eq!(
+                        raw_pages,
+                        pages(&compressed).await?,
+                        "codec changed logical SQL pages"
+                    );
+                    for run in 0..repeats {
+                        if layout == MapLayout::Radix {
+                            codec_bench(&mut cpu, case, &raw_pages, run)?;
+                        }
+                        let policies = if run.is_multiple_of(2) {
+                            [PageCompression::Raw, PageCompression::Lz4]
+                        } else {
+                            [PageCompression::Lz4, PageCompression::Raw]
+                        };
+                        for codec in policies {
+                            let base = if codec == PageCompression::Raw {
+                                &raw
+                            } else {
+                                &compressed
+                            };
+                            for operation in [
+                                "cold_pk",
+                                "range_10",
+                                "full_scan",
+                                "replace_payload",
+                                "ten_adjacent",
+                                "ten_scattered",
+                                "read_only_save",
+                            ] {
+                                workload(
+                                    base,
+                                    Sample {
+                                        case,
+                                        layout,
+                                        codec,
+                                        run,
+                                        operation,
+                                    },
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
+}

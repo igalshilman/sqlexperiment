@@ -2,7 +2,7 @@
 //!
 //! All writes are private until atomic snapshot publication. sync() is an
 //! overlay barrier; Session::save is the backing-store durability boundary.
-use crate::kv::{KvStore, yield_once};
+use crate::kv::KvStore;
 use crate::snapshot::{Snapshot, StorageOptions};
 use futures::channel::mpsc;
 use std::{
@@ -34,24 +34,8 @@ fn engine_error(message: impl Into<String>) -> LimboError {
 struct State {
     sizes: [u64; 2],
     dirty: BTreeMap<(usize, u64), Option<Vec<u8>>>,
+    #[cfg(feature = "simulation")]
     written: [u64; 2],
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct IoStats {
-    pub database_bytes_written: u64,
-    pub private_wal_bytes_written: u64,
-    pub database_len: u64,
-    pub private_wal_len: u64,
-}
-
-#[cfg(test)]
-struct Fault {
-    at: usize,
-    seen: usize,
-    after: bool,
-    cancel: bool,
-    reached: Option<futures::channel::oneshot::Sender<()>>,
 }
 
 enum Operation {
@@ -113,8 +97,8 @@ pub struct KvIo {
     event_receiver: Mutex<Option<mpsc::UnboundedReceiver<()>>>,
     progress: Mutex<Progress>,
     wake: Condvar,
-    #[cfg(test)]
-    fault: Mutex<Option<Fault>>,
+    #[cfg(all(test, feature = "simulation"))]
+    fault: Mutex<Option<test_faults::Fault>>,
 }
 
 impl KvIo {
@@ -144,20 +128,21 @@ impl KvIo {
             event_receiver: Mutex::new(Some(event_receiver)),
             progress: Mutex::default(),
             wake: Condvar::new(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "simulation"))]
             fault: Mutex::new(None),
         }))
     }
 
     /// Engine success callbacks run only from IO::step on the engine worker.
-    /// Keep low-level public drive() behavior unchanged for standalone users.
+    /// Standalone drivers can complete directly; Session selects worker delivery.
     pub(crate) fn use_worker_completions(&self) {
         self.worker_completions.store(true, Ordering::SeqCst);
     }
 
-    pub fn stats(&self) -> IoStats {
+    #[cfg(feature = "simulation")]
+    pub fn stats(&self) -> crate::simulation::IoStats {
         let state = self.state.lock().unwrap();
-        IoStats {
+        crate::simulation::IoStats {
             database_bytes_written: state.written[0],
             private_wal_bytes_written: state.written[1],
             database_len: state.sizes[0],
@@ -167,59 +152,6 @@ impl KvIo {
 
     pub(crate) fn wal_len(&self) -> u64 {
         self.state.lock().unwrap().sizes[1]
-    }
-
-    #[cfg(test)]
-    pub(crate) fn arm_fault(
-        &self,
-        at: usize,
-        after: bool,
-        cancel: bool,
-    ) -> futures::channel::oneshot::Receiver<()> {
-        let (tx, rx) = futures::channel::oneshot::channel();
-        *self.fault.lock().unwrap() = Some(Fault {
-            at,
-            seen: 0,
-            after,
-            cancel,
-            reached: Some(tx),
-        });
-        rx
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fault_ops(&self) -> usize {
-        self.fault.lock().unwrap().as_ref().unwrap().seen
-    }
-
-    #[cfg(test)]
-    async fn fault_point(&self, after: bool) -> io::Result<()> {
-        let action = {
-            let mut guard = self.fault.lock().unwrap();
-            match guard.as_mut() {
-                Some(fault) => {
-                    if !after {
-                        fault.seen += 1;
-                    }
-                    if fault.seen == fault.at && fault.after == after {
-                        Some((fault.cancel, fault.reached.take()))
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            }
-        };
-        if let Some((cancel, signal)) = action {
-            if let Some(signal) = signal {
-                let _ = signal.send(());
-            }
-            if cancel {
-                futures::future::pending::<()>().await;
-            }
-            return Err(io::Error::other("injected checkpoint I/O failure"));
-        }
-        Ok(())
     }
 
     fn enqueue(&self, op: Operation, completion: Completion) -> turso_core::Result<Completion> {
@@ -339,7 +271,10 @@ impl KvIo {
         if !bytes.is_empty() {
             let mut state = self.state.lock().unwrap();
             state.sizes[file] = state.sizes[file].max(end);
-            state.written[file] += bytes.len() as u64;
+            #[cfg(feature = "simulation")]
+            {
+                state.written[file] += bytes.len() as u64;
+            }
         }
         Ok(bytes.len())
     }
@@ -388,8 +323,9 @@ impl KvIo {
             if completion.finished() {
                 continue;
             }
-            yield_once().await;
-            #[cfg(test)]
+            #[cfg(feature = "simulation")]
+            crate::simulation::yield_once().await;
+            #[cfg(all(test, feature = "simulation"))]
             self.fault_point(false).await?;
             let result = match op {
                 Operation::Read { file, pos } => {
@@ -411,7 +347,7 @@ impl KvIo {
                 Operation::Truncate { file, len } => self.truncate_file(file, len).await.map(|_| 0),
                 Operation::Sync => Ok(0),
             };
-            #[cfg(test)]
+            #[cfg(all(test, feature = "simulation"))]
             self.fault_point(true).await?;
             match result {
                 Ok(n) => {
@@ -635,83 +571,10 @@ impl File for KvFile {
     }
 }
 
-#[cfg(test)]
-mod completion_tests {
-    use super::*;
-    use crate::kv::MemoryKv;
+#[cfg(all(test, feature = "simulation"))]
+#[path = "../tests/unit/io.rs"]
+mod completion_tests;
 
-    #[test]
-    fn cached_snapshot_page_never_masks_overlay_wal_or_truncation() -> crate::Result<()> {
-        futures::executor::block_on(async {
-            let store = Arc::new(MemoryKv::default());
-            let initial = KvIo::mount(store.clone()).await?;
-            initial.write(0, 0, &vec![7; 2 * BLOCK_SIZE]).await?;
-            initial.publish().await?;
-            let io = KvIo::mount(store.clone()).await?;
-            assert_eq!(io.block(0, 0).await?, vec![7; BLOCK_SIZE]);
-            io.write(0, 10, &[9, 8]).await?;
-            assert_eq!(&io.block(0, 0).await?[10..12], &[9, 8]);
-            assert_eq!(io.block(1, 0).await?, vec![0; BLOCK_SIZE]);
-            io.write(1, 0, &[3]).await?;
-            assert_eq!(io.block(1, 0).await?[0], 3);
-            assert_eq!(io.block(0, 0).await?[0], 7);
-            assert_eq!(io.block(0, 1).await?, vec![7; BLOCK_SIZE]);
-            io.truncate_file(0, 100).await?;
-            io.truncate_file(0, (2 * BLOCK_SIZE) as u64).await?;
-            let page = io.block(0, 0).await?;
-            assert_eq!(&page[10..12], &[9, 8]);
-            assert!(page[100..].iter().all(|&b| b == 0));
-            assert_eq!(io.block(0, 1).await?, vec![0; BLOCK_SIZE]);
-            io.truncate_file(1, 0).await?;
-            io.publish().await?;
-            let reopened = KvIo::mount(store).await?;
-            assert_eq!(reopened.block(0, 0).await?, page);
-            assert_eq!(reopened.block(0, 1).await?, vec![0; BLOCK_SIZE]);
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn engine_callbacks_wait_for_worker_step_and_shutdown_aborts_ready() -> crate::Result<()> {
-        futures::executor::block_on(async {
-            for abort in [false, true] {
-                let io = KvIo::mount(Arc::new(MemoryKv::default())).await?;
-                io.use_worker_completions();
-                let file = MountedIo(io.clone()).open_file(DB_PATH, OpenFlags::Create, false)?;
-                let called_on = Arc::new(Mutex::new(None));
-                let captured = called_on.clone();
-                let c = file.pwrite(
-                    0,
-                    Arc::new(Buffer::new_temporary(4096)),
-                    Completion::new_write(move |result| {
-                        *captured.lock().unwrap() =
-                            Some((std::thread::current().id(), result.is_ok()));
-                    }),
-                )?;
-                io.drive().await?;
-                assert!(!c.finished(), "host must not run engine success callbacks");
-                assert_eq!(
-                    io.pending_count(),
-                    1,
-                    "queued completion still counts as in flight"
-                );
-                if abort {
-                    io.shutdown();
-                    assert!(c.failed());
-                    assert!(!called_on.lock().unwrap().unwrap().1);
-                } else {
-                    let worker_io = io.clone();
-                    let worker = std::thread::spawn(move || {
-                        worker_io.step().unwrap();
-                        std::thread::current().id()
-                    });
-                    let worker_id = worker.join().unwrap();
-                    assert_eq!(*called_on.lock().unwrap(), Some((worker_id, true)));
-                    assert!(c.succeeded());
-                }
-                assert_eq!(io.pending_count(), 0);
-            }
-            Ok(())
-        })
-    }
-}
+#[cfg(all(test, feature = "simulation"))]
+#[path = "../tests/unit/io_faults.rs"]
+mod test_faults;

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use turso_lazy_kv::{MapLayout, Result, Session, StorageOptions, kv::MemoryKv};
+use turso_lazy_kv::{MapLayout, Result, Session, StorageOptions, simulation::MemoryKv};
 
 fn main() -> Result<()> {
     futures::executor::block_on(async {

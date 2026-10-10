@@ -1,16 +1,48 @@
 [package]
 name = "turso-lazy-kv"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 publish = false
 description = "Turso over asynchronous lazy KV with atomic snapshot publication"
 
+[features]
+default = []
+simulation = []
+
+[lib]
+bench = false
+
 [dependencies]
 turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
 futures = "0.3"
+lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 
 [profile.dev]
 debug = 0
 
 [profile.test]
 debug = 0
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+required-features = ["simulation"]
+
+[[example]]
+name = "lazy_lookup"
+required-features = ["simulation"]
+
+[[bench]]
+name = "amplification"
+harness = false
+required-features = ["simulation"]
+
+[[bench]]
+name = "page_compression"
+harness = false
+required-features = ["simulation"]
+
+[[bench]]
+name = "small_databases"
+harness = false
+required-features = ["simulation"]

@@ -1,3 +1,0 @@
-   Compiling turso-lazy-kv v0.9.0 (/workspace/scratch/79326ed8eaab/publish-source/turso-lazy-kv)
-    Finished `release` profile [optimized] target(s) in 2.31s
-     Running `target/release/examples/amplification 3`

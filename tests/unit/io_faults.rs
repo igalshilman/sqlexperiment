@@ -1,0 +1,61 @@
+use super::*;
+
+pub(super) struct Fault {
+    at: usize,
+    seen: usize,
+    after: bool,
+    cancel: bool,
+    reached: Option<futures::channel::oneshot::Sender<()>>,
+}
+
+impl KvIo {
+    pub(crate) fn arm_fault(
+        &self,
+        at: usize,
+        after: bool,
+        cancel: bool,
+    ) -> futures::channel::oneshot::Receiver<()> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        *self.fault.lock().unwrap() = Some(Fault {
+            at,
+            seen: 0,
+            after,
+            cancel,
+            reached: Some(tx),
+        });
+        rx
+    }
+
+    pub(crate) fn fault_ops(&self) -> usize {
+        self.fault.lock().unwrap().as_ref().unwrap().seen
+    }
+
+    pub(super) async fn fault_point(&self, after: bool) -> io::Result<()> {
+        let action = {
+            let mut guard = self.fault.lock().unwrap();
+            match guard.as_mut() {
+                Some(fault) => {
+                    if !after {
+                        fault.seen += 1;
+                    }
+                    if fault.seen == fault.at && fault.after == after {
+                        Some((fault.cancel, fault.reached.take()))
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        };
+        if let Some((cancel, signal)) = action {
+            if let Some(signal) = signal {
+                let _ = signal.send(());
+            }
+            if cancel {
+                futures::future::pending::<()>().await;
+            }
+            return Err(io::Error::other("injected checkpoint I/O failure"));
+        }
+        Ok(())
+    }
+}

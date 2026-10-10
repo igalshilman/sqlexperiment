@@ -1,18 +1,18 @@
 //! Immutable pages with durable head publication and selectable map layouts.
 use crate::{
-    io::BLOCK_SIZE,
+    format::{HEAD, HEAD_MAGIC, PENDING, key},
     kv::KvStore,
     map_codec::{Node, decode as decode_node, encode as encode_node},
-    pending::{Objects, PENDING, PendingSave, SaveReport, recover},
+    page_codec::{self, PageCompression},
+    pending::{Objects, PendingSave, SaveReport, recover},
 };
-use futures::{StreamExt, future::BoxFuture, stream};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     sync::{Arc, Mutex},
 };
 
-pub const HEAD: &str = "v8/head";
 const OVERRIDE_LIMIT: usize = 64;
 type Id = u64;
 type Changes = BTreeMap<u64, Option<Vec<u8>>>;
@@ -33,21 +33,21 @@ pub struct StorageOptions {
     pub layout: MapLayout,
     /// Bounds outstanding object puts/deletes, including recovery. Head publication remains ordered.
     pub write_concurrency: usize,
+    /// Encoding for newly written pages. Existing pages carry their own codec tag.
+    pub page_compression: PageCompression,
 }
 impl Default for StorageOptions {
     fn default() -> Self {
         Self {
             layout: MapLayout::Radix,
             write_concurrency: 16,
+            page_compression: PageCompression::Lz4,
         }
     }
 }
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
-}
-pub(crate) fn key(kind: &str, id: &Id) -> String {
-    format!("v8/{kind}/{id:016x}")
 }
 fn height_for(index: u64) -> u8 {
     ((64 - index.leading_zeros()).max(1).div_ceil(8)) as u8
@@ -86,7 +86,7 @@ struct Head {
 impl Head {
     fn decode(bytes: &[u8]) -> io::Result<Self> {
         let mut result = Self::default();
-        if bytes.len() < 26 || &bytes[..4] != b"TKV8" {
+        if bytes.len() < 26 || &bytes[..4] != HEAD_MAGIC {
             return Err(invalid("invalid snapshot head"));
         }
         result.size = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
@@ -148,6 +148,7 @@ pub(crate) struct Snapshot {
     last_id: Id,
     layout: MapLayout,
     concurrency: usize,
+    page_compression: PageCompression,
     pub size: u64,
     nodes: Mutex<BTreeMap<Id, Node>>,
     // One validated immutable page, scoped to this snapshot. No lock across await.
@@ -155,10 +156,6 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
-    #[cfg(test)]
-    pub async fn open(store: Arc<dyn KvStore>) -> io::Result<Self> {
-        Self::open_with_options(store, StorageOptions::default()).await
-    }
     pub async fn open_with_options(
         store: Arc<dyn KvStore>,
         options: StorageOptions,
@@ -176,6 +173,7 @@ impl Snapshot {
             last_id: 0,
             layout: options.layout,
             concurrency: options.write_concurrency,
+            page_compression: options.page_compression,
             size: 0,
             nodes: Mutex::default(),
             block_cache: Mutex::default(),
@@ -184,26 +182,8 @@ impl Snapshot {
         if let Some(bytes) = bytes {
             result.load_head(&bytes)?;
             result.original_head = Some(bytes);
-        } else {
-            for legacy in [
-                "v7/head",
-                "v7/pending_save",
-                "v6/head",
-                "v5/head",
-                "v5/allocated",
-                "v4/head",
-                "v3/head",
-                "v2/head",
-                "object.db/size",
-                "object.db-wal/size",
-            ] {
-                if result.store.get(legacy).await?.is_some() {
-                    return Err(invalid(
-                        "older storage format requires migration; use a fresh namespace",
-                    ));
-                }
-            }
         }
+
         Ok(result)
     }
     pub(crate) fn validate_head(bytes: &[u8]) -> io::Result<u64> {
@@ -234,7 +214,7 @@ impl Snapshot {
         } else {
             root.unwrap_or(0).to_le_bytes().to_vec()
         };
-        let mut out = b"TKV8".to_vec();
+        let mut out = HEAD_MAGIC.to_vec();
         out.extend_from_slice(&size.to_le_bytes());
         out.extend_from_slice(&last_id.to_le_bytes());
         out.push(height);
@@ -312,10 +292,7 @@ impl Snapshot {
         {
             return Ok(Some(bytes.clone()));
         }
-        let bytes = self.fetch("block", id).await?;
-        if bytes.len() != BLOCK_SIZE {
-            return Err(invalid("invalid block length"));
-        }
+        let bytes = page_codec::decode(&self.fetch("block", id).await?)?;
         *self.block_cache.lock().unwrap() = Some((id, bytes.clone()));
         Ok(Some(bytes))
     }
@@ -485,42 +462,6 @@ impl Snapshot {
             .retain(|entry| entry.1 <= self.last_id && !kept_old.contains(entry));
         Ok(())
     }
-    /// Conservative marking: overridden base blocks stay live until a fold.
-    /// No database payload reads. Inline roots are already inside the head.
-    #[cfg(test)]
-    pub(crate) async fn reachable(&self) -> io::Result<BTreeSet<String>> {
-        let mut live = BTreeSet::new();
-        let mut visited = BTreeSet::new();
-        let mut pending = Vec::new();
-        if let Some(root) = self.root {
-            pending.push((Some(root), self.height));
-        } else if self.layout == MapLayout::InlineRoot && self.height > 0 {
-            pending.push((None, self.height));
-        }
-        while let Some((id, level)) = pending.pop() {
-            if !visited.insert((id, level)) {
-                continue;
-            }
-            let node = match id {
-                Some(id) => {
-                    live.insert(key("node", &id));
-                    self.node(Some(id)).await?
-                }
-                None => self.inline.clone(),
-            };
-            for child in node.into_values() {
-                if level == 1 {
-                    live.insert(key("block", &child));
-                } else {
-                    pending.push((Some(child), level - 1));
-                }
-            }
-        }
-        for id in self.overrides.values().flatten() {
-            live.insert(key("block", id));
-        }
-        Ok(live)
-    }
     /// Exclusive ownership must persist until all requests settle, even on
     /// cancellation. Reopen after failure; never reuse this Snapshot for writes.
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
@@ -535,8 +476,9 @@ impl Snapshot {
                 build.retired.insert(("block", *old));
             }
             let id = match value {
-                Some(bytes) if bytes.len() == BLOCK_SIZE => Some(build.put("block", bytes)?),
-                Some(_) => return Err(invalid("invalid block length")),
+                Some(bytes) => {
+                    Some(build.put("block", page_codec::encode(&bytes, self.page_compression)?)?)
+                }
                 None => None,
             };
             changes.insert(index, id);
@@ -578,17 +520,14 @@ impl Snapshot {
         self.store.put(PENDING, intent).await?;
         // Parent references are already known; all object puts may overlap.
         // Drain all futures on ordinary errors. Cancellation still requires host fencing/drain.
-        let jobs: Vec<BoxFuture<'static, io::Result<()>>> = build
-            .objects
-            .into_iter()
-            .map(|(id, (kind, bytes))| {
-                let store = self.store.clone();
-                let object_key = key(kind, &id);
-                Box::pin(async move { store.put(&object_key, bytes).await })
-                    as BoxFuture<'static, io::Result<()>>
-            })
-            .collect();
-        let mut writes = stream::iter(jobs).buffer_unordered(self.concurrency);
+        let jobs = build.objects.into_iter().map(|(id, (kind, bytes))| {
+            let store = self.store.clone();
+            let object_key = key(kind, &id);
+            async move { store.put(&object_key, bytes).await }.boxed()
+        });
+        let mut writes = stream::iter(jobs)
+            .boxed()
+            .buffer_unordered(self.concurrency);
         let mut error = None;
         while let Some(result) = writes.next().await {
             if let Err(e) = result {
@@ -612,164 +551,14 @@ impl Snapshot {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::kv::MemoryKv;
-    #[test]
-    fn height_grows_shrinks_and_small_reads_use_one_index_node() -> io::Result<()> {
-        futures::executor::block_on(async {
-            let store = Arc::new(MemoryKv::default());
-            let snapshot = Snapshot::open(store.clone()).await?;
-            snapshot
-                .publish(
-                    BTreeMap::from([
-                        (0, Some(vec![1; BLOCK_SIZE])),
-                        (255, Some(vec![2; BLOCK_SIZE])),
-                    ]),
-                    256 * BLOCK_SIZE as u64,
-                )
-                .await?;
-            let mut snapshot = Snapshot::open(store.clone()).await?;
-            assert_eq!(snapshot.height, 1);
-            for (index, expected) in [(256, 2), (65536, 3), (1 << 40, 6)] {
-                assert!(snapshot.block(index).await?.is_none());
-                snapshot
-                    .publish(
-                        BTreeMap::from([(index, Some(vec![7; BLOCK_SIZE]))]),
-                        (index + 1) * BLOCK_SIZE as u64,
-                    )
-                    .await?;
-                snapshot = Snapshot::open(store.clone()).await?;
-                assert_eq!(snapshot.height, expected);
-                assert_eq!(snapshot.block(index).await?, Some(vec![7; BLOCK_SIZE]));
-                assert_eq!(snapshot.block(0).await?, Some(vec![1; BLOCK_SIZE]));
-                assert!(snapshot.block(index + 1).await?.is_none());
-            }
-            snapshot
-                .publish(
-                    BTreeMap::from([(256, None), (65536, None), (1 << 40, None)]),
-                    256 * BLOCK_SIZE as u64,
-                )
-                .await?;
-            store.reset_stats();
-            let snapshot = Snapshot::open(store.clone()).await?;
-            assert_eq!(snapshot.height, 1);
-            assert_eq!(snapshot.block(255).await?, Some(vec![2; BLOCK_SIZE]));
-            assert_eq!(
-                store.stats().gets,
-                4,
-                "pending check + one head + one index node + one block"
-            );
-            assert!(snapshot.block(256).await?.is_none());
-            assert_eq!(store.stats().gets, 4, "outside tree range requires no read");
-            snapshot
-                .publish(BTreeMap::from([(0, None), (255, None)]), 0)
-                .await?;
-            let empty = Snapshot::open(store).await?;
-            assert_eq!(empty.height, 0);
-            assert!(empty.root.is_none());
-            Ok(())
-        })
-    }
+#[cfg(all(test, feature = "simulation"))]
+#[path = "../tests/unit/snapshot.rs"]
+mod tests;
 
-    #[test]
-    fn persistent_tree_sparse_paths_updates_and_deletions() -> io::Result<()> {
-        futures::executor::block_on(async {
-            let store = Arc::new(MemoryKv::default());
-            let mut snapshot = Snapshot::open(store.clone()).await?;
-            let indexes = [0, 1, 255, 256, 257, 65535, 65536, 1 << 40];
-            let mut dirty = Changes::new();
-            for (i, &index) in indexes.iter().enumerate() {
-                dirty.insert(index, Some(vec![i as u8 + 1; BLOCK_SIZE]));
-            }
-            snapshot
-                .publish(dirty, ((1 << 40) + 1) * BLOCK_SIZE as u64)
-                .await?;
-            snapshot = Snapshot::open(store.clone()).await?;
-            assert!(snapshot.block(99).await?.is_none());
-            for (i, &index) in indexes.iter().enumerate() {
-                assert_eq!(
-                    snapshot.block(index).await?.unwrap(),
-                    vec![i as u8 + 1; BLOCK_SIZE]
-                );
-            }
-            let mut dirty = Changes::new();
-            dirty.insert(256, None);
-            dirty.insert(255, Some(vec![99; BLOCK_SIZE]));
-            dirty.insert(258, Some(vec![42; BLOCK_SIZE]));
-            snapshot.publish(dirty, snapshot.size).await?;
-            let updated = Snapshot::open(store.clone()).await?;
-            assert!(updated.block(256).await?.is_none());
-            assert_eq!(updated.block(255).await?.unwrap(), vec![99; BLOCK_SIZE]);
-            assert_eq!(updated.block(258).await?.unwrap(), vec![42; BLOCK_SIZE]);
-            // Saving invalidates old snapshots; their replaced blocks are reclaimed.
-            assert!(snapshot.block(255).await.is_err());
-            let mut dirty: Changes = indexes.iter().map(|&i| (i, None)).collect();
-            dirty.insert(258, None);
-            updated.publish(dirty, 0).await?;
-            let empty = Snapshot::open(store).await?;
-            assert_eq!(empty.root, None);
-            assert_eq!(empty.size, 0);
-            Ok(())
-        })
-    }
+#[cfg(all(test, feature = "simulation"))]
+#[path = "../tests/unit/snapshot_properties.rs"]
+mod properties;
 
-    #[test]
-    fn referenced_objects_must_exist_and_have_valid_structure() -> io::Result<()> {
-        futures::executor::block_on(async {
-            let store = Arc::new(MemoryKv::default());
-            let snapshot = Snapshot::open(store.clone()).await?;
-            let bytes = vec![7; BLOCK_SIZE];
-            snapshot
-                .publish(
-                    BTreeMap::from([(0, Some(bytes.clone()))]),
-                    BLOCK_SIZE as u64,
-                )
-                .await?;
-            let block_key = key("block", &1);
-            store.delete(&block_key).await?;
-            let snapshot = Snapshot::open(store.clone()).await?;
-            assert!(
-                snapshot
-                    .block(0)
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains("missing referenced")
-            );
-            store.put(&block_key, vec![8; BLOCK_SIZE - 1]).await?;
-            assert!(
-                snapshot
-                    .block(0)
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains("invalid")
-            );
-            let root_key = key("node", &snapshot.root.unwrap());
-            store.put(&root_key, vec![0; 9]).await?;
-            let snapshot = Snapshot::open(store.clone()).await?;
-            assert!(
-                snapshot
-                    .block(0)
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains("invalid")
-            );
-            store.put(HEAD, b"bad head".to_vec()).await?;
-            assert!(Snapshot::open(store.clone()).await.is_err());
-            store.delete(HEAD).await?;
-            store
-                .put("object.db/size", 4096u64.to_le_bytes().to_vec())
-                .await?;
-            assert!(Snapshot::open(store).await.is_err());
-            Ok(())
-        })
-    }
-}
-
-#[cfg(test)]
-#[path = "snapshot_tests.rs"]
-mod advanced_tests;
+#[cfg(all(test, feature = "simulation"))]
+#[path = "../tests/unit/snapshot_support.rs"]
+mod test_support;

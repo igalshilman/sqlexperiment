@@ -1,14 +1,14 @@
 //! A single write-ahead intent covers allocation and retirement. No scans.
 use crate::{
+    format::{HEAD, PENDING, PENDING_MAGIC, key},
     kv::KvStore,
-    snapshot::{HEAD, Snapshot, key},
+    snapshot::Snapshot,
 };
-use futures::{StreamExt, future::BoxFuture, stream};
+use futures::{FutureExt, StreamExt, stream};
 use std::{collections::BTreeSet, io, sync::Arc};
 
-pub(crate) const PENDING: &str = "v8/pending_save";
 /// Prototype limit: fail before any mutation rather than silently splitting an
-/// atomic record. A backend must accept values this large (plus 4 KiB pages).
+/// atomic record. A backend must accept values this large (pages use at most 4099 bytes).
 pub const MAX_PENDING_BYTES: usize = 1024 * 1024;
 pub(crate) type Objects = BTreeSet<(&'static str, u64)>;
 
@@ -70,7 +70,7 @@ impl PendingSave {
                 "pending-save record exceeds 1 MiB limit; use smaller saves",
             ));
         }
-        let mut bytes = b"TKP8".to_vec();
+        let mut bytes = PENDING_MAGIC.to_vec();
         for n in [
             old.len(),
             self.new_head.len(),
@@ -90,18 +90,12 @@ impl PendingSave {
         Ok(bytes)
     }
     pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() < 20 || bytes.len() > MAX_PENDING_BYTES || &bytes[..4] != b"TKP8" {
+        if bytes.len() < 20 || bytes.len() > MAX_PENDING_BYTES || &bytes[..4] != PENDING_MAGIC {
             return Err(invalid());
         }
-        let lengths: Vec<_> = bytes[4..20]
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|n| u32::from_le_bytes(*n) as usize)
-            .collect();
-        let [old_len, new_len, created_len, retired_len] = lengths[..] else {
-            unreachable!()
-        };
+        let [old_len, new_len, created_len, retired_len] = [4, 8, 12, 16].map(|offset| {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
+        });
         // Bounded input first; checked u64 arithmetic also works on 32-bit hosts.
         let expected =
             20u64 + old_len as u64 + new_len as u64 + 9 * (created_len as u64 + retired_len as u64);
@@ -148,16 +142,11 @@ impl PendingSave {
         } else {
             &self.created
         };
-        let jobs: Vec<BoxFuture<'static, io::Result<()>>> = entries
-            .iter()
-            .copied()
-            .map(|(kind, id)| {
-                let store = store.clone();
-                Box::pin(async move { store.delete(&key(kind, &id)).await })
-                    as BoxFuture<'static, io::Result<()>>
-            })
-            .collect();
-        let mut deletes = stream::iter(jobs).buffer_unordered(concurrency);
+        let jobs = entries.iter().copied().map(|(kind, id)| {
+            let store = store.clone();
+            async move { store.delete(&key(kind, &id)).await }.boxed()
+        });
+        let mut deletes = stream::iter(jobs).boxed().buffer_unordered(concurrency);
         let mut error = None;
         while let Some(result) = deletes.next().await {
             if let Err(e) = result {
@@ -203,76 +192,6 @@ pub(crate) async fn recover(
     Ok(head)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::kv::MemoryKv;
-
-    fn head(high: u64) -> Vec<u8> {
-        let mut h = b"TKV8".to_vec();
-        h.extend(0u64.to_le_bytes());
-        h.extend(high.to_le_bytes());
-        h.extend([0, 0]);
-        h.extend(8u16.to_le_bytes());
-        h.extend(0u16.to_le_bytes());
-        h.extend(0u64.to_le_bytes());
-        h
-    }
-    #[test]
-    fn malformed_intents_and_unexpected_heads_fail_before_mutation() -> io::Result<()> {
-        futures::executor::block_on(async {
-            let intent = PendingSave {
-                old_head: Some(head(10)),
-                new_head: head(12),
-                created: Objects::from([("block", 11), ("node", 12)]),
-                retired: Objects::from([("block", 2)]),
-            };
-            let valid = intent.encode()?;
-            let mut bad: Vec<_> = (0..valid.len()).map(|n| valid[..n].to_vec()).collect();
-            let mut b = valid.clone();
-            b[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
-            bad.push(b);
-            let mut b = valid.clone();
-            b[20 + 68] = 9;
-            bad.push(b); // invalid object kind
-            let mut b = valid.clone();
-            b[20 + 68 + 1..20 + 68 + 9].copy_from_slice(&1u64.to_le_bytes());
-            bad.push(b); // created ID in committed range
-            let mut b = valid.clone();
-            let n = b.len();
-            b[n - 8..].copy_from_slice(&11u64.to_le_bytes());
-            bad.push(b); // retire new ID
-            for bytes in bad {
-                let store = Arc::new(MemoryKv::default());
-                store.put(HEAD, head(10)).await?;
-                store.put(PENDING, bytes).await?;
-                store.reset_stats();
-                assert!(recover(store.clone(), 8).await.is_err());
-                assert_eq!(store.stats().puts + store.stats().deletes, 0);
-            }
-            let store = Arc::new(MemoryKv::default());
-            store.put(HEAD, head(99)).await?;
-            store.put(PENDING, valid).await?;
-            store.reset_stats();
-            assert!(
-                recover(store.clone(), 8)
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains("does not match")
-            );
-            assert_eq!(store.stats().puts + store.stats().deletes, 0);
-            Ok(())
-        })
-    }
-    #[test]
-    fn large_intent_has_an_explicit_limit() {
-        let intent = PendingSave {
-            old_head: None,
-            new_head: head(120000),
-            created: (1..=120000).map(|id| ("block", id)).collect(),
-            retired: Objects::new(),
-        };
-        assert!(intent.encode().unwrap_err().to_string().contains("1 MiB"));
-    }
-}
+#[cfg(all(test, feature = "simulation"))]
+#[path = "../tests/unit/pending.rs"]
+mod tests;
