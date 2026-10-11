@@ -87,6 +87,43 @@ three bugs, all fixed with regression tests:
 
 Minor fixes: a new namespace state no longer probes and refreshes from log
 position 1, and cache identities start at a random value.
+
+## Second independent review
+
+After per-commit durability, three more reviews (storage protocol, owner cache,
+engine integration and API) tried to break the whole project, confirming each
+finding with a failing test. None found a lost or partial commit in a single
+session. They found these, all fixed with regression tests:
+
+- **Overlapping sessions were not isolated.** A writer's checkpoint could
+  overwrite page keys and cached pages with images an open reader had not
+  replayed, tearing its B-trees (`short read on page 10`). Open sessions now
+  register their log position, and checkpoints write no image past the oldest
+  other one.
+- **Two writers of one owner lost a commit.** Both wrote the same log position.
+  A commit is now refused when another session committed since this one
+  opened, and an evicted namespace keeps one state while a handle holds it.
+- **A raced read reverted an acknowledged commit.** A page get issued before
+  another session's checkpoint was cached under the new version. Reads are now
+  cached only under the key taken before the get.
+- **Multi-statement strings ran only the first statement**, returning `Ok`;
+  `BEGIN; ...; COMMIT` silently left a transaction open and lost later writes.
+  Every statement now runs.
+- **`Session::transaction` could report `Err` with part of its body durable**
+  (a body that ran `COMMIT`), or leave its transaction open when the future was
+  dropped while awaiting something else. Both now poison the session first.
+- **Connection counters** (`last_insert_rowid()`, `changes()`) carried over
+  through a reused engine. Each session now connects afresh.
+- **Corrupt numbers**: a `meta` with a log start near `u64::MAX` panicked (debug)
+  or spun forever (release). Decoding now bounds sequences, sizes and page
+  numbers, and probes use checked arithmetic.
+- **Unbounded costs**: working-set tracking sorted the whole map on every read
+  once interior pages filled it, and the exact probe at open was not capped at
+  64 keys.
+
+Also added: bound parameters (`query_with`), cleanup errors reported in
+per-commit mode (`take_cleanup_error`), and checkpoint slices that count each
+page once.
 - Removed `map_codec.rs`, `pending.rs`, the radix map, object IDs, the intent and
   `MAX_PENDING_BYTES`.
 - Measurement fix: concurrent phases issue their requests when queued, and the
@@ -122,6 +159,10 @@ caught:
 | A commit leaves values fetched ahead for the pages it rewrote | Continued-snapshot test fails |
 | Dropping checkpointed transactions also drops pages a later one changed | Continued-snapshot test and three commit-durability tests fail |
 | After a failed checkpoint, a continued session drops its transactions anyway | Commit campaign fails |
+| Checkpoints ignore other sessions' positions | Overlapping-reader test fails |
+| A parked engine keeps its position | Parked-engine checkpoint test fails |
+| An evicted namespace gets a second state while in use | Eviction test fails |
+| Reads are cached under the current key and checkpoints ignore positions | Read-race test reverts an acknowledged commit |
 
 ## Executed validation
 
@@ -129,8 +170,8 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 
 | Check | Outcome |
 |---|---|
-| `cargo test --locked` | 9 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
-| `cargo test --locked --features simulation` | 71 tests pass: 37 unit, 32 integration, two public API; one rustdoc example also passes |
+| `cargo test --locked` | 11 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
+| `cargo test --locked --features simulation` | 85 tests pass: 40 unit, 43 integration, two public API; one rustdoc example also passes |
 | Interruption campaigns | 2,169 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
@@ -163,7 +204,8 @@ Interruption cases:
 ## Remaining limits
 
 Exclusive ownership and settlement of outstanding requests remain host
-requirements. A namespace must use one stable key with `PageCache::namespace`. Log replay and
+requirements. A namespace must use one stable key with `PageCache::namespace`;
+sessions that overlap must share it (without a cache they must not overlap). Log replay and
 dirty pages have no memory budget. Memory budgets, request fencing,
 real-backend latency and process crash/power-loss validation remain future work.
 

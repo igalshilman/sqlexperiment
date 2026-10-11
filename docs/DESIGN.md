@@ -79,7 +79,7 @@ and commits them:
    1 MiB of images is one segment, so usually one put.
 2. **Checkpoint slice, in the same round trip.** When the log holds more than
    `checkpoint_after` transactions (default 4) or more than 256 KiB, take whole
-   transactions from the oldest until about 12 pages are covered. Put each
+   transactions from the oldest until about 12 distinct pages are covered. Put each
    page's latest committed image to its page key; holes become deletes.
 3. **Garbage, in the same round trip.** Delete segments in
    `[deleted_below, log_start)` of the durable `meta`.
@@ -209,9 +209,15 @@ The engine sees two virtual files, the database and its WAL, served by `KvIo`:
   first page (every 4096-byte block of it, for larger page sizes) for those
   reads, and any other synchronous read that would need KV fails and poisons the
   session.
+- **Statements.** A string of several statements runs them in order, each
+  under the same rules as on its own. `query_with`/`execute_with` bind
+  parameters to one statement, so values never become SQL text.
 - **Sessions.** Query errors and cancellation poison a session; an error from a
   statement that saves leaves its commit outcome unknown. `save()` consumes a
-  session, and dropping it discards unsaved work.
+  session, and dropping it discards unsaved work. Inside
+  `Session::transaction`, a statement that ends the transaction (`COMMIT`,
+  `END`, `ROLLBACK`) fails and poisons the session before anything is durable,
+  and so does dropping or unwinding the transaction future.
 
 ## Owner cache
 
@@ -253,16 +259,34 @@ owner (around 7 saves with default settings) leaves the cache warm.
 does not stop a write already queued. So a cache key is (generation, page,
 version): changing or invalidating a page bumps its version, and dropping all of
 a namespace's pages starts a new generation. Stale entries are unreachable and
-age out. The disk tier starts empty in every process, because the per-namespace
-state that validates it is not persisted.
+age out. A value read from the backend is cached under the key taken before the
+read, and only if that key is still current, so a read that raced a
+replacement cannot store the old value under the new version. The disk tier
+starts empty in every process, because the per-namespace state that validates
+it is not persisted.
+
+**Sessions of one owner.** Sessions may overlap, such as a writer and readers
+for a virtual object's shared handlers, if they share the namespace's handle;
+one namespace keeps one state while any handle holds it.
+- *One writer.* A commit is refused when another session committed since this
+  one opened, rather than writing the log position that session used.
+- *Isolation.* A session reads the state it opened at: pages outside its log
+  come from page keys and the cache, which checkpoints overwrite. So each open
+  session registers its log position, and a checkpoint writes no image of a
+  transaction after the oldest other session's position (like SQLite's WAL read
+  marks). A parked engine releases its position. Checkpoints resume when the
+  reader ends.
+- Without a cache there is no shared state, so sessions must not overlap.
 
 **Engine reuse.** A session that ends cleanly (a successful save, or read-only)
 parks its engine, but only if that engine holds the owner's latest
 acknowledged commit (an overlapping session's engine may be older) and its SQL
 changed no per-connection state (`PRAGMA`, `ATTACH`, `DETACH`, the temp schema).
+Only the database is kept: the next session connects afresh, so connection
+counters (`last_insert_rowid()`, `changes()`) and settings never carry over.
 The next open reuses it if `meta` matches, the log ends where that engine left
-it, and its I/O is clean. This keeps the parsed schema and the
-engine's page cache warm, which cuts CPU per session about 5×. Parked engines
+it, and its I/O is clean. This keeps the parsed schema warm, which cuts CPU per
+session several-fold ([cache results](../benches/CACHE_RESULTS.md)). Parked engines
 and namespace states are capped per process, least recently used first;
 dropping either only makes a namespace cold.
 
@@ -297,7 +321,8 @@ replay at most a short log. Measurements: [log shipping](../benches/LOG_RESULTS.
   commit and `meta` writes would close that gap.
 - **Memory.** Dirty pages, the private WAL, the replayed log and query results
   have no byte budgets.
-- **Integrity.** Encodings are validated structurally; there are no checksums.
+- **Integrity.** Encodings are validated structurally, with bounds on sequence
+  numbers, sizes and page numbers; there are no checksums.
 - **Format.** Only v12, with no migration.
 - **Validation.** Crash, interruption and handover campaigns run against an
   in-memory simulator; there are no process-kill or power-loss tests. See

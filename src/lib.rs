@@ -53,6 +53,12 @@
 //! [`PageCache`] knows where the log starts. The I/O pump batches adjacent file
 //! reads without crossing write, truncate or sync barriers.
 //!
+//! Sessions of one owner may overlap when they share a [`NamespaceCache`]:
+//! each reads the state it opened at (checkpoints write no image past the
+//! oldest open session's log position), and a commit is refused if another
+//! session committed since this one opened. Without a cache they must not
+//! overlap.
+//!
 //! [`StorageOptions::cache`] can hold a [`NamespaceCache`]: one namespace's handle
 //! on the process-wide [`PageCache`], which keeps pages in memory and on a local
 //! disk tier under one budget for every namespace. It refreshes pages another
