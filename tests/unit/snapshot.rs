@@ -4,8 +4,8 @@ use crate::{
     format::{HINT, LOG_PREFIX, PAGE_PREFIX},
     io::BLOCK_SIZE,
     simulation::{
-        Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, Operation, cache_config, fresh_namespace,
-        open_cache,
+        Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, MonitorKv, Operation, cache_config,
+        fresh_namespace, open_cache,
     },
 };
 
@@ -303,7 +303,7 @@ fn weak_backends_confirm_what_this_owner_did_not_write() -> io::Result<()> {
 #[test]
 fn large_transactions_span_segments_and_failed_ones_leave_only_debris() -> io::Result<()> {
     futures::executor::block_on(async {
-        let store = Arc::new(FaultKv::new(MemoryKv::default(), 3));
+        let store = Arc::new(MonitorKv::new(FaultKv::new(MemoryKv::default(), 3)));
         let raw = StorageOptions {
             page_compression: PageCompression::Raw,
             ..options(4, None)
@@ -313,7 +313,7 @@ fn large_transactions_span_segments_and_failed_ones_leave_only_debris() -> io::R
             .await?
             .publish(big(0), 300 * 4096)
             .await?;
-        assert_eq!(keys(&store.inner, LOG_PREFIX).len(), 2);
+        assert_eq!(keys(&store.inner.inner, LOG_PREFIX).len(), 2);
 
         // The commit part of the next one fails: its first part is debris.
         let snapshot = open(&store, &raw).await?;
@@ -334,6 +334,7 @@ fn large_transactions_span_segments_and_failed_ones_leave_only_debris() -> io::R
         let snapshot = open(&store, &raw).await?;
         assert_eq!(number(snapshot.block(5).await?), Some(77));
         assert_eq!(number(snapshot.block(6).await?), Some(6));
+        assert_eq!(store.violations(), Vec::<String>::new());
         Ok(())
     })
 }
@@ -363,7 +364,7 @@ async fn prepared(cache: Option<&NamespaceCache>, saves: u64) -> io::Result<(Mem
 #[test]
 fn every_save_mutation_is_crash_safe() -> io::Result<()> {
     futures::executor::block_on(async {
-        let mut cases = 0;
+        let (mut cases, mut checked) = (0, 0);
         // (cache, prepared saves, large faulted save)
         let scenarios = [
             (false, 3, false),
@@ -380,7 +381,8 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
                         for crash in [false, true] {
                             let cache = cached.then(fresh_namespace);
                             let (base, old) = prepared(cache.as_ref(), saves).await?;
-                            let store = Arc::new(FaultKv::new(base, 0));
+                            let seed = base.durable_values();
+                            let store = Arc::new(MonitorKv::seeded(FaultKv::new(base, 0), seed));
                             let opts = StorageOptions {
                                 page_compression: PageCompression::Raw,
                                 ..options(1, cache.as_ref())
@@ -412,7 +414,7 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
                             new.apply(&changes, size);
                             let mut opts = opts.clone();
                             if crash {
-                                store.inner.crash(&[]);
+                                store.inner.inner.crash(&[]);
                                 opts.cache = cached.then(fresh_namespace);
                             }
                             let reopened = open(&store, &opts).await?;
@@ -426,17 +428,19 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
                             reopened.publish(changes.clone(), size).await?;
                             model.apply(&changes, size);
                             // The follow-up commit survives a crash.
-                            store.inner.crash(&[]);
+                            store.inner.inner.crash(&[]);
                             opts.cache = cached.then(fresh_namespace);
                             assert!(model.check(&open(&store, &opts).await?).await?);
-                            assert_collected(&store.inner).await?;
+                            assert_collected(&store.inner.inner).await?;
+                            assert_eq!(store.violations(), Vec::<String>::new());
+                            checked += store.checked();
                         }
                     }
                 }
             }
         }
         assert!(cases > 600, "{cases}");
-        println!("interrupted saves: {cases} cases");
+        println!("interrupted saves: {cases} cases, {checked} requests checked by the monitor");
         Ok(())
     })
 }
@@ -455,7 +459,7 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
                 .wrapping_add(1442695040888963407);
             (seed >> 33) % n
         };
-        let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
+        let store = Arc::new(MonitorKv::new(FaultKv::new(MemoryKv::default(), 0)));
         let decoded = open_cache(PageCacheConfig {
             decoded: true,
             ..cache_config(8 * 4096, 64 << 20)
@@ -492,7 +496,7 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
                 let result = snapshot.publish(changes.clone(), size).await;
                 store.disarm();
                 if random(3) == 0 {
-                    store.inner.crash(&[]);
+                    store.inner.inner.crash(&[]);
                 }
                 if random(4) == 0 {
                     caches[owner] = fresh_namespace();
@@ -518,7 +522,11 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
                 dropped += 1
             }
         }
-        println!("handovers: cache kept {kept}, dropped {dropped}");
+        println!(
+            "handovers: cache kept {kept}, dropped {dropped}; {} requests checked by the monitor",
+            store.checked()
+        );
+        assert_eq!(store.violations(), Vec::<String>::new());
         assert!(kept > 50 && dropped > 50, "{kept} {dropped}");
         Ok(())
     })
