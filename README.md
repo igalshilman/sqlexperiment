@@ -29,7 +29,8 @@ db.execute("INSERT INTO t VALUES(1)").await?;
 let saved = db.save().await?; // durable once this returns Ok
 ```
 
-SQL changes are private until `save()`. `Ok` means committed; an error means the
+Bind values with `query_with`/`execute_with` rather than formatting them into
+SQL. SQL changes are private until `save()`. `Ok` means committed; an error means the
 outcome is unknown, so settle outstanding requests and reopen. The host must
 guarantee one owner per namespace.
 

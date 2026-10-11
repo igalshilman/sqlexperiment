@@ -36,9 +36,29 @@ fn usage_ranks_the_header_then_interior_then_recent_leaves() {
     assert_eq!(usage.top(1000).len(), 13);
 
     // Tracking is bounded; interior pages survive, old leaves go first.
-    for page in 1000..1000 + 5 * MAX_HINT_PAGES as u64 {
+    for page in 1000..1000 + 10 * MAX_HINT_PAGES as u64 {
         usage.record(page, &[0x0d]);
     }
-    assert!(usage.pages.len() <= MAX_TRACKED);
+    assert!(usage.pages.len() <= 2 * MAX_TRACKED);
     assert_eq!(usage.top(3), vec![0, 3, 7]);
+}
+
+/// Interior pages are bounded too, and reads stay cheap however many pages
+/// look interior (overflow and freelist pages can).
+#[test]
+fn usage_stays_bounded_with_many_interior_pages() {
+    let mut usage = Usage::default();
+    let started = std::time::Instant::now();
+    for page in 1..20_000 {
+        usage.record(page, &[0x05]);
+    }
+    for page in 0..100_000 {
+        usage.record(100_000 + page, &[0x0d]);
+    }
+    assert!(usage.pages.len() <= 2 * MAX_TRACKED);
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+    assert!(
+        usage.top(10).iter().all(|&page| page < 20_000),
+        "interior first"
+    );
 }

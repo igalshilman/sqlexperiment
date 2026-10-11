@@ -18,20 +18,23 @@ cargo bench --locked --features simulation --bench cache_cpu -- 3 > benches/resu
 
 The cache is process-wide: pages live in memory and spill to a local disk tier
 ([foyer](https://github.com/foyer-rs/foyer) 0.22.3, single-file device, 1 MiB
-blocks), shared by every namespace. Engine reuse is on.
+blocks), shared by every namespace. Engine reuse is on: each session connects
+afresh to the parked database, so no connection state carries over. That costs
+about 25% more allocation than reusing the connection (72 → 91 MB at 100%) and
+little CPU.
 
 | Cache | Memory (of logical DB) | Page gets | Round trips | Allocated MB | CPU ms |
 |---|---|---|---|---|---|
-| encoded | 5% | 239 | 503 | 82.5 | 148 |
-| decoded | 5% | 239 | 503 | 82.6 | 144 |
-| encoded | 10% | 239 | 503 | 77.7 | 110 |
-| decoded | 10% | 239 | 503 | 76.8 | 111 |
-| encoded | 25% | 239 | 503 | 74.1 | 67 |
-| decoded | 25% | 239 | 503 | 69.5 | 69 |
-| encoded | 50% | 239 | 503 | 72.5 | 62 |
-| decoded | 50% | 239 | 503 | 67.5 | 52 |
-| encoded | 100% | 239 | 503 | 72.3 | 58 |
-| decoded | 100% | 239 | 503 | 66.6 | 50 |
+| encoded | 5% | 239 | 503 | 102.7 | 188 |
+| decoded | 5% | 239 | 503 | 101.1 | 192 |
+| encoded | 10% | 239 | 503 | 95.7 | 125 |
+| decoded | 10% | 239 | 503 | 91.6 | 150 |
+| encoded | 25% | 239 | 503 | 92.5 | 84 |
+| decoded | 25% | 239 | 503 | 83.2 | 78 |
+| encoded | 50% | 239 | 503 | 91.1 | 64 |
+| decoded | 50% | 239 | 503 | 81.7 | 65 |
+| encoded | 100% | 239 | 503 | 90.9 | 64 |
+| decoded | 100% | 239 | 503 | 80.8 | 63 |
 
 - **No backend misses beyond first touches at any memory size.** The in-memory
   LRU (below) needed 1,120 misses and 1,450 round trips at 5%; the disk tier

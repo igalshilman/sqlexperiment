@@ -353,3 +353,66 @@ fn connection_state_never_reaches_the_next_session() -> Result<()> {
         Ok(())
     })
 }
+
+/// A reused engine starts with fresh connection counters, exactly like a cold
+/// one, so the same SQL gives the same answer either way.
+#[test]
+fn a_reused_engine_has_fresh_connection_counters() -> sqlite_kv::Result<()> {
+    futures::executor::block_on(async {
+        let store = std::sync::Arc::new(sqlite_kv::simulation::MemoryKv::default());
+        let options = sqlite_kv::StorageOptions {
+            cache: Some(sqlite_kv::simulation::fresh_namespace()),
+            ..sqlite_kv::StorageOptions::default()
+        };
+        let mut db = sqlite_kv::Session::open_with_options(store.clone(), options.clone()).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
+        db.execute("INSERT INTO t VALUES(42)").await?;
+        db.save().await?;
+        let counters = "SELECT last_insert_rowid(), changes(), total_changes()";
+        let mut warm = sqlite_kv::Session::open_with_options(store.clone(), options).await?;
+        assert!(warm.reused_engine());
+        let mut cold = sqlite_kv::Session::open(store).await?;
+        assert_eq!(warm.query(counters).await?, cold.query(counters).await?);
+        assert_eq!(warm.query(counters).await?[0][0].as_int(), Some(0));
+        Ok(())
+    })
+}
+
+/// Evicting a namespace's state from the LRU while a session still holds its
+/// handle must not give the next session a second, independent state: the two
+/// would not see each other's commits and could both write one log position.
+#[test]
+fn an_evicted_namespace_keeps_one_state_while_in_use() -> Result<()> {
+    use sqlite_kv::{
+        Durability,
+        simulation::{cache_config, open_cache},
+    };
+    futures::executor::block_on(async {
+        let cache = open_cache(sqlite_kv::PageCacheConfig {
+            namespaces: 1,
+            ..cache_config(1 << 20, 64 << 20)
+        });
+        let store = Arc::new(MemoryKv::default());
+        let options = |namespace: NamespaceCache| StorageOptions {
+            cache: Some(namespace),
+            durability: Durability::Commit,
+            ..StorageOptions::default()
+        };
+        let mut first =
+            Session::open_with_options(store.clone(), options(cache.namespace("a"))).await?;
+        first
+            .execute("CREATE TABLE t(id INTEGER PRIMARY KEY)")
+            .await?;
+        for other in 0..1000 {
+            cache.namespace(&format!("other-{other}")); // evicts "a"
+        }
+        let mut second =
+            Session::open_with_options(store.clone(), options(cache.namespace("a"))).await?;
+        second.execute("INSERT INTO t VALUES(1)").await?;
+        assert!(first.execute("INSERT INTO t VALUES(2)").await.is_err());
+        drop((first, second));
+        let mut db = Session::open(store).await?;
+        assert_eq!(db.query("SELECT id FROM t").await?.len(), 1);
+        Ok(())
+    })
+}

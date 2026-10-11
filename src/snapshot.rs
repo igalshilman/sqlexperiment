@@ -40,7 +40,7 @@
 //! re-puts the commit tail and `meta` before exposing them, unless this owner
 //! wrote them and had them acknowledged.
 use crate::{
-    cache::{NamespaceCache, Reuse},
+    cache::{NamespaceCache, PageKey, Reader, Reuse},
     format::{HINT, META, log_key, page_key},
     hint::{self, Usage},
     kv::KvStore,
@@ -192,12 +192,18 @@ pub(crate) struct Snapshot {
     /// The last decoded page, for repeated reads of one page.
     page: Mutex<Option<(u64, Page)>>,
     /// Page values fetched ahead of use (prefetch and readahead), each used once.
-    fetched: Mutex<HashMap<u64, Option<Bytes>>>,
+    fetched: Mutex<HashMap<u64, Fetched>>,
     readahead: Mutex<Readahead>,
     /// The working-set hint read at open, and the pages this session read.
     hint: Option<Bytes>,
     usage: Mutex<Usage>,
+    /// This view's registration with the owner cache while a session uses it.
+    reader: Mutex<Option<Reader>>,
 }
+
+/// A stored page value, with the cache key taken before it was read (see
+/// [`NamespaceCache::insert_read`]).
+type Fetched = (Option<PageKey>, Option<Bytes>);
 
 /// Detects sequential reads of page keys.
 #[derive(Default)]
@@ -244,7 +250,7 @@ impl Snapshot {
                 Some(start) => {
                     // The owner knows where its log ended: probe exactly that far.
                     let first = match cache.and_then(NamespaceCache::committed) {
-                        Some(end) if end >= start => end - start + 1,
+                        Some(end) if end >= start => log::batch((end - start).saturating_sub(1)),
                         _ => batch,
                     };
                     let (meta, probe) =
@@ -299,9 +305,11 @@ impl Snapshot {
             (true, None) => Vec::new(),
         };
         let prefetch = async {
+            let tokens: Vec<_> = wanted.iter().map(|&n| cache.map(|c| c.token(n))).collect();
             let keys: Vec<_> = wanted.iter().copied().map(page_key).collect();
             let values = futures::future::try_join_all(keys.iter().map(|k| store.get(k))).await?;
-            Ok::<_, io::Error>(wanted.iter().copied().zip(values).collect::<Vec<_>>())
+            let fetched = tokens.into_iter().zip(values);
+            Ok::<_, io::Error>(wanted.iter().copied().zip(fetched).collect::<Vec<_>>())
         };
         let (log, changes, prefetched_pages) = futures::try_join!(
             log::replay(&*store, start, batch, prefetched),
@@ -330,6 +338,7 @@ impl Snapshot {
         if let Some(cache) = cache {
             cache.record(meta_bytes.clone(), claim, log.next);
         }
+        let reader = cache.map(|cache| cache.reader(log.next));
         Ok(Self {
             store,
             options,
@@ -343,33 +352,34 @@ impl Snapshot {
             readahead: Mutex::default(),
             hint,
             usage: Mutex::default(),
+            reader: Mutex::new(reader),
         }
         .with_fetched(prefetched_pages))
     }
 
     /// Keep page values fetched at open, except pages the log overrides.
-    fn with_fetched(self, pages: Vec<(u64, Option<Bytes>)>) -> Self {
+    fn with_fetched(self, pages: Vec<(u64, Fetched)>) -> Self {
         let mut fetched = self.fetched.lock().unwrap();
-        for (index, value) in pages {
+        for (index, (token, value)) in pages {
             if self.log.images.contains_key(&index) {
                 continue;
             }
             // The cache keeps values; holes, and pages without a cache, stay here.
-            if let (Some(cache), Some(value)) = (&self.options.cache, &value) {
+            if let (Some(cache), Some(token), Some(value)) = (&self.options.cache, &token, &value) {
                 match cache.is_decoded() {
                     true => {
                         if let Ok(page) = page_codec::decode_bytes(value) {
-                            cache.insert(index, page);
+                            cache.insert_read(token.clone(), page);
                             continue;
                         }
                     }
                     false => {
-                        cache.insert(index, value.clone());
+                        cache.insert_read(token.clone(), value.clone());
                         continue;
                     }
                 }
             }
-            fetched.insert(index, value);
+            fetched.insert(index, (token, value));
         }
         drop(fetched);
         self
@@ -406,17 +416,17 @@ impl Snapshot {
                 false => page_codec::decode_bytes(&value)?,
             }
         } else {
-            let Some(image) = self.fetch(index).await? else {
+            let (token, Some(image)) = self.fetch(index).await? else {
                 return Ok(None);
             };
             let page = page_codec::decode_bytes(&image)?;
-            if let Some(cache) = cache {
+            if let (Some(cache), Some(token)) = (cache, token) {
                 let value = if cache.is_decoded() {
                     page.clone()
                 } else {
                     image
                 };
-                cache.insert(index, value);
+                cache.insert_read(token, value);
             }
             page
         };
@@ -430,7 +440,7 @@ impl Snapshot {
 
     /// The stored value of a page outside the log: fetched ahead, or one get.
     /// Sequential gets start reading ahead, in the same round trip.
-    async fn fetch(&self, index: u64) -> io::Result<Option<Bytes>> {
+    async fn fetch(&self, index: u64) -> io::Result<Fetched> {
         self.readahead.lock().unwrap().observe(index);
         if let Some(value) = self.fetched.lock().unwrap().remove(&index) {
             return Ok(value);
@@ -443,15 +453,15 @@ impl Snapshot {
                 .filter(|n| !self.log.images.contains_key(n) && !fetched.contains_key(n))
                 .collect()
         };
-        let keys: Vec<_> = std::iter::once(index)
-            .chain(ahead.iter().copied())
-            .map(page_key)
-            .collect();
-        let mut values =
-            futures::future::try_join_all(keys.iter().map(|k| self.store.get(k))).await?;
-        let value = values.remove(0);
+        let pages: Vec<_> = std::iter::once(index).chain(ahead).collect();
+        let cache = self.options.cache.as_ref();
+        let tokens: Vec<_> = pages.iter().map(|&n| cache.map(|c| c.token(n))).collect();
+        let keys: Vec<_> = pages.iter().copied().map(page_key).collect();
+        let values = futures::future::try_join_all(keys.iter().map(|k| self.store.get(k))).await?;
+        let mut values = tokens.into_iter().zip(values);
+        let value = values.next().expect("the page itself");
         let mut fetched = self.fetched.lock().unwrap();
-        fetched.extend(ahead.into_iter().zip(values));
+        fetched.extend(pages[1..].iter().copied().zip(values));
         Ok(value)
     }
 
@@ -485,16 +495,37 @@ impl Snapshot {
         {
             return None;
         }
+        // A page's image is its latest; another open session may only see it
+        // if that transaction ends within the session's log position.
+        let limit = self.checkpoint_limit();
+        let mut latest = HashMap::new();
+        for transaction in transactions {
+            for &page in &transaction.pages {
+                latest.insert(page, transaction.end);
+            }
+        }
         let mut images = Images::new();
         let mut covered = 0;
         for transaction in transactions {
-            if covered > 0 && images.len() + transaction.pages.len() > CHECKPOINT_PAGES {
+            // Pages already in the slice cost nothing more: their latest image
+            // is written once, whichever transactions it covers.
+            let new = transaction
+                .pages
+                .iter()
+                .filter(|page| !images.contains_key(*page));
+            if covered > 0 && images.len() + new.count() > CHECKPOINT_PAGES {
+                break;
+            }
+            if transaction.pages.iter().any(|page| latest[page] > limit) {
                 break;
             }
             for &page in &transaction.pages {
                 images.insert(page, self.log.images[&page].clone());
             }
             covered += 1;
+        }
+        if covered == 0 {
+            return None;
         }
         let last = &transactions[covered - 1];
         Some(Checkpoint {
@@ -521,9 +552,16 @@ impl Snapshot {
                 log_next: self.log.next,
                 ..SaveReport::default()
             };
-            return Ok((
-                report,
-                self.continued(self.meta, self.meta_bytes.clone(), self.claim),
+            let after = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
+            return Ok((report, after.registered()));
+        }
+        // One writer at a time: another session's commit since this view was
+        // taken would be overwritten at the same log position.
+        if let Some(cache) = &self.options.cache
+            && cache.committed() != Some(self.log.next)
+        {
+            return Err(io::Error::other(
+                "another session committed since this one opened; reopen",
             ));
         }
         let mut images = Images::new();
@@ -591,7 +629,8 @@ impl Snapshot {
 
         // A large transaction is checkpointed right away, with the whole log, so
         // later opens do not replay it.
-        let plan = match (large, cleanup.is_ok()) {
+        let alone = self.checkpoint_limit() == u64::MAX;
+        let plan = match (large, cleanup.is_ok() && alone) {
             (true, true) => {
                 let mut all = self.log.images.clone();
                 all.extend(images.clone());
@@ -609,7 +648,7 @@ impl Snapshot {
         let committed = (next, size, images, logged_bytes, tail);
         if let Err(error) = cleanup {
             if let Some(cache) = cache {
-                cache.forget();
+                cache.forget_meta(next);
             }
             let report = SaveReport {
                 checkpointed_pages,
@@ -620,7 +659,7 @@ impl Snapshot {
             // the failed checkpoint may have written.
             let mut after = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
             after.extend(committed, None);
-            return Ok((report, after));
+            return Ok((report, after.registered()));
         }
 
         // Everything acknowledged is durable. Work out what `meta` may say: past
@@ -671,7 +710,7 @@ impl Snapshot {
                 }
             }
             if cleanup_error.is_some() {
-                cache.forget();
+                cache.forget_meta(next);
             } else {
                 cache.record(durable_bytes.clone(), claim, next);
                 if let Some(hint) = &hint {
@@ -689,7 +728,7 @@ impl Snapshot {
             cleanup_error,
             log_next: next,
         };
-        Ok((report, after))
+        Ok((report, after.registered()))
     }
 
     /// This committed view under a new checkpoint record, for a session that
@@ -725,7 +764,33 @@ impl Snapshot {
             readahead: Mutex::default(),
             hint: self.hint.clone(),
             usage: Mutex::new(std::mem::take(&mut *self.usage.lock().unwrap())),
+            reader: Mutex::default(),
         }
+    }
+
+    /// Register this view, at its log position, with the owner cache.
+    fn registered(self) -> Self {
+        let reader = self
+            .options
+            .cache
+            .as_ref()
+            .map(|cache| cache.reader(self.log.next));
+        *self.reader.lock().unwrap() = reader;
+        self
+    }
+
+    /// End this view's registration: its engine is parked, not reading.
+    pub(crate) fn release_reader(&self) {
+        self.reader.lock().unwrap().take();
+    }
+
+    /// The latest log position a checkpoint may write images of: no other open
+    /// session may read a page key that holds an image it has not replayed.
+    fn checkpoint_limit(&self) -> u64 {
+        let cache = self.options.cache.as_ref();
+        cache
+            .and_then(|cache| cache.oldest_reader(self.log.next))
+            .unwrap_or(u64::MAX)
     }
 
     /// Add this owner's acknowledged transaction to the log. Values fetched
