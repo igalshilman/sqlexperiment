@@ -25,8 +25,8 @@ again. Here its storage is a Restate virtual object's SQL database
   ```
 
   Its tools move money in the [ledger](../node/ledger.mjs), with the call id
-  as the transfer id; the call to the ledger gets an idempotency key derived
-  by the SDK.
+  as the transfer id; each call to the ledger has an idempotency key made
+  from the request id (`ctx.request().id`) and the tool call id.
 - [`pi-storage.mjs`](pi-storage.mjs): pi-durable's SQLite storage on the
   session's database, through the `SqliteDatabase` facade pi-durable's
   storage expects. Each pi-durable commit is an SQL transaction, stored in

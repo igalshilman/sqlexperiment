@@ -104,10 +104,16 @@ operation it reaches happens again. What each one does then:
 | Awakeables | Refused. |
 
 An explicit idempotency key (`rpc.opts({ idempotencyKey })`) is used as
-given. A derived key holds while Restate keeps the invocation: a day by
-default (the target's idempotency retention). A retried attempt that makes a
-different request (other input, because it read other state) starts a new
-invocation, as it should.
+given, and makes the intent visible: the examples build theirs from the
+request id, `ctx.request().id`, which is the same on every attempt of an
+invocation, and what the call is for (`${ctx.request().id}:reserve`). A key
+names one call: one that an invocation makes several times (a tool call)
+adds what tells them apart. Restate attaches a call with a key it has seen to
+the earlier invocation, whatever its input, so a key suits a call whose input
+is the same on every attempt; a derived key covers the others (a retried
+attempt that makes a different request, because it read other state, starts
+a new invocation). Either holds while Restate keeps the invocation: a day by
+default (the target's idempotency retention).
 
 ### Plain promises, one await point
 
