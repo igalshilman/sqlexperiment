@@ -145,6 +145,9 @@ pub struct Session {
     cache: Option<NamespaceCache>,
     /// The engine moved into the owner cache; nothing is left to shut down.
     parked: bool,
+    /// No SQL changed per-connection state (settings, attachments, the temp
+    /// schema), which would otherwise carry over to the next session.
+    reusable: bool,
     /// The engine continued from a previous session.
     #[cfg_attr(not(feature = "simulation"), allow(dead_code))]
     reused: bool,
@@ -231,6 +234,7 @@ impl Session {
                 cache,
                 parked: false,
                 reused: true,
+                reusable: true,
             };
             session.io.resume(snapshot).await?;
             session.connection = Some(warm.connection);
@@ -244,6 +248,7 @@ impl Session {
             cache,
             parked: false,
             reused: false,
+            reusable: true,
         };
         session.io.prepare_engine().await?;
         session.connection = Some(open_engine(&session.io).await?);
@@ -257,12 +262,15 @@ impl Session {
         self.reused
     }
 
-    /// Leave an idle engine at a committed state to the owner cache.
+    /// Leave an idle engine at a committed state to the owner cache. Only an
+    /// engine at the owner's latest acknowledged commit qualifies: one that an
+    /// overlapping session left behind holds an older state.
     fn park(&mut self) {
         let Some(cache) = &self.cache else { return };
-        let Some(next) = cache.committed() else {
+        let next = self.io.log_next();
+        if cache.committed() != Some(next) || !self.reusable {
             return;
-        };
+        }
         let idle = self
             .connection
             .as_ref()
@@ -287,6 +295,13 @@ impl Session {
     /// Cached execution yields every 64 steps; one engine call cannot be preempted.
     /// An engine helper requiring synchronous nonresident I/O returns an error.
     pub async fn query(&mut self, sql: &str) -> Result<Rows> {
+        if changes_connection_state(sql) {
+            self.reusable = false;
+        }
+        self.run(sql).await
+    }
+
+    async fn run(&mut self, sql: &str) -> Result<Rows> {
         if self.poisoned {
             return Err("session is poisoned; discard and reopen".into());
         }
@@ -307,7 +322,7 @@ impl Session {
     /// This is a local barrier, **not** backend durability. Failure poisons the
     /// session. A successful checkpoint may still be discarded without saving.
     pub async fn checkpoint(&mut self) -> Result<()> {
-        let rows = self.query("PRAGMA wal_checkpoint(TRUNCATE)").await?;
+        let rows = self.run("PRAGMA wal_checkpoint(TRUNCATE)").await?;
         if rows.len() != 1
             || rows[0].len() != 3
             || rows[0][0].as_int() != Some(0)
@@ -354,6 +369,18 @@ impl Drop for Session {
             drop(self.connection.take());
         }
     }
+}
+
+/// Whether SQL may change per-connection state rather than the database:
+/// PRAGMA settings, ATTACH/DETACH or the temp schema. Conservative: a false
+/// positive only costs reusing the engine.
+fn changes_connection_state(sql: &str) -> bool {
+    sql.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|word| {
+            ["pragma", "attach", "detach", "temp", "temporary"]
+                .iter()
+                .any(|keyword| word.eq_ignore_ascii_case(keyword))
+        })
 }
 
 /// Resume an engine completion only after the host has driven all submitted I/O.

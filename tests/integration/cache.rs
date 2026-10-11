@@ -291,3 +291,65 @@ fn parked_engines_are_bounded() -> Result<()> {
         Ok(())
     })
 }
+
+/// A read-only session that overlaps a save must not park its older engine
+/// under the newer commit: the next session would read and save stale state.
+#[test]
+fn an_overlapping_session_never_parks_a_stale_engine() -> Result<()> {
+    futures::executor::block_on(async {
+        let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
+        let cache = fresh_namespace();
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
+        db.save().await?;
+
+        let mut reader = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert_eq!(count(&mut reader).await?, 0);
+        let mut writer = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        writer.execute("INSERT INTO t VALUES (1)").await?;
+        writer.save().await?;
+        drop(reader);
+
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert_eq!(count(&mut db).await?, 1);
+        db.execute("INSERT INTO t VALUES (2)").await?;
+        db.save().await?;
+        let mut cold = Session::open(store).await?;
+        assert_eq!(count(&mut cold).await?, 2, "no commit lost");
+        Ok(())
+    })
+}
+
+/// Settings, attachments and the temp schema belong to a connection; a session
+/// that changes them does not hand its engine to the next one.
+#[test]
+fn connection_state_never_reaches_the_next_session() -> Result<()> {
+    futures::executor::block_on(async {
+        let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
+        let cache = fresh_namespace();
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
+        db.save().await?;
+
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        db.execute("PRAGMA query_only = 1").await?;
+        drop(db);
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(!db.reused_engine());
+        db.execute("INSERT INTO t VALUES (1)").await?;
+        db.execute("CREATE TEMP TABLE scratch(x)").await?;
+        db.save().await?;
+
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(!db.reused_engine());
+        assert!(db.query("SELECT * FROM scratch").await.is_err());
+        drop(db);
+        // Ordinary SQL keeps the engine warm.
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert_eq!(count(&mut db).await?, 1);
+        drop(db);
+        let db = Session::open_with_options(store, owner(&cache)).await?;
+        assert!(db.reused_engine());
+        Ok(())
+    })
+}

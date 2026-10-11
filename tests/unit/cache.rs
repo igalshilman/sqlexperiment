@@ -51,9 +51,15 @@ fn a_different_meta_forgets_claims_and_keeps_pages_to_refresh() {
             ..meta
         };
         let cache = fresh_namespace();
+        assert_eq!(cache.expected_start(), None, "a fresh owner knows nothing");
+        assert_eq!(
+            cache.validate(Some(&meta.encode()), 5),
+            Reuse::Changed(None)
+        );
+        cache.record(None, None, 1);
         assert_eq!(
             cache.validate(None, 1),
-            Reuse::Known(None, None),
+            Reuse::Known(None, Some(1)),
             "absent meta"
         );
         cache.insert(1, value(4));

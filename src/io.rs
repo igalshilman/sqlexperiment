@@ -98,9 +98,10 @@ fn blocks(pos: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize, usiz
 #[derive(Default)]
 struct State {
     sizes: [u64; 2],
-    /// Original page zero retained for synchronous engine metadata reads.
-    /// Overlay entries, including explicit holes, always override these bytes.
-    header: Option<Page>,
+    /// The blocks of the original first database page, retained for synchronous
+    /// engine metadata reads. Overlay entries, including explicit holes, always
+    /// override these bytes.
+    header: Vec<Page>,
     /// Pages are shared with readers; a partial write updates a page in place
     /// when nothing else holds it.
     dirty: BTreeMap<(usize, u64), Option<Page>>,
@@ -161,6 +162,8 @@ impl Drop for Completing<'_> {
 pub struct KvIo {
     /// The committed view; replaced when a warm engine continues in a new session.
     snapshot: Mutex<Arc<Snapshot>>,
+    /// See [`Self::log_next`].
+    log_next: Mutex<u64>,
     state: Mutex<State>,
     queue: Mutex<VecDeque<Pending>>,
     driver: futures::lock::Mutex<()>,
@@ -190,6 +193,7 @@ impl KvIo {
             ..State::default()
         };
         Arc::new(Self {
+            log_next: Mutex::new(snapshot.log.next),
             snapshot: Mutex::new(Arc::new(snapshot)),
             state: Mutex::new(state),
             queue: Mutex::default(),
@@ -198,6 +202,12 @@ impl KvIo {
             #[cfg(all(test, feature = "simulation"))]
             fault: Mutex::new(None),
         })
+    }
+
+    /// One past the last transaction of the committed state the engine holds: the
+    /// snapshot it was opened or resumed on, or its own acknowledged save.
+    pub(crate) fn log_next(&self) -> u64 {
+        *self.log_next.lock().unwrap()
     }
 
     pub(crate) fn snapshot(&self) -> Arc<Snapshot> {
@@ -225,6 +235,7 @@ impl KvIo {
             sizes: [snapshot.size(), 0],
             ..State::default()
         };
+        *self.log_next.lock().unwrap() = snapshot.log.next;
         *self.snapshot.lock().unwrap() = Arc::new(snapshot);
         self.prepare_engine().await
     }
@@ -233,8 +244,17 @@ impl KvIo {
     /// metadata reads during connection setup and SQL preparation. Fetching it
     /// happens asynchronously before entering the engine; dirty pages take priority.
     pub(crate) async fn prepare_engine(&self) -> io::Result<()> {
-        let header = self.block(0, 0).await?;
-        self.state.lock().unwrap().header = Some(header);
+        let first = self.block(0, 0).await?;
+        // The first page spans several blocks when the page size is larger.
+        let page_size = match u16::from_be_bytes([first[16], first[17]]) {
+            1 => 65536,
+            size => usize::from(size),
+        };
+        let blocks = page_size.div_ceil(BLOCK_SIZE).max(1) as u64;
+        let rest = futures::future::try_join_all((1..blocks).map(|n| self.block(0, n))).await?;
+        let mut header = vec![first];
+        header.extend(rest);
+        self.state.lock().unwrap().header = header;
         Ok(())
     }
 
@@ -294,10 +314,7 @@ impl KvIo {
         if file == 1 {
             return Some(zero());
         }
-        if index == 0 {
-            return state.header.clone();
-        }
-        None
+        state.header.get(index as usize).cloned()
     }
 
     async fn block(&self, file: usize, index: u64) -> io::Result<Page> {
@@ -530,7 +547,9 @@ impl KvIo {
                 .collect();
             (dirty, state.sizes[0])
         };
-        self.snapshot().publish(dirty, size).await
+        let report = self.snapshot().publish(dirty, size).await?;
+        *self.log_next.lock().unwrap() = report.log_next;
+        Ok(report)
     }
 }
 

@@ -89,6 +89,8 @@ pub struct SaveReport {
     pub checkpointed_pages: usize,
     /// Committed, but checkpoint work failed. Do not replay SQL.
     pub cleanup_error: Option<io::Error>,
+    /// One past the last committed transaction after this save.
+    pub(crate) log_next: u64,
 }
 
 /// One backend mutation of a save.
@@ -314,7 +316,10 @@ impl Snapshot {
     /// cancellation. After an error, reopen; never reuse this snapshot.
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
         if dirty.is_empty() && size == self.size() {
-            return Ok(SaveReport::default());
+            return Ok(SaveReport {
+                log_next: self.log.next,
+                ..SaveReport::default()
+            });
         }
         let mut images = Images::new();
         for (index, page) in dirty {
@@ -390,6 +395,7 @@ impl Snapshot {
             return Ok(SaveReport {
                 checkpointed_pages,
                 cleanup_error: Some(error),
+                log_next: next,
             });
         }
 
@@ -449,6 +455,7 @@ impl Snapshot {
         Ok(SaveReport {
             checkpointed_pages,
             cleanup_error,
+            log_next: next,
         })
     }
 }

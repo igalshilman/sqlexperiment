@@ -159,3 +159,26 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
         Ok(())
     })
 }
+
+/// Pages larger than a 4096-byte block survive a save and a cold reopen.
+#[test]
+fn large_page_sizes_reopen_after_a_save() -> Result<()> {
+    futures::executor::block_on(async {
+        for page_size in [8192, 65536] {
+            let store: Arc<dyn sqlite_kv::kv::KvStore> =
+                Arc::new(sqlite_kv::simulation::MemoryKv::default());
+            let mut db = Session::open(store.clone()).await?;
+            db.execute(&format!("PRAGMA page_size = {page_size}"))
+                .await?;
+            db.execute("CREATE TABLE t(v TEXT)").await?;
+            db.execute("INSERT INTO t VALUES ('kept')").await?;
+            db.save().await?;
+            let mut db = Session::open(store.clone()).await?;
+            let rows = db.query("SELECT v FROM t").await?;
+            assert_eq!(rows[0][0].to_string(), "kept", "page size {page_size}");
+            let rows = db.query("PRAGMA page_size").await?;
+            assert_eq!(rows[0][0].as_int(), Some(page_size));
+        }
+        Ok(())
+    })
+}
