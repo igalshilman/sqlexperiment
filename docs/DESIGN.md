@@ -4,6 +4,20 @@ SQLite-compatible SQL (Turso's `turso_core` engine, unmodified) over an
 asynchronous key/value store, for namespaces with one owner at a time, such as
 a Restate virtual object.
 
+It serves two kinds of host:
+
+- **A journaled handler**, which a failure replays from the start. The
+  database is part of the invocation's state: a session is durable as a whole at
+  its end (`Durability::Save`), and a failed attempt leaves nothing behind.
+- **An object without a journal**: a key, its own database, and calls to other
+  objects or services, with at-least-once delivery. The database is the
+  object's only durable record, so it behaves like SQLite: each SQL
+  transaction is durable when it commits (`Durability::Commit`), and
+  `Session::transaction` scopes one to a closure.
+
+Both write the same format through the same protocol; only how much one save
+covers differs.
+
 ## Constraints
 
 - **The backend is plain KV.** Whole-value `get`, and atomic, durable
@@ -106,12 +120,26 @@ one round trip with a cache (checkpoint work rides along). Commits are
 sequential: invariant 2 forbids starting the next before the previous one is
 acknowledged.
 
-**Retries.** With at-least-once delivery, a handler that fails after a commit
-runs again on top of it. Make the request idempotent inside the database: in
-the same transaction as its effects, insert the request id into a table with a
-unique key, and stop if it is already there. For calls to other objects or
-services, commit the intent first (an outbox row), then send, and delete the
-row once acknowledged.
+**Retries without a journal.** With at-least-once delivery, a handler that
+fails after a commit runs again on top of it. Two patterns keep that correct:
+
+- **Idempotent requests.** In the same transaction as the request's effects,
+  insert its id into a table with a unique key, and stop if the row exists.
+  The dedupe record and the effects commit atomically, because they are one
+  log transaction.
+- **Outbox for calls.** Commit the intent to call another object or service
+  as a row, then send it, and delete the row once the call is acknowledged. A
+  retry finds the row and resends, so the callee must deduplicate too.
+
+A commit whose statement returned an error has an unknown outcome: reopen and
+look (the dedupe row says whether it landed) rather than retrying blindly.
+
+**Choosing.** Per-save durability costs one round trip per session and
+keeps a failed attempt invisible; per-commit durability costs one round trip
+per write transaction and makes progress durable as it happens. With a
+journal, prefer per-save: a replay re-runs the SQL against the state it
+started from. Without one, per-commit is the only choice that does not lose
+acknowledged work when a later step fails.
 
 ## Open
 

@@ -3,7 +3,9 @@
 SQLite-compatible SQL over an asynchronous key/value store, for namespaces with
 one owner at a time (such as a Restate virtual object). It runs Turso's Rust
 engine (`turso_core` 0.8.2) unmodified and needs only `get`, `put` and
-`delete` from the backend. A save is usually one put.
+`delete` from the backend. Changes become durable per session (`save()`), for
+hosts that journal and replay, or per SQL commit as in SQLite, for objects
+without a journal. Either way, a save is usually one put.
 
 An experiment, not a production backend: see [the design](docs/DESIGN.md).
 
