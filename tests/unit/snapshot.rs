@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// First eight bytes of a page as its number, for readable assertions.
-fn number(page: Option<Vec<u8>>) -> Option<u64> {
+fn number(page: Option<Page>) -> Option<u64> {
     page.map(|p| u64::from_le_bytes(p[..8].try_into().unwrap()))
 }
 fn page(n: u64) -> Vec<u8> {
@@ -45,7 +45,7 @@ impl Model {
         }
         for index in 0..self.size / BLOCK_SIZE as u64 {
             let expected = self.pages.get(&index).cloned().flatten();
-            if snapshot.block(index).await? != expected {
+            if snapshot.block(index).await?.as_deref() != expected.as_ref() {
                 return Ok(false);
             }
         }
@@ -245,7 +245,13 @@ fn weak_backends_confirm_what_this_owner_did_not_write() -> io::Result<()> {
             .publish(Changes::from([(0, Some(page(1)))]), 4096)
             .await?;
         // A failed append is visible but not durable.
-        let images = Images::from([(0, Some(page_codec::encode(&page(2), PageCompression::Raw)?))]);
+        let images = Images::from([(
+            0,
+            Some(Arc::new(page_codec::encode(
+                &page(2),
+                PageCompression::Raw,
+            )?)),
+        )]);
         let segment = log::encode_transaction(2, 4096, &images).remove(0);
         store.simulate_unacknowledged_put(&log_key(2), segment);
         assert_eq!(number(open(&store, &opts).await?.block(0).await?), Some(2));

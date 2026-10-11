@@ -34,7 +34,8 @@ In the same round trip it may checkpoint the oldest logged pages into
 log, else at their own key, so a cold read is one get. There is no page map,
 object allocation or intent. `StorageOptions` selects
 `PageCompression::{Lz4, Raw}` (default adaptive LZ4), `checkpoint_after` (logged
-transactions before saves checkpoint, default 4) and an optional `PageCache`:
+transactions before saves checkpoint, default 4) and an optional `PageCache`
+(pages as stored, or `PageCache::decoded`; see [cache results](benches/CACHE_RESULTS.md)):
 owner-process state that caches pages, resets itself when another writer moves
 `meta`, and remembers what this owner made durable. With it, a steady-state open
 and save are one round trip each. Backends whose visible values are always

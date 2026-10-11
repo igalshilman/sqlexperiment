@@ -4,8 +4,8 @@ use crate::{
     page_codec::{self, PageCompression},
 };
 
-fn image(n: u8) -> Vec<u8> {
-    page_codec::encode(&vec![n; BLOCK_SIZE], PageCompression::Raw).unwrap()
+fn image(n: u8) -> Page {
+    std::sync::Arc::new(page_codec::encode(&vec![n; BLOCK_SIZE], PageCompression::Raw).unwrap())
 }
 
 #[test]

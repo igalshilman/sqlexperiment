@@ -1,7 +1,7 @@
 use super::*;
 
-fn value(n: usize) -> Arc<[u8]> {
-    vec![n as u8; n].into()
+fn value(n: usize) -> Page {
+    Arc::new(vec![n as u8; n])
 }
 
 #[test]
