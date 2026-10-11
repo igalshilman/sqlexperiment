@@ -54,7 +54,10 @@ const attempt = (ctx) => {
   attempts.set(id, (attempts.get(id) ?? 0) + 1);
   return () => attempts.get(id);
 };
-const slow = (ctx, key, args) => ctx.objectClient(helper, key).slow(args);
+// A call to the helper, idempotent across attempts: a retried or resumed
+// attempt reaches the call the first one made.
+const slow = (ctx, key, args) =>
+  ctx.objectClient(helper, key).slow(args, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${key}` }));
 
 const conc = restate.object({
   name: 'Concurrency',
@@ -138,7 +141,9 @@ const conc = restate.object({
 
     ids: async (ctx) => {
       const call = slow(ctx, 'ids', { ms: 10, value: 1 });
-      const send = ctx.objectSendClient(helper, 'ids-send').slow({ ms: 10, value: 1 });
+      const send = ctx
+        .objectSendClient(helper, 'ids-send')
+        .slow({ ms: 10, value: 1 }, restate.rpc.sendOpts({ idempotencyKey: `${ctx.request().id}:send` }));
       const [callId, sendId, value] = await Promise.all([call.invocationId, send.invocationId, call]);
       return { call: callId.startsWith('inv'), send: sendId.startsWith('inv'), value };
     },

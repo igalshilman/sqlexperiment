@@ -3,8 +3,9 @@
 //
 // Its tools move money in the ledger (../node/ledger.mjs), with the tool call
 // id as the transfer id, so a tool call run again after a crash moves the
-// money once; the call to the ledger gets an idempotency key derived by the
-// SDK.
+// money once. Each call to the ledger has an idempotency key made from the
+// request id (`ctx.request().id`, the same on every attempt) and the tool
+// call id, so a retried attempt reaches the call the first one made.
 //
 // Environment: PORT (default 9080), PI_MODEL (see utils.mjs) and
 // ABORT_PER_MILLE (see ../faults.mjs).
@@ -32,7 +33,9 @@ const bank = (ctx) => {
       }),
       replay: 'safe', // runs again after a crash, with the same call id
       execute: async ({ from, to, amount }, api) => {
-        await books.transfer({ id: api.callId, from, to, amount });
+        // One key per tool call: an invocation makes many.
+        const opts = restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` });
+        await books.transfer({ id: api.callId, from, to, amount }, opts);
         return { content: [{ type: 'text', text: `moved ${amount} from account ${from} to account ${to}` }] };
       },
     }),
@@ -41,7 +44,10 @@ const bank = (ctx) => {
       description: 'Check the books: accounts, total money, transfers, and inconsistent accounts.',
       parameters: Type.Object({}),
       replay: 'safe',
-      execute: async () => ({ content: [{ type: 'text', text: JSON.stringify(await books.audit()) }] }),
+      execute: async (_params, api) => {
+        const opts = restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` });
+        return { content: [{ type: 'text', text: JSON.stringify(await books.audit(opts)) }] };
+      },
     }),
   ];
 };

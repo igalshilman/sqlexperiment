@@ -95,19 +95,32 @@ operation it reaches happens again. What each one does then:
 | Operation | On a retried attempt |
 |---|---|
 | `ctx.sql`, `ctx.sqlSession` | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
-| Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | Idempotent: the call gets an idempotency key derived from the invocation id and the request (target, input, and how many identical requests came before in this attempt). The same call reaches the invocation the earlier attempt started, and gets its result. |
-| Sends, delayed sends | Idempotent in the same way: a repeated send is dropped, and a delayed send keeps its first timer. |
+| Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result. |
+| Sends, delayed sends | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer. |
 | `ctx.get`, `ctx.set`, `ctx.clear` | Read the state as stored; writes are ordered, and a lost one takes the later commands with it. |
 | `ctx.run` | Runs again: its result is not kept. It starts when made, awaited or not. An empty `ctx.run` is a barrier: every write before it is stored once it resolves. |
 | `ctx.sleep` | Starts over. |
 | `attach`, `cancel` | Idempotent already. |
 | Awakeables | Refused. |
 
-An explicit idempotency key (`rpc.opts({ idempotencyKey })`) is used as
-given. A derived key holds while Restate keeps the invocation: a day by
-default (the target's idempotency retention). A retried attempt that makes a
-different request (other input, because it read other state) starts a new
-invocation, as it should.
+The SDK does not make up keys: a call is idempotent when the code says so,
+with `rpc.opts({ idempotencyKey })` (`rpc.sendOpts` for a send). The examples
+build theirs from the request id, `ctx.request().id`, which is the same on
+every attempt of an invocation, and what the call is for:
+
+```js
+await ctx
+  .objectClient(warehouse, sku)
+  .reserve({ order: ctx.key, qty }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:reserve` }));
+```
+
+A key names one call: one that an invocation makes several times (a tool
+call) adds what tells them apart. Restate attaches a call with a key it has
+seen to the earlier invocation, whatever its input, so the key fits a call
+whose input is the same on every attempt; one whose input depends on what
+the attempt read needs that in its key, or none. A key holds while Restate
+keeps the invocation: a day by default (the target's idempotency
+retention).
 
 ### Plain promises, one await point
 
