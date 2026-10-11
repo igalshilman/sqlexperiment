@@ -7,9 +7,9 @@
 //! `PORT` sets the listening port (default 9080).
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
+use sqlite_kv::Value;
 use sqlite_kv::kv::KvStore;
-use sqlite_kv::{PageCache, PageCacheConfig, Value};
-use sqlite_kv_restate::{ObjectState, Sql, SqlContext, service_options};
+use sqlite_kv_restate::{ObjectState, SqlObjectContext, service_options};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,18 +35,22 @@ struct Audit {
     inconsistent: i64,
 }
 
-const SCHEMA: &str = "
-    CREATE TABLE accounts(id INTEGER PRIMARY KEY, opening INTEGER, balance INTEGER);
-    CREATE TABLE transfers(id TEXT PRIMARY KEY, src INTEGER, dst INTEGER, amount INTEGER);
-";
-
 #[restate_sdk::object]
 impl Ledger {
-    /// Open `count` accounts with `balance` each, once.
+    /// Create the tables, and open `count` accounts with `balance` each, once.
     #[handler]
-    async fn init(&self, ctx: ObjectContext<'_>, request: Json<(i64, i64)>) -> HandlerResult<()> {
+    async fn init(
+        &self,
+        ctx: SqlObjectContext<'_>,
+        request: Json<(i64, i64)>,
+    ) -> HandlerResult<()> {
         let (count, balance) = request.into_inner();
-        ctx.with_sql(async |db| {
+        ctx.sql(async |db| {
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, opening INTEGER, balance INTEGER);
+                 CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, src INTEGER, dst INTEGER, amount INTEGER);",
+            )
+            .await?;
             for id in 0..count {
                 db.execute_with(
                     "INSERT OR IGNORE INTO accounts VALUES(?, ?, ?)",
@@ -65,9 +69,9 @@ impl Ledger {
 
     /// Move money between accounts; false if this transfer id was applied before.
     #[handler]
-    async fn transfer(&self, ctx: ObjectContext<'_>, t: Json<Transfer>) -> HandlerResult<bool> {
+    async fn transfer(&self, ctx: SqlObjectContext<'_>, t: Json<Transfer>) -> HandlerResult<bool> {
         let t = t.into_inner();
-        ctx.with_sql(async |db| {
+        ctx.sql(async |db| {
             let id = Value::build_text(t.id.clone());
             let seen = db
                 .query_with("SELECT 1 FROM transfers WHERE id = ?", [id.clone()])
@@ -102,9 +106,9 @@ impl Ledger {
 
     /// Totals, and accounts that disagree with the recorded transfers.
     #[handler]
-    async fn audit(&self, ctx: ObjectContext<'_>) -> HandlerResult<Json<Audit>> {
+    async fn audit(&self, ctx: SqlObjectContext<'_>) -> HandlerResult<Json<Audit>> {
         let audit = ctx
-            .with_sql(async |db| {
+            .sql(async |db| {
                 let integrity = db.query("PRAGMA integrity_check").await?;
                 if integrity.len() != 1 || integrity[0][0].to_string() != "ok" {
                     return Err("integrity check failed".into());
@@ -211,16 +215,10 @@ async fn main() {
     let port: u16 = std::env::var("PORT").map_or(9080, |p| p.parse().expect("PORT"));
     let abort_per_mille =
         std::env::var("LEDGER_ABORT_PER_MILLE").map_or(0, |p| p.parse().expect("per mille"));
-    let mut sql = Sql::new().schema("Ledger", SCHEMA);
-    if let Ok(dir) = std::env::var("LEDGER_CACHE_DIR") {
-        let config = PageCacheConfig::new(dir, 64 << 20, 256 << 20);
-        sql = sql.cache(PageCache::open(config).await.expect("page cache"));
-    }
     if abort_per_mille > 0 {
         ABORT_PER_MILLE.store(abort_per_mille, Ordering::Relaxed);
-        sql = sql.wrap_store(with_aborts);
+        sqlite_kv_restate::set_store_wrapper(with_aborts);
     }
-    sql.install();
     let mut options = service_options()
         .retry_policy_initial_interval(Duration::from_millis(50))
         .retry_policy_max_interval(Duration::from_millis(500));

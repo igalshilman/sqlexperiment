@@ -9,27 +9,33 @@ the state, single-writer execution per key, and retries.
 #[restate_sdk::object]
 impl Ledger {
     #[handler]
-    async fn transfer(&self, ctx: ObjectContext<'_>, t: Json<Transfer>) -> HandlerResult<bool> {
-        ctx.with_sql(async |db| {
+    async fn init(&self, ctx: SqlObjectContext<'_>) -> HandlerResult<()> {
+        ctx.sql(async |db| db.execute("CREATE TABLE IF NOT EXISTS accounts(...); ...").await)
+            .await
+    }
+
+    #[handler]
+    async fn transfer(&self, ctx: SqlObjectContext<'_>, t: Json<Transfer>) -> HandlerResult<bool> {
+        ctx.sql(async |db| {
             // ... SELECT, INSERT, UPDATE ...
         })
         .await // one transaction: durable as a whole once this returns Ok
     }
 }
 
-// Once per process: the page cache and each service's schema.
-Sql::new()
-    .cache(PageCache::open(PageCacheConfig::new(file, 256 << 20, 8 << 30)).await?)
-    .schema("Ledger", "CREATE TABLE accounts(...); CREATE TABLE transfers(...);")
-    .install();
 Endpoint::builder()
     .bind(Ledger.into_service_definition().options(sqlite_kv_restate::service_options()))
 ```
 
-`with_sql` opens the object's database (namespace `service/key`), creates
-the schema when the database has no tables, runs the body as one SQL
-transaction, and turns errors into handler errors: an SQL error, or the body's
-own, is terminal, since a retry would repeat it; a storage error is retryable.
+A handler takes a `SqlObjectContext` instead of an `ObjectContext`: the same
+context (it dereferences to it, so state, calls and `ctx.run` work as usual)
+plus `ctx.sql(...)`. That opens the object's database (namespace
+`service/key`), runs the body as one SQL transaction, and turns errors into
+handler errors: an SQL error, or the body's own, is terminal, since a retry
+would repeat it; a storage error is retryable. There is nothing to set up: a
+page cache shared by the process's objects is built in (256 MiB of memory,
+1 GiB of disk in a temporary file, or the file `SQLITE_KV_CACHE_FILE` names).
+Creating tables is the handlers' business, as the ledger's `init` does.
 
 [`src/bin/ledger.rs`](src/bin/ledger.rs) is a complete object: accounts and
 transfers, each transfer recorded with its id in the same SQL transaction as
@@ -53,7 +59,7 @@ trust writes that may be lost. Two things do:
 - **The page cache.** It keeps what this process wrote (the last commit, a
   checkpoint not yet recorded in `meta`, checkpointed pages, the parked
   engine) for the object's next invocation. So after a session that wrote,
-  `with_sql` waits for one barrier: an empty `ctx.run`, which the runtime
+  `sql` waits for one barrier: an empty `ctx.run`, which the runtime
   acknowledges after the commands before it. If the attempt dies before that,
   the next session in this process resets the namespace's cache and starts
   cold.
@@ -75,7 +81,7 @@ Recovery is then the storage protocol's: open reads `meta` and the log, so a
 half-written commit or checkpoint from the crashed attempt is ignored or
 replayed over.
 
-**Durability.** Sessions use `Durability::Commit`, and `with_sql` runs its
+**Durability.** Sessions use `Durability::Commit`, and `sql` runs its
 body as one transaction: it is durable as a whole when it returns.
 
 **Semantics.** A handler runs at least once: a crash after a commit and before
@@ -92,8 +98,9 @@ checkpoints, and are not supported.
 
 ## SDK changes
 
-The SDK is vendored (`vendor/`, restate-sdk 0.12.1 and restate-sdk-shared-core
-7.0.3) and patched; the first commit on the branch is the unmodified copy, so
+The SDK is vendored (`vendor/`: restate-sdk 0.12.1, restate-sdk-shared-core
+7.0.3 and restate-sdk-macros 0.12.1) and patched; each was first committed
+unmodified, so
 `git diff` shows the patches. They build together through this crate's
 `[patch.crates-io]`.
 
@@ -102,6 +109,7 @@ The SDK is vendored (`vendor/`, restate-sdk 0.12.1 and restate-sdk-shared-core
 | `JournalReplay::Disabled`: after the input, skip the recorded commands; start completion ids at `1 + 2 × known entries` (a command takes at most two, so ids of earlier attempts are never reused); refuse awakeables, whose signal ids cannot be made fresh | shared-core `VMOptions`, `SysInput`, `Journal::skip_replayed` |
 | `ServiceOptions::journal_replay(bool)`, recorded in the service metadata and applied to each invocation's VM | SDK `endpoint/builder.rs`, `endpoint/mod.rs` |
 | `ObjectContext::internal()`, so a store can hold the context beyond a borrow | SDK `context/mod.rs` |
+| Handlers may take a custom context whose type name ends in `ObjectContext` (or another context's name), built like the others from the internal context and input metadata | macros `struct_ast.rs` |
 | Fix: futures awaited concurrently in one task lost wake-ups and hung | SDK `endpoint/futures/async_result_poll.rs` |
 | Fix: set `TCP_NODELAY` on accepted connections | SDK `http_server.rs` |
 
@@ -142,8 +150,8 @@ took 62 ms with the barrier, and takes 15.7 ms with the fix.
 
   | Abort rate per state request | Runs | Ledger restarts | Result |
   |---|---|---|---|
-  | 1.5% | 17 | 34 to 78 | All consistent |
-  | 4% | 8 | 185 to 290 | All consistent |
+  | 1.5% | 19 | 34 to 78 | All consistent |
+  | 4% | 10 | 130 to 290 | All consistent |
 
   At 8% an invocation of about 100 requests almost never completes, so the
   campaign does not finish; that is a liveness bound of the test, not a
@@ -157,15 +165,15 @@ took 62 ms with the barrier, and takes 15.7 ms with the fix.
 200 sequential transfers on a 100-account ledger, release build, one local
 server node, measured through the ingress:
 
-| | Mean latency | Lazy reads per transfer | Writes per transfer |
-|---|---|---|---|
-| Page cache | 15.7 ms | 5.0, and one `ctx.run` | 2.0 sets, 1.9 clears |
-| No cache | 15.5 ms | 11.9 | 1.8 sets, 1.0 clear |
+| Mean latency | Lazy reads per transfer | Writes per transfer |
+|---|---|---|
+| 14.5 ms | 5.0, and one `ctx.run` | 2.0 sets, 1.9 clears |
 
 A lazy read, and the `ctx.run`, are two journal entries each (the command,
-and the notification carrying the value), so a cached transfer journals about
-18 entries. On one local node the cache saves reads, not time; it pays off as
-reads get more expensive and databases larger.
+and the notification carrying the value), so a transfer journals about 18
+entries. Without the page cache a transfer made 11.9 reads and no `ctx.run`,
+in about the same time on one local node: the cache saves reads, which pays
+off as reads get more expensive and databases larger.
 
 ## Caveats
 

@@ -2298,8 +2298,6 @@ dependencies = [
 [[package]]
 name = "restate-sdk-macros"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be5c9e728067ad808d3f95ffe8f678d0c0b3a6374888dbd55764194e87d879c1"
 dependencies = [
  "jiff",
  "proc-macro2",

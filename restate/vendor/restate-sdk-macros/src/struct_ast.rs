@@ -600,18 +600,22 @@ fn parse_handler(
 /// shared (read-only) context.
 fn validate_context(service_ty: ServiceType, ty: &Type) -> Result<bool> {
     let ident = type_last_ident(ty)?;
+    // A custom context type, built like the others from the internal context and
+    // the input metadata, declares its kind by its name's suffix, such as
+    // `SqlObjectContext` for an exclusive object handler.
     let (kind, shared) = match ident.to_string().as_str() {
-        "Context" => (ServiceType::Service, false),
-        "ObjectContext" => (ServiceType::Object, false),
-        "SharedObjectContext" => (ServiceType::Object, true),
-        "WorkflowContext" => (ServiceType::Workflow, false),
-        "SharedWorkflowContext" => (ServiceType::Workflow, true),
+        n if n.ends_with("SharedObjectContext") => (ServiceType::Object, true),
+        n if n.ends_with("ObjectContext") => (ServiceType::Object, false),
+        n if n.ends_with("SharedWorkflowContext") => (ServiceType::Workflow, true),
+        n if n.ends_with("WorkflowContext") => (ServiceType::Workflow, false),
+        n if n.ends_with("Context") => (ServiceType::Service, false),
         other => {
             return Err(Error::new_spanned(
                 ty,
                 format!(
                     "unrecognized context type `{other}`; expected one of Context, ObjectContext, \
-                     SharedObjectContext, WorkflowContext, SharedWorkflowContext"
+                     SharedObjectContext, WorkflowContext, SharedWorkflowContext, or a type \
+                     whose name ends in one of them"
                 ),
             ));
         }

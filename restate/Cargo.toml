@@ -25,3 +25,4 @@ ureq = { version = "2", default-features = false }
 [patch.crates-io]
 restate-sdk = { path = "vendor/restate-sdk" }
 restate-sdk-shared-core = { path = "vendor/restate-sdk-shared-core" }
+restate-sdk-macros = { path = "vendor/restate-sdk-macros" }
