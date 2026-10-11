@@ -89,7 +89,7 @@ pub struct StorageOptions {
     pub prefetch_pages: u64,
     /// Pages a checkpointing save lists in the working-set hint, which a cold
     /// open of a larger database fetches alongside replay (at most
-    /// [`crate::hint::MAX_HINT_PAGES`]); 0 neither writes nor reads it.
+    /// [`crate::MAX_HINT_PAGES`]); 0 neither writes nor reads it.
     pub hint_pages: usize,
 }
 

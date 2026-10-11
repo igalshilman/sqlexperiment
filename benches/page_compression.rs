@@ -78,9 +78,12 @@ fn hex(bytes: &[u8]) -> String {
     }
     s
 }
+/// No working-set hint: when checkpoints happen depends on encoded sizes, so a
+/// hint would differ between codecs and blur the comparison.
 fn options(page_compression: PageCompression) -> StorageOptions {
     StorageOptions {
         page_compression,
+        hint_pages: 0,
         ..StorageOptions::default()
     }
 }
