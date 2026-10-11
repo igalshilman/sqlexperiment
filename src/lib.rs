@@ -122,15 +122,24 @@ pub use hint::MAX_HINT_PAGES;
 pub use log::MAX_SEGMENT_BYTES;
 pub use page_codec::PageCompression;
 pub use snapshot::{CHECKPOINT_PAGES, Durability, SaveReport, StorageOptions};
+/// SQL values, as returned in rows and bound as parameters.
+pub use turso_core::Value;
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use crate::kv::KvStore;
 use crate::snapshot::Snapshot;
-use std::{future::poll_fn, sync::Arc, task::Poll};
+use std::{
+    future::poll_fn,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::Poll,
+};
 use turso_core::storage::database::DatabaseFile;
 use turso_core::{
     ConnectAsyncState, Connection, Database, IO, IOResult, OpenFlags, OpenOptions, SqliteDialect,
-    StepResult, TempStore, Value,
+    StepResult, TempStore,
 };
 
 /// Adapter, engine and backend errors returned to the host task.
@@ -145,6 +154,7 @@ type Rows = Vec<Vec<Value>>;
 /// poisons the view; discard it and reopen after settling backend requests.
 /// [`Self::save`] consumes the handle; dropping it never implicitly saves.
 pub struct Session {
+    database: Option<Arc<Database>>,
     connection: Option<Arc<Connection>>,
     io: Arc<KvIo>,
     poisoned: bool,
@@ -158,12 +168,35 @@ pub struct Session {
     #[cfg_attr(not(feature = "simulation"), allow(dead_code))]
     reused: bool,
     durability: Durability,
+    /// A [`Self::transaction`] body is running.
+    in_body: bool,
+    /// Set when a [`Self::transaction`] future is dropped or unwinds before
+    /// finishing, which may leave its SQL transaction open.
+    abandoned: Arc<AtomicBool>,
+    /// A checkpoint failure after a commit, kept for [`Self::take_cleanup_error`].
+    cleanup_error: Option<std::io::Error>,
+}
+
+/// Marks a session abandoned unless it finished; see [`Session::transaction`].
+struct Abandon {
+    abandoned: Arc<AtomicBool>,
+    finished: bool,
+}
+impl Drop for Abandon {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.abandoned.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 /// An idle engine and its adapter at a committed state, kept in the owner's
-/// [`PageCache`] so the next session can skip opening an engine.
+/// [`PageCache`] so the next session can skip opening an engine. Only the
+/// database is kept: each session connects afresh, so no connection state
+/// (counters such as `last_insert_rowid()`, settings, attachments, the temp
+/// schema) carries over.
 pub(crate) struct WarmEngine {
-    connection: Arc<Connection>,
+    database: Arc<Database>,
     io: Arc<KvIo>,
     /// The log position its state corresponds to.
     next: u64,
@@ -236,6 +269,7 @@ impl Session {
         };
         if let Some(warm) = warm {
             let mut session = Self {
+                database: None,
                 connection: None,
                 io: warm.io,
                 poisoned: true,
@@ -244,13 +278,18 @@ impl Session {
                 reused: true,
                 reusable: true,
                 durability,
+                in_body: false,
+                abandoned: Arc::default(),
+                cleanup_error: None,
             };
             session.io.resume(snapshot).await?;
-            session.connection = Some(warm.connection);
+            session.connection = Some(connect(&session.io, &warm.database).await?);
+            session.database = Some(warm.database);
             session.poisoned = false;
             return Ok(session);
         }
         let mut session = Self {
+            database: None,
             connection: None,
             io: KvIo::from_snapshot(snapshot),
             poisoned: true,
@@ -259,9 +298,14 @@ impl Session {
             reused: false,
             reusable: true,
             durability,
+            in_body: false,
+            abandoned: Arc::default(),
+            cleanup_error: None,
         };
         session.io.prepare_engine().await?;
-        session.connection = Some(open_engine(&session.io).await?);
+        let database = open_engine(&session.io).await?;
+        session.connection = Some(connect(&session.io, &database).await?);
+        session.database = Some(database);
         session.poisoned = false;
         Ok(session)
     }
@@ -285,12 +329,17 @@ impl Session {
             .connection
             .as_ref()
             .is_some_and(|connection| connection.get_auto_commit());
-        if self.poisoned || !idle || !self.io.is_clean() {
+        if self.is_poisoned() || !idle || !self.io.is_clean() {
             return;
         }
-        if let Some(connection) = self.connection.take() {
+        drop(self.connection.take());
+        // Closing the connection must leave nothing behind.
+        if !self.io.is_clean() {
+            return;
+        }
+        if let Some(database) = self.database.take() {
             cache.park(WarmEngine {
-                connection,
+                database,
                 io: self.io.clone(),
                 next,
             });
@@ -298,7 +347,9 @@ impl Session {
         }
     }
 
-    /// Execute one SQL statement and collect all result rows in memory.
+    /// Execute SQL and collect the result rows of its last statement in memory.
+    /// A string of several statements runs them in order, each as if executed
+    /// on its own.
     ///
     /// There is no result byte limit or streaming cursor. With
     /// [`Durability::Save`], SQL writes remain private until [`Self::save`]. With
@@ -311,46 +362,66 @@ impl Session {
         if changes_connection_state(sql) {
             self.reusable = false;
         }
-        let rows = self.run(sql).await?;
-        if self.durability == Durability::Commit
-            && self.connection.as_ref().unwrap().get_auto_commit()
-            && !self.io.is_clean()
-        {
-            self.commit().await?;
+        self.run(sql, None).await
+    }
+
+    /// [`Self::query`] for one statement with its parameters (`?`, `?N`,
+    /// `:name`, ...) bound in order. Values never become SQL text, so they need
+    /// no quoting. The number of values must match the statement's parameters.
+    pub async fn query_with(
+        &mut self,
+        sql: &str,
+        params: impl IntoIterator<Item = Value>,
+    ) -> Result<Rows> {
+        if changes_connection_state(sql) {
+            self.reusable = false;
         }
-        Ok(rows)
+        self.run(sql, Some(params.into_iter().collect())).await
+    }
+
+    /// [`Self::query_with`], discarding the result rows.
+    pub async fn execute_with(
+        &mut self,
+        sql: &str,
+        params: impl IntoIterator<Item = Value>,
+    ) -> Result<()> {
+        self.query_with(sql, params).await.map(|_| ())
     }
 
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
     /// `Ok`, or `ROLLBACK` when it returns `Err`. With [`Durability::Commit`],
-    /// `Ok` means the whole transaction is durable, as one log transaction.
+    /// `Ok` means the whole transaction is durable, as one log transaction, and
+    /// `Err` means none of it is (or, for a storage error, that its outcome is
+    /// unknown).
     ///
-    /// `body` must leave the transaction open; it may run any statements on the
-    /// session. An error from `COMMIT` leaves the outcome unknown and poisons
-    /// the session, like any other storage error.
+    /// The body may run any statements except ones that end the transaction
+    /// (`COMMIT`, `END`, `ROLLBACK`): those fail and poison the session before
+    /// anything becomes durable. Dropping the future or unwinding before it
+    /// finishes also poisons the session, since its transaction may be open.
     pub async fn transaction<T>(
         &mut self,
         body: impl AsyncFnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
-        self.execute("BEGIN").await?;
-        let result = body(self).await;
-        let open = !self.poisoned && !self.connection.as_ref().unwrap().get_auto_commit();
-        match result {
-            Ok(value) if open => {
-                self.execute("COMMIT").await?;
-                Ok(value)
-            }
-            Ok(_) => {
-                self.poisoned = true;
-                Err("the transaction ended inside its body, or the session is poisoned".into())
-            }
-            Err(error) => {
-                if open {
-                    self.execute("ROLLBACK").await?;
-                }
-                Err(error)
-            }
+        if self.in_body {
+            return Err("transactions do not nest; use SAVEPOINT".into());
         }
+        let mut guard = Abandon {
+            abandoned: self.abandoned.clone(),
+            finished: false,
+        };
+        self.execute("BEGIN").await?;
+        self.in_body = true;
+        let result = body(self).await;
+        self.in_body = false;
+        let open = !self.is_poisoned() && !self.connection.as_ref().unwrap().get_auto_commit();
+        let result = match result {
+            Ok(value) if open => self.execute("COMMIT").await.map(|()| value),
+            Ok(_) => Err("session is poisoned; discard and reopen".into()),
+            Err(error) if open => self.execute("ROLLBACK").await.and(Err(error)),
+            Err(error) => Err(error),
+        };
+        guard.finished = true;
+        result
     }
 
     /// Make the committed SQL state durable and continue on it. A cleanup error
@@ -361,20 +432,87 @@ impl Session {
         // so a failure must not leave it for reuse.
         self.poisoned = true;
         let report = self.io.publish().await?;
-        // Resident already, unless the page size grew.
-        self.io.prepare_engine().await?;
-        self.poisoned = false;
+        // Resident already, unless the page size grew. The commit is durable
+        // either way; a failure here only ends the session.
+        if self.io.prepare_engine().await.is_ok() {
+            self.poisoned = false;
+        }
         Ok(report)
     }
 
-    async fn run(&mut self, sql: &str) -> Result<Rows> {
-        if self.poisoned {
+    fn is_poisoned(&self) -> bool {
+        self.poisoned || self.abandoned.load(Ordering::SeqCst)
+    }
+
+    /// Run each statement of `sql`, applying the transaction rules after each:
+    /// inside a [`Self::transaction`] body the transaction must stay open, and
+    /// with [`Durability::Commit`] a commit is made durable.
+    /// With `params`, `sql` must be one statement.
+    async fn run(&mut self, sql: &str, mut params: Option<Vec<Value>>) -> Result<Rows> {
+        let mut remaining = sql;
+        let mut rows = None;
+        loop {
+            if self.is_poisoned() {
+                return Err("session is poisoned; discard and reopen".into());
+            }
+            self.poisoned = true; // cancellation/error requires discarding the session
+            let connection = self.connection.as_ref().unwrap();
+            let Some((mut statement, end)) = connection.consume_stmt(remaining)? else {
+                self.poisoned = false;
+                break;
+            };
+            remaining = &remaining[end..];
+            if let Some(values) = params.take() {
+                // Refused before anything runs, so the session stays usable.
+                if connection.consume_stmt(remaining)?.is_some() {
+                    self.poisoned = false;
+                    return Err("parameters bind to a single statement".into());
+                }
+                if values.len() != statement.parameters_count() {
+                    self.poisoned = false;
+                    return Err(format!(
+                        "the statement has {} parameters, {} values given",
+                        statement.parameters_count(),
+                        values.len()
+                    )
+                    .into());
+                }
+                for (index, value) in (1..).zip(values) {
+                    statement.bind_at(std::num::NonZero::new(index).unwrap(), value)?;
+                }
+            }
+            rows = Some(query_engine(&self.io, statement).await?);
+            let idle = connection.get_auto_commit();
+            if self.in_body && idle {
+                return Err("a statement ended the transaction of Session::transaction".into());
+            }
+            self.poisoned = false;
+            if idle && self.durability == Durability::Commit && !self.io.is_clean() {
+                if let Some(error) = self.commit().await?.cleanup_error {
+                    self.cleanup_error = Some(error);
+                }
+            }
+        }
+        rows.ok_or_else(|| "the SQL contains no statements".into())
+    }
+
+    /// Run one statement of this crate's own, outside the transaction rules.
+    async fn internal(&mut self, sql: &str) -> Result<Rows> {
+        if self.is_poisoned() {
             return Err("session is poisoned; discard and reopen".into());
         }
-        self.poisoned = true; // cancellation/error requires discarding the session
-        let rows = query_engine(self.connection.as_ref().unwrap(), &self.io, sql).await?;
+        self.poisoned = true;
+        let statement = self.connection.as_ref().unwrap().prepare(sql)?;
+        let rows = query_engine(&self.io, statement).await?;
         self.poisoned = false;
         Ok(rows)
+    }
+
+    /// Take the error of checkpoint work that failed after a commit with
+    /// [`Durability::Commit`]. The commit is durable; a later commit retries
+    /// the work. [`Self::save`] also reports it.
+    pub fn take_cleanup_error(&mut self) -> Option<std::io::Error> {
+        self.cleanup_error.take()
     }
 
     /// Execute one statement and discard its collected result rows.
@@ -388,7 +526,7 @@ impl Session {
     /// This is a local barrier, **not** backend durability. Failure poisons the
     /// session. A successful checkpoint may still be discarded without saving.
     pub async fn checkpoint(&mut self) -> Result<()> {
-        let rows = self.run("PRAGMA wal_checkpoint(TRUNCATE)").await?;
+        let rows = self.internal("PRAGMA wal_checkpoint(TRUNCATE)").await?;
         if rows.len() != 1
             || rows[0].len() != 3
             || rows[0][0].as_int() != Some(0)
@@ -411,13 +549,14 @@ impl Session {
     /// With [`Durability::Commit`] every SQL transaction is already durable, so
     /// this only ends the session.
     pub async fn save(mut self) -> Result<SaveReport> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err("cannot save a poisoned session".into());
         }
         if !self.connection.as_ref().unwrap().get_auto_commit() {
             return Err("cannot save an open SQL transaction".into());
         }
-        let report = self.commit().await?;
+        let mut report = self.commit().await?;
+        report.cleanup_error = report.cleanup_error.or(self.cleanup_error.take());
         self.park();
         Ok(report)
     }
@@ -440,9 +579,19 @@ impl Drop for Session {
 fn changes_connection_state(sql: &str) -> bool {
     sql.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .any(|word| {
-            ["pragma", "attach", "detach", "temp", "temporary"]
-                .iter()
-                .any(|keyword| word.eq_ignore_ascii_case(keyword))
+            [
+                "pragma",
+                "attach",
+                "detach",
+                "temp",
+                "temporary",
+                // Connection counters that a reused engine would carry over.
+                "last_insert_rowid",
+                "changes",
+                "total_changes",
+            ]
+            .iter()
+            .any(|keyword| word.eq_ignore_ascii_case(keyword))
         })
 }
 
@@ -462,7 +611,7 @@ async fn drive_completion(io: &KvIo, completion: turso_core::types::IOCompletion
     Ok(())
 }
 
-async fn open_engine(io: &Arc<KvIo>) -> Result<Arc<Connection>> {
+async fn open_engine(io: &Arc<KvIo>) -> Result<Arc<Database>> {
     let mounted: Arc<dyn IO> = Arc::new(MountedIo(io.clone()));
     let file = mounted.open_file(DB_PATH, OpenFlags::Create, false)?;
     let options =
@@ -475,6 +624,11 @@ async fn open_engine(io: &Arc<KvIo>) -> Result<Arc<Connection>> {
             IOResult::IO(completion) => drive_completion(io, completion).await?,
         }
     };
+    Ok(db)
+}
+
+/// A new connection with this crate's settings.
+async fn connect(io: &KvIo, db: &Arc<Database>) -> Result<Arc<Connection>> {
     let mut state = ConnectAsyncState::default();
     let connection = loop {
         match db.connect_async(&mut state)? {
@@ -487,8 +641,7 @@ async fn open_engine(io: &Arc<KvIo>) -> Result<Arc<Connection>> {
     Ok(connection)
 }
 
-async fn query_engine(connection: &Arc<Connection>, io: &KvIo, sql: &str) -> Result<Rows> {
-    let mut statement = connection.prepare(sql)?;
+async fn query_engine(io: &KvIo, mut statement: turso_core::Statement) -> Result<Rows> {
     let mut running = Running {
         io,
         complete: false,

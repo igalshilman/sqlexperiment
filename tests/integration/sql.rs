@@ -182,3 +182,37 @@ fn large_page_sizes_reopen_after_a_save() -> Result<()> {
         Ok(())
     })
 }
+
+/// Parameters bind values without SQL text: quotes need no escaping, and a
+/// mismatched count or a second statement is refused before anything runs.
+#[test]
+fn parameters_bind_values_not_text() -> Result<()> {
+    use sqlite_kv::Value;
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let mut db = Session::open(store).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)")
+            .await?;
+        let hostile = "x'); DROP TABLE t; --";
+        db.execute_with(
+            "INSERT INTO t VALUES(?, ?)",
+            [Value::from_i64(1), Value::from_text(hostile.to_string())],
+        )
+        .await?;
+        let rows = db
+            .query_with("SELECT name FROM t WHERE id = ?1", [Value::from_i64(1)])
+            .await?;
+        assert_eq!(rows[0][0].to_string(), hostile);
+        assert!(db.execute_with("SELECT ?", []).await.is_err());
+        assert!(
+            db.execute_with("SELECT ?; SELECT 1", [Value::from_i64(1)])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
+            Some(1)
+        );
+        Ok(())
+    })
+}

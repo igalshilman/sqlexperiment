@@ -242,3 +242,133 @@ async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize
     assert_eq!(count(&mut db).await?, survived + 1);
     Ok(reached)
 }
+
+/// A string of several statements runs all of them, each under the same rules
+/// as on its own, and returns the rows of the last.
+#[test]
+fn every_statement_of_a_string_runs() -> Result<()> {
+    futures::executor::block_on(async {
+        for durability in [Durability::Save, Durability::Commit] {
+            let store = Arc::new(MemoryKv::default());
+            let options = StorageOptions {
+                durability,
+                ..StorageOptions::default()
+            };
+            let mut db = Session::open_with_options(store.clone(), options.clone()).await?;
+            let rows = db
+                .query(
+                    "CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER);
+                     INSERT INTO t VALUES(1, 0); INSERT INTO t VALUES(2, 0);
+                     SELECT count(*) FROM t; -- trailing comment",
+                )
+                .await?;
+            assert_eq!(rows[0][0].as_int(), Some(2));
+            db.execute("BEGIN; INSERT INTO t VALUES(3, 0); COMMIT")
+                .await?;
+            assert!(db.execute("  -- nothing\n ").await.is_err());
+            if durability == Durability::Save {
+                db.save().await?;
+            } else {
+                drop(db);
+            }
+            store.crash(&[]);
+            let mut db = Session::open_with_options(store, options).await?;
+            assert_eq!(count(&mut db).await?, 3, "{durability:?}");
+        }
+        Ok(())
+    })
+}
+
+/// A transaction body may not end its transaction: the statement fails, the
+/// session is poisoned, and nothing of the body becomes durable.
+#[test]
+fn a_transaction_body_cannot_commit_itself() -> Result<()> {
+    futures::executor::block_on(async {
+        for end in ["COMMIT", "END", "ROLLBACK", "COMMIT; BEGIN"] {
+            let store = Arc::new(MemoryKv::default());
+            let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+            db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
+                .await?;
+            let result: Result<()> = db
+                .transaction(async |db| {
+                    db.execute("INSERT INTO t VALUES(1, 0)").await?;
+                    db.execute(end).await?;
+                    Ok(())
+                })
+                .await;
+            assert!(result.is_err(), "{end}");
+            assert!(db.execute("SELECT 1").await.is_err(), "{end}: poisoned");
+            drop(db);
+            store.crash(&[]);
+            let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+            assert_eq!(count(&mut db).await?, 0, "{end}");
+        }
+
+        let store = Arc::new(MemoryKv::default());
+        let mut db = Session::open_with_options(store, options(None)).await?;
+        let nested: Result<()> = db
+            .transaction(async |db| db.transaction(async |_| Ok(())).await)
+            .await;
+        assert!(nested.unwrap_err().to_string().contains("do not nest"));
+        Ok(())
+    })
+}
+
+/// Dropping a transaction future while its body awaits something else (a call
+/// to another service, a timeout) leaves its SQL transaction open; the session
+/// must not accept more work that would silently join it.
+#[test]
+fn an_abandoned_transaction_poisons_the_session() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
+            .await?;
+        {
+            let (_send, receive) = futures::channel::oneshot::channel::<()>();
+            let mut transaction = Box::pin(db.transaction(async move |db| {
+                db.execute("INSERT INTO t VALUES(1, 0)").await?;
+                let _ = receive.await;
+                Ok(())
+            }));
+            for _ in 0..1000 {
+                assert!(futures::poll!(transaction.as_mut()).is_pending());
+            }
+        }
+        assert!(db.execute("INSERT INTO t VALUES(2, 0)").await.is_err());
+        assert!(db.save().await.is_err());
+        Ok(())
+    })
+}
+
+/// A checkpoint failure after a durable commit is reported, not swallowed.
+#[test]
+fn commit_cleanup_errors_are_reported() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
+        let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
+            .await?;
+        let _signal = store.arm(Failpoint {
+            operation: Operation::Put,
+            key_prefix: "v12/page/".into(),
+            nth: 1,
+            effect: Effect::None,
+            cancel: false,
+        });
+        let mut i = 0;
+        while store.events().iter().all(|event| !event.faulted) {
+            db.execute(&format!("INSERT INTO t VALUES({i}, 0)")).await?;
+            i += 1;
+        }
+        assert!(db.take_cleanup_error().is_some());
+        assert!(db.take_cleanup_error().is_none());
+        db.execute("INSERT INTO t VALUES(-1, 0)").await?;
+        store.disarm();
+        db.execute("INSERT INTO t VALUES(-2, 0)").await?;
+        drop(db);
+        let mut db = Session::open_with_options(store, options(None)).await?;
+        assert_eq!(count(&mut db).await?, i + 2);
+        Ok(())
+    })
+}

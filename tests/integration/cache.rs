@@ -353,3 +353,27 @@ fn connection_state_never_reaches_the_next_session() -> Result<()> {
         Ok(())
     })
 }
+
+/// A reused engine starts with fresh connection counters, exactly like a cold
+/// one, so the same SQL gives the same answer either way.
+#[test]
+fn a_reused_engine_has_fresh_connection_counters() -> sqlite_kv::Result<()> {
+    futures::executor::block_on(async {
+        let store = std::sync::Arc::new(sqlite_kv::simulation::MemoryKv::default());
+        let options = sqlite_kv::StorageOptions {
+            cache: Some(sqlite_kv::simulation::fresh_namespace()),
+            ..sqlite_kv::StorageOptions::default()
+        };
+        let mut db = sqlite_kv::Session::open_with_options(store.clone(), options.clone()).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
+        db.execute("INSERT INTO t VALUES(42)").await?;
+        db.save().await?;
+        let counters = "SELECT last_insert_rowid(), changes(), total_changes()";
+        let mut warm = sqlite_kv::Session::open_with_options(store.clone(), options).await?;
+        assert!(warm.reused_engine());
+        let mut cold = sqlite_kv::Session::open(store).await?;
+        assert_eq!(warm.query(counters).await?, cold.query(counters).await?);
+        assert_eq!(warm.query(counters).await?[0][0].as_int(), Some(0));
+        Ok(())
+    })
+}

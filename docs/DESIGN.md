@@ -124,9 +124,11 @@ acknowledged.
 fails after a commit runs again on top of it. Two patterns keep that correct:
 
 - **Idempotent requests.** In the same transaction as the request's effects,
-  insert its id into a table with a unique key, and stop if the row exists.
-  The dedupe record and the effects commit atomically, because they are one
-  log transaction.
+  record its id, and stop if it was already there:
+  `INSERT INTO requests VALUES(?) ON CONFLICT DO NOTHING RETURNING id` returns
+  no row for a duplicate. (A plain `INSERT` would fail on the duplicate, and any
+  SQL error poisons the session.) The dedupe record and the effects commit
+  atomically, because they are one log transaction.
 - **Outbox for calls.** Commit the intent to call another object or service
   as a row, then send it, and delete the row once the call is acknowledged. A
   retry finds the row and resends, so the callee must deduplicate too.
