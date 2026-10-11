@@ -107,9 +107,10 @@
 //! # Limits
 //!
 //! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
-//! Dirty pages, private WAL, the replayed log and query results do not have byte
-//! budgets. The format has structural validation but no checksum or corruption
-//! repair. Use a fresh, dedicated namespace; no migration or format discovery is
+//! A session's private changes and a statement's result rows are capped by
+//! [`StorageOptions::max_private_bytes`] and [`StorageOptions::max_result_bytes`].
+//! Every stored value carries a CRC32C checksum; a corrupt value is an error,
+//! and there is no repair. Use a fresh, dedicated namespace; no migration or format discovery is
 //! implemented. Simulation and benchmark support require the opt-in `simulation`
 //! feature.
 mod cache;

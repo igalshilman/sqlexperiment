@@ -88,6 +88,20 @@ three bugs, all fixed with regression tests:
 Minor fixes: a new namespace state no longer probes and refreshes from log
 position 1, and cache identities start at a random value.
 
+## Format v13: checksums and memory limits
+
+v13 is v12 with a CRC32C on every stored value: in each page envelope (so page
+keys and every image in a log segment), and trailing on segments, `meta` and
+the hint. It costs 4 bytes per page image and per record, and about a
+microsecond per 4 KiB page. A test flips random bits in every stored value of
+a database (408 flips under Raw and LZ4 pages): each read either fails or
+returns exactly the committed rows. Every single-bit change of a segment or
+`meta` is rejected.
+
+Sessions now cap private changes and result rows, and a log grown by failed
+checkpoints (for example a backend rejecting page puts for a while) shrinks
+again once they succeed.
+
 ## Second independent review
 
 After per-commit durability, three more reviews (storage protocol, owner cache,
@@ -163,6 +177,9 @@ caught:
 | A parked engine keeps its position | Parked-engine checkpoint test fails |
 | An evicted namespace gets a second state while in use | Eviction test fails |
 | Reads are cached under the current key and checkpoints ignore positions | Read-race test reverts an acknowledged commit |
+| Page checksums are not verified | Bit-flip test reads silently wrong data |
+| Segment checksums are not verified | Single-bit test accepts flipped segments |
+| Catch-up checkpoints are disabled | Grown log does not shrink |
 
 ## Executed validation
 
@@ -170,8 +187,8 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 
 | Check | Outcome |
 |---|---|
-| `cargo test --locked` | 11 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
-| `cargo test --locked --features simulation` | 85 tests pass: 40 unit, 43 integration, two public API; one rustdoc example also passes |
+| `cargo test --locked` | 12 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
+| `cargo test --locked --features simulation` | 90 tests pass: 41 unit, 47 integration, two public API; one rustdoc example also passes |
 | Interruption campaigns | 2,169 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
@@ -205,9 +222,9 @@ Interruption cases:
 
 Exclusive ownership and settlement of outstanding requests remain host
 requirements. A namespace must use one stable key with `PageCache::namespace`;
-sessions that overlap must share it (without a cache they must not overlap). Log replay and
-dirty pages have no memory budget. Memory budgets, request fencing,
-real-backend latency and process crash/power-loss validation remain future work.
+sessions that overlap must share it (without a cache they must not overlap).
+Parked engines are capped by count, not bytes. Request fencing, real-backend
+latency and process crash/power-loss validation remain future work.
 
 See [format](FORMAT.md), [design](DESIGN.md), and
 [benchmark methodology and evidence](../benches/README.md).
