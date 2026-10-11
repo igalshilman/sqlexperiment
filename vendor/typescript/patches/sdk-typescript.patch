@@ -305,10 +305,10 @@ index 7cee518..5f5bf5a 100644
   * Downcast the given context to {@link ContextInternal}, to access the internal APIs.
 diff --git a/packages/libs/restate-sdk/src/promise_selector.ts b/packages/libs/restate-sdk/src/promise_selector.ts
 new file mode 100644
-index 0000000..330fd5c
+index 0000000..d68ce73
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/promise_selector.ts
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,155 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 + *
@@ -365,6 +365,8 @@ index 0000000..330fd5c
 +  private readonly pending = new Set<Selectable>();
 +  private running = false;
 +  private closed = false;
++  // Between the VM's WaitExternalProgress and the next external progress.
++  private waiting = false;
 +
 +  constructor(private readonly driver: SelectorDriver) {}
 +
@@ -372,7 +374,7 @@ index 0000000..330fd5c
 +    if (this.closed || this.pending.has(promise)) return;
 +    this.pending.add(promise);
 +    if (this.running) {
-+      this.driver.wake();
++      this.wake();
 +    } else {
 +      this.running = true;
 +      void this.loop();
@@ -384,7 +386,16 @@ index 0000000..330fd5c
 +    if (this.closed) return;
 +    this.closed = true;
 +    this.pending.clear();
-+    if (this.running) this.driver.wake();
++    if (this.running) this.wake();
++  }
++
++  // Only a waiting loop needs waking, once: any other picks up the change on
++  // its next pass. (Waking it otherwise would buffer a signal per promise, and
++  // as many needless passes.)
++  private wake(): void {
++    if (!this.waiting) return;
++    this.waiting = false;
++    this.driver.wake();
 +  }
 +
 +  /** The promises still pending, for tests. */
@@ -423,8 +434,12 @@ index 0000000..330fd5c
 +        if (result === "AnyCompleted") {
 +          continue;
 +        } else if (result === "WaitExternalProgress") {
++          // From here, in the same turn as the check: what is registered
++          // after it is not part of it.
++          this.waiting = true;
 +          await this.driver.flushOutput();
 +          await this.driver.awaitExternalProgress();
++          this.waiting = false;
 +        } else if (result === "CancelSignalReceived") {
 +          // Reaches every pending promise; what is awaited after it is not cancelled.
 +          for (const promise of this.pending) promise.tryCancel();
@@ -859,10 +874,10 @@ index 9b9e22f..31a08d1 100644
  /**
 diff --git a/packages/libs/restate-sdk/src/unjournaled.ts b/packages/libs/restate-sdk/src/unjournaled.ts
 new file mode 100644
-index 0000000..e78269c
+index 0000000..ce78c12
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/unjournaled.ts
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,117 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 + *
@@ -890,7 +905,8 @@ index 0000000..e78269c
 +import { isRestatePromise, plainPromise } from "./promises.js";
 +
 +// Methods whose result is an object of more operations (a client, a scoped
-+// context, an invocation reference), wrapped the same way.
++// context, an invocation reference, a workflow's durable promise), wrapped the
++// same way.
 +const WRAP_RESULT = new Set([
 +  "serviceClient",
 +  "objectClient",
@@ -903,6 +919,7 @@ index 0000000..e78269c
 +  "scope",
 +  "invocation",
 +  "signal",
++  "promise",
 +]);
 +// Properties that are objects of more operations.
 +const WRAP_PROPERTY = new Set(["date"]);
@@ -980,10 +997,10 @@ index 0000000..e78269c
 +}
 diff --git a/packages/libs/restate-sdk/test/promise_selector.test.ts b/packages/libs/restate-sdk/test/promise_selector.test.ts
 new file mode 100644
-index 0000000..b9182e0
+index 0000000..e04f3df
 --- /dev/null
 +++ b/packages/libs/restate-sdk/test/promise_selector.test.ts
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,484 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 + *
@@ -1344,6 +1361,19 @@ index 0000000..b9182e0
 +    await expect(p.user).resolves.toBe("late");
 +  });
 +
++  it("joins a run registered between the check and the wait to the next check", async () => {
++    let t: ReturnType<typeof setup> | undefined;
++    let r: FakePromise | undefined;
++    t = setup({
++      // The flush before waiting: a run is made in between.
++      onFlush: () => {
++        if (!r && t!.fake.progress.length > 0) r = t!.run();
++      },
++    });
++    t.promise(); // never completes
++    await until(() => r !== undefined && t!.started.includes(r.handle));
++  });
++
 +  it("does not keep waiting on a race's loser once the race settled", async () => {
 +    const t = setup();
 +    const a = new FakePromise(t.fake, 100);
@@ -1442,6 +1472,17 @@ index 0000000..b9182e0
 +      await until(() => t.selector.size === 0);
 +      expect(t.errors).toEqual([]);
 +    }
++  });
++
++  it("checks a batch of promises made at once together, not once per promise", async () => {
++    const t = setup();
++    const ps = Array.from({ length: 100 }, () => t.promise());
++    await settle(50);
++    expect(t.fake.progress.length).toBeLessThanOrEqual(2);
++    expect(t.selector.size).toBe(100);
++    ps.forEach((p, i) => t.complete(p, i));
++    await expect(Promise.all(ps.map((p) => p.user))).resolves.toHaveLength(100);
++    expect(t.errors).toEqual([]);
 +  });
 +});
 diff --git a/sdk-shared-core-wasm-bindings/Cargo.toml b/sdk-shared-core-wasm-bindings/Cargo.toml

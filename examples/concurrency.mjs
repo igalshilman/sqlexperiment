@@ -165,6 +165,22 @@ const conc = restate.object({
   options: { journalReplay: false },
 });
 
+const flow = restate.workflow({
+  name: 'Flow',
+  handlers: {
+    run: async (ctx) => {
+      const got = ctx.promise('approval').get();
+      return { promise: got instanceof Promise, map: typeof got.map, value: await got };
+    },
+    approve: async (ctx, value) => {
+      const resolved = ctx.promise('approval').resolve(value);
+      await resolved;
+      return typeof resolved.map;
+    },
+  },
+  options: { journalReplay: false },
+});
+
 const db = restate.object({
   name: 'Db',
   handlers: {
@@ -203,7 +219,7 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   if (await fetch(`${ADMIN}/health`).then((r) => r.ok, () => false)) break;
   if (Date.now() > deadline) throw new Error('restate-server did not start');
 }
-const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(db).listen(PORT);
+const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(db).listen(PORT);
 void endpoint;
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   const registered = await fetch(`${ADMIN}/deployments`, {
@@ -299,6 +315,20 @@ await check('a cancellation reaches every pending operation', async () => {
     signal: AbortSignal.timeout(30_000),
   }).then((r) => r.json());
   assert.deepEqual(output, ['rejected:409', 'rejected:409', 'rejected:409']);
+});
+
+await check("a workflow's durable promise is a plain promise", async () => {
+  const sent = await fetch(`${INGRESS}/Flow/f/run/send`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: 'null',
+  }).then((r) => r.json());
+  await sleep(200);
+  assert.equal((await call('Flow/f/approve', 'yes')).value, 'undefined');
+  const output = await fetch(`${INGRESS}/restate/invocation/${sent.invocationId}/attach`, {
+    signal: AbortSignal.timeout(30_000),
+  }).then((r) => r.json());
+  assert.deepEqual(output, { promise: true, map: 'undefined', value: 'yes' });
 });
 
 await check('ctx.sqlSession with statements, a call and a run at once', async () => {

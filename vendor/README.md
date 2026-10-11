@@ -50,5 +50,5 @@ writes the patches back.
 | Build: the bindings depend on the patched core by path; [`inline-wasm.mjs`](typescript/inline-wasm.mjs) inlines the WebAssembly; the sqlite-kv peer dependency is added before packing | The SDK's own inliner (wasm-pack-inline 0.1.4) slices wasm-bindgen's output at positions that current wasm-bindgen no longer produces | `sdk-typescript.patch`, `setup.sh` |
 
 The shared core's tests pass with the patch (280), and so do the TypeScript
-SDK's (55, of which 17 are the selector's, against a fake VM and the
+SDK's (57, of which 19 are the selector's, against a fake VM and the
 published single-waiter progress channel).

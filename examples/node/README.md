@@ -116,7 +116,8 @@ Without journal replay the handler's `ctx` returns plain promises: `ctx.get`,
 combine them with `Promise.all`, `Promise.race` or your own combinators, or
 leave them; a library that takes promises takes these. There is no
 `RestatePromise` (no `map`, `orTimeout` or `RestatePromise.all`): with nothing
-replayed, the order things happen in needs no recording.
+replayed, the order things happen in needs no recording. (The TypeScript types
+still say `RestatePromise`; treat them as `Promise`.)
 
 - **An operation starts when it is made.** Its promise is registered then, and
   driven to completion whether or not anything awaits it: a `ctx.run` closure
