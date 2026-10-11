@@ -81,3 +81,95 @@ fn other_writers_never_leave_the_cache_stale() -> Result<()> {
         Ok(())
     })
 }
+
+fn owner(cache: &PageCache) -> StorageOptions {
+    StorageOptions {
+        cache: Some(cache.clone()),
+        ..StorageOptions::default()
+    }
+}
+async fn count(db: &mut Session) -> Result<i64> {
+    Ok(db.query("SELECT count(*) FROM t").await?[0][0]
+        .as_int()
+        .unwrap())
+}
+
+/// A clean save or read-only session leaves its engine to the next session; a
+/// session with unsaved changes, an error, or a write by anyone else does not.
+#[test]
+fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> {
+    use sqlite_kv::simulation::{Effect, Failpoint, FaultKv, Operation};
+    futures::executor::block_on(async {
+        let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
+        let cache = PageCache::new(1 << 20);
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(!db.reused_engine());
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
+        db.save().await?;
+
+        // After a save, and after a read-only session, the engine continues.
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(db.reused_engine(), "after a save");
+        db.execute("INSERT INTO t VALUES (1)").await?;
+        db.save().await?;
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(db.reused_engine());
+        assert_eq!(count(&mut db).await?, 1);
+        drop(db);
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(db.reused_engine(), "after a read-only session");
+
+        // Unsaved changes discard the engine with them.
+        db.execute("INSERT INTO t VALUES (2)").await?;
+        drop(db);
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(!db.reused_engine(), "unsaved changes");
+        assert_eq!(count(&mut db).await?, 1);
+        drop(db);
+
+        // So does a query error.
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(db.reused_engine());
+        assert!(db.execute("INSERT INTO missing VALUES (1)").await.is_err());
+        drop(db);
+        let db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(!db.reused_engine(), "poisoned session");
+        drop(db);
+
+        // Another writer appends, then checkpoints: both force a fresh engine.
+        for checkpoint_after in [100, 0] {
+            let other = StorageOptions {
+                checkpoint_after,
+                ..StorageOptions::default()
+            };
+            let mut db = Session::open_with_options(store.clone(), other).await?;
+            db.execute("INSERT INTO t SELECT max(id) + 1 FROM t")
+                .await?;
+            db.save().await?;
+            let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+            assert!(!db.reused_engine(), "another writer");
+            let expected = if checkpoint_after == 0 { 3 } else { 2 };
+            assert_eq!(count(&mut db).await?, expected);
+            drop(db);
+            let db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+            assert!(db.reused_engine(), "warm again once unchanged");
+        }
+
+        // A save that fails before committing leaves nothing to reuse.
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        db.execute("INSERT INTO t VALUES (100)").await?;
+        let _gate = store.arm(Failpoint {
+            operation: Operation::Put,
+            key_prefix: "v12/log/".into(),
+            nth: 1,
+            effect: Effect::None,
+            cancel: false,
+        });
+        assert!(db.save().await.is_err());
+        store.disarm();
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(!db.reused_engine(), "failed save");
+        assert_eq!(count(&mut db).await?, 3);
+        Ok(())
+    })
+}

@@ -154,7 +154,8 @@ impl Drop for Completing<'_> {
 /// Mount performs recovery and requires exclusive namespace ownership. The queue
 /// lock orders engine mutations; it does not implement a distributed ownership lock.
 pub struct KvIo {
-    snapshot: Snapshot,
+    /// The committed view; replaced when a warm engine continues in a new session.
+    snapshot: Mutex<Arc<Snapshot>>,
     state: Mutex<State>,
     queue: Mutex<VecDeque<Pending>>,
     driver: futures::lock::Mutex<()>,
@@ -175,19 +176,52 @@ impl KvIo {
         options: StorageOptions,
     ) -> io::Result<Arc<Self>> {
         let snapshot = Snapshot::open_with_options(store, options).await?;
+        Ok(Self::from_snapshot(snapshot))
+    }
+
+    pub(crate) fn from_snapshot(snapshot: Snapshot) -> Arc<Self> {
         let state = State {
             sizes: [snapshot.size(), 0],
             ..State::default()
         };
-        Ok(Arc::new(Self {
-            snapshot,
+        Arc::new(Self {
+            snapshot: Mutex::new(Arc::new(snapshot)),
             state: Mutex::new(state),
             queue: Mutex::default(),
             driver: futures::lock::Mutex::new(()),
             progress: Mutex::default(),
             #[cfg(all(test, feature = "simulation"))]
             fault: Mutex::new(None),
-        }))
+        })
+    }
+
+    pub(crate) fn snapshot(&self) -> Arc<Snapshot> {
+        self.snapshot.lock().unwrap().clone()
+    }
+
+    /// No private changes, no private WAL and no outstanding I/O: the engine's
+    /// view equals the committed state it was opened or saved at.
+    pub(crate) fn is_clean(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        let progress = self.progress.lock().unwrap();
+        state.sizes[1] == 0
+            && !state.dirty.keys().any(|(file, _)| *file == 0)
+            && progress.inflight == 0
+            && !progress.stopped
+    }
+
+    /// Continue a clean adapter on a newly opened snapshot of the same committed
+    /// state, keeping the engine that uses it warm.
+    pub(crate) async fn resume(&self, snapshot: Snapshot) -> io::Result<()> {
+        if !self.is_clean() {
+            return Err(invalid("cannot resume an adapter with private changes"));
+        }
+        *self.state.lock().unwrap() = State {
+            sizes: [snapshot.size(), 0],
+            ..State::default()
+        };
+        *self.snapshot.lock().unwrap() = Arc::new(snapshot);
+        self.prepare_engine().await
     }
 
     /// Keep the database header page resident for the engine's synchronous
@@ -265,7 +299,7 @@ impl KvIo {
         if let Some(page) = self.resident_block(file, index) {
             return Ok(page);
         }
-        match self.snapshot.block(index).await? {
+        match self.snapshot().block(index).await? {
             Some(page) if page.len() == BLOCK_SIZE => Ok(page),
             Some(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -488,7 +522,7 @@ impl KvIo {
                 .collect();
             (dirty, state.sizes[0])
         };
-        self.snapshot.publish(dirty, size).await
+        self.snapshot().publish(dirty, size).await
     }
 }
 

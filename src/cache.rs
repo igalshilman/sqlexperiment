@@ -16,7 +16,7 @@
 //!   replay can start there.
 //!
 //! One cache must serve exactly one namespace; sharing it returns wrong pages.
-use crate::{log::Meta, page_codec::Page};
+use crate::{WarmEngine, log::Meta, page_codec::Page};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
@@ -42,6 +42,8 @@ struct State {
     claim: Option<Meta>,
     /// One past this owner's last acknowledged commit.
     committed: Option<u64>,
+    /// An engine whose state equals the committed state at `committed`.
+    engine: Option<WarmEngine>,
 }
 
 impl PageCache {
@@ -68,6 +70,7 @@ impl PageCache {
             meta: None,
             claim: None,
             committed: None,
+            engine: None,
         })))
     }
 
@@ -119,6 +122,20 @@ impl PageCache {
         self.0.lock().unwrap().forget();
     }
 
+    /// One past this owner's last acknowledged commit, if still known.
+    pub(crate) fn committed(&self) -> Option<u64> {
+        self.0.lock().unwrap().committed
+    }
+
+    /// Keep an engine for the next session; it is dropped on any reset.
+    pub(crate) fn park(&self, engine: WarmEngine) {
+        self.0.lock().unwrap().engine = Some(engine);
+    }
+
+    pub(crate) fn take_engine(&self) -> Option<WarmEngine> {
+        self.0.lock().unwrap().engine.take()
+    }
+
     pub(crate) fn get(&self, index: u64) -> Option<Page> {
         let mut state = self.0.lock().unwrap();
         state.clock += 1;
@@ -160,6 +177,7 @@ impl State {
         self.meta = Some(Vec::new()); // matches no real record
         self.claim = None;
         self.committed = None;
+        self.engine = None;
     }
 
     fn remove(&mut self, index: u64) {
