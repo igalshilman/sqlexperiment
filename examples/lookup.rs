@@ -11,21 +11,19 @@ fn main() -> Result<()> {
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < 12000) INSERT INTO accounts SELECT x, printf('user%05d@example.com', x), printf('%0500d', x) FROM n").await?;
         let local = db.io_stats();
         assert_eq!(store.stats().puts, 0);
-        db.save().await?; // checkpoint, then durable object puts and head publication
-        let publication = store.stats();
+        // A large save: commit to the log, then checkpoint into page keys and meta.
+        db.save().await?;
+        let saved = store.stats();
         store.crash(&[]);
         println!(
             "Private WAL bytes written locally: {}",
             local.private_wal_bytes_written
         );
         println!("Backend puts before save: 0");
-        println!(
-            "Backend bytes written by save: {}",
-            publication.bytes_written
-        );
-        println!("Durable publication puts: {}", publication.puts);
+        println!("Backend bytes written by save: {}", saved.bytes_written);
+        println!("Backend puts by save: {}", saved.puts);
 
-        let db_blocks = store.page_count();
+        let pages = store.page_count();
         let stored_bytes = store.stored_bytes();
         store.reset_stats();
         // New engine, pager, file handles and I/O adapter; only KV bytes survive.
@@ -38,24 +36,24 @@ fn main() -> Result<()> {
         assert_eq!(rows[0][0].to_string(), "7321");
         assert_eq!(rows[0][1].to_string(), "500");
         let stats = store.stats();
-        let blocks_read = stats
+        let pages_read = stats
             .read_keys
             .iter()
             .filter(|k| k.contains("/page/"))
             .count();
-        assert!(db_blocks > 100);
+        assert!(pages > 100);
         assert!(
-            blocks_read * 10 < db_blocks,
+            pages_read * 10 < pages,
             "cold lookup fetched too much of the database"
         );
         assert!(stats.bytes_read < stored_bytes as u64 / 10);
 
-        println!("SQLite / asynchronous in-memory KV / no Restate or replay");
+        println!("SQLite over an asynchronous in-memory KV store, without a cache");
         println!("Rows: 12000");
         println!("Stored bytes (including metadata): {stored_bytes}");
-        println!("Stored block objects: {db_blocks} (4096 bytes each)");
+        println!("Checkpointed pages: {pages} (4096 bytes each before compression)");
         println!("Cold open + query KV gets: {}", stats.gets);
-        println!("Distinct blocks fetched: {blocks_read}");
+        println!("Distinct pages fetched: {pages_read}");
         println!("KV bytes fetched: {}", stats.bytes_read);
         println!("Result: id={}, payload length={}", rows[0][0], rows[0][1]);
         for row in plan {
