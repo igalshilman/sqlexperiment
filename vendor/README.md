@@ -34,7 +34,7 @@ pinned revisions into `typescript/.build/` (ignored), applies
 [`typescript/patches/`](typescript/patches), builds the shared core to
 WebAssembly, inlines it into the SDK, and packs the SDK as
 `typescript/.build/restatedev-restate-sdk-1.17.3.tgz`, which
-[`examples/node`](../examples/node) installs. It needs cargo with the
+[`examples`](../examples) installs. It needs cargo with the
 `wasm32-unknown-unknown` target, `wasm-bindgen` 0.2.121, node and pnpm. After
 editing the clones, [`typescript/patches/regenerate.sh`](typescript/patches/regenerate.sh)
 writes the patches back.

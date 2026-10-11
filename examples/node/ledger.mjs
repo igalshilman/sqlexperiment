@@ -6,7 +6,7 @@
 // random state requests, for crash tests; see faults.mjs) and
 // SQLITE_KV_CACHE_FILE.
 import * as restate from '@restatedev/restate-sdk';
-import { serveIfMain } from './faults.mjs';
+import { serveIfMain } from '../faults.mjs';
 
 export const ledger = restate.object({
   name: 'Ledger',
