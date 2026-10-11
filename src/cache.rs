@@ -44,6 +44,7 @@
 //! namespaces, least recently used first; forgetting one only makes it cold.
 use crate::{
     WarmEngine,
+    hint::Usage,
     log::{Images, Meta},
     page_codec::{self, Page},
 };
@@ -214,6 +215,10 @@ struct Owner {
     claim: Option<Meta>,
     /// One past this owner's last acknowledged commit.
     committed: Option<u64>,
+    /// Pages this owner's sessions read, for the working-set hint.
+    usage: Usage,
+    /// The hint this owner last wrote, to skip rewriting an unchanged one.
+    hint: Option<Vec<u8>>,
 }
 
 /// What open may reuse, given the durable `meta` it read.
@@ -303,6 +308,23 @@ impl NamespaceCache {
         owner.claim = None;
         owner.committed = None;
         self.take_engine_of(owner.id);
+    }
+
+    /// Record a page read by a session, for the working-set hint.
+    pub(crate) fn record_use(&self, page: u64, content: &[u8]) {
+        self.owner().usage.record(page, content);
+    }
+
+    /// The working-set hint to write, unless this owner already wrote it.
+    pub(crate) fn hint(&self, limit: usize) -> Option<Vec<u8>> {
+        let owner = self.owner();
+        let hint = crate::hint::encode(&owner.usage.top(limit));
+        (owner.hint.as_ref() != Some(&hint)).then_some(hint)
+    }
+
+    /// Remember an acknowledged hint.
+    pub(crate) fn wrote_hint(&self, hint: Vec<u8>) {
+        self.owner().hint = Some(hint);
     }
 
     /// One past this owner's last acknowledged commit, if still known.
@@ -396,6 +418,8 @@ impl Owner {
             base: None,
             claim: None,
             committed: None,
+            usage: Usage::default(),
+            hint: None,
         }
     }
 

@@ -58,6 +58,13 @@ checkpoint slice per save and confirmation on weak backends. See
   reads from the backend start readahead in a window that doubles up to 64; an
   owner probes the log exactly to where it left it. Up to 64 mutations of a
   save group are in flight, so saves with a cache take one round trip.
+- Working-set hint: checkpointing saves write the pages their owner read most
+  usefully (page 0, interior B-tree pages, recent leaves; 32 by default, at most
+  256) to `v12/hint`, and a cold open of a database larger than 16 pages fetches
+  them alongside replay. On 10,000 rows a cold point-read session went from 5.7
+  to 3.2 round trips. The hint is advisory and outside the invariants. The
+  compression benchmark disables it, because checkpoint timing (and so the hint)
+  depends on encoded sizes.
 
 ## Independent review
 
@@ -110,6 +117,7 @@ caught:
 | Sessions that change connection state still park | Connection state test fails |
 | Page keys carry no generation | Six cache, crash and handover tests fail |
 | No prefetch, no readahead, no exact probe, or 16 mutations in flight | The matching round-trip test fails |
+| The hint is never written, or not used at open | Working-set hint test fails |
 
 ## Executed validation
 
@@ -117,8 +125,8 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 
 | Check | Outcome |
 |---|---|
-| `cargo test --locked` | 6 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
-| `cargo test --locked --features simulation` | 61 tests pass: 33 unit, 27 integration, one public API; one rustdoc example also passes |
+| `cargo test --locked` | 8 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
+| `cargo test --locked --features simulation` | 64 tests pass: 36 unit, 27 integration, one public API; one rustdoc example also passes |
 | Interruption campaigns | 1,548 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |

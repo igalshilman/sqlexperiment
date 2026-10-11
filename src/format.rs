@@ -5,12 +5,15 @@
 //! | `v12/meta` | `SM12` checkpoint record; see [`crate::log::Meta`] |
 //! | `v12/log/<16 hex digits>` | Log segment by sequence number; see [`crate::log`] |
 //! | `v12/page/<16 hex digits>` | Checkpointed page by page number; see [`crate::page_codec`] |
+//! | `v12/hint` | `SH12` advisory list of pages a cold open fetches; see [`crate::hint`] |
 //!
 //! Log segments are the commit records. Pages are overwritten in place by
 //! checkpoints and are only authoritative for pages absent from the log. The
 //! namespace must be dedicated to one database.
 pub(crate) const META: &str = "v12/meta";
 pub(crate) const META_MAGIC: &[u8; 4] = b"SM12";
+pub(crate) const HINT: &str = "v12/hint";
+pub(crate) const HINT_MAGIC: &[u8; 4] = b"SH12";
 pub(crate) const LOG_MAGIC: &[u8; 4] = b"SL12";
 pub(crate) const LOG_PREFIX: &str = "v12/log/";
 pub(crate) const PAGE_PREFIX: &str = "v12/page/";

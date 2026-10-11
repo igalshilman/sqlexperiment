@@ -1,6 +1,6 @@
 //! In-memory visibility/durability model and exact logical traffic counters.
 use crate::{
-    format::{LOG_PREFIX, META, PAGE_PREFIX},
+    format::{HINT, LOG_PREFIX, META, PAGE_PREFIX},
     kv::KvStore,
     yield_now,
 };
@@ -37,6 +37,8 @@ pub fn object_kind(key: &str) -> &'static str {
         "log"
     } else if key == META {
         "meta"
+    } else if key == HINT {
+        "hint"
     } else {
         "other"
     }

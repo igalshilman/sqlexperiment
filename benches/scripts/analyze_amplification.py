@@ -34,7 +34,7 @@ phases = defaultdict(dict)
 for row in rows:
     phases[tuple(row[k] for k in DIMENSIONS[:-1])][row["kind"]] = row
 for key, objects in phases.items():
-    assert set(objects) == {"all", "page", "log", "meta", "other"}, key
+    assert set(objects) == {"all", "page", "log", "meta", "hint", "other"}, key
     for field in TRAFFIC:
         assert objects["all"][field] == sum(r[field] for k, r in objects.items() if k != "all"), (key, field)
     page = objects["page"]

@@ -22,16 +22,16 @@ blocks), shared by every namespace. Engine reuse is on.
 
 | Cache | Memory (of logical DB) | Page gets | Round trips | Allocated MB | CPU ms |
 |---|---|---|---|---|---|
-| encoded | 5% | 239 | 503 | 82.1 | 168 |
-| decoded | 5% | 239 | 503 | 82.8 | 163 |
-| encoded | 10% | 239 | 503 | 77.9 | 114 |
-| decoded | 10% | 239 | 503 | 76.6 | 119 |
-| encoded | 25% | 239 | 503 | 73.8 | 62 |
-| decoded | 25% | 239 | 503 | 69.0 | 68 |
-| encoded | 50% | 239 | 503 | 72.5 | 58 |
-| decoded | 50% | 239 | 503 | 67.4 | 75 |
-| encoded | 100% | 239 | 503 | 72.2 | 55 |
-| decoded | 100% | 239 | 503 | 66.5 | 48 |
+| encoded | 5% | 239 | 503 | 82.5 | 148 |
+| decoded | 5% | 239 | 503 | 82.6 | 144 |
+| encoded | 10% | 239 | 503 | 77.7 | 110 |
+| decoded | 10% | 239 | 503 | 76.8 | 111 |
+| encoded | 25% | 239 | 503 | 74.1 | 67 |
+| decoded | 25% | 239 | 503 | 69.5 | 69 |
+| encoded | 50% | 239 | 503 | 72.5 | 62 |
+| decoded | 50% | 239 | 503 | 67.5 | 52 |
+| encoded | 100% | 239 | 503 | 72.3 | 58 |
+| decoded | 100% | 239 | 503 | 66.6 | 50 |
 
 - **No backend misses beyond first touches at any memory size.** The in-memory
   LRU (below) needed 1,120 misses and 1,450 round trips at 5%; the disk tier

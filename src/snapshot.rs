@@ -41,7 +41,8 @@
 //! wrote them and had them acknowledged.
 use crate::{
     cache::{NamespaceCache, Reuse},
-    format::{META, log_key, page_key},
+    format::{HINT, META, log_key, page_key},
+    hint::{self, Usage},
     kv::KvStore,
     log::{self, Images, Log, Meta},
     page_codec::{self, Page, PageCompression},
@@ -61,7 +62,9 @@ type Changes = BTreeMap<u64, Option<Page>>;
 /// commit, a checkpoint slice of whole transactions and garbage in one round trip.
 pub(crate) const MAX_MUTATIONS_IN_FLIGHT: usize = 64;
 /// Default [`StorageOptions::prefetch_pages`].
-pub const PREFETCH_PAGES: u64 = 64;
+pub const PREFETCH_PAGES: u64 = 16;
+/// Default [`StorageOptions::hint_pages`].
+pub const HINT_PAGES: usize = 32;
 const PAGE: u64 = crate::io::BLOCK_SIZE as u64;
 /// Consecutive page reads that start sequential readahead.
 const READAHEAD_AFTER: u32 = 3;
@@ -84,6 +87,10 @@ pub struct StorageOptions {
     /// A cold open (no warm cache pages) fetches every page of a database of
     /// at most this many pages, alongside replay.
     pub prefetch_pages: u64,
+    /// Pages a checkpointing save lists in the working-set hint, which a cold
+    /// open of a larger database fetches alongside replay (at most
+    /// [`crate::MAX_HINT_PAGES`]); 0 neither writes nor reads it.
+    pub hint_pages: usize,
 }
 
 impl Default for StorageOptions {
@@ -93,6 +100,7 @@ impl Default for StorageOptions {
             cache: None,
             checkpoint_after: 4,
             prefetch_pages: PREFETCH_PAGES,
+            hint_pages: HINT_PAGES,
         }
     }
 }
@@ -169,6 +177,9 @@ pub(crate) struct Snapshot {
     /// Page values fetched ahead of use (prefetch and readahead), each used once.
     fetched: Mutex<HashMap<u64, Option<Bytes>>>,
     readahead: Mutex<Readahead>,
+    /// The working-set hint read at open, and the pages this session read.
+    hint: Option<Bytes>,
+    usage: Mutex<Usage>,
 }
 
 /// Detects sequential reads of page keys.
@@ -211,19 +222,30 @@ impl Snapshot {
         let cache = options.cache.as_ref();
         let batch = log::batch(u64::from(options.checkpoint_after));
         let expected = cache.and_then(NamespaceCache::expected_start);
-        let (meta_bytes, prefetched) = match expected {
-            Some(start) => {
-                // The owner knows where its log ended: probe exactly that far.
-                let first = match cache.and_then(NamespaceCache::committed) {
-                    Some(end) if end >= start => end - start + 1,
-                    _ => batch,
-                };
-                let (meta, probe) =
-                    futures::join!(store.get(META), log::probe(&*store, start, first));
-                (meta?, Some((start, probe)))
+        let first_round = async {
+            match expected {
+                Some(start) => {
+                    // The owner knows where its log ended: probe exactly that far.
+                    let first = match cache.and_then(NamespaceCache::committed) {
+                        Some(end) if end >= start => end - start + 1,
+                        _ => batch,
+                    };
+                    let (meta, probe) =
+                        futures::join!(store.get(META), log::probe(&*store, start, first));
+                    Ok((meta?, Some((start, probe))))
+                }
+                None => Ok::<_, io::Error>((store.get(META).await?, None)),
             }
-            None => (store.get(META).await?, None),
         };
+        // An owner that knows nothing reads the working-set hint with meta.
+        let read_hint = async {
+            match expected.is_none() && options.hint_pages > 0 {
+                true => store.get(HINT).await,
+                false => Ok(None),
+            }
+        };
+        let (first_round, hint) = futures::join!(first_round, read_hint);
+        let ((meta_bytes, prefetched), hint) = (first_round?, hint?);
         let meta = match &meta_bytes {
             Some(bytes) => Meta::decode(bytes)?,
             None => Meta::default(),
@@ -249,16 +271,20 @@ impl Snapshot {
                 None => Ok(None),
             }
         };
-        // Without warm pages, fetch a small database whole, alongside replay.
+        // Without warm pages, fetch a small database whole, or the pages the
+        // working-set hint lists, alongside replay.
         let pages = meta.size.div_ceil(PAGE);
         let cold = !meta_known && since.is_none() && claim.is_none();
+        let wanted: Vec<u64> = match (cold, &hint) {
+            (false, _) => Vec::new(),
+            _ if pages <= options.prefetch_pages => (0..pages).collect(),
+            (true, Some(hint)) => hint::decode(hint, options.hint_pages).unwrap_or_default(),
+            (true, None) => Vec::new(),
+        };
         let prefetch = async {
-            if !cold || pages > options.prefetch_pages {
-                return Ok(Vec::new());
-            }
-            let keys: Vec<_> = (0..pages).map(page_key).collect();
+            let keys: Vec<_> = wanted.iter().copied().map(page_key).collect();
             let values = futures::future::try_join_all(keys.iter().map(|k| store.get(k))).await?;
-            Ok::<_, io::Error>((0..pages).zip(values).collect())
+            Ok::<_, io::Error>(wanted.iter().copied().zip(values).collect::<Vec<_>>())
         };
         let (log, changes, prefetched_pages) = futures::try_join!(
             log::replay(&*store, start, batch, prefetched),
@@ -298,6 +324,8 @@ impl Snapshot {
             page: Mutex::default(),
             fetched: Mutex::default(),
             readahead: Mutex::default(),
+            hint,
+            usage: Mutex::default(),
         }
         .with_fetched(prefetched_pages))
     }
@@ -375,6 +403,10 @@ impl Snapshot {
             }
             page
         };
+        match cache {
+            Some(cache) => cache.record_use(index, &page),
+            None => self.usage.lock().unwrap().record(index, &page),
+        }
         *self.page.lock().unwrap() = Some((index, page.clone()));
         Ok(Some(page))
     }
@@ -404,6 +436,23 @@ impl Snapshot {
         let mut fetched = self.fetched.lock().unwrap();
         fetched.extend(ahead.into_iter().zip(values));
         Ok(value)
+    }
+
+    /// The working-set hint a checkpointing save writes, unless it is unchanged
+    /// or empty.
+    fn hint(&self) -> Option<Vec<u8>> {
+        let limit = self.options.hint_pages;
+        if limit == 0 {
+            return None;
+        }
+        let hint = match &self.options.cache {
+            Some(cache) => cache.hint(limit)?,
+            None => {
+                let hint = hint::encode(&self.usage.lock().unwrap().top(limit));
+                (self.hint.as_deref() != Some(&hint[..])).then_some(hint)?
+            }
+        };
+        (hint::decode(&hint, limit).is_some_and(|pages| !pages.is_empty())).then_some(hint)
     }
 
     /// Oldest transactions to checkpoint before this save commits.
@@ -485,6 +534,14 @@ impl Snapshot {
         };
         if let Some(claim) = early_meta {
             maintenance.push(Mutation::Put(META.to_owned(), claim.encode().into()));
+        }
+        // A checkpointing save also refreshes the working-set hint, if it changed.
+        let hint = match plan.is_some() || large {
+            true => self.hint(),
+            false => None,
+        };
+        if let Some(hint) = &hint {
+            maintenance.push(Mutation::Put(HINT.to_owned(), hint.clone().into()));
         }
         let store = &*self.store;
         let commit = async {
@@ -578,6 +635,9 @@ impl Snapshot {
                 cache.forget();
             } else {
                 cache.record(durable_bytes, claim, next);
+                if let Some(hint) = hint {
+                    cache.wrote_hint(hint);
+                }
             }
         }
         Ok(SaveReport {

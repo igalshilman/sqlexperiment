@@ -104,6 +104,7 @@
 //! feature.
 mod cache;
 mod format;
+mod hint;
 pub mod io;
 pub mod kv;
 mod log;
@@ -113,6 +114,7 @@ pub mod simulation;
 mod snapshot;
 
 pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
+pub use hint::MAX_HINT_PAGES;
 pub use log::MAX_SEGMENT_BYTES;
 pub use page_codec::PageCompression;
 pub use snapshot::{CHECKPOINT_PAGES, SaveReport, StorageOptions};
