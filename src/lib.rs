@@ -338,6 +338,8 @@ impl Session {
             return;
         }
         if let Some(database) = self.database.take() {
+            // An idle engine reads nothing, so it must not hold back checkpoints.
+            self.io.snapshot().release_reader();
             cache.park(WarmEngine {
                 database,
                 io: self.io.clone(),

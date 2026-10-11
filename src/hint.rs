@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 /// Most pages a hint may list.
 pub const MAX_HINT_PAGES: usize = 256;
-/// Pages tracked per owner; the least recently read leaves are dropped first.
+/// Pages tracked per owner, at most twice this; the least useful are dropped.
 const MAX_TRACKED: usize = 4 * MAX_HINT_PAGES;
 
 /// Encode ascending page numbers.
@@ -82,34 +82,30 @@ impl Usage {
         let interior = page == 0 || matches!(content.first(), Some(0x02 | 0x05));
         self.clock += 1;
         self.pages.insert(page, (self.clock, interior));
-        if self.pages.len() > MAX_TRACKED {
-            let mut leaves: Vec<_> = self
-                .pages
-                .iter()
-                .filter(|(_, (_, interior))| !interior)
-                .map(|(&page, &(used, _))| (used, page))
-                .collect();
-            leaves.sort_unstable();
-            for (_, page) in leaves.iter().take(self.pages.len() - MAX_TRACKED / 2) {
-                self.pages.remove(page);
-            }
+        // Trim in bulk, so each read costs amortized constant time: keep the
+        // most useful pages, as ranked for the hint.
+        if self.pages.len() > 2 * MAX_TRACKED {
+            let keep: std::collections::HashSet<u64> = self.ranked().take(MAX_TRACKED).collect();
+            self.pages.retain(|page, _| keep.contains(page));
         }
     }
 
-    /// The `limit` most useful pages, ascending: page 0, then interior pages,
-    /// then leaves, each most recently read first.
-    pub(crate) fn top(&self, limit: usize) -> Vec<u64> {
+    /// Tracked pages, most useful first: page 0, then interior pages, then
+    /// leaves, each most recently read first.
+    fn ranked(&self) -> impl Iterator<Item = u64> {
         let mut ranked: Vec<_> = self
             .pages
             .iter()
             .map(|(&page, &(used, interior))| ((page != 0, !interior, u64::MAX - used), page))
             .collect();
         ranked.sort_unstable();
-        let mut pages: Vec<u64> = ranked
-            .into_iter()
-            .take(limit.min(MAX_HINT_PAGES))
-            .map(|(_, page)| page)
-            .collect();
+        ranked.into_iter().map(|(_, page)| page)
+    }
+
+    /// The `limit` most useful pages, ascending: page 0, then interior pages,
+    /// then leaves, each most recently read first.
+    pub(crate) fn top(&self, limit: usize) -> Vec<u64> {
+        let mut pages: Vec<u64> = self.ranked().take(limit.min(MAX_HINT_PAGES)).collect();
         pages.sort_unstable();
         pages
     }

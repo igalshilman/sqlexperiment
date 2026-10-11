@@ -372,3 +372,126 @@ fn commit_cleanup_errors_are_reported() -> Result<()> {
         Ok(())
     })
 }
+
+/// A session that only reads, open while another commits, keeps reading the
+/// state it opened at: checkpoints do not write images it has not replayed.
+/// Once it ends, checkpoints catch up.
+#[test]
+fn an_overlapping_reader_keeps_its_view() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let namespace = fresh_namespace();
+        let opts = || StorageOptions {
+            prefetch_pages: 0,
+            hint_pages: 0,
+            ..options(Some(namespace.clone()))
+        };
+        let mut db = Session::open_with_options(store.clone(), opts()).await?;
+        db.execute(
+            "CREATE TABLE a(x); CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, pad BLOB)",
+        )
+        .await?;
+        db.transaction(async |db| {
+            for i in 0..200 {
+                db.execute(&format!("INSERT INTO t VALUES ({i}, 1, zeroblob(100))"))
+                    .await?;
+            }
+            Ok(())
+        })
+        .await?;
+        for i in 0..8 {
+            db.execute(&format!("INSERT INTO a VALUES ({i})")).await?;
+        }
+        drop(db);
+
+        let mut reader = Session::open_with_options(store.clone(), opts()).await?;
+        reader.query("SELECT count(*) FROM a").await?;
+        let mut writer = Session::open_with_options(store.clone(), opts()).await?;
+        for _ in 0..10 {
+            writer.execute("UPDATE t SET n = n + 1").await?;
+        }
+        let rows = reader.query("SELECT count(*), sum(n) FROM t").await?;
+        assert_eq!(
+            (rows[0][0].as_int(), rows[0][1].as_int()),
+            (Some(200), Some(200))
+        );
+        drop(reader);
+
+        let logs = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/log/")).count();
+        let held = logs(&store);
+        assert!(held > 8, "the reader held checkpoints back: {held}");
+        for _ in 0..30 {
+            writer.execute("UPDATE t SET n = n + 1").await?;
+        }
+        assert!(
+            logs(&store) <= 8,
+            "checkpoints catch up: {held} then {}",
+            logs(&store)
+        );
+        let rows = writer.query("SELECT sum(n) FROM t").await?;
+        assert_eq!(rows[0][0].as_int(), Some(200 * 41));
+        Ok(())
+    })
+}
+
+/// Two sessions of one owner that both write: the second commit would land at
+/// the log position the first already used, so it is refused.
+#[test]
+fn a_second_concurrent_writer_is_refused() -> Result<()> {
+    futures::executor::block_on(async {
+        for durability in [Durability::Save, Durability::Commit] {
+            let store = Arc::new(MemoryKv::default());
+            let namespace = fresh_namespace();
+            let opts = || StorageOptions {
+                durability,
+                ..options(Some(namespace.clone()))
+            };
+            let mut db = Session::open_with_options(store.clone(), opts()).await?;
+            db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
+                .await?;
+            db.save().await?;
+            let mut first = Session::open_with_options(store.clone(), opts()).await?;
+            let mut second = Session::open_with_options(store.clone(), opts()).await?;
+            first.execute("INSERT INTO t VALUES(1, 0)").await?;
+            let refused = match durability {
+                Durability::Save => {
+                    first.save().await?;
+                    second.execute("INSERT INTO t VALUES(2, 0)").await?;
+                    second.save().await.map(|_| ())
+                }
+                Durability::Commit => second.execute("INSERT INTO t VALUES(2, 0)").await,
+            };
+            assert!(refused.unwrap_err().to_string().contains("another session"));
+            let mut db = Session::open_with_options(store.clone(), opts()).await?;
+            assert_eq!(count(&mut db).await?, 1, "{durability:?}");
+        }
+        Ok(())
+    })
+}
+
+/// An engine parked while another session goes on committing holds no
+/// reader position: checkpoints keep the log short.
+#[test]
+fn a_parked_engine_does_not_hold_back_checkpoints() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let namespace = fresh_namespace();
+        let opts = || options(Some(namespace.clone()));
+        let mut db = Session::open_with_options(store.clone(), opts()).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
+            .await?;
+        drop(db);
+        let mut idle = Session::open_with_options(store.clone(), opts()).await?;
+        let mut writer = Session::open_with_options(store.clone(), opts()).await?;
+        idle.query("SELECT count(*) FROM t").await?;
+        drop(idle); // parks: nothing was committed since it opened
+        for i in 0..30 {
+            writer
+                .execute(&format!("INSERT INTO t VALUES({i}, 0)"))
+                .await?;
+        }
+        let logs = store.keys().iter().filter(|k| k.contains("/log/")).count();
+        assert!(logs <= 8, "{logs} log segments");
+        Ok(())
+    })
+}

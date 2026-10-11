@@ -138,3 +138,39 @@ fn replay_stops_at_incomplete_or_stale_transactions() -> io::Result<()> {
         Ok(())
     })
 }
+
+/// Stored numbers far outside what this crate writes are rejected, so a
+/// corrupt record cannot overflow sequence arithmetic or size a huge view.
+#[test]
+fn implausible_numbers_are_rejected() {
+    let meta = |log_start, size| {
+        Meta {
+            log_start,
+            deleted_below: 1,
+            size,
+        }
+        .encode()
+    };
+    assert!(Meta::decode(&meta(u64::MAX - 1, 0)).is_err());
+    assert!(Meta::decode(&meta(MAX_SEQUENCE + 1, 0)).is_err());
+    assert!(Meta::decode(&meta(2, 4095)).is_err(), "not whole pages");
+    assert!(Meta::decode(&meta(2, MAX_DATABASE_BYTES + 512)).is_err());
+    assert!(Meta::decode(&meta(2, 512 * 3)).is_ok());
+
+    let images = Images::from([(MAX_DATABASE_BYTES / 4096, None)]);
+    let segment = Bytes::from(encode_transaction(1, 4096, &images).remove(0));
+    assert!(decode(&segment, 1).is_err(), "page index out of range");
+    let segment = Bytes::from(encode_transaction(1, 1 << 50, &Images::new()).remove(0));
+    assert!(decode(&segment, 1).is_err(), "size out of range");
+}
+
+/// A probe that would pass the largest sequence fails instead of wrapping.
+#[cfg(feature = "simulation")]
+#[test]
+fn probes_do_not_overflow() {
+    futures::executor::block_on(async {
+        let store = crate::simulation::MemoryKv::default();
+        assert!(probe(&store, u64::MAX - 1, 4).await.is_err());
+        assert!(probe(&store, MAX_SEQUENCE - 1, 4).await.is_err());
+    })
+}

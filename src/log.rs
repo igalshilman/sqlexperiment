@@ -33,6 +33,16 @@ const PREFIX: usize = 33;
 const ENTRY_HEADER: usize = 10;
 /// Upper bound on concurrent probe gets.
 const MAX_PROBE: u64 = 64;
+/// Largest sequence number a stored record may name, far from overflow.
+pub(crate) const MAX_SEQUENCE: u64 = 1 << 62;
+/// Largest database size a stored record may name (16 TiB).
+pub(crate) const MAX_DATABASE_BYTES: u64 = 1 << 44;
+
+/// Whether a stored database size is plausible: whole pages of at least the
+/// smallest SQLite page size, bounded.
+fn valid_size(size: u64) -> bool {
+    size.is_multiple_of(512) && size <= MAX_DATABASE_BYTES
+}
 
 /// Encoded page images by page number; `None` is a hole.
 pub(crate) type Images = BTreeMap<u64, Option<Page>>;
@@ -96,7 +106,7 @@ pub(crate) fn decode(bytes: &Bytes, seq: u64) -> io::Result<Segment> {
     }
     let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
     let first = u64_at(12);
-    if u64_at(4) != seq || first > seq || bytes[20] > 1 {
+    if u64_at(4) != seq || first > seq || bytes[20] > 1 || !valid_size(u64_at(21)) {
         return Err(segment());
     }
     let count = u32::from_le_bytes(bytes[29..33].try_into().unwrap());
@@ -107,7 +117,8 @@ pub(crate) fn decode(bytes: &Bytes, seq: u64) -> io::Result<Segment> {
         let index = u64::from_le_bytes(header[..8].try_into().unwrap());
         let len = u16::from_le_bytes([header[8], header[9]]) as usize;
         at += ENTRY_HEADER;
-        if at + len > bytes.len()
+        if index >= MAX_DATABASE_BYTES / 4096
+            || at + len > bytes.len()
             || images
                 .last_key_value()
                 .is_some_and(|(&last, _)| last >= index)
@@ -173,7 +184,11 @@ impl Meta {
             deleted_below: u64_at(12),
             size: u64_at(20),
         };
-        if meta.deleted_below == 0 || meta.deleted_below > meta.log_start {
+        if meta.deleted_below == 0
+            || meta.deleted_below > meta.log_start
+            || meta.log_start > MAX_SEQUENCE
+            || !valid_size(meta.size)
+        {
             return Err(invalid("checkpoint record"));
         }
         Ok(meta)
@@ -270,7 +285,11 @@ pub(crate) async fn probe(
     first: u64,
     batch: u64,
 ) -> io::Result<Vec<Option<Bytes>>> {
-    let keys: Vec<_> = (first..first + batch).map(log_key).collect();
+    let end = first
+        .checked_add(batch)
+        .filter(|&end| end <= MAX_SEQUENCE)
+        .ok_or_else(|| invalid("log position"))?;
+    let keys: Vec<_> = (first..end).map(log_key).collect();
     try_join_all(keys.iter().map(|key| store.get(key))).await
 }
 

@@ -116,6 +116,9 @@ struct Shared {
     decoded: bool,
     pages: HybridCache<PageKey, Page>,
     namespaces: Cache<String, Arc<Mutex<Owner>>>,
+    /// Every namespace state a handle still holds, so that one namespace never
+    /// has two states while a session uses it, even after LRU eviction.
+    live: Mutex<HashMap<String, Weak<Mutex<Owner>>>>,
     /// Source of namespace state identities and page generations.
     ids: AtomicU64,
     /// Keeps the disk tier's own runtime alive when the host has none.
@@ -157,6 +160,7 @@ impl PageCache {
                 decoded: config.decoded,
                 pages,
                 namespaces: CacheBuilder::new(config.namespaces).build(),
+                live: Mutex::default(),
                 // Distinct per instance, so two caches sharing a disk file by
                 // mistake still never share keys.
                 ids: AtomicU64::new(random_start()),
@@ -169,14 +173,21 @@ impl PageCache {
     /// The handle for one namespace, such as one virtual object. Successive
     /// sessions of the namespace must use the same key.
     pub fn namespace(&self, key: &str) -> NamespaceCache {
+        let mut live = self.shared.live.lock().unwrap();
         let owner = match self.shared.namespaces.get(key) {
             Some(entry) => entry.value().clone(),
             None => {
-                let owner = Arc::new(Mutex::new(Owner::new(&self.shared.ids)));
+                let owner = live
+                    .get(key)
+                    .and_then(Weak::upgrade)
+                    .unwrap_or_else(|| Arc::new(Mutex::new(Owner::new(&self.shared.ids))));
                 self.shared.namespaces.insert(key.to_owned(), owner.clone());
                 owner
             }
         };
+        live.retain(|_, owner| owner.strong_count() > 0);
+        live.insert(key.to_owned(), Arc::downgrade(&owner));
+        drop(live);
         NamespaceCache {
             shared: self.shared.clone(),
             engines: Arc::downgrade(&self.engines),
@@ -219,6 +230,10 @@ struct Owner {
     usage: Usage,
     /// The hint this owner last wrote, to skip rewriting an unchanged one.
     hint: Option<Vec<u8>>,
+    /// Log positions of open sessions (as a multiset): each reads pages
+    /// outside its log from the page keys and this cache, so a checkpoint may
+    /// not write images of transactions at or after the oldest of them.
+    readers: BTreeMap<u64, usize>,
 }
 
 /// What open may reuse, given the durable `meta` it read.
@@ -301,6 +316,35 @@ impl NamespaceCache {
     /// after the base, which the next open refreshes if `meta` moved past them.
     pub(crate) fn forget(&self) {
         self.forget_locked(&mut self.owner());
+    }
+
+    /// Forget the durable `meta` after checkpoint work failed, keeping the
+    /// acknowledged commit at `committed`.
+    pub(crate) fn forget_meta(&self, committed: u64) {
+        let mut owner = self.owner();
+        self.forget_locked(&mut owner);
+        owner.committed = Some(committed);
+    }
+
+    /// Register an open session at log position `next`; see [`Reader`].
+    pub(crate) fn reader(&self, next: u64) -> Reader {
+        *self.owner().readers.entry(next).or_default() += 1;
+        Reader {
+            cache: self.clone(),
+            next,
+        }
+    }
+
+    /// The oldest position of an open session other than one at `own`: a
+    /// checkpoint may write only images of transactions that end at or before it.
+    pub(crate) fn oldest_reader(&self, own: u64) -> Option<u64> {
+        let owner = self.owner();
+        let mut readers = owner.readers.iter();
+        let (&oldest, &count) = readers.next()?;
+        if oldest != own || count > 1 {
+            return Some(oldest);
+        }
+        readers.next().map(|(&next, _)| next)
     }
 
     fn forget_locked(&self, owner: &mut Owner) {
@@ -420,6 +464,7 @@ impl Owner {
             committed: None,
             usage: Usage::default(),
             hint: None,
+            readers: BTreeMap::new(),
         }
     }
 
@@ -441,6 +486,24 @@ fn random_start() -> u64 {
             .map_or(0, |time| time.as_nanos()),
     );
     hasher.finish() >> 1
+}
+
+/// An open session's registration at its log position; dropping it ends it.
+pub(crate) struct Reader {
+    cache: NamespaceCache,
+    next: u64,
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        let mut owner = self.cache.owner();
+        if let Some(count) = owner.readers.get_mut(&self.next) {
+            *count -= 1;
+            if *count == 0 {
+                owner.readers.remove(&self.next);
+            }
+        }
+    }
 }
 
 /// Parked engines, least recently parked dropped first.
