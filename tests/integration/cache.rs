@@ -54,8 +54,8 @@ fn an_owner_cache_serves_reopened_sessions_in_one_round_trip() -> Result<()> {
     })
 }
 
-/// Another writer that checkpoints changes `meta`, which resets the owner's
-/// cache; one that only appends is overridden by the log.
+/// Another writer that checkpoints changes `meta`, and the owner refreshes or
+/// drops its cache; one that only appends is overridden by the log.
 #[test]
 fn other_writers_never_leave_the_cache_stale() -> Result<()> {
     futures::executor::block_on(async {
@@ -170,6 +170,36 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
         let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
         assert!(!db.reused_engine(), "failed save");
         assert_eq!(count(&mut db).await?, 3);
+        Ok(())
+    })
+}
+
+/// A brief other owner that checkpoints leaves this owner's cache warm: open
+/// refreshes the pages it checkpointed from its still present log segments. Once
+/// garbage collection has deleted them, the cache drops its pages.
+#[test]
+fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
+    futures::executor::block_on(async {
+        for (saves, warm) in [(6, true), (12, false)] {
+            let store = Arc::new(LatencyKv::new(MemoryKv::default()));
+            let cache = PageCache::new(64 << 20);
+            create(store.clone(), cached(&cache)).await?;
+            let other = PageCache::new(64 << 20);
+            for n in 0..saves {
+                let mut db = Session::open_with_options(store.clone(), cached(&other)).await?;
+                db.execute(&format!(
+                    "UPDATE t SET payload = printf('%0800d', id) WHERE id = {}",
+                    n * 31 + 1
+                ))
+                .await?;
+                db.save().await?;
+            }
+            store.inner.reset_stats();
+            let expected = 400 * 900 + 400 * 401 / 2 - 100 * saves;
+            assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
+            let page_gets = store.inner.stats().kind("page").gets;
+            assert_eq!(page_gets == 0, warm, "{saves} saves: {page_gets} page gets");
+        }
         Ok(())
     })
 }

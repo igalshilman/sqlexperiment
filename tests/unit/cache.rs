@@ -38,7 +38,7 @@ fn replaces_removes_and_skips_oversized_values() {
 }
 
 #[test]
-fn a_different_meta_resets_pages_and_claims() {
+fn a_different_meta_forgets_claims_and_keeps_pages_to_refresh() {
     let meta = Meta {
         log_start: 5,
         deleted_below: 2,
@@ -50,27 +50,49 @@ fn a_different_meta_resets_pages_and_claims() {
     };
     let cache = PageCache::new(100);
     assert_eq!(
-        cache.validate(None),
-        Some((None, None)),
-        "absent meta at start"
+        cache.validate(None, 1),
+        Reuse::Known(None, None),
+        "absent meta"
     );
     cache.insert(1, value(4));
+    cache.insert(2, value(4));
     cache.record(Some(meta.encode().into()), Some(claim), 9);
     assert_eq!(cache.expected_start(), Some(7));
     assert_eq!(
-        cache.validate(Some(&meta.encode())),
-        Some((Some(claim), Some(9)))
+        cache.validate(Some(&meta.encode()), 5),
+        Reuse::Known(Some(claim), Some(9))
     );
-    assert_eq!(cache.bytes(), 4);
 
-    assert_eq!(cache.validate(Some(&claim.encode())), None);
-    assert_eq!(cache.bytes(), 0);
+    // Another writer moved meta: refresh what it changed from the base.
     assert_eq!(
-        cache.validate(Some(&claim.encode())),
-        None,
+        cache.validate(Some(&claim.encode()), 7),
+        Reuse::Changed(Some(5))
+    );
+    assert_eq!(cache.expected_start(), Some(5), "the claim is forgotten");
+    cache.refresh(Some(&Images::from([(1, None), (3, Some(value(2)))])));
+    assert!(cache.get(1).is_none(), "a hole");
+    assert!(cache.get(3).is_none(), "uncached pages stay uncached");
+    assert_eq!(cache.bytes(), 4);
+    assert_eq!(
+        cache.validate(Some(&claim.encode()), 7),
+        Reuse::Changed(Some(5)),
         "until recorded"
     );
     cache.record(Some(claim.encode().into()), None, 9);
     cache.forget();
-    assert_eq!(cache.validate(Some(&claim.encode())), None);
+    assert_eq!(
+        cache.validate(Some(&claim.encode()), 7),
+        Reuse::Changed(Some(7))
+    );
+
+    // Unreadable changes, or a log start before the base, drop every page.
+    cache.refresh(None);
+    assert_eq!((cache.bytes(), cache.expected_start()), (0, None));
+    cache.insert(1, value(4));
+    cache.record(Some(claim.encode().into()), None, 9);
+    assert_eq!(
+        cache.validate(Some(&meta.encode()), 5),
+        Reuse::Changed(None)
+    );
+    assert_eq!(cache.bytes(), 0);
 }

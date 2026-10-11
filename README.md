@@ -38,8 +38,9 @@ object allocation or intent. `StorageOptions` selects
 `PageCompression::{Lz4, Raw}` (default adaptive LZ4), `checkpoint_after` (logged
 transactions before saves checkpoint, default 4) and an optional `PageCache`
 (pages as stored, or `PageCache::decoded`; see [cache results](benches/CACHE_RESULTS.md)):
-owner-process state that caches pages, resets itself when another writer moves
-`meta`, and remembers what this owner made durable. With it, a steady-state open
+owner-process state that caches pages and remembers what this owner made durable.
+When another writer checkpoints, open refreshes the cached pages it rewrote from
+its still present log segments, or drops them all once those are collected. With it, a steady-state open
 and save are one round trip each, and a session that ends cleanly leaves its
 engine for the next one, which reuses it when nothing changed (about 5× less CPU
 per session). Backends whose visible values are always

@@ -69,6 +69,29 @@ Every step is idempotent. A crash at any point leaves state that replay reads
 correctly; at worst it replays more of the log or leaves garbage segments for the
 next checkpoint.
 
+## Owner cache across checkpoints
+
+A `PageCache` keeps a base: the log start of the last durable `meta` its owner
+saw. A cached page is current unless a committed transaction at or after the base
+changed it. While such a transaction is in the replayed log, its image overrides
+the cache. Only a checkpoint can expose a stale value, by moving `meta` past it.
+The owner's own checkpoints write through the cache.
+
+When open reads a `meta` that this owner did not record (another writer
+checkpointed, or this owner's save failed with an unknown outcome), it reads the
+segments from the base to the new log start, concurrently with replay and often
+from the speculative probe. The latest image of each page they change replaces a
+cached value; every other cached page stays. Those segments are below the new log
+start, so they are committed and never rewritten, only deleted. If any is absent,
+if they do not chain into whole transactions, or if there are more than one probe
+batch, the cache drops every page. Garbage collection deletes them in the save
+after the one that recorded the checkpoint, so a brief other owner (a few saves
+with default settings) leaves the cache warm; a longer one resets it.
+
+A failed save leaves the pages alone: whatever it wrote in place belongs to
+transactions after the base, which the next open refreshes if `meta` passed
+them. It forgets only the claim, the acknowledged commit and the parked engine.
+
 ## Uncertain outcomes and confirmation
 
 An error or cancellation can leave a put absent, visible but not durable, or

@@ -34,12 +34,13 @@
 //! # Open
 //!
 //! Read `meta`, then replay from its log start. With a cache the first probe batch
-//! is read together with `meta`. On backends where a failed put can be visible
+//! is read together with `meta`, and if another writer moved `meta`, the
+//! segments it checkpointed are read alongside replay to refresh the cache. On backends where a failed put can be visible
 //! without being durable ([`KvStore::durable_when_visible`] is false), open
 //! re-puts the commit tail and `meta` before exposing them, unless this owner
 //! wrote them and had them acknowledged.
 use crate::{
-    cache::PageCache,
+    cache::{PageCache, Reuse},
     format::{META, log_key, page_key},
     kv::KvStore,
     log::{self, Images, Log, Meta},
@@ -169,17 +170,32 @@ impl Snapshot {
             Some(bytes) => Meta::decode(bytes)?,
             None => Meta::default(),
         };
-        let (claim, committed, meta_known) = match cache.map(|c| c.validate(meta_bytes.as_deref()))
-        {
-            Some(Some((claim, committed))) => (claim, committed, true),
-            _ => (None, None, false),
+        let reuse = cache.map(|c| c.validate(meta_bytes.as_deref(), meta.log_start));
+        let (claim, committed, meta_known, since) = match reuse {
+            Some(Reuse::Known(claim, committed)) => (claim, committed, true, None),
+            Some(Reuse::Changed(since)) => (None, None, false, since),
+            None => (None, None, false, None),
         };
         let start = claim.map_or(meta.log_start, |claim| claim.log_start);
-        let prefetched = match prefetched {
-            Some((at, probe)) if at == start => Some(probe?),
-            _ => None,
+        // The speculative probe serves replay, or else the changed range.
+        let (prefetched, prefetched_changes) = match prefetched {
+            Some((at, probe)) if at == start => (Some(probe?), None),
+            Some((at, probe)) if Some(at) == since => (None, Some(probe?)),
+            _ => (None, None),
         };
-        let log = log::replay(&*store, start, batch, prefetched).await?;
+        let changes = async {
+            match since {
+                Some(since) => log::changes(&*store, since..meta.log_start, prefetched_changes)
+                    .await
+                    .map(Some),
+                None => Ok(None),
+            }
+        };
+        let (log, changes) =
+            futures::try_join!(log::replay(&*store, start, batch, prefetched), changes)?;
+        if let (Some(cache), Some(changes)) = (cache, changes) {
+            cache.refresh(changes.as_ref());
+        }
         let unchanged = meta_known && committed == Some(log.next);
 
         if !store.durable_when_visible() {
