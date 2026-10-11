@@ -1,10 +1,9 @@
-// Fault injection for crash tests: with ABORT_PER_MILLE (or
-// LEDGER_ABORT_PER_MILLE, as the Rust crash test sets it), the process aborts
+// Fault injection for crash tests: with ABORT_PER_MILLE, the process aborts
 // before or after random requests of the objects' stores.
 import * as restate from '@restatedev/restate-sdk';
 import { fileURLToPath } from 'node:url';
 
-const perMille = Number(process.env.ABORT_PER_MILLE ?? process.env.LEDGER_ABORT_PER_MILLE ?? 0);
+const perMille = Number(process.env.ABORT_PER_MILLE ?? 0);
 
 const maybeAbort = () => {
   if (Math.random() * 1000 < perMille) {

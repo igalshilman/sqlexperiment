@@ -8,7 +8,7 @@
 // Checks: the warehouses' books balance and agree with every order, and every
 // agent prompt moved money exactly once.
 //
-//   RESTATE_SERVER=/path/to/restate-server node test.mjs   (or make crash-test-node)
+//   RESTATE_SERVER=/path/to/restate-server node test.mjs   (or make crash-test)
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

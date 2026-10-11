@@ -1,6 +1,4 @@
 /target/
 spec/*_TTrace_*
 spec/states/
-/restate/target/
 /node/target/
-/examples/rust/ledger/target/

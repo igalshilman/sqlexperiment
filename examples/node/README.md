@@ -1,9 +1,11 @@
-# SQL in Restate virtual objects, with the TypeScript SDK
+# SQL in Restate virtual objects, without a journal
 
-The Node.js counterpart of [the Rust integration](../../restate/README.md): a
-virtual object keeps a SQL database in its state, with journal replay turned
-off. It uses the [sqlite-kv addon](../../node/README.md) and a patched Restate
-TypeScript SDK ([`vendor/typescript`](../../vendor/README.md#typescript)).
+An experiment: a Restate virtual object whose handlers keep a SQL database in
+the object's state, with journal-based recovery turned off. The storage
+protocol of this repository provides durability and recovery; Restate provides
+the state, single-writer execution per key, and retries. It uses the
+[sqlite-kv addon](../../node/README.md) and a patched Restate TypeScript SDK
+([`vendor/typescript`](../../vendor/README.md#typescript)).
 
 ```js
 import * as restate from '@restatedev/restate-sdk';
@@ -42,6 +44,43 @@ The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear`, and the barrier is an empty `ctx.run`. The SDK loads
 the sqlite-kv addon, an optional peer dependency, on first use.
 
+## How it works
+
+**State access.** A get is a state read, from the runtime unless this attempt
+wrote the key (lazy state, so an invocation does not start by loading every
+page). A set or clear is a state write, and returns at once. Restate stores an
+invocation's commands in order, and after a crash keeps a prefix of them, so
+writes are FIFO: a lost write takes every later command with it, including
+later writes, calls to other services and the response. The protocol's
+ordering rules (commit after the transaction's other segments, `meta` after
+the checkpointed pages, deletes after `meta`) hold by that order, without
+waiting for acknowledgements.
+
+**A barrier only for the page cache.** The process's page cache keeps what it
+wrote (the last commit, checkpointed pages, the parked engine) for the
+object's next invocation, so it must not trust writes that may be lost. The
+store is ordered: a session that wrote confirms its writes when it is saved,
+with one empty `ctx.run`, which the runtime acknowledges after the commands
+before it. If the attempt dies first, the next session in this process starts
+cold. Without that barrier a lost checkpoint would stay claimed, and the next
+save would record `meta` past log segments whose pages were never stored, and
+delete them (`tests/integration/ordered.rs` in the main crate simulates
+exactly that).
+
+**No journal replay.** On a retry or a resume, the SDK normally replays the
+journal: each operation returns its recorded result and must match it. That
+cannot work here, since a later attempt makes different reads (the page cache,
+the log length and the other owners' checkpoints all differ). With
+`journalReplay: false` the SDK skips the recorded journal: the handler runs
+again from the start against the state as it is. Recovery is then the storage
+protocol's: open reads `meta` and the log, so a half-written commit or
+checkpoint from the crashed attempt is ignored or replayed over.
+
+**One owner.** The protocol needs one writer per namespace. Restate runs one
+exclusive invocation per object key at a time, and one attempt of it at a
+time, so the namespace is `service/key` and only exclusive handlers may open
+it.
+
 ## The context without journal replay
 
 A retried attempt runs the handler again from the start, so every context
@@ -73,7 +112,6 @@ Each runs alone (`node shop.mjs`), or together (`npm run serve`, or
 `node serve.mjs ledger shop` for some, on port 9080, or `PORT`):
 
 - [`ledger.mjs`](ledger.mjs): accounts and transfers, deduped by transfer id.
-  The Rust ledger, ported.
 - [`shop.mjs`](shop.mjs): a Warehouse object per SKU and an Orders object per
   order, each with its own database, over RPC. Placing an order reserves stock
   (a call) and schedules its expiry (a delayed send); paying commits the
@@ -127,24 +165,35 @@ passed twice, with 109 and 108 restarts of the shop's process and 85 and 92 of
 the agents'.
 
 ```sh
-RESTATE_SERVER=/path/to/restate-server make crash-test-node
+RESTATE_SERVER=/path/to/restate-server make crash-test
 ```
 
-The Rust crash campaign ([`examples/rust/ledger`](../rust/ledger)) also runs
-this ledger, with `LEDGER_COMMAND`: 120 transfers from six clients, a third
-sent twice, the ledger aborting at random state requests, and the server
-killed three times (`make crash-test-rust` runs it for both ledgers).
+200 sequential ledger transfers take 18.8 ms each on one local node.
 
-| Abort rate per state request | Ledger restarts | Result |
-|---|---|---|
-| 1.5% | 57, 39, 40 | All consistent |
-| 4% | 394, 271 | All consistent |
+## Caveats
 
-200 sequential transfers take 18.8 ms each on one local node (the Rust ledger
-takes 14.5 ms).
+- **Every read is journaled with its value.** A state read appends the value
+  to the invocation's journal, so reading pages costs log writes, and the
+  page cache matters more than it does elsewhere. `sqlOptions` sets journal
+  retention to zero so completed journals are not kept.
+- **The journal grows across attempts.** Skipped entries stay; each attempt
+  appends its own.
+- **A suspension is a restart.** Resuming means running from the start, so
+  long handlers that hit the inactivity timeout start over.
+- **Outside the model.** The TLA+ specification and the protocol monitor
+  assume independent, acknowledged puts. Writes that return before they are
+  stored are safe only by the FIFO argument above, which the crash tests test
+  but nothing proves.
+- **Assumptions to confirm with the runtime:** an attempt's stored commands
+  are a prefix of those it sent, in order (FIFO writes); an empty `ctx.run` is
+  acknowledged only after the commands before it are stored (the barrier); an
+  abandoned attempt's commands are never applied after a new attempt starts
+  (fencing); state a lazy read returns is durable. The crash tests kill
+  processes, so they check ordering and recovery, not storage durability
+  across a machine crash.
 
 ## Not supported
 
-As in Rust: shared handlers, awakeables, journal replay for the same service,
-and request/response deployments (such as Lambda), which suspend at every
-await, since a suspension is a restart.
+Shared handlers, awakeables, journal replay for the same service, and
+request/response deployments (such as Lambda), which suspend at every await,
+since a suspension is a restart.

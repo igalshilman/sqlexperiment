@@ -125,14 +125,14 @@ the owner cache.
 - [Protocol specification](spec/README.md): the protocol in TLA+, model-checked
   with TLC, and the monitor that checks the code against it
 - [Benchmarks](benches/README.md)
-- [Restate virtual objects without a journal](restate/README.md): an
-  experiment embedding this crate in the Restate Rust SDK, with a patched SDK
 - [Node.js addon](node/README.md): the same over a key/value store implemented
   in JavaScript, for the Restate TypeScript SDK
-- [SQL in Restate with the TypeScript SDK](examples/node/README.md): `ctx.sql`,
-  idempotent calls, and examples, including a durable pi agent
-- [Vendored and patched code](vendor/README.md): the Restate SDKs, and what
-  changed and why
+- [SQL in Restate virtual objects, without a journal](examples/node/README.md):
+  an experiment embedding this crate in a patched Restate TypeScript SDK:
+  `ctx.sql`, how it works, idempotent calls, and examples, including a durable
+  pi agent
+- [Vendored and patched code](vendor/README.md): the patched Restate
+  TypeScript SDK and shared core, and what changed and why
 - [Examples](examples/README.md), by language
 
 ## Layout
@@ -140,18 +140,17 @@ the owner cache.
 | Path | What |
 |---|---|
 | `src/`, `tests/`, `benches/`, `docs/`, `spec/` | The `sqlite-kv` crate: the storage protocol, its tests, benchmarks, design and TLA+ specification |
-| [`restate/`](restate) | `sqlite-kv-restate`: SQL in Restate virtual objects with the Rust SDK |
 | [`node/`](node) | The Node.js addon, the `sqlite-kv` npm package |
-| [`vendor/`](vendor) | The Restate SDKs (Rust copies, TypeScript patches) and their changes |
+| [`vendor/`](vendor) | The patches to the Restate TypeScript SDK and shared core, and their changes |
 | [`examples/`](examples) | Examples, under `rust/` and `node/` |
 | [`Makefile`](Makefile) | Builds and tests everything |
 
 ## Build and test
 
 ```sh
-make              # build everything: the crate, the Restate crate, the addon, the patched SDK, the examples
+make              # build everything: the crate, the addon, the patched SDK, the examples
 make test         # every test that needs no Restate server
-RESTATE_SERVER=/path/to/restate-server make crash-test   # the crash campaigns
+RESTATE_SERVER=/path/to/restate-server make crash-test   # the crash campaign
 make help
 ```
 
