@@ -129,8 +129,9 @@ the owner cache.
   in JavaScript, for the Restate TypeScript SDK
 - [SQL in Restate virtual objects, without a journal](examples/node/README.md):
   an experiment embedding this crate in a patched Restate TypeScript SDK:
-  `ctx.sql`, how it works, idempotent calls, and examples, including a durable
-  pi agent
+  `ctx.sql`, how it works, idempotent calls, and examples
+- [A durable pi agent](examples/pi/README.md): pi-durable with its storage in a
+  virtual object's database
 - [Vendored and patched code](vendor/README.md): the patched Restate
   TypeScript SDK and shared core, and what changed and why
 - [Examples](examples/README.md), by language
@@ -142,7 +143,7 @@ the owner cache.
 | `src/`, `tests/`, `benches/`, `docs/`, `spec/` | The `sqlite-kv` crate: the storage protocol, its tests, benchmarks, design and TLA+ specification |
 | [`node/`](node) | The Node.js addon, the `sqlite-kv` npm package |
 | [`vendor/`](vendor) | The patches to the Restate TypeScript SDK and shared core, and their changes |
-| [`examples/`](examples) | Examples, under `rust/` and `node/` |
+| [`examples/`](examples) | Examples: `rust/`, and in JavaScript `node/` and `pi/` |
 | [`Makefile`](Makefile) | Builds and tests everything |
 
 ## Build and test

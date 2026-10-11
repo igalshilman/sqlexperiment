@@ -13,8 +13,8 @@ CARGO ?= cargo
 SDK_TARBALL := vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 ADDON := node/sqlite_kv.node
 
-.PHONY: all help core addon sdk-ts examples examples-rust examples-node \
-	test test-core test-addon test-sdk-ts lint crash-test clean
+.PHONY: all help core addon sdk-ts examples examples-rust examples-js \
+	test test-core test-addon test-sdk-ts test-pi lint crash-test clean
 
 all: core addon examples ## Build everything
 
@@ -36,17 +36,17 @@ sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK
 $(SDK_TARBALL): $(wildcard vendor/typescript/patches/*.patch) vendor/typescript/setup.sh vendor/typescript/inline-wasm.mjs
 	vendor/typescript/setup.sh
 
-examples: examples-rust examples-node ## Every example
+examples: examples-rust examples-js ## Every example
 
 examples-rust: ## The Rust example: the core crate's lookup
 	$(CARGO) build --locked --release --features simulation --example lookup
 
-examples-node: $(ADDON) $(SDK_TARBALL) ## The Node.js examples, installed with the patched SDK
-	cd examples/node && rm -rf node_modules/@restatedev/restate-sdk package-lock.json && npm install
+examples-js: $(ADDON) $(SDK_TARBALL) ## The JavaScript examples (node/, pi/), installed with the patched SDK
+	cd examples && rm -rf node_modules/@restatedev/restate-sdk package-lock.json && npm install
 
 # --- Test
 
-test: test-core test-addon test-sdk-ts ## Every test that needs no Restate server
+test: test-core test-addon test-sdk-ts test-pi ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	$(CARGO) test --locked
@@ -58,12 +58,15 @@ test-addon: $(ADDON) ## The Node.js addon
 test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests
 	cd vendor/typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx vitest run
 
+test-pi: examples-js ## pi-durable's storage conformance suite on the pi example's storage
+	cd examples && npm run test:pi
+
 lint: ## Clippy on the core crate
 	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 
-crash-test: examples-node ## Every Node.js example through crashes (needs RESTATE_SERVER)
+crash-test: examples-js ## Every JavaScript example through crashes (needs RESTATE_SERVER)
 	@test -n "$(RESTATE_SERVER)" || (echo "set RESTATE_SERVER to a restate-server binary" && exit 1)
-	cd examples/node && node test.mjs
+	cd examples && node test.mjs
 
 clean: ## Remove build outputs
-	rm -rf $(CARGO_TARGET_DIR) $(ADDON) vendor/typescript/.build examples/node/node_modules
+	rm -rf $(CARGO_TARGET_DIR) $(ADDON) vendor/typescript/.build examples/node_modules

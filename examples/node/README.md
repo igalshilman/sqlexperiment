@@ -26,6 +26,12 @@ const ledger = restate.object({
 });
 ```
 
+`journalReplay` is a handler option, as well as a service option that its
+handlers inherit: the examples set it for the whole object, but a single
+handler may take it (`restate.handlers.object.exclusive({ ...restate.sqlOptions },
+handler)`), and the object's other handlers keep replaying their journals.
+`ctx.sql` needs it off in the handler that calls it.
+
 `ctx.sql(body)`, on the context of an exclusive object handler, opens the
 object's database (namespace `service/key`) over the object's state, with the
 process's page cache, runs `body` as one SQL transaction, and ends the session
@@ -38,7 +44,7 @@ handler: each statement is its own transaction, and `db.transaction(fn)`
 groups several. A commit is durable once its writes are stored, which Restate
 does in order, so it needs no barrier of its own: a lost commit takes
 everything after it, including calls and the response. The session is saved
-once, at the end. The agent example runs pi-durable's storage this way.
+once, at the end. The [pi example](../pi/README.md) runs pi-durable's storage this way.
 
 The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear`, and the barrier is an empty `ctx.run`. The SDK loads
@@ -108,67 +114,30 @@ SDK's limit of one pending await per invocation.
 
 ## The examples
 
-Each runs alone (`node shop.mjs`), or together (`npm run serve`, or
-`node serve.mjs ledger shop` for some, on port 9080, or `PORT`):
+Each runs alone (`node node/shop.mjs` from [`examples/`](..)), or together
+with the others (`npm run serve` there, or `node serve.mjs ledger shop` for
+some, on port 9080, or `PORT`):
 
 - [`ledger.mjs`](ledger.mjs): accounts and transfers, deduped by transfer id.
 - [`shop.mjs`](shop.mjs): a Warehouse object per SKU and an Orders object per
   order, each with its own database, over RPC. Placing an order reserves stock
   (a call) and schedules its expiry (a delayed send); paying commits the
   stock, and an unpaid order releases it when it expires.
-- [`agent.mjs`](agent.mjs): a durable agent on
-  [pi-durable](https://www.npmjs.com/package/@earendil-works/pi-durable)
-  (`@earendil-works/pi-durable`), a durable agent harness that commits
-  conversations, model turns, tool calls and their state to storage before
-  anything is shown, and resumes unfinished work when the storage is opened
-  again. An Agent object per session runs a pi-durable Harness whose storage
-  is the object's database: the handler runs in one `ctx.sqlSession`, and
-  [`pi-storage.mjs`](pi-storage.mjs) gives pi-durable's SQLite storage its
-  `SqliteDatabase` facade over it (pi-durable's storage conformance suite
-  passes on it). A retried attempt reopens the Harness and carries on:
-  - a prompt is submitted once, by its id (pi-durable's `requestId`);
-  - an answered prompt returns its answer;
-  - unfinished work resumes: a model call is made again, and a tool call
-    declared replay-safe runs again with the same call id.
 
-  Its tools move money in the ledger, with the call id as the transfer id.
-  `PI_MODEL=anthropic/claude-sonnet-4-5` (with `ANTHROPIC_API_KEY`) picks a
-  model; by default a scripted teller answers "move 5 from 1 to 2" and
-  "audit", with no key.
+[`../pi`](../pi/README.md) has a durable agent on pi-durable, with its
+storage in the object's database.
 
 ```sh
-make examples-node   # from the repository root: the addon, the patched SDK, npm install
-npm run serve
+make examples-js   # from the repository root: the addon, the patched SDK, npm install
+cd examples && npm run serve
 restate deployments register http://localhost:9080
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
-curl localhost:8080/Agent/me/prompt --json '{"id": "p1", "text": "move 5 from 1 to 2"}'
 curl localhost:8080/Orders/o1/place --json '{"sku": "apple", "qty": 2}'
 ```
 
-## Validation
-
-[`test.mjs`](test.mjs) runs every example against a real server through
-crashes. The ledger and the shop run in one process, aborting at 1.5% of
-state requests; the agents run in another, aborting at 0.3% (a prompt makes
-some 200 state requests, so one attempt in three crashes). The server is
-killed twice. Meanwhile:
-- 60 orders are placed (a quarter twice), half of them paid, the rest
-  expiring;
-- four agent sessions take eight transfer prompts each (a third sent twice)
-  and an audit.
-
-It checks that each warehouse's stock balances and agrees with every order,
-that each prompt moved money exactly once, and, from the server's
-`sys_invocation` table, that there is exactly one `reserve` and one `transfer`
-invocation per order and prompt, though their callers ran many attempts. It
-passed twice, with 109 and 108 restarts of the shop's process and 85 and 92 of
-the agents'.
-
-```sh
-RESTATE_SERVER=/path/to/restate-server make crash-test
-```
-
-200 sequential ledger transfers take 18.8 ms each on one local node.
+All the examples run through crashes against a real server: see
+[the examples' validation](../README.md#validation). 200 sequential ledger
+transfers take 18.8 ms each on one local node.
 
 ## Caveats
 
@@ -194,6 +163,6 @@ RESTATE_SERVER=/path/to/restate-server make crash-test
 
 ## Not supported
 
-Shared handlers, awakeables, journal replay for the same service, and
-request/response deployments (such as Lambda), which suspend at every await,
+Shared handlers, awakeables, `ctx.sql` in a handler that replays its journal,
+and request/response deployments (such as Lambda), which suspend at every await,
 since a suspension is a restart.

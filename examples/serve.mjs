@@ -3,12 +3,12 @@
 import * as restate from '@restatedev/restate-sdk';
 
 const groups = {
-  ledger: async () => [(await import('./ledger.mjs')).ledger],
+  ledger: async () => [(await import('./node/ledger.mjs')).ledger],
   shop: async () => {
-    const { warehouse, orders } = await import('./shop.mjs');
+    const { warehouse, orders } = await import('./node/shop.mjs');
     return [warehouse, orders];
   },
-  agent: async () => [(await import('./agent.mjs')).agent],
+  agent: async () => [(await import('./pi/agent.mjs')).agent],
 };
 const names = process.argv.length > 2 ? process.argv.slice(2) : Object.keys(groups);
 const services = (await Promise.all(names.map((name) => groups[name]()))).flat();

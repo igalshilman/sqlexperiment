@@ -4,7 +4,7 @@
 # Clones the SDK and its shared core at the pinned revisions into .build/,
 # applies patches/, builds the core to WebAssembly and inlines it into the SDK,
 # and packs the SDK as .build/restatedev-restate-sdk-1.17.3.tgz, which
-# examples/node installs (`make examples-node`).
+# examples installs (`make examples-js`).
 #
 # Needs: git, cargo with the wasm32-unknown-unknown target, wasm-bindgen 0.2.121
 # (cargo install wasm-bindgen-cli --version 0.2.121), node and pnpm.
