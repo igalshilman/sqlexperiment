@@ -43,7 +43,7 @@ use crate::{
     format::{META, log_key, page_key},
     kv::KvStore,
     log::{self, Images, Log, Meta},
-    page_codec::{self, PageCompression},
+    page_codec::{self, Page, PageCompression},
 };
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::{collections::BTreeMap, io, sync::Arc, sync::Mutex};
@@ -109,17 +109,10 @@ fn apply(store: &dyn KvStore, mutation: Mutation) -> BoxFuture<'_, io::Result<()
 ///
 /// Each request is issued when it is queued, not when the stream first polls it,
 /// so a window of requests really is in flight together.
-async fn concurrently(store: &dyn KvStore, mutations: Vec<Mutation>) -> io::Result<()> {
-    let mutations: Vec<_> = mutations
-        .into_iter()
-        .map(|mutation| match mutation {
-            Mutation::Put(key, value) => (key, Some(value)),
-            Mutation::Delete(key) => (key, None),
-        })
-        .collect();
-    let mut queued = mutations.iter().map(|(key, value)| match value {
-        Some(value) => store.put(key, value.clone()),
-        None => store.delete(key),
+async fn concurrently(store: &dyn KvStore, mut mutations: Vec<Mutation>) -> io::Result<()> {
+    let mut queued = mutations.iter_mut().map(|mutation| match mutation {
+        Mutation::Put(key, value) => store.put(key, std::mem::take(value)),
+        Mutation::Delete(key) => store.delete(key),
     });
     let mut running = FuturesUnordered::new();
     let mut error = None;
@@ -148,7 +141,8 @@ pub(crate) struct Snapshot {
     /// An acknowledged checkpoint this owner has not recorded in `meta` yet.
     claim: Option<Meta>,
     pub(crate) log: Log,
-    page: Mutex<Option<(u64, Vec<u8>)>>,
+    /// The last decoded page, for repeated reads of one page.
+    page: Mutex<Option<(u64, Page)>>,
 }
 
 impl Snapshot {
@@ -221,36 +215,38 @@ impl Snapshot {
         self.log.size().unwrap_or(self.base().size)
     }
 
-    /// Encoded image of a page: the log's latest, else the checkpointed value.
-    async fn image(&self, index: u64) -> io::Result<Option<Arc<[u8]>>> {
-        if let Some(image) = self.log.images.get(&index) {
-            return Ok(image.as_deref().map(Arc::from));
-        }
-        let cache = self.options.cache.as_ref();
-        if let Some(bytes) = cache.and_then(|cache| cache.get(index)) {
-            return Ok(Some(bytes));
-        }
-        let Some(bytes) = self.store.get(&page_key(index)).await? else {
-            return Ok(None);
-        };
-        let bytes: Arc<[u8]> = bytes.into();
-        if let Some(cache) = cache {
-            cache.insert(index, bytes.clone());
-        }
-        Ok(Some(bytes))
-    }
-
-    /// Decode a logical page; `None` means a hole.
-    pub async fn block(&self, index: u64) -> io::Result<Option<Vec<u8>>> {
+    /// Decode a logical page; `None` means a hole. The log's latest image wins,
+    /// then the cache, then the checkpointed value at `page/<n>`.
+    pub async fn block(&self, index: u64) -> io::Result<Option<Page>> {
         if let Some((cached, page)) = &*self.page.lock().unwrap()
             && *cached == index
         {
             return Ok(Some(page.clone()));
         }
-        let Some(image) = self.image(index).await? else {
-            return Ok(None);
+        let cache = self.options.cache.as_ref();
+        let page = if let Some(image) = self.log.images.get(&index) {
+            let Some(image) = image else { return Ok(None) };
+            Arc::new(page_codec::decode(image)?)
+        } else if let Some(value) = cache.and_then(|cache| cache.get(index)) {
+            match cache.is_some_and(PageCache::is_decoded) {
+                true => value,
+                false => Arc::new(page_codec::decode(&value)?),
+            }
+        } else {
+            let Some(image) = self.store.get(&page_key(index)).await? else {
+                return Ok(None);
+            };
+            let page = Arc::new(page_codec::decode(&image)?);
+            if let Some(cache) = cache {
+                let value = if cache.is_decoded() {
+                    page.clone()
+                } else {
+                    Arc::new(image)
+                };
+                cache.insert(index, value);
+            }
+            page
         };
-        let page = page_codec::decode(&image)?;
         *self.page.lock().unwrap() = Some((index, page.clone()));
         Ok(Some(page))
     }
@@ -298,7 +294,10 @@ impl Snapshot {
         let mut images = Images::new();
         for (index, page) in dirty {
             let image = match page {
-                Some(page) => Some(page_codec::encode(&page, self.options.page_compression)?),
+                Some(page) => Some(Arc::new(page_codec::encode(
+                    &page,
+                    self.options.page_compression,
+                )?)),
                 None => None,
             };
             images.insert(index, image);
@@ -411,7 +410,11 @@ impl Snapshot {
             if let Some(plan) = &plan {
                 for (&index, image) in &plan.images {
                     match image {
-                        Some(image) => cache.insert(index, Arc::from(image.as_slice())),
+                        Some(image) if cache.is_decoded() => match page_codec::decode(image) {
+                            Ok(page) => cache.insert(index, Arc::new(page)),
+                            Err(_) => cache.remove(index),
+                        },
+                        Some(image) => cache.insert(index, image.clone()),
                         None => cache.remove(index),
                     }
                 }
@@ -441,7 +444,7 @@ impl Checkpoint {
         self.images
             .iter()
             .map(|(&index, image)| match image {
-                Some(image) => Mutation::Put(page_key(index), image.clone()),
+                Some(image) => Mutation::Put(page_key(index), Vec::clone(image)),
                 None => Mutation::Delete(page_key(index)),
             })
             .collect()

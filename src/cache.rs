@@ -16,7 +16,7 @@
 //!   replay can start there.
 //!
 //! One cache must serve exactly one namespace; sharing it returns wrong pages.
-use crate::log::Meta;
+use crate::{log::Meta, page_codec::Page};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
@@ -27,11 +27,13 @@ use std::{
 pub struct PageCache(Arc<Mutex<State>>);
 
 struct State {
+    /// Whether entries are decoded pages rather than stored encodings.
+    decoded: bool,
     capacity: usize,
     bytes: usize,
     clock: u64,
-    /// Encoded value and last-use time by page number.
-    entries: HashMap<u64, (Arc<[u8]>, u64)>,
+    /// Value and last-use time by page number.
+    entries: HashMap<u64, (Page, u64)>,
     /// Last-use time to page, oldest first.
     order: BTreeMap<u64, u64>,
     /// `meta` bytes as last read or written by this owner; `None` when absent.
@@ -43,9 +45,21 @@ struct State {
 }
 
 impl PageCache {
-    /// Create a cache holding at most `capacity` bytes of encoded pages.
+    /// Create a cache holding at most `capacity` bytes of pages as stored
+    /// (usually LZ4-compressed), decoding them on every hit.
     pub fn new(capacity: usize) -> Self {
+        Self::with_mode(capacity, false)
+    }
+
+    /// Create a cache holding at most `capacity` bytes of decoded 4096-byte
+    /// pages: hits need no decoding, but fewer pages fit.
+    pub fn decoded(capacity: usize) -> Self {
+        Self::with_mode(capacity, true)
+    }
+
+    fn with_mode(capacity: usize, decoded: bool) -> Self {
         Self(Arc::new(Mutex::new(State {
+            decoded,
             capacity,
             bytes: 0,
             clock: 0,
@@ -60,6 +74,10 @@ impl PageCache {
     /// Total bytes of the cached page values.
     pub fn bytes(&self) -> usize {
         self.0.lock().unwrap().bytes
+    }
+
+    pub(crate) fn is_decoded(&self) -> bool {
+        self.0.lock().unwrap().decoded
     }
 
     /// Where this owner expects the log to start, for a speculative probe.
@@ -101,7 +119,7 @@ impl PageCache {
         self.0.lock().unwrap().forget();
     }
 
-    pub(crate) fn get(&self, index: u64) -> Option<Arc<[u8]>> {
+    pub(crate) fn get(&self, index: u64) -> Option<Page> {
         let mut state = self.0.lock().unwrap();
         state.clock += 1;
         let now = state.clock;
@@ -112,7 +130,7 @@ impl PageCache {
         Some(bytes)
     }
 
-    pub(crate) fn insert(&self, index: u64, bytes: Arc<[u8]>) {
+    pub(crate) fn insert(&self, index: u64, bytes: Page) {
         let mut state = self.0.lock().unwrap();
         state.remove(index);
         if bytes.len() > state.capacity {

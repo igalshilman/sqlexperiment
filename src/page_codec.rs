@@ -17,6 +17,8 @@ use crate::io::BLOCK_SIZE;
 use std::io;
 
 const HEADER: usize = 3;
+/// A page held in memory, encoded or decoded, shared without copying.
+pub(crate) type Page = std::sync::Arc<Vec<u8>>;
 /// Largest valid encoded value: a three-byte envelope plus one raw logical page.
 pub const MAX_ENCODED_PAGE: usize = HEADER + BLOCK_SIZE;
 

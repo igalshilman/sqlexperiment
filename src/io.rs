@@ -34,12 +34,13 @@
 //! later when the save commits, after a complete checkpoint and connection drop.
 //! The engine WAL never becomes a durable KV object.
 use crate::kv::KvStore;
+use crate::page_codec::Page;
 use crate::snapshot::{Snapshot, StorageOptions};
 use futures::future::join_all;
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, LazyLock, Mutex},
 };
 use turso_core::io::{FileId, FileSyncType, clock::DefaultClock};
 use turso_core::{
@@ -62,6 +63,11 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 fn engine_error(message: impl Into<String>) -> LimboError {
     LimboError::InternalError(message.into())
+}
+/// One shared zero-filled page for holes and the unwritten WAL.
+fn zero() -> Page {
+    static ZERO: LazyLock<Page> = LazyLock::new(|| Arc::new(vec![0; BLOCK_SIZE]));
+    ZERO.clone()
 }
 /// Split `len` bytes at `pos` into per-block pieces:
 /// `(block index, offset in block, offset in buffer, piece length)`.
@@ -89,8 +95,10 @@ struct State {
     sizes: [u64; 2],
     /// Original page zero retained for synchronous engine metadata reads.
     /// Overlay entries, including explicit holes, always override these bytes.
-    header: Option<Vec<u8>>,
-    dirty: BTreeMap<(usize, u64), Option<Vec<u8>>>,
+    header: Option<Page>,
+    /// Pages are shared with readers; a partial write updates a page in place
+    /// when nothing else holds it.
+    dirty: BTreeMap<(usize, u64), Option<Page>>,
     #[cfg(feature = "simulation")]
     written: [u64; 2],
 }
@@ -239,13 +247,13 @@ impl KvIo {
         self.progress.lock().unwrap().inflight
     }
 
-    fn resident_block(&self, file: usize, index: u64) -> Option<Vec<u8>> {
+    fn resident_block(&self, file: usize, index: u64) -> Option<Page> {
         let state = self.state.lock().unwrap();
-        if let Some(bytes) = state.dirty.get(&(file, index)) {
-            return Some(bytes.clone().unwrap_or_else(|| vec![0; BLOCK_SIZE]));
+        if let Some(page) = state.dirty.get(&(file, index)) {
+            return Some(page.clone().unwrap_or_else(zero));
         }
         if file == 1 {
-            return Some(vec![0; BLOCK_SIZE]);
+            return Some(zero());
         }
         if index == 0 {
             return state.header.clone();
@@ -253,17 +261,17 @@ impl KvIo {
         None
     }
 
-    async fn block(&self, file: usize, index: u64) -> io::Result<Vec<u8>> {
-        if let Some(bytes) = self.resident_block(file, index) {
-            return Ok(bytes);
+    async fn block(&self, file: usize, index: u64) -> io::Result<Page> {
+        if let Some(page) = self.resident_block(file, index) {
+            return Ok(page);
         }
         match self.snapshot.block(index).await? {
-            Some(bytes) if bytes.len() == BLOCK_SIZE => Ok(bytes),
+            Some(page) if page.len() == BLOCK_SIZE => Ok(page),
             Some(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid block length",
             )),
-            None => Ok(vec![0; BLOCK_SIZE]), // sparse-file hole
+            None => Ok(zero()), // sparse-file hole
         }
     }
 
@@ -299,18 +307,29 @@ impl KvIo {
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| invalid("offset overflow"))?;
         for (index, start, done, len) in blocks(pos, bytes.len()) {
-            // Full blocks do not require a read before overwrite.
-            let mut block = if len == BLOCK_SIZE {
-                vec![0; BLOCK_SIZE]
-            } else {
-                self.block(file, index).await?
-            };
-            block[start..start + len].copy_from_slice(&bytes[done..done + len]);
+            let piece = &bytes[done..done + len];
+            if len == BLOCK_SIZE {
+                // A full block needs no read before overwrite.
+                let page = Arc::new(piece.to_vec());
+                self.state
+                    .lock()
+                    .unwrap()
+                    .dirty
+                    .insert((file, index), Some(page));
+                continue;
+            }
+            // A partial write to a dirty page (most WAL frames) updates it in place.
+            if let Some(Some(page)) = self.state.lock().unwrap().dirty.get_mut(&(file, index)) {
+                Arc::make_mut(page)[start..start + len].copy_from_slice(piece);
+                continue;
+            }
+            let mut page = Vec::clone(&*self.block(file, index).await?);
+            page[start..start + len].copy_from_slice(piece);
             self.state
                 .lock()
                 .unwrap()
                 .dirty
-                .insert((file, index), Some(block));
+                .insert((file, index), Some(Arc::new(page)));
         }
         if !bytes.is_empty() {
             let mut state = self.state.lock().unwrap();
@@ -329,13 +348,13 @@ impl KvIo {
             let tail = (len % BLOCK_SIZE as u64) as usize;
             if tail != 0 {
                 let index = len / BLOCK_SIZE as u64;
-                let mut block = self.block(file, index).await?;
-                block[tail..].fill(0);
+                let mut page = Vec::clone(&*self.block(file, index).await?);
+                page[tail..].fill(0);
                 self.state
                     .lock()
                     .unwrap()
                     .dirty
-                    .insert((file, index), Some(block));
+                    .insert((file, index), Some(Arc::new(page)));
             }
             let first = len.div_ceil(BLOCK_SIZE as u64);
             let last = old_size.div_ceil(BLOCK_SIZE as u64);
@@ -450,22 +469,22 @@ impl KvIo {
     }
 
     /// Publish after the engine connection is dropped and no SQL transaction remains.
+    /// The dirty pages move into the save; the adapter is not used afterwards.
     pub(crate) async fn publish(&self) -> io::Result<crate::SaveReport> {
         if self.pending_count() != 0 {
             return Err(invalid("cannot save with pending I/O"));
         }
         let (dirty, size) = {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
             if state.sizes[1] != 0 {
                 return Err(invalid(
                     "WAL must be fully checkpointed and truncated before publication",
                 ));
             }
-            let dirty = state
-                .dirty
-                .iter()
+            let dirty = std::mem::take(&mut state.dirty)
+                .into_iter()
                 .filter(|((file, _), _)| *file == 0)
-                .map(|((_, block), bytes)| (*block, bytes.clone()))
+                .map(|((_, block), page)| (block, page.map(Arc::unwrap_or_clone)))
                 .collect();
             (dirty, state.sizes[0])
         };

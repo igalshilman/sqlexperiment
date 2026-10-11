@@ -21,9 +21,10 @@
 use crate::{
     format::{LOG_MAGIC, META_MAGIC, log_key},
     kv::KvStore,
+    page_codec::Page,
 };
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, io};
+use std::{collections::BTreeMap, io, sync::Arc};
 
 /// Largest segment value; larger transactions span several segments.
 pub const MAX_SEGMENT_BYTES: usize = 1024 * 1024;
@@ -33,7 +34,7 @@ const ENTRY_HEADER: usize = 10;
 const MAX_PROBE: u64 = 16;
 
 /// Encoded page images by page number; `None` is a hole.
-pub(crate) type Images = BTreeMap<u64, Option<Vec<u8>>>;
+pub(crate) type Images = BTreeMap<u64, Option<Page>>;
 
 fn invalid(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("invalid {what}"))
@@ -53,7 +54,7 @@ pub(crate) fn encode_transaction(first: u64, size: u64, images: &Images) -> Vec<
     let mut parts: Vec<Vec<(u64, &[u8])>> = vec![Vec::new()];
     let mut bytes = PREFIX;
     for (&index, image) in images {
-        let image = image.as_deref().unwrap_or_default();
+        let image = image.as_deref().map_or(&[][..], Vec::as_slice);
         let entry = ENTRY_HEADER + image.len();
         if bytes + entry > MAX_SEGMENT_BYTES && !parts.last().unwrap().is_empty() {
             parts.push(Vec::new());
@@ -113,7 +114,7 @@ pub(crate) fn decode(bytes: &[u8], seq: u64) -> io::Result<Segment> {
         if len != 0 {
             crate::page_codec::decode(image)?;
         }
-        images.insert(index, (len != 0).then(|| image.to_vec()));
+        images.insert(index, (len != 0).then(|| Arc::new(image.to_vec())));
         input = rest;
     }
     if !input.is_empty() {

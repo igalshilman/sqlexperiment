@@ -10,25 +10,25 @@ fn cached_snapshot_page_never_masks_overlay_wal_or_truncation() -> crate::Result
         initial.publish().await?;
         let io = KvIo::mount(store.clone()).await?;
         io.prepare_engine().await?;
-        assert_eq!(io.block(0, 0).await?, vec![7; BLOCK_SIZE]);
+        assert_eq!(*io.block(0, 0).await?, vec![7; BLOCK_SIZE]);
         io.write(0, 10, &[9, 8]).await?;
         assert_eq!(&io.block(0, 0).await?[10..12], &[9, 8]);
-        assert_eq!(io.block(1, 0).await?, vec![0; BLOCK_SIZE]);
+        assert_eq!(*io.block(1, 0).await?, vec![0; BLOCK_SIZE]);
         io.write(1, 0, &[3]).await?;
         assert_eq!(io.block(1, 0).await?[0], 3);
         assert_eq!(io.block(0, 0).await?[0], 7);
-        assert_eq!(io.block(0, 1).await?, vec![7; BLOCK_SIZE]);
+        assert_eq!(*io.block(0, 1).await?, vec![7; BLOCK_SIZE]);
         io.truncate_file(0, 100).await?;
         io.truncate_file(0, (2 * BLOCK_SIZE) as u64).await?;
         let page = io.block(0, 0).await?;
         assert_eq!(&page[10..12], &[9, 8]);
         assert!(page[100..].iter().all(|&b| b == 0));
-        assert_eq!(io.block(0, 1).await?, vec![0; BLOCK_SIZE]);
+        assert_eq!(*io.block(0, 1).await?, vec![0; BLOCK_SIZE]);
         io.truncate_file(1, 0).await?;
         io.publish().await?;
         let reopened = KvIo::mount(store).await?;
         assert_eq!(reopened.block(0, 0).await?, page);
-        assert_eq!(reopened.block(0, 1).await?, vec![0; BLOCK_SIZE]);
+        assert_eq!(*reopened.block(0, 1).await?, vec![0; BLOCK_SIZE]);
         Ok(())
     })
 }
