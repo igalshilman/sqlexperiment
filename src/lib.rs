@@ -44,7 +44,7 @@
 //! The host grants one owner exclusive use of a namespace, including settlement
 //! of cancelled requests before reopening or handing ownership to another session.
 //! There is no distributed lock or fence here. A save issues its commit and its
-//! checkpoint slice concurrently, at most 16 mutations of distinct keys at a time
+//! checkpoint slice concurrently, at most 64 mutations of distinct keys at a time
 //! per group. Open reads `meta` and probes the log, together when a
 //! [`PageCache`] knows where the log starts. The I/O pump batches adjacent file
 //! reads without crossing write, truncate or sync barriers.
