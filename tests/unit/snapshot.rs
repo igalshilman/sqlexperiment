@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     PageCacheConfig,
-    format::{LOG_PREFIX, PAGE_PREFIX},
+    format::{HINT, LOG_PREFIX, PAGE_PREFIX},
     io::BLOCK_SIZE,
     simulation::{
         Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, Operation, cache_config, fresh_namespace,
@@ -547,7 +547,7 @@ async fn checkpointed(pages: u64) -> io::Result<MemoryKv> {
 #[test]
 fn a_cold_open_prefetches_a_small_database() -> io::Result<()> {
     futures::executor::block_on(async {
-        let store = Arc::new(LatencyKv::new(checkpointed(20).await?));
+        let store = Arc::new(LatencyKv::new(checkpointed(PREFETCH_PAGES).await?));
         let without = StorageOptions {
             prefetch_pages: 0,
             ..options(4, None)
@@ -565,10 +565,69 @@ fn a_cold_open_prefetches_a_small_database() -> io::Result<()> {
         );
         store.reset();
         store.inner.reset_stats();
-        for index in 0..20 {
+        for index in 0..PREFETCH_PAGES {
             assert_eq!(number(snapshot.block(index).await?), Some(index));
         }
         assert_eq!((store.round_trips(), store.inner.stats().gets), (0, 0));
+        Ok(())
+    })
+}
+
+/// A larger database is not fetched whole. A checkpointing save lists the pages
+/// its session read in the working-set hint, and a cold open fetches exactly
+/// those alongside replay.
+#[test]
+fn a_cold_open_fetches_the_working_set_hint() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(LatencyKv::new(checkpointed(40).await?));
+        let cold_gets = |snapshot: Snapshot, pages: Vec<u64>| {
+            let store = store.clone();
+            async move {
+                store.inner.reset_stats();
+                for index in pages {
+                    assert_eq!(number(snapshot.block(index).await?), Some(index));
+                }
+                io::Result::Ok(store.inner.stats().gets)
+            }
+        };
+        let snapshot = open(&store, &options(4, None)).await?;
+        assert_eq!(cold_gets(snapshot, vec![5, 9, 33]).await?, 3, "no hint yet");
+
+        // A session reads three pages, then saves with a checkpoint.
+        let snapshot = open(&store, &options(0, None)).await?;
+        for index in [5, 9, 33] {
+            snapshot.block(index).await?;
+        }
+        snapshot
+            .publish(Changes::from([(1, Some(page(1)))]), 40 * 4096)
+            .await?;
+        let hint = store.inner.get(HINT).await?.expect("a hint");
+        assert_eq!(hint::decode(&hint, 32), Some(vec![5, 9, 33]));
+
+        store.reset();
+        store.inner.reset_stats();
+        let snapshot = open(&store, &options(4, None)).await?;
+        assert_eq!(
+            store.inner.stats().gets,
+            1 + 1 + 6 + 3,
+            "meta, hint, probe, pages"
+        );
+        assert_eq!(cold_gets(snapshot, vec![5, 9, 33]).await?, 0);
+
+        // Disabled, or with a malformed hint, opens read nothing extra.
+        let off = StorageOptions {
+            hint_pages: 0,
+            ..options(4, None)
+        };
+        assert_eq!(cold_gets(open(&store, &off).await?, vec![5]).await?, 1);
+        store
+            .inner
+            .put(HINT, Bytes::from_static(b"SH12\x09\x00garbage"))
+            .await?;
+        assert_eq!(
+            cold_gets(open(&store, &options(4, None)).await?, vec![5]).await?,
+            1
+        );
         Ok(())
     })
 }

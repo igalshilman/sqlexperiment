@@ -71,6 +71,7 @@ async fn populated() -> Result<Arc<ControlledKv>> {
 fn no_prefetch() -> StorageOptions {
     StorageOptions {
         prefetch_pages: 0,
+        hint_pages: 0,
         ..StorageOptions::default()
     }
 }

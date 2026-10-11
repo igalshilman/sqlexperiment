@@ -104,6 +104,7 @@
 //! feature.
 mod cache;
 mod format;
+mod hint;
 pub mod io;
 pub mod kv;
 mod log;
