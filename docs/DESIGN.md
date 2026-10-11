@@ -27,6 +27,7 @@ A namespace holds three kinds of keys:
 | `v12/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
 | `v12/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
 | `v12/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
+| `v12/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
 
 **Read rule.** Page *n* is its latest image in the committed log from
 `meta.log_start`, else `page/<n>`, else zeros.
@@ -95,11 +96,24 @@ later save retries it. Any other error leaves the commit outcome unknown.
    This is skipped when the backend reports `durable_when_visible()`, or when the
    cache shows this owner wrote and had them acknowledged.
 
-**Cold opens prefetch small databases.** Without warm cache pages, open
-fetches every page key of a database of at most `prefetch_pages` pages (default
-64) alongside replay. The engine reads one dependent page at a time, so
-otherwise each B-tree level of a query would cost a round trip. Pages the log
-holds are dropped from the prefetch; the log wins as always.
+**Cold opens prefetch.** The engine reads one dependent page at a time, so
+without warm cache pages each B-tree level of a query would cost a round trip.
+An owner that knows nothing about the namespace therefore reads `v12/hint`
+together with `meta`, and fetches pages alongside replay:
+
+- a database of at most `prefetch_pages` pages (default 16) whole;
+- otherwise, the pages the working-set hint lists.
+
+Pages the log holds are dropped from the prefetch; the log wins as always.
+
+**The working-set hint.** An owner (or, without a cache, a session) records the
+pages its sessions read. A save that checkpoints writes the most useful of
+them, if the list changed, in the same round trip: page 0, then interior B-tree
+pages, then the most recently read leaves, at most `hint_pages` (default 32,
+at most 256), as ascending LEB128 deltas (about 1–4 bytes per page). The hint
+is advisory and outside the invariants: it is never confirmed or ordered
+against other writes, and a stale, missing or malformed hint only wastes or
+saves gets. It stays out of `meta`, which is on the correctness path.
 
 ## Failures
 
@@ -202,7 +216,7 @@ one-thread runtime of its own. It is the only background work.
 | Large save (over 256 KiB) | 2 or more | Segments, then every logged page and `meta` |
 | Open, with cache | 1 | None |
 | Open, fresh owner, weak backend | 2 to 3 | Re-put of the last commit and `meta` |
-| Cold open of a small database | Same as open; every page arrives with replay | None |
+| Cold open | Same as open; hinted pages (or a small database whole) arrive with replay | None, plus the hint put in checkpointing saves |
 | Cold page read | 1 get; sequential reads fetch up to 64 ahead | None |
 
 Each page is written twice, once to the log and once at checkpoint, and opens

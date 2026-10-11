@@ -9,6 +9,7 @@ discovery.
 | `v12/meta` | Checkpoint record; absent until the first checkpoint |
 | `v12/log/<16-digit hex sequence>` | Log segment |
 | `v12/page/<16-digit hex page number>` | Checkpointed page, overwritten in place |
+| `v12/hint` | Working-set hint; advisory, may be absent or stale |
 
 ## Pages
 
@@ -37,6 +38,16 @@ numbers. Only its last segment has the commit flag.
 | Entries | Strictly ascending: page index u64 LE, image length u16 LE (zero for a hole), page image |
 
 A segment is at most 1 MiB. Every image is decoded when the segment is read.
+
+## Working-set hint
+
+| Field | Encoding |
+|---|---|
+| Magic | `SH12` |
+| Entry count | u16 LE; at most 256 |
+| Pages | Ascending page numbers as LEB128 deltas, the first from zero |
+
+Readers ignore a malformed hint.
 
 ## Checkpoint record
 
