@@ -38,10 +38,10 @@ A namespace holds three kinds of keys:
 
 | Key | Holds |
 |---|---|
-| `v12/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
-| `v12/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
-| `v12/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
-| `v12/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
+| `v13/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
+| `v13/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
+| `v13/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
+| `v13/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
 
 **Read rule.** Page *n* is its latest image in the committed log from
 `meta.log_start`, else `page/<n>`, else zeros.
@@ -159,7 +159,7 @@ acknowledged work when a later step fails.
 
 **Cold opens prefetch.** The engine reads one dependent page at a time, so
 without warm cache pages each B-tree level of a query would cost a round trip.
-An owner that knows nothing about the namespace therefore reads `v12/hint`
+An owner that knows nothing about the namespace therefore reads `v13/hint`
 together with `meta`, and fetches pages alongside replay:
 
 - a database of at most `prefetch_pages` pages (default 16) whole;
@@ -286,9 +286,14 @@ Only the database is kept: the next session connects afresh, so connection
 counters (`last_insert_rowid()`, `changes()`) and settings never carry over.
 The next open reuses it if `meta` matches, the log ends where that engine left
 it, and its I/O is clean. This keeps the parsed schema warm, which cuts CPU per
-session several-fold ([cache results](../benches/CACHE_RESULTS.md)). Parked engines
-and namespace states are capped per process, least recently used first;
-dropping either only makes a namespace cold.
+session several-fold ([cache results](../benches/CACHE_RESULTS.md)). A parked
+engine releases its view of the log (the next open replaces it), so what it
+holds is its parsed schema: measured at 40–110 KiB from one to 50 tables. Parked
+engines share a byte budget (`PageCacheConfig::engine_bytes`, 64 MiB), each
+weighed as 48 KiB plus 16 bytes per byte of schema SQL, measured when an engine
+opens and after a commit that may have changed the schema. Namespace states are
+capped by count. Least recently used go first; dropping either only makes a
+namespace cold.
 
 **Threads.** foyer's disk I/O runs on the host's tokio runtime, or on a
 one-thread runtime of its own. It is the only background work.
@@ -319,11 +324,15 @@ replay at most a short log. Measurements: [log shipping](../benches/LOG_RESULTS.
 - **Fencing.** Exclusive ownership is assumed. A delayed write from a former
   owner could overwrite newer data. A conditional put or an ownership epoch on
   commit and `meta` writes would close that gap.
-- **Memory.** Dirty pages, the private WAL, the replayed log and query results
-  have no byte budgets.
-- **Integrity.** Encodings are validated structurally, with bounds on sequence
-  numbers, sizes and page numbers; there are no checksums.
-- **Format.** Only v12, with no migration.
+- **Memory.** A session's private changes (`max_private_bytes`, 256 MiB) and a
+  statement's result rows (`max_result_bytes`, 64 MiB) are capped; exceeding
+  either fails the statement. Past 4 MiB of log, checkpoint slices grow to 256
+  pages, so a log grown by failed checkpoints shrinks again and replay stays
+  bounded. Parked engines share a byte budget, by a measured estimate.
+- **Integrity.** Every stored value carries a CRC32C, verified before it is
+  decoded, and decoding bounds sequence numbers, sizes and page numbers. A
+  corrupt value is an error, never different data; there is no repair.
+- **Format.** Only v13, with no migration.
 - **Validation.** Crash, interruption and handover campaigns run against an
   in-memory simulator; there are no process-kill or power-loss tests. See
   [REVIEW.md](REVIEW.md).

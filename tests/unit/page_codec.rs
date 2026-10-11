@@ -73,8 +73,11 @@ fn seeded_page_roundtrips_and_arbitrary_inputs_are_bounded() -> io::Result<()> {
         assert_eq!(decode(&encode(&page, PageCompression::Lz4)?)?, page);
         let len = iteration * 3571 % (MAX_ENCODED_PAGE + 32);
         let mut bytes: Vec<_> = (0..len).map(|_| random(&mut seed)).collect();
+        // A valid header and checksum, so arbitrary payloads reach the decoder.
         if bytes.len() >= HEADER {
-            bytes[..HEADER].copy_from_slice(&[1, 0, 16]);
+            let sum = crate::format::checksum(&bytes[HEADER..]).to_le_bytes();
+            bytes[..3].copy_from_slice(&[1, 0, 16]);
+            bytes[3..HEADER].copy_from_slice(&sum);
         }
         if let Ok(decoded) = decode(&bytes) {
             assert_eq!(decoded.len(), BLOCK_SIZE);

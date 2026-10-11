@@ -65,6 +65,10 @@ pub(crate) const MAX_MUTATIONS_IN_FLIGHT: usize = 64;
 pub const PREFETCH_PAGES: u64 = 16;
 /// Default [`StorageOptions::hint_pages`].
 pub const HINT_PAGES: usize = 32;
+/// Default [`StorageOptions::max_private_bytes`].
+pub const MAX_PRIVATE_BYTES: usize = 256 << 20;
+/// Default [`StorageOptions::max_result_bytes`].
+pub const MAX_RESULT_BYTES: usize = 64 << 20;
 const PAGE: u64 = crate::io::BLOCK_SIZE as u64;
 /// Consecutive page reads that start sequential readahead.
 const READAHEAD_AFTER: u32 = 3;
@@ -74,6 +78,12 @@ const MAX_READAHEAD: u64 = 64;
 pub const CHECKPOINT_PAGES: usize = 12;
 /// Logged bytes that trigger checkpointing; a larger save checkpoints itself.
 pub const CHECKPOINT_LOG_BYTES: usize = 256 * 1024;
+/// Logged bytes beyond which a checkpoint slice covers up to
+/// [`CATCH_UP_PAGES`], so a log grown by failed checkpoints shrinks again and
+/// replay at open stays bounded.
+const CATCH_UP_LOG_BYTES: usize = 16 * CHECKPOINT_LOG_BYTES;
+/// Pages of a catch-up checkpoint slice: a few round trips of mutations.
+const CATCH_UP_PAGES: usize = 4 * MAX_MUTATIONS_IN_FLIGHT;
 
 /// When a session's SQL changes become durable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -107,6 +117,12 @@ pub struct StorageOptions {
     pub hint_pages: usize,
     /// When SQL changes become durable.
     pub durability: Durability,
+    /// Most bytes of uncommitted changes and private engine WAL a session may
+    /// hold; a write beyond it fails its statement.
+    pub max_private_bytes: usize,
+    /// Most bytes of result rows one statement may collect; beyond it the
+    /// statement fails.
+    pub max_result_bytes: usize,
 }
 
 impl Default for StorageOptions {
@@ -118,6 +134,8 @@ impl Default for StorageOptions {
             prefetch_pages: PREFETCH_PAGES,
             hint_pages: HINT_PAGES,
             durability: Durability::Save,
+            max_private_bytes: MAX_PRIVATE_BYTES,
+            max_result_bytes: MAX_RESULT_BYTES,
         }
     }
 }
@@ -385,6 +403,10 @@ impl Snapshot {
         self
     }
 
+    pub(crate) fn options(&self) -> &StorageOptions {
+        &self.options
+    }
+
     /// The checkpoint the log is replayed from.
     fn base(&self) -> Meta {
         self.claim.unwrap_or(self.meta)
@@ -504,6 +526,10 @@ impl Snapshot {
                 latest.insert(page, transaction.end);
             }
         }
+        let budget = match self.log.bytes > CATCH_UP_LOG_BYTES {
+            true => CATCH_UP_PAGES,
+            false => CHECKPOINT_PAGES,
+        };
         let mut images = Images::new();
         let mut covered = 0;
         for transaction in transactions {
@@ -513,7 +539,7 @@ impl Snapshot {
                 .pages
                 .iter()
                 .filter(|page| !images.contains_key(*page));
-            if covered > 0 && images.len() + new.count() > CHECKPOINT_PAGES {
+            if covered > 0 && images.len() + new.count() > budget {
                 break;
             }
             if transaction.pages.iter().any(|page| latest[page] > limit) {
@@ -768,6 +794,22 @@ impl Snapshot {
         }
     }
 
+    /// An empty view at the same position, for a parked engine: no log images,
+    /// pages fetched ahead, usage or reader registration.
+    pub(crate) fn idle(&self) -> Self {
+        let mut idle = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
+        idle.log = Log {
+            transactions: Vec::new(),
+            images: Images::new(),
+            next: self.log.next,
+            tail: None,
+            bytes: 0,
+        };
+        idle.fetched = Mutex::default();
+        idle.usage = Mutex::default();
+        idle
+    }
+
     /// Register this view, at its log position, with the owner cache.
     fn registered(self) -> Self {
         let reader = self
@@ -777,11 +819,6 @@ impl Snapshot {
             .map(|cache| cache.reader(self.log.next));
         *self.reader.lock().unwrap() = reader;
         self
-    }
-
-    /// End this view's registration: its engine is parked, not reading.
-    pub(crate) fn release_reader(&self) {
-        self.reader.lock().unwrap().take();
     }
 
     /// The latest log position a checkpoint may write images of: no other open

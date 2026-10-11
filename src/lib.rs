@@ -107,9 +107,10 @@
 //! # Limits
 //!
 //! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
-//! Dirty pages, private WAL, the replayed log and query results do not have byte
-//! budgets. The format has structural validation but no checksum or corruption
-//! repair. Use a fresh, dedicated namespace; no migration or format discovery is
+//! A session's private changes and a statement's result rows are capped by
+//! [`StorageOptions::max_private_bytes`] and [`StorageOptions::max_result_bytes`].
+//! Every stored value carries a CRC32C checksum; a corrupt value is an error,
+//! and there is no repair. Use a fresh, dedicated namespace; no migration or format discovery is
 //! implemented. Simulation and benchmark support require the opt-in `simulation`
 //! feature.
 mod cache;
@@ -127,7 +128,9 @@ pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
 pub use log::MAX_SEGMENT_BYTES;
 pub use page_codec::PageCompression;
-pub use snapshot::{CHECKPOINT_PAGES, Durability, SaveReport, StorageOptions};
+pub use snapshot::{
+    CHECKPOINT_PAGES, Durability, MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport, StorageOptions,
+};
 /// SQL values, as returned in rows and bound as parameters.
 pub use turso_core::Value;
 
@@ -181,6 +184,11 @@ pub struct Session {
     abandoned: Arc<AtomicBool>,
     /// A checkpoint failure after a commit, kept for [`Self::take_cleanup_error`].
     cleanup_error: Option<std::io::Error>,
+    /// Bytes of the schema's SQL as of the last commit, to weigh a parked
+    /// engine; `None` when unknown, which prevents parking.
+    schema_bytes: Option<usize>,
+    /// SQL since the last commit may have changed the schema.
+    schema_changed: bool,
 }
 
 /// Marks a session abandoned unless it finished; see [`Session::transaction`].
@@ -206,6 +214,18 @@ pub(crate) struct WarmEngine {
     io: Arc<KvIo>,
     /// The log position its state corresponds to.
     next: u64,
+    /// Bytes of its schema's SQL, which sizes its parsed schema.
+    schema_bytes: usize,
+}
+
+/// Memory of a parked engine besides its schema, measured with one table.
+const ENGINE_BYTES: usize = 48 << 10;
+
+impl WarmEngine {
+    /// Estimated memory: the parsed schema dominates once the view is released.
+    pub(crate) fn weight(&self) -> usize {
+        ENGINE_BYTES + 16 * self.schema_bytes
+    }
 }
 
 /// Abort queued requests before a suspended statement is destroyed. This guard
@@ -287,6 +307,8 @@ impl Session {
                 in_body: false,
                 abandoned: Arc::default(),
                 cleanup_error: None,
+                schema_bytes: Some(warm.schema_bytes),
+                schema_changed: false,
             };
             session.io.resume(snapshot).await?;
             session.connection = Some(connect(&session.io, &warm.database).await?);
@@ -307,12 +329,17 @@ impl Session {
             in_body: false,
             abandoned: Arc::default(),
             cleanup_error: None,
+            schema_bytes: None,
+            schema_changed: false,
         };
         session.io.prepare_engine().await?;
         let database = open_engine(&session.io).await?;
         session.connection = Some(connect(&session.io, &database).await?);
         session.database = Some(database);
         session.poisoned = false;
+        if session.cache.is_some() {
+            session.schema_bytes = Some(session.measure_schema().await?);
+        }
         Ok(session)
     }
 
@@ -328,9 +355,12 @@ impl Session {
     fn park(&mut self) {
         let Some(cache) = &self.cache else { return };
         let next = self.io.log_next();
-        if cache.committed() != Some(next) || !self.reusable {
+        if cache.committed() != Some(next) || !self.reusable || self.schema_changed {
             return;
         }
+        let Some(schema_bytes) = self.schema_bytes else {
+            return;
+        };
         let idle = self
             .connection
             .as_ref()
@@ -344,12 +374,14 @@ impl Session {
             return;
         }
         if let Some(database) = self.database.take() {
-            // An idle engine reads nothing, so it must not hold back checkpoints.
-            self.io.snapshot().release_reader();
+            // An idle engine reads nothing: it holds back no checkpoint, and the
+            // next open replaces its view.
+            self.io.idle();
             cache.park(WarmEngine {
                 database,
                 io: self.io.clone(),
                 next,
+                schema_bytes,
             });
             self.parked = true;
         }
@@ -367,9 +399,7 @@ impl Session {
     /// Cached execution yields every 64 steps; one engine call cannot be preempted.
     /// An engine helper requiring synchronous nonresident I/O returns an error.
     pub async fn query(&mut self, sql: &str) -> Result<Rows> {
-        if changes_connection_state(sql) {
-            self.reusable = false;
-        }
+        self.screen(sql);
         self.run(sql, None).await
     }
 
@@ -381,9 +411,7 @@ impl Session {
         sql: &str,
         params: impl IntoIterator<Item = Value>,
     ) -> Result<Rows> {
-        if changes_connection_state(sql) {
-            self.reusable = false;
-        }
+        self.screen(sql);
         self.run(sql, Some(params.into_iter().collect())).await
     }
 
@@ -432,6 +460,29 @@ impl Session {
         result
     }
 
+    /// Note what `sql` may change besides the database: connection state, which
+    /// rules out reuse, and the schema, which a parked engine is weighed by.
+    fn screen(&mut self, sql: &str) {
+        if changes_connection_state(sql) {
+            self.reusable = false;
+        }
+        if mentions(sql, &["create", "drop", "alter"]) {
+            self.schema_changed = true;
+        }
+    }
+
+    /// Bytes of the schema's SQL.
+    async fn measure_schema(&mut self) -> Result<usize> {
+        let rows = self
+            .internal("SELECT coalesce(sum(length(sql)), 0) FROM sqlite_schema")
+            .await?;
+        let bytes = rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(Value::as_int);
+        Ok(bytes.unwrap_or(0).max(0) as usize)
+    }
+
     /// Make the committed SQL state durable and continue on it. A cleanup error
     /// leaves it committed; a later commit retries the checkpoint work.
     async fn commit(&mut self) -> Result<SaveReport> {
@@ -444,6 +495,11 @@ impl Session {
         // either way; a failure here only ends the session.
         if self.io.prepare_engine().await.is_ok() {
             self.poisoned = false;
+        }
+        if self.schema_changed && self.cache.is_some() && !self.poisoned {
+            // Durable either way; without a size the engine is just not parked.
+            self.schema_bytes = self.measure_schema().await.ok();
+            self.schema_changed = false;
         }
         Ok(report)
     }
@@ -489,7 +545,8 @@ impl Session {
                     statement.bind_at(std::num::NonZero::new(index).unwrap(), value)?;
                 }
             }
-            rows = Some(query_engine(&self.io, statement).await?);
+            let limit = self.io.snapshot().options().max_result_bytes;
+            rows = Some(query_engine(&self.io, statement, limit).await?);
             let idle = connection.get_auto_commit();
             if self.in_body && idle {
                 return Err("a statement ended the transaction of Session::transaction".into());
@@ -513,7 +570,7 @@ impl Session {
         }
         self.poisoned = true;
         let statement = self.connection.as_ref().unwrap().prepare(sql)?;
-        let rows = query_engine(&self.io, statement).await?;
+        let rows = query_engine(&self.io, statement, usize::MAX).await?;
         self.poisoned = false;
         Ok(rows)
     }
@@ -587,21 +644,16 @@ impl Drop for Session {
 /// PRAGMA settings, ATTACH/DETACH or the temp schema. Conservative: a false
 /// positive only costs reusing the engine.
 fn changes_connection_state(sql: &str) -> bool {
+    mentions(sql, &["pragma", "attach", "detach", "temp", "temporary"])
+}
+
+/// Whether `sql` contains one of `keywords` as a whole word, in any case.
+fn mentions(sql: &str, keywords: &[&str]) -> bool {
     sql.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .any(|word| {
-            [
-                "pragma",
-                "attach",
-                "detach",
-                "temp",
-                "temporary",
-                // Connection counters that a reused engine would carry over.
-                "last_insert_rowid",
-                "changes",
-                "total_changes",
-            ]
-            .iter()
-            .any(|keyword| word.eq_ignore_ascii_case(keyword))
+            keywords
+                .iter()
+                .any(|keyword| word.eq_ignore_ascii_case(keyword))
         })
 }
 
@@ -651,12 +703,26 @@ async fn connect(io: &KvIo, db: &Arc<Database>) -> Result<Arc<Connection>> {
     Ok(connection)
 }
 
-async fn query_engine(io: &KvIo, mut statement: turso_core::Statement) -> Result<Rows> {
+/// Bytes a value takes in collected rows, approximately.
+fn value_bytes(value: &Value) -> usize {
+    16 + match value {
+        Value::Text(text) => text.as_str().len(),
+        Value::Blob(blob) => blob.len(),
+        _ => 0,
+    }
+}
+
+async fn query_engine(
+    io: &KvIo,
+    mut statement: turso_core::Statement,
+    max_bytes: usize,
+) -> Result<Rows> {
     let mut running = Running {
         io,
         complete: false,
     };
     let mut rows = Vec::new();
+    let mut bytes = 0;
     let mut steps = 0;
     loop {
         // Bound work between host yields even when all pages are already cached.
@@ -667,14 +733,19 @@ async fn query_engine(io: &KvIo, mut statement: turso_core::Statement) -> Result
         }
         steps += 1;
         match statement.step()? {
-            StepResult::Row => rows.push(
-                statement
+            StepResult::Row => {
+                let row: Vec<Value> = statement
                     .row()
                     .ok_or("missing row")?
                     .get_values()
                     .cloned()
-                    .collect(),
-            ),
+                    .collect();
+                bytes += row.iter().map(value_bytes).sum::<usize>();
+                if bytes > max_bytes {
+                    return Err("result rows exceed StorageOptions::max_result_bytes".into());
+                }
+                rows.push(row);
+            }
             StepResult::Done => {
                 running.complete = true;
                 return Ok(rows);

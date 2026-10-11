@@ -210,6 +210,13 @@ impl KvIo {
         *self.log_next.lock().unwrap()
     }
 
+    /// Release the committed view while the engine is parked: it reads
+    /// nothing until a new open replaces the view.
+    pub(crate) fn idle(&self) {
+        let idle = Arc::new(self.snapshot().idle());
+        *self.snapshot.lock().unwrap() = idle;
+    }
+
     pub(crate) fn snapshot(&self) -> Arc<Snapshot> {
         self.snapshot.lock().unwrap().clone()
     }
@@ -359,6 +366,15 @@ impl KvIo {
     }
 
     async fn write(&self, file: usize, pos: u64, bytes: &[u8]) -> io::Result<usize> {
+        // Count the blocks this write may add: one write can be a large batch.
+        let limit = self.snapshot().options().max_private_bytes;
+        let held = self.state.lock().unwrap().dirty.len() * BLOCK_SIZE;
+        if held + bytes.len() + 2 * BLOCK_SIZE > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "private changes exceed StorageOptions::max_private_bytes",
+            ));
+        }
         let end = pos
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| invalid("offset overflow"))?;

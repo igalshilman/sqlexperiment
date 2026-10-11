@@ -622,7 +622,7 @@ fn a_cold_open_fetches_the_working_set_hint() -> io::Result<()> {
         assert_eq!(cold_gets(open(&store, &off).await?, vec![5]).await?, 1);
         store
             .inner
-            .put(HINT, Bytes::from_static(b"SH12\x09\x00garbage"))
+            .put(HINT, Bytes::from_static(b"SH13\x09\x00garbage"))
             .await?;
         assert_eq!(
             cold_gets(open(&store, &options(4, None)).await?, vec![5]).await?,

@@ -40,8 +40,9 @@
 //!   replay can start there;
 //! - an idle engine at that commit, for the next session.
 //!
-//! Namespace state and parked engines are kept for a bounded number of
-//! namespaces, least recently used first; forgetting one only makes it cold.
+//! Namespace states are kept for a bounded number of namespaces, and parked
+//! engines within a byte budget, least recently used first; forgetting either
+//! only makes a namespace cold.
 use crate::{
     WarmEngine,
     hint::Usage,
@@ -84,8 +85,10 @@ pub struct PageCacheConfig {
     pub decoded: bool,
     /// Namespaces whose durability knowledge is kept.
     pub namespaces: usize,
-    /// Idle engines kept for the next session of their namespace.
-    pub engines: usize,
+    /// Bytes of idle engines kept for the next session of their namespace, by
+    /// estimate: a parked engine holds its parsed schema, about 48 KiB plus 16
+    /// bytes per byte of schema SQL. Least recently parked go first.
+    pub engine_bytes: usize,
 }
 
 impl PageCacheConfig {
@@ -97,7 +100,7 @@ impl PageCacheConfig {
             disk_block: 4 << 20,
             decoded: false,
             namespaces: 1 << 16,
-            engines: 256,
+            engine_bytes: 64 << 20,
         }
     }
 }
@@ -166,7 +169,7 @@ impl PageCache {
                 ids: AtomicU64::new(random_start()),
                 _runtime: matches!(spawner, Spawner::Runtime(_)).then_some(spawner),
             }),
-            engines: Arc::new(Mutex::new(Engines::new(config.engines))),
+            engines: Arc::new(Mutex::new(Engines::new(config.engine_bytes))),
         })
     }
 
@@ -520,18 +523,20 @@ impl Drop for Reader {
     }
 }
 
-/// Parked engines, least recently parked dropped first.
+/// Parked engines within a byte budget, least recently parked dropped first.
 struct Engines {
-    capacity: usize,
+    budget: usize,
+    used: usize,
     clock: u64,
     parked: HashMap<u64, (WarmEngine, u64)>,
     order: BTreeMap<u64, u64>,
 }
 
 impl Engines {
-    fn new(capacity: usize) -> Self {
+    fn new(budget: usize) -> Self {
         Self {
-            capacity,
+            budget,
+            used: 0,
             clock: 0,
             parked: HashMap::new(),
             order: BTreeMap::new(),
@@ -541,17 +546,23 @@ impl Engines {
     fn park(&mut self, id: u64, engine: WarmEngine) {
         self.take(id);
         self.clock += 1;
+        self.used += engine.weight();
         self.parked.insert(id, (engine, self.clock));
         self.order.insert(self.clock, id);
-        while self.parked.len() > self.capacity {
-            let (_, oldest) = self.order.pop_first().expect("nonempty when over capacity");
-            self.parked.remove(&oldest);
+        while self.used > self.budget {
+            let (_, oldest) = self.order.pop_first().expect("nonempty when over budget");
+            let (engine, _) = self
+                .parked
+                .remove(&oldest)
+                .expect("ordered engines are parked");
+            self.used -= engine.weight();
         }
     }
 
     fn take(&mut self, id: u64) -> Option<WarmEngine> {
         let (engine, parked) = self.parked.remove(&id)?;
         self.order.remove(&parked);
+        self.used -= engine.weight();
         Some(engine)
     }
 }
