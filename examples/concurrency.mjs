@@ -68,6 +68,7 @@ const conc = restate.object({
         map: typeof p.map,
         orTimeout: typeof call.orTimeout,
         date: typeof (await ctx.date.now()),
+        journalReplay: ctx.journalReplay,
       };
     },
 
@@ -257,7 +258,13 @@ async function check(name, body) {
 
 await check('operations are plain promises; replayed handlers keep RestatePromises', async () => {
   const { value } = await call('Concurrency/plain/plain');
-  assert.deepEqual(value, { promise: true, map: 'undefined', orTimeout: 'undefined', date: 'number' });
+  assert.deepEqual(value, {
+    promise: true,
+    map: 'undefined',
+    orTimeout: 'undefined',
+    date: 'number',
+    journalReplay: false,
+  });
   assert.deepEqual((await call('Replayed/combine')).value, { map: 'function' });
 });
 
