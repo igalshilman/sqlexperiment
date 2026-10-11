@@ -152,6 +152,7 @@ the owner cache.
 make              # build everything: the crate, the addon, the patched SDK, the examples
 make test         # every test that needs no Restate server
 RESTATE_SERVER=/path/to/restate-server make crash-test   # the crash campaign
+RESTATE_SERVER=/path/to/restate-server make concurrency-test   # the context without journal replay
 make help
 ```
 

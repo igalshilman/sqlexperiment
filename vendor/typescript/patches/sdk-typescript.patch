@@ -62,19 +62,20 @@ index 8ea15b1..ea67df0 100644
  
  /**
 diff --git a/packages/libs/restate-sdk/src/context_impl.ts b/packages/libs/restate-sdk/src/context_impl.ts
-index 2487c57..954e774 100644
+index 2487c57..e919d44 100644
 --- a/packages/libs/restate-sdk/src/context_impl.ts
 +++ b/packages/libs/restate-sdk/src/context_impl.ts
-@@ -71,6 +71,8 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
+@@ -71,6 +71,9 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
  import type { ContextInternal, GetProjectOptions } from "./internal.js";
  import { InputReader, OutputWriter } from "./endpoint/handlers/types.js";
  import { ExecutionOptions } from "./endpoint/components.js";
 +import { runSql, type SqlDatabase, type SqlSession } from "./sql.js";
 +import { IdempotencyKeys } from "./idempotency.js";
++import { unjournaledContext } from "./unjournaled.js";
  
  /**
   * The runtime shape a client method needs. implement() and type manipulations respect this.
-@@ -109,6 +111,9 @@ export class ContextImpl
+@@ -109,6 +112,9 @@ export class ContextImpl
    private cancellationPromise?: SingleRestatePromise<void>;
    readonly defaultSerde: Serde<any>;
    private readonly asTerminalError?: (error: any) => TerminalError | undefined;
@@ -84,7 +85,16 @@ index 2487c57..954e774 100644
  
    // If undefined, we're not tracking invocation id promises
    private readonly trackedInvocationIdPromises?: SingleRestatePromise<string>[];
-@@ -159,6 +164,10 @@ export class ContextImpl
+@@ -152,18 +158,31 @@ export class ContextImpl
+       this.runClosuresTracker,
+       this.ephemeralRequestTracker,
+       externalProgressChannel,
+-      this.abortAttempt.bind(this)
++      this.abortAttempt.bind(this),
++      executionOptions?.journalReplay ?? true
+     );
+     this.serviceKey = input.key;
+     // Identity interceptor by default; replaced by startUserHandler after hooks are instantiated
      this.runInterceptor = (_name, runner) => runner();
      this.defaultSerde = executionOptions?.defaultSerde ?? serde.json;
      this.asTerminalError = executionOptions?.asTerminalError;
@@ -95,7 +105,20 @@ index 2487c57..954e774 100644
      this.trackedInvocationIdPromises = executionOptions?.explicitCancellation
        ? []
        : undefined;
-@@ -291,6 +300,14 @@ export class ContextImpl
+   }
+ 
++  /**
++   * The context the handler gets: this one, or without journal replay, this
++   * one with plain promises (see unjournaled.ts).
++   */
++  userContext(): ContextImpl {
++    return this.journalReplay ? this : unjournaledContext(this);
++  }
++
+   setRunInterceptor(
+     interceptor: (name: string, runner: () => Promise<void>) => Promise<void>
+   ) {
+@@ -291,6 +310,14 @@ export class ContextImpl
      );
    }
  
@@ -110,7 +133,7 @@ index 2487c57..954e774 100644
    public clear(name: string): void {
      this.processNonCompletableEntry(
        WasmCommandType.ClearState,
-@@ -340,7 +357,14 @@ export class ContextImpl
+@@ -340,7 +367,14 @@ export class ContextImpl
                ([key, value]) => new WasmHeader(key, value)
              )
            : [],
@@ -126,7 +149,7 @@ index 2487c57..954e774 100644
          call.scope,
          call.limitKey,
          call.name
-@@ -423,7 +447,15 @@ export class ContextImpl
+@@ -423,7 +457,15 @@ export class ContextImpl
              )
            : [],
          delay !== undefined && delay > 0 ? BigInt(delay) : undefined,
@@ -165,7 +188,7 @@ index 14d8ab1..f24c370 100644
  }
  
 diff --git a/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts b/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts
-index f5a20a7..afc8a76 100644
+index f5a20a7..bfe3d6d 100644
 --- a/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts
 +++ b/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts
 @@ -302,7 +302,8 @@ class RestateInvokeResponse implements RestateResponse {
@@ -178,6 +201,23 @@ index f5a20a7..afc8a76 100644
      );
      const responseHead = this.coreVm.get_response_head();
      this.statusCode = responseHead.status_code;
+@@ -507,6 +508,7 @@ class RestateInvokeResponse implements RestateResponse {
+     } catch (e) {
+       notifyError(e, ctx, this.handler.executionOptions.asTerminalError);
+     } finally {
++      ctx.promisesExecutor.close();
+       try {
+         await flushAndClose(
+           this.coreVm,
+@@ -592,7 +594,7 @@ async function startUserHandler(
+       );
+ 
+     // Then run user code
+-    const output = await handler.invoke(ctx, decodedInput);
++    const output = await handler.invoke(ctx.userContext(), decodedInput);
+ 
+     // Encode user code output
+     encodedOutput = journalValueCodec.encode(output);
 diff --git a/packages/libs/restate-sdk/src/idempotency.ts b/packages/libs/restate-sdk/src/idempotency.ts
 new file mode 100644
 index 0000000..9cdb273
@@ -263,28 +303,296 @@ index 7cee518..5f5bf5a 100644
  
  /**
   * Downcast the given context to {@link ContextInternal}, to access the internal APIs.
+diff --git a/packages/libs/restate-sdk/src/promise_selector.ts b/packages/libs/restate-sdk/src/promise_selector.ts
+new file mode 100644
+index 0000000..330fd5c
+--- /dev/null
++++ b/packages/libs/restate-sdk/src/promise_selector.ts
+@@ -0,0 +1,140 @@
++/*
++ * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
++ *
++ * This file is part of the Restate SDK for Node.js/TypeScript,
++ * which is released under the MIT license.
++ *
++ * You can find a copy of the license in file LICENSE in the root
++ * directory of this repository or package, or at
++ * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++ */
++
++import type * as vm from "./endpoint/handlers/vm/sdk_shared_core_wasm_bindings.js";
++import { setImmediate } from "node:timers/promises";
++
++/** What the selector needs of a promise: the shape of InternalRestatePromise. */
++export interface Selectable {
++  /** Takes the result if it is ready, and settles the promise with it. */
++  tryComplete(): Promise<void>;
++  /** What it still waits for, or null once settled. */
++  unresolvedFuture(): vm.WasmUnresolvedFuture | null;
++  /** Rejects it with a CancelledError. */
++  tryCancel(): void;
++}
++
++/** What the selector needs of the invocation. */
++export interface SelectorDriver {
++  doProgress(future: vm.WasmUnresolvedFuture): vm.WasmDoProgressResult;
++  /** Writes out what the VM has buffered. */
++  flushOutput(): Promise<void>;
++  /** Resolves on the next signal of external progress (input, a finished run, a registration). */
++  awaitExternalProgress(): Promise<void>;
++  /** Signals external progress. */
++  wake(): void;
++  executeRun(handle: number): void;
++  completeEphemeral(completionId: number): Promise<void>;
++  /** The attempt cannot go on: suspension, or an error. */
++  onError(e: unknown): void;
++}
++
++/**
++ * One loop that drives every pending promise of an invocation, so that the
++ * invocation has a single await point however many promises user code awaits
++ * at once, with its own combinators or none.
++ *
++ * A promise is registered once and stays until it settles. The loop settles
++ * whatever is ready, then asks the VM for progress on the first of all the
++ * pending promises to complete: so a suspension waits for any of them, a
++ * pending run starts whichever promise is awaited first, and a cancellation
++ * reaches all of them. Registering wakes the loop, so a promise registered
++ * while it waits is part of the next await point. The loop runs while
++ * something is pending, and is the only one waiting for external progress.
++ */
++export class PromiseSelector {
++  private readonly pending = new Set<Selectable>();
++  private running = false;
++  private closed = false;
++
++  constructor(private readonly driver: SelectorDriver) {}
++
++  register(promise: Selectable): void {
++    if (this.closed || this.pending.has(promise)) return;
++    this.pending.add(promise);
++    if (this.running) {
++      this.driver.wake();
++    } else {
++      this.running = true;
++      void this.loop();
++    }
++  }
++
++  /** Stops the loop (it finds nothing pending), at the end of the attempt. */
++  close(): void {
++    if (this.closed) return;
++    this.closed = true;
++    this.pending.clear();
++    if (this.running) this.driver.wake();
++  }
++
++  /** The promises still pending, for tests. */
++  get size(): number {
++    return this.pending.size;
++  }
++
++  private async loop(): Promise<void> {
++    try {
++      await this.driver.flushOutput();
++      for (;;) {
++        // Settle what is ready.
++        for (const promise of this.pending) {
++          await promise.tryComplete();
++        }
++        // Let what that settled run, and register what it awaits next, so
++        // that one check covers them (a combinator also flags itself
++        // completed in a .finally, a tick late). An optimization: what is
++        // registered later wakes the loop anyway.
++        await setImmediate();
++
++        const futures: vm.WasmUnresolvedFuture[] = [];
++        for (const promise of this.pending) {
++          const future = promise.unresolvedFuture();
++          if (future === null) {
++            this.pending.delete(promise);
++          } else {
++            futures.push(future);
++          }
++        }
++        if (futures.length === 0) return;
++
++        const result = this.driver.doProgress(
++          futures.length === 1 ? futures[0]! : { FirstCompleted: futures }
++        );
++        if (result === "AnyCompleted") {
++          continue;
++        } else if (result === "WaitExternalProgress") {
++          await this.driver.flushOutput();
++          await this.driver.awaitExternalProgress();
++        } else if (result === "CancelSignalReceived") {
++          // Reaches every pending promise; what is awaited after it is not cancelled.
++          for (const promise of this.pending) promise.tryCancel();
++          this.pending.clear();
++        } else if ("EphemeralNotificationReady" in result) {
++          await this.driver.completeEphemeral(
++            result.EphemeralNotificationReady
++          );
++        } else {
++          this.driver.executeRun(result.ExecuteRun);
++          // Let the run start, then come back.
++          await setImmediate();
++        }
++      }
++    } catch (e) {
++      this.close();
++      this.driver.onError(e);
++    } finally {
++      // Decided with nothing pending, in the same turn: a registration from
++      // here on starts a new loop.
++      this.running = false;
++    }
++  }
++}
 diff --git a/packages/libs/restate-sdk/src/promises.ts b/packages/libs/restate-sdk/src/promises.ts
-index f14da79..8728d8c 100644
+index f14da79..bdc98ec 100644
 --- a/packages/libs/restate-sdk/src/promises.ts
 +++ b/packages/libs/restate-sdk/src/promises.ts
-@@ -548,6 +548,8 @@ export class PromisesExecutor {
-           // Completed, we're good!
-           return;
-         }
-+        // Read before checking, so a signal from here on wakes this loop.
-+        const seen = this.externalProgressChannel.generation();
-         const doProgressResult = this.coreVm.do_progress(unresolvedFuture);
+@@ -31,6 +31,7 @@ import type {
+ import { setImmediate } from "node:timers/promises";
+ import type { OutputPump } from "./io.js";
+ import type { ExternalProgressChannel } from "./utils/external_progress_channel.js";
++import { PromiseSelector } from "./promise_selector.js";
+ import type { Duration } from "@restatedev/restate-sdk-core";
  
-         if (doProgressResult === "AnyCompleted") {
-@@ -567,7 +569,7 @@ export class PromisesExecutor {
-           await this.outputPump.awaitNextProgress();
+ // A promise that is never completed
+@@ -52,6 +53,18 @@ export function isRestatePromise<T>(p: Promise<T>): p is RestatePromise<T> {
+   return p instanceof InternalRestatePromise;
+ }
  
-           // Await next external progress
--          await this.externalProgressChannel.awaitNext();
-+          await this.externalProgressChannel.awaitNext(seen);
-         } else if (doProgressResult === "CancelSignalReceived") {
-           restatePromise.tryCancel();
-           return;
++/**
++ * The plain JS promise of a {@link RestatePromise}, registered now to be driven
++ * to completion whether or not it is awaited. Used without journal replay,
++ * where the invocation's selector drives every promise; the same promise each
++ * time.
++ */
++export function plainPromise<T>(p: RestatePromise<T>): Promise<T> {
++  if (p instanceof BaseRestatePromise) return p.plain();
++  if (p instanceof InternalRestatePromise) return p.publicPromise();
++  return p;
++}
++
+ enum PromiseState {
+   COMPLETED,
+   NOT_COMPLETED,
+@@ -119,32 +132,29 @@ abstract class BaseRestatePromise<T> extends InternalRestatePromise<T> {
+     onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+     onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null
+   ): Promise<TResult1 | TResult2> {
+-    this.pollingPromise =
+-      this.pollingPromise ||
+-      this[RESTATE_CTX_SYMBOL].promisesExecutor
+-        .doProgress(this)
+-        .catch(() => {});
++    this.poll();
+     return this.publicPromiseOrCancelPromise().then(onfulfilled, onrejected);
+   }
+ 
+   catch<TResult = never>(
+     onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | null
+   ): Promise<T | TResult> {
+-    this.pollingPromise =
+-      this.pollingPromise ||
+-      this[RESTATE_CTX_SYMBOL].promisesExecutor
+-        .doProgress(this)
+-        .catch(() => {});
++    this.poll();
+     return this.publicPromiseOrCancelPromise().catch(onrejected);
+   }
+ 
+   finally(onfinally?: (() => void) | null): Promise<T> {
++    this.poll();
++    return this.publicPromiseOrCancelPromise().finally(onfinally);
++  }
++
++  // Drives the promise, once.
++  private poll() {
+     this.pollingPromise =
+       this.pollingPromise ||
+       this[RESTATE_CTX_SYMBOL].promisesExecutor
+         .doProgress(this)
+         .catch(() => {});
+-    return this.publicPromiseOrCancelPromise().finally(onfinally);
+   }
+ 
+   private publicPromiseOrCancelPromise(): Promise<T> {
+@@ -154,6 +164,20 @@ abstract class BaseRestatePromise<T> extends InternalRestatePromise<T> {
+     ]);
+   }
+ 
++  private plainPromise?: Promise<T>;
++
++  /** See {@link plainPromise}. */
++  plain(): Promise<T> {
++    if (this.plainPromise === undefined) {
++      this.poll();
++      this.plainPromise = this.publicPromiseOrCancelPromise();
++      // Settled by the selector whether or not it is awaited: a failure
++      // nobody awaits is not an unhandled rejection.
++      this.plainPromise.catch(() => {});
++    }
++    return this.plainPromise;
++  }
++
+   // --- RestatePromise methods
+ 
+   orTimeout(duration: number | Duration): RestatePromise<T> {
+@@ -506,16 +530,48 @@ export class ConstRestatePromise<T> extends InternalRestatePromise<T> {
+  * Promises executor, gluing VM with I/O and Promises given to user space.
+  */
+ export class PromisesExecutor {
++  // Without journal replay, the one loop that drives every promise.
++  private readonly selector?: PromiseSelector;
++
+   constructor(
+     private readonly coreVm: vm.WasmVM,
+     private readonly outputPump: OutputPump,
+     private readonly runClosuresTracker: RunClosuresTracker,
+     private readonly ephemeralRequestTracker: EphemeralRequestTracker,
+     private readonly externalProgressChannel: ExternalProgressChannel,
+-    private readonly errorCallback: (e: any) => void
+-  ) {}
++    private readonly errorCallback: (e: any) => void,
++    journalReplay: boolean = true
++  ) {
++    if (!journalReplay) {
++      this.selector = new PromiseSelector({
++        doProgress: (future) => coreVm.do_progress(future),
++        flushOutput: () => outputPump.awaitNextProgress(),
++        awaitExternalProgress: () => externalProgressChannel.awaitNext(),
++        wake: () => externalProgressChannel.signal(),
++        executeRun: (handle) => runClosuresTracker.executeRun(handle),
++        completeEphemeral: (completionId) =>
++          ephemeralRequestTracker.complete(
++            completionId,
++            coreVm.take_ephemeral_notification(completionId)
++          ),
++        onError: errorCallback,
++      });
++    }
++  }
++
++  /** At the end of the attempt. */
++  close() {
++    this.selector?.close();
++  }
+ 
+   async doProgress(restatePromise: InternalRestatePromise<unknown>) {
++    if (this.selector) {
++      // Without journal replay, a promise awaited inside the SDK (or a
++      // RestatePromise that reached user code) is driven by the selector too,
++      // so that nothing else waits for external progress.
++      this.selector.register(restatePromise);
++      return;
++    }
+     // Only the first time try process output
+     await this.outputPump.awaitNextProgress();
+     await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
 index 0000000..4f74a88
@@ -549,73 +857,593 @@ index 9b9e22f..31a08d1 100644
  };
  
  /**
-diff --git a/packages/libs/restate-sdk/src/utils/external_progress_channel.ts b/packages/libs/restate-sdk/src/utils/external_progress_channel.ts
-index ef2776a..3833a48 100644
---- a/packages/libs/restate-sdk/src/utils/external_progress_channel.ts
-+++ b/packages/libs/restate-sdk/src/utils/external_progress_channel.ts
-@@ -10,41 +10,39 @@
-  */
- 
- /**
-- * Multi-producer single-consumer unit-signal channel used to wake the
-+ * Multi-producer multi-consumer unit-signal channel used to wake the
-  * {@link PromisesExecutor} when any external progress source (input read or
-  * run-closure completion) has made progress.
-  *
-- * Producers call {@link signal} to emit a progress event.
-- * The single consumer calls {@link awaitNext} to await the next signal.
-- *
-- * Signals emitted with no consumer waiting are buffered, so no progress signal
-- * is ever lost. At most one {@link awaitNext} may be pending at a time; a
-- * concurrent second call rejects.
-+ * Producers call {@link signal} to emit a progress event, which wakes every
-+ * waiting consumer. A consumer reads {@link generation} before it checks for
-+ * progress, and passes it to {@link awaitNext}: a signal emitted since then
-+ * resolves at once, so no progress signal is ever lost. Several promises may
-+ * be awaited at a time, each by its own consumer.
-  */
- export class ExternalProgressChannel {
--  private pending = 0;
--  private waiter: (() => void) | undefined;
-+  private signals = 0;
-+  private waiters: (() => void)[] = [];
- 
-   signal(): void {
--    if (this.waiter !== undefined) {
--      const w = this.waiter;
--      this.waiter = undefined;
--      w();
--    } else {
--      this.pending++;
--    }
-+    this.signals++;
-+    const waiters = this.waiters;
-+    this.waiters = [];
-+    for (const waiter of waiters) waiter();
-   }
- 
--  awaitNext(): Promise<void> {
--    if (this.waiter !== undefined) {
--      return Promise.reject(new Error("awaitNext already pending"));
--    }
--    if (this.pending > 0) {
--      this.pending--;
-+  /** The signals emitted so far. */
-+  generation(): number {
-+    return this.signals;
+diff --git a/packages/libs/restate-sdk/src/unjournaled.ts b/packages/libs/restate-sdk/src/unjournaled.ts
+new file mode 100644
+index 0000000..e78269c
+--- /dev/null
++++ b/packages/libs/restate-sdk/src/unjournaled.ts
+@@ -0,0 +1,115 @@
++/*
++ * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
++ *
++ * This file is part of the Restate SDK for Node.js/TypeScript,
++ * which is released under the MIT license.
++ *
++ * You can find a copy of the license in file LICENSE in the root
++ * directory of this repository or package, or at
++ * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++ */
++
++/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument */
++
++// The context of a handler without journal replay (`journalReplay: false`).
++//
++// It is the handler's context, except that what would be a RestatePromise is a
++// plain JS promise, so user code awaits and combines it as it likes:
++// Promise.all, Promise.race, its own combinators, or a library's. Each promise
++// is registered, when the operation is made, with the invocation's selector,
++// which drives all of them from one await point (see promise_selector.ts). So
++// an operation starts when it is made, `ctx.run` included, whether or not it
++// is awaited; and RestatePromise combinators and methods (`map`,
++// `orTimeout`) are not available, nor needed.
++
++import { isRestatePromise, plainPromise } from "./promises.js";
++
++// Methods whose result is an object of more operations (a client, a scoped
++// context, an invocation reference), wrapped the same way.
++const WRAP_RESULT = new Set([
++  "serviceClient",
++  "objectClient",
++  "workflowClient",
++  "serviceSendClient",
++  "objectSendClient",
++  "workflowSendClient",
++  "client",
++  "sendClient",
++  "scope",
++  "invocation",
++  "signal",
++]);
++// Properties that are objects of more operations.
++const WRAP_PROPERTY = new Set(["date"]);
++
++function convert(value: any): any {
++  if (value === null || typeof value !== "object") return value;
++  if (isRestatePromise(value)) {
++    const promise: any = plainPromise(value);
++    // A call: its invocation id, when asked for.
++    if ("invocationId" in value) {
++      return withInvocationId(promise, value);
++    }
++    return promise;
++  }
++  // A send: only its invocation id.
++  if (
++    "invocationId" in value &&
++    isRestatePromise(value.invocationId as Promise<unknown>)
++  ) {
++    return withInvocationId({}, value);
++  }
++  // An awakeable (refused without journal replay, but converted all the same).
++  if ("id" in value && "promise" in value && isRestatePromise(value.promise)) {
++    return { id: value.id, promise: plainPromise(value.promise) };
++  }
++  return value;
++}
++
++function withInvocationId<T extends object>(target: T, handle: any): T {
++  let invocationId: Promise<string> | undefined;
++  return Object.defineProperty(target, "invocationId", {
++    get: () => (invocationId ??= plainPromise(handle.invocationId)),
++    enumerable: true,
++  });
++}
++
++// Every method's result converted, and the listed ones wrapped. Methods run
++// on the target itself, so a wrapped context behaves as the context.
++function wrap<T extends object>(target: T, wrapAll: boolean): T {
++  return new Proxy(target, {
++    get(t, prop, receiver) {
++      const value = Reflect.get(t, prop, t);
++      if (typeof prop !== "string") return value;
++      if (typeof value === "function") {
++        return (...args: unknown[]) => {
++          const result = value.apply(t, args);
++          if (
++            (wrapAll || WRAP_RESULT.has(prop)) &&
++            result !== null &&
++            typeof result === "object" &&
++            !isRestatePromise(result) &&
++            !("invocationId" in result)
++          ) {
++            return wrap(result, true);
++          }
++          return convert(result);
++        };
++      }
++      if (
++        WRAP_PROPERTY.has(prop) &&
++        value !== null &&
++        typeof value === "object"
++      ) {
++        return wrap(value, true);
++      }
++      void receiver;
++      return value;
++    },
++  });
++}
++
++/** The context handed to a handler without journal replay. */
++export function unjournaledContext<T extends object>(ctx: T): T {
++  return wrap(ctx, false);
++}
+diff --git a/packages/libs/restate-sdk/test/promise_selector.test.ts b/packages/libs/restate-sdk/test/promise_selector.test.ts
+new file mode 100644
+index 0000000..b9182e0
+--- /dev/null
++++ b/packages/libs/restate-sdk/test/promise_selector.test.ts
+@@ -0,0 +1,460 @@
++/*
++ * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
++ *
++ * This file is part of the Restate SDK for Node.js/TypeScript,
++ * which is released under the MIT license.
++ *
++ * You can find a copy of the license in file LICENSE in the root
++ * directory of this repository or package, or at
++ * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++ */
++
++import { describe, expect, it } from "vitest";
++import { setImmediate } from "node:timers/promises";
++import { PromiseSelector, type Selectable } from "../src/promise_selector.js";
++import { ExternalProgressChannel } from "../src/utils/external_progress_channel.js";
++import type * as vm from "../src/endpoint/handlers/vm/sdk_shared_core_wasm_bindings.js";
++
++// A VM with the shared core's rules for do_progress, as far as the selector sees them:
++// a ready result completes the future (AnyCompleted); else a run the future awaits
++// and nobody started is handed out (ExecuteRun); else, with the input closed and no
++// run of the future executing, the invocation suspends on the future; else it waits.
++// Results stay until taken; a cancellation is reported once.
++
++type Result = { ok: unknown } | { fail: Error };
++
++function leaves(f: vm.WasmUnresolvedFuture): number[] {
++  if ("Single" in f) return [f.Single];
++  return Object.values(f)[0]!.flatMap(leaves);
++}
++
++function resolved(
++  f: vm.WasmUnresolvedFuture,
++  ready: Map<number, Result>
++): boolean {
++  if ("Single" in f) return ready.has(f.Single);
++  if ("AllCompleted" in f || "AllSucceededOrFirstFailed" in f) {
++    return Object.values(f)[0]!.every((c) => resolved(c, ready));
++  }
++  return Object.values(f)[0]!.some((c) => resolved(c, ready));
++}
++
++class FakeVm {
++  readonly ready = new Map<number, Result>();
++  readonly runs = new Set<number>();
++  readonly executing = new Set<number>();
++  inputClosed = false;
++  cancelled = false;
++  suspendedOn?: vm.WasmUnresolvedFuture;
++  readonly progress: vm.WasmUnresolvedFuture[] = [];
++  failWith?: Error;
++
++  doProgress(f: vm.WasmUnresolvedFuture): vm.WasmDoProgressResult {
++    if (this.suspendedOn) throw new Error("closed");
++    if (this.failWith) throw this.failWith;
++    this.progress.push(f);
++    if (this.cancelled) {
++      this.cancelled = false;
++      return "CancelSignalReceived";
++    }
++    if (resolved(f, this.ready)) return "AnyCompleted";
++    const run = leaves(f).find((h) => this.runs.has(h));
++    if (run !== undefined) {
++      this.runs.delete(run);
++      this.executing.add(run);
++      return { ExecuteRun: run };
++    }
++    if (this.inputClosed && !leaves(f).some((h) => this.executing.has(h))) {
++      this.suspendedOn = f;
++      throw new Error("suspended");
++    }
++    return "WaitExternalProgress";
 +  }
 +
-+  /** Wait for a signal after `seen`, a {@link generation}. */
-+  awaitNext(seen: number): Promise<void> {
-+    if (this.signals !== seen) {
-       return Promise.resolve();
-     }
-     return new Promise((resolve) => {
--      this.waiter = resolve;
-+      this.waiters.push(resolve);
-     });
-   }
- }
++  take(handle: number): Result | undefined {
++    const r = this.ready.get(handle);
++    this.ready.delete(handle);
++    return r;
++  }
++}
++
++// Shaped like SingleRestatePromise: takes its result once, and is cancelled through a race.
++class FakePromise<T = unknown> implements Selectable {
++  private done = false;
++  private readonly result = Promise.withResolvers<T>();
++  private readonly cancel = Promise.withResolvers<never>();
++  readonly user: Promise<T> = Promise.race([
++    this.cancel.promise,
++    this.result.promise,
++  ]);
++
++  constructor(
++    private readonly vm: FakeVm,
++    readonly handle: number
++  ) {
++    this.user.catch(() => {});
++  }
++
++  isDone() {
++    return this.done;
++  }
++
++  tryComplete(): Promise<void> {
++    if (this.done) return Promise.resolve();
++    const r = this.vm.take(this.handle);
++    if (r === undefined) return Promise.resolve();
++    this.done = true;
++    if ("ok" in r) this.result.resolve(r.ok as T);
++    else this.result.reject(r.fail);
++    return Promise.resolve();
++  }
++
++  unresolvedFuture(): vm.WasmUnresolvedFuture | null {
++    return this.done ? null : { Single: this.handle };
++  }
++
++  tryCancel() {
++    this.cancel.reject(new Error("cancelled"));
++  }
++}
++
++// Shaped like CombinatorRestatePromise: flags itself completed in a .finally, a tick late.
++class FakeRace implements Selectable {
++  private done = false;
++  readonly user: Promise<unknown>;
++
++  constructor(readonly children: FakePromise[]) {
++    this.user = Promise.race(children.map((c) => c.user)).finally(() => {
++      this.done = true;
++    });
++    this.user.catch(() => {});
++  }
++
++  async tryComplete() {
++    await Promise.allSettled(this.children.map((c) => c.tryComplete()));
++  }
++
++  unresolvedFuture(): vm.WasmUnresolvedFuture | null {
++    if (this.done) return null;
++    const futures = this.children
++      .map((c) => c.unresolvedFuture())
++      .filter((f): f is vm.WasmUnresolvedFuture => f !== null);
++    return futures.length === 0 ? null : { FirstCompleted: futures };
++  }
++
++  tryCancel() {
++    this.children.forEach((c) => c.tryCancel());
++  }
++}
++
++function setup(opts: { onFlush?: () => void } = {}) {
++  const fake = new FakeVm();
++  const channel = new ExternalProgressChannel(); // upstream's: one waiter, else it rejects
++  const errors: unknown[] = [];
++  const started: number[] = [];
++  let flushes = 0;
++  const selector = new PromiseSelector({
++    doProgress: (f) => fake.doProgress(f),
++    flushOutput: () => {
++      flushes++;
++      opts.onFlush?.();
++      return Promise.resolve();
++    },
++    awaitExternalProgress: () => channel.awaitNext(),
++    wake: () => channel.signal(),
++    executeRun: (h) => started.push(h),
++    completeEphemeral: () => Promise.resolve(),
++    onError: (e) => errors.push(e),
++  });
++  let next = 1;
++  const t = {
++    fake,
++    channel,
++    selector,
++    errors,
++    started,
++    flushes: () => flushes,
++    promise<T = unknown>() {
++      const p = new FakePromise<T>(fake, next++);
++      selector.register(p);
++      return p;
++    },
++    run<T = unknown>() {
++      const p = new FakePromise<T>(fake, next++);
++      fake.runs.add(p.handle);
++      selector.register(p);
++      return p;
++    },
++    complete(p: FakePromise, value: unknown) {
++      fake.ready.set(p.handle, { ok: value });
++      fake.executing.delete(p.handle);
++      channel.signal();
++    },
++    fail(p: FakePromise, error: Error) {
++      fake.ready.set(p.handle, { fail: error });
++      fake.executing.delete(p.handle);
++      channel.signal();
++    },
++    closeInput() {
++      fake.inputClosed = true;
++      channel.signal();
++    },
++    cancel() {
++      fake.cancelled = true;
++      channel.signal();
++    },
++  };
++  return t;
++}
++
++async function until(cond: () => boolean, turns = 200) {
++  for (let i = 0; i < turns; i++) {
++    if (cond()) return;
++    await setImmediate();
++  }
++  throw new Error("condition not reached");
++}
++
++async function settle(turns = 20) {
++  for (let i = 0; i < turns; i++) await setImmediate();
++}
++
++describe("PromiseSelector", () => {
++  it("settles a promise when its result arrives", async () => {
++    const t = setup();
++    const p = t.promise<string>();
++    await settle();
++    expect(p.isDone()).toBe(false);
++    t.complete(p, "a");
++    await expect(p.user).resolves.toBe("a");
++    expect(t.errors).toEqual([]);
++  });
++
++  it("drives several awaits at once, under native combinators", async () => {
++    const t = setup();
++    const a = t.promise<string>();
++    const b = t.promise<string>();
++    const c = t.promise<string>();
++    const all = Promise.all([a.user, b.user, c.user]);
++    const race = Promise.race([a.user, b.user, c.user]);
++    await settle();
++    t.complete(c, "c");
++    await expect(race).resolves.toBe("c");
++    t.complete(a, "a");
++    t.complete(b, "b");
++    await expect(all).resolves.toEqual(["a", "b", "c"]);
++    expect(t.errors).toEqual([]); // the channel never had two waiters
++  });
++
++  it("asks the VM about every pending promise at once", async () => {
++    const t = setup();
++    const a = t.promise();
++    const b = t.promise();
++    await until(() => t.fake.progress.length > 0);
++    expect(t.fake.progress.at(-1)).toEqual({
++      FirstCompleted: [{ Single: a.handle }, { Single: b.handle }],
++    });
++  });
++
++  it("delivers failures to their own promise only", async () => {
++    const t = setup();
++    const a = t.promise();
++    const b = t.promise<number>();
++    t.fail(a, new Error("boom"));
++    await expect(a.user).rejects.toThrow("boom");
++    t.complete(b, 2);
++    await expect(b.user).resolves.toBe(2);
++  });
++
++  it("drives a promise registered while it waits, even if older ones never complete", async () => {
++    const t = setup();
++    t.promise(); // never completes
++    await until(() => t.fake.progress.length > 0);
++    await settle();
++    const r = t.run<number>();
++    await until(() => t.started.includes(r.handle));
++    t.complete(r, 42);
++    await expect(r.user).resolves.toBe(42);
++  });
++
++  it("suspends on every pending promise", async () => {
++    const t = setup();
++    const a = t.promise();
++    const b = t.promise();
++    await settle();
++    t.closeInput();
++    await until(() => t.errors.length > 0);
++    expect(t.fake.suspendedOn).toEqual({
++      FirstCompleted: [{ Single: a.handle }, { Single: b.handle }],
++    });
++    expect(t.selector.size).toBe(0);
++  });
++
++  it("does not suspend while a run it awaits is executing", async () => {
++    const t = setup();
++    const sleep = t.promise();
++    const r = t.run<string>();
++    await until(() => t.started.includes(r.handle));
++    t.closeInput();
++    await settle();
++    expect(t.errors).toEqual([]);
++    t.complete(r, "done");
++    await expect(r.user).resolves.toBe("done");
++    await until(() => t.errors.length > 0);
++    expect(t.fake.suspendedOn).toEqual({ Single: sleep.handle });
++  });
++
++  it("starts a run as soon as it is registered, without an await", async () => {
++    const t = setup();
++    const r = t.run();
++    await until(() => t.started.includes(r.handle));
++  });
++
++  it("reaches every pending promise with a cancellation, and only those", async () => {
++    const t = setup();
++    const a = t.promise();
++    const b = t.promise();
++    await settle();
++    t.cancel();
++    await expect(a.user).rejects.toThrow("cancelled");
++    await expect(b.user).rejects.toThrow("cancelled");
++    const c = t.promise<string>();
++    t.complete(c, "after");
++    await expect(c.user).resolves.toBe("after");
++    expect(t.errors).toEqual([]);
++  });
++
++  it("stops when nothing is pending, and starts again on a registration", async () => {
++    const t = setup();
++    const a = t.promise<number>();
++    t.complete(a, 1);
++    await expect(a.user).resolves.toBe(1);
++    await settle();
++    const calls = t.fake.progress.length;
++    t.channel.signal(); // input arriving with nothing pending
++    t.channel.signal();
++    await settle();
++    expect(t.fake.progress.length).toBe(calls);
++    const b = t.promise<number>();
++    t.complete(b, 2);
++    await expect(b.user).resolves.toBe(2);
++    expect(t.errors).toEqual([]);
++  });
++
++  it("loses no wake-up that comes between the check and the wait", async () => {
++    let t: ReturnType<typeof setup> | undefined = undefined;
++    let p: FakePromise<string> | undefined = undefined;
++    let armed = true;
++    t = setup({
++      // The flush before waiting: the result arrives in between.
++      onFlush: () => {
++        if (armed && p && t!.fake.progress.length > 0) {
++          armed = false;
++          t!.complete(p, "late");
++        }
++      },
++    });
++    p = t.promise<string>();
++    await expect(p.user).resolves.toBe("late");
++  });
++
++  it("does not keep waiting on a race's loser once the race settled", async () => {
++    const t = setup();
++    const a = new FakePromise(t.fake, 100);
++    const b = new FakePromise(t.fake, 101);
++    const race = new FakeRace([a, b]);
++    t.selector.register(race);
++    t.complete(a, "a");
++    await expect(race.user).resolves.toBe("a");
++    await until(() => t.selector.size === 0);
++  });
++
++  it("settles both a promise and a combinator over it", async () => {
++    const t = setup();
++    const a = t.promise<string>();
++    const b = new FakePromise(t.fake, 200);
++    const race = new FakeRace([a, b]);
++    t.selector.register(race);
++    t.complete(a, "a");
++    await expect(a.user).resolves.toBe("a");
++    await expect(race.user).resolves.toBe("a");
++  });
++
++  it("stops on close", async () => {
++    const t = setup();
++    const a = t.promise();
++    await until(() => t.fake.progress.length > 0);
++    t.selector.close();
++    await settle();
++    const calls = t.fake.progress.length;
++    t.complete(a, 1);
++    t.promise();
++    await settle();
++    expect(t.fake.progress.length).toBe(calls);
++    expect(a.isDone()).toBe(false);
++  });
++
++  it("reports a VM error once, and stops", async () => {
++    const t = setup();
++    t.fake.failWith = new Error("protocol violation");
++    const a = t.promise();
++    await until(() => t.errors.length > 0);
++    await settle();
++    expect(t.errors).toHaveLength(1);
++    t.promise();
++    await settle();
++    expect(t.errors).toHaveLength(1);
++    expect(a.isDone()).toBe(false);
++  });
++
++  it("flushes output before its first check and before every wait", async () => {
++    const t = setup();
++    t.promise();
++    await until(() => t.fake.progress.length > 0);
++    await settle();
++    expect(t.flushes()).toBeGreaterThanOrEqual(2);
++  });
++
++  it("settles everything under random registrations, completions and signals", async () => {
++    let seed = 7;
++    const random = () => {
++      seed = (seed * 1103515245 + 12345) % 2 ** 31;
++      return seed / 2 ** 31;
++    };
++    for (let round = 0; round < 20; round++) {
++      const t = setup();
++      const promises: { p: FakePromise; expect: Result }[] = [];
++      const open: FakePromise[] = [];
++      for (let step = 0; step < 300; step++) {
++        const x = random();
++        if (x < 0.3 || open.length === 0) {
++          const p = random() < 0.2 ? t.run() : t.promise();
++          open.push(p);
++        } else if (x < 0.75) {
++          const i = Math.floor(random() * open.length);
++          const p = open.splice(i, 1)[0]!;
++          const result: Result =
++            random() < 0.2
++              ? { fail: new Error(`f${p.handle}`) }
++              : { ok: p.handle };
++          promises.push({ p, expect: result });
++          if ("ok" in result) t.complete(p, result.ok);
++          else t.fail(p, result.fail);
++        } else if (x < 0.85) {
++          t.channel.signal();
++        }
++        if (random() < 0.5) await setImmediate();
++      }
++      for (const p of open) {
++        t.complete(p, p.handle);
++        promises.push({ p, expect: { ok: p.handle } });
++      }
++      for (const { p, expect: r } of promises) {
++        if ("ok" in r) await expect(p.user).resolves.toBe(r.ok);
++        else await expect(p.user).rejects.toBe(r.fail);
++      }
++      await until(() => t.selector.size === 0);
++      expect(t.errors).toEqual([]);
++    }
++  });
++});
 diff --git a/sdk-shared-core-wasm-bindings/Cargo.toml b/sdk-shared-core-wasm-bindings/Cargo.toml
 index ba25532..fa8eb6d 100644
 --- a/sdk-shared-core-wasm-bindings/Cargo.toml

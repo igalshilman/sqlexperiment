@@ -98,7 +98,7 @@ operation it reaches happens again. What each one does then:
 | Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | Idempotent: the call gets an idempotency key derived from the invocation id and the request (target, input, and how many identical requests came before in this attempt). The same call reaches the invocation the earlier attempt started, and gets its result. |
 | Sends, delayed sends | Idempotent in the same way: a repeated send is dropped, and a delayed send keeps its first timer. |
 | `ctx.get`, `ctx.set`, `ctx.clear` | Read the state as stored; writes are ordered, and a lost one takes the later commands with it. |
-| `ctx.run` | Runs again: its result is not kept. An empty `ctx.run` is a barrier: every write before it is stored once it resolves. |
+| `ctx.run` | Runs again: its result is not kept. It starts when made, awaited or not. An empty `ctx.run` is a barrier: every write before it is stored once it resolves. |
 | `ctx.sleep` | Starts over. |
 | `attach`, `cancel` | Idempotent already. |
 | Awakeables | Refused. |
@@ -109,8 +109,30 @@ default (the target's idempotency retention). A retried attempt that makes a
 different request (other input, because it read other state) starts a new
 invocation, as it should.
 
-Promises may be awaited concurrently: the patched SDK lifts the published
-SDK's limit of one pending await per invocation.
+### Plain promises, one await point
+
+Without journal replay the handler's `ctx` returns plain promises: `ctx.get`,
+`ctx.run`, `ctx.sleep`, calls, `invocationId`, and the rest. Await them,
+combine them with `Promise.all`, `Promise.race` or your own combinators, or
+leave them; a library that takes promises takes these. There is no
+`RestatePromise` (no `map`, `orTimeout` or `RestatePromise.all`): with nothing
+replayed, the order things happen in needs no recording.
+
+- **An operation starts when it is made.** Its promise is registered then, and
+  driven to completion whether or not anything awaits it: a `ctx.run` closure
+  runs without an `await`. A failure nobody awaits is dropped, not an
+  unhandled rejection.
+- **One await point.** One loop per invocation drives every pending promise,
+  and asks the server about all of them at once. So a suspension (after the
+  server's inactivity timeout) resumes on the first of them to complete, and an
+  operation made while the loop waits joins the next check: a `ctx.run`
+  awaited late is not held up by a long sleep made earlier.
+- **A cancellation reaches every pending promise** (each rejects with
+  `CancelledError`); what is made after it runs normally.
+
+A handler that replays its journal keeps the published SDK's context and
+`RestatePromise`s. [`../concurrency.mjs`](../concurrency.mjs) tests all of
+this against a real server.
 
 ## The examples
 

@@ -11,8 +11,8 @@ git -C "$core" add -N -- src
 git -C "$core" diff -- src Cargo.toml > sdk-shared-core.patch
 
 sdk=$build/sdk-typescript
-git -C "$sdk" add -N -- packages/libs/restate-sdk/src sdk-shared-core-wasm-bindings/src
-git -C "$sdk" diff -- packages/libs/restate-sdk/src sdk-shared-core-wasm-bindings/Cargo.toml \
+git -C "$sdk" add -N -- packages/libs/restate-sdk/src packages/libs/restate-sdk/test sdk-shared-core-wasm-bindings/src
+git -C "$sdk" diff -- packages/libs/restate-sdk/src packages/libs/restate-sdk/test sdk-shared-core-wasm-bindings/Cargo.toml \
   sdk-shared-core-wasm-bindings/src ':!packages/libs/restate-sdk/src/endpoint/handlers/vm' \
   > sdk-typescript.patch
 
