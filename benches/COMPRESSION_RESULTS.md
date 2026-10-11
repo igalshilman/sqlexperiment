@@ -62,12 +62,12 @@ policy, verify the changed payloads and row count, and run `integrity_check`.
 
 | Rows | Payload bytes | Payload family | Raw | Adaptive LZ4 | Reduction |
 |---:|---:|---|---:|---:|---:|
-| 100 | 64 | Repetitive | 12,501 | 1,242 | 90.1% |
-| 100 | 64 | JSON | 12,501 | 2,138 | 82.9% |
-| 100 | 64 | Random | 12,501 | 4,542 | 63.7% |
-| 10,000 | 256 | Repetitive | 12,501 | 772 | 93.8% |
-| 10,000 | 256 | JSON | 12,501 | 2,093 | 83.3% |
-| 10,000 | 256 | Random | 12,501 | 4,563 | 63.5% |
+| 100 | 64 | Repetitive | 12,477 | 1,218 | 90.2% |
+| 100 | 64 | JSON | 12,477 | 2,114 | 83.1% |
+| 100 | 64 | Random | 12,477 | 4,518 | 63.8% |
+| 10,000 | 256 | Repetitive | 12,477 | 748 | 94.0% |
+| 10,000 | 256 | JSON | 12,477 | 2,069 | 83.4% |
+| 10,000 | 256 | Random | 12,477 | 4,539 | 63.6% |
 
 These bytes now include the log tail that open re-puts on this weak backend
 (here the baseline's last save, which touched the header and schema pages) in
@@ -83,8 +83,8 @@ The unit tests separately exercise fully random 4096-byte pages and verify the
 4099-byte fallback bound.
 
 For the 10,000-row JSON cold PK lookup, read key/value traffic fell from
-**20,831 to 9,580 bytes (54.0%)**, and stored value bytes from 5,726,742 to
-2,249,538 (60.7%). Stored bytes include the bulk load's log segments, which wait
+**20,803 to 9,552 bytes (54.1%)**, and stored value bytes from 5,721,146 to
+2,243,946 (60.8%). Stored bytes include the bulk load's log segments, which wait
 for the next checkpoint to collect them. The workload still performs the same
 dependent KV gets.
 
@@ -108,9 +108,9 @@ Median time per page for the 10,000-row / 256-byte datasets:
 
 | Payload | Raw encode | LZ4 encode | Raw decode | Adaptive decode |
 |---|---:|---:|---:|---:|
-| Repetitive | 0.82 µs | 1.22 µs | 0.94 µs | 0.57 µs |
-| JSON | 0.83 µs | 6.85 µs | 0.94 µs | 2.56 µs |
-| Random | 0.76 µs | 2.10 µs | 0.94 µs | 1.02 µs |
+| Repetitive | 0.09 µs | 1.09 µs | 0.24 µs | 0.40 µs |
+| JSON | 0.09 µs | 5.98 µs | 0.22 µs | 2.01 µs |
+| Random | 0.13 µs | 1.53 µs | 0.26 µs | 0.37 µs |
 
 These are elapsed times in isolated codec loops on this shared host, not remote
 request timings or a production speedup. Min/median/max are retained. Raw SQL
