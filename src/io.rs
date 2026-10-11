@@ -359,6 +359,15 @@ impl KvIo {
     }
 
     async fn write(&self, file: usize, pos: u64, bytes: &[u8]) -> io::Result<usize> {
+        // Count the blocks this write may add: one write can be a large batch.
+        let limit = self.snapshot().options().max_private_bytes;
+        let held = self.state.lock().unwrap().dirty.len() * BLOCK_SIZE;
+        if held + bytes.len() + 2 * BLOCK_SIZE > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "private changes exceed StorageOptions::max_private_bytes",
+            ));
+        }
         let end = pos
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| invalid("offset overflow"))?;

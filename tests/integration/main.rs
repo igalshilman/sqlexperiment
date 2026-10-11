@@ -5,6 +5,7 @@ mod corruption;
 mod durability;
 mod failpoints;
 mod failure;
+mod limits;
 mod log;
 mod publication;
 mod races;

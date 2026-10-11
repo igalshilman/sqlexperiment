@@ -127,7 +127,9 @@ pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
 pub use log::MAX_SEGMENT_BYTES;
 pub use page_codec::PageCompression;
-pub use snapshot::{CHECKPOINT_PAGES, Durability, SaveReport, StorageOptions};
+pub use snapshot::{
+    CHECKPOINT_PAGES, Durability, MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport, StorageOptions,
+};
 /// SQL values, as returned in rows and bound as parameters.
 pub use turso_core::Value;
 
@@ -489,7 +491,8 @@ impl Session {
                     statement.bind_at(std::num::NonZero::new(index).unwrap(), value)?;
                 }
             }
-            rows = Some(query_engine(&self.io, statement).await?);
+            let limit = self.io.snapshot().options().max_result_bytes;
+            rows = Some(query_engine(&self.io, statement, limit).await?);
             let idle = connection.get_auto_commit();
             if self.in_body && idle {
                 return Err("a statement ended the transaction of Session::transaction".into());
@@ -513,7 +516,7 @@ impl Session {
         }
         self.poisoned = true;
         let statement = self.connection.as_ref().unwrap().prepare(sql)?;
-        let rows = query_engine(&self.io, statement).await?;
+        let rows = query_engine(&self.io, statement, usize::MAX).await?;
         self.poisoned = false;
         Ok(rows)
     }
@@ -651,12 +654,26 @@ async fn connect(io: &KvIo, db: &Arc<Database>) -> Result<Arc<Connection>> {
     Ok(connection)
 }
 
-async fn query_engine(io: &KvIo, mut statement: turso_core::Statement) -> Result<Rows> {
+/// Bytes a value takes in collected rows, approximately.
+fn value_bytes(value: &Value) -> usize {
+    16 + match value {
+        Value::Text(text) => text.as_str().len(),
+        Value::Blob(blob) => blob.len(),
+        _ => 0,
+    }
+}
+
+async fn query_engine(
+    io: &KvIo,
+    mut statement: turso_core::Statement,
+    max_bytes: usize,
+) -> Result<Rows> {
     let mut running = Running {
         io,
         complete: false,
     };
     let mut rows = Vec::new();
+    let mut bytes = 0;
     let mut steps = 0;
     loop {
         // Bound work between host yields even when all pages are already cached.
@@ -667,14 +684,19 @@ async fn query_engine(io: &KvIo, mut statement: turso_core::Statement) -> Result
         }
         steps += 1;
         match statement.step()? {
-            StepResult::Row => rows.push(
-                statement
+            StepResult::Row => {
+                let row: Vec<Value> = statement
                     .row()
                     .ok_or("missing row")?
                     .get_values()
                     .cloned()
-                    .collect(),
-            ),
+                    .collect();
+                bytes += row.iter().map(value_bytes).sum::<usize>();
+                if bytes > max_bytes {
+                    return Err("result rows exceed StorageOptions::max_result_bytes".into());
+                }
+                rows.push(row);
+            }
             StepResult::Done => {
                 running.complete = true;
                 return Ok(rows);
