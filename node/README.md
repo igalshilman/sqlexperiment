@@ -48,8 +48,7 @@ names. `save()` ends a session and confirms its writes (one `sync`, if it
 wrote), so the cache may trust them. A session that ends otherwise (`close()`,
 a failed `save`, or garbage collection) makes the next session of that
 namespace in the process start cold, since its writes may be lost. The logic
-is the main crate's ordered-store mode, shared with the Rust Restate
-integration.
+is the main crate's ordered-store mode.
 
 ## Values
 

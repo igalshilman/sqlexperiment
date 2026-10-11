@@ -1,8 +1,9 @@
 // A ledger virtual object: accounts and transfers in SQL, with no journal.
 //
-// The Node.js port of examples/rust/ledger, with the same handlers and
-// environment: PORT (default 9080), LEDGER_ABORT_PER_MILLE (abort the process
-// at random state requests, for crash tests; see faults.mjs) and
+// Each transfer is recorded with its id in the same SQL transaction as the
+// balances it moves, so a retried or repeated transfer moves money once.
+// Environment: PORT (default 9080), ABORT_PER_MILLE (abort the process at
+// random state requests, for crash tests; see faults.mjs) and
 // SQLITE_KV_CACHE_FILE.
 import * as restate from '@restatedev/restate-sdk';
 import { serveIfMain } from './faults.mjs';
