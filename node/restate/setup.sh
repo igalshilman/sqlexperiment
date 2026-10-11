@@ -36,10 +36,15 @@ wasm-bindgen --target web --out-dir "$bindings/pkg" --out-name sdk_shared_core_w
 node "$here/inline-wasm.mjs" "$bindings/pkg" sdk_shared_core_wasm_bindings \
   "$build/sdk-typescript/packages/libs/restate-sdk/src/endpoint/handlers/vm"
 
-# The SDK package.
+# The SDK package; ctx.sql loads the addon, an optional peer dependency (added
+# after installing, which would otherwise fetch it).
 (cd "$build/sdk-typescript" && pnpm install --frozen-lockfile && pnpm --filter @restatedev/restate-sdk run build)
-(cd "$build/sdk-typescript/packages/libs/restate-sdk" && pnpm pack --pack-destination "$build")
+(cd "$build/sdk-typescript/packages/libs/restate-sdk" &&
+  npm pkg set 'peerDependencies.sqlite-kv="*"' 'peerDependenciesMeta.sqlite-kv.optional=true' --json &&
+  pnpm pack --pack-destination "$build")
 
 # This package, and the addon.
 (cd "$here/.." && npm run build)
+# A fresh install, since the SDK tarball keeps its name across builds.
+rm -rf node_modules/@restatedev/restate-sdk package-lock.json
 npm install

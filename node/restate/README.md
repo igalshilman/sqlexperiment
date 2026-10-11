@@ -7,30 +7,36 @@ TypeScript SDK.
 
 ```js
 import * as restate from '@restatedev/restate-sdk';
-import { sql, sqlOptions } from './sql.mjs';
 
 const ledger = restate.object({
   name: 'Ledger',
   handlers: {
-    init: sql(async (ctx, db) => {
-      await db.execute('CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, balance INTEGER)');
-    }),
-    deposit: sql(async (ctx, db, { id, amount }) => {
-      await db.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, id]);
-    }), // one transaction: durable as a whole once the handler returns
+    init: (ctx) =>
+      ctx.sql(async (db) => {
+        await db.execute('CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, balance INTEGER)');
+      }),
+    deposit: (ctx, { id, amount }) =>
+      ctx.sql(async (db) => {
+        await db.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, id]);
+      }), // one transaction: durable as a whole once ctx.sql resolves
   },
-  options: sqlOptions, // journalReplay: false, lazy state, no journal retention
+  options: restate.sqlOptions, // journalReplay: false, lazy state, no journal retention
 });
 ```
 
-`sql(handler)` opens the object's database (namespace `service/key`), runs
-the handler as one SQL transaction, ends the session with `save()` (one
-`ctx.run`, if it wrote, so the page cache may trust the writes), and turns
-errors into handler errors: an SQL error, or the handler's own, is terminal; a
-storage error is retried. [`ledger.mjs`](ledger.mjs) is the Rust ledger,
-ported.
+`ctx.sql(body)`, on the context of an exclusive object handler, opens the
+object's database (namespace `service/key`) over the object's state, with the
+process's page cache, runs `body` as one SQL transaction, and ends the session
+with `save()` (one `ctx.run`, if it wrote, so the page cache may trust the
+writes). An SQL error, or the body's own, is terminal; a storage error is
+retried. Creating tables is up to the handlers, such as `init`. The store is
+internal to the SDK; the SDK loads the sqlite-kv addon, an optional peer
+dependency, on the first `ctx.sql`. [`ledger.mjs`](ledger.mjs) is the Rust
+ledger, ported.
 
 ## How the store maps to the SDK
+
+Inside the SDK (`src/sql.ts` in the patch):
 
 | Store | SDK |
 |---|---|
@@ -56,7 +62,9 @@ protocol V8), applies [`patches/`](patches), and builds:
   with fresh completion ids, and refuses awakeables.
 - **TypeScript SDK** (`sdk-typescript.patch`): a `journalReplay` service and
   handler option, passed to the WebAssembly VM's new constructor argument; the
-  bindings build against the patched core.
+  bindings build against the patched core. `ObjectContext.sql`, with
+  `restate.sqlOptions` and the `SqlDatabase` type; it refuses a handler that
+  replays its journal, and a shared one.
 - The core is compiled to WebAssembly and inlined into the SDK with
   [`inline-wasm.mjs`](inline-wasm.mjs). The SDK's own inliner
   (wasm-pack-inline 0.1.4) slices wasm-bindgen's output at text positions that
@@ -81,8 +89,8 @@ RESTATE_SERVER=/path/to/restate-server cargo test --test crash -- --nocapture
 
 | Abort rate per state request | Ledger restarts | Result |
 |---|---|---|
-| 1.5% | 57 | All consistent |
-| 4% | 394 | All consistent |
+| 1.5% | 57, 39 | All consistent |
+| 4% | 394, 271 | All consistent |
 
 200 sequential transfers take 18.8 ms each on one local node (the Rust ledger
 takes 14.5 ms).

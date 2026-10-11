@@ -3,8 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "SQL in Restate virtual objects with the TypeScript SDK, without journal replay",
-  "main": "sql.mjs",
+  "description": "SQL in Restate virtual objects with the TypeScript SDK (ctx.sql), without journal replay",
   "scripts": {
     "setup": "./setup.sh",
     "ledger": "node ledger.mjs"
