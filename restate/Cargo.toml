@@ -1,0 +1,27 @@
+[package]
+name = "sqlite-kv-restate"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "SQL in Restate virtual objects, over lazy state and without journal replay"
+
+# Its own workspace: the patched SDK stays out of the main crate's build.
+[workspace]
+exclude = ["vendor"]
+
+[dependencies]
+sqlite-kv = { path = ".." }
+restate-sdk = "=0.12.1"
+bytes = "1.11"
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+ureq = { version = "2", default-features = false }
+
+[patch.crates-io]
+restate-sdk = { path = "vendor/restate-sdk" }
+restate-sdk-shared-core = { path = "vendor/restate-sdk-shared-core" }
