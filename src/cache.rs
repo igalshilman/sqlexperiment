@@ -314,6 +314,18 @@ impl NamespaceCache {
         owner.committed = Some(committed);
     }
 
+    /// Drop everything this process knows about the namespace: `meta`, a claim,
+    /// the last commit, every cached page and the parked engine. For a host whose
+    /// acknowledged writes may still be lost (a store that acknowledges writes as
+    /// it orders them, and loses an unconfirmed tail when a request fails): call
+    /// it before opening after a session whose writes were not confirmed, since
+    /// this owner state would describe writes that may not exist.
+    pub fn reset(&self) {
+        let mut owner = self.owner();
+        self.forget_locked(&mut owner);
+        owner.clear(&self.shared.ids);
+    }
+
     /// Forget durability knowledge after a save with an unknown outcome. Cached
     /// pages stay: whatever the save did, it changed only pages of transactions
     /// after the base, which the next open refreshes if `meta` moved past them.

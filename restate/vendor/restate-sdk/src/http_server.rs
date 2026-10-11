@@ -116,6 +116,10 @@ impl HttpServer {
             tokio::select! {
                 Ok((stream, remote)) = listener.accept() => {
                     let endpoint = endpoint.clone();
+                    // A command and its result go out as separate small writes, as
+                    // for `ctx.run`; with Nagle's algorithm the second one waits for
+                    // the peer's delayed acknowledgement, about 40 ms.
+                    let _ = stream.set_nodelay(true);
 
                     let conn = http2::Builder::new(TokioExecutor::default())
                         .serve_connection(TokioIo::new(stream), endpoint);

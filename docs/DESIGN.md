@@ -302,6 +302,17 @@ opens and after a commit that may have changed the schema. Namespace states are
 capped by count. Least recently used go first; dropping either only makes a
 namespace cold.
 
+**Stores that acknowledge before storing.** All of the above trusts what the
+backend acknowledged. A store may instead acknowledge writes as it orders them
+and lose an unconfirmed tail when a request fails, such as Restate state
+writes, which an attempt that dies loses from its first unstored command on.
+The process, and this cache, then outlive writes that do not exist: a claim
+whose pages were lost would let the next save move `meta` past segments that
+no page key covers, and delete them. Such a host confirms the writes before the
+cache is used again, or calls `NamespaceCache::reset`, which drops the
+namespace's `meta`, claim, commit, pages and parked engine
+([`tests/integration/ordered.rs`](../tests/integration/ordered.rs)).
+
 **Threads.** foyer's disk I/O runs on the host's tokio runtime, or on a
 one-thread runtime of its own. It is the only background work.
 
