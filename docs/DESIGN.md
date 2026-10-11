@@ -38,10 +38,10 @@ A namespace holds three kinds of keys:
 
 | Key | Holds |
 |---|---|
-| `v13/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
-| `v13/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
-| `v13/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
-| `v13/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
+| `v12/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
+| `v12/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
+| `v12/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
+| `v12/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
 
 **Read rule.** Page *n* is its latest image in the committed log from
 `meta.log_start`, else `page/<n>`, else zeros.
@@ -159,7 +159,7 @@ acknowledged work when a later step fails.
 
 **Cold opens prefetch.** The engine reads one dependent page at a time, so
 without warm cache pages each B-tree level of a query would cost a round trip.
-An owner that knows nothing about the namespace therefore reads `v13/hint`
+An owner that knows nothing about the namespace therefore reads `v12/hint`
 together with `meta`, and fetches pages alongside replay:
 
 - a database of at most `prefetch_pages` pages (default 16) whole;
@@ -336,10 +336,11 @@ replay at most a short log. Measurements: [log shipping](../benches/LOG_RESULTS.
   either fails the statement. Past 4 MiB of log, checkpoint slices grow to 256
   pages, so a log grown by failed checkpoints shrinks again and replay stays
   bounded. Parked engines share a byte budget, by a measured estimate.
-- **Integrity.** Every stored value carries a CRC32C, verified before it is
-  decoded, and decoding bounds sequence numbers, sizes and page numbers. A
-  corrupt value is an error, never different data; there is no repair.
-- **Format.** Only v13, with no migration.
+- **Integrity.** Storage is assumed reliable: a value reads back as written.
+  Decoding checks structure and bounds sequence numbers, sizes and page
+  numbers, so a bug cannot overflow arithmetic or size a huge view; there are
+  no checksums.
+- **Format.** Only v12, with no migration.
 - **Validation.** Crash, interruption and handover campaigns run against an
   in-memory simulator; there are no process-kill or power-loss tests. See
   [REVIEW.md](REVIEW.md).

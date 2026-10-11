@@ -88,15 +88,11 @@ three bugs, all fixed with regression tests:
 Minor fixes: a new namespace state no longer probes and refreshes from log
 position 1, and cache identities start at a random value.
 
-## Format v13: checksums and memory limits
+## Memory limits
 
-v13 is v12 with a CRC32C on every stored value: in each page envelope (so page
-keys and every image in a log segment), and trailing on segments, `meta` and
-the hint. It costs 4 bytes per page image and per record, and about 0.7 µs
-per 4 KiB page to compute or verify. A test flips random bits in every stored value of
-a database (408 flips under Raw and LZ4 pages): each read either fails or
-returns exactly the committed rows. Every single-bit change of a segment or
-`meta` is rejected.
+Storage is assumed reliable, so the format has no checksums (a CRC32C variant,
+v13, was built and measured at about 0.7 µs per 4 KiB page, then dropped);
+decoding checks structure and bounds.
 
 Sessions now cap private changes and result rows, and a log grown by failed
 checkpoints (for example a backend rejecting page puts for a while) shrinks
@@ -179,8 +175,6 @@ caught:
 | A parked engine keeps its position | Parked-engine checkpoint test fails |
 | An evicted namespace gets a second state while in use | Eviction test fails |
 | Reads are cached under the current key and checkpoints ignore positions | Read-race test reverts an acknowledged commit |
-| Page checksums are not verified | Bit-flip test reads silently wrong data |
-| Segment checksums are not verified | Single-bit test accepts flipped segments |
 | Catch-up checkpoints are disabled | Grown log does not shrink |
 | Parked engines are weighed without their schema | Schema-weight test keeps every small engine |
 | A failed synchronous engine read is not recorded | Synchronous-read test fails |
@@ -191,8 +185,8 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 
 | Check | Outcome |
 |---|---|
-| `cargo test --locked` | 12 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
-| `cargo test --locked --features simulation` | 95 tests pass: 41 unit, 52 integration, two public API; one rustdoc example also passes |
+| `cargo test --locked` | 11 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
+| `cargo test --locked --features simulation` | 93 tests pass: 40 unit, 51 integration, two public API; one rustdoc example also passes |
 | Interruption campaigns | 2,169 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
@@ -200,8 +194,8 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 | Amplification benchmark, three repeats | 3,420 observations / 684 phases / 104 configurations; counters reconcile |
 | Page-compression benchmark, three repeats | 504 SQL observations / 84 Raw-LZ4 pairs / 72 codec timing samples; traffic agrees |
 | Small-database benchmark, three repeats | 495 observations; SQL/reopen checks pass |
-| Log-shipping benchmark, two repeats | 16 v13 configurations × 128 sessions plus re-measured v11; repeats identical; final reads verify every write |
-| All four benchmark analyzers | Pass on v13 evidence |
+| Log-shipping benchmark, two repeats | 16 v12 configurations × 128 sessions plus re-measured v11; repeats identical; final reads verify every write |
+| All four benchmark analyzers | Pass on v12 evidence |
 
 Interruption cases:
 

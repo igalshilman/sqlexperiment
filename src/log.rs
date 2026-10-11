@@ -14,13 +14,12 @@
 //! save overwrites it from [`Log::next`], and ignoring it is safe because a commit
 //! part is only written after its earlier parts were acknowledged.
 //!
-//! Segment encoding: `SL13`, sequence u64 LE, first sequence of its transaction
+//! Segment encoding: `SL12`, sequence u64 LE, first sequence of its transaction
 //! u64 LE, flags u8 (bit 0: commit), database size u64 LE, entry count u32 LE, then
 //! per entry in ascending page order: page index u64 LE, encoded length u16 LE
-//! (zero for a hole) and the [`crate::page_codec`] value; then the CRC32C of
-//! everything before it.
+//! (zero for a hole) and the [`crate::page_codec`] value.
 use crate::{
-    format::{CHECKSUM, LOG_MAGIC, META_MAGIC, log_key, seal, unseal},
+    format::{LOG_MAGIC, META_MAGIC, log_key},
     kv::KvStore,
     page_codec::Page,
 };
@@ -64,13 +63,13 @@ pub(crate) struct Segment {
 /// Split a transaction's images into encoded segments starting at `first`.
 pub(crate) fn encode_transaction(first: u64, size: u64, images: &Images) -> Vec<Vec<u8>> {
     let mut parts: Vec<Vec<(u64, &[u8])>> = vec![Vec::new()];
-    let mut bytes = PREFIX + CHECKSUM;
+    let mut bytes = PREFIX;
     for (&index, image) in images {
         let image = image.as_deref().unwrap_or_default();
         let entry = ENTRY_HEADER + image.len();
         if bytes + entry > MAX_SEGMENT_BYTES && !parts.last().unwrap().is_empty() {
             parts.push(Vec::new());
-            bytes = PREFIX + CHECKSUM;
+            bytes = PREFIX;
         }
         parts.last_mut().unwrap().push((index, image));
         bytes += entry;
@@ -92,7 +91,7 @@ pub(crate) fn encode_transaction(first: u64, size: u64, images: &Images) -> Vec<
                 out.extend_from_slice(&(image.len() as u16).to_le_bytes());
                 out.extend_from_slice(image);
             }
-            seal(out)
+            out
         })
         .collect()
 }
@@ -102,14 +101,7 @@ pub(crate) fn encode_transaction(first: u64, size: u64, images: &Images) -> Vec<
 /// Page images share the segment's buffer.
 pub(crate) fn decode(bytes: &Bytes, seq: u64) -> io::Result<Segment> {
     let segment = || invalid("log segment");
-    if bytes.len() > MAX_SEGMENT_BYTES {
-        return Err(segment());
-    }
-    let content = unseal(bytes)
-        .ok_or_else(|| invalid("log segment checksum"))?
-        .len();
-    let bytes = &bytes.slice(..content);
-    if bytes.len() < PREFIX || &bytes[..4] != LOG_MAGIC {
+    if bytes.len() < PREFIX || bytes.len() > MAX_SEGMENT_BYTES || &bytes[..4] != LOG_MAGIC {
         return Err(segment());
     }
     let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
@@ -153,8 +145,7 @@ pub(crate) fn decode(bytes: &Bytes, seq: u64) -> io::Result<Segment> {
 
 /// The checkpoint record at `meta`.
 ///
-/// Encoding: `SM13`, log start u64 LE, deleted-below u64 LE, size u64 LE, CRC32C
-/// of the preceding bytes. Segments
+/// Encoding: `SM12`, log start u64 LE, deleted-below u64 LE, size u64 LE. Segments
 /// before `log_start` are checkpointed into pages; those before `deleted_below`
 /// are also deleted. `size` is the database size at `log_start`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,11 +171,10 @@ impl Meta {
         for n in [self.log_start, self.deleted_below, self.size] {
             out.extend_from_slice(&n.to_le_bytes());
         }
-        seal(out)
+        out
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
-        let bytes = unseal(bytes).ok_or_else(|| invalid("checkpoint record checksum"))?;
         if bytes.len() != 28 || &bytes[..4] != META_MAGIC {
             return Err(invalid("checkpoint record"));
         }

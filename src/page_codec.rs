@@ -1,10 +1,9 @@
 //! Independent immutable-page envelopes; logical pages remain 4096 bytes.
 //!
-//! The value starts with a codec tag (u8), logical size (u16 LE, always 4096) and
-//! the CRC32C of the payload (u32 LE), followed by raw bytes (tag 0) or one LZ4
-//! block (tag 1). Compression is retained only when its payload is smaller than
-//! the raw page. Incompressible pages therefore use 4103 bytes including the
-//! header, even under the LZ4 policy.
+//! The value starts with a codec tag (u8) and logical size (u16 LE, always 4096),
+//! followed by raw bytes (tag 0) or one LZ4 block (tag 1). Compression is retained only
+//! when its payload is smaller than the raw page. Incompressible pages therefore use
+//! 4099 bytes including the header, even under the LZ4 policy.
 //!
 //! Raw and compressed pages can coexist. Write policy is per session, while stored
 //! tags determine decoding; no dictionary, neighboring page, frame stream or policy
@@ -12,15 +11,15 @@
 //!
 //! Decode allocates exactly one logical page, never a stored-length-sized buffer.
 //! Bounds, tag, logical size and LZ4 expansion are validated before a decoded page
-//! enters the snapshot cache, and the checksum before the payload is decoded.
-//! There is no corruption repair: a damaged page is an error.
-use crate::{format::checksum, io::BLOCK_SIZE};
+//! enters the snapshot cache. A valid-looking bit change can remain undetected:
+//! there is no checksum or corruption repair.
+use crate::io::BLOCK_SIZE;
 use std::io;
 
-const HEADER: usize = 7;
+const HEADER: usize = 3;
 /// A page held in memory, encoded or decoded, shared without copying.
 pub(crate) type Page = bytes::Bytes;
-/// Largest valid encoded value: a seven-byte envelope plus one raw logical page.
+/// Largest valid encoded value: a three-byte envelope plus one raw logical page.
 pub const MAX_ENCODED_PAGE: usize = HEADER + BLOCK_SIZE;
 
 /// Per-session write policy. Both policies can read either encoded form.
@@ -37,8 +36,7 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-/// Tag (0 = raw, 1 = LZ4 block), u16 LE logical length, u32 LE payload
-/// checksum, then payload.
+/// Tag (0 = raw, 1 = LZ4 block), u16 LE logical length, then payload.
 /// Compression is retained only when it is smaller than the raw payload.
 pub fn encode(page: &[u8], policy: PageCompression) -> io::Result<Vec<u8>> {
     if page.len() != BLOCK_SIZE {
@@ -52,13 +50,12 @@ pub fn encode(page: &[u8], policy: PageCompression) -> io::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(HEADER + payload.len());
     out.push(tag);
     out.extend_from_slice(&(BLOCK_SIZE as u16).to_le_bytes());
-    out.extend_from_slice(&checksum(payload).to_le_bytes());
     out.extend_from_slice(payload);
     Ok(out)
 }
 
 /// Decodes into exactly one bounded page. Never allocate from stored lengths.
-/// This validates structure, size and the payload checksum.
+/// This validates structure and size, not arbitrary corruption (no checksum).
 pub fn decode(bytes: &[u8]) -> io::Result<Vec<u8>> {
     decode_bytes(&bytes::Bytes::copy_from_slice(bytes)).map(Vec::from)
 }
@@ -73,9 +70,6 @@ pub(crate) fn decode_bytes(bytes: &bytes::Bytes) -> io::Result<Page> {
         return Err(invalid("invalid decoded page length"));
     }
     let payload = &bytes[HEADER..];
-    if checksum(payload).to_le_bytes() != bytes[3..HEADER] {
-        return Err(invalid("page checksum mismatch"));
-    }
     match bytes[0] {
         0 if payload.len() == BLOCK_SIZE => Ok(bytes.slice(HEADER..)),
         1 if !payload.is_empty() && payload.len() < BLOCK_SIZE => {

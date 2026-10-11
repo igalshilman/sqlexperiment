@@ -110,8 +110,8 @@ reads correctly:
 **What it relies on.**
 - **One owner at a time.** The host must guarantee it, and settle every
   outstanding request before another owner opens.
-- **Checksums.** Every stored value carries a CRC32C, so corruption is
-  reported as an error and never read as data.
+- **Reliable storage.** The backend returns what was stored. Values are
+  checked for structure and bounds, not checksummed.
 
 [The design](docs/DESIGN.md) has the exact invariants, the failure table and
 the owner cache.

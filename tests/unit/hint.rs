@@ -7,23 +7,18 @@ fn hints_round_trip_and_reject_malformed_input() {
     assert_eq!(decode(&bytes, MAX_HINT_PAGES), Some(pages.clone()));
     assert_eq!(decode(&bytes, 3), None, "longer than the limit");
     assert_eq!(decode(&encode(&[]), 32), Some(vec![]));
-    let seal = crate::format::seal;
-    let mut flipped = bytes.clone();
-    flipped[6] ^= 1;
     for bad in [
-        seal(b"SH13".to_vec()),
-        seal(b"XX13\x01\x00\x00".to_vec()),
-        seal(bytes[..bytes.len() - 5].to_vec()),
-        seal([&bytes[..bytes.len() - 4], &[0]].concat()),
-        seal(b"SH13\x01\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01".to_vec()),
-        flipped,
-        bytes[..bytes.len() - 1].to_vec(),
+        &b"SH12"[..],
+        &b"XX12\x01\x00\x00"[..],
+        &bytes[..bytes.len() - 1],
+        &[&bytes[..], &[0]].concat()[..],
+        &b"SH12\x01\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01"[..],
     ] {
-        assert_eq!(decode(&bad, MAX_HINT_PAGES), None, "{bad:?}");
+        assert_eq!(decode(bad, MAX_HINT_PAGES), None, "{bad:?}");
     }
-    // 32 clustered pages fit in about 44 bytes.
+    // 32 clustered pages fit in about 40 bytes.
     let clustered: Vec<u64> = (500..532).collect();
-    assert!(encode(&clustered).len() <= 44);
+    assert!(encode(&clustered).len() <= 40);
 }
 
 #[test]

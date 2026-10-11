@@ -1732,7 +1732,6 @@ name = "sqlite-kv"
 version = "0.11.0"
 dependencies = [
  "bytes",
- "crc32c",
  "foyer",
  "futures",
  "lz4_flex",

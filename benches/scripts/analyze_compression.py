@@ -44,11 +44,11 @@ for key, copies in groups.items():
         row[field] = int(row[field])
     assert row["put_value_bytes"] == sum(row[f"{kind}_write_bytes"] for kind in ["page", "log", "meta"]), key
     if row["codec"] == "Raw":
-        assert row["page_write_bytes"] == row["page_puts"] * 4103, key
-        assert row["page_read_bytes"] == row["page_gets"] * 4103, key
+        assert row["page_write_bytes"] == row["page_puts"] * 4099, key
+        assert row["page_read_bytes"] == row["page_gets"] * 4099, key
     else:
-        assert 3 * row["page_puts"] <= row["page_write_bytes"] <= 4103 * row["page_puts"], key
-        assert 3 * row["page_gets"] <= row["page_read_bytes"] <= 4103 * row["page_gets"], key
+        assert 3 * row["page_puts"] <= row["page_write_bytes"] <= 4099 * row["page_puts"], key
+        assert 3 * row["page_gets"] <= row["page_read_bytes"] <= 4099 * row["page_gets"], key
     if row["app_write_bytes"] == 0:
         # Reads write nothing except open's confirmation of the log tail and meta.
         assert row["deletes"] == row["page_puts"] == 0 and row["puts"] <= 2, key

@@ -109,8 +109,8 @@
 //! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
 //! A session's private changes and a statement's result rows are capped by
 //! [`StorageOptions::max_private_bytes`] and [`StorageOptions::max_result_bytes`].
-//! Every stored value carries a CRC32C checksum; a corrupt value is an error,
-//! and there is no repair. Use a fresh, dedicated namespace; no migration or format discovery is
+//! The backend is assumed to return what was stored; decoding checks structure
+//! and bounds, not checksums. Use a fresh, dedicated namespace; no migration or format discovery is
 //! implemented. Simulation and benchmark support require the opt-in `simulation`
 //! feature.
 mod cache;

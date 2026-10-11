@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Compare the WAL-native store (v13) with the previous design (v11).
+"""Compare the WAL-native store (v12) with the previous design (v11).
 
-Reads benches/results/log-shipping.csv (v13) and log-shipping-v11.csv (v11,
+Reads benches/results/log-shipping.csv (v12) and log-shipping-v11.csv (v11,
 publish-every-save and its delta-log variant), checks that repeats agree, writes
 log-shipping-summary.csv and prints Markdown tables of critical-path round trips,
 mutations, bytes and storage per database case.
@@ -24,7 +24,7 @@ def configurations():
     sources = [
         ("log-shipping-v11.csv", "max_log_segments", lambda p: "v11: publish every save"
          if p == "0" else f"v11: map + log of {p}"),
-        ("log-shipping.csv", "checkpoint_after", lambda p: f"v13: checkpoint after {p}"),
+        ("log-shipping.csv", "checkpoint_after", lambda p: f"v12: checkpoint after {p}"),
     ]
     for name, policy, label in sources:
         runs = defaultdict(lambda: defaultdict(list))
@@ -101,7 +101,7 @@ def main():
               "| Bytes written / write | Gets / read | Stored bytes |")
         print("|---|---|---|---|---|---|---|---|---|---|---|---|")
         order = sorted((k for k in results if k[0] == case),
-                       key=lambda k: (k[1].startswith("v13"), k[3], k[2], k[1]))
+                       key=lambda k: (k[1].startswith("v12"), k[3], k[2], k[1]))
         for key in order:
             _, label, backend, cache = key
             r = results[key]
