@@ -116,7 +116,7 @@ fn cancellation_during_pending_kv_read_poison_session_without_publishing() -> Re
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("poisoned")
+                .contains("the session ended")
         );
         drop(db);
         assert_eq!(store.inner.stats().puts, 0);

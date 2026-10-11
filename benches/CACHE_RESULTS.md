@@ -25,16 +25,16 @@ little CPU.
 
 | Cache | Memory (of logical DB) | Page gets | Round trips | Allocated MB | CPU ms |
 |---|---|---|---|---|---|
-| encoded | 5% | 239 | 503 | 102.2 | 208 |
-| decoded | 5% | 239 | 503 | 100.7 | 219 |
-| encoded | 10% | 239 | 503 | 95.6 | 139 |
-| decoded | 10% | 239 | 503 | 91.2 | 155 |
-| encoded | 25% | 239 | 503 | 92.5 | 90 |
-| decoded | 25% | 239 | 503 | 83.5 | 93 |
-| encoded | 50% | 239 | 503 | 91.0 | 66 |
-| decoded | 50% | 239 | 503 | 81.7 | 73 |
-| encoded | 100% | 239 | 503 | 90.9 | 67 |
-| decoded | 100% | 239 | 503 | 80.8 | 71 |
+| encoded | 5% | 239 | 503 | 102.6 | 182 |
+| decoded | 5% | 239 | 503 | 102.4 | 217 |
+| encoded | 10% | 239 | 503 | 96.7 | 112 |
+| decoded | 10% | 239 | 503 | 91.8 | 133 |
+| encoded | 25% | 239 | 503 | 92.8 | 69 |
+| decoded | 25% | 239 | 503 | 83.8 | 86 |
+| encoded | 50% | 239 | 503 | 91.5 | 79 |
+| decoded | 50% | 239 | 503 | 82.2 | 70 |
+| encoded | 100% | 239 | 503 | 91.3 | 66 |
+| decoded | 100% | 239 | 503 | 81.2 | 66 |
 
 - **No backend misses beyond first touches at any memory size.** The in-memory
   LRU (below) needed 1,120 misses and 1,450 round trips at 5%; the disk tier

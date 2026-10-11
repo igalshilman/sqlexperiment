@@ -83,6 +83,7 @@ fn synchronous_engine_waits_use_only_resident_data_or_fail() -> crate::Result<()
         let header = file.pread(0, Completion::new_read(out.clone(), |_| None))?;
         io.step()?;
         assert!(header.succeeded());
+        assert!(!io.failed(), "a resident read is no failure");
         assert!(out.as_slice().iter().all(|&b| b == 7));
         assert_eq!(store.stats().gets, 0);
         out.as_mut_slice().fill(9);
@@ -92,6 +93,8 @@ fn synchronous_engine_waits_use_only_resident_data_or_fail() -> crate::Result<()
         )?;
         assert!(io.step().unwrap_err().to_string().contains("nonresident"));
         assert!(cold.failed());
+        // The session must not take the engine's error for an SQL error.
+        assert!(io.failed(), "a failed synchronous read is recorded");
         assert!(out.as_slice().iter().all(|&b| b == 9));
         assert_eq!(
             store.stats().gets,

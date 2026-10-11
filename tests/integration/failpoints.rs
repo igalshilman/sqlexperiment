@@ -132,7 +132,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
                                     .await
                                     .unwrap_err()
                                     .to_string()
-                                    .contains("poisoned")
+                                    .contains("the session ended")
                             );
                             drop(db);
                         }
@@ -164,7 +164,7 @@ fn commit_and_checkpoint_errors_drain_and_keep_the_outcome() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
-        for (prefix, nth) in [("v13/log/", 1), ("v13/page/", 1)] {
+        for (prefix, nth) in [("v12/log/", 1), ("v12/page/", 1)] {
             for effect in [Effect::None, Effect::Visible, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
                 // The save checkpoints the previous transaction while committing.
@@ -175,14 +175,14 @@ fn commit_and_checkpoint_errors_drain_and_keep_the_outcome() -> Result<()> {
                 let result = db.save().await;
                 assert_eq!(store.active(), 0, "the failed phase must drain");
                 store.disarm();
-                if prefix == "v13/page/" {
+                if prefix == "v12/page/" {
                     assert!(result?.cleanup_error.is_some());
                     assert!((2..=16).contains(&store.max_active()), "page puts overlap");
                 } else {
                     assert!(result.is_err());
                 }
                 store.inner.crash(&[]);
-                let committed = prefix == "v13/page/" || matches!(effect, Effect::After);
+                let committed = prefix == "v12/page/" || matches!(effect, Effect::After);
                 check(store.clone(), committed).await?;
                 cases += 1;
             }
@@ -244,7 +244,7 @@ fn open_read_and_confirmation_failures_are_retryable() -> Result<()> {
         let store = Arc::new(FaultKv::new(base.fork(), 3));
         for attempt in 0..4 {
             let effect = [Effect::None, Effect::Visible, Effect::After][attempt % 3];
-            let _gate = store.arm(plan(Operation::Put, "v13/", 1, effect, false));
+            let _gate = store.arm(plan(Operation::Put, "v12/", 1, effect, false));
             assert!(Session::open(store.clone()).await.is_err());
             assert_eq!(store.active(), 0);
             store.disarm();
@@ -263,7 +263,7 @@ fn open_read_and_confirmation_failures_are_retryable() -> Result<()> {
 fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let key = "v13/page/0000000000000001";
+        let key = "v12/page/0000000000000001";
         assert!(store.get(key).await?.is_none());
         store.put(key, vec![1; 4096].into()).await?;
         store.get(key).await?;

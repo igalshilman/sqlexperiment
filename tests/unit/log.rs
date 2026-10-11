@@ -107,10 +107,8 @@ fn replay_stops_at_incomplete_or_stale_transactions() -> io::Result<()> {
         let put = |seq: u64, first: u64, commit: bool, page: u8| {
             let mut bytes =
                 encode_transaction(first, 4096, &Images::from([(0, Some(image(page)))])).remove(0);
-            bytes.truncate(bytes.len() - crate::format::CHECKSUM);
             bytes[4..12].copy_from_slice(&seq.to_le_bytes());
             bytes[20] = u8::from(commit);
-            let bytes = crate::format::seal(bytes);
             let store = store.clone();
             async move { store.put(&log_key(seq), bytes.into()).await }
         };
@@ -175,32 +173,4 @@ fn probes_do_not_overflow() {
         assert!(probe(&store, u64::MAX - 1, 4).await.is_err());
         assert!(probe(&store, MAX_SEQUENCE - 1, 4).await.is_err());
     })
-}
-
-/// Every single-bit change of a segment or checkpoint record is rejected, also
-/// in fields that would otherwise decode to valid-looking values (a page
-/// number, a size, the commit flag).
-#[test]
-fn every_flipped_bit_is_rejected() {
-    let images = Images::from([(3, Some(image(7))), (9, None)]);
-    let segment = encode_transaction(5, 40 * 4096, &images).remove(0);
-    let meta = Meta {
-        log_start: 5,
-        deleted_below: 2,
-        size: 40 * 4096,
-    }
-    .encode();
-    for bit in 0..segment.len() * 8 {
-        let mut flipped = segment.clone();
-        flipped[bit / 8] ^= 1 << (bit % 8);
-        assert!(
-            decode(&Bytes::from(flipped), 5).is_err(),
-            "segment bit {bit}"
-        );
-    }
-    for bit in 0..meta.len() * 8 {
-        let mut flipped = meta.clone();
-        flipped[bit / 8] ^= 1 << (bit % 8);
-        assert!(Meta::decode(&flipped).is_err(), "meta bit {bit}");
-    }
 }

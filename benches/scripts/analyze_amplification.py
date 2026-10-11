@@ -38,7 +38,7 @@ for key, objects in phases.items():
     for field in TRAFFIC:
         assert objects["all"][field] == sum(r[field] for k, r in objects.items() if k != "all"), (key, field)
     page = objects["page"]
-    assert 3 * page["puts"] <= page["write_value_bytes"] <= 4103 * page["puts"], key
+    assert 3 * page["puts"] <= page["write_value_bytes"] <= 4099 * page["puts"], key
     assert objects["other"]["gets"] + objects["other"]["puts"] + objects["other"]["deletes"] == 0, key
 
 groups = defaultdict(list)
@@ -103,7 +103,7 @@ def table(data, fields):
     return "\n".join(result)
 
 report = ["# Amplification results — 2026-10-10", "",
-          "Storage format v13: a log of page images, pages checkpointed in place and a "
+          "Storage format v12: a log of page images, pages checkpointed in place and a "
           "small checkpoint record, with adaptive LZ4 page envelopes. Each baseline is a "
           "bulk load followed by a save that checkpoints it, so reads reach page keys.", "",
           f"{len(rows):,} raw class/phase rows; {len(phases):,} measured phases; "

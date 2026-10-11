@@ -126,13 +126,15 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
         assert_eq!(count(&mut db).await?, 1);
         drop(db);
 
-        // So does a query error.
+        // An SQL error leaves the session, and so its engine, usable.
         let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
         assert!(db.reused_engine());
         assert!(db.execute("INSERT INTO missing VALUES (1)").await.is_err());
+        assert!(db.is_usable());
         drop(db);
-        let db = Session::open_with_options(store.clone(), owner(&cache)).await?;
-        assert!(!db.reused_engine(), "poisoned session");
+        let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
+        assert!(db.reused_engine(), "after an SQL error");
+        assert_eq!(count(&mut db).await?, 1);
         drop(db);
 
         // Another writer appends, then checkpoints: both force a fresh engine.
@@ -159,7 +161,7 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v13/log/".into(),
+            key_prefix: "v12/log/".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,

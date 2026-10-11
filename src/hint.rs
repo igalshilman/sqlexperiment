@@ -1,7 +1,7 @@
 //! The working-set hint: which pages a cold open should fetch.
 //!
 //! An owner records the pages its sessions read. Checkpointing saves write the
-//! most useful ones to `v13/hint`; a cold open reads that key together with
+//! most useful ones to `v12/hint`; a cold open reads that key together with
 //! `meta` and fetches the listed pages alongside replay, so its first queries
 //! find them without a round trip per B-tree level.
 //!
@@ -10,10 +10,9 @@
 //! are still read through the normal rules. (A backend error reading it fails
 //! open like any other read.)
 //!
-//! Encoding: `SH13`, entry count u16 LE, then the page numbers in ascending
-//! order as LEB128 deltas (the first from zero), then the CRC32C of the
-//! preceding bytes.
-use crate::format::{HINT_MAGIC, seal, unseal};
+//! Encoding: `SH12`, entry count u16 LE, then the page numbers in ascending
+//! order as LEB128 deltas (the first from zero).
+use crate::format::HINT_MAGIC;
 use std::collections::HashMap;
 
 /// Most pages a hint may list.
@@ -39,12 +38,12 @@ pub(crate) fn encode(pages: &[u64]) -> Vec<u8> {
             out.push(byte | 0x80);
         }
     }
-    seal(out)
+    out
 }
 
 /// Decode a hint; `None` if it is malformed or longer than `limit` pages.
 pub(crate) fn decode(bytes: &[u8], limit: usize) -> Option<Vec<u64>> {
-    let rest = unseal(bytes)?.strip_prefix(HINT_MAGIC)?;
+    let rest = bytes.strip_prefix(HINT_MAGIC)?;
     let count = u16::from_le_bytes(rest.get(..2)?.try_into().ok()?) as usize;
     if count > limit.min(MAX_HINT_PAGES) {
         return None;

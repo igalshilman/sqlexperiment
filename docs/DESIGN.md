@@ -38,10 +38,10 @@ A namespace holds three kinds of keys:
 
 | Key | Holds |
 |---|---|
-| `v13/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
-| `v13/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
-| `v13/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
-| `v13/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
+| `v12/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
+| `v12/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
+| `v12/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
+| `v12/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
 
 **Read rule.** Page *n* is its latest image in the committed log from
 `meta.log_start`, else `page/<n>`, else zeros.
@@ -125,10 +125,10 @@ fails after a commit runs again on top of it. Two patterns keep that correct:
 
 - **Idempotent requests.** In the same transaction as the request's effects,
   record its id, and stop if it was already there:
-  `INSERT INTO requests VALUES(?) ON CONFLICT DO NOTHING RETURNING id` returns
-  no row for a duplicate. (A plain `INSERT` would fail on the duplicate, and any
-  SQL error poisons the session.) The dedupe record and the effects commit
-  atomically, because they are one log transaction.
+  a plain `INSERT` into a table keyed by the id fails on a duplicate, which
+  rolls back `Session::transaction`, or `ON CONFLICT DO NOTHING RETURNING id`
+  returns no row for one. The dedupe record and the effects commit atomically,
+  because they are one log transaction.
 - **Outbox for calls.** Commit the intent to call another object or service
   as a row, then send it, and delete the row once the call is acknowledged. A
   retry finds the row and resends, so the callee must deduplicate too.
@@ -159,7 +159,7 @@ acknowledged work when a later step fails.
 
 **Cold opens prefetch.** The engine reads one dependent page at a time, so
 without warm cache pages each B-tree level of a query would cost a round trip.
-An owner that knows nothing about the namespace therefore reads `v13/hint`
+An owner that knows nothing about the namespace therefore reads `v12/hint`
 together with `meta`, and fetches pages alongside replay:
 
 - a database of at most `prefetch_pages` pages (default 16) whole;
@@ -207,16 +207,23 @@ The engine sees two virtual files, the database and its WAL, served by `KvIo`:
   awaits KV I/O. Queries yield every 64 engine steps; one engine call cannot be
   preempted. The engine also reads synchronously for metadata. Open preloads the
   first page (every 4096-byte block of it, for larger page sizes) for those
-  reads, and any other synchronous read that would need KV fails and poisons the
+  reads, and any other synchronous read that would need KV fails and ends the
   session.
 - **Statements.** A string of several statements runs them in order, each
   under the same rules as on its own. `query_with`/`execute_with` bind
   parameters to one statement, so values never become SQL text.
-- **Sessions.** Query errors and cancellation poison a session; an error from a
-  statement that saves leaves its commit outcome unknown. `save()` consumes a
-  session, and dropping it discards unsaved work. Inside
+- **Errors.** An SQL error (syntax, a constraint, a missing table, wrong
+  parameters) undoes its statement, as in SQLite: the session stays usable and
+  an open transaction continues. The engine undoes a failed statement itself,
+  so this holds when no I/O failed and none is pending; the adapter records
+  every failed request and synchronous read to tell. Any other error (storage,
+  a limit, a cancelled call, an engine anomaly) ends the session, and an error
+  from a statement that saves leaves its commit outcome unknown.
+  `Session::is_usable` says which happened.
+- **Sessions.** `save()` consumes a session, and dropping it discards unsaved
+  work. Inside
   `Session::transaction`, a statement that ends the transaction (`COMMIT`,
-  `END`, `ROLLBACK`) fails and poisons the session before anything is durable,
+  `END`, `ROLLBACK`) fails and ends the session before anything is durable,
   and so does dropping or unwinding the transaction future.
 
 ## Owner cache
@@ -329,10 +336,11 @@ replay at most a short log. Measurements: [log shipping](../benches/LOG_RESULTS.
   either fails the statement. Past 4 MiB of log, checkpoint slices grow to 256
   pages, so a log grown by failed checkpoints shrinks again and replay stays
   bounded. Parked engines share a byte budget, by a measured estimate.
-- **Integrity.** Every stored value carries a CRC32C, verified before it is
-  decoded, and decoding bounds sequence numbers, sizes and page numbers. A
-  corrupt value is an error, never different data; there is no repair.
-- **Format.** Only v13, with no migration.
+- **Integrity.** Storage is assumed reliable: a value reads back as written.
+  Decoding checks structure and bounds sequence numbers, sizes and page
+  numbers, so a bug cannot overflow arithmetic or size a huge view; there are
+  no checksums.
+- **Format.** Only v12, with no migration.
 - **Validation.** Crash, interruption and handover campaigns run against an
   in-memory simulator; there are no process-kill or power-loss tests. See
   [REVIEW.md](REVIEW.md).

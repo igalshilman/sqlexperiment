@@ -122,7 +122,7 @@ fn cached_queries_yield_to_host_and_cancellation_poisons_the_view() -> Result<()
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("poisoned")
+                .contains("the session ended")
         );
         assert_eq!(store.stats().puts, 0);
         Ok(())
