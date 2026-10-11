@@ -5,7 +5,7 @@ Crate **0.11.0**, storage format **v12**, engine `turso_core` **0.8.2**.
 This compares the WAL-native store (v12: a log of page images, pages checkpointed
 in place, a small checkpoint record) with the previous format (v11: radix page
 map, head, intent), both when it published every save and with its map-based
-delta log. See [PROTOCOL.md](../docs/PROTOCOL.md) for the v12 design.
+delta log. See [DESIGN.md](../docs/DESIGN.md) for the v12 design.
 
 ## Method
 

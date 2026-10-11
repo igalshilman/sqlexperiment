@@ -9,9 +9,8 @@
 //! File methods enqueue work without calling KV. [`KvIo::drive`] polls backend
 //! futures on the host executor. Adjacent reads overlap in bounded batches; writes,
 //! truncation and sync serialize the queue into ordered phases. Within a read batch,
-//! completion order may differ from submission order. Map traversal within one read
-//! still follows dependent pointers; a single multi-page file read fetches its pages
-//! sequentially. There is no speculative prefetch; cross-session reuse comes from
+//! completion order may differ from submission order. A single multi-page file read
+//! fetches its pages sequentially. There is no speculative prefetch; cross-session reuse comes from
 //! the optional [`crate::PageCache`].
 //!
 //! Read buffers are staged privately until the read succeeds. `Completing` retires
@@ -31,7 +30,7 @@
 //! or spinning. Normal engine I/O is driven by the asynchronous pump.
 //!
 //! File sync is only a private-overlay ordering barrier. Durable KV mutations happen
-//! later when the save commits, after a complete checkpoint and connection drop.
+//! later when the save commits, after a complete private checkpoint.
 //! The engine WAL never becomes a durable KV object.
 use crate::kv::KvStore;
 use crate::page_codec::Page;

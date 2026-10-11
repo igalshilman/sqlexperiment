@@ -17,7 +17,7 @@ Because the log replays over pages until `meta` moves past it, checkpoints can
 overwrite `page/<n>` in place. The map, head, intent, IDs and retirement
 accounting are gone. What remains is the log codec, replay rules, a bounded
 checkpoint slice per save and confirmation on weak backends. See
-[PROTOCOL.md](PROTOCOL.md).
+[DESIGN.md](DESIGN.md).
 
 "Fix" and "fold" from the v11 delta-log review are part of the design:
 
@@ -119,5 +119,5 @@ requirements. A namespace must use one stable key with `PageCache::namespace`. L
 dirty pages have no memory budget. Memory budgets, request fencing,
 real-backend latency and process crash/power-loss validation remain future work.
 
-See [format](FORMAT.md), [protocol](PROTOCOL.md), and
+See [format](FORMAT.md), [design](DESIGN.md), and
 [benchmark methodology and evidence](../benches/README.md).
