@@ -25,7 +25,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, io};
+use std::{collections::BTreeMap, io, ops::Range};
 
 /// Largest segment value; larger transactions span several segments.
 pub const MAX_SEGMENT_BYTES: usize = 1024 * 1024;
@@ -222,6 +222,41 @@ pub(crate) async fn probe(
 ) -> io::Result<Vec<Option<Bytes>>> {
     let keys: Vec<_> = (first..first + batch).map(log_key).collect();
     try_join_all(keys.iter().map(|key| store.get(key))).await
+}
+
+/// Latest images of the pages changed by the committed transactions in `range`,
+/// which must start and end at transaction boundaries. `None` when that cannot be
+/// read in one probe batch: garbage collection deleted some of it, or it is
+/// longer than a batch. `prefetched` is an already read probe at `range.start`.
+pub(crate) async fn changes(
+    store: &dyn KvStore,
+    range: Range<u64>,
+    prefetched: Option<Vec<Option<Bytes>>>,
+) -> io::Result<Option<Images>> {
+    let len = range.end - range.start;
+    if len > MAX_PROBE {
+        return Ok(None);
+    }
+    let values = match prefetched {
+        Some(values) if values.len() as u64 >= len => values,
+        _ if len == 0 => Vec::new(),
+        _ => probe(store, range.start, len).await?,
+    };
+    let mut images = Images::new();
+    let mut first = range.start;
+    for (seq, value) in range.clone().zip(values) {
+        let Some(segment) = value.and_then(|bytes| decode(&bytes, seq).ok()) else {
+            return Ok(None);
+        };
+        if segment.first != first {
+            return Ok(None);
+        }
+        if segment.commit {
+            first = seq + 1;
+        }
+        images.extend(segment.images);
+    }
+    Ok((first == range.end).then_some(images))
 }
 
 /// Replay committed transactions from `start`. `prefetched` is an already read

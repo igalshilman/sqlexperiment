@@ -2,12 +2,21 @@
 //! a byte-bounded LRU of checkpointed page values plus what this owner knows to
 //! be durable.
 //!
-//! Pages are overwritten in place, so cached values can go stale. Only the
-//! process that writes them through stays coherent. The cache therefore
-//! remembers the exact `meta` bytes it last read or wrote. If open reads anything
-//! else, another writer checkpointed, and the cache drops everything. Without a
-//! `meta` change, every page another writer could have rewritten still has a newer
-//! image in the log, which overrides the cache.
+//! Pages are overwritten in place, so cached values can go stale. The cache keeps
+//! a *base*: the log start of the last durable `meta` this owner saw. A cached
+//! page is current unless a committed transaction at or after the base changed
+//! it, and while such a transaction is still in the replayed log, its image
+//! overrides the cache. Only a checkpoint that moves `meta` past it makes the
+//! cached value visible, and only another writer does that without writing
+//! through this cache.
+//!
+//! The cache also remembers the exact `meta` bytes it last read or wrote. If open
+//! reads anything else, another writer checkpointed (or this owner's last save
+//! failed). Open then reads the segments from the base to the new log start and
+//! refreshes the cached pages they changed. Those segments usually still exist:
+//! garbage collection deletes them only in the save after the one that
+//! advanced `meta`. If any is gone, or there are more than one probe batch, the
+//! cache drops all pages instead.
 //!
 //! The owner also remembers facts that would otherwise cost round trips:
 //! - the commit it last had acknowledged, so open need not re-put that tail;
@@ -16,7 +25,11 @@
 //!   replay can start there.
 //!
 //! One cache must serve exactly one namespace; sharing it returns wrong pages.
-use crate::{WarmEngine, log::Meta, page_codec::Page};
+use crate::{
+    WarmEngine,
+    log::{Images, Meta},
+    page_codec::{self, Page},
+};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
@@ -38,6 +51,9 @@ struct State {
     order: BTreeMap<u64, u64>,
     /// `meta` bytes as last read or written by this owner; `None` when absent.
     meta: Option<Page>,
+    /// Cached pages are current unless changed by a committed transaction at or
+    /// after this log position; `None` when unknown.
+    base: Option<u64>,
     /// A durable checkpoint this owner may record in `meta`.
     claim: Option<Meta>,
     /// One past this owner's last acknowledged commit.
@@ -68,6 +84,7 @@ impl PageCache {
             entries: HashMap::new(),
             order: BTreeMap::new(),
             meta: None,
+            base: Some(Meta::default().log_start),
             claim: None,
             committed: None,
             engine: None,
@@ -86,38 +103,68 @@ impl PageCache {
     /// Where this owner expects the log to start, for a speculative probe.
     pub(crate) fn expected_start(&self) -> Option<u64> {
         let state = self.0.lock().unwrap();
-        let meta = match &state.meta {
-            Some(bytes) => Meta::decode(bytes).ok()?,
-            None => Meta::default(),
-        };
-        Some(state.claim.map_or(meta.log_start, |claim| claim.log_start))
+        state.claim.map(|claim| claim.log_start).or(state.base)
     }
 
-    /// If `meta` is the durable record this owner last saw, return the claim and
-    /// acknowledged commit that remain valid. Otherwise drop everything; the
-    /// caller records the new `meta` once it knows it is durable.
-    pub(crate) fn validate(&self, meta: Option<&[u8]>) -> Option<(Option<Meta>, Option<u64>)> {
+    /// Compare the durable `meta` that open read, with log start `log_start`, to
+    /// what this owner last saw.
+    pub(crate) fn validate(&self, meta: Option<&[u8]>, log_start: u64) -> Reuse {
         let mut state = self.0.lock().unwrap();
         if state.meta.as_deref() == meta {
-            return Some((state.claim, state.committed));
+            return Reuse::Known(state.claim, state.committed);
         }
-        state.entries.clear();
-        state.order.clear();
-        state.bytes = 0;
         state.forget();
-        None
+        match state.base {
+            Some(base) if base <= log_start => Reuse::Changed(Some(base)),
+            _ => {
+                state.clear();
+                Reuse::Changed(None)
+            }
+        }
     }
 
-    /// Record durable `meta` bytes, a claim beyond them, and the acknowledged commit.
+    /// Bring cached pages up to date with the latest images of the transactions
+    /// between the base and the new log start, as read by open after
+    /// [`Reuse::Changed`]; `None` means they could not be read.
+    pub(crate) fn refresh(&self, changes: Option<&Images>) {
+        let mut state = self.0.lock().unwrap();
+        let Some(changes) = changes else {
+            return state.clear();
+        };
+        for (&index, image) in changes {
+            if !state.entries.contains_key(&index) {
+                continue;
+            }
+            let value = match image {
+                Some(image) if state.decoded => page_codec::decode_bytes(image).ok(),
+                image => image.clone(),
+            };
+            match value {
+                Some(value) => state.insert(index, value),
+                None => state.remove(index),
+            }
+        }
+    }
+
+    /// Record durable `meta` bytes, a claim beyond them, and the acknowledged
+    /// commit. Cached pages must be current as of the log start of `meta`.
     pub(crate) fn record(&self, meta: Option<Page>, claim: Option<Meta>, committed: u64) {
         let mut state = self.0.lock().unwrap();
+        state.base = match &meta {
+            Some(bytes) => Meta::decode(bytes).ok().map(|meta| meta.log_start),
+            None => Some(Meta::default().log_start),
+        };
+        if state.base.is_none() {
+            state.clear();
+        }
         state.meta = meta;
         state.claim = claim;
         state.committed = Some(committed);
     }
 
-    /// Forget durability knowledge after a save with an unknown outcome; the next
-    /// open then resets the pages too.
+    /// Forget durability knowledge after a save with an unknown outcome. Cached
+    /// pages stay: whatever the save did, it changed only pages of transactions
+    /// after the base, which the next open refreshes if `meta` moved past them.
     pub(crate) fn forget(&self) {
         self.0.lock().unwrap().forget();
     }
@@ -148,23 +195,7 @@ impl PageCache {
     }
 
     pub(crate) fn insert(&self, index: u64, bytes: Page) {
-        let mut state = self.0.lock().unwrap();
-        state.remove(index);
-        if bytes.len() > state.capacity {
-            return;
-        }
-        state.clock += 1;
-        let now = state.clock;
-        state.bytes += bytes.len();
-        state.entries.insert(index, (bytes, now));
-        state.order.insert(now, index);
-        while state.bytes > state.capacity {
-            let (_, oldest) = state
-                .order
-                .pop_first()
-                .expect("nonempty when over capacity");
-            state.remove(oldest);
-        }
+        self.0.lock().unwrap().insert(index, bytes);
     }
 
     pub(crate) fn remove(&self, index: u64) {
@@ -172,7 +203,41 @@ impl PageCache {
     }
 }
 
+/// What open may reuse, given the durable `meta` it read.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Reuse {
+    /// `meta` is what this owner last saw: the claim and acknowledged commit hold.
+    Known(Option<Meta>, Option<u64>),
+    /// `meta` changed. With a base, cached pages changed by transactions from the
+    /// base to the new log start must be refreshed before the next read; without
+    /// one, the pages were dropped.
+    Changed(Option<u64>),
+}
+
 impl State {
+    fn insert(&mut self, index: u64, bytes: Page) {
+        self.remove(index);
+        if bytes.len() > self.capacity {
+            return;
+        }
+        self.clock += 1;
+        let now = self.clock;
+        self.bytes += bytes.len();
+        self.entries.insert(index, (bytes, now));
+        self.order.insert(now, index);
+        while self.bytes > self.capacity {
+            let (_, oldest) = self.order.pop_first().expect("nonempty when over capacity");
+            self.remove(oldest);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+        self.base = None;
+    }
+
     fn forget(&mut self) {
         self.meta = Some(Page::new()); // matches no real record
         self.claim = None;

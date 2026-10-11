@@ -40,8 +40,12 @@ checkpoint slice per save and confirmation on weak backends. See
   (over 256 KiB) checkpoint themselves after committing. Garbage is only deleted
   below a durable `meta`.
 - `src/cache.rs`: `PageCache` replaces `ObjectCache`. Pages are mutable now, so
-  the cache keeps the exact durable `meta` bytes as a validity token. It resets
-  on any foreign checkpoint and remembers acknowledged commits and claims.
+  the cache keeps the exact durable `meta` bytes as a validity token and
+  remembers acknowledged commits and claims. After a foreign checkpoint, or this
+  owner's failed save, open reads the segments between the cache's base and the
+  new log start alongside replay and refreshes the cached pages they changed. It
+  drops every page only when those segments are collected or exceed one probe
+  batch.
 - `KvStore::durable_when_visible()` (default false) lets strong backends skip
   confirmation.
 - Removed `map_codec.rs`, `pending.rs`, the radix map, object IDs, the intent and
@@ -57,7 +61,7 @@ checkpoint slice per save and confirmation on weak backends. See
 
 ## Validation by mutation
 
-The crash campaign was run against four deliberately broken variants. Each was
+The crash and handover campaigns were run against deliberately broken variants. Each was
 caught:
 
 | Broken rule | Result |
@@ -66,6 +70,9 @@ caught:
 | `meta` passes a checkpoint before its pages are acknowledged | Campaign fails |
 | Garbage below a not-yet-durable `meta` is deleted | Campaign fails |
 | A large save writes its pages in place before its commit | Campaign fails |
+| Open keeps cached pages without refreshing them after a foreign checkpoint | Handover campaign fails |
+| The refresh loses the first changed segment's images | Handover campaign fails |
+| The refresh trusts whichever changed segments are still present | Handover campaign fails |
 
 ## Executed validation
 
@@ -74,7 +81,7 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 | Check | Outcome |
 |---|---|
 | `cargo test --locked` | 9 tests and one compile-checked rustdoc example pass |
-| `cargo test --locked --features simulation` | 48 tests pass: 28 unit, 19 integration, one public API; one rustdoc example also passes |
+| `cargo test --locked --features simulation` | 51 tests pass: 29 unit, 21 integration, one public API; one rustdoc example also passes |
 | Interruption campaigns | 1,548 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
@@ -95,6 +102,9 @@ Interruption cases:
 - 396 read failpoints across six workloads.
 - 28 open-read failpoints and 4 interrupted confirmations.
 - 6 commit and checkpoint errors.
+- Owner handover: two owners, each with its own cache, alternate over 400
+  random tenures with failed saves, lost unconfirmed values and restarts, and
+  every open checks every page. It also passed 200 seeds (80,000 tenures).
 - 28 private-checkpoint interruptions.
 
 ## Remaining limits

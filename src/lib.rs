@@ -50,9 +50,9 @@
 //! reads without crossing write, truncate or sync barriers.
 //!
 //! [`StorageOptions::cache`] can hold a [`PageCache`]: owner-process state shared
-//! by successive sessions of one namespace. It caches checkpointed pages, resets
-//! itself when another writer changes `meta`, and remembers what this owner has
-//! made durable, so a steady-state open and save are each one round trip. A
+//! by successive sessions of one namespace. It caches checkpointed pages, refreshes
+//! those another writer's checkpoint rewrote (or drops them all when it cannot
+//! tell which), and remembers what this owner has made durable, so a steady-state open and save are each one round trip. A
 //! session that ends cleanly leaves its idle engine there; the next open reuses
 //! it when nothing changed, keeping the parsed schema and engine page cache.
 //!

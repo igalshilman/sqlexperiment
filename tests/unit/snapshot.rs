@@ -181,7 +181,7 @@ fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
 }
 
 #[test]
-fn another_writer_resets_or_is_overridden_in_the_cache() -> io::Result<()> {
+fn another_writer_is_refreshed_or_overridden_in_the_cache() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
         let cache = PageCache::new(1 << 20);
@@ -200,7 +200,7 @@ fn another_writer_resets_or_is_overridden_in_the_cache() -> io::Result<()> {
         assert!(model.check(&snapshot).await?);
         assert!(cache.bytes() > 0, "pages are cached");
 
-        // Another writer checkpoints: meta changes and the cache resets.
+        // Another writer checkpoints: meta changes and the cache is refreshed.
         for round in 10..13 {
             let (changes, size) = dirty(round);
             open(&store, &other)
@@ -432,6 +432,87 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
         }
         assert!(cases > 600, "{cases}");
         println!("interrupted saves: {cases} cases");
+        Ok(())
+    })
+}
+
+/// Two owner processes, each with its own cache, hand the namespace back and
+/// forth after random tenures. Saves fail in random places and outcomes, the
+/// backend sometimes loses unconfirmed values, and owners sometimes restart.
+/// Every open must read the model exactly, from whatever its cache kept.
+#[test]
+fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let mut seed = 0x5eed_u64;
+        let mut random = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
+        let mut caches = [PageCache::new(1 << 20), PageCache::decoded(8 * 4096)];
+        let mut model = Model::default();
+        let (mut kept, mut dropped, mut round) = (0, 0, 0);
+        for tenure in 0..400 {
+            let owner = tenure % 2;
+            let opts = options(random(4) as u32, Some(&caches[owner]));
+            for _ in 0..random(8) {
+                round += 1;
+                let snapshot = open(&store, &opts).await?;
+                assert!(model.check(&snapshot).await?, "round {round}");
+                let size = (8 + random(5)) * 4096;
+                let changes: Changes = (0..1 + random(4))
+                    .map(|_| {
+                        let index = random(size / 4096);
+                        (index, (random(8) > 0).then(|| page(round * 100 + index)))
+                    })
+                    .collect();
+                if random(6) > 0 {
+                    snapshot.publish(changes.clone(), size).await?;
+                    model.apply(&changes, size);
+                    continue;
+                }
+                let _gate = store.arm(Failpoint {
+                    operation: [Operation::Put, Operation::Delete][random(2) as usize],
+                    key_prefix: String::new(),
+                    nth: 1 + random(4) as usize,
+                    effect: [Effect::None, Effect::Visible, Effect::After][random(3) as usize],
+                    cancel: false,
+                });
+                let result = snapshot.publish(changes.clone(), size).await;
+                store.disarm();
+                if random(3) == 0 {
+                    store.inner.crash(&[]);
+                }
+                if random(4) == 0 {
+                    caches[owner] = PageCache::new(1 << 20);
+                }
+                let opts = options(1, Some(&caches[owner]));
+                let reopened = open(&store, &opts).await?;
+                let mut new = model.clone();
+                new.apply(&changes, size);
+                if new.check(&reopened).await? {
+                    model = new;
+                } else {
+                    assert!(result.is_err(), "acknowledged commit lost, round {round}");
+                    assert!(model.check(&reopened).await?, "round {round}");
+                }
+            }
+            // How the other owner's cache fares when it takes over.
+            let other = &caches[1 - owner];
+            let before = other.bytes();
+            drop(open(&store, &options(1, Some(other))).await?);
+            if before > 0 {
+                if other.bytes() > 0 {
+                    kept += 1
+                } else {
+                    dropped += 1
+                }
+            }
+        }
+        println!("handovers: cache kept {kept}, dropped {dropped}");
+        assert!(kept > 50 && dropped > 50, "{kept} {dropped}");
         Ok(())
     })
 }
