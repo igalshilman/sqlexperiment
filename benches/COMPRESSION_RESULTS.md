@@ -1,6 +1,6 @@
 # Page compression experiment — 2026-10-10
 
-Crate **0.11.0**, storage format **v13**, SQLite-compatible engine `turso_core` **0.8.2**.
+Crate **0.11.0**, storage format **v12**, SQLite-compatible engine `turso_core` **0.8.2**.
 
 Adaptive LZ4 materially reduces the bytes in this experiment's repetitive and
 synthetic JSON workloads. It offers little benefit for random row payloads and
@@ -11,19 +11,17 @@ workloads where attempting compression is not useful.
 ## Implementation and boundaries
 
 - `src/page_codec.rs` uses pinned `lz4_flex` **0.14.0**, with safe encoding and
-  decoding enabled. Each immutable page has a seven-byte envelope: one-byte tag
-  (0 raw, 1 LZ4 block), u16 LE logical size (4096) and the payload's CRC32C,
-  followed by its payload.
+  decoding enabled. Each immutable page has a three-byte envelope: one-byte tag
+  (0 raw, 1 LZ4 block), then u16 LE logical size (4096), followed by its payload.
   The codec uses independent LZ4 blocks, without a dictionary or frame wrapper.
 - A compressed payload is retained only when smaller than the 4096-byte raw
-  payload. Maximum encoded value: **4103 bytes**. Incompressible pages cost seven
-  extra bytes versus an unwrapped 4096-byte page (0.17%); raw fallback avoids larger compression expansion,
+  payload. Maximum encoded value: **4099 bytes**. Incompressible pages cost three
+  extra bytes versus an unwrapped 4096-byte page (0.073%); raw fallback avoids larger compression expansion,
   but still pays for attempting compression under the LZ4 policy.
 - Decoding validates encoded bounds, tag, logical size and decoded length. The
   decoder always gets a fixed 4096-byte destination, never an allocation sized
   from stored metadata. Invalid LZ4 back-references and incorrect expansion sizes
-  are rejected, and the checksum is verified before decoding. There is no
-  corruption repair.
+  are rejected. Storage is assumed reliable, so there is no checksum.
 - Encoding happens once per changed page when a save builds its log
   transaction; checkpoints copy those encoded images to `page/<n>` unchanged.
   Decoding happens when a segment is replayed and when a page is read. The
@@ -32,7 +30,7 @@ workloads where attempting compression is not useful.
 - `StorageOptions::page_compression` selects new writes only. Raw and compressed
   pages coexist; a different policy on reopen does not require rewriting them.
   Switching policy and performing a read-only save causes no mutations.
-- Namespace keys and magic numbers are v13/`SL13`/`SM13`. Start with a fresh
+- Namespace keys and magic numbers are v12/`SL12`/`SM12`. Start with a fresh
   namespace. Only this format is supported; there are no compatibility probes.
 
 ## Paired workload results
@@ -82,7 +80,7 @@ never increase relative to raw pages. Random row payloads can still leave compre
 SQLite headers and free space, explaining their small improvement. In the codec
 sample for 9000-byte random payloads, **56 of 64 pages used raw fallback**.
 The unit tests separately exercise fully random 4096-byte pages and verify the
-4103-byte fallback bound.
+4099-byte fallback bound.
 
 For the 10,000-row JSON cold PK lookup, read key/value traffic fell from
 **20,831 to 9,580 bytes (54.0%)**, and stored value bytes from 5,726,742 to
@@ -113,10 +111,6 @@ Median time per page for the 10,000-row / 256-byte datasets:
 | Repetitive | 0.82 µs | 1.22 µs | 0.94 µs | 0.57 µs |
 | JSON | 0.83 µs | 6.85 µs | 0.94 µs | 2.56 µs |
 | Random | 0.76 µs | 2.10 µs | 0.94 µs | 1.02 µs |
-
-Every encode and decode now computes a CRC32C over the payload: about 0.7 µs
-for a raw 4 KiB page on this host (raw encode and decode were 0.1–0.25 µs
-without it), less for compressed pages, whose payload is shorter.
 
 These are elapsed times in isolated codec loops on this shared host, not remote
 request timings or a production speedup. Min/median/max are retained. Raw SQL

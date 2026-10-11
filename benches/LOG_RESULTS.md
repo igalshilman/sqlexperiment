@@ -1,15 +1,11 @@
 # WAL-native store results — 2026-10-11
 
-Crate **0.11.0**, storage format **v13**, engine `turso_core` **0.8.2**.
+Crate **0.11.0**, storage format **v12**, engine `turso_core` **0.8.2**.
 
-This compares the WAL-native store (v13: a log of page images, pages checkpointed
+This compares the WAL-native store (v12: a log of page images, pages checkpointed
 in place, a small checkpoint record) with the previous format (v11: radix page
 map, head, intent), both when it published every save and with its map-based
-delta log. See [DESIGN.md](../docs/DESIGN.md) for the v13 design.
-
-Format v13 is v12 plus a CRC32C on every stored value (4 bytes per page image
-and record). Against the v12 measurements, round trips are identical and bytes
-written or stored rose by under 1%.
+delta log. See [DESIGN.md](../docs/DESIGN.md) for the v12 design.
 
 ## Method
 
