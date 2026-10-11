@@ -303,31 +303,28 @@ index 8ea15b1..762a9d2 100644
 +    UnjournaledObjectContext<TState>,
 +    RestateWorkflowContext {}
 diff --git a/packages/libs/restate-sdk/src/context_impl.ts b/packages/libs/restate-sdk/src/context_impl.ts
-index 2487c57..9c7f61a 100644
+index 2487c57..274fecf 100644
 --- a/packages/libs/restate-sdk/src/context_impl.ts
 +++ b/packages/libs/restate-sdk/src/context_impl.ts
-@@ -71,6 +71,9 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
+@@ -71,6 +71,8 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
  import type { ContextInternal, GetProjectOptions } from "./internal.js";
  import { InputReader, OutputWriter } from "./endpoint/handlers/types.js";
  import { ExecutionOptions } from "./endpoint/components.js";
 +import { runSql, type SqlDatabase, type SqlSession } from "./sql.js";
-+import { IdempotencyKeys } from "./idempotency.js";
 +import { unjournaledContext } from "./unjournaled.js";
  
  /**
   * The runtime shape a client method needs. implement() and type manipulations respect this.
-@@ -109,6 +112,10 @@ export class ContextImpl
+@@ -109,6 +111,8 @@ export class ContextImpl
    private cancellationPromise?: SingleRestatePromise<void>;
    readonly defaultSerde: Serde<any>;
    private readonly asTerminalError?: (error: any) => TerminalError | undefined;
 +  // Public: the context without journal replay has it (see UnjournaledContext).
 +  readonly journalReplay: boolean;
-+  // Without journal replay: idempotency keys for calls and sends.
-+  private readonly idempotencyKeys?: IdempotencyKeys;
  
    // If undefined, we're not tracking invocation id promises
    private readonly trackedInvocationIdPromises?: SingleRestatePromise<string>[];
-@@ -152,18 +159,31 @@ export class ContextImpl
+@@ -152,18 +156,28 @@ export class ContextImpl
        this.runClosuresTracker,
        this.ephemeralRequestTracker,
        externalProgressChannel,
@@ -341,9 +338,6 @@ index 2487c57..9c7f61a 100644
      this.defaultSerde = executionOptions?.defaultSerde ?? serde.json;
      this.asTerminalError = executionOptions?.asTerminalError;
 +    this.journalReplay = executionOptions?.journalReplay ?? true;
-+    if (!this.journalReplay) {
-+      this.idempotencyKeys = new IdempotencyKeys(invocationRequest.id);
-+    }
      this.trackedInvocationIdPromises = executionOptions?.explicitCancellation
        ? []
        : undefined;
@@ -360,7 +354,7 @@ index 2487c57..9c7f61a 100644
    setRunInterceptor(
      interceptor: (name: string, runner: () => Promise<void>) => Promise<void>
    ) {
-@@ -291,6 +311,14 @@ export class ContextImpl
+@@ -291,6 +305,14 @@ export class ContextImpl
      );
    }
  
@@ -375,39 +369,6 @@ index 2487c57..9c7f61a 100644
    public clear(name: string): void {
      this.processNonCompletableEntry(
        WasmCommandType.ClearState,
-@@ -340,7 +368,14 @@ export class ContextImpl
-               ([key, value]) => new WasmHeader(key, value)
-             )
-           : [],
--        call.idempotencyKey,
-+        call.idempotencyKey ??
-+          this.idempotencyKeys?.next(
-+            "call",
-+            call.service,
-+            call.method,
-+            call.key,
-+            parameter
-+          ),
-         call.scope,
-         call.limitKey,
-         call.name
-@@ -423,7 +458,15 @@ export class ContextImpl
-             )
-           : [],
-         delay !== undefined && delay > 0 ? BigInt(delay) : undefined,
--        send.idempotencyKey,
-+        send.idempotencyKey ??
-+          this.idempotencyKeys?.next(
-+            "send",
-+            send.service,
-+            send.method,
-+            send.key,
-+            parameter,
-+            delay
-+          ),
-         send.scope,
-         send.limitKey,
-         send.name
 diff --git a/packages/libs/restate-sdk/src/endpoint/components.ts b/packages/libs/restate-sdk/src/endpoint/components.ts
 index 14d8ab1..f24c370 100644
 --- a/packages/libs/restate-sdk/src/endpoint/components.ts
@@ -460,79 +421,6 @@ index f5a20a7..bfe3d6d 100644
  
      // Encode user code output
      encodedOutput = journalValueCodec.encode(output);
-diff --git a/packages/libs/restate-sdk/src/idempotency.ts b/packages/libs/restate-sdk/src/idempotency.ts
-new file mode 100644
-index 0000000..9cdb273
---- /dev/null
-+++ b/packages/libs/restate-sdk/src/idempotency.ts
-@@ -0,0 +1,67 @@
-+/*
-+ * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
-+ *
-+ * This file is part of the Restate SDK for Node.js/TypeScript,
-+ * which is released under the MIT license.
-+ *
-+ * You can find a copy of the license in file LICENSE in the root
-+ * directory of this repository or package, or at
-+ * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
-+ */
-+
-+// Without journal replay, a retried attempt runs the handler again from the
-+// start, and each call or send it makes is a new command. So that it reaches
-+// the invocation the earlier attempt started instead of starting another, a
-+// call or send without an idempotency key gets one derived from this
-+// invocation and the request: the same request, made the same number of times
-+// before, gets the same key. Restate then attaches a repeated call to the
-+// earlier invocation (and its result), and drops a repeated send.
-+
-+const encoder = new TextEncoder();
-+
-+/** A 64-bit FNV-1a hash of `parts`, in hex: two 32-bit lanes. */
-+function hash(parts: (string | Uint8Array)[]): string {
-+  let a = 0x811c9dc5;
-+  let b = 0x050c5d1f;
-+  const mix = (byte: number) => {
-+    a = Math.imul(a ^ byte, 0x01000193);
-+    b = Math.imul(b ^ byte, 0x01000193) ^ (a >>> 15);
-+  };
-+  for (const part of parts) {
-+    const bytes = typeof part === "string" ? encoder.encode(part) : part;
-+    for (const byte of bytes) mix(byte);
-+    mix(0xff); // separator
-+    mix(bytes.length & 0xff);
-+  }
-+  const hex = (n: number) => (n >>> 0).toString(16).padStart(8, "0");
-+  return hex(a) + hex(b);
-+}
-+
-+/** Idempotency keys for the calls and sends of one attempt. */
-+export class IdempotencyKeys {
-+  private readonly seen = new Map<string, number>();
-+
-+  constructor(private readonly invocationId: string) {}
-+
-+  /** The key of a request: `kind` ("call" or "send") and its target, input and delay. */
-+  next(
-+    kind: "call" | "send",
-+    service: string,
-+    method: string,
-+    key: string | undefined,
-+    parameter: Uint8Array,
-+    delay?: number
-+  ): string {
-+    const digest = hash([
-+      kind,
-+      service,
-+      method,
-+      key ?? "",
-+      parameter,
-+      delay === undefined ? "" : String(delay),
-+    ]);
-+    const n = this.seen.get(digest) ?? 0;
-+    this.seen.set(digest, n + 1);
-+    return `${this.invocationId}:${digest}:${n}`;
-+  }
-+}
 diff --git a/packages/libs/restate-sdk/src/internal.ts b/packages/libs/restate-sdk/src/internal.ts
 index 7cee518..5f5bf5a 100644
 --- a/packages/libs/restate-sdk/src/internal.ts
@@ -1071,7 +959,7 @@ index 0000000..4f74a88
 +  return result.value;
 +}
 diff --git a/packages/libs/restate-sdk/src/types/rpc.ts b/packages/libs/restate-sdk/src/types/rpc.ts
-index 9b9e22f..8ddc5cb 100644
+index 9b9e22f..be4457f 100644
 --- a/packages/libs/restate-sdk/src/types/rpc.ts
 +++ b/packages/libs/restate-sdk/src/types/rpc.ts
 @@ -26,6 +26,12 @@ import type {
@@ -1145,10 +1033,10 @@ index 9b9e22f..8ddc5cb 100644
 +   * When set to `false`, a retried or resumed invocation skips the journal of its
 +   * earlier attempts: the handler runs again from the start, and every context
 +   * call executes anew, reading current state. Effects of earlier attempts may
-+   * repeat (at least once), and awakeables are unsupported. A call or send
-+   * without an idempotency key gets one derived from the invocation and the
-+   * request, so that a retried attempt reaches the invocation the earlier one
-+   * started.
++   * repeat (at least once), and awakeables are unsupported. Each attempt's calls
++   * and sends are new requests: to reach the invocation an earlier attempt
++   * started, give one an idempotency key that is the same on every attempt,
++   * such as one made from `ctx.request().id`.
 +   *
 +   * @experimental
 +   */
@@ -1341,10 +1229,10 @@ index 9b9e22f..8ddc5cb 100644
 +   * When set to `false`, a retried or resumed invocation skips the journal of its
 +   * earlier attempts: the handler runs again from the start, and every context
 +   * call executes anew, reading current state. Effects of earlier attempts may
-+   * repeat (at least once), and awakeables are unsupported. A call or send
-+   * without an idempotency key gets one derived from the invocation and the
-+   * request, so that a retried attempt reaches the invocation the earlier one
-+   * started.
++   * repeat (at least once), and awakeables are unsupported. Each attempt's calls
++   * and sends are new requests: to reach the invocation an earlier attempt
++   * started, give one an idempotency key that is the same on every attempt,
++   * such as one made from `ctx.request().id`.
 +   *
 +   * @experimental
 +   */

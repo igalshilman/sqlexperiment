@@ -9,7 +9,8 @@
 //   (`ctx.request().id`, the same on every attempt of an invocation) and
 //   what the call is for. So a retried attempt reaches the invocation the
 //   first one started (and gets its result) instead of starting another, and
-//   a repeated `expire` message is dropped, keeping its first timer.
+//   a repeated `expire` message is dropped, keeping its first timer. Without
+//   a key, each attempt's call would be a new one.
 //
 // Environment: PORT (default 9080), SHOP_EXPIRY_MS (how long an unpaid order
 // holds its stock, default 5000) and ABORT_PER_MILLE (see faults.mjs).
@@ -17,9 +18,6 @@ import * as restate from '@restatedev/restate-sdk';
 import { serveIfMain } from '../faults.mjs';
 
 const EXPIRY_MS = Number(process.env.SHOP_EXPIRY_MS ?? 5000);
-
-/** Options for a call: its idempotency key is this invocation's request id and `what`. */
-const once = (ctx, what) => restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${what}` });
 
 const WAREHOUSE = `
   CREATE TABLE IF NOT EXISTS stock(id INTEGER PRIMARY KEY CHECK (id = 0), available INTEGER NOT NULL);
@@ -102,7 +100,9 @@ export const orders = restate.object({
       ctx.sql(async (db) => {
         const placed = await order(db);
         if (placed) return placed.status;
-        const ok = await ctx.objectClient(warehouse, sku).reserve({ order: ctx.key, qty }, once(ctx, 'reserve'));
+        const ok = await ctx
+          .objectClient(warehouse, sku)
+          .reserve({ order: ctx.key, qty }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:reserve` }));
         const status = ok ? 'reserved' : 'rejected';
         await db.execute('INSERT INTO orders VALUES(0, ?, ?, ?)', [sku, qty, status]);
         if (ok) {
@@ -121,7 +121,9 @@ export const orders = restate.object({
       ctx.sql(async (db) => {
         const placed = await order(db);
         if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
-        await ctx.objectClient(warehouse, placed.sku).commit({ order: ctx.key }, once(ctx, 'commit'));
+        await ctx
+          .objectClient(warehouse, placed.sku)
+          .commit({ order: ctx.key }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:commit` }));
         await db.execute(`UPDATE orders SET status = 'paid'`);
         return 'paid';
       }),
@@ -131,7 +133,9 @@ export const orders = restate.object({
       ctx.sql(async (db) => {
         const placed = await order(db);
         if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
-        await ctx.objectClient(warehouse, placed.sku).release({ order: ctx.key }, once(ctx, 'release'));
+        await ctx
+          .objectClient(warehouse, placed.sku)
+          .release({ order: ctx.key }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:release` }));
         await db.execute(`UPDATE orders SET status = 'expired'`);
         return 'expired';
       }),

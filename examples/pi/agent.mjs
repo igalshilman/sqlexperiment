@@ -22,8 +22,6 @@ const { models, model } = await modelFromEnv();
 /** The bank tools of one invocation: they reach the ledger through `ctx`. */
 const bank = (ctx) => {
   const books = ctx.objectClient(ledger, 'bank');
-  // One key per tool call: an invocation makes many.
-  const once = (api) => restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` });
   return [
     defineTool({
       name: 'transfer',
@@ -35,7 +33,9 @@ const bank = (ctx) => {
       }),
       replay: 'safe', // runs again after a crash, with the same call id
       execute: async ({ from, to, amount }, api) => {
-        await books.transfer({ id: api.callId, from, to, amount }, once(api));
+        // One key per tool call: an invocation makes many.
+        const opts = restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` });
+        await books.transfer({ id: api.callId, from, to, amount }, opts);
         return { content: [{ type: 'text', text: `moved ${amount} from account ${from} to account ${to}` }] };
       },
     }),
@@ -44,9 +44,10 @@ const bank = (ctx) => {
       description: 'Check the books: accounts, total money, transfers, and inconsistent accounts.',
       parameters: Type.Object({}),
       replay: 'safe',
-      execute: async (_params, api) => ({
-        content: [{ type: 'text', text: JSON.stringify(await books.audit(once(api))) }],
-      }),
+      execute: async (_params, api) => {
+        const opts = restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` });
+        return { content: [{ type: 'text', text: JSON.stringify(await books.audit(opts)) }] };
+      },
     }),
   ];
 };
