@@ -2,42 +2,12 @@
 //
 // The Node.js port of restate/src/bin/ledger.rs, with the same handlers and
 // environment: PORT (default 9080), LEDGER_ABORT_PER_MILLE (abort the process
-// at random state requests, for crash tests) and SQLITE_KV_CACHE_FILE.
+// at random state requests, for crash tests; see faults.mjs) and
+// SQLITE_KV_CACHE_FILE.
 import * as restate from '@restatedev/restate-sdk';
+import { serveIfMain } from './faults.mjs';
 
-const abortPerMille = Number(process.env.LEDGER_ABORT_PER_MILLE ?? 0);
-const maybeAbort = () => {
-  if (Math.random() * 1000 < abortPerMille) {
-    console.error('ledger: aborting at a state request');
-    process.abort();
-  }
-};
-
-// Abort before or after random requests of each object's store.
-if (abortPerMille > 0) {
-  restate.internal.setSqlStoreWrapper((store) => ({
-    get: async (key) => {
-      maybeAbort();
-      return store.get(key);
-    },
-    set: (key, value) => {
-      maybeAbort();
-      store.set(key, value);
-      maybeAbort();
-    },
-    clear: (key) => {
-      maybeAbort();
-      store.clear(key);
-      maybeAbort();
-    },
-    sync: async () => {
-      maybeAbort();
-      return store.sync();
-    },
-  }));
-}
-
-const ledger = restate.object({
+export const ledger = restate.object({
   name: 'Ledger',
   handlers: {
     /** Create the tables, and open `count` accounts with `balance` each, once. */
@@ -84,4 +54,4 @@ const ledger = restate.object({
   },
 });
 
-restate.serve({ services: [ledger], port: Number(process.env.PORT ?? 9080) });
+serveIfMain(import.meta, [ledger]);
