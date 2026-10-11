@@ -302,12 +302,25 @@ pub enum JournalMismatchRetryBehavior {
     FollowRetryPolicy,
 }
 
+/// What a retried or resumed invocation does with the journal of its earlier attempts.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum JournalReplay {
+    /// Replay it: commands return their recorded results, and must match them.
+    #[default]
+    Enabled,
+    /// Skip it: the handler runs again from the start and every command executes anew,
+    /// reading current state. Effects of earlier attempts may repeat (at least once), and
+    /// awakeables are unsupported.
+    Disabled,
+}
+
 #[derive(Debug)]
 pub struct VMOptions {
     pub implicit_cancellation: ImplicitCancellationOption,
     pub non_determinism_checks: NonDeterministicChecksOption,
     pub awaiting_on_policy: AwaitingOnPolicy,
     pub journal_mismatch_retry_behavior: JournalMismatchRetryBehavior,
+    pub journal_replay: JournalReplay,
 }
 
 impl Default for VMOptions {
@@ -320,6 +333,7 @@ impl Default for VMOptions {
             non_determinism_checks: Default::default(),
             awaiting_on_policy: Default::default(),
             journal_mismatch_retry_behavior: Default::default(),
+            journal_replay: Default::default(),
         }
     }
 }
@@ -469,7 +483,14 @@ pub trait VM: Sized {
         options: PayloadOptions,
     ) -> VMResult<NotificationHandle>;
 
+    /// Like [`VM::sys_state_get`], but always asks the runtime, ignoring eager state. The
+    /// runtime processes commands in order, so the answer also means every earlier command
+    /// of this invocation was processed.
+    fn sys_state_get_lazy(&mut self, key: String) -> VMResult<NotificationHandle>;
+
     fn sys_state_get_keys(&mut self) -> VMResult<NotificationHandle>;
+
+    fn journal_replay(&self) -> JournalReplay;
 
     fn sys_state_set(&mut self, key: String, value: Bytes, options: PayloadOptions)
         -> VMResult<()>;

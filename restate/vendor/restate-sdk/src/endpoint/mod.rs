@@ -19,7 +19,8 @@ use http_body::{Body, Frame, SizeHint};
 use http_body_util::{BodyExt, Either, Full};
 use pin_project_lite::pin_project;
 use restate_sdk_shared_core::{
-    CoreVM, Error as CoreError, Header, HeaderMap, IdentityVerifier, ResponseHead, VM, VerifyError,
+    CoreVM, Error as CoreError, Header, HeaderMap, IdentityVerifier, JournalReplay, ResponseHead,
+    VM, VMOptions, VerifyError,
 };
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -174,6 +175,8 @@ struct EndpointInner {
     svcs: HashMap<String, BoxedService>,
     discovery_services: Vec<crate::discovery::Service>,
     identity_verifier: IdentityVerifier,
+    /// Services bound with [`ServiceOptions::journal_replay`] set to `false`.
+    without_journal_replay: std::collections::HashSet<String>,
 }
 
 #[derive(Default)]
@@ -262,7 +265,15 @@ impl Endpoint {
         };
 
         // Prepare vm
-        let vm = match CoreVM::new(headers, Default::default()) {
+        let options = VMOptions {
+            journal_replay: if self.0.without_journal_replay.contains(&svc_name) {
+                JournalReplay::Disabled
+            } else {
+                JournalReplay::Enabled
+            },
+            ..Default::default()
+        };
+        let vm = match CoreVM::new(headers, options) {
             Ok(vm) => vm,
             Err(e) => return error_response(e),
         };

@@ -1,9 +1,12 @@
 use crate::endpoint::{BoxedService, Endpoint, EndpointInner};
 use crate::service::{IntoServiceDefinition, ServiceDefinition};
 use restate_sdk_shared_core::{IdentityVerifier, KeyError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Service metadata key of [`ServiceOptions::journal_replay`].
+pub(crate) const JOURNAL_REPLAY_METADATA: &str = "restate.sdk.journal_replay";
 
 /// Various configuration options that can be provided when binding a service
 #[derive(Default, Debug, Clone)]
@@ -87,6 +90,18 @@ impl ServiceOptions {
     /// HTTP and Kafka ingress, but only from other services.
     pub fn ingress_private(mut self, private: bool) -> Self {
         self.ingress_private = Some(private);
+        self
+    }
+
+    /// When set to `false`, a retried or resumed invocation of this service skips the journal of
+    /// its earlier attempts: the handler runs again from the start, and every call to the context
+    /// executes anew, reading current state. Effects of earlier attempts may repeat (at least
+    /// once), and awakeables are unsupported. Recorded in the service metadata.
+    pub fn journal_replay(mut self, enabled: bool) -> Self {
+        self.metadata.insert(
+            JOURNAL_REPLAY_METADATA.to_owned(),
+            if enabled { "enabled" } else { "disabled" }.to_owned(),
+        );
         self
     }
 
@@ -298,6 +313,7 @@ pub struct Builder {
     svcs: HashMap<String, BoxedService>,
     discovery_services: Vec<crate::discovery::Service>,
     identity_verifier: IdentityVerifier,
+    without_journal_replay: HashSet<String>,
 }
 
 impl Builder {
@@ -338,6 +354,14 @@ impl Builder {
         } = definition.into_service_definition();
         discovery.apply_options(service_options);
 
+        if discovery
+            .metadata
+            .get(JOURNAL_REPLAY_METADATA)
+            .is_some_and(|value| value == "disabled")
+        {
+            self.without_journal_replay
+                .insert(discovery.name.to_string());
+        }
         self.svcs.insert(discovery.name.to_string(), dispatcher);
         self.discovery_services.push(discovery);
         self
@@ -355,6 +379,7 @@ impl Builder {
             svcs: self.svcs,
             discovery_services: self.discovery_services,
             identity_verifier: self.identity_verifier,
+            without_journal_replay: self.without_journal_replay,
         }))
     }
 }

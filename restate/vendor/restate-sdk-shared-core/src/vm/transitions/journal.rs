@@ -21,8 +21,8 @@ use crate::vm::errors::{
 use crate::vm::transitions::{Transition, TransitionAndReturn};
 use crate::vm::State;
 use crate::{
-    CommandRelationship, CommandType, EntryRetryInfo, Error, Header, Input, NotificationHandle,
-    PayloadOptions, RetryPolicy, RunExitResult, RunHandle, Version,
+    CommandRelationship, CommandType, EntryRetryInfo, Error, Header, Input, JournalReplay,
+    NotificationHandle, PayloadOptions, RetryPolicy, RunExitResult, RunHandle, Version,
 };
 use bytes::Bytes;
 use std::collections::VecDeque;
@@ -58,6 +58,11 @@ impl TransitionAndReturn<Context, SysInput> for State {
                     .resolve_related_command(CommandRelationship::Last),
             )
         })?;
+        let s = if context.journal_replay == JournalReplay::Disabled {
+            s.skip_replay(context)
+        } else {
+            s
+        };
         let start_info = context.expect_start_info();
 
         Ok((
@@ -296,8 +301,13 @@ impl TransitionAndReturn<Context, CreateSignalHandle> for State {
     }
 }
 
-/// State get with key and payload options for replay checks.
-pub(crate) struct SysStateGet(pub(crate) String, pub(crate) PayloadOptions);
+/// State get with key and payload options for replay checks, and whether to ask
+/// the runtime even when eager state knows the key.
+pub(crate) struct SysStateGet(
+    pub(crate) String,
+    pub(crate) PayloadOptions,
+    pub(crate) bool,
+);
 
 impl TransitionAndReturn<Context, SysStateGet> for State {
     type Output = NotificationHandle;
@@ -305,7 +315,7 @@ impl TransitionAndReturn<Context, SysStateGet> for State {
     fn transition_and_return(
         mut self,
         context: &mut Context,
-        SysStateGet(key, options): SysStateGet,
+        SysStateGet(key, options, lazy): SysStateGet,
     ) -> Result<(Self, Self::Output), Error> {
         let completion_id = context.journal.next_completion_notification_id();
 
@@ -320,6 +330,7 @@ impl TransitionAndReturn<Context, SysStateGet> for State {
 
                 // Let's look into the eager_state
                 let result = match eager_state.get(&key) {
+                    _ if lazy => None,
                     EagerGetState::Unknown => None,
                     EagerGetState::Empty => Some((
                         get_eager_state_command_message::Result::Void(Void::default()),

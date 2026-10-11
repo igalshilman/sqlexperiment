@@ -76,11 +76,25 @@ impl Future for VmAsyncResultPollFuture {
                         Poll::Ready(t) => t,
                         Poll::Pending => {
                             // Still need to wait for input
+                            if !inner_lock
+                                .input_waiters
+                                .iter()
+                                .any(|waker| waker.will_wake(cx.waker()))
+                            {
+                                inner_lock.input_waiters.push(cx.waker().clone());
+                            }
                             drop(inner_lock);
-                            self.state = Some(AsyncResultPollState::WaitingInput { ctx, handle });
+                            // When woken, check progress first: another future may
+                            // have read the input that completes this handle.
+                            self.state = Some(AsyncResultPollState::PollProgress { ctx, handle });
                             return Poll::Pending;
                         }
                     };
+
+                    // The input may complete another future's handle.
+                    for waker in inner_lock.input_waiters.drain(..) {
+                        waker.wake();
+                    }
 
                     // Pass read result to VM
                     match read_result {

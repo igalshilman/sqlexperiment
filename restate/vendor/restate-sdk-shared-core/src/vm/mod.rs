@@ -17,9 +17,9 @@ use crate::vm::run_state::RunState;
 use crate::vm::transitions::*;
 use crate::{
     AttachInvocationTarget, AwaitResponse, AwakeableHandle, CallHandle, CommandRelationship, Error,
-    Header, ImplicitCancellationOption, Input, NonDeterministicChecksOption, NonEmptyValue,
-    NotificationHandle, PayloadOptions, ResponseHead, RetryPolicy, RunExitResult, RunHandle,
-    SendHandle, Target, TerminalFailure, UnresolvedFuture, VMOptions, VMResult, Value,
+    Header, ImplicitCancellationOption, Input, JournalReplay, NonDeterministicChecksOption,
+    NonEmptyValue, NotificationHandle, PayloadOptions, ResponseHead, RetryPolicy, RunExitResult,
+    RunHandle, SendHandle, Target, TerminalFailure, UnresolvedFuture, VMOptions, VMResult, Value,
     CANCEL_NOTIFICATION_HANDLE,
 };
 use async_results_state::AsyncResultsState;
@@ -90,6 +90,32 @@ impl State {
                 async_results,
                 eager_state,
             },
+            s => s,
+        }
+    }
+
+    /// With journal replay disabled: drop the commands left to replay after the input, and
+    /// start processing as a fresh attempt.
+    fn skip_replay(self, context: &mut Context) -> Self {
+        match self {
+            State::Replaying {
+                mut commands,
+                run_state,
+                async_results,
+                eager_state,
+            } => {
+                let skipped = commands.len() as u32;
+                let entries = context.expect_start_info().entries_to_replay;
+                commands.clear();
+                context.journal.skip_replayed(skipped, entries);
+                State::Replaying {
+                    commands,
+                    run_state,
+                    async_results,
+                    eager_state,
+                }
+                .try_transition_to_processing()
+            }
             s => s,
         }
     }
@@ -281,6 +307,7 @@ impl super::VM for CoreVM {
             NonDeterministicChecksOption::PayloadChecksDisabled
         );
         let awaiting_on_policy = options.awaiting_on_policy;
+        let journal_replay = options.journal_replay;
 
         Ok(Self {
             options,
@@ -293,6 +320,7 @@ impl super::VM for CoreVM {
                 non_deterministic_checks_ignore_payload_equality,
                 negotiated_protocol_version: version,
                 awaiting_on_policy,
+                journal_replay,
             },
             last_transition: Ok(State::WaitingStart),
             tracked_invocation_ids: vec![],
@@ -603,7 +631,16 @@ impl super::VM for CoreVM {
         options: PayloadOptions,
     ) -> Result<NotificationHandle, Error> {
         invocation_debug_logs!(self, "Executing 'Get state {key}'");
-        self.do_transition(SysStateGet(key, options))
+        self.do_transition(SysStateGet(key, options, false))
+    }
+
+    fn sys_state_get_lazy(&mut self, key: String) -> Result<NotificationHandle, Error> {
+        invocation_debug_logs!(self, "Executing 'Get lazy state {key}'");
+        self.do_transition(SysStateGet(key, PayloadOptions::default(), true))
+    }
+
+    fn journal_replay(&self) -> JournalReplay {
+        self.options.journal_replay
     }
 
     #[instrument(
@@ -939,6 +976,14 @@ impl super::VM for CoreVM {
     )]
     fn sys_awakeable(&mut self) -> VMResult<AwakeableHandle> {
         invocation_debug_logs!(self, "Executing 'Create awakeable'");
+        if self.options.journal_replay == JournalReplay::Disabled {
+            // Signal ids of skipped attempts are unknown, so a new one could collide.
+            self.do_transition(HitError(Error::new(
+                errors::codes::UNSUPPORTED_FEATURE,
+                "awakeables need journal replay",
+            )))?;
+            unreachable!();
+        }
 
         let signal_id = self.context.journal.next_signal_notification_id();
 

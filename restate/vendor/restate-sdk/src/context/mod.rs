@@ -165,6 +165,12 @@ pub struct ObjectContext<'ctx> {
 }
 
 impl ObjectContext<'_> {
+    /// The internal context, for libraries that keep a handle on the object's state beyond a
+    /// borrow of this one.
+    pub fn internal(&self) -> &ContextInternal {
+        self.inner
+    }
+
     /// Get invocation id.
     pub fn invocation_id(&self) -> &str {
         &self.invocation_id

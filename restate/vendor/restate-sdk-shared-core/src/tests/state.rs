@@ -1376,3 +1376,145 @@ mod state_keys {
         assert_eq!(output.next(), None);
     }
 }
+
+mod journal_replay_disabled {
+    use super::*;
+    use crate::tests::{input_entry_message, suspended_waiting_completion};
+    use crate::{JournalReplay, VMOptions};
+
+    fn options() -> VMOptions {
+        VMOptions {
+            journal_replay: JournalReplay::Disabled,
+            ..Default::default()
+        }
+    }
+
+    /// A retry reads current state anew instead of the recorded result, with a completion
+    /// id after any an earlier attempt can have used.
+    #[test]
+    fn retry_skips_the_journal() {
+        let mut output = VMTestCase::with_vm_options(options())
+            .input(StartMessage {
+                id: Bytes::from_static(b"abc"),
+                debug_id: "abc".to_owned(),
+                known_entries: 4,
+                partial_state: true,
+                ..Default::default()
+            })
+            .input(input_entry_message(b"Till"))
+            .input(SetStateCommandMessage {
+                key: Bytes::from_static(b"OTHER"),
+                value: Some(Bytes::from_static(b"x").into()),
+                ..Default::default()
+            })
+            .input(GetLazyStateCommandMessage {
+                key: Bytes::from_static(b"STATE"),
+                result_completion_id: 1,
+                ..Default::default()
+            })
+            .input(GetLazyStateCompletionNotificationMessage {
+                completion_id: 1,
+                result: Some(
+                    get_lazy_state_completion_notification_message::Result::Value(
+                        Bytes::from_static(b"Francesco").into(),
+                    ),
+                ),
+            })
+            .run(get_state_handler);
+
+        assert_eq!(
+            output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+            GetLazyStateCommandMessage {
+                key: Bytes::from_static(b"STATE"),
+                result_completion_id: 9,
+                ..Default::default()
+            }
+        );
+        assert_that!(
+            output.next_decoded::<SuspensionMessage>().unwrap(),
+            suspended_waiting_completion(9)
+        );
+        assert_eq!(output.next(), None);
+    }
+
+    /// A first attempt has nothing to skip.
+    #[test]
+    fn first_attempt_is_unchanged() {
+        let mut output = VMTestCase::with_vm_options(options())
+            .input(StartMessage {
+                id: Bytes::from_static(b"abc"),
+                debug_id: "abc".to_owned(),
+                known_entries: 1,
+                partial_state: true,
+                ..Default::default()
+            })
+            .input(input_entry_message(b"Till"))
+            .run(get_state_handler);
+
+        assert_eq!(
+            output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+            GetLazyStateCommandMessage {
+                key: Bytes::from_static(b"STATE"),
+                result_completion_id: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// A forced lazy get asks the runtime even for a key set in this attempt.
+    #[test]
+    fn lazy_get_ignores_eager_state() {
+        let mut output = VMTestCase::with_vm_options(options())
+            .input(StartMessage {
+                id: Bytes::from_static(b"abc"),
+                debug_id: "abc".to_owned(),
+                known_entries: 1,
+                partial_state: false,
+                ..Default::default()
+            })
+            .input(input_entry_message(b"Till"))
+            .run(|vm| {
+                vm.sys_input().unwrap();
+                vm.sys_state_set(
+                    "STATE".to_owned(),
+                    Bytes::from_static(b"x"),
+                    PayloadOptions::default(),
+                )
+                .unwrap();
+                vm.sys_state_get_lazy("STATE".to_owned()).unwrap();
+            });
+
+        assert_eq!(
+            output.next_decoded::<SetStateCommandMessage>().unwrap(),
+            SetStateCommandMessage {
+                key: Bytes::from_static(b"STATE"),
+                value: Some(Bytes::from_static(b"x").into()),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+            GetLazyStateCommandMessage {
+                key: Bytes::from_static(b"STATE"),
+                result_completion_id: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn awakeables_are_refused() {
+        let mut vm = VMTestCase::with_vm_options(options())
+            .input(StartMessage {
+                id: Bytes::from_static(b"abc"),
+                debug_id: "abc".to_owned(),
+                known_entries: 1,
+                ..Default::default()
+            })
+            .input(input_entry_message(b"Till"))
+            .vm;
+        vm.notify_input_closed();
+        vm.sys_input().unwrap();
+        assert!(vm.sys_awakeable().is_err());
+    }
+}
