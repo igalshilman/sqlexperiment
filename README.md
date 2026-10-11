@@ -127,6 +127,8 @@ the owner cache.
 - [Benchmarks](benches/README.md)
 - [Restate virtual objects without a journal](restate/README.md): an
   experiment embedding this crate in the Restate Rust SDK, with a patched SDK
+- [Node.js addon](node/README.md): the same over a key/value store implemented
+  in JavaScript, for the Restate TypeScript SDK
 
 ## Build and test
 
