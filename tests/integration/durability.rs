@@ -1,7 +1,9 @@
 //! `Durability::Commit`: every SQL commit is durable when its statement returns.
 use sqlite_kv::{
     Durability, NamespaceCache, Result, Session, StorageOptions,
-    simulation::{Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, Operation, fresh_namespace},
+    simulation::{
+        Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, MonitorKv, Operation, fresh_namespace,
+    },
 };
 use std::sync::Arc;
 
@@ -186,7 +188,10 @@ fn every_acknowledged_commit_survives_any_single_failure() -> Result<()> {
 /// Returns whether the failpoint was reached.
 async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize) -> Result<bool> {
     let cache = cached.then(fresh_namespace);
-    let store = Arc::new(FaultKv::new(MemoryKv::default(), nth as u64));
+    let store = Arc::new(MonitorKv::new(FaultKv::new(
+        MemoryKv::default(),
+        nth as u64,
+    )));
     let mut db = Session::open_with_options(store.clone(), options(cache.clone())).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, body TEXT)")
         .await?;
@@ -222,7 +227,7 @@ async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize
     let reached = store.events().iter().any(|event| event.faulted);
     drop(db);
     store.disarm();
-    store.inner.crash(&[]);
+    store.inner.inner.crash(&[]);
 
     // Reopen through the same owner cache, as a restarted handler would.
     let mut db = Session::open_with_options(store.clone(), options(cache)).await?;
@@ -238,8 +243,13 @@ async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize
     // The namespace stays writable.
     db.execute("INSERT INTO t VALUES(1000, 0, 'y')").await?;
     drop(db);
-    let mut db = Session::open_with_options(store, options(None)).await?;
+    let mut db = Session::open_with_options(store.clone(), options(None)).await?;
     assert_eq!(count(&mut db).await?, survived + 1);
+    assert_eq!(
+        store.violations(),
+        Vec::<String>::new(),
+        "{effect:?} {operation:?} #{nth}"
+    );
     Ok(reached)
 }
 

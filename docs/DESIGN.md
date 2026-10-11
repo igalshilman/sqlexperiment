@@ -341,6 +341,8 @@ replay at most a short log. Measurements: [log shipping](../benches/LOG_RESULTS.
   numbers, so a bug cannot overflow arithmetic or size a huge view; there are
   no checksums.
 - **Format.** Only v12, with no migration.
-- **Validation.** Crash, interruption and handover campaigns run against an
-  in-memory simulator; there are no process-kill or power-loss tests. See
-  [REVIEW.md](REVIEW.md).
+- **Validation.** The protocol is specified in TLA+ and model-checked within
+  small bounds, and a monitor checks every request of the simulator's crash,
+  interruption and handover campaigns against it
+  ([spec/README.md](../spec/README.md)). There are no process-kill or
+  power-loss tests, and no real backend yet. See [REVIEW.md](REVIEW.md).

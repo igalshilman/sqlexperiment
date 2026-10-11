@@ -3,9 +3,11 @@
 mod fault;
 mod latency;
 mod memory;
+mod monitor;
 pub use fault::{Effect, Event, Failpoint, FaultKv, Operation};
 pub use latency::LatencyKv;
 pub use memory::{MemoryKv, Stats, Traffic, object_kind};
+pub use monitor::MonitorKv;
 
 use crate::{NamespaceCache, PageCache, PageCacheConfig};
 use std::sync::{

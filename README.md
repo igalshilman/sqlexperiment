@@ -122,6 +122,8 @@ the owner cache.
   and costs
 - [Storage format](docs/FORMAT.md): exact encodings
 - [Review and validation](docs/REVIEW.md): what was tested and how
+- [Protocol specification](spec/README.md): the protocol in TLA+, model-checked
+  with TLC, and the monitor that checks the code against it
 - [Benchmarks](benches/README.md)
 
 ## Build and test

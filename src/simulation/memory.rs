@@ -128,6 +128,15 @@ impl MemoryKv {
         self.inner.lock().unwrap().stats = Stats::default();
     }
     /// Diagnostic view of the simulator; not part of the raw K/V interface.
+    /// The durable values, for seeding a [`super::MonitorKv`].
+    pub fn durable_values(&self) -> Vec<(String, Bytes)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .durable
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
     pub fn keys(&self) -> BTreeSet<String> {
         self.inner.lock().unwrap().values.keys().cloned().collect()
     }
