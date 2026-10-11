@@ -6,9 +6,7 @@ publish = false
 description = "Node.js bindings: SQL over a key/value store the host implements in JavaScript"
 
 # Its own workspace, like restate/: the addon stays out of the main crate's build.
-# restate/setup.sh clones the patched SDK under restate/.build.
 [workspace]
-exclude = ["restate/.build"]
 
 [lib]
 crate-type = ["cdylib"]

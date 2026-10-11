@@ -216,3 +216,30 @@ fn parameters_bind_values_not_text() -> Result<()> {
         Ok(())
     })
 }
+
+#[test]
+fn query_columns_names_the_last_statement_columns() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let mut db = Session::open(store).await?;
+        db.execute("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)")
+            .await?;
+        let (columns, rows) = db
+            .query_columns(
+                "INSERT INTO items VALUES (1, 'one'); SELECT id, value AS v, id * 2 FROM items",
+                None,
+            )
+            .await?;
+        assert_eq!(columns, ["id", "v", "id * 2"]);
+        assert_eq!(rows.len(), 1);
+        let (columns, rows) = db
+            .query_columns(
+                "SELECT value FROM items WHERE id = ?",
+                Some(vec![sqlite_kv::Value::from_i64(1)]),
+            )
+            .await?;
+        assert_eq!(columns, ["value"]);
+        assert_eq!(rows[0][0].to_string(), "one");
+        Ok(())
+    })
+}

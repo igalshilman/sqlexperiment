@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Build the patched Restate TypeScript SDK and this package's dependencies.
+# Build the patched Restate TypeScript SDK (see ../README.md).
 #
 # Clones the SDK and its shared core at the pinned revisions into .build/,
 # applies patches/, builds the core to WebAssembly and inlines it into the SDK,
-# packs the SDK, installs it here, and builds the sqlite-kv addon.
+# and packs the SDK as .build/restatedev-restate-sdk-1.17.3.tgz, which
+# examples/node installs (`make examples-node`).
 #
 # Needs: git, cargo with the wasm32-unknown-unknown target, wasm-bindgen 0.2.121
 # (cargo install wasm-bindgen-cli --version 0.2.121), node and pnpm.
@@ -30,7 +31,9 @@ git -C "$build/sdk-typescript" apply "$here/patches/sdk-typescript.patch"
 
 # The core, as WebAssembly inlined into the SDK.
 bindings=$build/sdk-typescript/sdk-shared-core-wasm-bindings
-(cd "$bindings" && RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable} cargo build --release --target wasm32-unknown-unknown)
+# Its own target directory, whatever CARGO_TARGET_DIR says: the path below reads from it.
+(cd "$bindings" && CARGO_TARGET_DIR="$bindings/target" RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable} \
+  cargo build --release --target wasm32-unknown-unknown)
 wasm-bindgen --target web --out-dir "$bindings/pkg" --out-name sdk_shared_core_wasm_bindings \
   "$bindings/target/wasm32-unknown-unknown/release/sdk_shared_core_wasm_bindings.wasm"
 node "$here/inline-wasm.mjs" "$bindings/pkg" sdk_shared_core_wasm_bindings \
@@ -42,9 +45,3 @@ node "$here/inline-wasm.mjs" "$bindings/pkg" sdk_shared_core_wasm_bindings \
 (cd "$build/sdk-typescript/packages/libs/restate-sdk" &&
   npm pkg set 'peerDependencies.sqlite-kv="*"' 'peerDependenciesMeta.sqlite-kv.optional=true' --json &&
   pnpm pack --pack-destination "$build")
-
-# This package, and the addon.
-(cd "$here/.." && npm run build)
-# A fresh install, since the SDK tarball keeps its name across builds.
-rm -rf node_modules/@restatedev/restate-sdk package-lock.json
-npm install

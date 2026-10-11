@@ -51,6 +51,11 @@ class Database {
     return this.#native.query(sql, params);
   }
 
+  /** Run SQL and return its rows with the column names of their statement. */
+  queryColumns(sql, params) {
+    return this.#native.queryColumns(sql, params);
+  }
+
   /** Run SQL, discarding rows. */
   async execute(sql, params) {
     await this.#native.query(sql, params);

@@ -7,7 +7,6 @@ description = "SQL in Restate virtual objects, over lazy state and without journ
 
 # Its own workspace: the patched SDK stays out of the main crate's build.
 [workspace]
-exclude = ["vendor"]
 
 [dependencies]
 sqlite-kv = { path = ".." }
@@ -15,14 +14,9 @@ restate-sdk = "=0.12.1"
 bytes = "1.11"
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[dev-dependencies]
-ureq = { version = "2", default-features = false }
-
+# The vendored, patched SDK: see vendor/README.md.
 [patch.crates-io]
-restate-sdk = { path = "vendor/restate-sdk" }
-restate-sdk-shared-core = { path = "vendor/restate-sdk-shared-core" }
-restate-sdk-macros = { path = "vendor/restate-sdk-macros" }
+restate-sdk = { path = "../vendor/rust/restate-sdk" }
+restate-sdk-shared-core = { path = "../vendor/rust/restate-sdk-shared-core" }
+restate-sdk-macros = { path = "../vendor/rust/restate-sdk-macros" }

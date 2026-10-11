@@ -39,6 +39,7 @@ required-features = ["simulation"]
 
 [[example]]
 name = "lookup"
+path = "examples/rust/lookup.rs"
 required-features = ["simulation"]
 
 [[bench]]

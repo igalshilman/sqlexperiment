@@ -37,7 +37,7 @@ page cache shared by the process's objects is built in (256 MiB of memory,
 1 GiB of disk in a temporary file, or the file `SQLITE_KV_CACHE_FILE` names).
 Creating tables is the handlers' business, as the ledger's `init` does.
 
-[`src/bin/ledger.rs`](src/bin/ledger.rs) is a complete object: accounts and
+[`examples/rust/ledger`](../examples/rust/ledger/src/main.rs) is a complete object: accounts and
 transfers, each transfer recorded with its id in the same SQL transaction as
 the balances it moves.
 
@@ -99,36 +99,12 @@ checkpoints, and are not supported.
 
 ## SDK changes
 
-The SDK is vendored (`vendor/`: restate-sdk 0.12.1, restate-sdk-shared-core
-7.0.3 and restate-sdk-macros 0.12.1) and patched; each was first committed
-unmodified, so
-`git diff` shows the patches. They build together through this crate's
-`[patch.crates-io]`.
-
-| Change | Where |
-|---|---|
-| `JournalReplay::Disabled`: after the input, skip the recorded commands; start completion ids at `1 + 2 × known entries` (a command takes at most two, so ids of earlier attempts are never reused); refuse awakeables, whose signal ids cannot be made fresh | shared-core `VMOptions`, `SysInput`, `Journal::skip_replayed` |
-| `ServiceOptions::journal_replay(bool)`, recorded in the service metadata and applied to each invocation's VM | SDK `endpoint/builder.rs`, `endpoint/mod.rs` |
-| `ObjectContext::internal()`, so a store can hold the context beyond a borrow | SDK `context/mod.rs` |
-| Handlers may take a custom context whose type name ends in `ObjectContext` (or another context's name), built like the others from the internal context and input metadata | macros `struct_ast.rs` |
-| Fix: futures awaited concurrently in one task lost wake-ups and hung | SDK `endpoint/futures/async_result_poll.rs` |
-| Fix: set `TCP_NODELAY` on accepted connections | SDK `http_server.rs` |
-
-The two fixes are bugs in the SDK as published, not specific to this
-experiment.
-
-**Concurrent awaits.** The input stream wakes only the last future to poll it. Once
-another future had read the input that completed a handle, the future waiting
-on that handle was never woken, and then went back to reading input rather
-than checking for its result. Session I/O awaits several state reads at once
-(prefetch and readahead), so invocations hung until Restate's
-60-second inactivity timeout. Now every future waiting for input is woken
-when input arrives, and a woken future checks for its result first.
-
-**`TCP_NODELAY`.** `ctx.run` sends its command and then its result as two
-small writes. With Nagle's algorithm the second waits for the server's delayed
-acknowledgement: every `ctx.run` took about 42 ms longer. A cached transfer
-took 62 ms with the barrier, and takes 15.7 ms with the fix.
+The SDK is vendored and patched: [`vendor/rust`](../vendor/rust), described
+in [`vendor/README.md`](../vendor/README.md). This crate builds against it
+through `[patch.crates-io]`. The changes: the `journal_replay` option and
+`JournalReplay::Disabled` in the shared core, `ObjectContext::internal()`,
+custom context types in the macros, and two fixes of bugs in the SDK as
+published (lost wake-ups with concurrent awaits, and `TCP_NODELAY`).
 
 ## Validation
 
@@ -140,7 +116,7 @@ took 62 ms with the barrier, and takes 15.7 ms with the fix.
   tail while the cache lives on. Declared ordered, every case stays consistent,
   whether the confirmation fails or the session is dropped first; a store that
   hides its ordering loses a checkpoint and corrupts the database.
-- **Crash campaign** ([`tests/crash.rs`](tests/crash.rs)) against a real
+- **Crash campaign** ([`examples/rust/ledger/tests/crash.rs`](../examples/rust/ledger/tests/crash.rs)) against a real
   `restate-server` 1.7.13 on one node. Two objects, six clients and 120
   transfers; one in three is sent twice, and every call is resent until
   answered. The ledger process aborts before or after random state requests
@@ -207,11 +183,12 @@ off as reads get more expensive and databases larger.
 
 ```sh
 npm install --prefix /tmp/restate @restatedev/restate-server@1.7.13   # or any restate-server binary
-cd restate
 RESTATE_SERVER=/tmp/restate/node_modules/@restatedev/restate-server-linux-x64/bin/restate-server \
-    cargo test --test crash -- --nocapture    # ABORT_PER_MILLE=40 for more faults
+    make crash-test-rust    # ABORT_PER_MILLE=40 for more faults
 ```
 
-Without `RESTATE_SERVER` the campaign is skipped. To run the ledger by hand,
-start `restate-server`, run `target/release/ledger` (port 9080, or `PORT`), and
-register `http://127.0.0.1:9080` with the admin API.
+`make crash-test-rust` runs the campaign against the Rust ledger, then against
+the Node.js one. Without `RESTATE_SERVER` the campaign is skipped. To run the
+ledger by hand, start `restate-server`, run `target/release/ledger` (`make
+examples-rust`; port 9080, or `PORT`), and register `http://127.0.0.1:9080`
+with the admin API.

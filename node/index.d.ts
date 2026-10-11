@@ -16,6 +16,7 @@ export interface Store {
 
 export declare class Database {
   query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
+  queryColumns(sql: string, params?: SqlValue[]): Promise<{ columns: string[]; rows: SqlValue[][] }>;
   execute(sql: string, params?: SqlValue[]): Promise<void>;
   transaction<T>(body: (db: Database) => Promise<T>): Promise<T>;
   isUsable(): boolean;
