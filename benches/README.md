@@ -29,7 +29,7 @@ filtered by each custom entry point. The page compression target also writes
 | `amplification` | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes | [AMPLIFICATION_RESULTS.md](AMPLIFICATION_RESULTS.md) |
 | `page_compression` | Paired Raw/LZ4 on repetitive, JSON and random payloads; isolated codec timing | [COMPRESSION_RESULTS.md](COMPRESSION_RESULTS.md) |
 | `small_databases` | Tiny databases, index counts, save grouping and a larger control | `results/small_databases.csv` |
-| `cache_cpu` | Encoded versus decoded owner cache by size: misses, round trips, allocations and CPU time | [CACHE_RESULTS.md](CACHE_RESULTS.md) |
+| `cache_cpu` | Process-wide memory and disk cache by memory size, encoded versus decoded: misses, round trips, allocations and CPU time | [CACHE_RESULTS.md](CACHE_RESULTS.md) |
 | `log_shipping` | The WAL-native store by checkpoint policy, backend strength and owner cache, in critical-path round trips, against the recorded v11 design (`results/log-shipping-v11.csv`) | [LOG_RESULTS.md](LOG_RESULTS.md) |
 
 All SQL result checks remain active in release builds. Successful writes are

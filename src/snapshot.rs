@@ -20,7 +20,7 @@
 //!   Overwriting in place is safe: until `meta` moves past those transactions,
 //!   replay applies their images over whatever is there. Holes are deletes.
 //! - **Meta:** `meta.log_start` may only pass a transaction once its pages are
-//!   acknowledged. With a [`PageCache`], the owner remembers acknowledged
+//!   acknowledged. With a [`crate::PageCache`], the owner remembers acknowledged
 //!   checkpoints and records them in the next save's round trip. Without one, a
 //!   checkpointing save writes `meta` in a second round trip.
 //! - **Garbage:** segments in `[deleted_below, log_start)` of the durable `meta`
@@ -40,7 +40,7 @@
 //! re-puts the commit tail and `meta` before exposing them, unless this owner
 //! wrote them and had them acknowledged.
 use crate::{
-    cache::{PageCache, Reuse},
+    cache::{NamespaceCache, Reuse},
     format::{META, log_key, page_key},
     kv::KvStore,
     log::{self, Images, Log, Meta},
@@ -65,8 +65,8 @@ pub const CHECKPOINT_LOG_BYTES: usize = 256 * 1024;
 pub struct StorageOptions {
     /// Encoding of newly written pages; stored tags decide how pages are read.
     pub page_compression: PageCompression,
-    /// Owner-process cache; it must be dedicated to this namespace.
-    pub cache: Option<PageCache>,
+    /// This namespace's handle on the process-wide [`crate::PageCache`].
+    pub cache: Option<NamespaceCache>,
     /// Transactions kept in the log before saves start checkpointing the oldest.
     pub checkpoint_after: u32,
 }
@@ -157,7 +157,7 @@ impl Snapshot {
     ) -> io::Result<Self> {
         let cache = options.cache.as_ref();
         let batch = log::batch(u64::from(options.checkpoint_after));
-        let expected = cache.and_then(PageCache::expected_start);
+        let expected = cache.and_then(NamespaceCache::expected_start);
         let (meta_bytes, prefetched) = match expected {
             Some(start) => {
                 let (meta, probe) =
@@ -249,8 +249,11 @@ impl Snapshot {
         let page = if let Some(image) = self.log.images.get(&index) {
             let Some(image) = image else { return Ok(None) };
             page_codec::decode_bytes(image)?
-        } else if let Some(value) = cache.and_then(|cache| cache.get(index)) {
-            match cache.is_some_and(PageCache::is_decoded) {
+        } else if let Some((cache, value)) = match cache {
+            Some(cache) => cache.get(index).await.map(|value| (cache, value)),
+            None => None,
+        } {
+            match cache.is_decoded() {
                 true => value,
                 false => page_codec::decode_bytes(&value)?,
             }
@@ -432,13 +435,7 @@ impl Snapshot {
             if let Some(plan) = &plan {
                 for (&index, image) in &plan.images {
                     match image {
-                        Some(image) if cache.is_decoded() => {
-                            match page_codec::decode_bytes(image) {
-                                Ok(page) => cache.insert(index, page),
-                                Err(_) => cache.remove(index),
-                            }
-                        }
-                        Some(image) => cache.insert(index, image.clone()),
+                        Some(image) => cache.replace(index, image.clone()),
                         None => cache.remove(index),
                     }
                 }

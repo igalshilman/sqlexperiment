@@ -49,16 +49,19 @@
 //! [`PageCache`] knows where the log starts. The I/O pump batches adjacent file
 //! reads without crossing write, truncate or sync barriers.
 //!
-//! [`StorageOptions::cache`] can hold a [`PageCache`]: owner-process state shared
-//! by successive sessions of one namespace. It caches checkpointed pages, refreshes
-//! those another writer's checkpoint rewrote (or drops them all when it cannot
-//! tell which), and remembers what this owner has made durable, so a steady-state open and save are each one round trip. A
-//! session that ends cleanly leaves its idle engine there; the next open reuses
-//! it when nothing changed, keeping the parsed schema and engine page cache.
+//! [`StorageOptions::cache`] can hold a [`NamespaceCache`]: one namespace's handle
+//! on the process-wide [`PageCache`], which keeps pages in memory and on a local
+//! disk tier under one budget for every namespace. It refreshes pages another
+//! writer's checkpoint rewrote (or drops them all when it cannot tell which), and
+//! remembers what this owner has made durable, so a steady-state open and save
+//! are each one round trip. A session that ends cleanly leaves its idle engine
+//! there; the next open reuses it when nothing changed, keeping the parsed
+//! schema and engine page cache. The disk tier's I/O runs on tokio.
 //!
 //! The caller's task drives nonblocking engine open/connect state machines and
 //! statement steps, awaits queued KV work, then resumes the engine. Completions run
-//! on that task. No worker thread, command channel or background task is created.
+//! on that task. No worker thread, command channel or background task is created,
+//! apart from the disk tier of a [`PageCache`].
 //! Cached queries yield to the executor after 64 steps; an individual engine call
 //! is not preemptible. Queries on a session remain sequential.
 //!
@@ -109,7 +112,7 @@ pub mod page_codec;
 pub mod simulation;
 mod snapshot;
 
-pub use cache::PageCache;
+pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use log::MAX_SEGMENT_BYTES;
 pub use page_codec::PageCompression;
 pub use snapshot::{CHECKPOINT_PAGES, SaveReport, StorageOptions};
@@ -139,7 +142,7 @@ pub struct Session {
     connection: Option<Arc<Connection>>,
     io: Arc<KvIo>,
     poisoned: bool,
-    cache: Option<PageCache>,
+    cache: Option<NamespaceCache>,
     /// The engine moved into the owner cache; nothing is left to shut down.
     parked: bool,
     /// The engine continued from a previous session.

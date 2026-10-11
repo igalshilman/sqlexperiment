@@ -1,8 +1,12 @@
 use super::*;
 use crate::{
+    PageCacheConfig,
     format::{LOG_PREFIX, PAGE_PREFIX},
     io::BLOCK_SIZE,
-    simulation::{Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, Operation},
+    simulation::{
+        Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, Operation, cache_config, fresh_namespace,
+        open_cache,
+    },
 };
 
 /// First eight bytes of a page as its number, for readable assertions.
@@ -14,7 +18,7 @@ fn page(n: u64) -> Page {
     p[..8].copy_from_slice(&n.to_le_bytes());
     p.into()
 }
-fn options(checkpoint_after: u32, cache: Option<&PageCache>) -> StorageOptions {
+fn options(checkpoint_after: u32, cache: Option<&NamespaceCache>) -> StorageOptions {
     StorageOptions {
         checkpoint_after,
         cache: cache.cloned(),
@@ -152,7 +156,7 @@ fn checkpoints_follow_the_log_without_a_cache() -> io::Result<()> {
 fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
-        let cache = PageCache::new(1 << 20);
+        let cache = fresh_namespace();
         let opts = options(2, Some(&cache));
         let mut model = Model::default();
         for round in 0..16 {
@@ -171,9 +175,8 @@ fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
             model.apply(&changes, size);
             assert_collected(&store.inner).await?;
         }
-        assert!(cache.bytes() > 0);
         // A restarted owner starts from the durable meta and replays further.
-        let restarted = options(2, Some(&PageCache::new(1 << 20)));
+        let restarted = options(2, Some(&fresh_namespace()));
         assert!(model.check(&open(&store, &restarted).await?).await?);
         assert!(model.check(&open(&store, &options(2, None)).await?).await?);
         Ok(())
@@ -184,7 +187,7 @@ fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
 fn another_writer_is_refreshed_or_overridden_in_the_cache() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
-        let cache = PageCache::new(1 << 20);
+        let cache = fresh_namespace();
         let owner = options(0, Some(&cache));
         let other = options(0, None);
         let mut model = Model::default();
@@ -198,7 +201,6 @@ fn another_writer_is_refreshed_or_overridden_in_the_cache() -> io::Result<()> {
         }
         let snapshot = open(&store, &owner).await?;
         assert!(model.check(&snapshot).await?);
-        assert!(cache.bytes() > 0, "pages are cached");
 
         // Another writer checkpoints: meta changes and the cache is refreshed.
         for round in 10..13 {
@@ -336,7 +338,7 @@ fn large_transactions_span_segments_and_failed_ones_leave_only_debris() -> io::R
 /// Build a log after `saves` saves with `checkpoint_after = 1`. After 3 saves
 /// the next save only appends; after 4 it also checkpoints, collects garbage and
 /// writes meta (a claim, with a cache).
-async fn prepared(cache: Option<&PageCache>, saves: u64) -> io::Result<(MemoryKv, Model)> {
+async fn prepared(cache: Option<&NamespaceCache>, saves: u64) -> io::Result<(MemoryKv, Model)> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
     let opts = options(1, cache);
@@ -373,7 +375,7 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
                 'ordinal: for nth in 1.. {
                     for effect in [Effect::None, Effect::Visible, Effect::After] {
                         for crash in [false, true] {
-                            let cache = cached.then(|| PageCache::new(1 << 20));
+                            let cache = cached.then(fresh_namespace);
                             let (base, old) = prepared(cache.as_ref(), saves).await?;
                             let store = Arc::new(FaultKv::new(base, 0));
                             let opts = StorageOptions {
@@ -408,7 +410,7 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
                             let mut opts = opts.clone();
                             if crash {
                                 store.inner.crash(&[]);
-                                opts.cache = cached.then(|| PageCache::new(1 << 20));
+                                opts.cache = cached.then(fresh_namespace);
                             }
                             let reopened = open(&store, &opts).await?;
                             let committed = new.check(&reopened).await?;
@@ -422,7 +424,7 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
                             model.apply(&changes, size);
                             // The follow-up commit survives a crash.
                             store.inner.crash(&[]);
-                            opts.cache = cached.then(|| PageCache::new(1 << 20));
+                            opts.cache = cached.then(fresh_namespace);
                             assert!(model.check(&open(&store, &opts).await?).await?);
                             assert_collected(&store.inner).await?;
                         }
@@ -451,7 +453,11 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
             (seed >> 33) % n
         };
         let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
-        let mut caches = [PageCache::new(1 << 20), PageCache::decoded(8 * 4096)];
+        let decoded = open_cache(PageCacheConfig {
+            decoded: true,
+            ..cache_config(8 * 4096, 64 << 20)
+        });
+        let mut caches = [fresh_namespace(), decoded.namespace("decoded")];
         let mut model = Model::default();
         let (mut kept, mut dropped, mut round) = (0, 0, 0);
         for tenure in 0..400 {
@@ -486,7 +492,7 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
                     store.inner.crash(&[]);
                 }
                 if random(4) == 0 {
-                    caches[owner] = PageCache::new(1 << 20);
+                    caches[owner] = fresh_namespace();
                 }
                 let opts = options(1, Some(&caches[owner]));
                 let reopened = open(&store, &opts).await?;
@@ -501,14 +507,12 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
             }
             // How the other owner's cache fares when it takes over.
             let other = &caches[1 - owner];
-            let before = other.bytes();
+            let before = other.generation();
             drop(open(&store, &options(1, Some(other))).await?);
-            if before > 0 {
-                if other.bytes() > 0 {
-                    kept += 1
-                } else {
-                    dropped += 1
-                }
+            if other.generation() == before {
+                kept += 1
+            } else {
+                dropped += 1
             }
         }
         println!("handovers: cache kept {kept}, dropped {dropped}");

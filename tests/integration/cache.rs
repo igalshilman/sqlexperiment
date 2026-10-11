@@ -1,11 +1,11 @@
 use sqlite_kv::{
-    PageCache, Result, Session, StorageOptions,
+    NamespaceCache, Result, Session, StorageOptions,
     kv::KvStore,
-    simulation::{LatencyKv, MemoryKv},
+    simulation::{LatencyKv, MemoryKv, fresh_namespace},
 };
 use std::sync::Arc;
 
-fn cached(cache: &PageCache) -> StorageOptions {
+fn cached(cache: &NamespaceCache) -> StorageOptions {
     StorageOptions {
         cache: Some(cache.clone()),
         ..StorageOptions::default()
@@ -32,9 +32,8 @@ async fn payload_sum(store: Arc<dyn KvStore>, options: StorageOptions) -> Result
 fn an_owner_cache_serves_reopened_sessions_in_one_round_trip() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
-        let cache = PageCache::new(64 << 20);
+        let cache = fresh_namespace();
         create(store.clone(), cached(&cache)).await?;
-        assert!(cache.bytes() > 0, "a checkpoint writes through the cache");
         let expected = 400 * 900 + 400 * 401 / 2;
         // The first session confirms nothing it wrote; it reads the full table.
         store.reset();
@@ -60,7 +59,7 @@ fn an_owner_cache_serves_reopened_sessions_in_one_round_trip() -> Result<()> {
 fn other_writers_never_leave_the_cache_stale() -> Result<()> {
     futures::executor::block_on(async {
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
-        let cache = PageCache::new(64 << 20);
+        let cache = fresh_namespace();
         create(store.clone(), cached(&cache)).await?;
         let mut expected = 400 * 900 + 400 * 401 / 2;
         assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
@@ -82,7 +81,7 @@ fn other_writers_never_leave_the_cache_stale() -> Result<()> {
     })
 }
 
-fn owner(cache: &PageCache) -> StorageOptions {
+fn owner(cache: &NamespaceCache) -> StorageOptions {
     StorageOptions {
         cache: Some(cache.clone()),
         ..StorageOptions::default()
@@ -101,7 +100,7 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
     use sqlite_kv::simulation::{Effect, Failpoint, FaultKv, Operation};
     futures::executor::block_on(async {
         let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
-        let cache = PageCache::new(1 << 20);
+        let cache = fresh_namespace();
         let mut db = Session::open_with_options(store.clone(), owner(&cache)).await?;
         assert!(!db.reused_engine());
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
@@ -182,9 +181,9 @@ fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
     futures::executor::block_on(async {
         for (saves, warm) in [(6, true), (12, false)] {
             let store = Arc::new(LatencyKv::new(MemoryKv::default()));
-            let cache = PageCache::new(64 << 20);
+            let cache = fresh_namespace();
             create(store.clone(), cached(&cache)).await?;
-            let other = PageCache::new(64 << 20);
+            let other = fresh_namespace();
             for n in 0..saves {
                 let mut db = Session::open_with_options(store.clone(), cached(&other)).await?;
                 db.execute(&format!(
@@ -200,6 +199,95 @@ fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
             let page_gets = store.inner.stats().kind("page").gets;
             assert_eq!(page_gets == 0, warm, "{saves} saves: {page_gets} page gets");
         }
+        Ok(())
+    })
+}
+
+/// Namespaces with byte-identical `meta` share one process cache without ever
+/// reading each other's pages, even with sessions running concurrently.
+#[test]
+fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
+    futures::executor::block_on(async {
+        let cache = sqlite_kv::simulation::shared_cache();
+        let stores: Vec<Arc<dyn KvStore>> = (0..2)
+            .map(|_| Arc::new(MemoryKv::default()) as Arc<dyn KvStore>)
+            .collect();
+        let options = |n: usize| StorageOptions {
+            cache: Some(cache.namespace(&format!("shared-{n}"))),
+            checkpoint_after: 0,
+            ..StorageOptions::default()
+        };
+        // The same history shape, so the same meta, with different values.
+        for (n, store) in stores.iter().enumerate() {
+            let mut db = Session::open_with_options(store.clone(), options(n)).await?;
+            db.execute("CREATE TABLE t(v TEXT)").await?;
+            db.save().await?;
+            let mut db = Session::open_with_options(store.clone(), options(n)).await?;
+            db.execute(&format!("INSERT INTO t VALUES ('from {n}')"))
+                .await?;
+            db.save().await?;
+        }
+        let read = |n: usize| {
+            let store = stores[n].clone();
+            async move {
+                let mut db = Session::open_with_options(store, options(n)).await?;
+                let rows = db.query("SELECT v FROM t").await?;
+                Result::Ok(rows[0][0].to_string())
+            }
+        };
+        for _ in 0..3 {
+            let (a, b) = futures::try_join!(read(0), read(1))?;
+            assert_eq!((a.as_str(), b.as_str()), ("from 0", "from 1"));
+        }
+        Ok(())
+    })
+}
+
+/// Pages evicted from memory are served from disk.
+#[test]
+fn evicted_pages_are_read_from_disk() -> Result<()> {
+    use sqlite_kv::simulation::{cache_config, open_cache};
+    futures::executor::block_on(async {
+        let cache = open_cache(cache_config(64 << 10, 64 << 20));
+        let store = Arc::new(LatencyKv::new(MemoryKv::default()));
+        let namespace = cache.namespace("spilled");
+        create(store.clone(), cached(&namespace)).await?;
+        assert!(cache.memory_bytes() <= 64 << 10);
+        store.inner.reset_stats();
+        let expected = 400 * 900 + 400 * 401 / 2;
+        assert_eq!(
+            payload_sum(store.clone(), cached(&namespace)).await?,
+            expected
+        );
+        assert_eq!(store.inner.stats().kind("page").gets, 0);
+        Ok(())
+    })
+}
+
+/// Parked engines are bounded across namespaces.
+#[test]
+fn parked_engines_are_bounded() -> Result<()> {
+    use sqlite_kv::{
+        PageCacheConfig,
+        simulation::{cache_config, open_cache},
+    };
+    futures::executor::block_on(async {
+        let cache = open_cache(PageCacheConfig {
+            engines: 1,
+            ..cache_config(1 << 20, 16 << 20)
+        });
+        let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
+        let other: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
+        let a = || owner(&cache.namespace("a"));
+        drop(Session::open_with_options(store.clone(), a()).await?);
+        assert!(
+            Session::open_with_options(store.clone(), a())
+                .await?
+                .reused_engine()
+        );
+        drop(Session::open_with_options(other, owner(&cache.namespace("b"))).await?);
+        let db = Session::open_with_options(store, a()).await?;
+        assert!(!db.reused_engine(), "evicted by b's engine");
         Ok(())
     })
 }
