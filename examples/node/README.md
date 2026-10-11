@@ -116,8 +116,7 @@ Without journal replay the handler's `ctx` returns plain promises: `ctx.get`,
 combine them with `Promise.all`, `Promise.race` or your own combinators, or
 leave them; a library that takes promises takes these. There is no
 `RestatePromise` (no `map`, `orTimeout` or `RestatePromise.all`): with nothing
-replayed, the order things happen in needs no recording. (The TypeScript types
-still say `RestatePromise`; treat them as `Promise`.)
+replayed, the order things happen in needs no recording.
 
 - **An operation starts when it is made.** Its promise is registered then, and
   driven to completion whether or not anything awaits it: a `ctx.run` closure
@@ -130,6 +129,29 @@ still say `RestatePromise`; treat them as `Promise`.)
   awaited late is not held up by a long sleep made earlier.
 - **A cancellation reaches every pending promise** (each rejects with
   `CancelledError`); what is made after it runs normally.
+
+In TypeScript this context has its own type, `UnjournaledContext`, with
+`UnjournaledObjectContext`, `UnjournaledObjectSharedContext` and the workflow
+ones: their operations return `Promise`s, there is no `awakeable`, and
+`ctx.journalReplay` is `false`. `restate.service`, `restate.object` and
+`restate.workflow` pick it from the options: an unannotated `ctx` gets it
+when they set `journalReplay: false` (`restate.sqlOptions` does), and a
+handler annotated with the other context is a type error, in either
+direction. A handler wrapper (`restate.handlers.object.exclusive` and the
+others) takes it when its own options say `journalReplay: false`.
+
+```ts
+const counter = restate.object({
+  name: "counter",
+  handlers: {
+    add: async (ctx: restate.UnjournaledObjectContext, n: number) => {
+      const [, total] = await Promise.all([ctx.sleep(10), ctx.run(() => n)]);
+      return total;
+    },
+  },
+  options: { ...restate.sqlOptions },
+});
+```
 
 A handler that replays its journal keeps the published SDK's context and
 `RestatePromise`s. [`../concurrency.mjs`](../concurrency.mjs) tests all of
