@@ -15,7 +15,7 @@ SDK_TARBALL := vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 ADDON := node/sqlite_kv.node
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
-	test test-core test-addon test-sdk-ts test-pi lint crash-test concurrency-test clean
+	test test-core test-addon test-sdk-ts test-pi test-langgraph lint crash-test concurrency-test clean
 
 all: core addon examples ## Build everything
 
@@ -42,12 +42,12 @@ examples: examples-rust examples-js ## Every example
 examples-rust: ## The Rust example: the core crate's lookup
 	$(CARGO) build --locked --release --features simulation --example lookup
 
-examples-js: $(ADDON) $(SDK_TARBALL) ## The JavaScript examples (node/, pi/), installed with the patched SDK
+examples-js: $(ADDON) $(SDK_TARBALL) ## The JavaScript examples (node/, pi/, langgraph/), installed with the patched SDK
 	cd examples && rm -rf node_modules/@restatedev/restate-sdk package-lock.json && npm install
 
 # --- Test
 
-test: test-core test-addon test-sdk-ts test-pi ## Every test that needs no Restate server
+test: test-core test-addon test-sdk-ts test-pi test-langgraph ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	$(CARGO) test --locked
@@ -61,6 +61,9 @@ test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests, and its t
 
 test-pi: examples-js ## pi-durable's storage conformance suite on the pi example's storage
 	cd examples && npm run test:pi
+
+test-langgraph: examples-js ## LangGraph's checkpointer conformance suite on the LangGraph example's checkpointer, and the agent through crashes
+	cd examples && npm run test:langgraph
 
 lint: ## Clippy on the core crate
 	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings

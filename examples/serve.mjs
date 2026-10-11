@@ -1,5 +1,5 @@
 // Examples in one endpoint: every one, or the groups named on the command
-// line (ledger, shop, agent), such as `node serve.mjs ledger shop`.
+// line (ledger, shop, agent, langgraph), such as `node serve.mjs ledger shop`.
 import * as restate from '@restatedev/restate-sdk';
 
 const groups = {
@@ -9,6 +9,7 @@ const groups = {
     return [warehouse, orders];
   },
   agent: async () => [(await import('./pi/agent.mjs')).agent],
+  langgraph: async () => [(await import('./langgraph/agent.mjs')).agent],
 };
 const names = process.argv.length > 2 ? process.argv.slice(2) : Object.keys(groups);
 const services = (await Promise.all(names.map((name) => groups[name]()))).flat();

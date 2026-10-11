@@ -21,6 +21,9 @@ One npm package, here, on the patched Restate TypeScript SDK and the
     own database, over idempotent RPC and delayed sends.
 - [`pi/`](pi/README.md): a durable agent on pi-durable, whose storage is the
   object's database, with a fake model for running agents without a key.
+- [`langgraph/`](langgraph/README.md): a LangGraph agent, whose checkpoints
+  are in the object's database, through a checkpointer that passes LangGraph's
+  conformance suite.
 - [`serve.mjs`](serve.mjs): serves them in one endpoint (`npm run serve`).
 - [`faults.mjs`](faults.mjs): fault injection for the crash test.
 - [`test.mjs`](test.mjs): all of them against a real Restate server, through
@@ -30,20 +33,22 @@ One npm package, here, on the patched Restate TypeScript SDK and the
 
 [`test.mjs`](test.mjs) runs every JavaScript example against a real server
 through crashes. The ledger and the shop run in one process, aborting at 1.5%
-of state requests; the agents run in another, aborting at 0.3% (a prompt makes
-some 200 state requests, so one attempt in three crashes). The server is
-killed twice. Meanwhile:
+of state requests; the pi agents run in another and the LangGraph agents in a
+third, aborting at 0.3% (a pi prompt makes some 200 state requests, so one
+attempt in three crashes). The server is killed twice. Meanwhile:
 - 60 orders are placed (a quarter twice), half of them paid, the rest
   expiring;
-- four agent sessions take eight transfer prompts each (a third sent twice)
-  and an audit.
+- four sessions of each agent take eight transfer prompts each (a third sent
+  twice) and an audit.
 
 It checks that each warehouse's stock balances and agrees with every order,
 that each prompt moved money exactly once, and, from the server's
 `sys_invocation` table, that there is exactly one `reserve` and one `transfer`
 invocation per order and prompt, though their callers ran many attempts. It
 passed twice, with 109 and 108 restarts of the shop's process and 85 and 92 of
-the agents', and again on the context with plain promises (81 and 111).
+the agents', and again on the context with plain promises (81 and 111). With
+the LangGraph agents too, it passed twice: 64 transfers, one per prompt, with
+28 and 26 restarts of their process.
 
 ```sh
 RESTATE_SERVER=/path/to/restate-server make crash-test

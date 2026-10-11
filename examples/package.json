@@ -3,21 +3,27 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Examples of SQL in Restate virtual objects with the TypeScript SDK: a ledger and a shop (node/), and a durable pi agent (pi/)",
+  "description": "Examples of SQL in Restate virtual objects with the TypeScript SDK: a ledger and a shop (node/), a durable pi agent (pi/) and a LangGraph agent (langgraph/)",
   "scripts": {
     "serve": "node serve.mjs",
     "test": "node test.mjs",
     "test:concurrency": "node concurrency.mjs",
-    "test:pi": "vitest run pi"
+    "test:pi": "vitest run pi",
+    "test:langgraph": "vitest run langgraph"
   },
   "dependencies": {
-    "@restatedev/restate-sdk": "file:../vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz",
-    "sqlite-kv": "file:../node",
     "@earendil-works/chord": "1.1.0",
     "@earendil-works/pi-ai": "1.1.0",
-    "@earendil-works/pi-durable": "1.1.0"
+    "@earendil-works/pi-durable": "1.1.0",
+    "@langchain/core": "1.2.12",
+    "@langchain/langgraph": "1.4.18",
+    "@langchain/langgraph-checkpoint": "1.1.5",
+    "@restatedev/restate-sdk": "file:../vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz",
+    "sqlite-kv": "file:../node",
+    "zod": "4.6.5"
   },
   "devDependencies": {
-    "vitest": "3.2.7"
+    "@langchain/langgraph-checkpoint-validation": "1.1.1",
+    "vitest": "4.1.11"
   }
 }
