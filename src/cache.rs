@@ -233,6 +233,11 @@ struct Owner {
     usage: Usage,
     /// The hint this owner last wrote, to skip rewriting an unchanged one.
     hint: Option<Vec<u8>>,
+    /// Sessions with unconfirmed writes to an ordered store.
+    unconfirmed: usize,
+    /// A session ended with unconfirmed writes, which may be lost: what this
+    /// owner knows may describe writes that do not exist.
+    doubtful: bool,
     /// Log positions of open sessions (as a multiset): each reads pages
     /// outside its log from the page keys and this cache, so a checkpoint may
     /// not write images of transactions at or after the oldest of them.
@@ -314,16 +319,35 @@ impl NamespaceCache {
         owner.committed = Some(committed);
     }
 
-    /// Drop everything this process knows about the namespace: `meta`, a claim,
-    /// the last commit, every cached page and the parked engine. For a host whose
-    /// acknowledged writes may still be lost (a store that acknowledges writes as
-    /// it orders them, and loses an unconfirmed tail when a request fails): call
-    /// it before opening after a session whose writes were not confirmed, since
-    /// this owner state would describe writes that may not exist.
-    pub fn reset(&self) {
+    /// Before a session of an ordered store opens: if an earlier session's
+    /// writes are unconfirmed, drop everything this owner knows (`meta`, claim,
+    /// commit, pages and the parked engine), since it may describe lost writes.
+    pub(crate) fn open_ordered(&self) {
         let mut owner = self.owner();
-        self.forget_locked(&mut owner);
+        if !owner.doubtful && owner.unconfirmed == 0 {
+            return;
+        }
+        owner.doubtful = false;
+        owner.meta = Some(Page::new()); // matches no real record
+        owner.claim = None;
+        owner.committed = None;
         owner.clear(&self.shared.ids);
+        let id = owner.id;
+        drop(owner);
+        // Dropped outside the lock: an engine's store may settle on drop.
+        drop(self.take_engine_of(id));
+    }
+
+    /// A session's first write to an ordered store.
+    pub(crate) fn write_unconfirmed(&self) {
+        self.owner().unconfirmed += 1;
+    }
+
+    /// That session's writes were confirmed, or it ended without.
+    pub(crate) fn settle(&self, confirmed: bool) {
+        let mut owner = self.owner();
+        owner.unconfirmed -= 1;
+        owner.doubtful |= !confirmed;
     }
 
     /// Forget durability knowledge after a save with an unknown outcome. Cached
@@ -493,6 +517,8 @@ impl Owner {
             committed: None,
             usage: Usage::default(),
             hint: None,
+            unconfirmed: 0,
+            doubtful: false,
             readers: BTreeMap::new(),
         }
     }

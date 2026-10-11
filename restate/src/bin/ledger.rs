@@ -205,6 +205,17 @@ impl KvStore for Abort {
     fn durable_when_visible(&self) -> bool {
         self.inner.durable_when_visible()
     }
+
+    fn ordered(&self) -> bool {
+        self.inner.ordered()
+    }
+
+    fn sync(&self) -> futures::future::BoxFuture<'_, io::Result<()>> {
+        Box::pin(async move {
+            self.maybe();
+            self.inner.sync().await
+        })
+    }
 }
 
 #[tokio::main]

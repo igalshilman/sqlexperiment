@@ -58,11 +58,12 @@ acknowledgements.
 trust writes that may be lost. Two things do:
 - **The page cache.** It keeps what this process wrote (the last commit, a
   checkpoint not yet recorded in `meta`, checkpointed pages, the parked
-  engine) for the object's next invocation. So after a session that wrote,
-  `sql` waits for one barrier: an empty `ctx.run`, which the runtime
-  acknowledges after the commands before it. If the attempt dies before that,
-  the next session in this process resets the namespace's cache and starts
-  cold.
+  engine) for the object's next invocation. The store tells the session it
+  is ordered (`KvStore::ordered`), so a session that wrote confirms its writes
+  when it saves, which `sql` does at the end: one barrier, an empty `ctx.run`,
+  which the runtime acknowledges after the commands before it
+  (`KvStore::sync`). If the attempt dies before that, the next session in this
+  process starts cold. That logic is in the main crate, for any ordered store.
 - **Effects outside Restate**, such as a request from `ctx.run` to another
   system. `sync(&ctx)` waits for the same barrier first.
 
@@ -136,8 +137,9 @@ took 62 ms with the barrier, and takes 15.7 ms with the fix.
   refused (258 tests pass).
 - **Lost writes and the page cache** (`tests/integration/ordered.rs` in the
   main crate): a store with FIFO, unconfirmed writes, where a request loses its
-  tail while the cache lives on. Resetting the cache keeps every case
-  consistent; without the reset, losing a checkpoint corrupts the database.
+  tail while the cache lives on. Declared ordered, every case stays consistent,
+  whether the confirmation fails or the session is dropped first; a store that
+  hides its ordering loses a checkpoint and corrupts the database.
 - **Crash campaign** ([`tests/crash.rs`](tests/crash.rs)) against a real
   `restate-server` 1.7.13 on one node. Two objects, six clients and 120
   transfers; one in three is sent twice, and every call is resent until
