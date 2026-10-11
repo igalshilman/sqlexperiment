@@ -1,19 +1,54 @@
-# Owner cache: encoded or decoded, and engine reuse — 2026-10-11
+# Owner cache: memory and disk, encoded or decoded, and engine reuse — 2026-10-11
 
 `benches/cache_cpu.rs` measures a long-lived owner: 300 sessions over a
 10,000-row table of JSON documents (half random hex; 493 pages, 2 MB
 logical, about 0.8 MB encoded). Each session opens, runs four skewed point
 lookups (90% within a hot tenth of the rows) and a 50-row range scan; every
 tenth session also updates a row and saves. All sessions share one
-`PageCache`, sized as a fraction of the logical database. The backend is
-strong, so nothing is confirmed. A counting global allocator records
-allocations; time is the median of three repeats on this shared host.
+`PageCache` whose memory is sized as a fraction of the logical database, with a
+1 GiB disk tier behind it. The backend is strong, so nothing is confirmed. A
+counting global allocator records allocations; time is the median of three
+repeats on this shared host.
 
 ```sh
 cargo bench --locked --features simulation --bench cache_cpu -- 3 > benches/results/cache-cpu.csv
 ```
 
-## Engine reuse
+## Memory and disk (foyer)
+
+The cache is process-wide: pages live in memory and spill to a local disk tier
+([foyer](https://github.com/foyer-rs/foyer) 0.22.3, single-file device, 1 MiB
+blocks), shared by every namespace. Engine reuse is on.
+
+| Cache | Memory (of logical DB) | Page misses | Round trips | Allocated MB | CPU ms |
+|---|---|---|---|---|---|
+| encoded | 5% | 179 | 509 | 82.2 | 157 |
+| decoded | 5% | 179 | 509 | 82.6 | 147 |
+| encoded | 10% | 179 | 509 | 77.7 | 101 |
+| decoded | 10% | 179 | 509 | 76.6 | 114 |
+| encoded | 25% | 179 | 509 | 73.7 | 58 |
+| decoded | 25% | 179 | 509 | 68.8 | 63 |
+| encoded | 50% | 179 | 509 | 72.4 | 60 |
+| decoded | 50% | 179 | 509 | 67.4 | 52 |
+| encoded | 100% | 179 | 509 | 72.2 | 54 |
+| decoded | 100% | 179 | 509 | 66.4 | 48 |
+
+- **No backend misses beyond first touches at any memory size.** The in-memory
+  LRU (below) needed 1,120 misses and 1,450 round trips at 5%; the disk tier
+  serves them locally. Each avoided round trip is worth milliseconds on a real
+  backend. At 5% memory a session takes about 0.5 ms of host time, mostly local
+  disk reads.
+- **foyer costs about 0.05 ms per session** once the working set fits in memory:
+  48–60 ms against 36–43 ms for the hand-written LRU. Allocated bytes fell
+  about 15%.
+- **Encoded or decoded matters less now:** a miss in memory is a local read,
+  not a round trip. Decoded saves a little CPU and allocation once it fits.
+
+The CPU column is wall time on a shared host and includes waiting for the disk
+tier's thread. The in-memory LRU results are in
+`results/cache-cpu-memory-lru.csv`; the sections below describe that design.
+
+## Engine reuse (in-memory LRU)
 
 With a `PageCache`, a session that ends cleanly (a successful save, or a
 read-only session) leaves its idle engine in the cache. The next open reuses it
@@ -33,7 +68,7 @@ also validates its own page cache against the database header at every read
 transaction, so a stale reuse would not return stale rows; the explicit check
 is the primary guard.
 
-## Results with engine reuse (300 sessions)
+## In-memory LRU with engine reuse (300 sessions)
 
 | Cache | Size (of logical DB) | Page misses | Round trips | Allocated MB | CPU ms |
 |---|---|---|---|---|---|
@@ -52,7 +87,7 @@ With the engine warm, decoding is a visible share of what remains: decoded
 caching saves about 7% CPU and 7% allocated bytes once the working set fits,
 but still costs 11–88% more misses when it does not.
 
-## Results without engine reuse (300 sessions)
+## In-memory LRU without engine reuse (300 sessions)
 
 | Cache | Size (of logical DB) | Page misses | Round trips | Allocated MB | CPU ms |
 |---|---|---|---|---|---|
@@ -69,7 +104,7 @@ but still costs 11–88% more misses when it does not.
 
 The remaining 179 misses are first touches of cold pages, which no cache avoids.
 
-## Findings
+## Findings (in-memory LRU)
 
 - **Encoded is the right default.** The same bytes hold about 2.5× more pages.
   When the working set does not fit decoded (5–10% here), decoding costs
@@ -86,6 +121,7 @@ The remaining 179 misses are first touches of cold pages, which no cache avoids.
   CPU time did not change measurably. The previous numbers are in
   `results/cache-cpu-before-cleanup.csv`.
 
-`PageCache::decoded` stays available for owners with memory to spare. Raw
-results: `results/cache-cpu.csv` (with reuse), `results/cache-cpu-no-reuse.csv`
+`PageCacheConfig::decoded` stays available for owners with memory to spare.
+Raw results: `results/cache-cpu.csv` (memory and disk),
+`results/cache-cpu-memory-lru.csv` (in-memory LRU with reuse), `results/cache-cpu-no-reuse.csv`
 and `results/cache-cpu-before-cleanup.csv`.

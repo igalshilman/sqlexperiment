@@ -2,12 +2,12 @@
 //! outcome, with and without a crash and an owner cache. The save is atomic, the
 //! database stays consistent and the next save works.
 use sqlite_kv::{
-    PageCache, Result, Session, StorageOptions,
-    simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
+    NamespaceCache, Result, Session, StorageOptions,
+    simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
 
-fn options(cache: Option<&PageCache>) -> StorageOptions {
+fn options(cache: Option<&NamespaceCache>) -> StorageOptions {
     StorageOptions {
         cache: cache.cloned(),
         checkpoint_after: 1,
@@ -16,7 +16,7 @@ fn options(cache: Option<&PageCache>) -> StorageOptions {
 }
 
 /// Saves leave the log one transaction long, so the next save checkpoints.
-async fn baseline(cache: Option<&PageCache>) -> Result<MemoryKv> {
+async fn baseline(cache: Option<&NamespaceCache>) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
     let mut db = Session::open_with_options(kv.clone(), options(cache)).await?;
@@ -58,7 +58,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                 'ordinal: for nth in 1.. {
                     for effect in [Effect::None, Effect::Visible, Effect::After] {
                         for crash in [false, true] {
-                            let cache = cached.then(|| PageCache::new(1 << 20));
+                            let cache = cached.then(fresh_namespace);
                             let base = baseline(cache.as_ref()).await?;
                             let store = Arc::new(FaultKv::new(base, nth as u64));
                             let mut db =
@@ -83,7 +83,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                             let mut cache = cache;
                             if crash {
                                 store.inner.crash(&[]);
-                                cache = cached.then(|| PageCache::new(1 << 20));
+                                cache = cached.then(fresh_namespace);
                             }
                             let committed = changed(store.clone(), options(cache.as_ref())).await?;
                             if result.is_ok() {

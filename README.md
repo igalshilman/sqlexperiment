@@ -36,14 +36,20 @@ In the same round trip it may checkpoint the oldest logged pages into
 log, else at their own key, so a cold read is one get. There is no page map,
 object allocation or intent. `StorageOptions` selects
 `PageCompression::{Lz4, Raw}` (default adaptive LZ4), `checkpoint_after` (logged
-transactions before saves checkpoint, default 4) and an optional `PageCache`
-(pages as stored, or `PageCache::decoded`; see [cache results](benches/CACHE_RESULTS.md)):
-owner-process state that caches pages and remembers what this owner made durable.
-When another writer checkpoints, open refreshes the cached pages it rewrote from
-its still present log segments, or drops them all once those are collected. With it, a steady-state open
-and save are one round trip each, and a session that ends cleanly leaves its
-engine for the next one, which reuses it when nothing changed (about 5× less CPU
-per session). Backends whose visible values are always
+transactions before saves checkpoint, default 4) and an optional
+`NamespaceCache`: one namespace's handle on the process-wide `PageCache`.
+
+`PageCache::open(PageCacheConfig)` creates one cache per process: pages in memory
+and on a local disk tier ([foyer](https://github.com/foyer-rs/foyer)), shared by
+every namespace under one budget. `cache.namespace(key)` returns the handle for
+one namespace, such as one virtual object; namespaces never read each other's
+pages. The cache also remembers what each owner made durable and keeps a bounded
+number of idle engines. When another writer checkpoints, open refreshes the
+cached pages it rewrote from its still present log segments, or drops them all
+once those are collected. With a cache, a steady-state open and save are one
+round trip each, and a session that ends cleanly leaves its engine for the next
+one, which reuses it when nothing changed (about 5× less CPU per session). See
+[cache results](benches/CACHE_RESULTS.md). Backends whose visible values are always
 durable can say so with `KvStore::durable_when_visible`; otherwise a fresh open
 re-puts the log tail and `meta` it did not write. See
 [the results](benches/LOG_RESULTS.md) for measurements against the previous design.
@@ -51,7 +57,9 @@ The engine I/O pump overlaps adjacent reads in batches of up to 16, with
 write/truncate/sync barriers.
 
 The host task drives engine open/connect, SQL steps and async KV I/O directly.
-There are no worker threads or background tasks. Cached queries yield every 64
+There are no worker threads or background tasks, except the disk tier of a
+`PageCache`, whose I/O runs on the host's tokio runtime (or a one-thread runtime
+of its own when there is none). Cached queries yield every 64
 engine steps. The header page is loaded asynchronously and retained for the
 engine's synchronous metadata reads. Other synchronous reads requiring KV or
 synchronous file mutations return an error; the caller must discard that session.
@@ -135,8 +143,9 @@ Segments are at most 1 MiB; larger saves span several. The backend must accept
 that value size. Dirty pages, private WAL, the replayed log and collected query
 results have no byte budgets. One engine step is not forcibly preemptible, and
 queries are not sandboxed. There is no payload checksum, corruption repair,
-attached-database guarantee, or process-kill/power-loss test. A `PageCache` must
-not be shared between namespaces: entries are keyed by page number only.
+attached-database guarantee, or process-kill/power-loss test. Each namespace must
+use one stable key with `PageCache::namespace`; the disk tier starts empty in
+every process.
 
 Measurements use an in-memory simulator. They count logical KV traffic and isolated
 codec time, without modeling real backend latency, replication or physical storage.

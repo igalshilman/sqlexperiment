@@ -9,9 +9,9 @@
 //! operation and byte counts from `MemoryKv`. Output is CSV, comparable with
 //! `results/log-shipping-v11.csv` from the previous design.
 use sqlite_kv::{
-    PageCache, Result, Session, StorageOptions,
+    NamespaceCache, Result, Session, StorageOptions,
     kv::KvStore,
-    simulation::{LatencyKv, MemoryKv},
+    simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ const WORKLOADS: [&str; 4] = ["read_pk", "update_1", "update_10", "insert_1"];
 
 type Store = Arc<LatencyKv<MemoryKv>>;
 
-fn options(policy: u32, cache: &Option<PageCache>) -> StorageOptions {
+fn options(policy: u32, cache: &Option<NamespaceCache>) -> StorageOptions {
     StorageOptions {
         checkpoint_after: policy,
         cache: cache.clone(),
@@ -80,7 +80,7 @@ struct Phase<'a> {
     case: Case,
     policy: u32,
     strong: bool,
-    cache: &'a Option<PageCache>,
+    cache: &'a Option<NamespaceCache>,
     run: usize,
     iteration: u64,
     workload: &'a str,
@@ -173,7 +173,7 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
 async fn run(case: Case, policy: u32, strong: bool, cached: bool, run: usize) -> Result<()> {
     let store: Store =
         Arc::new(LatencyKv::new(baseline(case).await?).with_durable_when_visible(strong));
-    let cache = cached.then(|| PageCache::new(256 << 20));
+    let cache = cached.then(|| open_cache(cache_config(256 << 20, 1 << 30)).namespace("bench"));
     // Warm the owner state outside the measurement.
     let mut db = Session::open_with_options(store.clone(), options(policy, &cache)).await?;
     db.execute("UPDATE t SET a = a WHERE id = 1").await?;

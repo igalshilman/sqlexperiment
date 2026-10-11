@@ -4,14 +4,15 @@
 //! checkpointed.
 //! Each measured session opens, runs four skewed point lookups (90% within a
 //! hot tenth of the rows) and a 50-row range scan; every tenth session also
-//! updates a row and saves. All sessions share one `PageCache`, sized as a
-//! fraction of the logical database. The backend is strong, so nothing is
+//! updates a row and saves. All sessions share one `PageCache`, whose memory is
+//! sized as a fraction of the logical database; the rest spills to a 1 GiB disk
+//! tier. The backend is strong, so nothing is
 //! confirmed. Output is CSV; counters are deterministic, time is the median of
 //! the repeats.
 use sqlite_kv::{
-    PageCache, Result, Session, StorageOptions,
+    PageCacheConfig, Result, Session, StorageOptions,
     kv::KvStore,
-    simulation::{LatencyKv, MemoryKv},
+    simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -127,13 +128,12 @@ struct Sample {
 
 async fn run(base: &MemoryKv, mode: &str, capacity: usize) -> Result<Sample> {
     let store: Store = Arc::new(LatencyKv::new(base.fork()).with_durable_when_visible(true));
-    let cache = match mode {
-        "encoded" => PageCache::new(capacity),
-        "decoded" => PageCache::decoded(capacity),
-        _ => unreachable!(),
-    };
+    let cache = open_cache(PageCacheConfig {
+        decoded: mode == "decoded",
+        ..cache_config(capacity, 1 << 30)
+    });
     let options = StorageOptions {
-        cache: Some(cache.clone()),
+        cache: Some(cache.namespace("bench")),
         ..StorageOptions::default()
     };
     let mut state = 7;
@@ -153,7 +153,7 @@ async fn run(base: &MemoryKv, mode: &str, capacity: usize) -> Result<Sample> {
         round_trips: store.round_trips(),
         allocations: ALLOCATIONS.load(Relaxed) - allocations,
         allocated: ALLOCATED.load(Relaxed) - allocated,
-        cache_bytes: cache.bytes(),
+        cache_bytes: cache.memory_bytes(),
         micros,
     })
 }

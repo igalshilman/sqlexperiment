@@ -71,7 +71,14 @@ next checkpoint.
 
 ## Owner cache across checkpoints
 
-A `PageCache` keeps a base: the log start of the last durable `meta` its owner
+A process has one `PageCache`, with pages in memory and on a local disk tier,
+and each namespace has its own handle and state. A cached page's key is
+(generation, page, version) and is never reused for another value: refreshing
+or invalidating a page bumps its version, and dropping a namespace's pages
+starts a new generation. The disk tier writes in the background and a delete
+does not stop a queued write, so correctness must not rely on deletes.
+
+Each namespace keeps a base: the log start of the last durable `meta` its owner
 saw. A cached page is current unless a committed transaction at or after the base
 changed it. While such a transaction is in the replayed log, its image overrides
 the cache. Only a checkpoint can expose a stale value, by moving `meta` past it.

@@ -46,6 +46,11 @@ checkpoint slice per save and confirmation on weak backends. See
   new log start alongside replay and refreshes the cached pages they changed. It
   drops every page only when those segments are collected or exceed one probe
   batch.
+- `PageCache` is process-wide: pages in memory and on a local foyer disk tier,
+  shared by every namespace under one budget. `PageCache::namespace(key)` returns
+  a `NamespaceCache` with that namespace's state. Page keys are (generation,
+  page, version) and never reused, so correctness does not depend on the disk
+  tier's deletes. Idle engines are capped across namespaces.
 - `KvStore::durable_when_visible()` (default false) lets strong backends skip
   confirmation.
 - Removed `map_codec.rs`, `pending.rs`, the radix map, object IDs, the intent and
@@ -80,8 +85,8 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 
 | Check | Outcome |
 |---|---|
-| `cargo test --locked` | 9 tests and one compile-checked rustdoc example pass |
-| `cargo test --locked --features simulation` | 51 tests pass: 29 unit, 21 integration, one public API; one rustdoc example also passes |
+| `cargo test --locked` | 6 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
+| `cargo test --locked --features simulation` | 56 tests pass: 30 unit, 24 integration, one public API; one rustdoc example also passes |
 | Interruption campaigns | 1,548 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
@@ -110,7 +115,7 @@ Interruption cases:
 ## Remaining limits
 
 Exclusive ownership and settlement of outstanding requests remain host
-requirements. A `PageCache` must be dedicated to one namespace. Log replay and
+requirements. A namespace must use one stable key with `PageCache::namespace`. Log replay and
 dirty pages have no memory budget. Memory budgets, request fencing,
 real-backend latency and process crash/power-loss validation remain future work.
 
