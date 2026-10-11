@@ -43,8 +43,21 @@ that each prompt moved money exactly once, and, from the server's
 `sys_invocation` table, that there is exactly one `reserve` and one `transfer`
 invocation per order and prompt, though their callers ran many attempts. It
 passed twice, with 109 and 108 restarts of the shop's process and 85 and 92 of
-the agents'.
+the agents', and again on the context with plain promises (81 and 111).
 
 ```sh
 RESTATE_SERVER=/path/to/restate-server make crash-test
+```
+
+[`concurrency.mjs`](concurrency.mjs) tests the context without journal replay
+against a real server, with the inactivity timeout at one second: plain
+promises under `Promise.all`, `Promise.race` and a hand-written combinator; a
+`ctx.run` that starts unawaited, and one awaited late beside a pending 30 s
+sleep; failures, invocation ids, statements beside a call and a run in
+`ctx.sqlSession`; a suspension resuming on the first of two operations (the
+call at 3 s, not the sleep at 20 s); and a cancellation reaching three pending
+operations. A handler that replays its journal keeps `RestatePromise`s.
+
+```sh
+RESTATE_SERVER=/path/to/restate-server make concurrency-test
 ```

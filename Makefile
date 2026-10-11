@@ -4,6 +4,7 @@
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
 #   make crash-test   the crash campaign, against RESTATE_SERVER
+#   make concurrency-test   the context without journal replay, against RESTATE_SERVER
 #   make help         every target
 #
 # The Rust workspaces (the crate, the addon) share one target directory.
@@ -14,7 +15,7 @@ SDK_TARBALL := vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 ADDON := node/sqlite_kv.node
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
-	test test-core test-addon test-sdk-ts test-pi lint crash-test clean
+	test test-core test-addon test-sdk-ts test-pi lint crash-test concurrency-test clean
 
 all: core addon examples ## Build everything
 
@@ -67,6 +68,10 @@ lint: ## Clippy on the core crate
 crash-test: examples-js ## Every JavaScript example through crashes (needs RESTATE_SERVER)
 	@test -n "$(RESTATE_SERVER)" || (echo "set RESTATE_SERVER to a restate-server binary" && exit 1)
 	cd examples && node test.mjs
+
+concurrency-test: examples-js ## The context without journal replay: plain promises, one await point (needs RESTATE_SERVER)
+	@test -n "$(RESTATE_SERVER)" || (echo "set RESTATE_SERVER to a restate-server binary" && exit 1)
+	cd examples && node concurrency.mjs
 
 clean: ## Remove build outputs
 	rm -rf $(CARGO_TARGET_DIR) $(ADDON) vendor/typescript/.build examples/node_modules
