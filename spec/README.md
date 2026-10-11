@@ -60,6 +60,16 @@ needs Java 11 or later.
 |---|---|---|---|
 | `MC.cfg` | cache, weak backend; 2 pages, 2 processes, 2 transactions, 4 sequences, 1 crash | 3,972,016 | No violation |
 | `MCNoCache.cfg` | as `MC.cfg`, no cache | 417,252 | No violation |
+| `MCStrong.cfg` | as `MC.cfg`, strong backend (no confirmation) | 267,532 | No violation |
+| `MCDeep.cfg` | as `MC.cfg`, 3 transactions, 5 sequences | 91,795,185 | No violation (34 minutes on four cores) |
+
+The two processes are symmetric, so TLC checks one of each pair of mirrored
+states (`Symmetry`). Bounds are small by design: a cache's `meta` moves only
+at a third save (commit, checkpoint into a claim, record the claim), so
+garbage collection and refreshing another owner's changes first appear in
+`MCDeep.cfg`. Dropping every cached page because the changed segments are
+already collected needs at least four transactions and is outside these
+bounds; the simulator's handover campaign covers it.
 
 ## Mutations
 
@@ -71,6 +81,8 @@ weak to trust:
 | Open skips confirming what it did not write (weak backend) | `OpensReadTheHistory` |
 | `meta` passes a checkpoint whose page puts failed | `ReadyReadsTheHistory` |
 | The commit part is sent before the first part is acknowledged | `OpensReadTheHistory` |
+| Garbage is deleted up to the claim, not the durable `meta` (`MCDeep.cfg`) | `OpensReadTheHistory` |
+| Open keeps cached pages another owner's checkpoint replaced (`MCDeep.cfg`) | `OpensReadTheHistory` |
 
 ## The code against the model
 
