@@ -20,26 +20,28 @@ The cache is process-wide: pages live in memory and spill to a local disk tier
 ([foyer](https://github.com/foyer-rs/foyer) 0.22.3, single-file device, 1 MiB
 blocks), shared by every namespace. Engine reuse is on.
 
-| Cache | Memory (of logical DB) | Page misses | Round trips | Allocated MB | CPU ms |
+| Cache | Memory (of logical DB) | Page gets | Round trips | Allocated MB | CPU ms |
 |---|---|---|---|---|---|
-| encoded | 5% | 179 | 509 | 82.2 | 157 |
-| decoded | 5% | 179 | 509 | 82.6 | 147 |
-| encoded | 10% | 179 | 509 | 77.7 | 101 |
-| decoded | 10% | 179 | 509 | 76.6 | 114 |
-| encoded | 25% | 179 | 509 | 73.7 | 58 |
-| decoded | 25% | 179 | 509 | 68.8 | 63 |
-| encoded | 50% | 179 | 509 | 72.4 | 60 |
-| decoded | 50% | 179 | 509 | 67.4 | 52 |
-| encoded | 100% | 179 | 509 | 72.2 | 54 |
-| decoded | 100% | 179 | 509 | 66.4 | 48 |
+| encoded | 5% | 239 | 503 | 82.1 | 168 |
+| decoded | 5% | 239 | 503 | 82.8 | 163 |
+| encoded | 10% | 239 | 503 | 77.9 | 114 |
+| decoded | 10% | 239 | 503 | 76.6 | 119 |
+| encoded | 25% | 239 | 503 | 73.8 | 62 |
+| decoded | 25% | 239 | 503 | 69.0 | 68 |
+| encoded | 50% | 239 | 503 | 72.5 | 58 |
+| decoded | 50% | 239 | 503 | 67.4 | 75 |
+| encoded | 100% | 239 | 503 | 72.2 | 55 |
+| decoded | 100% | 239 | 503 | 66.5 | 48 |
 
 - **No backend misses beyond first touches at any memory size.** The in-memory
   LRU (below) needed 1,120 misses and 1,450 round trips at 5%; the disk tier
-  serves them locally. Each avoided round trip is worth milliseconds on a real
+  serves them locally. Sequential readahead turns some first touches into
+  pages fetched ahead: 239 gets in 503 round trips. Each avoided round trip is worth milliseconds on a real
   backend. At 5% memory a session takes about 0.5 ms of host time, mostly local
   disk reads.
 - **foyer costs about 0.05 ms per session** once the working set fits in memory:
-  48–60 ms against 36–43 ms for the hand-written LRU. Allocated bytes fell
+  48–75 ms (noisy on this shared host) against 36–43 ms for the
+  hand-written LRU. Allocated bytes fell
   about 15%.
 - **Encoded or decoded matters less now:** a miss in memory is a local read,
   not a round trip. Decoded saves a little CPU and allocation once it fits.
