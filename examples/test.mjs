@@ -1,9 +1,10 @@
 // The examples against a real Restate server, through crashes: the services
 // abort at random state requests, and the server is killed twice, while
 // clients place, pay and expire orders and prompt agents. The ledger and the
-// shop run in one process (ABORT_PER_MILLE, default 15), the agents in another
-// (AGENT_ABORT_PER_MILLE, default 3: a prompt makes some 200 state requests).
-// Each request is resent until answered, some twice.
+// shop run in one process (ABORT_PER_MILLE, default 15), the pi agents in
+// another and the LangGraph agents in a third (AGENT_ABORT_PER_MILLE, default
+// 3: a prompt makes some 200 state requests). Both agents get the same
+// prompts. Each request is resent until answered, some twice.
 //
 // Checks: the warehouses' books balance and agree with every order, and every
 // agent prompt moved money exactly once.
@@ -28,7 +29,10 @@ const AGENT_PER_MILLE = Number(process.env.AGENT_ABORT_PER_MILLE ?? 3);
 const PROCESSES = [
   { name: 'shop', groups: ['ledger', 'shop'], port: 9182, perMille: PER_MILLE },
   { name: 'agent', groups: ['agent'], port: 9183, perMille: AGENT_PER_MILLE },
+  { name: 'langgraph', groups: ['langgraph'], port: 9186, perMille: AGENT_PER_MILLE },
 ];
+// The agents: the pi one and the LangGraph one, with the same prompts.
+const AGENTS = ['Agent', 'GraphAgent'];
 const EXPIRY_MS = 1500;
 const SKUS = ['apple', 'pear', 'plum'];
 const STOCK = 20;
@@ -154,7 +158,7 @@ for (const sku of SKUS) {
 }
 
 let progress = 0;
-const total = ORDERS * 2 + SESSIONS * (PROMPTS + 1);
+const total = ORDERS * 2 + AGENTS.length * SESSIONS * (PROMPTS + 1);
 const step = () => {
   if (++progress % 25 === 0) console.error(`${progress}/${total} requests answered`);
 };
@@ -171,21 +175,20 @@ const shop = pool(6, Array.from({ length: ORDERS }, (_, i) => async () => {
   step();
 }));
 
-// Agents: transfers, then an audit, per session.
-const prompts = [];
-const agents = pool(SESSIONS, Array.from({ length: SESSIONS }, (_, s) => async () => {
+// Agents: transfers, then an audit, per session of each agent.
+const sessions = AGENTS.flatMap((name) => Array.from({ length: SESSIONS }, (_, s) => [name, s]));
+const agents = pool(sessions.length, sessions.map(([name, s]) => async () => {
   for (let p = 0; p < PROMPTS; p++) {
     const from = (s + p) % ACCOUNTS;
     const to = (s + 3 * p + 1) % ACCOUNTS;
     const prompt = { id: `s${s}-p${p}`, text: `Please move ${1 + p} from ${from} to ${to === from ? (to + 1) % ACCOUNTS : to}` };
-    prompts.push(prompt);
     for (let n = 0; n < (p % 3 === 0 ? 2 : 1); n++) {
-      const { answer } = await call(`Agent/s${s}/prompt`, prompt);
-      assert.match(answer, /^Done: moved/, `${prompt.id}: ${answer}`);
+      const { answer } = await call(`${name}/s${s}/prompt`, prompt);
+      assert.match(answer, /^Done: moved/, `${name} ${prompt.id}: ${answer}`);
     }
     step();
   }
-  const { answer } = await call(`Agent/s${s}/prompt`, { id: `s${s}-audit`, text: 'audit the books' });
+  const { answer } = await call(`${name}/s${s}/prompt`, { id: `s${s}-audit`, text: 'audit the books' });
   assert.match(answer, /"inconsistent":0/, answer);
   step();
 }));
@@ -238,7 +241,7 @@ const audit = await call('Ledger/bank/audit');
 assert.deepEqual(audit, {
   accounts: ACCOUNTS,
   total: ACCOUNTS * OPENING,
-  transfers: SESSIONS * PROMPTS, // exactly one per prompt
+  transfers: AGENTS.length * SESSIONS * PROMPTS, // exactly one per prompt
   inconsistent: 0,
 });
 
@@ -257,7 +260,7 @@ const invocations = async (service, handler) => {
   return rows[0].n;
 };
 assert.equal(await invocations('Warehouse', 'reserve'), ORDERS, 'reserve invocations');
-assert.equal(await invocations('Ledger', 'transfer'), SESSIONS * PROMPTS, 'transfer invocations');
+assert.equal(await invocations('Ledger', 'transfer'), AGENTS.length * SESSIONS * PROMPTS, 'transfer invocations');
 
 console.error(`orders: ${JSON.stringify(counts)}`);
 console.error(`ledger: ${JSON.stringify(audit)}`);
