@@ -2,8 +2,9 @@
 
 SQL over a key/value store implemented in JavaScript: a native addon
 ([napi-rs](https://napi.rs)) around `sqlite-kv`, for the Restate TypeScript
-SDK, where the store is an object's state. [`restate/`](restate/README.md)
-is that integration: a patched SDK with `ctx.sql(...)`, and the ledger.
+SDK, where the store is an object's state: the patched SDK
+([`vendor/typescript`](../vendor/README.md#typescript)) builds `ctx.sql` on it,
+and [`examples/node`](../examples/node/README.md) has the examples.
 
 ```js
 const { open } = require('sqlite-kv');
@@ -21,8 +22,7 @@ await db.save(); // confirms the session's writes for the page cache
 ```
 
 This is the shape of the store. With the Restate SDK, use `ctx.sql` instead,
-which builds the store inside the SDK: the SDK waits on one thing at a time per
-invocation, so it batches concurrent reads into one wait.
+which builds the store inside the SDK.
 
 ## The store
 
@@ -64,7 +64,7 @@ integration.
 ## Build and test
 
 ```sh
-npm run build      # release build, copied to sqlite_kv.node
+npm run build      # release build, copied to sqlite_kv.node (or `make addon`)
 npm run build:debug
 npm test           # node:test, against an in-memory ordered store
 ```

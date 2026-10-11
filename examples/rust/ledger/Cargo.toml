@@ -1,0 +1,32 @@
+[package]
+name = "sqlite-kv-restate-ledger"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A ledger virtual object on sqlite-kv-restate, and its crash campaign"
+
+# Its own workspace, like restate/.
+[workspace]
+
+[[bin]]
+name = "ledger"
+path = "src/main.rs"
+
+[dependencies]
+sqlite-kv = { path = "../../.." }
+sqlite-kv-restate = { path = "../../../restate" }
+restate-sdk = "=0.12.1"
+bytes = "1.11"
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+ureq = { version = "2", default-features = false }
+
+# The vendored, patched SDK: see vendor/README.md.
+[patch.crates-io]
+restate-sdk = { path = "../../../vendor/rust/restate-sdk" }
+restate-sdk-shared-core = { path = "../../../vendor/rust/restate-sdk-shared-core" }
+restate-sdk-macros = { path = "../../../vendor/rust/restate-sdk-macros" }

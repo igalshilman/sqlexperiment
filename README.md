@@ -129,8 +129,37 @@ the owner cache.
   experiment embedding this crate in the Restate Rust SDK, with a patched SDK
 - [Node.js addon](node/README.md): the same over a key/value store implemented
   in JavaScript, for the Restate TypeScript SDK
+- [SQL in Restate with the TypeScript SDK](examples/node/README.md): `ctx.sql`,
+  idempotent calls, and examples, including a durable pi agent
+- [Vendored and patched code](vendor/README.md): the Restate SDKs, and what
+  changed and why
+- [Examples](examples/README.md), by language
+
+## Layout
+
+| Path | What |
+|---|---|
+| `src/`, `tests/`, `benches/`, `docs/`, `spec/` | The `sqlite-kv` crate: the storage protocol, its tests, benchmarks, design and TLA+ specification |
+| [`restate/`](restate) | `sqlite-kv-restate`: SQL in Restate virtual objects with the Rust SDK |
+| [`node/`](node) | The Node.js addon, the `sqlite-kv` npm package |
+| [`vendor/`](vendor) | The Restate SDKs (Rust copies, TypeScript patches) and their changes |
+| [`examples/`](examples) | Examples, under `rust/` and `node/` |
+| [`Makefile`](Makefile) | Builds and tests everything |
 
 ## Build and test
+
+```sh
+make              # build everything: the crate, the Restate crate, the addon, the patched SDK, the examples
+make test         # every test that needs no Restate server
+RESTATE_SERVER=/path/to/restate-server make crash-test   # the crash campaigns
+make help
+```
+
+Besides Rust, the Node.js parts need node 20 or later; the patched TypeScript
+SDK also needs pnpm, the `wasm32-unknown-unknown` target and `wasm-bindgen`
+0.2.121 (`cargo install wasm-bindgen-cli --version 0.2.121`).
+
+The core crate alone:
 
 ```sh
 cargo test --locked

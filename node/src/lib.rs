@@ -180,6 +180,35 @@ impl Database {
             .collect())
     }
 
+    /// [`Self::query`], also returning the column names of the statement whose
+    /// rows these are.
+    #[napi(
+        ts_args_type = "sql: string, params?: SqlValue[]",
+        ts_return_type = "Promise<{ columns: string[]; rows: SqlValue[][] }>"
+    )]
+    pub async fn query_columns(
+        &self,
+        sql: String,
+        params: Option<Vec<SqlValue>>,
+    ) -> Result<QueryResult> {
+        let mut session = self.session.lock().await;
+        let session = session
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("the database is closed"))?;
+        let params = params.map(|params| params.into_iter().map(|p| p.0).collect());
+        let (columns, rows) = session
+            .query_columns(&sql, params)
+            .await
+            .map_err(sql_error)?;
+        Ok(QueryResult {
+            columns,
+            rows: rows
+                .into_iter()
+                .map(|row| row.into_iter().map(SqlValue).collect())
+                .collect(),
+        })
+    }
+
     /// Whether the session can still run SQL: an SQL error leaves it usable,
     /// a storage error ends it.
     #[napi]
@@ -204,6 +233,13 @@ impl Database {
     pub async fn close(&self) {
         self.session.lock().await.take();
     }
+}
+
+/// Rows with the column names of their statement.
+#[napi(object)]
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<SqlValue>>,
 }
 
 /// An SQL value: `null`, a number (an integer is stored as INTEGER), a bigint,

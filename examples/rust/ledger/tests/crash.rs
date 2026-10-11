@@ -4,7 +4,7 @@
 //! exactly once and the balances consistent with them.
 //!
 //! Needs `RESTATE_SERVER` (a `restate-server` binary); skipped otherwise.
-//! `LEDGER_COMMAND` replaces the Rust ledger, e.g. `node ../node/restate/examples/ledger.mjs`.
+//! `LEDGER_COMMAND` replaces the Rust ledger, e.g. `node ../../node/ledger.mjs`.
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

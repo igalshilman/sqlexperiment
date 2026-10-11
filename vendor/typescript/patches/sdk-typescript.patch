@@ -1,5 +1,5 @@
 diff --git a/packages/libs/restate-sdk/src/common_api.ts b/packages/libs/restate-sdk/src/common_api.ts
-index 18d3aa3..185436b 100644
+index 18d3aa3..29c7a47 100644
 --- a/packages/libs/restate-sdk/src/common_api.ts
 +++ b/packages/libs/restate-sdk/src/common_api.ts
 @@ -38,6 +38,8 @@ export type {
@@ -7,23 +7,23 @@ index 18d3aa3..185436b 100644
  export { InvocationIdParser, RestatePromise } from "./context.js";
  export { isRestatePromise } from "./promises.js";
 +export { sqlOptions } from "./sql.js";
-+export type { SqlDatabase, SqlValue } from "./sql.js";
++export type { SqlDatabase, SqlSession, SqlValue } from "./sql.js";
  
  /**
   * @deprecated Use {@link RestatePromise}
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..3c7f475 100644
+index 8ea15b1..ea67df0 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,6 +9,7 @@
   * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
   */
  
-+import type { SqlDatabase } from "./sql.js";
++import type { SqlDatabase, SqlSession } from "./sql.js";
  import type {
    Client,
    SendClient,
-@@ -839,6 +840,23 @@ export interface SignalReference<T> {
+@@ -839,6 +840,37 @@ export interface SignalReference<T> {
  export interface ObjectContext<TState extends TypedState = UntypedState>
    extends Context, KeyValueStore<TState>, RestateObjectContext {
    key: string;
@@ -44,18 +44,32 @@ index 8ea15b1..3c7f475 100644
 +   * @experimental
 +   */
 +  sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
++
++  /**
++   * Run `body` with the object's SQL database for longer work, such as a whole
++   * handler: each statement is its own transaction, and `db.transaction`
++   * groups several. A commit is durable once its writes are stored, which
++   * Restate does in order: a lost commit takes everything after it, including
++   * calls and the response. The session is saved when `body` resolves.
++   *
++   * Errors are classified as for {@link sql}. `ctx.sql` and `ctx.sqlSession`
++   * cannot run inside one another.
++   *
++   * @experimental
++   */
++  sqlSession<T>(body: (db: SqlSession) => Promise<T>): Promise<T>;
  }
  
  /**
 diff --git a/packages/libs/restate-sdk/src/context_impl.ts b/packages/libs/restate-sdk/src/context_impl.ts
-index 2487c57..a69b328 100644
+index 2487c57..954e774 100644
 --- a/packages/libs/restate-sdk/src/context_impl.ts
 +++ b/packages/libs/restate-sdk/src/context_impl.ts
 @@ -71,6 +71,8 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
  import type { ContextInternal, GetProjectOptions } from "./internal.js";
  import { InputReader, OutputWriter } from "./endpoint/handlers/types.js";
  import { ExecutionOptions } from "./endpoint/components.js";
-+import { runSql, type SqlDatabase } from "./sql.js";
++import { runSql, type SqlDatabase, type SqlSession } from "./sql.js";
 +import { IdempotencyKeys } from "./idempotency.js";
  
  /**
@@ -81,18 +95,22 @@ index 2487c57..a69b328 100644
      this.trackedInvocationIdPromises = executionOptions?.explicitCancellation
        ? []
        : undefined;
-@@ -291,6 +300,10 @@ export class ContextImpl
+@@ -291,6 +300,14 @@ export class ContextImpl
      );
    }
  
 +  public sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T> {
-+    return runSql(this, this.journalReplay, body);
++    return runSql(this, this.journalReplay, false, body);
++  }
++
++  public sqlSession<T>(body: (db: SqlSession) => Promise<T>): Promise<T> {
++    return runSql(this, this.journalReplay, true, body);
 +  }
 +
    public clear(name: string): void {
      this.processNonCompletableEntry(
        WasmCommandType.ClearState,
-@@ -340,7 +353,14 @@ export class ContextImpl
+@@ -340,7 +357,14 @@ export class ContextImpl
                ([key, value]) => new WasmHeader(key, value)
              )
            : [],
@@ -108,7 +126,7 @@ index 2487c57..a69b328 100644
          call.scope,
          call.limitKey,
          call.name
-@@ -423,7 +443,15 @@ export class ContextImpl
+@@ -423,7 +447,15 @@ export class ContextImpl
              )
            : [],
          delay !== undefined && delay > 0 ? BigInt(delay) : undefined,
@@ -245,12 +263,34 @@ index 7cee518..5f5bf5a 100644
  
  /**
   * Downcast the given context to {@link ContextInternal}, to access the internal APIs.
+diff --git a/packages/libs/restate-sdk/src/promises.ts b/packages/libs/restate-sdk/src/promises.ts
+index f14da79..8728d8c 100644
+--- a/packages/libs/restate-sdk/src/promises.ts
++++ b/packages/libs/restate-sdk/src/promises.ts
+@@ -548,6 +548,8 @@ export class PromisesExecutor {
+           // Completed, we're good!
+           return;
+         }
++        // Read before checking, so a signal from here on wakes this loop.
++        const seen = this.externalProgressChannel.generation();
+         const doProgressResult = this.coreVm.do_progress(unresolvedFuture);
+ 
+         if (doProgressResult === "AnyCompleted") {
+@@ -567,7 +569,7 @@ export class PromisesExecutor {
+           await this.outputPump.awaitNextProgress();
+ 
+           // Await next external progress
+-          await this.externalProgressChannel.awaitNext();
++          await this.externalProgressChannel.awaitNext(seen);
+         } else if (doProgressResult === "CancelSignalReceived") {
+           restatePromise.tryCancel();
+           return;
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..1c89b44
+index 0000000..4f74a88
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,214 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -262,11 +302,11 @@ index 0000000..1c89b44
 + * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 + */
 +
-+// SQL in a virtual object: `ctx.sql(body)` runs `body` against a database kept
-+// in the object's state, through the sqlite-kv addon, with no journal replay.
++// SQL in a virtual object: `ctx.sql(body)` and `ctx.sqlSession(body)` run
++// `body` against a database kept in the object's state, through the sqlite-kv
++// addon, with no journal replay.
 +
 +import { serde } from "@restatedev/restate-sdk-core";
-+import { RestatePromise } from "./context.js";
 +import type { ContextImpl } from "./context_impl.js";
 +import { TerminalError } from "./types/errors.js";
 +import { HandlerKind } from "./types/rpc.js";
@@ -278,8 +318,25 @@ index 0000000..1c89b44
 +export interface SqlDatabase {
 +  /** Run SQL and return its rows; parameters bind to a single statement. */
 +  query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
++  /** {@link query}, with the column names of the statement whose rows these are. */
++  queryColumns(
++    sql: string,
++    params?: SqlValue[]
++  ): Promise<{ columns: string[]; rows: SqlValue[][] }>;
 +  /** Run SQL (one or more statements), discarding rows. */
 +  execute(sql: string, params?: SqlValue[]): Promise<void>;
++}
++
++/**
++ * The object's database for a whole handler, inside `ctx.sqlSession`: each
++ * statement outside {@link transaction} is its own transaction.
++ */
++export interface SqlSession extends SqlDatabase {
++  /**
++   * Run `body` as one SQL transaction: it commits when `body` resolves, and
++   * rolls back when it rejects. Not inside another transaction.
++   */
++  transaction<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
 +}
 +
 +/**
@@ -312,9 +369,7 @@ index 0000000..1c89b44
 +  wrapStore = wrap;
 +}
 +
-+interface Session {
-+  query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
-+  execute(sql: string, params?: SqlValue[]): Promise<void>;
++interface Session extends SqlDatabase {
 +  transaction<T>(body: (db: Session) => Promise<T>): Promise<T>;
 +  isUsable(): boolean;
 +  save(): Promise<void>;
@@ -345,61 +400,36 @@ index 0000000..1c89b44
 + * The object's state as an ordered store: `set` and `clear` are state writes,
 + * which return at once and which the runtime stores in order; `sync` is an
 + * empty `ctx.run`, acknowledged after the commands before it.
-+ *
-+ * The context waits on one thing at a time, and the engine reads pages
-+ * concurrently. So each request is issued at once, which keeps the commands in
-+ * the engine's order, and the requests issued together are awaited as one
-+ * batch, one batch after another.
 + */
 +function objectStore(ctx: ContextImpl): SqlStore {
-+  type Waiting = {
-+    promise: RestatePromise<unknown>;
-+    resolve: (value: unknown) => void;
-+    reject: (reason: unknown) => void;
-+  };
-+  const waiting: Waiting[] = [];
-+  let draining = false;
-+  const later = (f: () => void) =>
-+    typeof setImmediate === "function" ? setImmediate(f) : setTimeout(f, 0);
-+  const drain = async () => {
-+    while (waiting.length > 0) {
-+      const batch = waiting.splice(0);
-+      const results = await RestatePromise.allSettled(
-+        batch.map((w) => w.promise)
-+      );
-+      results.forEach((result, i) =>
-+        result.status === "fulfilled"
-+          ? batch[i]!.resolve(result.value)
-+          : batch[i]!.reject(result.reason)
-+      );
-+    }
-+    draining = false;
-+  };
-+  const wait = <T>(promise: RestatePromise<T>) =>
-+    new Promise<T>((resolve, reject) => {
-+      waiting.push({
-+        promise,
-+        resolve: resolve as (value: unknown) => void,
-+        reject,
-+      });
-+      if (!draining) {
-+        draining = true;
-+        later(() => void drain());
-+      }
-+    });
 +  return {
-+    get: (key) => wait(ctx.get(key, serde.binary)),
++    get: async (key) => (await ctx.get(key, serde.binary)) ?? undefined,
 +    set: (key, value) => ctx.set(key, value, serde.binary),
 +    clear: (key) => ctx.clear(key),
-+    sync: () => wait(ctx.run("sync", () => {})),
++    sync: async () => {
++      await ctx.run("sync", () => {});
++    },
 +  };
 +}
 +
-+/** `ctx.sql(body)`; see `ObjectContext.sql`. */
++const view = (db: SqlDatabase): SqlDatabase => ({
++  query: (sql, params) => db.query(sql, params),
++  queryColumns: (sql, params) => db.queryColumns(sql, params),
++  execute: (sql, params) => db.execute(sql, params),
++});
++
++// Invocations with an open session: one at a time per invocation.
++const open = new WeakSet<ContextImpl>();
++
++/**
++ * `ctx.sql(body)` or, with `session`, `ctx.sqlSession(body)`; see
++ * `ObjectContext.sql` and `ObjectContext.sqlSession`.
++ */
 +export async function runSql<T>(
 +  ctx: ContextImpl,
 +  journalReplay: boolean,
-+  body: (db: SqlDatabase) => Promise<T>
++  session: boolean,
++  body: (db: SqlSession) => Promise<T>
 +): Promise<T> {
 +  if (ctx.handlerKind !== HandlerKind.EXCLUSIVE) {
 +    throw new TerminalError("ctx.sql is for exclusive object handlers");
@@ -410,6 +440,24 @@ index 0000000..1c89b44
 +        "a replayed journal would not match the reads of a later attempt"
 +    );
 +  }
++  if (open.has(ctx)) {
++    throw new TerminalError(
++      "ctx.sql and ctx.sqlSession cannot run inside one another"
++    );
++  }
++  open.add(ctx);
++  try {
++    return await withSession(ctx, session, body);
++  } finally {
++    open.delete(ctx);
++  }
++}
++
++async function withSession<T>(
++  ctx: ContextImpl,
++  session: boolean,
++  body: (db: SqlSession) => Promise<T>
++): Promise<T> {
 +  const sqliteKv = await loadAddon();
 +  const namespace = `${ctx.request().target.service}/${ctx.key}`;
 +  const store = objectStore(ctx);
@@ -420,12 +468,20 @@ index 0000000..1c89b44
 +  let result: { value: T } | { error: unknown };
 +  try {
 +    result = {
-+      value: await db.transaction((tx) =>
-+        body({
-+          query: (sql, params) => tx.query(sql, params),
-+          execute: (sql, params) => tx.execute(sql, params),
-+        })
-+      ),
++      value: session
++        ? await body({
++            ...view(db),
++            transaction: (inner) => db.transaction((tx) => inner(view(tx))),
++          })
++        : await db.transaction((tx) =>
++            body({
++              ...view(tx),
++              transaction: () =>
++                Promise.reject(
++                  new Error("ctx.sql already runs in a transaction")
++                ),
++            })
++          ),
 +    };
 +  } catch (error) {
 +    // While the session is usable this was an SQL error, or the body's own,
@@ -493,6 +549,73 @@ index 9b9e22f..31a08d1 100644
  };
  
  /**
+diff --git a/packages/libs/restate-sdk/src/utils/external_progress_channel.ts b/packages/libs/restate-sdk/src/utils/external_progress_channel.ts
+index ef2776a..3833a48 100644
+--- a/packages/libs/restate-sdk/src/utils/external_progress_channel.ts
++++ b/packages/libs/restate-sdk/src/utils/external_progress_channel.ts
+@@ -10,41 +10,39 @@
+  */
+ 
+ /**
+- * Multi-producer single-consumer unit-signal channel used to wake the
++ * Multi-producer multi-consumer unit-signal channel used to wake the
+  * {@link PromisesExecutor} when any external progress source (input read or
+  * run-closure completion) has made progress.
+  *
+- * Producers call {@link signal} to emit a progress event.
+- * The single consumer calls {@link awaitNext} to await the next signal.
+- *
+- * Signals emitted with no consumer waiting are buffered, so no progress signal
+- * is ever lost. At most one {@link awaitNext} may be pending at a time; a
+- * concurrent second call rejects.
++ * Producers call {@link signal} to emit a progress event, which wakes every
++ * waiting consumer. A consumer reads {@link generation} before it checks for
++ * progress, and passes it to {@link awaitNext}: a signal emitted since then
++ * resolves at once, so no progress signal is ever lost. Several promises may
++ * be awaited at a time, each by its own consumer.
+  */
+ export class ExternalProgressChannel {
+-  private pending = 0;
+-  private waiter: (() => void) | undefined;
++  private signals = 0;
++  private waiters: (() => void)[] = [];
+ 
+   signal(): void {
+-    if (this.waiter !== undefined) {
+-      const w = this.waiter;
+-      this.waiter = undefined;
+-      w();
+-    } else {
+-      this.pending++;
+-    }
++    this.signals++;
++    const waiters = this.waiters;
++    this.waiters = [];
++    for (const waiter of waiters) waiter();
+   }
+ 
+-  awaitNext(): Promise<void> {
+-    if (this.waiter !== undefined) {
+-      return Promise.reject(new Error("awaitNext already pending"));
+-    }
+-    if (this.pending > 0) {
+-      this.pending--;
++  /** The signals emitted so far. */
++  generation(): number {
++    return this.signals;
++  }
++
++  /** Wait for a signal after `seen`, a {@link generation}. */
++  awaitNext(seen: number): Promise<void> {
++    if (this.signals !== seen) {
+       return Promise.resolve();
+     }
+     return new Promise((resolve) => {
+-      this.waiter = resolve;
++      this.waiters.push(resolve);
+     });
+   }
+ }
 diff --git a/sdk-shared-core-wasm-bindings/Cargo.toml b/sdk-shared-core-wasm-bindings/Cargo.toml
 index ba25532..fa8eb6d 100644
 --- a/sdk-shared-core-wasm-bindings/Cargo.toml

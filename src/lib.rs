@@ -509,6 +509,17 @@ impl Session {
         self.run(sql, Some(params.into_iter().collect())).await
     }
 
+    /// [`Self::query`] (without `params`) or [`Self::query_with`], also
+    /// returning the column names of the statement whose rows these are.
+    pub async fn query_columns(
+        &mut self,
+        sql: &str,
+        params: Option<Vec<Value>>,
+    ) -> Result<(Vec<String>, Rows)> {
+        self.screen(sql);
+        self.run_columns(sql, params).await
+    }
+
     /// [`Self::query_with`], discarding the result rows.
     pub async fn execute_with(
         &mut self,
@@ -615,7 +626,16 @@ impl Session {
     /// inside a [`Self::transaction`] body the transaction must stay open, and
     /// with [`Durability::Commit`] a commit is made durable.
     /// With `params`, `sql` must be one statement.
-    async fn run(&mut self, sql: &str, mut params: Option<Vec<Value>>) -> Result<Rows> {
+    async fn run(&mut self, sql: &str, params: Option<Vec<Value>>) -> Result<Rows> {
+        self.run_columns(sql, params).await.map(|(_, rows)| rows)
+    }
+
+    /// [`Self::run`], with the column names of the last statement.
+    async fn run_columns(
+        &mut self,
+        sql: &str,
+        mut params: Option<Vec<Value>>,
+    ) -> Result<(Vec<String>, Rows)> {
         let mut remaining = sql;
         let mut rows = None;
         loop {
@@ -663,9 +683,12 @@ impl Session {
                 }
             }
             let limit = self.io.snapshot().options().max_result_bytes;
+            let columns = (0..statement.num_columns())
+                .map(|i| statement.get_column_name(i).into_owned())
+                .collect();
             let failure = match query_engine(&self.io, statement, limit).await {
                 Ok(result) => {
-                    rows = Some(result);
+                    rows = Some((columns, result));
                     None
                 }
                 Err(Failure::Sql(error)) => Some(error),

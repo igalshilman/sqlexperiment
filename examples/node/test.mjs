@@ -1,12 +1,14 @@
-// The examples against a real Restate server, through crashes: the service
-// aborts at random state requests (ABORT_PER_MILLE, default 15), and the server
-// is killed twice, while clients place, pay and expire orders and prompt agents.
+// The examples against a real Restate server, through crashes: the services
+// abort at random state requests, and the server is killed twice, while
+// clients place, pay and expire orders and prompt agents. The ledger and the
+// shop run in one process (ABORT_PER_MILLE, default 15), the agents in another
+// (AGENT_ABORT_PER_MILLE, default 3: a prompt makes some 200 state requests).
 // Each request is resent until answered, some twice.
 //
 // Checks: the warehouses' books balance and agree with every order, and every
 // agent prompt moved money exactly once.
 //
-//   RESTATE_SERVER=/path/to/restate-server node examples/test.mjs
+//   RESTATE_SERVER=/path/to/restate-server node test.mjs   (or make crash-test-node)
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,8 +23,12 @@ if (!SERVER) {
 }
 const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
-const PORT = 9182;
 const PER_MILLE = Number(process.env.ABORT_PER_MILLE ?? 15);
+const AGENT_PER_MILLE = Number(process.env.AGENT_ABORT_PER_MILLE ?? 3);
+const PROCESSES = [
+  { name: 'shop', groups: ['ledger', 'shop'], port: 9182, perMille: PER_MILLE },
+  { name: 'agent', groups: ['agent'], port: 9183, perMille: AGENT_PER_MILLE },
+];
 const EXPIRY_MS = 1500;
 const SKUS = ['apple', 'pear', 'plum'];
 const STOCK = 20;
@@ -50,21 +56,21 @@ async function healthy() {
   throw new Error('restate-server did not start');
 }
 
-/** Keep the examples running, restarting them whenever they abort. */
-function supervise(perMille) {
+/** Keep `process` running, restarting it whenever it aborts. */
+function supervise({ name, groups, port }, perMille) {
   const state = { starts: 0, stopped: false, child: null };
   const start = () => {
     if (state.stopped) return;
     state.starts++;
-    state.child = spawn(process.execPath, [fileURLToPath(new URL('serve.mjs', import.meta.url))], {
+    state.child = spawn(process.execPath, [fileURLToPath(new URL('serve.mjs', import.meta.url)), ...groups], {
       env: {
         ...process.env,
-        PORT: String(PORT),
+        PORT: String(port),
         ABORT_PER_MILLE: String(perMille),
         SHOP_EXPIRY_MS: String(EXPIRY_MS),
-        SQLITE_KV_CACHE_FILE: join(dir, 'cache'),
+        SQLITE_KV_CACHE_FILE: join(dir, `${name}.cache`),
       },
-      stdio: ['ignore', 'ignore', log('service.log')],
+      stdio: ['ignore', 'ignore', log(`${name}.log`)],
     });
     state.child.on('exit', start);
   };
@@ -119,22 +125,26 @@ async function pool(width, tasks) {
 }
 
 let server = startServer();
-let service = supervise(PER_MILLE);
+let services = PROCESSES.map((p) => supervise(p, p.perMille));
 // On failure too, leave nothing running.
 process.on('exit', () => {
-  service.stopped = true;
-  service.child.kill('SIGKILL');
+  for (const service of services) {
+    service.stopped = true;
+    service.child.kill('SIGKILL');
+  }
   server.kill('SIGKILL');
 });
 await healthy();
-for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
-  const registered = await fetch(`${ADMIN}/deployments`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ uri: `http://127.0.0.1:${PORT}`, force: true }),
-  }).then((r) => r.ok, () => false);
-  if (registered) break;
-  if (Date.now() > deadline) throw new Error('registration failed');
+for (const { port } of PROCESSES) {
+  for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
+    const registered = await fetch(`${ADMIN}/deployments`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ uri: `http://127.0.0.1:${port}`, force: true }),
+    }).then((r) => r.ok, () => false);
+    if (registered) break;
+    if (Date.now() > deadline) throw new Error('registration failed');
+  }
 }
 
 await call('Ledger/bank/init', [ACCOUNTS, OPENING]);
@@ -193,9 +203,9 @@ const kills = (async () => {
   }
 })();
 await Promise.all([shop, agents, kills]);
-const starts = service.starts;
-await service.stop();
-service = supervise(0);
+const starts = services.map((s) => s.starts);
+await Promise.all(services.map((s) => s.stop()));
+services = PROCESSES.map((p) => supervise(p, 0));
 
 // Unpaid orders expire.
 const statuses = new Map();
@@ -231,7 +241,6 @@ assert.deepEqual(audit, {
   transfers: SESSIONS * PROMPTS, // exactly one per prompt
   inconsistent: 0,
 });
-const transcript = await call('Agent/s0/transcript');
 
 // Retried attempts reached the invocations their first attempt started: one
 // reserve and one ledger transfer per order and prompt, though attempts of
@@ -252,11 +261,10 @@ assert.equal(await invocations('Ledger', 'transfer'), SESSIONS * PROMPTS, 'trans
 
 console.error(`orders: ${JSON.stringify(counts)}`);
 console.error(`ledger: ${JSON.stringify(audit)}`);
-console.error(`agent s0 transcript: ${transcript.length} messages, last: ${JSON.stringify(transcript.at(-1))}`);
-console.error(`service started ${starts} times`);
-assert.ok(PER_MILLE === 0 || starts > 1, 'no abort happened');
+PROCESSES.forEach((p, i) => console.error(`${p.name} process started ${starts[i]} times`));
+PROCESSES.forEach((p, i) => assert.ok(p.perMille === 0 || starts[i] > 1, `no abort happened in ${p.name}`));
 
-await service.stop();
+await Promise.all(services.map((s) => s.stop()));
 server.kill('SIGKILL');
 rmSync(dir, { recursive: true, force: true });
 console.error('ok');
