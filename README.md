@@ -125,6 +125,8 @@ the owner cache.
 - [Protocol specification](spec/README.md): the protocol in TLA+, model-checked
   with TLC, and the monitor that checks the code against it
 - [Benchmarks](benches/README.md)
+- [Restate virtual objects without a journal](restate/README.md): an
+  experiment embedding this crate in the Restate Rust SDK, with a patched SDK
 
 ## Build and test
 
