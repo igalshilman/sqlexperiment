@@ -8,19 +8,19 @@ See [README.md](README.md) for workload definitions and denominators. Cold total
 
 ## Cold-open baseline
 
-Observed (meta gets, log probe gets, page gets, confirmation puts) during open: (1, 6, 0, 2). Open reads meta, probes the log in one batch and, on this weak simulated backend, re-puts the log tail and meta it did not write.
+Observed (meta gets, log probe gets, page gets, confirmation puts) during open: (1, 6, 0, 2), (1, 6, 5, 2). Open reads meta, probes the log in one batch and, on this weak simulated backend, re-puts the log tail and meta it did not write.
 
 ## Reads: 100 rows, 64-byte payload
 
 | Operation | DB pages | Open gets | Query page gets | Distinct query pages | Total gets | Read bytes + keys | Read amp |
 |---|---|---|---|---|---|---|---|
-| pk_hit | 5 | 7 | 2 | 2 | 9 | 2,218 | 34.66× |
-| pk_miss | 5 | 7 | 2 | 2 | 9 | 2,127 | — |
-| range_10 | 5 | 7 | 3 | 3 | 10 | 2,872 | 4.49× |
-| covering_index | 5 | 7 | 1 | 1 | 8 | 1,470 | 18.38× |
-| secondary_rows | 5 | 7 | 4 | 4 | 11 | 3,614 | 5.65× |
-| unindexed_filter | 5 | 7 | 3 | 3 | 10 | 2,872 | 44.88× |
-| full_scan | 5 | 7 | 3 | 3 | 10 | 2,872 | 0.45× |
+| pk_hit | 5 | 12 | 0 | 0 | 12 | 3,869 | 60.45× |
+| pk_miss | 5 | 12 | 0 | 0 | 12 | 3,869 | — |
+| range_10 | 5 | 12 | 0 | 0 | 12 | 3,869 | 6.05× |
+| covering_index | 5 | 12 | 0 | 0 | 12 | 3,869 | 48.36× |
+| secondary_rows | 5 | 12 | 0 | 0 | 12 | 3,869 | 6.05× |
+| unindexed_filter | 5 | 12 | 0 | 0 | 12 | 3,869 | 60.45× |
+| full_scan | 5 | 12 | 0 | 0 | 12 | 3,869 | 0.60× |
 
 ## Reads: 10,000 rows, 256-byte payload
 
@@ -30,34 +30,34 @@ Observed (meta gets, log probe gets, page gets, confirmation puts) during open: 
 | pk_miss | 696 | 7 | 3 | 3 | 10 | 8,390 | — |
 | range_10 | 696 | 7 | 3 | 3 | 10 | 8,416 | 3.29× |
 | covering_index | 696 | 7 | 4 | 4 | 11 | 12,621 | 1.58× |
-| secondary_rows | 696 | 7 | 674 | 674 | 681 | 209,364 | 0.82× |
-| unindexed_filter | 696 | 7 | 670 | 670 | 677 | 197,475 | 771.39× |
-| full_scan | 696 | 7 | 670 | 670 | 677 | 197,475 | 0.08× |
+| secondary_rows | 696 | 7 | 695 | 693 | 702 | 268,846 | 1.05× |
+| unindexed_filter | 696 | 7 | 691 | 690 | 698 | 256,957 | 1,003.74× |
+| full_scan | 696 | 7 | 691 | 690 | 698 | 256,957 | 0.10× |
 
 ## Reads: 100 rows, 9,000-byte payload
 
 | Operation | DB pages | Open gets | Query page gets | Distinct query pages | Total gets | Read bytes + keys | Read amp |
 |---|---|---|---|---|---|---|---|
-| pk_hit | 228 | 7 | 4 | 4 | 11 | 1,267 | 0.14× |
+| pk_hit | 228 | 7 | 8 | 8 | 15 | 1,503 | 0.17× |
 | pk_miss | 228 | 7 | 2 | 2 | 9 | 1,150 | — |
-| range_10 | 228 | 7 | 24 | 24 | 31 | 2,589 | 0.03× |
+| range_10 | 228 | 7 | 27 | 27 | 34 | 2,766 | 0.03× |
 | covering_index | 228 | 7 | 1 | 1 | 8 | 1,472 | 18.40× |
 | secondary_rows | 228 | 7 | 32 | 32 | 39 | 4,241 | 0.05× |
-| unindexed_filter | 228 | 7 | 226 | 226 | 233 | 16,068 | 1.79× |
-| full_scan | 228 | 7 | 226 | 226 | 233 | 16,068 | 0.02× |
+| unindexed_filter | 228 | 7 | 227 | 226 | 234 | 16,199 | 1.80× |
+| full_scan | 228 | 7 | 227 | 226 | 234 | 16,199 | 0.02× |
 
 ## Writes: 100 rows, 64-byte payload
 
 | Operation | Gets | Open puts | Puts | Deletes | Log bytes | Put value bytes | Mutation bytes + keys | App write amp |
 |---|---|---|---|---|---|---|---|---|
-| read_only_save | 8 | 2 | 2 | 0 | 548 | 576 | 608 | — |
-| rollback | 9 | 2 | 2 | 0 | 548 | 576 | 608 | — |
-| replace_payload | 9 | 2 | 3 | 0 | 1,334 | 1,362 | 1,418 | 22.16× |
-| update_index | 10 | 2 | 3 | 0 | 2,048 | 2,076 | 2,132 | 266.50× |
-| insert | 10 | 2 | 3 | 0 | 1,937 | 1,965 | 2,021 | 25.26× |
-| delete | 10 | 2 | 3 | 0 | 2,041 | 2,069 | 2,125 | — |
-| ten_adjacent | 9 | 2 | 3 | 0 | 1,311 | 1,339 | 1,395 | 2.18× |
-| ten_scattered | 10 | 2 | 3 | 0 | 1,919 | 1,947 | 2,003 | 3.13× |
+| read_only_save | 12 | 2 | 2 | 0 | 548 | 576 | 608 | — |
+| rollback | 12 | 2 | 2 | 0 | 548 | 576 | 608 | — |
+| replace_payload | 12 | 2 | 3 | 0 | 1,334 | 1,362 | 1,418 | 22.16× |
+| update_index | 12 | 2 | 3 | 0 | 2,048 | 2,076 | 2,132 | 266.50× |
+| insert | 12 | 2 | 3 | 0 | 1,937 | 1,965 | 2,021 | 25.26× |
+| delete | 12 | 2 | 3 | 0 | 2,041 | 2,069 | 2,125 | — |
+| ten_adjacent | 12 | 2 | 3 | 0 | 1,311 | 1,339 | 1,395 | 2.18× |
+| ten_scattered | 12 | 2 | 3 | 0 | 1,919 | 1,947 | 2,003 | 3.13× |
 
 ## Update locality: 10,000 rows, 256-byte payload
 
@@ -71,9 +71,9 @@ Observed (meta gets, log probe gets, page gets, confirmation puts) during open: 
 
 | Interruption | Gets | Puts | Deletes | Read bytes + keys | Mutation bytes + keys | Reclaimed value bytes |
 |---|---|---|---|---|---|---|
-| commit_lost | 7 | 2 | 0 | 728 | 608 | 0 |
-| commit_ack_lost | 7 | 2 | 0 | 1,514 | 846 | 0 |
-| checkpoint_error | 7 | 2 | 0 | 1,514 | 846 | 0 |
-| meta_error | 7 | 2 | 0 | 1,514 | 846 | 0 |
+| commit_lost | 12 | 2 | 0 | 3,905 | 608 | 0 |
+| commit_ack_lost | 12 | 2 | 0 | 4,691 | 846 | 0 |
+| checkpoint_error | 12 | 2 | 0 | 4,655 | 846 | 0 |
+| meta_error | 12 | 2 | 0 | 4,691 | 846 | 0 |
 
 Same-session warm queries: 28/28 configurations issued zero gets. The raw files retain wide rows, phase splits, local WAL writes, key lengths, reclaimed bytes and retained storage.

@@ -7,8 +7,8 @@
 //! updates a row and saves. All sessions share one `PageCache`, whose memory is
 //! sized as a fraction of the logical database; the rest spills to a 1 GiB disk
 //! tier. The backend is strong, so nothing is
-//! confirmed. Output is CSV; counters are deterministic, time is the median of
-//! the repeats.
+//! confirmed. Output is CSV; traffic counters are deterministic, time is the
+//! median of the repeats.
 use sqlite_kv::{
     PageCacheConfig, Result, Session, StorageOptions,
     kv::KvStore,
@@ -183,9 +183,10 @@ fn main() -> Result<()> {
                 }
                 let first = &samples[0];
                 for s in &samples[1..] {
+                    // Memory use depends on the disk tier's timing; traffic does not.
                     assert_eq!(
-                        (s.page_gets, s.round_trips, s.cache_bytes),
-                        (first.page_gets, first.round_trips, first.cache_bytes),
+                        (s.page_gets, s.round_trips),
+                        (first.page_gets, first.round_trips),
                         "counters must not vary"
                     );
                 }

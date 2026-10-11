@@ -1,4 +1,4 @@
-# Review and validation — 2026-10-10
+# Review and validation — 2026-10-11
 
 Storage format v12 replaces the radix page map, snapshot head and intent record
 of v11 with a durable log, pages checkpointed in place and a small checkpoint
@@ -53,6 +53,33 @@ checkpoint slice per save and confirmation on weak backends. See
   tier's deletes. Idle engines are capped across namespaces.
 - `KvStore::durable_when_visible()` (default false) lets strong backends skip
   confirmation.
+- Reads: a cold open prefetches every page of a database of at most
+  `StorageOptions::prefetch_pages` (64) alongside replay; three consecutive page
+  reads from the backend start readahead in a window that doubles up to 64; an
+  owner probes the log exactly to where it left it. Up to 64 mutations of a
+  save group are in flight, so saves with a cache take one round trip.
+
+## Independent review
+
+Three independent reviews (storage protocol, engine integration, efficiency)
+read the code and tried to break it, each confirming findings with temporary
+tests. The storage protocol review found no bug: about 2,700 fuzzed runs with
+faults on every request (around 550,000 injected), crashes and three
+alternating owners, at the snapshot and SQL levels. The engine review found
+three bugs, all fixed with regression tests:
+
+- A read-only session that overlapped a save parked its older engine under the
+  newer commit; the next session read stale data and its save erased the other
+  commit. Engines now park only at their own position, and only when it is the
+  owner's latest acknowledged commit.
+- With a page size above 4096, a saved database could not be reopened: the
+  engine's synchronous header read spanned an unloaded block. Open now keeps
+  every block of the first page resident.
+- Per-connection state (PRAGMA settings, the temp schema) carried over to the
+  next session through a reused engine. Sessions that change it no longer park.
+
+Minor fixes: a new namespace state no longer probes and refreshes from log
+position 1, and cache identities start at a random value.
 - Removed `map_codec.rs`, `pending.rs`, the radix map, object IDs, the intent and
   `MAX_PENDING_BYTES`.
 - Measurement fix: concurrent phases issue their requests when queued, and the
@@ -78,6 +105,11 @@ caught:
 | Open keeps cached pages without refreshing them after a foreign checkpoint | Handover campaign fails |
 | The refresh loses the first changed segment's images | Handover campaign fails |
 | The refresh trusts whichever changed segments are still present | Handover campaign fails |
+| An engine parks at the cache's latest commit instead of its own position | Overlapping-session test fails |
+| Only the first block of the first page is resident | Large page size test fails |
+| Sessions that change connection state still park | Connection state test fails |
+| Page keys carry no generation | Six cache, crash and handover tests fail |
+| No prefetch, no readahead, no exact probe, or 16 mutations in flight | The matching round-trip test fails |
 
 ## Executed validation
 
@@ -86,7 +118,7 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 | Check | Outcome |
 |---|---|
 | `cargo test --locked` | 6 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
-| `cargo test --locked --features simulation` | 56 tests pass: 30 unit, 24 integration, one public API; one rustdoc example also passes |
+| `cargo test --locked --features simulation` | 61 tests pass: 33 unit, 27 integration, one public API; one rustdoc example also passes |
 | Interruption campaigns | 1,548 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |

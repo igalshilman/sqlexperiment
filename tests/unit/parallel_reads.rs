@@ -48,8 +48,10 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
         for mode in ["success", "error", "cancel"] {
             let base = Arc::new(MemoryKv::default());
             // Commit two pages, then checkpoint them so reads reach the backend.
+            // No prefetch at open: the reads under test reach the backend.
             let all = crate::StorageOptions {
                 checkpoint_after: 0,
+                prefetch_pages: 0,
                 ..Default::default()
             };
             for _ in 0..2 {

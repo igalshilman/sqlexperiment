@@ -32,7 +32,7 @@ pub const MAX_SEGMENT_BYTES: usize = 1024 * 1024;
 const PREFIX: usize = 33;
 const ENTRY_HEADER: usize = 10;
 /// Upper bound on concurrent probe gets.
-const MAX_PROBE: u64 = 16;
+const MAX_PROBE: u64 = 64;
 
 /// Encoded page images by page number; `None` is a hole.
 pub(crate) type Images = BTreeMap<u64, Option<Page>>;

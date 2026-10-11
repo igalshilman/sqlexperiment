@@ -156,7 +156,9 @@ impl PageCache {
                 decoded: config.decoded,
                 pages,
                 namespaces: CacheBuilder::new(config.namespaces).build(),
-                ids: AtomicU64::new(1),
+                // Distinct per instance, so two caches sharing a disk file by
+                // mistake still never share keys.
+                ids: AtomicU64::new(random_start()),
                 _runtime: matches!(spawner, Spawner::Runtime(_)).then_some(spawner),
             }),
             engines: Arc::new(Mutex::new(Engines::new(config.engines))),
@@ -388,8 +390,10 @@ impl Owner {
             id: ids.fetch_add(1, Relaxed),
             generation: ids.fetch_add(1, Relaxed),
             versions: HashMap::new(),
-            meta: None,
-            base: Some(Meta::default().log_start),
+            // Knows nothing yet: the first open neither probes speculatively
+            // nor refreshes pages it does not have.
+            meta: Some(Page::new()),
+            base: None,
             claim: None,
             committed: None,
         }
@@ -401,6 +405,18 @@ impl Owner {
         self.versions.clear();
         self.base = None;
     }
+}
+
+/// A random starting point for identities, leaving room to count up.
+fn random_start() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |time| time.as_nanos()),
+    );
+    hasher.finish() >> 1
 }
 
 /// Parked engines, least recently parked dropped first.

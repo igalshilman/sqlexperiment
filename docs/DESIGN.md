@@ -76,16 +76,17 @@ pages, and commits them:
    itself, right after committing, then writes `meta`. Later opens do not replay
    a bulk load.
 
-At most 16 mutations of distinct keys are in flight per group. `Ok(SaveReport)`
+At most 64 mutations of distinct keys are in flight per group, so a commit
+and its checkpoint slice, garbage and `meta` take one round trip. `Ok(SaveReport)`
 means committed. `cleanup_error` means committed but checkpoint work failed; a
 later save retries it. Any other error leaves the commit outcome unknown.
 
 ## Open
 
-1. Read `meta`. With a cache, also read the first batch of log keys at the
-   expected start in the same round trip.
+1. Read `meta`. With a cache, also read the log keys at the expected start in
+   the same round trip: exactly to where this owner left the log, plus one.
 2. Replay from `log_start` (or the cache's claim) in concurrent batches of
-   `checkpoint_after + 2` keys (at most 16). Apply a transaction at its commit
+   `checkpoint_after + 2` keys (at most 64). Apply a transaction at its commit
    segment. Stop at the first absent key, or at a segment that does not continue
    the current transaction: that is debris from a failed save, which the next
    commit overwrites.
@@ -93,6 +94,12 @@ later save retries it. Any other error leaves the commit outcome unknown.
    `meta` that was read, so that nothing exposed can later vanish (invariant 2).
    This is skipped when the backend reports `durable_when_visible()`, or when the
    cache shows this owner wrote and had them acknowledged.
+
+**Cold opens prefetch small databases.** Without warm cache pages, open
+fetches every page key of a database of at most `prefetch_pages` pages (default
+64) alongside replay. The engine reads one dependent page at a time, so
+otherwise each B-tree level of a query would cost a round trip. Pages the log
+holds are dropped from the prefetch; the log wins as always.
 
 ## Failures
 
@@ -111,17 +118,22 @@ correctly.
 
 The engine sees two virtual files, the database and its WAL, served by `KvIo`:
 
-- **Reads** of the database file go to the committed view (log image, cache or
-  page key). Adjacent reads are batched (up to 16 concurrently) without crossing
-  write, truncate or sync barriers.
+- **Reads** of the database file go to the committed view: log image, then
+  cache, then pages fetched ahead, then the page key. The engine issues one
+  dependent read at a time; adjacent queued reads are batched (up to 16) without
+  crossing write, truncate or sync barriers. After three consecutive page reads
+  from the backend, each further get also fetches the following pages, in a
+  window that doubles up to 64, so a scan costs a few round trips rather than
+  one per page.
 - **Writes, truncation and sync** stay in private memory. File sync is only an
   ordering barrier. Nothing reaches KV before `save()`, and the engine WAL never
   does.
 - **Execution.** The caller's task drives the engine's state machines and
   awaits KV I/O. Queries yield every 64 engine steps; one engine call cannot be
   preempted. The engine also reads synchronously for metadata. Open preloads the
-  header page for those reads, and any other synchronous read that would need KV
-  fails and poisons the session.
+  first page (every 4096-byte block of it, for larger page sizes) for those
+  reads, and any other synchronous read that would need KV fails and poisons the
+  session.
 - **Sessions.** Query errors and cancellation poison a session. `save()`
   consumes it, and dropping it discards unsaved work.
 
@@ -157,7 +169,7 @@ another writer (or this owner's failed save) can do that.
 it reads the segments from the base to the new log start, alongside replay, and
 replaces the cached pages they changed. Segments below a durable log start are
 committed and never rewritten, only deleted, so a present segment is trustworthy.
-If any is gone, or there are more than 16, the namespace drops all its pages.
+If any is gone, or there are more than 64, the namespace drops all its pages.
 Garbage collection deletes them one save after `meta` moves, so a brief other
 owner (around 7 saves with default settings) leaves the cache warm.
 
@@ -169,8 +181,11 @@ age out. The disk tier starts empty in every process, because the per-namespace
 state that validates it is not persisted.
 
 **Engine reuse.** A session that ends cleanly (a successful save, or read-only)
-parks its engine. The next open reuses it if `meta` matches, the log ends where
-that engine left it, and its I/O is clean. This keeps the parsed schema and the
+parks its engine, but only if that engine holds the owner's latest
+acknowledged commit (an overlapping session's engine may be older) and its SQL
+changed no per-connection state (`PRAGMA`, `ATTACH`, `DETACH`, the temp schema).
+The next open reuses it if `meta` matches, the log ends where that engine left
+it, and its I/O is clean. This keeps the parsed schema and the
 engine's page cache warm, which cuts CPU per session about 5×. Parked engines
 and namespace states are capped per process, least recently used first;
 dropping either only makes a namespace cold.
@@ -187,7 +202,8 @@ one-thread runtime of its own. It is the only background work.
 | Large save (over 256 KiB) | 2 or more | Segments, then every logged page and `meta` |
 | Open, with cache | 1 | None |
 | Open, fresh owner, weak backend | 2 to 3 | Re-put of the last commit and `meta` |
-| Cold page read | 1 get | None |
+| Cold open of a small database | Same as open; every page arrives with replay | None |
+| Cold page read | 1 get; sequential reads fetch up to 64 ahead | None |
 
 Each page is written twice, once to the log and once at checkpoint, and opens
 replay at most a short log. Measurements: [log shipping](../benches/LOG_RESULTS.md),

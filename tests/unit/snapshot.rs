@@ -97,7 +97,10 @@ fn a_save_is_one_put_and_a_checkpointed_page_one_get() -> io::Result<()> {
         assert_eq!(store.keys().into_iter().collect::<Vec<_>>(), [log_key(1)]);
 
         // Checkpointing everything moves pages to their keys and advances meta.
-        let all = options(0, None);
+        let all = StorageOptions {
+            prefetch_pages: 0,
+            ..options(0, None)
+        };
         let snapshot = open(&store, &all).await?;
         let report = snapshot
             .publish(Changes::from([(3, None)]), 4 * 4096)
@@ -517,6 +520,112 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
         }
         println!("handovers: cache kept {kept}, dropped {dropped}");
         assert!(kept > 50 && dropped > 50, "{kept} {dropped}");
+        Ok(())
+    })
+}
+
+/// Checkpoint `pages` pages so that reads reach their page keys.
+async fn checkpointed(pages: u64) -> io::Result<MemoryKv> {
+    let store = MemoryKv::default();
+    let kv = Arc::new(store.clone());
+    let changes: Changes = (0..pages).map(|i| (i, Some(page(i)))).collect();
+    open(&kv, &options(4, None))
+        .await?
+        .publish(changes, pages * 4096)
+        .await?;
+    // The next save checkpoints the first; page 0 stays in the log.
+    open(&kv, &options(0, None))
+        .await?
+        .publish(Changes::from([(0, Some(page(0)))]), pages * 4096)
+        .await?;
+    assert_eq!(keys(&store, PAGE_PREFIX).len() as u64, pages);
+    Ok(store)
+}
+
+/// A cold open of a small database fetches every page alongside replay, so no
+/// read afterwards waits for the backend, and open takes no extra round trip.
+#[test]
+fn a_cold_open_prefetches_a_small_database() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(LatencyKv::new(checkpointed(20).await?));
+        let without = StorageOptions {
+            prefetch_pages: 0,
+            ..options(4, None)
+        };
+        store.reset();
+        open(&store, &without).await?;
+        let plain = store.round_trips();
+
+        store.reset();
+        let snapshot = open(&store, &options(4, None)).await?;
+        assert_eq!(
+            store.round_trips(),
+            plain,
+            "prefetch rides along with replay"
+        );
+        store.reset();
+        store.inner.reset_stats();
+        for index in 0..20 {
+            assert_eq!(number(snapshot.block(index).await?), Some(index));
+        }
+        assert_eq!((store.round_trips(), store.inner.stats().gets), (0, 0));
+        Ok(())
+    })
+}
+
+/// Sequential reads of page keys fetch ahead in a growing window.
+#[test]
+fn sequential_reads_fetch_ahead() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(LatencyKv::new(checkpointed(300).await?));
+        let snapshot = open(&store, &options(4, None)).await?;
+        store.reset();
+        store.inner.reset_stats();
+        for index in 0..300 {
+            assert_eq!(number(snapshot.block(index).await?), Some(index));
+        }
+        let (round_trips, gets) = (store.round_trips(), store.inner.stats().gets);
+        assert!(round_trips < 15, "{round_trips} round trips");
+        assert_eq!(
+            gets, 299,
+            "page 0 is in the log; nothing else is fetched twice"
+        );
+
+        // Scattered reads do not fetch ahead.
+        let snapshot = open(&store, &options(4, None)).await?;
+        store.inner.reset_stats();
+        for index in [7, 100, 3, 250, 42] {
+            assert_eq!(number(snapshot.block(index).await?), Some(index));
+        }
+        assert_eq!(store.inner.stats().gets, 5);
+        Ok(())
+    })
+}
+
+/// With a cache, open probes exactly to where this owner left the log, and
+/// every save is one round trip, including its checkpoint slice.
+#[test]
+fn an_owner_probes_exactly_and_saves_in_one_round_trip() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(LatencyKv::new(MemoryKv::default()));
+        let cache = fresh_namespace();
+        let opts = options(16, Some(&cache));
+        for round in 0..40u64 {
+            store.reset();
+            store.inner.reset_stats();
+            let snapshot = open(&store, &opts).await?;
+            if round > 0 {
+                assert_eq!(store.round_trips(), 1, "open {round}");
+                // The log, plus the key after it, plus meta.
+                let expected = snapshot.log.transactions.len() as u64 + 2;
+                assert_eq!(store.inner.stats().gets, expected, "open {round}");
+            }
+            // Transactions of 20 pages: a checkpoint slice spans more than 16 puts.
+            let changes: Changes = (0..20).map(|i| (i, Some(page(round * 100 + i)))).collect();
+            store.reset();
+            snapshot.publish(changes, 20 * 4096).await?;
+            assert_eq!(store.round_trips(), 1, "save {round}");
+        }
         Ok(())
     })
 }

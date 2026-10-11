@@ -48,13 +48,25 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use std::{collections::BTreeMap, io, sync::Arc, sync::Mutex};
+use std::{
+    collections::{BTreeMap, HashMap},
+    io,
+    sync::{Arc, Mutex},
+};
 
 /// Logical page replacements from the session; `None` is a hole.
 type Changes = BTreeMap<u64, Option<Page>>;
 
-/// Upper bound on concurrent backend mutations of each save group.
-pub(crate) const MAX_MUTATIONS_IN_FLIGHT: usize = 16;
+/// Upper bound on concurrent backend mutations of each save group: enough for a
+/// commit, a checkpoint slice of whole transactions and garbage in one round trip.
+pub(crate) const MAX_MUTATIONS_IN_FLIGHT: usize = 64;
+/// Default [`StorageOptions::prefetch_pages`].
+pub const PREFETCH_PAGES: u64 = 64;
+const PAGE: u64 = crate::io::BLOCK_SIZE as u64;
+/// Consecutive page reads that start sequential readahead.
+const READAHEAD_AFTER: u32 = 3;
+/// Largest readahead window, in pages.
+const MAX_READAHEAD: u64 = 64;
 /// Pages a save checkpoints, rounded up to whole transactions.
 pub const CHECKPOINT_PAGES: usize = 12;
 /// Logged bytes that trigger checkpointing; a larger save checkpoints itself.
@@ -69,6 +81,9 @@ pub struct StorageOptions {
     pub cache: Option<NamespaceCache>,
     /// Transactions kept in the log before saves start checkpointing the oldest.
     pub checkpoint_after: u32,
+    /// A cold open (no warm cache pages) fetches every page of a database of
+    /// at most this many pages, alongside replay.
+    pub prefetch_pages: u64,
 }
 
 impl Default for StorageOptions {
@@ -77,6 +92,7 @@ impl Default for StorageOptions {
             page_compression: PageCompression::default(),
             cache: None,
             checkpoint_after: 4,
+            prefetch_pages: PREFETCH_PAGES,
         }
     }
 }
@@ -89,6 +105,8 @@ pub struct SaveReport {
     pub checkpointed_pages: usize,
     /// Committed, but checkpoint work failed. Do not replay SQL.
     pub cleanup_error: Option<io::Error>,
+    /// One past the last committed transaction after this save.
+    pub(crate) log_next: u64,
 }
 
 /// One backend mutation of a save.
@@ -148,6 +166,41 @@ pub(crate) struct Snapshot {
     pub(crate) unchanged: bool,
     /// The last decoded page, for repeated reads of one page.
     page: Mutex<Option<(u64, Page)>>,
+    /// Page values fetched ahead of use (prefetch and readahead), each used once.
+    fetched: Mutex<HashMap<u64, Option<Bytes>>>,
+    readahead: Mutex<Readahead>,
+}
+
+/// Detects sequential reads of page keys.
+#[derive(Default)]
+struct Readahead {
+    last: Option<u64>,
+    run: u32,
+    window: u64,
+}
+
+impl Readahead {
+    /// Record a page read from the backend or from pages fetched ahead.
+    fn observe(&mut self, index: u64) {
+        self.run = match self.last {
+            Some(last) if last + 1 == index => self.run + 1,
+            _ => 1,
+        };
+        self.last = Some(index);
+        if self.run < READAHEAD_AFTER {
+            self.window = 0;
+        }
+    }
+
+    /// Pages to read ahead with a get that missed; doubles while reads stay
+    /// sequential.
+    fn window(&mut self) -> u64 {
+        if self.run < READAHEAD_AFTER {
+            return 0;
+        }
+        self.window = (self.window * 2).clamp(4, MAX_READAHEAD);
+        self.window
+    }
 }
 
 impl Snapshot {
@@ -160,8 +213,13 @@ impl Snapshot {
         let expected = cache.and_then(NamespaceCache::expected_start);
         let (meta_bytes, prefetched) = match expected {
             Some(start) => {
+                // The owner knows where its log ended: probe exactly that far.
+                let first = match cache.and_then(NamespaceCache::committed) {
+                    Some(end) if end >= start => end - start + 1,
+                    _ => batch,
+                };
                 let (meta, probe) =
-                    futures::join!(store.get(META), log::probe(&*store, start, batch));
+                    futures::join!(store.get(META), log::probe(&*store, start, first));
                 (meta?, Some((start, probe)))
             }
             None => (store.get(META).await?, None),
@@ -191,8 +249,22 @@ impl Snapshot {
                 None => Ok(None),
             }
         };
-        let (log, changes) =
-            futures::try_join!(log::replay(&*store, start, batch, prefetched), changes)?;
+        // Without warm pages, fetch a small database whole, alongside replay.
+        let pages = meta.size.div_ceil(PAGE);
+        let cold = !meta_known && since.is_none() && claim.is_none();
+        let prefetch = async {
+            if !cold || pages > options.prefetch_pages {
+                return Ok(Vec::new());
+            }
+            let keys: Vec<_> = (0..pages).map(page_key).collect();
+            let values = futures::future::try_join_all(keys.iter().map(|k| store.get(k))).await?;
+            Ok::<_, io::Error>((0..pages).zip(values).collect())
+        };
+        let (log, changes, prefetched_pages) = futures::try_join!(
+            log::replay(&*store, start, batch, prefetched),
+            changes,
+            prefetch
+        )?;
         if let (Some(cache), Some(changes)) = (cache, changes) {
             cache.refresh(changes.as_ref());
         }
@@ -224,7 +296,38 @@ impl Snapshot {
             log,
             unchanged,
             page: Mutex::default(),
-        })
+            fetched: Mutex::default(),
+            readahead: Mutex::default(),
+        }
+        .with_fetched(prefetched_pages))
+    }
+
+    /// Keep page values fetched at open, except pages the log overrides.
+    fn with_fetched(self, pages: Vec<(u64, Option<Bytes>)>) -> Self {
+        let mut fetched = self.fetched.lock().unwrap();
+        for (index, value) in pages {
+            if self.log.images.contains_key(&index) {
+                continue;
+            }
+            // The cache keeps values; holes, and pages without a cache, stay here.
+            if let (Some(cache), Some(value)) = (&self.options.cache, &value) {
+                match cache.is_decoded() {
+                    true => {
+                        if let Ok(page) = page_codec::decode_bytes(value) {
+                            cache.insert(index, page);
+                            continue;
+                        }
+                    }
+                    false => {
+                        cache.insert(index, value.clone());
+                        continue;
+                    }
+                }
+            }
+            fetched.insert(index, value);
+        }
+        drop(fetched);
+        self
     }
 
     /// The checkpoint the log is replayed from.
@@ -258,7 +361,7 @@ impl Snapshot {
                 false => page_codec::decode_bytes(&value)?,
             }
         } else {
-            let Some(image) = self.store.get(&page_key(index)).await? else {
+            let Some(image) = self.fetch(index).await? else {
                 return Ok(None);
             };
             let page = page_codec::decode_bytes(&image)?;
@@ -274,6 +377,33 @@ impl Snapshot {
         };
         *self.page.lock().unwrap() = Some((index, page.clone()));
         Ok(Some(page))
+    }
+
+    /// The stored value of a page outside the log: fetched ahead, or one get.
+    /// Sequential gets start reading ahead, in the same round trip.
+    async fn fetch(&self, index: u64) -> io::Result<Option<Bytes>> {
+        self.readahead.lock().unwrap().observe(index);
+        if let Some(value) = self.fetched.lock().unwrap().remove(&index) {
+            return Ok(value);
+        }
+        let ahead = self.readahead.lock().unwrap().window();
+        let last = self.size().div_ceil(PAGE);
+        let ahead: Vec<u64> = {
+            let fetched = self.fetched.lock().unwrap();
+            (index + 1..(index + 1 + ahead).min(last))
+                .filter(|n| !self.log.images.contains_key(n) && !fetched.contains_key(n))
+                .collect()
+        };
+        let keys: Vec<_> = std::iter::once(index)
+            .chain(ahead.iter().copied())
+            .map(page_key)
+            .collect();
+        let mut values =
+            futures::future::try_join_all(keys.iter().map(|k| self.store.get(k))).await?;
+        let value = values.remove(0);
+        let mut fetched = self.fetched.lock().unwrap();
+        fetched.extend(ahead.into_iter().zip(values));
+        Ok(value)
     }
 
     /// Oldest transactions to checkpoint before this save commits.
@@ -314,7 +444,10 @@ impl Snapshot {
     /// cancellation. After an error, reopen; never reuse this snapshot.
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
         if dirty.is_empty() && size == self.size() {
-            return Ok(SaveReport::default());
+            return Ok(SaveReport {
+                log_next: self.log.next,
+                ..SaveReport::default()
+            });
         }
         let mut images = Images::new();
         for (index, page) in dirty {
@@ -390,6 +523,7 @@ impl Snapshot {
             return Ok(SaveReport {
                 checkpointed_pages,
                 cleanup_error: Some(error),
+                log_next: next,
             });
         }
 
@@ -449,6 +583,7 @@ impl Snapshot {
         Ok(SaveReport {
             checkpointed_pages,
             cleanup_error,
+            log_next: next,
         })
     }
 }
