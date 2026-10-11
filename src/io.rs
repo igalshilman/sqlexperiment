@@ -168,6 +168,9 @@ pub struct KvIo {
     queue: Mutex<VecDeque<Pending>>,
     driver: futures::lock::Mutex<()>,
     progress: Mutex<Progress>,
+    /// A request or synchronous engine read failed: the engine's state after
+    /// the error is unknown.
+    failed: std::sync::atomic::AtomicBool,
     #[cfg(all(test, feature = "simulation"))]
     fault: Mutex<Option<test_faults::Fault>>,
 }
@@ -199,6 +202,7 @@ impl KvIo {
             queue: Mutex::default(),
             driver: futures::lock::Mutex::new(()),
             progress: Mutex::default(),
+            failed: Default::default(),
             #[cfg(all(test, feature = "simulation"))]
             fault: Mutex::new(None),
         })
@@ -284,7 +288,7 @@ impl KvIo {
     fn enqueue(&self, op: Operation, completion: Completion) -> turso_core::Result<Completion> {
         let mut progress = self.progress.lock().unwrap();
         if progress.stopped {
-            return Err(engine_error("adapter stopped"));
+            return Err(self.engine_error("adapter stopped"));
         }
         progress.inflight += 1;
         self.queue.lock().unwrap().push_back(Pending {
@@ -292,6 +296,21 @@ impl KvIo {
             completion: completion.clone(),
         });
         Ok(completion)
+    }
+
+    /// Whether any request or synchronous engine read failed.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn fail(&self) {
+        self.failed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// An error for the engine, recorded as a failure of this adapter.
+    fn engine_error(&self, message: impl Into<String>) -> LimboError {
+        self.fail();
+        engine_error(message)
     }
 
     pub(crate) fn shutdown(&self) {
@@ -535,6 +554,7 @@ impl KvIo {
                     completion.complete(n);
                 }
                 Err(e) => {
+                    self.fail();
                     completion.error(CompletionError::IOError(e.kind(), "KV I/O"));
                     return Err(e);
                 }
@@ -588,12 +608,10 @@ impl Clock for KvIo {
 
 impl IO for KvIo {
     fn open_file(&self, _: &str, _: OpenFlags, _: bool) -> turso_core::Result<Arc<dyn File>> {
-        Err(engine_error(
-            "use MountedIo: file handles need the shared adapter",
-        ))
+        Err(self.engine_error("use MountedIo: file handles need the shared adapter"))
     }
     fn remove_file(&self, _: &str) -> turso_core::Result<()> {
-        Err(engine_error("dynamic files are out of scope"))
+        Err(self.engine_error("dynamic files are out of scope"))
     }
     fn step(&self) -> turso_core::Result<()> {
         // Synchronous engine helpers may read resident metadata, but they must
@@ -601,7 +619,7 @@ impl IO for KvIo {
         let _driver = self
             .driver
             .try_lock()
-            .ok_or_else(|| engine_error("I/O driver is active"))?;
+            .ok_or_else(|| self.engine_error("I/O driver is active"))?;
         let mut progressed = false;
         loop {
             let pending = self.queue.lock().unwrap().pop_front();
@@ -609,9 +627,7 @@ impl IO for KvIo {
                 return if progressed {
                     Ok(())
                 } else {
-                    Err(engine_error(
-                        "engine attempted a synchronous wait without queued I/O",
-                    ))
+                    Err(self.engine_error("engine attempted a synchronous wait without queued I/O"))
                 };
             };
             let _finishing = Completing {
@@ -626,7 +642,7 @@ impl IO for KvIo {
                 Operation::Read { file, pos } => {
                     let mut bytes = vec![0; completion.as_read().buf().len()];
                     let Some(n) = self.read_resident(file, pos, &mut bytes) else {
-                        return Err(engine_error(
+                        return Err(self.engine_error(
                             "engine attempted synchronous I/O for a nonresident page",
                         ));
                     };
@@ -635,11 +651,12 @@ impl IO for KvIo {
                         .buf()
                         .as_mut_slice()
                         .copy_from_slice(&bytes);
-                    completion
-                        .complete(i32::try_from(n).map_err(|_| engine_error("I/O too large"))?);
+                    completion.complete(
+                        i32::try_from(n).map_err(|_| self.engine_error("I/O too large"))?,
+                    );
                 }
                 Operation::Sync => completion.complete(0),
-                _ => return Err(engine_error("engine attempted a synchronous file mutation")),
+                _ => return Err(self.engine_error("engine attempted a synchronous file mutation")),
             }
         }
     }
@@ -665,7 +682,7 @@ impl IO for MountedIo {
         let file = FILES
             .iter()
             .position(|name| *name == path)
-            .ok_or_else(|| engine_error(format!("unsupported file: {path}")))?;
+            .ok_or_else(|| self.0.engine_error(format!("unsupported file: {path}")))?;
         Ok(Arc::new(KvFile {
             io: self.0.clone(),
             file,

@@ -3,6 +3,7 @@ mod block_io;
 mod cache;
 mod corruption;
 mod durability;
+mod errors;
 mod failpoints;
 mod failure;
 mod limits;

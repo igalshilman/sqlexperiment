@@ -159,8 +159,9 @@ type Rows = Vec<Vec<Value>>;
 ///
 /// The host advances engine state machines, awaits queued KV I/O and resumes the
 /// engine on the same task. No worker thread or background task is created.
-/// Queries require exclusive access to this handle. An error or cancellation
-/// poisons the view; discard it and reopen after settling backend requests.
+/// Queries require exclusive access to this handle. An SQL error leaves the
+/// session usable; a storage error, a cancelled call or a failed commit ends
+/// it (see [`Self::is_usable`]): open a new one after settling backend requests.
 /// [`Self::save`] consumes the handle; dropping it never implicitly saves.
 pub struct Session {
     database: Option<Arc<Database>>,
@@ -394,8 +395,11 @@ impl Session {
     /// There is no result byte limit or streaming cursor. With
     /// [`Durability::Save`], SQL writes remain private until [`Self::save`]. With
     /// [`Durability::Commit`], a statement that ends a write transaction returns
-    /// once that transaction is durable; an error then leaves its outcome
-    /// unknown. Errors and cancellation poison this session.
+    /// once that transaction is durable. An SQL error (syntax, a constraint, a
+    /// missing table) undoes that statement and leaves the session usable;
+    /// earlier statements of `sql`, and an open transaction, stand. Any other
+    /// error or a cancellation ends the session, and a failed commit's outcome
+    /// is unknown; see [`Self::is_usable`].
     /// Cached execution yields every 64 steps; one engine call cannot be preempted.
     /// An engine helper requiring synchronous nonresident I/O returns an error.
     pub async fn query(&mut self, sql: &str) -> Result<Rows> {
@@ -452,7 +456,7 @@ impl Session {
         let open = !self.is_poisoned() && !self.connection.as_ref().unwrap().get_auto_commit();
         let result = match result {
             Ok(value) if open => self.execute("COMMIT").await.map(|()| value),
-            Ok(_) => Err("session is poisoned; discard and reopen".into()),
+            Ok(_) => Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into()),
             Err(error) if open => self.execute("ROLLBACK").await.and(Err(error)),
             Err(error) => Err(error),
         };
@@ -504,6 +508,15 @@ impl Session {
         Ok(report)
     }
 
+    /// Whether the session can run more SQL. An SQL error (a syntax error, a
+    /// constraint, a missing table) leaves it usable: the failed statement had
+    /// no effect, and an open transaction continues. A storage error, a
+    /// cancelled call, a failed commit or an exceeded limit ends it: discard it
+    /// and open a new one, after settling outstanding requests.
+    pub fn is_usable(&self) -> bool {
+        !self.is_poisoned()
+    }
+
     fn is_poisoned(&self) -> bool {
         self.poisoned || self.abandoned.load(Ordering::SeqCst)
     }
@@ -517,11 +530,20 @@ impl Session {
         let mut rows = None;
         loop {
             if self.is_poisoned() {
-                return Err("session is poisoned; discard and reopen".into());
+                return Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into());
             }
             self.poisoned = true; // cancellation/error requires discarding the session
             let connection = self.connection.as_ref().unwrap();
-            let Some((mut statement, end)) = connection.consume_stmt(remaining)? else {
+            let prepared = match connection.consume_stmt(remaining) {
+                Ok(prepared) => prepared,
+                // A parse or name error: nothing ran.
+                Err(error) if !self.io.failed() => {
+                    self.poisoned = false;
+                    return Err(error.into());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let Some((mut statement, end)) = prepared else {
                 self.poisoned = false;
                 break;
             };
@@ -542,16 +564,32 @@ impl Session {
                     .into());
                 }
                 for (index, value) in (1..).zip(values) {
-                    statement.bind_at(std::num::NonZero::new(index).unwrap(), value)?;
+                    if let Err(error) =
+                        statement.bind_at(std::num::NonZero::new(index).unwrap(), value)
+                    {
+                        self.poisoned = false;
+                        return Err(error.into());
+                    }
                 }
             }
             let limit = self.io.snapshot().options().max_result_bytes;
-            rows = Some(query_engine(&self.io, statement, limit).await?);
+            let failure = match query_engine(&self.io, statement, limit).await {
+                Ok(result) => {
+                    rows = Some(result);
+                    None
+                }
+                Err(Failure::Sql(error)) => Some(error),
+                Err(Failure::Fatal(error)) => return Err(error),
+            };
             let idle = connection.get_auto_commit();
             if self.in_body && idle {
                 return Err("a statement ended the transaction of Session::transaction".into());
             }
             self.poisoned = false;
+            // The statement had no effect; earlier statements of `sql` stand.
+            if let Some(error) = failure {
+                return Err(error.into());
+            }
             if idle
                 && self.durability == Durability::Commit
                 && !self.io.is_clean()
@@ -566,11 +604,15 @@ impl Session {
     /// Run one statement of this crate's own, outside the transaction rules.
     async fn internal(&mut self, sql: &str) -> Result<Rows> {
         if self.is_poisoned() {
-            return Err("session is poisoned; discard and reopen".into());
+            return Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into());
         }
         self.poisoned = true;
         let statement = self.connection.as_ref().unwrap().prepare(sql)?;
-        let rows = query_engine(&self.io, statement, usize::MAX).await?;
+        let rows = match query_engine(&self.io, statement, usize::MAX).await {
+            Ok(rows) => rows,
+            Err(Failure::Sql(error)) => return Err(error.into()),
+            Err(Failure::Fatal(error)) => return Err(error),
+        };
         self.poisoned = false;
         Ok(rows)
     }
@@ -617,7 +659,7 @@ impl Session {
     /// this only ends the session.
     pub async fn save(mut self) -> Result<SaveReport> {
         if self.is_poisoned() {
-            return Err("cannot save a poisoned session".into());
+            return Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into());
         }
         if !self.connection.as_ref().unwrap().get_auto_commit() {
             return Err("cannot save an open SQL transaction".into());
@@ -712,11 +754,26 @@ fn value_bytes(value: &Value) -> usize {
     }
 }
 
+/// Why a statement failed.
+enum Failure {
+    /// The engine rejected the SQL (a constraint, a type error, ...) and undid
+    /// the statement; no I/O failed and none is pending, so the session can go on.
+    Sql(turso_core::LimboError),
+    /// Anything else: storage, limits, anomalies. The session's state is unknown.
+    Fatal(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl<E: Into<Box<dyn std::error::Error + Send + Sync>>> From<E> for Failure {
+    fn from(error: E) -> Self {
+        Failure::Fatal(error.into())
+    }
+}
+
 async fn query_engine(
     io: &KvIo,
     mut statement: turso_core::Statement,
     max_bytes: usize,
-) -> Result<Rows> {
+) -> std::result::Result<Rows, Failure> {
     let mut running = Running {
         io,
         complete: false,
@@ -732,7 +789,15 @@ async fn query_engine(
             steps = 0;
         }
         steps += 1;
-        match statement.step()? {
+        let step = match statement.step() {
+            Ok(step) => step,
+            Err(error) if !io.failed() && io.pending_count() == 0 => {
+                running.complete = true;
+                return Err(Failure::Sql(error));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        match step {
             StepResult::Row => {
                 let row: Vec<Value> = statement
                     .row()

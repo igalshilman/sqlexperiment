@@ -183,6 +183,7 @@ caught:
 | Segment checksums are not verified | Single-bit test accepts flipped segments |
 | Catch-up checkpoints are disabled | Grown log does not shrink |
 | Parked engines are weighed without their schema | Schema-weight test keeps every small engine |
+| A failed synchronous engine read is not recorded | Synchronous-read test fails |
 
 ## Executed validation
 
@@ -191,7 +192,7 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 | Check | Outcome |
 |---|---|
 | `cargo test --locked` | 12 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
-| `cargo test --locked --features simulation` | 91 tests pass: 41 unit, 48 integration, two public API; one rustdoc example also passes |
+| `cargo test --locked --features simulation` | 95 tests pass: 41 unit, 52 integration, two public API; one rustdoc example also passes |
 | Interruption campaigns | 2,169 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
@@ -220,6 +221,18 @@ Interruption cases:
   random tenures with failed saves, lost unconfirmed values and restarts, and
   every open checks every page. It also passed 200 seeds (80,000 tenures).
 - 28 private-checkpoint interruptions.
+
+## SQL errors keep the session
+
+An SQL error used to end a session like a storage error. Now a statement the
+engine rejects (syntax, a constraint, a missing table, wrong parameters) is
+undone and the session goes on, as in SQLite; an open transaction continues.
+That is safe because the engine undoes a failed statement itself, which holds
+when no I/O failed and none is pending: the adapter records every failed
+request and synchronous read, and anything else still ends the session. A test
+runs 400 random statements, about a third failing, on a session and on a
+reference engine on plain memory, in both durability modes: every outcome,
+every result and the reopened state agree.
 
 ## Remaining limits
 

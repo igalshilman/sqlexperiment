@@ -30,9 +30,13 @@ let saved = db.save().await?; // durable once this returns Ok
 ```
 
 Bind values with `query_with`/`execute_with` rather than formatting them into
-SQL. SQL changes are private until `save()`. `Ok` means committed; an error means the
-outcome is unknown, so settle outstanding requests and reopen. The host must
+SQL. SQL changes are private until `save()`. `Ok` means committed. The host must
 guarantee one owner per namespace.
+
+An SQL error (syntax, a constraint, a missing table) undoes just that statement,
+as in SQLite, and the session goes on. A storage error, a cancelled call or a
+failed commit ends the session (`is_usable()` returns false): settle
+outstanding requests and open a new one; a failed commit's outcome is unknown.
 
 Or make every SQL commit durable, as in SQLite, with no `save()`:
 

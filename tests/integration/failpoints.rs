@@ -132,7 +132,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
                                     .await
                                     .unwrap_err()
                                     .to_string()
-                                    .contains("poisoned")
+                                    .contains("the session ended")
                             );
                             drop(db);
                         }
