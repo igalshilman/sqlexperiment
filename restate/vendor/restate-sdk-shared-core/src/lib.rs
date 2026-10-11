@@ -483,11 +483,6 @@ pub trait VM: Sized {
         options: PayloadOptions,
     ) -> VMResult<NotificationHandle>;
 
-    /// Like [`VM::sys_state_get`], but always asks the runtime, ignoring eager state. The
-    /// runtime processes commands in order, so the answer also means every earlier command
-    /// of this invocation was processed.
-    fn sys_state_get_lazy(&mut self, key: String) -> VMResult<NotificationHandle>;
-
     fn sys_state_get_keys(&mut self) -> VMResult<NotificationHandle>;
 
     fn journal_replay(&self) -> JournalReplay;

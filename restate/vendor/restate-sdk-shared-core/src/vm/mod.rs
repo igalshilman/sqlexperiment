@@ -631,12 +631,7 @@ impl super::VM for CoreVM {
         options: PayloadOptions,
     ) -> Result<NotificationHandle, Error> {
         invocation_debug_logs!(self, "Executing 'Get state {key}'");
-        self.do_transition(SysStateGet(key, options, false))
-    }
-
-    fn sys_state_get_lazy(&mut self, key: String) -> Result<NotificationHandle, Error> {
-        invocation_debug_logs!(self, "Executing 'Get lazy state {key}'");
-        self.do_transition(SysStateGet(key, PayloadOptions::default(), true))
+        self.do_transition(SysStateGet(key, options))
     }
 
     fn journal_replay(&self) -> JournalReplay {

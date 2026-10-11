@@ -301,13 +301,8 @@ impl TransitionAndReturn<Context, CreateSignalHandle> for State {
     }
 }
 
-/// State get with key and payload options for replay checks, and whether to ask
-/// the runtime even when eager state knows the key.
-pub(crate) struct SysStateGet(
-    pub(crate) String,
-    pub(crate) PayloadOptions,
-    pub(crate) bool,
-);
+/// State get with key and payload options for replay checks.
+pub(crate) struct SysStateGet(pub(crate) String, pub(crate) PayloadOptions);
 
 impl TransitionAndReturn<Context, SysStateGet> for State {
     type Output = NotificationHandle;
@@ -315,7 +310,7 @@ impl TransitionAndReturn<Context, SysStateGet> for State {
     fn transition_and_return(
         mut self,
         context: &mut Context,
-        SysStateGet(key, options, lazy): SysStateGet,
+        SysStateGet(key, options): SysStateGet,
     ) -> Result<(Self, Self::Output), Error> {
         let completion_id = context.journal.next_completion_notification_id();
 
@@ -330,7 +325,6 @@ impl TransitionAndReturn<Context, SysStateGet> for State {
 
                 // Let's look into the eager_state
                 let result = match eager_state.get(&key) {
-                    _ if lazy => None,
                     EagerGetState::Unknown => None,
                     EagerGetState::Empty => Some((
                         get_eager_state_command_message::Result::Void(Void::default()),

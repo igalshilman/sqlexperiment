@@ -3,7 +3,8 @@
 //! Each transfer carries an id and is recorded in the same SQL transaction as
 //! the balances it moves, so a retried invocation (at least once) applies it
 //! once. `LEDGER_ABORT_PER_MILLE` aborts the process at random state requests,
-//! for crash tests; `PORT` sets the listening port (default 9080).
+//! for crash tests; `LEDGER_KEEP_JOURNAL` keeps completed journals for an hour;
+//! `PORT` sets the listening port (default 9080).
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlite_kv::kv::KvStore;
@@ -144,6 +145,9 @@ impl Ledger {
             .await
             .map_err(|e| classify(&db, e))?;
         let int = |i: usize| rows[0][i].as_int().unwrap_or(0);
+        // Nothing here needs it, since the audit writes nothing: it shows where a
+        // handler would wait for its writes before acting outside Restate.
+        sqlite_kv_restate::sync(&ctx).await?;
         Ok(Json(Audit {
             accounts: int(0),
             total: int(1),
@@ -239,9 +243,13 @@ async fn main() {
         cache,
         abort_per_mille,
     };
-    let options = service_options()
+    let mut options = service_options()
         .retry_policy_initial_interval(Duration::from_millis(50))
         .retry_policy_max_interval(Duration::from_millis(500));
+    if std::env::var_os("LEDGER_KEEP_JOURNAL").is_some() {
+        // To inspect what invocations journaled.
+        options = options.journal_retention(Duration::from_secs(3600));
+    }
     let endpoint = Endpoint::builder()
         .bind(ledger.into_service_definition().options(options))
         .build();

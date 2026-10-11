@@ -301,36 +301,6 @@ impl ContextInternal {
         Either::Left(InterceptErrorFuture::new(self.clone(), poll_future))
     }
 
-    /// Like [`ContextInternal::get`], but always asks the runtime, even for a key this attempt
-    /// already knows. The runtime processes an invocation's commands in order, so once this
-    /// resolves every earlier command was processed, such as the state writes before it.
-    pub fn get_lazy<T: Deserialize>(
-        &self,
-        key: &str,
-    ) -> impl Future<Output = Result<Option<T>, TerminalError>> + Send {
-        let mut inner_lock = must_lock!(self.inner);
-        let handle = unwrap_or_trap!(inner_lock, inner_lock.vm.sys_state_get_lazy(key.to_owned()));
-        inner_lock.maybe_flip_span_replaying_field();
-
-        let poll_future = get_async_result(Arc::clone(&self.inner), handle).map(|res| match res {
-            Ok(Value::Void) => Ok(Ok(None)),
-            Ok(Value::Success(mut s)) => {
-                let t =
-                    T::deserialize(&mut s).map_err(|e| Error::deserialization("get_state", e))?;
-                Ok(Ok(Some(t)))
-            }
-            Ok(Value::Failure(f)) => Ok(Err(f.into())),
-            Ok(v) => Err(ErrorInner::UnexpectedValueVariantForSyscall {
-                variant: <&'static str>::from(v),
-                syscall: "get_state",
-            }
-            .into()),
-            Err(e) => Err(e),
-        });
-
-        Either::Left(InterceptErrorFuture::new(self.clone(), poll_future))
-    }
-
     /// Whether a retried or resumed attempt replays the journal; see
     /// [`ServiceOptions::journal_replay`](crate::endpoint::ServiceOptions::journal_replay).
     pub fn journal_replay(&self) -> bool {

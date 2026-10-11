@@ -22,20 +22,16 @@
 //! Endpoint::builder().bind(Ledger::new().into_service_definition().options(service_options()))
 //! ```
 use bytes::Bytes;
-use futures::future::{BoxFuture, FutureExt, Shared};
+use futures::future::BoxFuture;
 use restate_sdk::endpoint::{ContextInternal, ServiceOptions};
-use restate_sdk::prelude::{HandlerError, ObjectContext, TerminalError};
+use restate_sdk::prelude::{
+    ContextSideEffects, HandlerError, ObjectContext, RunFuture, TerminalError,
+};
 use sqlite_kv::kv::KvStore;
 use sqlite_kv::{Durability, PageCache, Session, StorageOptions};
-use std::future::poll_fn;
 use std::io;
-use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::sync::Arc;
 use std::time::Duration;
-
-/// A state key nobody writes: reading it from the runtime is the durability
-/// barrier for every state write before it.
-const BARRIER_KEY: &str = "sqlite-kv/barrier";
 
 /// Options for a service whose handlers use [`open`]: no journal replay; lazy
 /// state, so an invocation does not start by loading every page; and no journal
@@ -94,73 +90,22 @@ pub fn classify(db: &Session, error: Box<dyn std::error::Error + Send + Sync>) -
 
 /// The state of one virtual object key, as a [`KvStore`].
 ///
-/// A get reads the state (from the runtime, unless this attempt wrote the key).
-/// A put or delete is a state write, which the runtime stores and applies in
-/// order with the invocation's other commands; it is durable once a later read
-/// from the runtime is answered. So a write awaits a read of [`BARRIER_KEY`],
-/// shared by the writes issued together.
+/// A get reads the state: from the runtime, or locally if this attempt wrote
+/// the key. A put or delete is a state write, which returns at once: the
+/// runtime stores an invocation's commands in order, and after a crash keeps a
+/// prefix of them. So a write that is lost takes every later command with it,
+/// including later writes, calls and the response; nothing that depends on it
+/// can outlive it. Before an effect Restate does not order, such as a request
+/// to another system, call [`sync`].
 pub struct ObjectState {
     ctx: ContextInternal,
-    barrier: Mutex<Barrier>,
-}
-
-type Pending = Shared<BoxFuture<'static, Result<(), String>>>;
-
-#[derive(Default)]
-struct Barrier {
-    /// Writes issued so far.
-    issued: u64,
-    /// Writes the pending barrier was issued after.
-    covered: u64,
-    pending: Option<Pending>,
 }
 
 impl ObjectState {
     pub fn new(ctx: &ObjectContext<'_>) -> Self {
         Self {
             ctx: ctx.internal().clone(),
-            barrier: Mutex::default(),
         }
-    }
-
-    /// Wait until the write just issued is durable.
-    async fn written(&self) -> io::Result<()> {
-        let ticket = {
-            let mut barrier = self.barrier.lock().unwrap();
-            barrier.issued += 1;
-            barrier.issued
-        };
-        // Let the writes polled with this one be issued first, to share a barrier.
-        let mut yielded = false;
-        poll_fn(|cx| {
-            if yielded {
-                return Poll::Ready(());
-            }
-            yielded = true;
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        })
-        .await;
-        let pending = {
-            let mut barrier = self.barrier.lock().unwrap();
-            match &barrier.pending {
-                Some(pending) if barrier.covered >= ticket => pending.clone(),
-                _ => {
-                    // Issued when first polled, which is after every write it covers.
-                    let ctx = self.ctx.clone();
-                    let pending = async move {
-                        let read = ctx.get_lazy::<Bytes>(BARRIER_KEY).await;
-                        read.map(drop).map_err(|e| e.to_string())
-                    }
-                    .boxed()
-                    .shared();
-                    barrier.covered = barrier.issued;
-                    barrier.pending = Some(pending.clone());
-                    pending
-                }
-            }
-        };
-        pending.await.map_err(io::Error::other)
     }
 }
 
@@ -171,21 +116,25 @@ impl KvStore for ObjectState {
     }
 
     fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            self.ctx.set(key, value);
-            self.written().await
-        })
+        self.ctx.set(key, value);
+        Box::pin(std::future::ready(Ok(())))
     }
 
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            self.ctx.clear(key);
-            self.written().await
-        })
+        self.ctx.clear(key);
+        Box::pin(std::future::ready(Ok(())))
     }
 
     /// A value the runtime returns was stored in its log first.
     fn durable_when_visible(&self) -> bool {
         true
     }
+}
+
+/// Wait until every state write so far is stored: an empty `ctx.run`, whose
+/// result the runtime acknowledges after the commands before it. Needed only
+/// before an effect outside Restate that must not happen for lost writes.
+pub async fn sync(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
+    ctx.run(async || Ok(())).name("sync").await?;
+    Ok(())
 }

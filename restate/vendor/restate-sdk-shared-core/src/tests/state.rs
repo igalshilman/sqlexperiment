@@ -1461,47 +1461,6 @@ mod journal_replay_disabled {
         );
     }
 
-    /// A forced lazy get asks the runtime even for a key set in this attempt.
-    #[test]
-    fn lazy_get_ignores_eager_state() {
-        let mut output = VMTestCase::with_vm_options(options())
-            .input(StartMessage {
-                id: Bytes::from_static(b"abc"),
-                debug_id: "abc".to_owned(),
-                known_entries: 1,
-                partial_state: false,
-                ..Default::default()
-            })
-            .input(input_entry_message(b"Till"))
-            .run(|vm| {
-                vm.sys_input().unwrap();
-                vm.sys_state_set(
-                    "STATE".to_owned(),
-                    Bytes::from_static(b"x"),
-                    PayloadOptions::default(),
-                )
-                .unwrap();
-                vm.sys_state_get_lazy("STATE".to_owned()).unwrap();
-            });
-
-        assert_eq!(
-            output.next_decoded::<SetStateCommandMessage>().unwrap(),
-            SetStateCommandMessage {
-                key: Bytes::from_static(b"STATE"),
-                value: Some(Bytes::from_static(b"x").into()),
-                ..Default::default()
-            }
-        );
-        assert_eq!(
-            output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
-            GetLazyStateCommandMessage {
-                key: Bytes::from_static(b"STATE"),
-                result_completion_id: 1,
-                ..Default::default()
-            }
-        );
-    }
-
     #[test]
     fn awakeables_are_refused() {
         let mut vm = VMTestCase::with_vm_options(options())

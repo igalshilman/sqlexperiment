@@ -32,11 +32,16 @@ the balances it moves.
 **State access.** `ObjectState` is a `KvStore` over the state of one object
 key. A get is a state read, from the runtime unless this attempt wrote the key
 (lazy state, so an invocation does not start by loading every page). A put or
-delete is a state write. Writes are not acknowledged by the protocol, so each
-one waits for a **barrier**: a read of a key nobody writes, forced to go to the
-runtime. The runtime processes an invocation's commands in order, so once the
-barrier is answered, every write before it was stored. Writes issued together
-share one barrier, so a commit costs one round trip.
+delete is a state write, and returns at once. Restate stores an invocation's
+commands in order, and after a crash keeps a prefix of them, so writes are
+FIFO: a lost write takes every later command with it, including later writes,
+calls to other services and the response. The protocol's ordering rules
+(commit after the transaction's other segments, `meta` after the checkpointed
+pages, deletes after `meta`) hold by that order, without waiting for
+acknowledgements. Before an effect Restate does not order, such as a request
+from `ctx.run` to another system, `sync(&ctx)` waits until every write so far
+is stored: it awaits an empty `ctx.run`, which the runtime acknowledges after
+the commands before it.
 
 **No journal replay.** On a retry or a resume, the SDK normally replays the
 journal: each call returns its recorded result and must match it. That cannot
@@ -77,7 +82,6 @@ The SDK is vendored (`vendor/`, restate-sdk 0.12.1 and restate-sdk-shared-core
 | Change | Where |
 |---|---|
 | `JournalReplay::Disabled`: after the input, skip the recorded commands; start completion ids at `1 + 2 × known entries` (a command takes at most two, so ids of earlier attempts are never reused); refuse awakeables, whose signal ids cannot be made fresh | shared-core `VMOptions`, `SysInput`, `Journal::skip_replayed` |
-| `sys_state_get_lazy` / `ContextInternal::get_lazy`: a state read that always asks the runtime, ignoring what the attempt knows | shared-core `SysStateGet`, SDK `endpoint/context.rs` |
 | `ServiceOptions::journal_replay(bool)`, recorded in the service metadata and applied to each invocation's VM | SDK `endpoint/builder.rs`, `endpoint/mod.rs` |
 | `ObjectContext::internal()`, so a store can hold the context beyond a borrow | SDK `context/mod.rs` |
 | Fix: futures awaited concurrently in one task lost wake-ups and hung | SDK `endpoint/futures/async_result_poll.rs` |
@@ -87,15 +91,15 @@ experiment. The input stream wakes only the last future to poll it. Once
 another future had read the input that completed a handle, the future waiting
 on that handle was never woken, and then went back to reading input rather
 than checking for its result. Session I/O awaits several state reads at once
-(prefetch, and puts sharing a barrier), so invocations hung until Restate's
+(prefetch and readahead), so invocations hung until Restate's
 60-second inactivity timeout. Now every future waiting for input is woken
 when input arrives, and a woken future checks for its result first.
 
 ## Validation
 
 - **Unit tests** in the vendored shared-core: a retry reads current state with
-  fresh completion ids, a first attempt is unchanged, a forced read ignores
-  eager state, and awakeables are refused (259 tests pass).
+  fresh completion ids, a first attempt is unchanged, and awakeables are
+  refused (258 tests pass).
 - **Crash campaign** ([`tests/crash.rs`](tests/crash.rs)) against a real
   `restate-server` 1.7.13 on one node. Two objects, six clients and 120
   transfers; one in three is sent twice, and every call is resent until
@@ -106,8 +110,11 @@ when input arrives, and a woken future checks for its result first.
 
   | Abort rate per state request | Ledger restarts | Result |
   |---|---|---|
-  | 1.5% | 45, 49, 60 | All consistent |
-  | 4% | 171, 212, 266 | All consistent |
+  | 1.5% | 46, 54 | All consistent |
+  | 4% | 140, 192 | All consistent |
+
+  An earlier version, in which every write waited for a barrier read, passed
+  the same runs (45 to 266 restarts).
 
   At 8% an invocation of about 100 requests almost never completes, so the
   campaign does not finish; that is a liveness bound of the test, not a
@@ -123,11 +130,13 @@ server node, measured through the ingress:
 
 | | Mean latency | Lazy reads per transfer | Writes per transfer |
 |---|---|---|---|
-| Page cache | 17.5–19 ms | 6.6 | 2.0 sets, 1.9 clears |
-| No cache | 20.1 ms | 13.3 | 1.8 sets, 1.0 clear |
+| Page cache | 15.1 ms | 5.0 | 2.0 sets, 1.9 clears |
+| No cache | 16.5 ms | 11.9 | 1.8 sets, 1.0 clear |
 
 A lazy read is two journal entries (the command, and the notification
-carrying the value); about half of the cached reads are barriers.
+carrying the value), so a cached transfer journals about 16 entries. Waiting
+for each write with a barrier read cost 1.6 more reads and about 3 ms per
+transfer (17.5–19 ms and 20.1 ms).
 
 ## Caveats
 
@@ -141,10 +150,15 @@ carrying the value); about half of the cached reads are barriers.
   handlers that hit the inactivity timeout start over, and request/response
   deployments (such as Lambda), which suspend at every await, cannot make
   progress. Use HTTP/2 bidirectional streaming.
+- **Outside the model.** The TLA+ specification and the protocol monitor
+  assume independent, acknowledged puts. Writes that return before they are
+  stored break their acknowledgement rules, and are safe only by the FIFO
+  argument above, which the crash campaign tests but nothing proves.
 - **Not supported:** shared handlers, awakeables, and journal replay for the
   same service.
-- **Assumptions to confirm with the runtime:** a lazy state read is answered
-  only after the invocation's earlier commands are stored (the barrier); an
+- **Assumptions to confirm with the runtime:** an attempt's stored commands
+  are a prefix of those it sent, in order (FIFO writes); an empty `ctx.run` is
+  acknowledged only after the commands before it are stored (`sync`); an
   abandoned attempt's commands are never applied after a new attempt starts
   (fencing); state a lazy read returns is durable (`durable_when_visible`).
   The campaign kills processes, so it checks ordering and recovery, not
