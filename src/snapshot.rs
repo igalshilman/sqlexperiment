@@ -141,6 +141,9 @@ pub(crate) struct Snapshot {
     /// An acknowledged checkpoint this owner has not recorded in `meta` yet.
     claim: Option<Meta>,
     pub(crate) log: Log,
+    /// Nothing changed since this owner last saw the namespace: the cache's
+    /// `meta` matched and the log ends where this owner left it.
+    pub(crate) unchanged: bool,
     /// The last decoded page, for repeated reads of one page.
     page: Mutex<Option<(u64, Page)>>,
 }
@@ -176,6 +179,7 @@ impl Snapshot {
             _ => None,
         };
         let log = log::replay(&*store, start, batch, prefetched).await?;
+        let unchanged = meta_known && committed == Some(log.next);
 
         if !store.durable_when_visible() {
             let mut confirm = Vec::new();
@@ -201,6 +205,7 @@ impl Snapshot {
             meta_bytes,
             claim,
             log,
+            unchanged,
             page: Mutex::default(),
         })
     }

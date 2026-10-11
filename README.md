@@ -38,7 +38,9 @@ transactions before saves checkpoint, default 4) and an optional `PageCache`
 (pages as stored, or `PageCache::decoded`; see [cache results](benches/CACHE_RESULTS.md)):
 owner-process state that caches pages, resets itself when another writer moves
 `meta`, and remembers what this owner made durable. With it, a steady-state open
-and save are one round trip each. Backends whose visible values are always
+and save are one round trip each, and a session that ends cleanly leaves its
+engine for the next one, which reuses it when nothing changed (about 5× less CPU
+per session). Backends whose visible values are always
 durable can say so with `KvStore::durable_when_visible`; otherwise a fresh open
 re-puts the log tail and `meta` it did not write. See
 [the results](benches/LOG_RESULTS.md) for measurements against the previous design.

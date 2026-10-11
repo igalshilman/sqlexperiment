@@ -52,7 +52,9 @@
 //! [`StorageOptions::cache`] can hold a [`PageCache`]: owner-process state shared
 //! by successive sessions of one namespace. It caches checkpointed pages, resets
 //! itself when another writer changes `meta`, and remembers what this owner has
-//! made durable, so a steady-state open and save are each one round trip.
+//! made durable, so a steady-state open and save are each one round trip. A
+//! session that ends cleanly leaves its idle engine there; the next open reuses
+//! it when nothing changed, keeping the parsed schema and engine page cache.
 //!
 //! The caller's task drives nonblocking engine open/connect state machines and
 //! statement steps, awaits queued KV work, then resumes the engine. Completions run
@@ -114,6 +116,7 @@ pub use snapshot::{CHECKPOINT_PAGES, SaveReport, StorageOptions};
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use crate::kv::KvStore;
+use crate::snapshot::Snapshot;
 use std::{future::poll_fn, sync::Arc, task::Poll};
 use turso_core::storage::database::DatabaseFile;
 use turso_core::{
@@ -136,6 +139,20 @@ pub struct Session {
     connection: Option<Arc<Connection>>,
     io: Arc<KvIo>,
     poisoned: bool,
+    cache: Option<PageCache>,
+    /// The engine moved into the owner cache; nothing is left to shut down.
+    parked: bool,
+    /// The engine continued from a previous session.
+    reused: bool,
+}
+
+/// An idle engine and its adapter at a committed state, kept in the owner's
+/// [`PageCache`] so the next session can skip opening an engine.
+pub(crate) struct WarmEngine {
+    connection: Arc<Connection>,
+    io: Arc<KvIo>,
+    /// The log position its state corresponds to.
+    next: u64,
 }
 
 /// Abort queued requests before a suspended statement is destroyed. This guard
@@ -185,20 +202,78 @@ impl Session {
 
     /// Open with explicit [`StorageOptions`]. Options never change the stored
     /// format: existing page tags determine decoding.
+    ///
+    /// With a [`PageCache`], an engine left idle by this owner's previous session
+    /// is reused when nothing changed since: the cache validated `meta` and the
+    /// log ends where that engine left it. Its page cache and parsed schema stay
+    /// warm.
     pub async fn open_with_options(
         store: Arc<dyn KvStore>,
         options: StorageOptions,
     ) -> Result<Self> {
-        let io = KvIo::mount_with_options(store, options).await?;
+        let cache = options.cache.clone();
+        let snapshot = Snapshot::open_with_options(store, options).await?;
+        let warm = match &cache {
+            Some(cache) if snapshot.unchanged => cache
+                .take_engine()
+                .filter(|warm| warm.next == snapshot.log.next && warm.io.is_clean()),
+            _ => None,
+        };
+        if let Some(warm) = warm {
+            let mut session = Self {
+                connection: None,
+                io: warm.io,
+                poisoned: true,
+                cache,
+                parked: false,
+                reused: true,
+            };
+            session.io.resume(snapshot).await?;
+            session.connection = Some(warm.connection);
+            session.poisoned = false;
+            return Ok(session);
+        }
         let mut session = Self {
             connection: None,
-            io,
+            io: KvIo::from_snapshot(snapshot),
             poisoned: true,
+            cache,
+            parked: false,
+            reused: false,
         };
         session.io.prepare_engine().await?;
         session.connection = Some(open_engine(&session.io).await?);
         session.poisoned = false;
         Ok(session)
+    }
+
+    /// Whether this session continued a previous session's engine.
+    #[cfg(feature = "simulation")]
+    pub fn reused_engine(&self) -> bool {
+        self.reused
+    }
+
+    /// Leave an idle engine at a committed state to the owner cache.
+    fn park(&mut self) {
+        let Some(cache) = &self.cache else { return };
+        let Some(next) = cache.committed() else {
+            return;
+        };
+        let idle = self
+            .connection
+            .as_ref()
+            .is_some_and(|connection| connection.get_auto_commit());
+        if self.poisoned || !idle || !self.io.is_clean() {
+            return;
+        }
+        if let Some(connection) = self.connection.take() {
+            cache.park(WarmEngine {
+                connection,
+                io: self.io.clone(),
+                next,
+            });
+            self.parked = true;
+        }
     }
 
     /// Execute one SQL statement and collect all result rows in memory.
@@ -256,16 +331,24 @@ impl Session {
             return Err("cannot save an open SQL transaction".into());
         }
         self.checkpoint().await?;
-        // Drop releases engine state without checkpointing or hidden file I/O.
-        drop(self.connection.take());
-        Ok(self.io.publish().await?)
+        // Until the commit is acknowledged the engine may hold uncommitted pages,
+        // so a failure must not leave it for reuse.
+        self.poisoned = true;
+        let report = self.io.publish().await?;
+        self.poisoned = false;
+        self.park();
+        Ok(report)
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.io.shutdown();
-        drop(self.connection.take());
+        // A clean read-only session leaves its engine for the next one.
+        self.park();
+        if !self.parked {
+            self.io.shutdown();
+            drop(self.connection.take());
+        }
     }
 }
 
