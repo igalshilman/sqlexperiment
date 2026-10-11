@@ -40,7 +40,7 @@
 //! re-puts the commit tail and `meta` before exposing them, unless this owner
 //! wrote them and had them acknowledged.
 use crate::{
-    cache::{NamespaceCache, Reader, Reuse},
+    cache::{NamespaceCache, PageKey, Reader, Reuse},
     format::{HINT, META, log_key, page_key},
     hint::{self, Usage},
     kv::KvStore,
@@ -192,7 +192,7 @@ pub(crate) struct Snapshot {
     /// The last decoded page, for repeated reads of one page.
     page: Mutex<Option<(u64, Page)>>,
     /// Page values fetched ahead of use (prefetch and readahead), each used once.
-    fetched: Mutex<HashMap<u64, Option<Bytes>>>,
+    fetched: Mutex<HashMap<u64, Fetched>>,
     readahead: Mutex<Readahead>,
     /// The working-set hint read at open, and the pages this session read.
     hint: Option<Bytes>,
@@ -200,6 +200,10 @@ pub(crate) struct Snapshot {
     /// This view's registration with the owner cache while a session uses it.
     reader: Mutex<Option<Reader>>,
 }
+
+/// A stored page value, with the cache key taken before it was read (see
+/// [`NamespaceCache::insert_read`]).
+type Fetched = (Option<PageKey>, Option<Bytes>);
 
 /// Detects sequential reads of page keys.
 #[derive(Default)]
@@ -301,9 +305,11 @@ impl Snapshot {
             (true, None) => Vec::new(),
         };
         let prefetch = async {
+            let tokens: Vec<_> = wanted.iter().map(|&n| cache.map(|c| c.token(n))).collect();
             let keys: Vec<_> = wanted.iter().copied().map(page_key).collect();
             let values = futures::future::try_join_all(keys.iter().map(|k| store.get(k))).await?;
-            Ok::<_, io::Error>(wanted.iter().copied().zip(values).collect::<Vec<_>>())
+            let fetched = tokens.into_iter().zip(values);
+            Ok::<_, io::Error>(wanted.iter().copied().zip(fetched).collect::<Vec<_>>())
         };
         let (log, changes, prefetched_pages) = futures::try_join!(
             log::replay(&*store, start, batch, prefetched),
@@ -352,28 +358,28 @@ impl Snapshot {
     }
 
     /// Keep page values fetched at open, except pages the log overrides.
-    fn with_fetched(self, pages: Vec<(u64, Option<Bytes>)>) -> Self {
+    fn with_fetched(self, pages: Vec<(u64, Fetched)>) -> Self {
         let mut fetched = self.fetched.lock().unwrap();
-        for (index, value) in pages {
+        for (index, (token, value)) in pages {
             if self.log.images.contains_key(&index) {
                 continue;
             }
             // The cache keeps values; holes, and pages without a cache, stay here.
-            if let (Some(cache), Some(value)) = (&self.options.cache, &value) {
+            if let (Some(cache), Some(token), Some(value)) = (&self.options.cache, &token, &value) {
                 match cache.is_decoded() {
                     true => {
                         if let Ok(page) = page_codec::decode_bytes(value) {
-                            cache.insert(index, page);
+                            cache.insert_read(token.clone(), page);
                             continue;
                         }
                     }
                     false => {
-                        cache.insert(index, value.clone());
+                        cache.insert_read(token.clone(), value.clone());
                         continue;
                     }
                 }
             }
-            fetched.insert(index, value);
+            fetched.insert(index, (token, value));
         }
         drop(fetched);
         self
@@ -410,17 +416,17 @@ impl Snapshot {
                 false => page_codec::decode_bytes(&value)?,
             }
         } else {
-            let Some(image) = self.fetch(index).await? else {
+            let (token, Some(image)) = self.fetch(index).await? else {
                 return Ok(None);
             };
             let page = page_codec::decode_bytes(&image)?;
-            if let Some(cache) = cache {
+            if let (Some(cache), Some(token)) = (cache, token) {
                 let value = if cache.is_decoded() {
                     page.clone()
                 } else {
                     image
                 };
-                cache.insert(index, value);
+                cache.insert_read(token, value);
             }
             page
         };
@@ -434,7 +440,7 @@ impl Snapshot {
 
     /// The stored value of a page outside the log: fetched ahead, or one get.
     /// Sequential gets start reading ahead, in the same round trip.
-    async fn fetch(&self, index: u64) -> io::Result<Option<Bytes>> {
+    async fn fetch(&self, index: u64) -> io::Result<Fetched> {
         self.readahead.lock().unwrap().observe(index);
         if let Some(value) = self.fetched.lock().unwrap().remove(&index) {
             return Ok(value);
@@ -447,15 +453,15 @@ impl Snapshot {
                 .filter(|n| !self.log.images.contains_key(n) && !fetched.contains_key(n))
                 .collect()
         };
-        let keys: Vec<_> = std::iter::once(index)
-            .chain(ahead.iter().copied())
-            .map(page_key)
-            .collect();
-        let mut values =
-            futures::future::try_join_all(keys.iter().map(|k| self.store.get(k))).await?;
-        let value = values.remove(0);
+        let pages: Vec<_> = std::iter::once(index).chain(ahead).collect();
+        let cache = self.options.cache.as_ref();
+        let tokens: Vec<_> = pages.iter().map(|&n| cache.map(|c| c.token(n))).collect();
+        let keys: Vec<_> = pages.iter().copied().map(page_key).collect();
+        let values = futures::future::try_join_all(keys.iter().map(|k| self.store.get(k))).await?;
+        let mut values = tokens.into_iter().zip(values);
+        let value = values.next().expect("the page itself");
         let mut fetched = self.fetched.lock().unwrap();
-        fetched.extend(ahead.into_iter().zip(values));
+        fetched.extend(pages[1..].iter().copied().zip(values));
         Ok(value)
     }
 

@@ -410,8 +410,22 @@ impl NamespaceCache {
         }
     }
 
-    /// Cache the value just read for a page that missed.
-    pub(crate) fn insert(&self, page: u64, value: Page) {
+    /// The key a value read from the backend now would be cached under.
+    pub(crate) fn token(&self, page: u64) -> PageKey {
+        self.key(page)
+    }
+
+    /// Cache a value read from the backend after taking `token`, unless the
+    /// page was replaced or invalidated meanwhile: the value may predate that.
+    pub(crate) fn insert_read(&self, token: PageKey, value: Page) {
+        let owner = self.owner();
+        let current = owner.versions.get(&token.page).copied().unwrap_or(0);
+        if owner.generation == token.generation && current == token.version {
+            self.shared.pages.insert(token, value);
+        }
+    }
+
+    fn insert(&self, page: u64, value: Page) {
         self.shared.pages.insert(self.key(page), value);
     }
 
@@ -544,7 +558,7 @@ impl Engines {
 
 /// A page value's key: never reused for a different value.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct PageKey {
+pub(crate) struct PageKey {
     generation: u64,
     page: u64,
     version: u32,

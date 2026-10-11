@@ -6,4 +6,5 @@ mod failpoints;
 mod failure;
 mod log;
 mod publication;
+mod races;
 mod sql;
