@@ -4,6 +4,7 @@
 //! exactly once and the balances consistent with them.
 //!
 //! Needs `RESTATE_SERVER` (a `restate-server` binary); skipped otherwise.
+//! `LEDGER_COMMAND` replaces the Rust ledger, e.g. `node ../node/restate/ledger.mjs`.
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -52,7 +53,12 @@ fn wait_healthy() {
 /// Keep a ledger running, restarting it whenever it aborts.
 fn supervise(dir: PathBuf, per_mille: u32, stop: Arc<AtomicBool>, starts: Arc<AtomicUsize>) {
     while !stop.load(Ordering::SeqCst) {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ledger"))
+        // `LEDGER_COMMAND` runs another port of the ledger, such as the Node.js one.
+        let command = std::env::var("LEDGER_COMMAND")
+            .unwrap_or_else(|_| env!("CARGO_BIN_EXE_ledger").to_owned());
+        let mut words = command.split_whitespace();
+        let mut child = Command::new(words.next().expect("a ledger command"))
+            .args(words)
             .env("PORT", LEDGER_PORT.to_string())
             .env("LEDGER_ABORT_PER_MILLE", per_mille.to_string())
             .env("SQLITE_KV_CACHE_FILE", dir.join("cache"))

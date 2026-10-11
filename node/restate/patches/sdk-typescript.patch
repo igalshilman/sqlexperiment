@@ -1,0 +1,119 @@
+diff --git a/packages/libs/restate-sdk/src/endpoint/components.ts b/packages/libs/restate-sdk/src/endpoint/components.ts
+index 14d8ab1..f24c370 100644
+--- a/packages/libs/restate-sdk/src/endpoint/components.ts
++++ b/packages/libs/restate-sdk/src/endpoint/components.ts
+@@ -48,6 +48,7 @@ export interface ExecutionOptions {
+   hooks?: HooksProvider[];
+   explicitCancellation?: boolean;
+   onJournalMismatchErrors?: "retry" | "pause" | "fail";
++  journalReplay?: boolean;
+ }
+ 
+ export interface ComponentHandler {
+@@ -146,6 +147,8 @@ function createExecutionOptions(
+     onJournalMismatchErrors:
+       handlerOptions?.onJournalMismatchErrors ??
+       serviceOptions?.onJournalMismatchErrors,
++    journalReplay:
++      handlerOptions?.journalReplay ?? serviceOptions?.journalReplay,
+   };
+ }
+ 
+diff --git a/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts b/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts
+index f5a20a7..afc8a76 100644
+--- a/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts
++++ b/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts
+@@ -302,7 +302,8 @@ class RestateInvokeResponse implements RestateResponse {
+       handler.executionOptions.explicitCancellation ?? false,
+       onJournalMismatchErrorsToWasm(
+         handler.executionOptions.onJournalMismatchErrors
+-      )
++      ),
++      handler.executionOptions.journalReplay ?? true
+     );
+     const responseHead = this.coreVm.get_response_head();
+     this.statusCode = responseHead.status_code;
+diff --git a/packages/libs/restate-sdk/src/types/rpc.ts b/packages/libs/restate-sdk/src/types/rpc.ts
+index 9b9e22f..4515489 100644
+--- a/packages/libs/restate-sdk/src/types/rpc.ts
++++ b/packages/libs/restate-sdk/src/types/rpc.ts
+@@ -636,6 +636,16 @@ export type ServiceHandlerOpts<I, O> = {
+    * @experimental
+    */
+   onJournalMismatchErrors?: "retry" | "pause" | "fail";
++
++  /**
++   * When set to `false`, a retried or resumed invocation skips the journal of its
++   * earlier attempts: the handler runs again from the start, and every context
++   * call executes anew, reading current state. Effects of earlier attempts may
++   * repeat (at least once), and awakeables are unsupported.
++   *
++   * @experimental
++   */
++  journalReplay?: boolean;
+ };
+ 
+ export type ObjectHandlerOpts<I, O> = ServiceHandlerOpts<I, O> & {
+@@ -1208,6 +1218,16 @@ export type ServiceOptions = {
+    * @experimental
+    */
+   onJournalMismatchErrors?: "retry" | "pause" | "fail";
++
++  /**
++   * When set to `false`, a retried or resumed invocation skips the journal of its
++   * earlier attempts: the handler runs again from the start, and every context
++   * call executes anew, reading current state. Effects of earlier attempts may
++   * repeat (at least once), and awakeables are unsupported.
++   *
++   * @experimental
++   */
++  journalReplay?: boolean;
+ };
+ 
+ /**
+diff --git a/sdk-shared-core-wasm-bindings/Cargo.toml b/sdk-shared-core-wasm-bindings/Cargo.toml
+index ba25532..fa8eb6d 100644
+--- a/sdk-shared-core-wasm-bindings/Cargo.toml
++++ b/sdk-shared-core-wasm-bindings/Cargo.toml
+@@ -20,7 +20,7 @@ tracing-subscriber = { version = "0.3.18", default-features = false, features =
+ 
+ # TODO remove once restate-sdk-shared-core with protocol V8 is released
+ [patch.crates-io]
+-restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core.git", rev = "382649d0652aa6d971ec16e788d24b4b2c8c8b45" }
++restate-sdk-shared-core = { path = "../../sdk-shared-core" }
+ 
+ [profile.release]
+ opt-level = 3
+diff --git a/sdk-shared-core-wasm-bindings/src/lib.rs b/sdk-shared-core-wasm-bindings/src/lib.rs
+index f115c2b..70f2b13 100644
+--- a/sdk-shared-core-wasm-bindings/src/lib.rs
++++ b/sdk-shared-core-wasm-bindings/src/lib.rs
+@@ -5,7 +5,7 @@ use restate_sdk_shared_core::{
+     Header, HeaderMap, IdentityVerifier, ImplicitCancellationOption, Input,
+     JournalMismatchRetryBehavior, NonDeterministicChecksOption, NonEmptyValue, OnMaxAttempts,
+     ResponseHead, RetryPolicy, RunExitResult, RunHandle, SendHandle, Target, TerminalFailure,
+-    UnresolvedFuture, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
++    UnresolvedFuture, JournalReplay, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
+ };
+ use serde::{Deserialize, Serialize};
+ use std::alloc::{GlobalAlloc, Layout, System};
+@@ -609,6 +609,7 @@ impl WasmVM {
+         disable_payload_checks: bool,
+         explicit_cancellation: bool,
+         on_journal_mismatch: WasmJournalMismatchBehavior,
++        journal_replay: bool,
+     ) -> Result<WasmVM, WasmFailure> {
+         let log_dispatcher = Dispatch::new(log_subscriber(log_level, Some(logger_id)));
+ 
+@@ -631,6 +632,11 @@ impl WasmVM {
+                     },
+                     awaiting_on_policy: Default::default(),
+                     journal_mismatch_retry_behavior: on_journal_mismatch.into(),
++                    journal_replay: if journal_replay {
++                        JournalReplay::Enabled
++                    } else {
++                        JournalReplay::Disabled
++                    },
+                 },
+             )
+         })?;
