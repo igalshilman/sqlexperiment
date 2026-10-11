@@ -33,7 +33,7 @@
 //! `meta`, checkpoints may overwrite `page/<n>` in place: replay applies the log
 //! over whatever they left. This is SQLite's own WAL design, applied to KV keys.
 //! There is no page map, no object allocation, no intent and no orphan collection.
-//! See `docs/PROTOCOL.md` and the private `snapshot` and `log` modules.
+//! See `docs/DESIGN.md` and the private `snapshot` and `log` modules.
 //!
 //! The costs are writing each page twice (log, then checkpoint) and replaying the
 //! log on open, which checkpoints keep short. This is not MVCC: one owner reads

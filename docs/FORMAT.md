@@ -51,4 +51,4 @@ Segments before the log start are checkpointed into pages; those before
 "deleted below" are deleted too. A missing record means log start 1, deleted
 below 1 and an empty database. The value is exactly 28 bytes.
 
-See [PROTOCOL.md](PROTOCOL.md) for commit, replay, checkpoint and recovery rules.
+See [DESIGN.md](DESIGN.md) for commit, replay, checkpoint and recovery rules.
