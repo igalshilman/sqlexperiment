@@ -188,6 +188,8 @@ pub(crate) struct Transaction {
     pub size: u64,
     /// Pages it changed.
     pub pages: Vec<u64>,
+    /// Encoded bytes of its segments.
+    pub bytes: usize,
 }
 
 /// Committed transactions replayed from a log start.
@@ -206,6 +208,54 @@ pub(crate) struct Log {
 impl Log {
     pub(crate) fn size(&self) -> Option<u64> {
         self.transactions.last().map(|t| t.size)
+    }
+
+    /// Add a transaction this owner committed at [`Self::next`].
+    pub(crate) fn append(
+        &mut self,
+        end: u64,
+        size: u64,
+        images: Images,
+        bytes: usize,
+        tail: Bytes,
+    ) {
+        self.transactions.push(Transaction {
+            end,
+            size,
+            pages: images.keys().copied().collect(),
+            bytes,
+        });
+        self.images.extend(images);
+        self.next = end;
+        self.bytes += bytes;
+        self.tail = Some(tail);
+    }
+
+    /// Drop the transactions before `start`, a transaction boundary that a
+    /// checkpoint has covered. Pages only they changed leave [`Self::images`].
+    pub(crate) fn drop_before(&mut self, start: u64) {
+        let covered = self
+            .transactions
+            .iter()
+            .take_while(|t| t.end <= start)
+            .count();
+        if covered == 0 {
+            return;
+        }
+        let dropped: Vec<_> = self.transactions.drain(..covered).collect();
+        let kept: std::collections::HashSet<u64> = self
+            .transactions
+            .iter()
+            .flat_map(|t| t.pages.iter().copied())
+            .collect();
+        for transaction in dropped {
+            self.bytes -= transaction.bytes;
+            for page in transaction.pages {
+                if !kept.contains(&page) {
+                    self.images.remove(&page);
+                }
+            }
+        }
     }
 }
 
@@ -298,13 +348,15 @@ pub(crate) async fn replay(
                     pages.extend(images.keys());
                     log.images.extend(images);
                 }
+                let committed = std::mem::take(&mut pending_bytes);
                 log.transactions.push(Transaction {
                     end: seq,
                     size: segment.size,
                     pages,
+                    bytes: committed,
                 });
                 log.next = seq;
-                log.bytes += std::mem::take(&mut pending_bytes);
+                log.bytes += committed;
                 log.tail = Some(bytes);
             }
         }

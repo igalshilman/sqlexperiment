@@ -57,8 +57,8 @@ Exact encodings are in [FORMAT.md](FORMAT.md).
 ## Save
 
 A session writes SQL into a private view (dirty pages and a private engine WAL).
-`save()` checkpoints that private WAL inside the engine, takes the changed
-pages, and commits them:
+A save checkpoints that private WAL inside the engine, takes the changed pages,
+and commits them:
 
 1. **Commit.** Encode the changed pages as one transaction at the log's next
    sequence. Put all segments but the last concurrently, then the last. Up to
@@ -81,6 +81,37 @@ At most 64 mutations of distinct keys are in flight per group, so a commit
 and its checkpoint slice, garbage and `meta` take one round trip. `Ok(SaveReport)`
 means committed. `cleanup_error` means committed but checkpoint work failed; a
 later save retries it. Any other error leaves the commit outcome unknown.
+
+## When a save happens
+
+`StorageOptions::durability` decides what one save covers:
+
+- **`Durability::Save`** (default): the whole session. SQL `COMMIT` stays
+  private until `Session::save()`, which commits everything as one log
+  transaction and ends the session. Dropping the session discards it all. This
+  fits a host that already makes the unit of work atomic, such as a journaled
+  handler that a failure replays from the start.
+- **`Durability::Commit`**: every SQL transaction, as in SQLite. When a
+  statement leaves the engine in autocommit mode with private changes (an
+  autocommit write, or `COMMIT`), the session saves before the statement
+  returns and continues on the committed view. Reads never save. Dropping the
+  session loses only an open transaction. `Session::transaction(closure)` wraps
+  `BEGIN`/`COMMIT`, and rolls back when the closure returns `Err`.
+
+A continuing session moves its view forward locally instead of reopening: the
+new transaction joins its replayed log, and transactions a checkpoint covered
+leave it once the recorded or claimed log start passes them. After a cleanup
+error it keeps them, so reads still come from the log. Each SQL commit costs
+one round trip with a cache (checkpoint work rides along). Commits are
+sequential: invariant 2 forbids starting the next before the previous one is
+acknowledged.
+
+**Retries.** With at-least-once delivery, a handler that fails after a commit
+runs again on top of it. Make the request idempotent inside the database: in
+the same transaction as its effects, insert the request id into a table with a
+unique key, and stop if it is already there. For calls to other objects or
+services, commit the intent first (an outbox row), then send, and delete the
+row once acknowledged.
 
 ## Open
 
@@ -140,7 +171,7 @@ The engine sees two virtual files, the database and its WAL, served by `KvIo`:
   window that doubles up to 64, so a scan costs a few round trips rather than
   one per page.
 - **Writes, truncation and sync** stay in private memory. File sync is only an
-  ordering barrier. Nothing reaches KV before `save()`, and the engine WAL never
+  ordering barrier. Nothing reaches KV before a save, and the engine WAL never
   does.
 - **Execution.** The caller's task drives the engine's state machines and
   awaits KV I/O. Queries yield every 64 engine steps; one engine call cannot be
@@ -148,8 +179,9 @@ The engine sees two virtual files, the database and its WAL, served by `KvIo`:
   first page (every 4096-byte block of it, for larger page sizes) for those
   reads, and any other synchronous read that would need KV fails and poisons the
   session.
-- **Sessions.** Query errors and cancellation poison a session. `save()`
-  consumes it, and dropping it discards unsaved work.
+- **Sessions.** Query errors and cancellation poison a session; an error from a
+  statement that saves leaves its commit outcome unknown. `save()` consumes a
+  session, and dropping it discards unsaved work.
 
 ## Owner cache
 
@@ -213,6 +245,7 @@ one-thread runtime of its own. It is the only background work.
 |---|---|---|
 | Save, with cache | 1 | 1 commit put; checkpoint pages, deletes and `meta` when due |
 | Save, without cache | 1, or 2 when it checkpoints | Same, with `meta` in the second round trip |
+| SQL commit with `Durability::Commit` | Same as a save | Same as a save |
 | Large save (over 256 KiB) | 2 or more | Segments, then every logged page and `meta` |
 | Open, with cache | 1 | None |
 | Open, fresh owner, weak backend | 2 to 3 | Re-put of the last commit and `meta` |

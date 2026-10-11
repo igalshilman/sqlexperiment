@@ -688,3 +688,39 @@ fn an_owner_probes_exactly_and_saves_in_one_round_trip() -> io::Result<()> {
         Ok(())
     })
 }
+
+/// A session that continues after each commit reads exactly what a reopen
+/// would, as checkpoints drop its transactions from the log, including pages
+/// fetched ahead at open that a commit rewrote without reading.
+#[test]
+fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
+    futures::executor::block_on(async {
+        for cached in [false, true] {
+            let cache = cached.then(fresh_namespace);
+            let store = Arc::new(checkpointed(PREFETCH_PAGES).await?);
+            let opts = options(1, cache.as_ref());
+            let mut model = Model::default();
+            let all: Changes = (0..PREFETCH_PAGES).map(|i| (i, Some(page(i)))).collect();
+            model.apply(&all, PREFETCH_PAGES * 4096);
+
+            // Page 5 is fetched ahead at open and rewritten unread.
+            let mut snapshot = open(&store, &opts).await?;
+            let mut rewrite = Changes::from([(5, Some(page(500)))]);
+            for round in 0..12u64 {
+                let size = PREFETCH_PAGES * 4096;
+                let (_, next) = snapshot.commit(rewrite.clone(), size).await?;
+                model.apply(&rewrite, size);
+                snapshot = next;
+                rewrite = Changes::from([(round % 3, Some(page(1000 + round)))]);
+            }
+            assert!(
+                !snapshot.log.images.contains_key(&5),
+                "the rewrite was checkpointed out of the log"
+            );
+            assert!(model.check(&snapshot).await?, "cached={cached}");
+            assert!(model.check(&open(&store, &opts).await?).await?);
+            assert_collected(&store).await?;
+        }
+        Ok(())
+    })
+}

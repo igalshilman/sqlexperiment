@@ -2,7 +2,7 @@
 //! instrumentation, forced yields or checkpoint fault hooks are required.
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use sqlite_kv::{Result, Session, kv::KvStore};
+use sqlite_kv::{Durability, Result, Session, StorageOptions, kv::KvStore};
 use std::{
     collections::BTreeMap,
     io,
@@ -57,6 +57,35 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
         assert_eq!(
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn commit_durability_with_an_immediately_ready_backend() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(Store::default());
+        fn require_send<T: Send>(value: T) -> T {
+            value
+        }
+        let options = StorageOptions {
+            durability: Durability::Commit,
+            ..StorageOptions::default()
+        };
+        let mut db = Session::open_with_options(store.clone(), options.clone()).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
+            .await?;
+        require_send(db.transaction(async |db| {
+            db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
+            db.execute("INSERT INTO t VALUES (2, 'world')").await
+        }))
+        .await?;
+        drop(db);
+        let mut db = Session::open_with_options(store, options).await?;
+        assert_eq!(
+            db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
+            Some(2)
         );
         Ok(())
     })
