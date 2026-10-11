@@ -1,0 +1,16 @@
+{
+  "name": "sqlite-kv",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SQL over a key/value store implemented in JavaScript (native addon)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "cargo build --release && cp target/release/libsqlite_kv_node.so sqlite_kv.node",
+    "build:debug": "cargo build && cp target/debug/libsqlite_kv_node.so sqlite_kv.node",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -190,6 +190,80 @@ pub struct Session {
     schema_bytes: Option<usize>,
     /// SQL since the last commit may have changed the schema.
     schema_changed: bool,
+    /// This session's writes to an ordered store with an owner cache.
+    ordered: Option<Arc<Ordered>>,
+}
+
+/// Tracks a session's writes to an ordered store (see [`KvStore::ordered`]):
+/// the owner cache trusts them only once [`Session::save`] confirms them.
+struct Ordered {
+    store: Arc<dyn KvStore>,
+    cache: NamespaceCache,
+    unconfirmed: AtomicBool,
+}
+
+impl Ordered {
+    fn wrote(&self) {
+        if !self.unconfirmed.swap(true, Ordering::SeqCst) {
+            self.cache.write_unconfirmed();
+        }
+    }
+
+    /// Confirm the writes so far, if any.
+    async fn confirm(&self) -> std::io::Result<()> {
+        if self.unconfirmed.load(Ordering::SeqCst) {
+            self.store.sync().await?;
+            self.settle(true);
+        }
+        Ok(())
+    }
+
+    fn settle(&self, confirmed: bool) {
+        if self.unconfirmed.swap(false, Ordering::SeqCst) {
+            self.cache.settle(confirmed);
+        }
+    }
+}
+
+impl Drop for Ordered {
+    fn drop(&mut self) {
+        self.settle(false);
+    }
+}
+
+impl KvStore for Ordered {
+    fn get<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> futures::future::BoxFuture<'a, std::io::Result<Option<bytes::Bytes>>> {
+        self.store.get(key)
+    }
+
+    fn put<'a>(
+        &'a self,
+        key: &'a str,
+        value: bytes::Bytes,
+    ) -> futures::future::BoxFuture<'a, std::io::Result<()>> {
+        self.wrote();
+        self.store.put(key, value)
+    }
+
+    fn delete<'a>(&'a self, key: &'a str) -> futures::future::BoxFuture<'a, std::io::Result<()>> {
+        self.wrote();
+        self.store.delete(key)
+    }
+
+    fn durable_when_visible(&self) -> bool {
+        self.store.durable_when_visible()
+    }
+
+    fn ordered(&self) -> bool {
+        true
+    }
+
+    fn sync(&self) -> futures::future::BoxFuture<'_, std::io::Result<()>> {
+        self.store.sync()
+    }
 }
 
 /// Marks a session abandoned unless it finished; see [`Session::transaction`].
@@ -287,6 +361,20 @@ impl Session {
     ) -> Result<Self> {
         let cache = options.cache.clone();
         let durability = options.durability;
+        // With an ordered store, start cold after a session whose writes were
+        // not confirmed, and track this session's.
+        let (store, ordered) = match &cache {
+            Some(cache) if store.ordered() => {
+                cache.open_ordered();
+                let ordered = Arc::new(Ordered {
+                    store,
+                    cache: cache.clone(),
+                    unconfirmed: AtomicBool::new(false),
+                });
+                (ordered.clone() as Arc<dyn KvStore>, Some(ordered))
+            }
+            _ => (store, None),
+        };
         let snapshot = Snapshot::open_with_options(store, options).await?;
         let warm = match &cache {
             Some(cache) if snapshot.unchanged => cache
@@ -310,6 +398,7 @@ impl Session {
                 cleanup_error: None,
                 schema_bytes: Some(warm.schema_bytes),
                 schema_changed: false,
+                ordered,
             };
             session.io.resume(snapshot).await?;
             session.connection = Some(connect(&session.io, &warm.database).await?);
@@ -332,6 +421,7 @@ impl Session {
             cleanup_error: None,
             schema_bytes: None,
             schema_changed: false,
+            ordered,
         };
         session.io.prepare_engine().await?;
         let database = open_engine(&session.io).await?;
@@ -666,6 +756,9 @@ impl Session {
         }
         let mut report = self.commit().await?;
         report.cleanup_error = report.cleanup_error.or(self.cleanup_error.take());
+        if let Some(ordered) = &self.ordered {
+            ordered.confirm().await?;
+        }
         self.park();
         Ok(report)
     }
@@ -673,6 +766,11 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        // Writes not confirmed by a save may be lost (before the engine, which
+        // holds the store, is parked).
+        if let Some(ordered) = &self.ordered {
+            ordered.settle(false);
+        }
         // A clean read-only session leaves its engine for the next one.
         self.park();
         if !self.parked {

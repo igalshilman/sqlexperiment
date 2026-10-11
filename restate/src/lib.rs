@@ -41,12 +41,10 @@ use restate_sdk::prelude::{
 };
 use sqlite_kv::kv::KvStore;
 use sqlite_kv::{Durability, PageCache, PageCacheConfig, Session, StorageOptions};
-use std::collections::HashMap;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
@@ -95,9 +93,6 @@ impl DerefMut for SqlObjectContext<'_> {
 /// `SQLITE_KV_CACHE_FILE` names.
 static CACHE: OnceCell<PageCache> = OnceCell::const_new();
 static WRAP: OnceLock<Wrap> = OnceLock::new();
-/// What this process knows of each namespace it opened.
-static NAMESPACES: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-
 type Wrap = fn(Arc<ObjectState>) -> Arc<dyn KvStore>;
 
 /// Wrap each object's store, such as for fault injection in tests.
@@ -140,18 +135,10 @@ impl SqlObjectContext<'_> {
         }
         let namespace = format!("{}/{}", internal.service_name(), self.key());
         let cache = page_cache().await?.namespace(&namespace);
-        let namespaces = NAMESPACES.get_or_init(Mutex::default);
-
-        // A session whose writes were not confirmed may have lost them, and the
-        // cache would describe writes that do not exist: start over.
-        if namespaces.lock().unwrap().insert(namespace.clone(), false) != Some(true) {
-            cache.reset();
-        }
-
         let state = Arc::new(ObjectState::new(&self.ctx));
         let store = match WRAP.get() {
-            Some(wrap) => wrap(state.clone()),
-            None => state.clone(),
+            Some(wrap) => wrap(state),
+            None => state,
         };
         let options = StorageOptions {
             cache: Some(cache),
@@ -160,14 +147,12 @@ impl SqlObjectContext<'_> {
         };
         let mut db = Session::open_with_options(store, options).await?;
         let result = db.transaction(body).await.map_err(|e| classify(&db, e));
-        drop(db);
-
-        // The cache trusts this session's writes beyond it, so only once they
-        // are stored: wait for them first.
-        if state.wrote() {
-            sync(self).await?;
+        // Saving confirms the session's writes (an empty `ctx.run`, when it
+        // wrote), so that the page cache may trust them. A session that does not
+        // get there makes the next one in this process start cold.
+        if db.is_usable() {
+            db.save().await?;
         }
-        namespaces.lock().unwrap().insert(namespace, true);
         result
     }
 }
@@ -199,24 +184,17 @@ pub async fn sync(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
 /// the key. A put or delete is a state write, which returns at once: the
 /// runtime stores an invocation's commands in order, and after a failed attempt
 /// keeps a prefix of them. So a write that is lost takes every later command
-/// with it, including later writes, calls and the response. What outlives the
-/// attempt in this process, the page cache, waits for [`sync`] instead.
+/// with it, including later writes, calls and the response: the store is
+/// ordered ([`KvStore::ordered`]), and [`KvStore::sync`] is an empty `ctx.run`.
 pub struct ObjectState {
     ctx: ContextInternal,
-    wrote: AtomicBool,
 }
 
 impl ObjectState {
     pub fn new(ctx: &ObjectContext<'_>) -> Self {
         Self {
             ctx: ctx.internal().clone(),
-            wrote: AtomicBool::new(false),
         }
-    }
-
-    /// Whether any write was issued.
-    pub fn wrote(&self) -> bool {
-        self.wrote.load(Ordering::Relaxed)
     }
 }
 
@@ -227,13 +205,11 @@ impl KvStore for ObjectState {
     }
 
     fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        self.wrote.store(true, Ordering::Relaxed);
         self.ctx.set(key, value);
         Box::pin(std::future::ready(Ok(())))
     }
 
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        self.wrote.store(true, Ordering::Relaxed);
         self.ctx.clear(key);
         Box::pin(std::future::ready(Ok(())))
     }
@@ -241,5 +217,16 @@ impl KvStore for ObjectState {
     /// A value the runtime returns was stored in its log first.
     fn durable_when_visible(&self) -> bool {
         true
+    }
+
+    fn ordered(&self) -> bool {
+        true
+    }
+
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        Box::pin(async {
+            let run = self.ctx.run(async || Ok(())).name("sync").await;
+            run.map_err(|e| io::Error::other(e.to_string()))
+        })
     }
 }

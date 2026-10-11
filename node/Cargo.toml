@@ -1,0 +1,25 @@
+[package]
+name = "sqlite-kv-node"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Node.js bindings: SQL over a key/value store the host implements in JavaScript"
+
+# Its own workspace, like restate/: the addon stays out of the main crate's build.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sqlite-kv = { path = ".." }
+# Its value type, as pinned by sqlite-kv.
+turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
+napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
+napi-derive = "3"
+bytes = "1.10"
+futures = "0.3"
+tokio = { version = "1", features = ["sync", "rt-multi-thread"] }
+
+[build-dependencies]
+napi-build = "2"

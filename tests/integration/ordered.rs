@@ -1,8 +1,9 @@
-//! A store that acknowledges writes as it orders them (as Restate state writes
-//! are): writes are stored in order, and a failed request loses its unconfirmed
-//! tail while the process, and its owner cache, live on. The owner cache then
-//! describes writes that do not exist, so the host must reset it before the next
-//! open; without that, a later save records a checkpoint whose pages were lost.
+//! An ordered store (as Restate state writes are): writes are acknowledged once
+//! ordered, stored in order, and a failed request loses its unconfirmed tail
+//! while the process, and its owner cache, live on. A session confirms its
+//! writes in `save`, and one that did not makes the next start cold. A store
+//! that hid its ordering would let a later save record a checkpoint whose pages
+//! were lost.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use sqlite_kv::{
@@ -11,16 +12,17 @@ use sqlite_kv::{
 };
 use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Stored values, and writes acknowledged but not yet confirmed.
 #[derive(Default)]
-struct Ordered {
+struct Backend {
     stored: Mutex<HashMap<String, Bytes>>,
     unconfirmed: Mutex<Vec<(String, Option<Bytes>)>>,
 }
 
-impl Ordered {
+impl Backend {
     /// Every write so far is stored.
     fn confirm(&self) {
         let mut stored = self.stored.lock().unwrap();
@@ -39,107 +41,146 @@ impl Ordered {
 }
 
 /// A request's view: its own writes over the stored values.
-struct Request(Arc<Ordered>);
+struct Request {
+    backend: Arc<Backend>,
+    /// Whether the store admits it is ordered.
+    ordered: bool,
+    /// This request fails before its writes are stored.
+    fails: AtomicBool,
+}
 
 impl KvStore for Request {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
-        let unconfirmed = self.0.unconfirmed.lock().unwrap();
+        let unconfirmed = self.backend.unconfirmed.lock().unwrap();
         let value = match unconfirmed.iter().rev().find(|(k, _)| k == key) {
             Some((_, value)) => value.clone(),
-            None => self.0.stored.lock().unwrap().get(key).cloned(),
+            None => self.backend.stored.lock().unwrap().get(key).cloned(),
         };
         Box::pin(async move { Ok(value) })
     }
 
     fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
         let write = (key.to_owned(), Some(value));
-        self.0.unconfirmed.lock().unwrap().push(write);
+        self.backend.unconfirmed.lock().unwrap().push(write);
         Box::pin(async { Ok(()) })
     }
 
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        self.0
-            .unconfirmed
-            .lock()
-            .unwrap()
-            .push((key.to_owned(), None));
+        let write = (key.to_owned(), None);
+        self.backend.unconfirmed.lock().unwrap().push(write);
         Box::pin(async { Ok(()) })
     }
 
     fn durable_when_visible(&self) -> bool {
         true
     }
+
+    fn ordered(&self) -> bool {
+        self.ordered
+    }
+
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        Box::pin(async {
+            if self.fails.load(Ordering::SeqCst) {
+                self.backend.lose();
+                return Err(io::Error::other("the request failed"));
+            }
+            self.backend.confirm();
+            Ok(())
+        })
+    }
 }
 
-async fn open(store: &Arc<Ordered>, cache: Option<&NamespaceCache>) -> Result<Session> {
+fn request(backend: &Arc<Backend>, ordered: bool, fails: bool) -> Arc<Request> {
+    Arc::new(Request {
+        backend: backend.clone(),
+        ordered,
+        fails: AtomicBool::new(fails),
+    })
+}
+
+async fn open(store: Arc<Request>, cache: Option<&NamespaceCache>) -> Result<Session> {
     let options = StorageOptions {
         cache: cache.cloned(),
         durability: Durability::Commit,
         ..StorageOptions::default()
     };
-    Session::open_with_options(Arc::new(Request(store.clone())), options).await
+    Session::open_with_options(store, options).await
 }
 
-/// Rows and integrity as a process with no cache reads them.
-async fn fresh_view(store: &Arc<Ordered>) -> Result<(i64, String)> {
-    let mut db = open(store, None).await?;
-    let rows = db.query("SELECT count(*) FROM t").await?[0][0]
-        .as_int()
-        .unwrap();
-    let integrity = db.query("PRAGMA integrity_check").await?[0][0].to_string();
-    Ok((rows, integrity))
+/// How a failed request ends.
+#[derive(Clone, Copy, Debug)]
+enum Failure {
+    /// Its save fails to confirm the writes.
+    Confirm,
+    /// It is dropped before saving, as a cancelled handler.
+    Dropped,
 }
 
-/// Requests insert a row each; request `lost` loses its writes. Returns whether
-/// a process without the cache then reads exactly the confirmed rows.
-async fn consistent_after_loss(lost: i64, reset: bool) -> Result<bool> {
-    let store = Arc::new(Ordered::default());
+/// Requests insert a row each and save; request `lost` fails and loses its
+/// writes. Returns whether a process without the cache then reads exactly the
+/// stored rows, as does the owner.
+async fn consistent_after_loss(lost: i64, ordered: bool, failure: Failure) -> Result<bool> {
+    let backend = Arc::new(Backend::default());
     let cache = fresh_namespace();
-    open(&store, Some(&cache))
-        .await?
-        .execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)")
+    let mut db = open(request(&backend, ordered, false), Some(&cache)).await?;
+    db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)")
         .await?;
-    store.confirm();
+    db.save().await?;
+    backend.confirm(); // the request succeeded
     let mut expected = 0;
     for id in 0..20 {
+        let fails = id == lost;
+        let mut db = open(request(&backend, ordered, fails), Some(&cache)).await?;
         let insert = "INSERT INTO t VALUES(?, randomblob(3000))";
-        open(&store, Some(&cache))
-            .await?
-            .execute_with(insert, [Value::from_i64(id)])
-            .await?;
-        if id == lost {
-            store.lose();
-            if reset {
-                cache.reset();
+        db.execute_with(insert, [Value::from_i64(id)]).await?;
+        match (fails, failure) {
+            (false, _) => {
+                db.save().await?;
+                backend.confirm(); // the request succeeded
+                expected += 1;
             }
-        } else {
-            store.confirm();
-            expected += 1;
+            (true, Failure::Confirm) => assert!(db.save().await.is_err() || !ordered),
+            (true, Failure::Dropped) => drop(db),
+        }
+        if fails {
+            backend.lose();
         }
     }
-    Ok(match fresh_view(&store).await {
-        Ok((rows, integrity)) => rows == expected && integrity == "ok",
-        Err(_) => false,
-    })
+    for cache in [None, Some(&cache)] {
+        let view = async {
+            let mut db = open(request(&backend, ordered, false), cache).await?;
+            let rows = db.query("SELECT count(*) FROM t").await?[0][0]
+                .as_int()
+                .unwrap();
+            let integrity = db.query("PRAGMA integrity_check").await?[0][0].to_string();
+            Result::Ok((rows, integrity))
+        };
+        match view.await {
+            Ok((rows, integrity)) if rows == expected && integrity == "ok" => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
 }
 
 #[tokio::test]
-async fn reset_after_lost_writes_keeps_the_store_consistent() -> Result<()> {
-    for lost in 1..15 {
-        assert!(
-            consistent_after_loss(lost, true).await?,
-            "lost request {lost}"
-        );
+async fn an_ordered_store_keeps_every_loss_consistent() -> Result<()> {
+    for failure in [Failure::Confirm, Failure::Dropped] {
+        for lost in 1..15 {
+            let consistent = consistent_after_loss(lost, true, failure).await?;
+            assert!(consistent, "lost request {lost}, {failure:?}");
+        }
     }
     Ok(())
 }
 
-/// The hazard the reset prevents: a lost checkpoint the owner still claims.
+/// The hazard: a store that acknowledges before storing but does not say so.
 #[tokio::test]
-async fn trusting_lost_writes_corrupts_the_store() -> Result<()> {
+async fn a_hidden_ordered_store_corrupts_the_database() -> Result<()> {
     let mut corrupt = 0;
     for lost in 1..15 {
-        corrupt += usize::from(!consistent_after_loss(lost, false).await?);
+        corrupt += usize::from(!consistent_after_loss(lost, false, Failure::Confirm).await?);
     }
     assert!(corrupt > 0, "no loss reached a checkpoint");
     Ok(())
