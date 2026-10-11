@@ -1,0 +1,147 @@
+use super::*;
+
+use crate::service_protocol::messages::*;
+
+use crate::{PayloadOptions, Value};
+use test_log::test;
+
+fn sleep_handler(vm: &mut CoreVM) {
+    vm.sys_input().unwrap();
+
+    let h1 = vm
+        .sys_sleep(String::default(), Duration::from_secs(1), None)
+        .unwrap();
+
+    if vm
+        .do_await(UnresolvedFuture::Single(h1))
+        .is_err_and(|e| e.is_suspended_error())
+    {
+        assert_that!(vm.take_notification(h1), err(is_closed()));
+        return;
+    }
+    assert2::assert!(let Some(Value::Void) = vm.take_notification(h1).unwrap());
+
+    vm.sys_write_output(
+        NonEmptyValue::Success(Bytes::default()),
+        PayloadOptions::default(),
+    )
+    .unwrap();
+    vm.sys_end().unwrap();
+}
+
+#[test]
+fn sleep_suspends() {
+    let mut output = VMTestCase::new()
+        .input(StartMessage {
+            id: Bytes::from_static(b"abc"),
+            debug_id: "abc".to_owned(),
+            known_entries: 1,
+            partial_state: true,
+            ..Default::default()
+        })
+        .input(input_entry_message(b"Till"))
+        .run(sleep_handler);
+
+    assert_that!(
+        output.next_decoded::<SleepCommandMessage>().unwrap(),
+        pat!(SleepCommandMessage {
+            result_completion_id: eq(1)
+        })
+    );
+    assert_that!(
+        output.next_decoded::<SuspensionMessage>().unwrap(),
+        suspended_waiting_completion(1)
+    );
+    assert_eq!(output.next(), None);
+}
+
+#[test]
+fn sleep_completed() {
+    let mut output = VMTestCase::new()
+        .input(StartMessage {
+            id: Bytes::from_static(b"abc"),
+            debug_id: "abc".to_owned(),
+            known_entries: 3,
+            partial_state: true,
+            ..Default::default()
+        })
+        .input(input_entry_message(b"Till"))
+        .input(SleepCommandMessage {
+            wake_up_time: 1721123699086,
+            result_completion_id: 1,
+            ..Default::default()
+        })
+        .input(SleepCompletionNotificationMessage {
+            completion_id: 1,
+            void: Some(Default::default()),
+        })
+        .run(sleep_handler);
+
+    assert_that!(
+        output.next_decoded::<OutputCommandMessage>().unwrap(),
+        is_output_with_success("")
+    );
+    assert_eq!(
+        output.next_decoded::<EndMessage>().unwrap(),
+        EndMessage::default()
+    );
+    assert_eq!(output.next(), None);
+}
+
+#[test]
+fn sleep_still_sleeping() {
+    let mut output = VMTestCase::new()
+        .input(StartMessage {
+            id: Bytes::from_static(b"abc"),
+            debug_id: "abc".to_owned(),
+            known_entries: 2,
+            partial_state: true,
+            ..Default::default()
+        })
+        .input(input_entry_message(b"Till"))
+        .input(SleepCommandMessage {
+            wake_up_time: 1721123699086,
+            result_completion_id: 1,
+            ..Default::default()
+        })
+        .run(sleep_handler);
+
+    assert_that!(
+        output.next_decoded::<SuspensionMessage>().unwrap(),
+        suspended_waiting_completion(1)
+    );
+    assert_eq!(output.next(), None);
+}
+
+#[test]
+fn sleep_with_out_of_bounds_duration_fails() {
+    let mut output = VMTestCase::new()
+        .input(StartMessage {
+            id: Bytes::from_static(b"abc"),
+            debug_id: "abc".to_owned(),
+            known_entries: 1,
+            partial_state: true,
+            ..Default::default()
+        })
+        .input(input_entry_message(b"Till"))
+        .run(|vm| {
+            vm.sys_input().unwrap();
+            // A wake-up instant whose milliseconds overflow u64 must surface as a
+            // clean error rather than panicking on the checked conversion.
+            assert!(vm
+                .sys_sleep(String::default(), Duration::MAX, None)
+                .is_err());
+        });
+
+    assert_that!(
+        output.next_decoded::<ErrorMessage>().unwrap(),
+        error_message_as_error(
+            vm::errors::OutOfBoundsDuration(
+                "sleep duration",
+                u64::try_from(u128::MAX).unwrap_err(),
+            )
+            .into()
+        )
+    );
+    assert_eq!(output.next(), None);
+}
