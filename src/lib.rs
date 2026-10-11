@@ -487,10 +487,12 @@ impl Session {
                 return Err("a statement ended the transaction of Session::transaction".into());
             }
             self.poisoned = false;
-            if idle && self.durability == Durability::Commit && !self.io.is_clean() {
-                if let Some(error) = self.commit().await?.cleanup_error {
-                    self.cleanup_error = Some(error);
-                }
+            if idle
+                && self.durability == Durability::Commit
+                && !self.io.is_clean()
+                && let Some(error) = self.commit().await?.cleanup_error
+            {
+                self.cleanup_error = Some(error);
             }
         }
         rows.ok_or_else(|| "the SQL contains no statements".into())
