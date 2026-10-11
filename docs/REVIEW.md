@@ -92,8 +92,8 @@ position 1, and cache identities start at a random value.
 
 v13 is v12 with a CRC32C on every stored value: in each page envelope (so page
 keys and every image in a log segment), and trailing on segments, `meta` and
-the hint. It costs 4 bytes per page image and per record, and about a
-microsecond per 4 KiB page. A test flips random bits in every stored value of
+the hint. It costs 4 bytes per page image and per record, and about 0.7 µs
+per 4 KiB page to compute or verify. A test flips random bits in every stored value of
 a database (408 flips under Raw and LZ4 pages): each read either fails or
 returns exactly the committed rows. Every single-bit change of a segment or
 `meta` is rejected.
@@ -196,8 +196,8 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 | Amplification benchmark, three repeats | 3,420 observations / 684 phases / 104 configurations; counters reconcile |
 | Page-compression benchmark, three repeats | 504 SQL observations / 84 Raw-LZ4 pairs / 72 codec timing samples; traffic agrees |
 | Small-database benchmark, three repeats | 495 observations; SQL/reopen checks pass |
-| Log-shipping benchmark, two repeats | 16 v12 configurations × 128 sessions plus re-measured v11; repeats identical; final reads verify every write |
-| All four benchmark analyzers | Pass on v12 evidence |
+| Log-shipping benchmark, two repeats | 16 v13 configurations × 128 sessions plus re-measured v11; repeats identical; final reads verify every write |
+| All four benchmark analyzers | Pass on v13 evidence |
 
 Interruption cases:
 
