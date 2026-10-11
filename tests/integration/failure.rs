@@ -67,12 +67,20 @@ async fn populated() -> Result<Arc<ControlledKv>> {
     Ok(store)
 }
 
+/// Page reads happen during the query, not at open.
+fn no_prefetch() -> StorageOptions {
+    StorageOptions {
+        prefetch_pages: 0,
+        ..StorageOptions::default()
+    }
+}
+
 #[test]
 fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
     futures::executor::block_on(async {
         let store = populated().await?;
         store.fail_reads.store(true, Ordering::SeqCst);
-        let mut db = Session::open(store.clone()).await?;
+        let mut db = Session::open_with_options(store.clone(), no_prefetch()).await?;
         match db.query("SELECT n FROM t").await {
             Ok(_) => panic!("expected injected failure"),
             Err(e) => assert!(e.to_string().contains("injected page-read failure")),
@@ -89,7 +97,7 @@ fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
 fn cancellation_during_pending_kv_read_poison_session_without_publishing() -> Result<()> {
     futures::executor::block_on(async {
         let store = populated().await?;
-        let mut db = Session::open(store.clone()).await?;
+        let mut db = Session::open_with_options(store.clone(), no_prefetch()).await?;
         let (started, waiting) = oneshot::channel();
         *store.gate.lock().unwrap() = Some(started);
         store.inner.reset_stats();
