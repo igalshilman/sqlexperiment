@@ -1,3 +1,91 @@
+diff --git a/packages/libs/restate-sdk/src/common_api.ts b/packages/libs/restate-sdk/src/common_api.ts
+index 18d3aa3..185436b 100644
+--- a/packages/libs/restate-sdk/src/common_api.ts
++++ b/packages/libs/restate-sdk/src/common_api.ts
+@@ -38,6 +38,8 @@ export type {
+ } from "./context.js";
+ export { InvocationIdParser, RestatePromise } from "./context.js";
+ export { isRestatePromise } from "./promises.js";
++export { sqlOptions } from "./sql.js";
++export type { SqlDatabase, SqlValue } from "./sql.js";
+ 
+ /**
+  * @deprecated Use {@link RestatePromise}
+diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
+index 8ea15b1..3c7f475 100644
+--- a/packages/libs/restate-sdk/src/context.ts
++++ b/packages/libs/restate-sdk/src/context.ts
+@@ -9,6 +9,7 @@
+  * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
+  */
+ 
++import type { SqlDatabase } from "./sql.js";
+ import type {
+   Client,
+   SendClient,
+@@ -839,6 +840,23 @@ export interface SignalReference<T> {
+ export interface ObjectContext<TState extends TypedState = UntypedState>
+   extends Context, KeyValueStore<TState>, RestateObjectContext {
+   key: string;
++
++  /**
++   * Run `body` against the object's SQL database as one transaction: it
++   * commits, durably, when `body` resolves, and rolls back when it rejects.
++   *
++   * The database lives in the object's state, and a page cache shared by the
++   * process's objects is built in. The object's options must include
++   * {@link sqlOptions}: an invocation is not replayed, it runs again from the
++   * start against the state as it is (at least once). Creating tables is up
++   * to the handlers, such as an `init` handler.
++   *
++   * An SQL error, or the body's own, is terminal, since a retry would repeat
++   * it; a storage error is retried. Needs the `sqlite-kv` addon.
++   *
++   * @experimental
++   */
++  sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
+ }
+ 
+ /**
+diff --git a/packages/libs/restate-sdk/src/context_impl.ts b/packages/libs/restate-sdk/src/context_impl.ts
+index 2487c57..c6de13a 100644
+--- a/packages/libs/restate-sdk/src/context_impl.ts
++++ b/packages/libs/restate-sdk/src/context_impl.ts
+@@ -71,6 +71,7 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
+ import type { ContextInternal, GetProjectOptions } from "./internal.js";
+ import { InputReader, OutputWriter } from "./endpoint/handlers/types.js";
+ import { ExecutionOptions } from "./endpoint/components.js";
++import { runSql, type SqlDatabase } from "./sql.js";
+ 
+ /**
+  * The runtime shape a client method needs. implement() and type manipulations respect this.
+@@ -109,6 +110,7 @@ export class ContextImpl
+   private cancellationPromise?: SingleRestatePromise<void>;
+   readonly defaultSerde: Serde<any>;
+   private readonly asTerminalError?: (error: any) => TerminalError | undefined;
++  private readonly journalReplay: boolean;
+ 
+   // If undefined, we're not tracking invocation id promises
+   private readonly trackedInvocationIdPromises?: SingleRestatePromise<string>[];
+@@ -159,6 +161,7 @@ export class ContextImpl
+     this.runInterceptor = (_name, runner) => runner();
+     this.defaultSerde = executionOptions?.defaultSerde ?? serde.json;
+     this.asTerminalError = executionOptions?.asTerminalError;
++    this.journalReplay = executionOptions?.journalReplay ?? true;
+     this.trackedInvocationIdPromises = executionOptions?.explicitCancellation
+       ? []
+       : undefined;
+@@ -291,6 +294,10 @@ export class ContextImpl
+     );
+   }
+ 
++  public sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T> {
++    return runSql(this, this.journalReplay, body);
++  }
++
+   public clear(name: string): void {
+     this.processNonCompletableEntry(
+       WasmCommandType.ClearState,
 diff --git a/packages/libs/restate-sdk/src/endpoint/components.ts b/packages/libs/restate-sdk/src/endpoint/components.ts
 index 14d8ab1..f24c370 100644
 --- a/packages/libs/restate-sdk/src/endpoint/components.ts
@@ -33,6 +121,18 @@ index f5a20a7..afc8a76 100644
      );
      const responseHead = this.coreVm.get_response_head();
      this.statusCode = responseHead.status_code;
+diff --git a/packages/libs/restate-sdk/src/internal.ts b/packages/libs/restate-sdk/src/internal.ts
+index 7cee518..5f5bf5a 100644
+--- a/packages/libs/restate-sdk/src/internal.ts
++++ b/packages/libs/restate-sdk/src/internal.ts
+@@ -2,6 +2,7 @@ import { Context, InvocationId, RestatePromise } from "./context.js";
+ import type { Serde } from "@restatedev/restate-sdk-core";
+ 
+ export { isSuspendedError } from "./types/errors.js";
++export { setSqlStoreWrapper, type SqlStore } from "./sql.js";
+ 
+ /**
+  * Downcast the given context to {@link ContextInternal}, to access the internal APIs.
 diff --git a/packages/libs/restate-sdk/src/types/rpc.ts b/packages/libs/restate-sdk/src/types/rpc.ts
 index 9b9e22f..4515489 100644
 --- a/packages/libs/restate-sdk/src/types/rpc.ts
@@ -117,3 +217,207 @@ index f115c2b..70f2b13 100644
                  },
              )
          })?;
+diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
+new file mode 100644
+index 0000000..1c89b44
+--- /dev/null
++++ b/packages/libs/restate-sdk/src/sql.ts
+@@ -0,0 +1,198 @@
++/*
++ * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
++ *
++ * This file is part of the Restate SDK for Node.js/TypeScript,
++ * which is released under the MIT license.
++ *
++ * You can find a copy of the license in file LICENSE in the root
++ * directory of this repository or package, or at
++ * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++ */
++
++// SQL in a virtual object: `ctx.sql(body)` runs `body` against a database kept
++// in the object's state, through the sqlite-kv addon, with no journal replay.
++
++import { serde } from "@restatedev/restate-sdk-core";
++import { RestatePromise } from "./context.js";
++import type { ContextImpl } from "./context_impl.js";
++import { TerminalError } from "./types/errors.js";
++import { HandlerKind } from "./types/rpc.js";
++
++/** An SQL value. Integers come back as numbers, or as bigints beyond 2^53. */
++export type SqlValue = null | number | bigint | string | Uint8Array | boolean;
++
++/** The object's database, inside `ctx.sql`. */
++export interface SqlDatabase {
++  /** Run SQL and return its rows; parameters bind to a single statement. */
++  query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
++  /** Run SQL (one or more statements), discarding rows. */
++  execute(sql: string, params?: SqlValue[]): Promise<void>;
++}
++
++/**
++ * Options for an object whose handlers use `ctx.sql`: no journal replay, since
++ * a later attempt makes different reads; lazy state, so an invocation does not
++ * start by loading every page; and no journal kept after an invocation
++ * completes, since it holds every page it read.
++ *
++ * @experimental
++ */
++export const sqlOptions = {
++  journalReplay: false,
++  enableLazyState: true,
++  journalRetention: 0,
++} as const;
++
++/** An ordered store, as the sqlite-kv addon takes it. */
++export interface SqlStore {
++  get(key: string): Promise<Uint8Array | null | undefined>;
++  set(key: string, value: Uint8Array): void;
++  clear(key: string): void;
++  sync(): Promise<void>;
++}
++
++type Wrap = (store: SqlStore) => SqlStore;
++let wrapStore: Wrap | undefined;
++
++/** Wrap each object's store, such as for fault injection in tests. @internal */
++export function setSqlStoreWrapper(wrap: Wrap) {
++  wrapStore = wrap;
++}
++
++interface Session {
++  query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
++  execute(sql: string, params?: SqlValue[]): Promise<void>;
++  transaction<T>(body: (db: Session) => Promise<T>): Promise<T>;
++  isUsable(): boolean;
++  save(): Promise<void>;
++}
++
++type Addon = {
++  open: (namespace: string, store: SqlStore) => Promise<Session>;
++};
++
++// A variable, so that neither the bundler nor tsc resolves the optional addon.
++const ADDON = "sqlite-kv";
++let addon: Promise<Addon> | undefined;
++
++function loadAddon() {
++  addon ??= (import(ADDON) as Promise<Addon & { default?: Addon }>).then(
++    (m) => m.default ?? m,
++    (error) => {
++      addon = undefined;
++      throw new TerminalError(
++        `ctx.sql needs the sqlite-kv addon installed: ${String(error)}`
++      );
++    }
++  );
++  return addon;
++}
++
++/**
++ * The object's state as an ordered store: `set` and `clear` are state writes,
++ * which return at once and which the runtime stores in order; `sync` is an
++ * empty `ctx.run`, acknowledged after the commands before it.
++ *
++ * The context waits on one thing at a time, and the engine reads pages
++ * concurrently. So each request is issued at once, which keeps the commands in
++ * the engine's order, and the requests issued together are awaited as one
++ * batch, one batch after another.
++ */
++function objectStore(ctx: ContextImpl): SqlStore {
++  type Waiting = {
++    promise: RestatePromise<unknown>;
++    resolve: (value: unknown) => void;
++    reject: (reason: unknown) => void;
++  };
++  const waiting: Waiting[] = [];
++  let draining = false;
++  const later = (f: () => void) =>
++    typeof setImmediate === "function" ? setImmediate(f) : setTimeout(f, 0);
++  const drain = async () => {
++    while (waiting.length > 0) {
++      const batch = waiting.splice(0);
++      const results = await RestatePromise.allSettled(
++        batch.map((w) => w.promise)
++      );
++      results.forEach((result, i) =>
++        result.status === "fulfilled"
++          ? batch[i]!.resolve(result.value)
++          : batch[i]!.reject(result.reason)
++      );
++    }
++    draining = false;
++  };
++  const wait = <T>(promise: RestatePromise<T>) =>
++    new Promise<T>((resolve, reject) => {
++      waiting.push({
++        promise,
++        resolve: resolve as (value: unknown) => void,
++        reject,
++      });
++      if (!draining) {
++        draining = true;
++        later(() => void drain());
++      }
++    });
++  return {
++    get: (key) => wait(ctx.get(key, serde.binary)),
++    set: (key, value) => ctx.set(key, value, serde.binary),
++    clear: (key) => ctx.clear(key),
++    sync: () => wait(ctx.run("sync", () => {})),
++  };
++}
++
++/** `ctx.sql(body)`; see `ObjectContext.sql`. */
++export async function runSql<T>(
++  ctx: ContextImpl,
++  journalReplay: boolean,
++  body: (db: SqlDatabase) => Promise<T>
++): Promise<T> {
++  if (ctx.handlerKind !== HandlerKind.EXCLUSIVE) {
++    throw new TerminalError("ctx.sql is for exclusive object handlers");
++  }
++  if (journalReplay) {
++    throw new TerminalError(
++      "ctx.sql needs the object's options to include restate.sqlOptions: " +
++        "a replayed journal would not match the reads of a later attempt"
++    );
++  }
++  const sqliteKv = await loadAddon();
++  const namespace = `${ctx.request().target.service}/${ctx.key}`;
++  const store = objectStore(ctx);
++  const db = await sqliteKv.open(
++    namespace,
++    wrapStore ? wrapStore(store) : store
++  );
++  let result: { value: T } | { error: unknown };
++  try {
++    result = {
++      value: await db.transaction((tx) =>
++        body({
++          query: (sql, params) => tx.query(sql, params),
++          execute: (sql, params) => tx.execute(sql, params),
++        })
++      ),
++    };
++  } catch (error) {
++    // While the session is usable this was an SQL error, or the body's own,
++    // which a retry would repeat; a storage error ends the session, and the
++    // handler is retried.
++    result = {
++      error:
++        db.isUsable() && !(error instanceof TerminalError)
++          ? new TerminalError(
++              error instanceof Error ? error.message : String(error)
++            )
++          : error,
++    };
++  }
++  // Saving confirms the session's writes (an empty ctx.run, if it wrote), so
++  // that the page cache may trust them. A session that does not get here
++  // makes the next one in this process start cold.
++  if (db.isUsable()) {
++    await db.save();
++  }
++  if ("error" in result) throw result.error;
++  return result.value;
++}
