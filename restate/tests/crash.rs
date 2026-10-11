@@ -55,7 +55,7 @@ fn supervise(dir: PathBuf, per_mille: u32, stop: Arc<AtomicBool>, starts: Arc<At
         let mut child = Command::new(env!("CARGO_BIN_EXE_ledger"))
             .env("PORT", LEDGER_PORT.to_string())
             .env("LEDGER_ABORT_PER_MILLE", per_mille.to_string())
-            .env("LEDGER_CACHE_DIR", dir.join("cache"))
+            .env("SQLITE_KV_CACHE_FILE", dir.join("cache"))
             .stdout(Stdio::null())
             .stderr(log(&dir.join("ledger.log")))
             .spawn()

@@ -1,15 +1,23 @@
 //! SQL in a Restate virtual object, with no journal.
 //!
-//! An exclusive handler runs SQL against its object's database with
-//! [`SqlContext::with_sql`]; opening, the page cache and the schema are set up
-//! once per process with [`Sql`].
+//! A handler takes a [`SqlObjectContext`] instead of an `ObjectContext`. It is
+//! the same context (it dereferences to it) plus [`SqlObjectContext::sql`],
+//! which runs SQL against the object's database. A page cache shared by the
+//! process's objects is built in. Creating tables is up to the handlers, such as
+//! an `init` handler, or `CREATE TABLE IF NOT EXISTS` where they are used.
 //!
 //! ```rust,ignore
 //! #[restate_sdk::object]
-//! impl Ledger {
+//! impl Account {
 //!     #[handler]
-//!     async fn deposit(&self, ctx: ObjectContext<'_>, amount: i64) -> HandlerResult<()> {
-//!         ctx.with_sql(async |db| {
+//!     async fn init(&self, ctx: SqlObjectContext<'_>) -> HandlerResult<()> {
+//!         ctx.sql(async |db| db.execute("CREATE TABLE IF NOT EXISTS balance(amount INTEGER)").await)
+//!             .await
+//!     }
+//!
+//!     #[handler]
+//!     async fn deposit(&self, ctx: SqlObjectContext<'_>, amount: i64) -> HandlerResult<()> {
+//!         ctx.sql(async |db| {
 //!             db.execute_with("UPDATE balance SET amount = amount + ?", [Value::from_i64(amount)])
 //!                 .await
 //!         })
@@ -17,11 +25,7 @@
 //!     }
 //! }
 //!
-//! Sql::new()
-//!     .cache(PageCache::open(PageCacheConfig::new(dir, 256 << 20, 8 << 30)).await?)
-//!     .schema("Ledger", "CREATE TABLE balance(amount INTEGER); INSERT INTO balance VALUES(0)")
-//!     .install();
-//! Endpoint::builder().bind(Ledger.into_service_definition().options(service_options()))
+//! Endpoint::builder().bind(Account.into_service_definition().options(service_options()))
 //! ```
 //!
 //! The database lives in the object's Restate state, through [`ObjectState`].
@@ -31,17 +35,20 @@
 //! against the state as it is (at least once).
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use restate_sdk::endpoint::{ContextInternal, ServiceOptions};
+use restate_sdk::endpoint::{ContextInternal, InputMetadata, ServiceOptions};
 use restate_sdk::prelude::{
     ContextSideEffects, HandlerError, ObjectContext, RunFuture, TerminalError,
 };
 use sqlite_kv::kv::KvStore;
-use sqlite_kv::{Durability, PageCache, Session, StorageOptions};
+use sqlite_kv::{Durability, PageCache, PageCacheConfig, Session, StorageOptions};
 use std::collections::HashMap;
 use std::io;
+use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use tokio::sync::OnceCell;
 
 /// Options for a service whose handlers use [`SqlContext::with_sql`]: no
 /// journal replay; lazy state, so an invocation does not start by loading every
@@ -54,85 +61,75 @@ pub fn service_options() -> ServiceOptions {
         .journal_retention(Duration::ZERO)
 }
 
-/// The process's SQL setup: a page cache shared by every object, and each
-/// service's schema. Without [`Sql::install`], objects run with no cache and
-/// no schema.
-#[derive(Default)]
-pub struct Sql {
-    cache: Option<PageCache>,
-    schemas: HashMap<String, String>,
-    wrap: Option<Wrap>,
-    /// What this process knows of each namespace it opened.
-    namespaces: Mutex<HashMap<String, Known>>,
+/// The context of an exclusive object handler, with the object's database.
+///
+/// It dereferences to the `ObjectContext`, so state, calls and `run` work as
+/// usual.
+pub struct SqlObjectContext<'ctx> {
+    ctx: ObjectContext<'ctx>,
 }
 
-type Wrap = fn(Arc<ObjectState>) -> Arc<dyn KvStore>;
-
-/// What a process knows of one object's database.
-#[derive(Clone, Copy, Default)]
-struct Known {
-    /// The last session's writes are stored, so the page cache's state for the
-    /// namespace describes storage.
-    confirmed: bool,
-    /// The schema exists, as of a confirmed session.
-    schema: bool,
-}
-
-static SQL: OnceLock<Sql> = OnceLock::new();
-
-impl Sql {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Keep pages and a warm engine of each object across its invocations.
-    pub fn cache(mut self, cache: PageCache) -> Self {
-        self.cache = Some(cache);
-        self
-    }
-
-    /// SQL creating the tables of `service`'s objects (one or more
-    /// statements), run in the first session of each object's database.
-    pub fn schema(mut self, service: &str, sql: impl Into<String>) -> Self {
-        self.schemas.insert(service.to_owned(), sql.into());
-        self
-    }
-
-    /// Wrap each object's store, such as for fault injection in tests.
-    #[doc(hidden)]
-    pub fn wrap_store(mut self, wrap: Wrap) -> Self {
-        self.wrap = Some(wrap);
-        self
-    }
-
-    /// Use this setup for the process. Panics if one is already in use.
-    pub fn install(self) {
-        if SQL.set(self).is_err() {
-            panic!("sqlite_kv_restate::Sql is already installed");
+impl<'ctx> From<(&'ctx ContextInternal, InputMetadata)> for SqlObjectContext<'ctx> {
+    fn from(value: (&'ctx ContextInternal, InputMetadata)) -> Self {
+        Self {
+            ctx: ObjectContext::from(value),
         }
     }
 }
 
-/// SQL on the context of an exclusive object handler.
-pub trait SqlContext {
+impl<'ctx> Deref for SqlObjectContext<'ctx> {
+    type Target = ObjectContext<'ctx>;
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
+
+impl DerefMut for SqlObjectContext<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ctx
+    }
+}
+
+/// The page cache shared by the process's objects: 256 MiB of memory and 1 GiB
+/// of disk, in a file under the temporary directory, or the file
+/// `SQLITE_KV_CACHE_FILE` names.
+static CACHE: OnceCell<PageCache> = OnceCell::const_new();
+static WRAP: OnceLock<Wrap> = OnceLock::new();
+/// What this process knows of each namespace it opened.
+static NAMESPACES: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+
+type Wrap = fn(Arc<ObjectState>) -> Arc<dyn KvStore>;
+
+/// Wrap each object's store, such as for fault injection in tests.
+#[doc(hidden)]
+pub fn set_store_wrapper(wrap: Wrap) -> bool {
+    WRAP.set(wrap).is_ok()
+}
+
+async fn page_cache() -> Result<&'static PageCache, HandlerError> {
+    CACHE
+        .get_or_try_init(async || {
+            let file = std::env::var_os("SQLITE_KV_CACHE_FILE").map_or_else(
+                || std::env::temp_dir().join(format!("sqlite-kv-{}.cache", std::process::id())),
+                PathBuf::from,
+            );
+            PageCache::open(PageCacheConfig::new(file, 256 << 20, 1 << 30)).await
+        })
+        .await
+        .map_err(|e| HandlerError::from(e.to_string()))
+}
+
+impl SqlObjectContext<'_> {
     /// Run `body` against the object's database as one SQL transaction: it
     /// commits, durably, when `body` returns `Ok`, and rolls back on `Err`.
     ///
     /// An SQL error, or the body's own, is terminal, since a retry would repeat
     /// it. A storage error, which ends the session, is retryable: the handler
     /// runs again from the start.
-    fn with_sql<T>(
-        &self,
-        body: impl AsyncFnOnce(&mut Session) -> sqlite_kv::Result<T>,
-    ) -> impl Future<Output = Result<T, HandlerError>>;
-}
-
-impl SqlContext for ObjectContext<'_> {
-    async fn with_sql<T>(
+    pub async fn sql<T>(
         &self,
         body: impl AsyncFnOnce(&mut Session) -> sqlite_kv::Result<T>,
     ) -> Result<T, HandlerError> {
-        let sql = SQL.get_or_init(Sql::default);
         let internal = self.internal();
         if internal.journal_replay() {
             return Err(TerminalError::new(
@@ -142,70 +139,37 @@ impl SqlContext for ObjectContext<'_> {
             .into());
         }
         let namespace = format!("{}/{}", internal.service_name(), self.key());
-        let cache = sql.cache.as_ref().map(|cache| cache.namespace(&namespace));
+        let cache = page_cache().await?.namespace(&namespace);
+        let namespaces = NAMESPACES.get_or_init(Mutex::default);
 
         // A session whose writes were not confirmed may have lost them, and the
         // cache would describe writes that do not exist: start over.
-        let known = {
-            let mut namespaces = sql.namespaces.lock().unwrap();
-            let known = namespaces.entry(namespace.clone()).or_default();
-            if !known.confirmed {
-                if let Some(cache) = &cache {
-                    cache.reset();
-                }
-                known.schema = false;
-            }
-            known.confirmed = false;
-            *known
-        };
+        if namespaces.lock().unwrap().insert(namespace.clone(), false) != Some(true) {
+            cache.reset();
+        }
 
-        let state = Arc::new(ObjectState::new(self));
-        let store = match sql.wrap {
+        let state = Arc::new(ObjectState::new(&self.ctx));
+        let store = match WRAP.get() {
             Some(wrap) => wrap(state.clone()),
             None => state.clone(),
         };
         let options = StorageOptions {
-            cache: cache.clone(),
+            cache: Some(cache),
             durability: Durability::Commit,
             ..StorageOptions::default()
         };
         let mut db = Session::open_with_options(store, options).await?;
-        if !known.schema
-            && let Some(schema) = sql.schemas.get(internal.service_name())
-        {
-            create(&mut db, schema)
-                .await
-                .map_err(|e| classify(&db, e))?;
-        }
         let result = db.transaction(body).await.map_err(|e| classify(&db, e));
         drop(db);
 
-        // Only a cache trusts this session's writes beyond it, and only once
-        // they are stored: wait for them then.
-        if cache.is_some() && state.wrote() {
+        // The cache trusts this session's writes beyond it, so only once they
+        // are stored: wait for them first.
+        if state.wrote() {
             sync(self).await?;
         }
-        let mut namespaces = sql.namespaces.lock().unwrap();
-        namespaces.insert(
-            namespace,
-            Known {
-                confirmed: true,
-                schema: true,
-            },
-        );
+        namespaces.lock().unwrap().insert(namespace, true);
         result
     }
-}
-
-/// Run `schema` if the database has no tables yet.
-async fn create(db: &mut Session, schema: &str) -> sqlite_kv::Result<()> {
-    let tables = db
-        .query("SELECT count(*) FROM sqlite_schema WHERE type = 'table'")
-        .await?;
-    if tables[0][0].as_int() == Some(0) {
-        db.transaction(async |db| db.execute(schema).await).await?;
-    }
-    Ok(())
 }
 
 /// The handler error for `error`, which `db` returned: terminal while `db` is
