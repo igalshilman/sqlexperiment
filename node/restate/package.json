@@ -1,0 +1,16 @@
+{
+  "name": "sqlite-kv-restate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SQL in Restate virtual objects with the TypeScript SDK, without journal replay",
+  "main": "sql.mjs",
+  "scripts": {
+    "setup": "./setup.sh",
+    "ledger": "node ledger.mjs"
+  },
+  "dependencies": {
+    "@restatedev/restate-sdk": "file:.build/restatedev-restate-sdk-1.17.3.tgz",
+    "sqlite-kv": "file:.."
+  }
+}

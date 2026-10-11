@@ -1,0 +1,311 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 351ce1c..470118f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -323,12 +323,25 @@ pub enum JournalMismatchRetryBehavior {
+     FollowRetryPolicy,
+ }
+ 
++/// What a retried or resumed invocation does with the journal of its earlier attempts.
++#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
++pub enum JournalReplay {
++    /// Replay it: commands return their recorded results, and must match them.
++    #[default]
++    Enabled,
++    /// Skip it: the handler runs again from the start and every command executes anew,
++    /// reading current state. Effects of earlier attempts may repeat (at least once), and
++    /// awakeables are unsupported.
++    Disabled,
++}
++
+ #[derive(Debug)]
+ pub struct VMOptions {
+     pub implicit_cancellation: ImplicitCancellationOption,
+     pub non_determinism_checks: NonDeterministicChecksOption,
+     pub awaiting_on_policy: AwaitingOnPolicy,
+     pub journal_mismatch_retry_behavior: JournalMismatchRetryBehavior,
++    pub journal_replay: JournalReplay,
+ }
+ 
+ impl Default for VMOptions {
+@@ -341,6 +354,7 @@ impl Default for VMOptions {
+             non_determinism_checks: Default::default(),
+             awaiting_on_policy: Default::default(),
+             journal_mismatch_retry_behavior: Default::default(),
++            journal_replay: Default::default(),
+         }
+     }
+ }
+@@ -518,6 +532,8 @@ pub trait VM: Sized {
+         completion_id: EphemeralCompletionId,
+     ) -> VMResult<Option<Value>>;
+ 
++    fn journal_replay(&self) -> JournalReplay;
++
+     fn sys_state_set(&mut self, key: String, value: Bytes, options: PayloadOptions)
+         -> VMResult<()>;
+ 
+diff --git a/src/tests/state.rs b/src/tests/state.rs
+index 9904374..0d98697 100644
+--- a/src/tests/state.rs
++++ b/src/tests/state.rs
+@@ -1376,3 +1376,104 @@ mod state_keys {
+         assert_eq!(output.next(), None);
+     }
+ }
++
++mod journal_replay_disabled {
++    use super::*;
++    use crate::tests::{input_entry_message, suspended_waiting_completion};
++    use crate::{JournalReplay, VMOptions};
++
++    fn options() -> VMOptions {
++        VMOptions {
++            journal_replay: JournalReplay::Disabled,
++            ..Default::default()
++        }
++    }
++
++    /// A retry reads current state anew instead of the recorded result, with a completion
++    /// id after any an earlier attempt can have used.
++    #[test]
++    fn retry_skips_the_journal() {
++        let mut output = VMTestCase::with_vm_options(options())
++            .input(StartMessage {
++                id: Bytes::from_static(b"abc"),
++                debug_id: "abc".to_owned(),
++                known_entries: 4,
++                partial_state: true,
++                ..Default::default()
++            })
++            .input(input_entry_message(b"Till"))
++            .input(SetStateCommandMessage {
++                key: Bytes::from_static(b"OTHER"),
++                value: Some(Bytes::from_static(b"x").into()),
++                ..Default::default()
++            })
++            .input(GetLazyStateCommandMessage {
++                key: Bytes::from_static(b"STATE"),
++                result_completion_id: 1,
++                ..Default::default()
++            })
++            .input(GetLazyStateCompletionNotificationMessage {
++                completion_id: 1,
++                result: Some(
++                    get_lazy_state_completion_notification_message::Result::Value(
++                        Bytes::from_static(b"Francesco").into(),
++                    ),
++                ),
++            })
++            .run(get_state_handler);
++
++        assert_eq!(
++            output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
++            GetLazyStateCommandMessage {
++                key: Bytes::from_static(b"STATE"),
++                result_completion_id: 9,
++                ..Default::default()
++            }
++        );
++        assert_that!(
++            output.next_decoded::<SuspensionMessage>().unwrap(),
++            suspended_waiting_completion(9)
++        );
++        assert_eq!(output.next(), None);
++    }
++
++    /// A first attempt has nothing to skip.
++    #[test]
++    fn first_attempt_is_unchanged() {
++        let mut output = VMTestCase::with_vm_options(options())
++            .input(StartMessage {
++                id: Bytes::from_static(b"abc"),
++                debug_id: "abc".to_owned(),
++                known_entries: 1,
++                partial_state: true,
++                ..Default::default()
++            })
++            .input(input_entry_message(b"Till"))
++            .run(get_state_handler);
++
++        assert_eq!(
++            output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
++            GetLazyStateCommandMessage {
++                key: Bytes::from_static(b"STATE"),
++                result_completion_id: 1,
++                ..Default::default()
++            }
++        );
++    }
++
++    #[test]
++    fn awakeables_are_refused() {
++        let mut vm = VMTestCase::with_vm_options(options())
++            .input(StartMessage {
++                id: Bytes::from_static(b"abc"),
++                debug_id: "abc".to_owned(),
++                known_entries: 1,
++                ..Default::default()
++            })
++            .input(input_entry_message(b"Till"))
++            .vm;
++        vm.notify_input_closed();
++        vm.sys_input().unwrap();
++        assert!(vm.sys_awakeable().is_err());
++    }
++}
+diff --git a/src/vm/context.rs b/src/vm/context.rs
+index db97978..cbaec35 100644
+--- a/src/vm/context.rs
++++ b/src/vm/context.rs
+@@ -3,7 +3,7 @@ use crate::service_protocol::messages::{
+     NamedCommandMessage, RestateEncodableMessage, RestateMessage,
+ };
+ use crate::service_protocol::{Encoder, MessageType, Version};
+-use crate::{AwaitingOnPolicy, CommandRelationship, EntryRetryInfo};
++use crate::{AwaitingOnPolicy, CommandRelationship, EntryRetryInfo, JournalReplay};
+ use bytes::Bytes;
+ use bytes_utils::SegmentedBuf;
+ use std::collections::HashMap;
+@@ -58,6 +58,18 @@ impl Journal {
+         next
+     }
+ 
++    /// Skip replayed entries without matching them: `commands` of the `entries` known ones
++    /// are commands. Later commands get indexes after them, and completion ids that no
++    /// earlier attempt used. A command takes at most two completion ids, and an attempt
++    /// that skipped started from this bound over the entries it knew, so ids from
++    /// `1 + 2 * entries` are fresh: every attempt's stored commands count in `entries`.
++    pub(crate) fn skip_replayed(&mut self, commands: u32, entries: u32) {
++        if commands > 0 {
++            self.command_index = Some(self.command_index.map_or(commands - 1, |i| i + commands));
++        }
++        self.completion_index = self.completion_index.max(1 + 2 * entries);
++    }
++
+     pub(crate) fn next_signal_notification_id(&mut self) -> u32 {
+         let next = self.signal_index;
+         self.signal_index += 1;
+@@ -233,6 +245,7 @@ pub(crate) struct Context {
+     pub(crate) output: Output,
+     pub(crate) non_deterministic_checks_ignore_payload_equality: bool,
+     pub(crate) awaiting_on_policy: AwaitingOnPolicy,
++    pub(crate) journal_replay: JournalReplay,
+ }
+ 
+ impl Context {
+diff --git a/src/vm/mod.rs b/src/vm/mod.rs
+index 8cf26e7..0ca3f6a 100644
+--- a/src/vm/mod.rs
++++ b/src/vm/mod.rs
+@@ -17,7 +17,7 @@ use crate::vm::run_state::RunState;
+ use crate::vm::transitions::*;
+ use crate::{
+     AttachInvocationTarget, AwaitResponse, AwakeableHandle, CallHandle, CommandRelationship,
+-    EphemeralCompletionId, Error, Header, ImplicitCancellationOption, Input,
++    EphemeralCompletionId, Error, Header, ImplicitCancellationOption, Input, JournalReplay,
+     NonDeterministicChecksOption, NonEmptyValue, NotificationHandle, PayloadOptions, ResponseHead,
+     RetryPolicy, RunExitResult, RunHandle, SendHandle, Target, TerminalFailure, UnresolvedFuture,
+     VMOptions, VMResult, Value, CANCEL_NOTIFICATION_HANDLE,
+@@ -98,6 +98,32 @@ impl State {
+         }
+     }
+ 
++    /// With journal replay disabled: drop the commands left to replay after the input, and
++    /// start processing as a fresh attempt.
++    fn skip_replay(self, context: &mut Context) -> Self {
++        match self {
++            State::Replaying {
++                mut commands,
++                run_state,
++                async_results,
++                eager_state,
++            } => {
++                let skipped = commands.len() as u32;
++                let entries = context.expect_start_info().entries_to_replay;
++                commands.clear();
++                context.journal.skip_replayed(skipped, entries);
++                State::Replaying {
++                    commands,
++                    run_state,
++                    async_results,
++                    eager_state,
++                }
++                .try_transition_to_processing()
++            }
++            s => s,
++        }
++    }
++
+     #[inline]
+     fn eager_state_mut(&mut self) -> Option<&mut EagerState> {
+         match self {
+@@ -285,6 +311,7 @@ impl super::VM for CoreVM {
+             NonDeterministicChecksOption::PayloadChecksDisabled
+         );
+         let awaiting_on_policy = options.awaiting_on_policy;
++        let journal_replay = options.journal_replay;
+ 
+         Ok(Self {
+             options,
+@@ -297,6 +324,7 @@ impl super::VM for CoreVM {
+                 non_deterministic_checks_ignore_payload_equality,
+                 negotiated_protocol_version: version,
+                 awaiting_on_policy,
++                journal_replay,
+             },
+             last_transition: Ok(State::WaitingStart),
+             tracked_invocation_ids: vec![],
+@@ -622,6 +650,10 @@ impl super::VM for CoreVM {
+         self.do_transition(SysStateGet(key, options))
+     }
+ 
++    fn journal_replay(&self) -> JournalReplay {
++        self.options.journal_replay
++    }
++
+     #[instrument(
+         level = "trace",
+         skip(self),
+@@ -990,6 +1022,14 @@ impl super::VM for CoreVM {
+     )]
+     fn sys_awakeable(&mut self) -> VMResult<AwakeableHandle> {
+         invocation_debug_logs!(self, "Executing 'Create awakeable'");
++        if self.options.journal_replay == JournalReplay::Disabled {
++            // Signal ids of skipped attempts are unknown, so a new one could collide.
++            self.do_transition(HitError(Error::new(
++                errors::codes::UNSUPPORTED_FEATURE,
++                "awakeables need journal replay",
++            )))?;
++            unreachable!();
++        }
+ 
+         let signal_id = self.context.journal.next_signal_notification_id();
+ 
+diff --git a/src/vm/transitions/journal.rs b/src/vm/transitions/journal.rs
+index d07a453..0b051ff 100644
+--- a/src/vm/transitions/journal.rs
++++ b/src/vm/transitions/journal.rs
+@@ -21,8 +21,8 @@ use crate::vm::errors::{
+ use crate::vm::transitions::{Transition, TransitionAndReturn};
+ use crate::vm::State;
+ use crate::{
+-    CommandRelationship, CommandType, EntryRetryInfo, Error, Header, Input, NotificationHandle,
+-    PayloadOptions, RetryPolicy, RunExitResult, RunHandle, Version,
++    CommandRelationship, CommandType, EntryRetryInfo, Error, Header, Input, JournalReplay,
++    NotificationHandle, PayloadOptions, RetryPolicy, RunExitResult, RunHandle, Version,
+ };
+ use bytes::Bytes;
+ use std::collections::VecDeque;
+@@ -58,6 +58,11 @@ impl TransitionAndReturn<Context, SysInput> for State {
+                     .resolve_related_command(CommandRelationship::Last),
+             )
+         })?;
++        let s = if context.journal_replay == JournalReplay::Disabled {
++            s.skip_replay(context)
++        } else {
++            s
++        };
+         let start_info = context.expect_start_info();
+ 
+         Ok((
