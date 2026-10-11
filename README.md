@@ -3,7 +3,9 @@
 SQLite-compatible SQL over an asynchronous key/value store, for namespaces with
 one owner at a time (such as a Restate virtual object). It runs Turso's Rust
 engine (`turso_core` 0.8.2) unmodified and needs only `get`, `put` and
-`delete` from the backend. A save is usually one put.
+`delete` from the backend. Changes become durable per session (`save()`), for
+hosts that journal and replay, or per SQL commit as in SQLite, for objects
+without a journal. Either way, a save is usually one put.
 
 An experiment, not a production backend: see [the design](docs/DESIGN.md).
 
@@ -12,7 +14,7 @@ An experiment, not a production backend: see [the design](docs/DESIGN.md).
 Implement `kv::KvStore` over your store, then:
 
 ```rust,ignore
-use sqlite_kv::{PageCache, PageCacheConfig, Session, StorageOptions};
+use sqlite_kv::{Durability, PageCache, PageCacheConfig, Session, StorageOptions};
 
 // Once per process: a page cache in memory and on a local disk file.
 let cache = PageCache::open(PageCacheConfig::new("/var/cache/pages", 256 << 20, 8 << 30)).await?;
@@ -30,6 +32,22 @@ let saved = db.save().await?; // durable once this returns Ok
 SQL changes are private until `save()`. `Ok` means committed; an error means the
 outcome is unknown, so settle outstanding requests and reopen. The host must
 guarantee one owner per namespace.
+
+Or make every SQL commit durable, as in SQLite, with no `save()`:
+
+```rust,ignore
+let options = StorageOptions {
+    cache: Some(cache.namespace("object-42")),
+    durability: Durability::Commit,
+    ..StorageOptions::default()
+};
+let mut db = Session::open_with_options(store, options).await?;
+db.execute("INSERT INTO t VALUES(1)").await?; // durable once this returns Ok
+db.transaction(async |db| {                    // durable as a whole, or rolled back
+    db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?;
+    db.execute("INSERT INTO shipments VALUES(7)").await
+}).await?;
+```
 
 ## Docs
 

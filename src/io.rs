@@ -527,8 +527,9 @@ impl KvIo {
         }
     }
 
-    /// Publish after the engine connection is dropped and no SQL transaction remains.
-    /// The dirty pages move into the save; the adapter is not used afterwards.
+    /// Publish once no SQL transaction remains and the private WAL is truncated.
+    /// The dirty pages move into the save. On success the adapter continues on
+    /// the committed view.
     pub(crate) async fn publish(&self) -> io::Result<crate::SaveReport> {
         if self.pending_count() != 0 {
             return Err(invalid("cannot save with pending I/O"));
@@ -540,15 +541,22 @@ impl KvIo {
                     "WAL must be fully checkpointed and truncated before publication",
                 ));
             }
-            let dirty = std::mem::take(&mut state.dirty)
+            let dirty: BTreeMap<u64, Option<Page>> = std::mem::take(&mut state.dirty)
                 .into_iter()
                 .filter(|((file, _), _)| *file == 0)
                 .map(|((_, block), page)| (block, page))
                 .collect();
+            // The resident header must show the committed first page.
+            for (block, slot) in state.header.iter_mut().enumerate() {
+                if let Some(page) = dirty.get(&(block as u64)) {
+                    *slot = page.clone().unwrap_or_else(zero);
+                }
+            }
             (dirty, state.sizes[0])
         };
-        let report = self.snapshot().publish(dirty, size).await?;
+        let (report, after) = self.snapshot().commit(dirty, size).await?;
         *self.log_next.lock().unwrap() = report.log_next;
+        *self.snapshot.lock().unwrap() = Arc::new(after);
         Ok(report)
     }
 }

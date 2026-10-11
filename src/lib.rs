@@ -5,12 +5,16 @@
 //! [`kv::KvStore::get`], [`kv::KvStore::put`] and [`kv::KvStore::delete`], not a
 //! multi-key transaction, compare-and-swap, listing operation or backend WAL API.
 //!
-//! # Two transaction boundaries
+//! # When changes become durable
 //!
+//! [`StorageOptions::durability`] chooses. With [`Durability::Save`] (default),
 //! SQL statements, SQL `COMMIT`, file sync and [`Session::checkpoint`] affect a
 //! private in-memory view. They do **not** make changes durable in KV. Dropping a
 //! session discards that view. [`Session::save`] checkpoints the private WAL,
-//! commits the changed pages and consumes the session.
+//! commits the changed pages and consumes the session. With
+//! [`Durability::Commit`], each SQL commit does the same before its statement
+//! returns, and the session continues; [`Session::transaction`] runs a closure
+//! as one SQL transaction.
 //!
 //! | Layer | Representation | Survives dropping the session? |
 //! |---|---|---|
@@ -117,7 +121,7 @@ pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
 pub use log::MAX_SEGMENT_BYTES;
 pub use page_codec::PageCompression;
-pub use snapshot::{CHECKPOINT_PAGES, SaveReport, StorageOptions};
+pub use snapshot::{CHECKPOINT_PAGES, Durability, SaveReport, StorageOptions};
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use crate::kv::KvStore;
@@ -153,6 +157,7 @@ pub struct Session {
     /// The engine continued from a previous session.
     #[cfg_attr(not(feature = "simulation"), allow(dead_code))]
     reused: bool,
+    durability: Durability,
 }
 
 /// An idle engine and its adapter at a committed state, kept in the owner's
@@ -221,6 +226,7 @@ impl Session {
         options: StorageOptions,
     ) -> Result<Self> {
         let cache = options.cache.clone();
+        let durability = options.durability;
         let snapshot = Snapshot::open_with_options(store, options).await?;
         let warm = match &cache {
             Some(cache) if snapshot.unchanged => cache
@@ -237,6 +243,7 @@ impl Session {
                 parked: false,
                 reused: true,
                 reusable: true,
+                durability,
             };
             session.io.resume(snapshot).await?;
             session.connection = Some(warm.connection);
@@ -251,6 +258,7 @@ impl Session {
             parked: false,
             reused: false,
             reusable: true,
+            durability,
         };
         session.io.prepare_engine().await?;
         session.connection = Some(open_engine(&session.io).await?);
@@ -292,15 +300,71 @@ impl Session {
 
     /// Execute one SQL statement and collect all result rows in memory.
     ///
-    /// There is no result byte limit or streaming cursor. SQL writes remain private
-    /// until [`Self::save`]. Errors and cancellation poison this session.
+    /// There is no result byte limit or streaming cursor. With
+    /// [`Durability::Save`], SQL writes remain private until [`Self::save`]. With
+    /// [`Durability::Commit`], a statement that ends a write transaction returns
+    /// once that transaction is durable; an error then leaves its outcome
+    /// unknown. Errors and cancellation poison this session.
     /// Cached execution yields every 64 steps; one engine call cannot be preempted.
     /// An engine helper requiring synchronous nonresident I/O returns an error.
     pub async fn query(&mut self, sql: &str) -> Result<Rows> {
         if changes_connection_state(sql) {
             self.reusable = false;
         }
-        self.run(sql).await
+        let rows = self.run(sql).await?;
+        if self.durability == Durability::Commit
+            && self.connection.as_ref().unwrap().get_auto_commit()
+            && !self.io.is_clean()
+        {
+            self.commit().await?;
+        }
+        Ok(rows)
+    }
+
+    /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
+    /// `Ok`, or `ROLLBACK` when it returns `Err`. With [`Durability::Commit`],
+    /// `Ok` means the whole transaction is durable, as one log transaction.
+    ///
+    /// `body` must leave the transaction open; it may run any statements on the
+    /// session. An error from `COMMIT` leaves the outcome unknown and poisons
+    /// the session, like any other storage error.
+    pub async fn transaction<T>(
+        &mut self,
+        body: impl AsyncFnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.execute("BEGIN").await?;
+        let result = body(self).await;
+        let open = !self.poisoned && !self.connection.as_ref().unwrap().get_auto_commit();
+        match result {
+            Ok(value) if open => {
+                self.execute("COMMIT").await?;
+                Ok(value)
+            }
+            Ok(_) => {
+                self.poisoned = true;
+                Err("the transaction ended inside its body, or the session is poisoned".into())
+            }
+            Err(error) => {
+                if open {
+                    self.execute("ROLLBACK").await?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Make the committed SQL state durable and continue on it. A cleanup error
+    /// leaves it committed; a later commit retries the checkpoint work.
+    async fn commit(&mut self) -> Result<SaveReport> {
+        self.checkpoint().await?;
+        // Until the commit is acknowledged the engine may hold uncommitted pages,
+        // so a failure must not leave it for reuse.
+        self.poisoned = true;
+        let report = self.io.publish().await?;
+        // Resident already, unless the page size grew.
+        self.io.prepare_engine().await?;
+        self.poisoned = false;
+        Ok(report)
     }
 
     async fn run(&mut self, sql: &str) -> Result<Rows> {
@@ -344,6 +408,8 @@ impl Session {
     /// Ok confirms durable publication. Inspect SaveReport::cleanup_error: Some
     /// means committed with pending cleanup, retried on open. Err/cancellation
     /// may have an unknown publication outcome: settle requests and reopen.
+    /// With [`Durability::Commit`] every SQL transaction is already durable, so
+    /// this only ends the session.
     pub async fn save(mut self) -> Result<SaveReport> {
         if self.poisoned {
             return Err("cannot save a poisoned session".into());
@@ -351,12 +417,7 @@ impl Session {
         if !self.connection.as_ref().unwrap().get_auto_commit() {
             return Err("cannot save an open SQL transaction".into());
         }
-        self.checkpoint().await?;
-        // Until the commit is acknowledged the engine may hold uncommitted pages,
-        // so a failure must not leave it for reuse.
-        self.poisoned = true;
-        let report = self.io.publish().await?;
-        self.poisoned = false;
+        let report = self.commit().await?;
         self.park();
         Ok(report)
     }

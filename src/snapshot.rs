@@ -75,6 +75,20 @@ pub const CHECKPOINT_PAGES: usize = 12;
 /// Logged bytes that trigger checkpointing; a larger save checkpoints itself.
 pub const CHECKPOINT_LOG_BYTES: usize = 256 * 1024;
 
+/// When a session's SQL changes become durable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Durability {
+    /// At [`crate::Session::save`], as one log transaction for the whole
+    /// session. SQL `COMMIT` is private, and dropping the session discards it.
+    #[default]
+    Save,
+    /// At every SQL commit: a statement that ends a write transaction (an
+    /// autocommit statement or `COMMIT`) returns once it is durable, one log
+    /// transaction per SQL transaction. Dropping the session discards only an
+    /// open transaction.
+    Commit,
+}
+
 /// Per-session storage options. They never change the stored format.
 #[derive(Clone)]
 pub struct StorageOptions {
@@ -91,6 +105,8 @@ pub struct StorageOptions {
     /// open of a larger database fetches alongside replay (at most
     /// [`crate::MAX_HINT_PAGES`]); 0 neither writes nor reads it.
     pub hint_pages: usize,
+    /// When SQL changes become durable.
+    pub durability: Durability,
 }
 
 impl Default for StorageOptions {
@@ -101,6 +117,7 @@ impl Default for StorageOptions {
             checkpoint_after: 4,
             prefetch_pages: PREFETCH_PAGES,
             hint_pages: HINT_PAGES,
+            durability: Durability::Save,
         }
     }
 }
@@ -491,12 +508,23 @@ impl Snapshot {
     ///
     /// Requires exclusive ownership until every request settles, even on
     /// cancellation. After an error, reopen; never reuse this snapshot.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
+        Ok(self.commit(dirty, size).await?.0)
+    }
+
+    /// [`Self::publish`], also returning the committed view afterwards, which a
+    /// session may continue on. This snapshot is not used again.
+    pub(crate) async fn commit(&self, dirty: Changes, size: u64) -> io::Result<(SaveReport, Self)> {
         if dirty.is_empty() && size == self.size() {
-            return Ok(SaveReport {
+            let report = SaveReport {
                 log_next: self.log.next,
                 ..SaveReport::default()
-            });
+            };
+            return Ok((
+                report,
+                self.continued(self.meta, self.meta_bytes.clone(), self.claim),
+            ));
         }
         let mut images = Images::new();
         for (index, page) in dirty {
@@ -510,7 +538,8 @@ impl Snapshot {
             images.insert(index, image);
         }
         let segments = log::encode_transaction(self.log.next, size, &images);
-        let large = segments.iter().map(Vec::len).sum::<usize>() > CHECKPOINT_LOG_BYTES;
+        let logged_bytes = segments.iter().map(Vec::len).sum::<usize>();
+        let large = logged_bytes > CHECKPOINT_LOG_BYTES;
         let next = self.log.next + segments.len() as u64;
         let mut parts: Vec<_> = segments
             .into_iter()
@@ -518,6 +547,10 @@ impl Snapshot {
             .map(|(n, bytes)| Mutation::Put(log_key(self.log.next + n as u64), bytes.into()))
             .collect();
         let commit_part = parts.pop().expect("a transaction has a commit part");
+        let tail = match &commit_part {
+            Mutation::Put(_, bytes) => bytes.clone(),
+            Mutation::Delete(_) => unreachable!("a commit part is a put"),
+        };
 
         // Round trip of the commit: checkpoint pages, garbage and a pending claim.
         let cache = self.options.cache.as_ref();
@@ -561,7 +594,7 @@ impl Snapshot {
         let plan = match (large, cleanup.is_ok()) {
             (true, true) => {
                 let mut all = self.log.images.clone();
-                all.extend(images);
+                all.extend(images.clone());
                 let checkpoint = Checkpoint {
                     log_start: next,
                     size,
@@ -573,15 +606,21 @@ impl Snapshot {
             _ => plan,
         };
         let checkpointed_pages = plan.as_ref().map_or(0, |plan| plan.images.len());
+        let committed = (next, size, images, logged_bytes, tail);
         if let Err(error) = cleanup {
             if let Some(cache) = cache {
                 cache.forget();
             }
-            return Ok(SaveReport {
+            let report = SaveReport {
                 checkpointed_pages,
                 cleanup_error: Some(error),
                 log_next: next,
-            });
+            };
+            // Keep what was durable before: the log still covers every page
+            // the failed checkpoint may have written.
+            let mut after = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
+            after.extend(committed, None);
+            return Ok((report, after));
         }
 
         // Everything acknowledged is durable. Work out what `meta` may say: past
@@ -611,13 +650,13 @@ impl Snapshot {
         // write it now so that no other process replays a bulk load.
         let mut claim = None;
         let mut cleanup_error = None;
-        let mut durable_bytes = durable_bytes;
+        let (mut durable, mut durable_bytes) = (durable, durable_bytes);
         if target != durable {
             if cache.is_some() && !large {
                 claim = Some(target);
             } else {
                 match store.put(META, target.encode().into()).await {
-                    Ok(()) => durable_bytes = Some(target.encode().into()),
+                    Ok(()) => (durable, durable_bytes) = (target, Some(target.encode().into())),
                     Err(error) => cleanup_error = Some(error),
                 }
             }
@@ -634,17 +673,76 @@ impl Snapshot {
             if cleanup_error.is_some() {
                 cache.forget();
             } else {
-                cache.record(durable_bytes, claim, next);
-                if let Some(hint) = hint {
-                    cache.wrote_hint(hint);
+                cache.record(durable_bytes.clone(), claim, next);
+                if let Some(hint) = &hint {
+                    cache.wrote_hint(hint.clone());
                 }
             }
         }
-        Ok(SaveReport {
+        // The log now starts at the recorded or claimed checkpoint. If `meta`
+        // could not be written, it keeps the checkpointed transactions.
+        let mut after = self.continued(durable, durable_bytes, claim);
+        after.extend(committed, hint.map(Bytes::from));
+        after.log.drop_before(after.base().log_start);
+        let report = SaveReport {
             checkpointed_pages,
             cleanup_error,
             log_next: next,
-        })
+        };
+        Ok((report, after))
+    }
+
+    /// This committed view under a new checkpoint record, for a session that
+    /// continues after a save. Pages fetched ahead and usage carry over.
+    fn continued(&self, meta: Meta, meta_bytes: Option<Bytes>, claim: Option<Meta>) -> Self {
+        let log = Log {
+            transactions: self
+                .log
+                .transactions
+                .iter()
+                .map(|t| log::Transaction {
+                    end: t.end,
+                    size: t.size,
+                    pages: t.pages.clone(),
+                    bytes: t.bytes,
+                })
+                .collect(),
+            images: self.log.images.clone(),
+            next: self.log.next,
+            tail: self.log.tail.clone(),
+            bytes: self.log.bytes,
+        };
+        Self {
+            store: self.store.clone(),
+            options: self.options.clone(),
+            meta,
+            meta_bytes,
+            claim,
+            log,
+            unchanged: false,
+            page: Mutex::default(),
+            fetched: Mutex::new(std::mem::take(&mut *self.fetched.lock().unwrap())),
+            readahead: Mutex::default(),
+            hint: self.hint.clone(),
+            usage: Mutex::new(std::mem::take(&mut *self.usage.lock().unwrap())),
+        }
+    }
+
+    /// Add this owner's acknowledged transaction to the log. Values fetched
+    /// ahead for its pages are stale once a checkpoint drops it from the log.
+    fn extend(
+        &mut self,
+        (end, size, images, bytes, tail): (u64, u64, Images, usize, Bytes),
+        hint: Option<Bytes>,
+    ) {
+        let fetched = self.fetched.get_mut().unwrap();
+        for page in images.keys() {
+            fetched.remove(page);
+        }
+        self.log.append(end, size, images, bytes, tail);
+        if hint.is_some() {
+            self.hint = hint;
+        }
     }
 }
 

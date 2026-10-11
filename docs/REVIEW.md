@@ -118,6 +118,10 @@ caught:
 | Page keys carry no generation | Six cache, crash and handover tests fail |
 | No prefetch, no readahead, no exact probe, or 16 mutations in flight | The matching round-trip test fails |
 | The hint is never written, or not used at open | Working-set hint test fails |
+| A continued session keeps a stale resident header page | Every commit-durability test fails |
+| A commit leaves values fetched ahead for the pages it rewrote | Continued-snapshot test fails |
+| Dropping checkpointed transactions also drops pages a later one changed | Continued-snapshot test and three commit-durability tests fail |
+| After a failed checkpoint, a continued session drops its transactions anyway | Commit campaign fails |
 
 ## Executed validation
 
@@ -125,9 +129,9 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 
 | Check | Outcome |
 |---|---|
-| `cargo test --locked` | 8 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
-| `cargo test --locked --features simulation` | 64 tests pass: 36 unit, 27 integration, one public API; one rustdoc example also passes |
-| Interruption campaigns | 1,548 cases (below) |
+| `cargo test --locked` | 9 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
+| `cargo test --locked --features simulation` | 71 tests pass: 37 unit, 32 integration, two public API; one rustdoc example also passes |
+| Interruption campaigns | 2,169 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
 | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps --all-features --document-private-items` | Pass |
@@ -147,6 +151,10 @@ Interruption cases:
 - 396 read failpoints across six workloads.
 - 28 open-read failpoints and 4 interrupted confirmations.
 - 6 commit and checkpoint errors.
+- 621 commit-per-transaction cases (`Durability::Commit`): every put and delete
+  of a 30-transaction session failed in three outcomes, with and without an
+  owner cache. Every acknowledged transaction survives a crash, the failed one
+  may, nothing else appears, and the namespace stays writable.
 - Owner handover: two owners, each with its own cache, alternate over 400
   random tenures with failed saves, lost unconfirmed values and restarts, and
   every open checks every page. It also passed 200 seeds (80,000 tenures).
