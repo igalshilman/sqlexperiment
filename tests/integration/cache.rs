@@ -264,7 +264,7 @@ fn evicted_pages_are_read_from_disk() -> Result<()> {
     })
 }
 
-/// Parked engines are bounded across namespaces.
+/// Parked engines are bounded by memory across namespaces.
 #[test]
 fn parked_engines_are_bounded() -> Result<()> {
     use sqlite_kv::{
@@ -273,7 +273,7 @@ fn parked_engines_are_bounded() -> Result<()> {
     };
     futures::executor::block_on(async {
         let cache = open_cache(PageCacheConfig {
-            engines: 1,
+            engine_bytes: 60 << 10, // one engine with an empty schema
             ..cache_config(1 << 20, 16 << 20)
         });
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
@@ -413,6 +413,51 @@ fn an_evicted_namespace_keeps_one_state_while_in_use() -> Result<()> {
         drop((first, second));
         let mut db = Session::open(store).await?;
         assert_eq!(db.query("SELECT id FROM t").await?.len(), 1);
+        Ok(())
+    })
+}
+
+/// A parked engine is weighed by its schema: one with a large schema takes the
+/// room of several small ones.
+#[test]
+fn parked_engines_are_weighed_by_schema() -> Result<()> {
+    use sqlite_kv::{
+        PageCacheConfig,
+        simulation::{cache_config, open_cache},
+    };
+    futures::executor::block_on(async {
+        let cache = open_cache(PageCacheConfig {
+            engine_bytes: 400 << 10,
+            ..cache_config(1 << 20, 16 << 20)
+        });
+        let open = |name: &str, store: &Arc<dyn KvStore>| {
+            Session::open_with_options(store.clone(), owner(&cache.namespace(name)))
+        };
+        let small: Vec<Arc<dyn KvStore>> = (0..4)
+            .map(|_| Arc::new(MemoryKv::default()) as Arc<dyn KvStore>)
+            .collect();
+        for (i, store) in small.iter().enumerate() {
+            drop(open(&format!("small-{i}"), store).await?);
+        }
+        for (i, store) in small.iter().enumerate() {
+            let db = open(&format!("small-{i}"), store).await?;
+            assert!(db.reused_engine(), "four small engines fit");
+        }
+
+        let big: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
+        let mut db = open("big", &big).await?;
+        for t in 0..200 {
+            db.execute(&format!(
+                "CREATE TABLE t{t}(id INTEGER PRIMARY KEY, a TEXT, b TEXT); CREATE INDEX i{t} ON t{t}(a, b)"
+            ))
+            .await?;
+        }
+        db.save().await?; // parks, weighed by its schema
+        let mut kept = 0;
+        for (i, store) in small.iter().enumerate() {
+            kept += usize::from(open(&format!("small-{i}"), store).await?.reused_engine());
+        }
+        assert!(kept < 4, "the big engine displaced small ones: {kept} kept");
         Ok(())
     })
 }

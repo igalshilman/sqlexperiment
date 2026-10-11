@@ -794,6 +794,22 @@ impl Snapshot {
         }
     }
 
+    /// An empty view at the same position, for a parked engine: no log images,
+    /// pages fetched ahead, usage or reader registration.
+    pub(crate) fn idle(&self) -> Self {
+        let mut idle = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
+        idle.log = Log {
+            transactions: Vec::new(),
+            images: Images::new(),
+            next: self.log.next,
+            tail: None,
+            bytes: 0,
+        };
+        idle.fetched = Mutex::default();
+        idle.usage = Mutex::default();
+        idle
+    }
+
     /// Register this view, at its log position, with the owner cache.
     fn registered(self) -> Self {
         let reader = self
@@ -803,11 +819,6 @@ impl Snapshot {
             .map(|cache| cache.reader(self.log.next));
         *self.reader.lock().unwrap() = reader;
         self
-    }
-
-    /// End this view's registration: its engine is parked, not reading.
-    pub(crate) fn release_reader(&self) {
-        self.reader.lock().unwrap().take();
     }
 
     /// The latest log position a checkpoint may write images of: no other open

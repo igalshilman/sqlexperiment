@@ -50,6 +50,68 @@ db.transaction(async |db| {                    // durable as a whole, or rolled 
 }).await?;
 ```
 
+## How durability and recovery work
+
+The backend only offers single-key puts. A database change touches many
+pages, so it can't be written atomically as pages. Like SQLite's WAL, this
+crate commits through a log instead, and copies pages into place later.
+
+A namespace holds three kinds of key:
+
+- **Log segments** (`log/<n>`): each transaction is a run of segments holding
+  the new images of the pages it changed.
+- **Pages** (`page/<n>`): each page as of some checkpoint, overwritten in place.
+- **`meta`**: where the log starts, meaning everything before it has been
+  copied into the pages.
+
+A page's current value is its latest image in the log, or else its page key.
+
+**Commit.** A transaction's segments are written first. Its last segment has
+a commit flag, and it is put only after the others are acknowledged. When
+that put is acknowledged, the transaction is durable. This one put is the
+atomic step: before it, the transaction doesn't exist; after it, all of it
+does. Usually the whole transaction fits in that one segment, so a save is
+one put.
+
+**Checkpoint.** Once the log holds more than a few transactions, a save
+also copies the latest images of the oldest ones to their page keys. These
+writes ride in the same round trip as the commit. Only after those copies
+are acknowledged does `meta` move past those transactions. Segments are
+deleted only after a durable `meta` has moved past them. A half-finished
+checkpoint is harmless, because the log still holds every image it was
+copying and replays over whatever landed.
+
+**Recovery.** There's no separate recovery step; every open does the same
+thing:
+
+1. Read `meta`.
+2. Read the log from where it starts, applying each transaction whose commit
+   segment is present.
+3. Stop at the first missing segment.
+
+Segments a failed save left past that point are ignored, and the next commit
+overwrites them. On a backend where a failed put can be visible without being
+durable, open first re-puts the last commit segment and `meta` it read, so
+nothing it shows can disappear later.
+
+**What a crash leaves.** Interrupting any step leaves a state the next open
+reads correctly:
+
+| Interrupted | Result |
+|---|---|
+| A commit | Either all of the transaction or none of it |
+| A checkpoint | Pages hold old or new images; the log replays over them |
+| A `meta` write or a deletion | Repeated by a later save |
+
+**What it relies on.**
+- **One owner at a time.** The host must guarantee it, and settle every
+  outstanding request before another owner opens.
+- **Checksums.** Every stored value carries a CRC32C, so corruption is
+  reported as an error and never read as data.
+
+[The design](docs/DESIGN.md) has the exact invariants, the failure table and
+the owner cache.
+
 ## Docs
 
 - [Design](docs/DESIGN.md): the model, invariants, save, open, failures, cache

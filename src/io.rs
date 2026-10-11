@@ -210,6 +210,13 @@ impl KvIo {
         *self.log_next.lock().unwrap()
     }
 
+    /// Release the committed view while the engine is parked: it reads
+    /// nothing until a new open replaces the view.
+    pub(crate) fn idle(&self) {
+        let idle = Arc::new(self.snapshot().idle());
+        *self.snapshot.lock().unwrap() = idle;
+    }
+
     pub(crate) fn snapshot(&self) -> Arc<Snapshot> {
         self.snapshot.lock().unwrap().clone()
     }

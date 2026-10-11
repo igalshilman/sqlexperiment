@@ -100,7 +100,9 @@ returns exactly the committed rows. Every single-bit change of a segment or
 
 Sessions now cap private changes and result rows, and a log grown by failed
 checkpoints (for example a backend rejecting page puts for a while) shrinks
-again once they succeed.
+again once they succeed. Parked engines release their view of the log and
+share a byte budget, each weighed by its schema; a counting allocator measured
+40–110 KiB per parked engine (one to 50 tables), within the estimate.
 
 ## Second independent review
 
@@ -180,6 +182,7 @@ caught:
 | Page checksums are not verified | Bit-flip test reads silently wrong data |
 | Segment checksums are not verified | Single-bit test accepts flipped segments |
 | Catch-up checkpoints are disabled | Grown log does not shrink |
+| Parked engines are weighed without their schema | Schema-weight test keeps every small engine |
 
 ## Executed validation
 
@@ -188,7 +191,7 @@ Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 | Check | Outcome |
 |---|---|
 | `cargo test --locked` | 12 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
-| `cargo test --locked --features simulation` | 90 tests pass: 41 unit, 47 integration, two public API; one rustdoc example also passes |
+| `cargo test --locked --features simulation` | 91 tests pass: 41 unit, 48 integration, two public API; one rustdoc example also passes |
 | Interruption campaigns | 2,169 cases (below) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo fmt --check` | Pass |
@@ -223,7 +226,7 @@ Interruption cases:
 Exclusive ownership and settlement of outstanding requests remain host
 requirements. A namespace must use one stable key with `PageCache::namespace`;
 sessions that overlap must share it (without a cache they must not overlap).
-Parked engines are capped by count, not bytes. Request fencing, real-backend
+Request fencing, real-backend
 latency and process crash/power-loss validation remain future work.
 
 See [format](FORMAT.md), [design](DESIGN.md), and

@@ -286,9 +286,14 @@ Only the database is kept: the next session connects afresh, so connection
 counters (`last_insert_rowid()`, `changes()`) and settings never carry over.
 The next open reuses it if `meta` matches, the log ends where that engine left
 it, and its I/O is clean. This keeps the parsed schema warm, which cuts CPU per
-session several-fold ([cache results](../benches/CACHE_RESULTS.md)). Parked engines
-and namespace states are capped per process, least recently used first;
-dropping either only makes a namespace cold.
+session several-fold ([cache results](../benches/CACHE_RESULTS.md)). A parked
+engine releases its view of the log (the next open replaces it), so what it
+holds is its parsed schema: measured at 40–110 KiB from one to 50 tables. Parked
+engines share a byte budget (`PageCacheConfig::engine_bytes`, 64 MiB), each
+weighed as 48 KiB plus 16 bytes per byte of schema SQL, measured when an engine
+opens and after a commit that may have changed the schema. Namespace states are
+capped by count. Least recently used go first; dropping either only makes a
+namespace cold.
 
 **Threads.** foyer's disk I/O runs on the host's tokio runtime, or on a
 one-thread runtime of its own. It is the only background work.
@@ -323,7 +328,7 @@ replay at most a short log. Measurements: [log shipping](../benches/LOG_RESULTS.
   statement's result rows (`max_result_bytes`, 64 MiB) are capped; exceeding
   either fails the statement. Past 4 MiB of log, checkpoint slices grow to 256
   pages, so a log grown by failed checkpoints shrinks again and replay stays
-  bounded. Parked engines are capped by count, not bytes.
+  bounded. Parked engines share a byte budget, by a measured estimate.
 - **Integrity.** Every stored value carries a CRC32C, verified before it is
   decoded, and decoding bounds sequence numbers, sizes and page numbers. A
   corrupt value is an error, never different data; there is no repair.
