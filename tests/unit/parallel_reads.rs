@@ -1,5 +1,6 @@
 use super::*;
 use crate::{kv::KvStore, simulation::MemoryKv};
+use bytes::Bytes;
 use futures::{channel::oneshot, future::BoxFuture};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -17,7 +18,7 @@ impl Drop for Active<'_> {
     }
 }
 impl KvStore for GatedReads {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             let gate = self.gates.lock().unwrap().remove(key);
             if let Some(gate) = gate {
@@ -33,7 +34,7 @@ impl KvStore for GatedReads {
             self.inner.get(key).await
         })
     }
-    fn put<'a>(&'a self, key: &'a str, value: Vec<u8>) -> BoxFuture<'a, io::Result<()>> {
+    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
         self.inner.put(key, value)
     }
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {

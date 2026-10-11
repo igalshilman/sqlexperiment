@@ -1,5 +1,6 @@
 //! Exercises the normal library with an immediately-ready backend: no simulator,
 //! instrumentation, forced yields or checkpoint fault hooks are required.
+use bytes::Bytes;
 use futures::future::BoxFuture;
 use sqlite_kv::{Result, Session, kv::KvStore};
 use std::{
@@ -9,13 +10,13 @@ use std::{
 };
 
 #[derive(Default)]
-struct Store(Mutex<BTreeMap<String, Vec<u8>>>);
+struct Store(Mutex<BTreeMap<String, Bytes>>);
 
 impl KvStore for Store {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move { Ok(self.0.lock().unwrap().get(key).cloned()) })
     }
-    fn put<'a>(&'a self, key: &'a str, value: Vec<u8>) -> BoxFuture<'a, io::Result<()>> {
+    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move {
             self.0.lock().unwrap().insert(key.into(), value);
             Ok(())

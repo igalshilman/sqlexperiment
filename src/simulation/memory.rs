@@ -4,6 +4,7 @@ use crate::{
     kv::KvStore,
     yield_now,
 };
+use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -63,8 +64,8 @@ impl Stats {
 
 #[derive(Default)]
 struct Inner {
-    values: BTreeMap<String, Vec<u8>>,
-    durable: BTreeMap<String, Vec<u8>>,
+    values: BTreeMap<String, Bytes>,
+    durable: BTreeMap<String, Bytes>,
     stats: Stats,
 }
 
@@ -106,12 +107,12 @@ impl MemoryKv {
     }
     /// Fault-injection hook, NOT a successful KvStore operation. Stage an atomic
     /// visible-only put, then have the test backend return an error or cancel.
-    pub fn simulate_unacknowledged_put(&self, key: &str, value: Vec<u8>) {
+    pub fn simulate_unacknowledged_put(&self, key: &str, value: impl Into<Bytes>) {
         self.inner
             .lock()
             .unwrap()
             .values
-            .insert(key.to_owned(), value);
+            .insert(key.to_owned(), value.into());
     }
     /// Fault-injection hook, NOT a successful KvStore operation. Stage an atomic
     /// visible-only delete, then have the test backend return an error or cancel.
@@ -134,7 +135,7 @@ impl MemoryKv {
             .unwrap()
             .values
             .values()
-            .map(Vec::len)
+            .map(Bytes::len)
             .sum()
     }
     pub fn stored_key_bytes(&self) -> usize {
@@ -160,10 +161,11 @@ impl MemoryKv {
 }
 
 impl KvStore for MemoryKv {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             yield_now().await;
             let mut inner = self.inner.lock().unwrap();
+            // A shared buffer, like a network client's receive buffer: no copy.
             let value = inner.values.get(key).cloned();
             inner.stats.gets += 1;
             inner.stats.bytes_read += value.as_ref().map_or(0, |v| v.len() as u64);
@@ -176,7 +178,7 @@ impl KvStore for MemoryKv {
             Ok(value)
         })
     }
-    fn put<'a>(&'a self, key: &'a str, value: Vec<u8>) -> BoxFuture<'a, io::Result<()>> {
+    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move {
             yield_now().await;
             let mut inner = self.inner.lock().unwrap();

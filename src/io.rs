@@ -36,11 +36,12 @@
 use crate::kv::KvStore;
 use crate::page_codec::Page;
 use crate::snapshot::{Snapshot, StorageOptions};
+use bytes::BytesMut;
 use futures::future::join_all;
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex},
 };
 use turso_core::io::{FileId, FileSyncType, clock::DefaultClock};
 use turso_core::{
@@ -66,8 +67,13 @@ fn engine_error(message: impl Into<String>) -> LimboError {
 }
 /// One shared zero-filled page for holes and the unwritten WAL.
 fn zero() -> Page {
-    static ZERO: LazyLock<Page> = LazyLock::new(|| Arc::new(vec![0; BLOCK_SIZE]));
-    ZERO.clone()
+    static ZERO: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+    Page::from_static(&ZERO)
+}
+/// A mutable page: the same buffer when nothing else shares it, else a copy.
+fn writable(page: Page) -> BytesMut {
+    page.try_into_mut()
+        .unwrap_or_else(|shared| BytesMut::from(&shared[..]))
 }
 /// Split `len` bytes at `pos` into per-block pieces:
 /// `(block index, offset in block, offset in buffer, piece length)`.
@@ -344,7 +350,7 @@ impl KvIo {
             let piece = &bytes[done..done + len];
             if len == BLOCK_SIZE {
                 // A full block needs no read before overwrite.
-                let page = Arc::new(piece.to_vec());
+                let page = Page::copy_from_slice(piece);
                 self.state
                     .lock()
                     .unwrap()
@@ -352,18 +358,21 @@ impl KvIo {
                     .insert((file, index), Some(page));
                 continue;
             }
-            // A partial write to a dirty page (most WAL frames) updates it in place.
-            if let Some(Some(page)) = self.state.lock().unwrap().dirty.get_mut(&(file, index)) {
-                Arc::make_mut(page)[start..start + len].copy_from_slice(piece);
+            // A partial write to a dirty page (most WAL frames) updates it in place
+            // when nothing else shares the buffer.
+            if let Some(slot @ Some(_)) = self.state.lock().unwrap().dirty.get_mut(&(file, index)) {
+                let mut page = writable(slot.take().unwrap());
+                page[start..start + len].copy_from_slice(piece);
+                *slot = Some(page.freeze());
                 continue;
             }
-            let mut page = Vec::clone(&*self.block(file, index).await?);
+            let mut page = writable(self.block(file, index).await?);
             page[start..start + len].copy_from_slice(piece);
             self.state
                 .lock()
                 .unwrap()
                 .dirty
-                .insert((file, index), Some(Arc::new(page)));
+                .insert((file, index), Some(page.freeze()));
         }
         if !bytes.is_empty() {
             let mut state = self.state.lock().unwrap();
@@ -382,13 +391,13 @@ impl KvIo {
             let tail = (len % BLOCK_SIZE as u64) as usize;
             if tail != 0 {
                 let index = len / BLOCK_SIZE as u64;
-                let mut page = Vec::clone(&*self.block(file, index).await?);
+                let mut page = writable(self.block(file, index).await?);
                 page[tail..].fill(0);
                 self.state
                     .lock()
                     .unwrap()
                     .dirty
-                    .insert((file, index), Some(Arc::new(page)));
+                    .insert((file, index), Some(page.freeze()));
             }
             let first = len.div_ceil(BLOCK_SIZE as u64);
             let last = old_size.div_ceil(BLOCK_SIZE as u64);
@@ -518,7 +527,7 @@ impl KvIo {
             let dirty = std::mem::take(&mut state.dirty)
                 .into_iter()
                 .filter(|((file, _), _)| *file == 0)
-                .map(|((_, block), page)| (block, page.map(Arc::unwrap_or_clone)))
+                .map(|((_, block), page)| (block, page))
                 .collect();
             (dirty, state.sizes[0])
         };

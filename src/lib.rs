@@ -143,6 +143,7 @@ pub struct Session {
     /// The engine moved into the owner cache; nothing is left to shut down.
     parked: bool,
     /// The engine continued from a previous session.
+    #[cfg_attr(not(feature = "simulation"), allow(dead_code))]
     reused: bool,
 }
 

@@ -265,7 +265,7 @@ fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<(
         let store = MemoryKv::default();
         let key = "v12/page/0000000000000001";
         assert!(store.get(key).await?.is_none());
-        store.put(key, vec![1; 4096]).await?;
+        store.put(key, vec![1; 4096].into()).await?;
         store.get(key).await?;
         store.get(key).await?;
         store.delete(key).await?;
