@@ -1,5 +1,5 @@
 //! Crash campaign against a real Restate server: the ledger aborts at random
-//! state requests and the server is killed once, while clients send transfers
+//! state requests and the server is killed three times, while clients send transfers
 //! (each resent until answered). The audit must find every transfer applied
 //! exactly once and the balances consistent with them.
 //!
@@ -20,6 +20,7 @@ const ACCOUNTS: i64 = 8;
 const OPENING: i64 = 1000;
 const TRANSFERS_PER_KEY: usize = 60;
 const CLIENTS_PER_KEY: usize = 3;
+const SERVER_KILLS: usize = 3;
 
 fn log(path: &Path) -> std::fs::File {
     std::fs::OpenOptions::new()
@@ -92,11 +93,14 @@ fn call(path: &str, body: &str) -> String {
                 response.into_reader().read_to_string(&mut text).unwrap();
                 return text;
             }
-            Err(ureq::Error::Status(code, response)) if code < 500 && code != 404 => {
-                panic!(
-                    "{path}: {code} {}",
-                    response.into_string().unwrap_or_default()
-                )
+            Err(ureq::Error::Status(code, response)) if code != 404 => {
+                let body = response.into_string().unwrap_or_default();
+                // A failed invocation, unlike an unavailable server, is final.
+                if code < 500 || body.contains(r#""source":"invocation""#) {
+                    panic!("{path}: {code} {body}");
+                }
+                assert!(Instant::now() < deadline, "{path}: no answer");
+                thread::sleep(Duration::from_millis(100));
             }
             Err(_) => {
                 assert!(Instant::now() < deadline, "{path}: no answer");
@@ -153,8 +157,7 @@ fn crash_campaign() {
         );
     }
 
-    // Clients send transfers; one in three is sent twice. The server is killed
-    // once, halfway.
+    // Clients send transfers; one in three is sent twice.
     let applied = Arc::new(AtomicUsize::new(0));
     let sent = Arc::new(AtomicUsize::new(0));
     let mut clients = Vec::new();
@@ -188,19 +191,24 @@ fn crash_campaign() {
         }
     }
     let total = KEYS.len() * TRANSFERS_PER_KEY;
-    while sent.load(Ordering::SeqCst) < total / 2 {
-        assert!(!clients.iter().any(|c| c.is_finished()), "a client failed");
-        thread::sleep(Duration::from_millis(50));
+    // Killing the server loses writes of attempts in flight while the ledger,
+    // and its page cache, live on.
+    for kill in 1..=SERVER_KILLS {
+        // A failed client stops early: its panic surfaces when it is joined.
+        while sent.load(Ordering::SeqCst) < total * kill / (SERVER_KILLS + 1)
+            && !clients.iter().all(|c| c.is_finished())
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!(
+            "killing the server after {} transfers",
+            sent.load(Ordering::SeqCst)
+        );
+        restate.kill().unwrap();
+        restate.wait().unwrap();
+        restate = server(&binary, &dir);
+        wait_healthy();
     }
-    eprintln!(
-        "killing the server after {} transfers",
-        sent.load(Ordering::SeqCst)
-    );
-    restate.kill().unwrap();
-    restate.wait().unwrap();
-    restate = server(&binary, &dir);
-    wait_healthy();
-    eprintln!("server restarted");
     for client in clients {
         client.join().unwrap();
     }

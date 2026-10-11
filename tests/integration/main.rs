@@ -7,6 +7,7 @@ mod failpoints;
 mod failure;
 mod limits;
 mod log;
+mod ordered;
 mod publication;
 mod races;
 mod sql;
