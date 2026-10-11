@@ -6,7 +6,7 @@ use futures::future::{join_all, try_join};
 fn overlapping_requests_share_a_round_trip() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = LatencyKv::new(MemoryKv::default());
-        store.put("a", vec![1]).await?;
+        store.put("a", vec![1].into()).await?;
         store.get("a").await?;
         assert_eq!(store.round_trips(), 2, "dependent requests");
         store.reset();

@@ -9,10 +9,10 @@ use crate::{
 fn number(page: Option<Page>) -> Option<u64> {
     page.map(|p| u64::from_le_bytes(p[..8].try_into().unwrap()))
 }
-fn page(n: u64) -> Vec<u8> {
+fn page(n: u64) -> Page {
     let mut p = vec![0; BLOCK_SIZE];
     p[..8].copy_from_slice(&n.to_le_bytes());
-    p
+    p.into()
 }
 fn options(checkpoint_after: u32, cache: Option<&PageCache>) -> StorageOptions {
     StorageOptions {
@@ -45,7 +45,7 @@ impl Model {
         }
         for index in 0..self.size / BLOCK_SIZE as u64 {
             let expected = self.pages.get(&index).cloned().flatten();
-            if snapshot.block(index).await?.as_deref() != expected.as_ref() {
+            if snapshot.block(index).await? != expected {
                 return Ok(false);
             }
         }
@@ -247,7 +247,7 @@ fn weak_backends_confirm_what_this_owner_did_not_write() -> io::Result<()> {
         // A failed append is visible but not durable.
         let images = Images::from([(
             0,
-            Some(Arc::new(page_codec::encode(
+            Some(Page::from(page_codec::encode(
                 &page(2),
                 PageCompression::Raw,
             )?)),

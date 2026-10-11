@@ -45,11 +45,12 @@ use crate::{
     log::{self, Images, Log, Meta},
     page_codec::{self, Page, PageCompression},
 };
+use bytes::Bytes;
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::{collections::BTreeMap, io, sync::Arc, sync::Mutex};
 
 /// Logical page replacements from the session; `None` is a hole.
-type Changes = BTreeMap<u64, Option<Vec<u8>>>;
+type Changes = BTreeMap<u64, Option<Page>>;
 
 /// Upper bound on concurrent backend mutations of each save group.
 pub(crate) const MAX_MUTATIONS_IN_FLIGHT: usize = 16;
@@ -91,7 +92,7 @@ pub struct SaveReport {
 
 /// One backend mutation of a save.
 enum Mutation {
-    Put(String, Vec<u8>),
+    Put(String, Bytes),
     Delete(String),
 }
 
@@ -137,7 +138,7 @@ pub(crate) struct Snapshot {
     options: StorageOptions,
     /// Durable `meta` and its exact bytes (`None` when absent), possibly behind `claim`.
     meta: Meta,
-    meta_bytes: Option<Vec<u8>>,
+    meta_bytes: Option<Bytes>,
     /// An acknowledged checkpoint this owner has not recorded in `meta` yet.
     claim: Option<Meta>,
     pub(crate) log: Log,
@@ -231,22 +232,22 @@ impl Snapshot {
         let cache = self.options.cache.as_ref();
         let page = if let Some(image) = self.log.images.get(&index) {
             let Some(image) = image else { return Ok(None) };
-            Arc::new(page_codec::decode(image)?)
+            page_codec::decode_bytes(image)?
         } else if let Some(value) = cache.and_then(|cache| cache.get(index)) {
             match cache.is_some_and(PageCache::is_decoded) {
                 true => value,
-                false => Arc::new(page_codec::decode(&value)?),
+                false => page_codec::decode_bytes(&value)?,
             }
         } else {
             let Some(image) = self.store.get(&page_key(index)).await? else {
                 return Ok(None);
             };
-            let page = Arc::new(page_codec::decode(&image)?);
+            let page = page_codec::decode_bytes(&image)?;
             if let Some(cache) = cache {
                 let value = if cache.is_decoded() {
                     page.clone()
                 } else {
-                    Arc::new(image)
+                    image
                 };
                 cache.insert(index, value);
             }
@@ -299,7 +300,7 @@ impl Snapshot {
         let mut images = Images::new();
         for (index, page) in dirty {
             let image = match page {
-                Some(page) => Some(Arc::new(page_codec::encode(
+                Some(page) => Some(Bytes::from(page_codec::encode(
                     &page,
                     self.options.page_compression,
                 )?)),
@@ -313,7 +314,7 @@ impl Snapshot {
         let mut parts: Vec<_> = segments
             .into_iter()
             .enumerate()
-            .map(|(n, bytes)| Mutation::Put(log_key(self.log.next + n as u64), bytes))
+            .map(|(n, bytes)| Mutation::Put(log_key(self.log.next + n as u64), bytes.into()))
             .collect();
         let commit_part = parts.pop().expect("a transaction has a commit part");
 
@@ -331,7 +332,7 @@ impl Snapshot {
             _ => None,
         };
         if let Some(claim) = early_meta {
-            maintenance.push(Mutation::Put(META.to_owned(), claim.encode()));
+            maintenance.push(Mutation::Put(META.to_owned(), claim.encode().into()));
         }
         let store = &*self.store;
         let commit = async {
@@ -376,7 +377,7 @@ impl Snapshot {
         // Everything acknowledged is durable. Work out what `meta` may say: past
         // the checkpointed transactions, and past the deleted garbage.
         let (durable, durable_bytes) = match early_meta {
-            Some(claim) => (claim, Some(claim.encode())),
+            Some(claim) => (claim, Some(claim.encode().into())),
             None => (self.meta, self.meta_bytes.clone()),
         };
         let deleted_below = if collect {
@@ -405,8 +406,8 @@ impl Snapshot {
             if cache.is_some() && !large {
                 claim = Some(target);
             } else {
-                match store.put(META, target.encode()).await {
-                    Ok(()) => durable_bytes = Some(target.encode()),
+                match store.put(META, target.encode().into()).await {
+                    Ok(()) => durable_bytes = Some(target.encode().into()),
                     Err(error) => cleanup_error = Some(error),
                 }
             }
@@ -415,10 +416,12 @@ impl Snapshot {
             if let Some(plan) = &plan {
                 for (&index, image) in &plan.images {
                     match image {
-                        Some(image) if cache.is_decoded() => match page_codec::decode(image) {
-                            Ok(page) => cache.insert(index, Arc::new(page)),
-                            Err(_) => cache.remove(index),
-                        },
+                        Some(image) if cache.is_decoded() => {
+                            match page_codec::decode_bytes(image) {
+                                Ok(page) => cache.insert(index, page),
+                                Err(_) => cache.remove(index),
+                            }
+                        }
                         Some(image) => cache.insert(index, image.clone()),
                         None => cache.remove(index),
                     }
@@ -449,7 +452,7 @@ impl Checkpoint {
         self.images
             .iter()
             .map(|(&index, image)| match image {
-                Some(image) => Mutation::Put(page_key(index), Vec::clone(image)),
+                Some(image) => Mutation::Put(page_key(index), image.clone()),
                 None => Mutation::Delete(page_key(index)),
             })
             .collect()

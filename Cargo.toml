@@ -15,6 +15,7 @@ bench = false
 [dependencies]
 turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
 futures = "0.3"
+bytes = "=1.10.1"
 # The engine retains an owned schema lock across open-time I/O. Allow that
 # guard to move with the host future between executor threads, without a worker.
 parking_lot = { version = "0.12", features = ["send_guard"] }

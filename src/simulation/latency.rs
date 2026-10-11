@@ -6,6 +6,7 @@
 //! trip, while dependent requests cost one each. Multiply by a backend's RTT to
 //! estimate wall time; CPU time, bandwidth and queueing are not modeled.
 use crate::kv::KvStore;
+use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::{io, sync::Mutex};
 
@@ -56,10 +57,10 @@ impl<S: KvStore> LatencyKv<S> {
 }
 
 impl<S: KvStore> KvStore for LatencyKv<S> {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         self.timed(self.inner.get(key))
     }
-    fn put<'a>(&'a self, key: &'a str, value: Vec<u8>) -> BoxFuture<'a, io::Result<()>> {
+    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
         self.timed(self.inner.put(key, value))
     }
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {

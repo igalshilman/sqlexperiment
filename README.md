@@ -12,7 +12,9 @@ fault injection, counters and artificial scheduling yields are opt-in.
 
 ## Use
 
-Implement `kv::KvStore` with asynchronous `get`, `put` and `delete`, then pass an
+Implement `kv::KvStore` with asynchronous `get`, `put` and `delete` over
+`bytes::Bytes` values (so a network client can hand over its buffers without
+copying), then pass an
 `Arc<dyn KvStore>` to `Session::open`:
 
 ```rust,ignore

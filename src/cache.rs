@@ -37,7 +37,7 @@ struct State {
     /// Last-use time to page, oldest first.
     order: BTreeMap<u64, u64>,
     /// `meta` bytes as last read or written by this owner; `None` when absent.
-    meta: Option<Vec<u8>>,
+    meta: Option<Page>,
     /// A durable checkpoint this owner may record in `meta`.
     claim: Option<Meta>,
     /// One past this owner's last acknowledged commit.
@@ -109,7 +109,7 @@ impl PageCache {
     }
 
     /// Record durable `meta` bytes, a claim beyond them, and the acknowledged commit.
-    pub(crate) fn record(&self, meta: Option<Vec<u8>>, claim: Option<Meta>, committed: u64) {
+    pub(crate) fn record(&self, meta: Option<Page>, claim: Option<Meta>, committed: u64) {
         let mut state = self.0.lock().unwrap();
         state.meta = meta;
         state.claim = claim;
@@ -174,7 +174,7 @@ impl PageCache {
 
 impl State {
     fn forget(&mut self) {
-        self.meta = Some(Vec::new()); // matches no real record
+        self.meta = Some(Page::new()); // matches no real record
         self.claim = None;
         self.committed = None;
         self.engine = None;

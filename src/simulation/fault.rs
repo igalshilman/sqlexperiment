@@ -2,6 +2,7 @@
 use super::MemoryKv;
 use crate::kv::KvStore;
 use crate::yield_now;
+use bytes::Bytes;
 use futures::{channel::oneshot, future::BoxFuture};
 use std::{io, sync::Mutex};
 
@@ -105,8 +106,8 @@ impl FaultKv {
         &self,
         operation: Operation,
         key: &str,
-        value: Option<Vec<u8>>,
-    ) -> io::Result<Option<Vec<u8>>> {
+        value: Option<Bytes>,
+    ) -> io::Result<Option<Bytes>> {
         let (plan, ordinal) = {
             let mut c = self.control.lock().unwrap();
             let matches = c
@@ -170,10 +171,10 @@ impl FaultKv {
 }
 
 impl KvStore for FaultKv {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Vec<u8>>>> {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(self.run(Operation::Get, key, None))
     }
-    fn put<'a>(&'a self, key: &'a str, value: Vec<u8>) -> BoxFuture<'a, io::Result<()>> {
+    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move { self.run(Operation::Put, key, Some(value)).await.map(|_| ()) })
     }
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {

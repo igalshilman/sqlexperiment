@@ -1,7 +1,7 @@
 use super::*;
 
 fn value(n: usize) -> Page {
-    Arc::new(vec![n as u8; n])
+    Page::from(vec![n as u8; n])
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn a_different_meta_resets_pages_and_claims() {
         "absent meta at start"
     );
     cache.insert(1, value(4));
-    cache.record(Some(meta.encode()), Some(claim), 9);
+    cache.record(Some(meta.encode().into()), Some(claim), 9);
     assert_eq!(cache.expected_start(), Some(7));
     assert_eq!(
         cache.validate(Some(&meta.encode())),
@@ -70,7 +70,7 @@ fn a_different_meta_resets_pages_and_claims() {
         None,
         "until recorded"
     );
-    cache.record(Some(claim.encode()), None, 9);
+    cache.record(Some(claim.encode().into()), None, 9);
     cache.forget();
     assert_eq!(cache.validate(Some(&claim.encode())), None);
 }

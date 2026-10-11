@@ -3,9 +3,10 @@ use crate::{
     io::BLOCK_SIZE,
     page_codec::{self, PageCompression},
 };
+use bytes::Bytes;
 
 fn image(n: u8) -> Page {
-    std::sync::Arc::new(page_codec::encode(&vec![n; BLOCK_SIZE], PageCompression::Raw).unwrap())
+    Bytes::from(page_codec::encode(&vec![n; BLOCK_SIZE], PageCompression::Raw).unwrap())
 }
 
 #[test]
@@ -14,7 +15,7 @@ fn transactions_round_trip_and_split_into_parts() -> io::Result<()> {
     let parts = encode_transaction(5, 901 * 4096, &small);
     assert_eq!(parts.len(), 1);
     assert_eq!(
-        decode(&parts[0], 5)?,
+        decode(&parts[0].clone().into(), 5)?,
         Segment {
             first: 5,
             commit: true,
@@ -30,7 +31,7 @@ fn transactions_round_trip_and_split_into_parts() -> io::Result<()> {
     let mut merged = Images::new();
     for (n, bytes) in parts.iter().enumerate() {
         assert!(bytes.len() <= MAX_SEGMENT_BYTES);
-        let segment = decode(bytes, 7 + n as u64)?;
+        let segment = decode(&bytes.clone().into(), 7 + n as u64)?;
         assert_eq!((segment.first, segment.commit), (7, n == 1));
         merged.extend(segment.images);
     }
@@ -42,7 +43,10 @@ fn transactions_round_trip_and_split_into_parts() -> io::Result<()> {
 fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
     let images = Images::from([(1, Some(image(1))), (2, None)]);
     let valid = encode_transaction(9, 3 * 4096, &images).remove(0);
-    assert!(decode(&valid, 8).is_err(), "sequence must match its key");
+    assert!(
+        decode(&valid.clone().into(), 8).is_err(),
+        "sequence must match its key"
+    );
     let mut invalid: Vec<_> = (0..valid.len()).map(|n| valid[..n].to_vec()).collect();
     let mut bytes = valid.clone();
     bytes.push(0);
@@ -63,7 +67,11 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
     bytes[PREFIX + 10] = 9;
     invalid.push(bytes); // invalid page codec tag
     for bytes in invalid {
-        assert!(decode(&bytes, 9).is_err(), "accepted {} bytes", bytes.len());
+        assert!(
+            decode(&bytes.clone().into(), 9).is_err(),
+            "accepted {} bytes",
+            bytes.len()
+        );
     }
 
     let meta = Meta {
@@ -102,7 +110,7 @@ fn replay_stops_at_incomplete_or_stale_transactions() -> io::Result<()> {
             bytes[4..12].copy_from_slice(&seq.to_le_bytes());
             bytes[20] = u8::from(commit);
             let store = store.clone();
-            async move { store.put(&log_key(seq), bytes).await }
+            async move { store.put(&log_key(seq), bytes.into()).await }
         };
         put(1, 1, true, 1).await?; // committed
         put(2, 2, false, 2).await?; // a two-part transaction ...
@@ -115,7 +123,7 @@ fn replay_stops_at_incomplete_or_stale_transactions() -> io::Result<()> {
             assert_eq!(log.next, 4);
             assert_eq!(log.images[&0], Some(image(3)));
             assert_eq!(
-                log.tail.as_deref().map(|t| decode(t, 3).unwrap().first),
+                log.tail.as_ref().map(|t| decode(t, 3).unwrap().first),
                 Some(2)
             );
         }

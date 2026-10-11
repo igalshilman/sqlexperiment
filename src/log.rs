@@ -23,8 +23,9 @@ use crate::{
     kv::KvStore,
     page_codec::Page,
 };
+use bytes::Bytes;
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, io, sync::Arc};
+use std::{collections::BTreeMap, io};
 
 /// Largest segment value; larger transactions span several segments.
 pub const MAX_SEGMENT_BYTES: usize = 1024 * 1024;
@@ -54,7 +55,7 @@ pub(crate) fn encode_transaction(first: u64, size: u64, images: &Images) -> Vec<
     let mut parts: Vec<Vec<(u64, &[u8])>> = vec![Vec::new()];
     let mut bytes = PREFIX;
     for (&index, image) in images {
-        let image = image.as_deref().map_or(&[][..], Vec::as_slice);
+        let image = image.as_deref().unwrap_or_default();
         let entry = ENTRY_HEADER + image.len();
         if bytes + entry > MAX_SEGMENT_BYTES && !parts.last().unwrap().is_empty() {
             parts.push(Vec::new());
@@ -87,7 +88,8 @@ pub(crate) fn encode_transaction(first: u64, size: u64, images: &Images) -> Vec<
 
 /// Decode a segment and check that it carries the sequence number of its key.
 /// Page images are validated by decoding them.
-pub(crate) fn decode(bytes: &[u8], seq: u64) -> io::Result<Segment> {
+/// Page images share the segment's buffer.
+pub(crate) fn decode(bytes: &Bytes, seq: u64) -> io::Result<Segment> {
     let segment = || invalid("log segment");
     if bytes.len() < PREFIX || bytes.len() > MAX_SEGMENT_BYTES || &bytes[..4] != LOG_MAGIC {
         return Err(segment());
@@ -98,26 +100,28 @@ pub(crate) fn decode(bytes: &[u8], seq: u64) -> io::Result<Segment> {
         return Err(segment());
     }
     let count = u32::from_le_bytes(bytes[29..33].try_into().unwrap());
-    let mut input = &bytes[PREFIX..];
+    let mut at = PREFIX;
     let mut images = Images::new();
     for _ in 0..count {
-        let (header, rest) = input.split_at_checked(ENTRY_HEADER).ok_or_else(segment)?;
+        let header = bytes.get(at..at + ENTRY_HEADER).ok_or_else(segment)?;
         let index = u64::from_le_bytes(header[..8].try_into().unwrap());
         let len = u16::from_le_bytes([header[8], header[9]]) as usize;
-        let (image, rest) = rest.split_at_checked(len).ok_or_else(segment)?;
-        if images
-            .last_key_value()
-            .is_some_and(|(&last, _)| last >= index)
+        at += ENTRY_HEADER;
+        if at + len > bytes.len()
+            || images
+                .last_key_value()
+                .is_some_and(|(&last, _)| last >= index)
         {
             return Err(segment());
         }
+        let image = bytes.slice(at..at + len);
         if len != 0 {
-            crate::page_codec::decode(image)?;
+            crate::page_codec::decode_bytes(&image)?;
         }
-        images.insert(index, (len != 0).then(|| Arc::new(image.to_vec())));
-        input = rest;
+        images.insert(index, (len != 0).then_some(image));
+        at += len;
     }
-    if !input.is_empty() {
+    if at != bytes.len() {
         return Err(segment());
     }
     Ok(Segment {
@@ -194,7 +198,7 @@ pub(crate) struct Log {
     /// Sequence number for the next transaction: one past the last commit.
     pub next: u64,
     /// The last commit part, for confirmation on weak backends.
-    pub tail: Option<Vec<u8>>,
+    pub tail: Option<Bytes>,
     /// Encoded bytes of the committed segments.
     pub bytes: usize,
 }
@@ -215,7 +219,7 @@ pub(crate) async fn probe(
     store: &dyn KvStore,
     first: u64,
     batch: u64,
-) -> io::Result<Vec<Option<Vec<u8>>>> {
+) -> io::Result<Vec<Option<Bytes>>> {
     let keys: Vec<_> = (first..first + batch).map(log_key).collect();
     try_join_all(keys.iter().map(|key| store.get(key))).await
 }
@@ -226,7 +230,7 @@ pub(crate) async fn replay(
     store: &dyn KvStore,
     start: u64,
     batch: u64,
-    prefetched: Option<Vec<Option<Vec<u8>>>>,
+    prefetched: Option<Vec<Option<Bytes>>>,
 ) -> io::Result<Log> {
     let mut log = Log {
         transactions: Vec::new(),

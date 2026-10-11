@@ -18,7 +18,7 @@ use std::io;
 
 const HEADER: usize = 3;
 /// A page held in memory, encoded or decoded, shared without copying.
-pub(crate) type Page = std::sync::Arc<Vec<u8>>;
+pub(crate) type Page = bytes::Bytes;
 /// Largest valid encoded value: a three-byte envelope plus one raw logical page.
 pub const MAX_ENCODED_PAGE: usize = HEADER + BLOCK_SIZE;
 
@@ -57,6 +57,12 @@ pub fn encode(page: &[u8], policy: PageCompression) -> io::Result<Vec<u8>> {
 /// Decodes into exactly one bounded page. Never allocate from stored lengths.
 /// This validates structure and size, not arbitrary corruption (no checksum).
 pub fn decode(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    decode_bytes(&bytes::Bytes::copy_from_slice(bytes)).map(Vec::from)
+}
+
+/// Like [`decode`], but a raw page is returned as a slice of `bytes` without
+/// copying; only LZ4 pages allocate.
+pub(crate) fn decode_bytes(bytes: &bytes::Bytes) -> io::Result<Page> {
     if bytes.len() < HEADER || bytes.len() > MAX_ENCODED_PAGE {
         return Err(invalid("invalid encoded page length"));
     }
@@ -65,7 +71,7 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<u8>> {
     }
     let payload = &bytes[HEADER..];
     match bytes[0] {
-        0 if payload.len() == BLOCK_SIZE => Ok(payload.to_vec()),
+        0 if payload.len() == BLOCK_SIZE => Ok(bytes.slice(HEADER..)),
         1 if !payload.is_empty() && payload.len() < BLOCK_SIZE => {
             let mut page = vec![0; BLOCK_SIZE];
             let decoded = lz4_flex::block::decompress_into(payload, &mut page)
@@ -73,7 +79,7 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<u8>> {
             if decoded != BLOCK_SIZE {
                 return Err(invalid("invalid LZ4 decoded length"));
             }
-            Ok(page)
+            Ok(page.into())
         }
         _ => Err(invalid("invalid page codec or payload length")),
     }
