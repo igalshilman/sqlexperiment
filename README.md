@@ -2,25 +2,31 @@
 
 A Rust experiment running SQLite-compatible SQL over an asynchronous key/value
 store, using the unmodified Rust engine implemented by Turso (`turso_core` 0.8.2).
-One owner serializes sessions in a dedicated namespace. SQL writes and the engine
-WAL stay private until `Session::save()` commits the changed pages as one durable
-log transaction, usually a single put. Checkpoints later move pages to stable keys,
-as SQLite does with its WAL.
+It targets single-owner namespaces, such as one Restate virtual object: one owner
+at a time runs sessions against a namespace, and each save commits durably to the
+KV store.
 
-The default library contains the adapter and storage protocol. Simulation,
-fault injection, counters and artificial scheduling yields are opt-in.
+SQL writes and the engine WAL stay private until `Session::save()`, which commits
+the changed pages as one log transaction, usually a single put. Checkpoints later
+move pages to stable keys, as SQLite does with its WAL.
 
 ## Use
 
 Implement `kv::KvStore` with asynchronous `get`, `put` and `delete` over
-`bytes::Bytes` values (so a network client can hand over its buffers without
-copying), then pass an
-`Arc<dyn KvStore>` to `Session::open`:
+`bytes::Bytes` values, then open a session:
 
 ```rust,ignore
-use sqlite_kv::Session;
+use sqlite_kv::{PageCache, PageCacheConfig, Session, StorageOptions};
 
-let mut db = Session::open(store).await?;
+// Once per process: pages in memory and on a local disk file.
+let cache = PageCache::open(PageCacheConfig::new("/var/cache/pages", 256 << 20, 8 << 30)).await?;
+
+// Per session, with the namespace's stable key.
+let options = StorageOptions {
+    cache: Some(cache.namespace("object-42")),
+    ..StorageOptions::default()
+};
+let mut db = Session::open_with_options(store, options).await?;
 db.execute("CREATE TABLE t(n INTEGER)").await?;
 db.execute("INSERT INTO t VALUES(1)").await?;
 let saved = db.save().await?;
@@ -30,58 +36,73 @@ if let Some(error) = saved.cleanup_error {
 }
 ```
 
-A save appends its changed pages to the log; the commit segment's put commits it.
-In the same round trip it may checkpoint the oldest logged pages into
-`page/<n>` keys and delete checkpointed segments. Pages are found in the replayed
-log, else at their own key, so a cold read is one get. There is no page map,
-object allocation or intent. `StorageOptions` selects
-`PageCompression::{Lz4, Raw}` (default adaptive LZ4), `checkpoint_after` (logged
-transactions before saves checkpoint, default 4) and an optional
-`NamespaceCache`: one namespace's handle on the process-wide `PageCache`.
+`Session::open(store)` works without a cache. `StorageOptions` also selects
+`PageCompression::{Lz4, Raw}` (default adaptive LZ4) and `checkpoint_after`
+(logged transactions before saves checkpoint, default 4).
 
-`PageCache::open(PageCacheConfig)` creates one cache per process: pages in memory
-and on a local disk tier ([foyer](https://github.com/foyer-rs/foyer)), shared by
-every namespace under one budget. `cache.namespace(key)` returns the handle for
-one namespace, such as one virtual object; namespaces never read each other's
-pages. The cache also remembers what each owner made durable and keeps a bounded
-number of idle engines. When another writer checkpoints, open refreshes the
-cached pages it rewrote from its still present log segments, or drops them all
-once those are collected. With a cache, a steady-state open and save are one
-round trip each, and a session that ends cleanly leaves its engine for the next
-one, which reuses it when nothing changed (about 5× less CPU per session). See
-[cache results](benches/CACHE_RESULTS.md). Backends whose visible values are always
-durable can say so with `KvStore::durable_when_visible`; otherwise a fresh open
-re-puts the log tail and `meta` it did not write. See
-[the results](benches/LOG_RESULTS.md) for measurements against the previous design.
-The engine I/O pump overlaps adjacent reads in batches of up to 16, with
-write/truncate/sync barriers.
+## How it works
 
-The host task drives engine open/connect, SQL steps and async KV I/O directly.
-There are no worker threads or background tasks, except the disk tier of a
-`PageCache`, whose I/O runs on the host's tokio runtime (or a one-thread runtime
-of its own when there is none). Cached queries yield every 64
-engine steps. The header page is loaded asynchronously and retained for the
-engine's synchronous metadata reads. Other synchronous reads requiring KV or
-synchronous file mutations return an error; the caller must discard that session.
-The normal query and checkpoint paths use asynchronous I/O.
+**Keys.** `v12/meta` records where the log starts. `v12/log/<n>` holds log
+segments, and `v12/page/<n>` holds checkpointed pages, overwritten in place. A
+page's value is its latest image in the log, else its page key, so a cold read is
+one get.
 
-SQL COMMIT and `checkpoint()` affect the private view. `save()` consumes the
-session and is the durability boundary. Dropping a session discards unsaved work.
-Query errors and cancellation poison the session. `Ok(SaveReport)` confirms the
-commit; its `cleanup_error` reports failed checkpoint work, which a later save
-retries. An ordinary error or cancellation can leave an unknown commit outcome. Settle requests
-and reopen; application operation IDs can resolve uncertain non-idempotent work.
+**Save.** A save writes its changed pages as one log transaction; the put of its
+commit segment commits it. In the same round trip it may checkpoint the oldest
+logged transactions (about 12 pages) into their page keys, and delete segments that a
+durable `meta` has moved past. `meta` moves past a transaction only after all its
+pages are acknowledged. A save over 256 KiB checkpoints itself right after
+committing, so later opens do not replay it.
+
+**Open.** Open reads `meta`, then replays committed transactions from its log
+start, stopping at the first absent key or at debris from a failed save. On
+backends where a failed put can be visible without being durable, open re-puts
+the log tail and `meta` it did not write itself. Backends whose visible values
+are always durable say so with `KvStore::durable_when_visible`.
+
+**Cache.** `PageCache` is created once per process. It keeps pages in memory and
+on a local disk tier ([foyer](https://github.com/foyer-rs/foyer)), shared by every
+namespace under one budget. `cache.namespace(key)` returns that namespace's
+handle, and namespaces never read each other's pages. Per namespace, the cache
+remembers what this owner made durable, so a steady-state open and save are one
+round trip each. A session that ends cleanly leaves its engine parked; the next
+session reuses it when nothing changed, which costs about 5× less CPU. Parked
+engines are capped across the process.
+
+When another writer checkpoints, open refreshes the cached pages it rewrote
+from its log segments, which are still present unless garbage collection
+already deleted them. If they are gone, the namespace drops its cached pages.
+The disk tier starts empty in every process.
+
+**Execution.** The host task drives engine open, SQL steps and KV I/O directly.
+Cached queries yield every 64 engine steps. The only background work is the
+cache's disk I/O, which runs on the host's tokio runtime, or on a one-thread
+runtime of its own when there is none. The engine I/O pump overlaps adjacent
+reads in batches of up to 16, without crossing write, truncate or sync barriers.
+
+## Sessions and errors
+
+SQL `COMMIT` and `checkpoint()` affect only the private view. `save()` consumes
+the session and is the durability boundary; dropping a session discards unsaved
+work. Query errors and cancellation poison the session.
+
+`Ok(SaveReport)` confirms the commit; its `cleanup_error` reports failed
+checkpoint work, which a later save retries. Any other error or cancellation can
+leave the commit outcome unknown: settle outstanding requests and reopen.
+Application operation IDs can resolve uncertain non-idempotent work.
 
 ## Backend and ownership contract
 
-- A get returns the latest visible whole value or absence.
+- A get returns the latest visible whole value, or absence.
 - Successful puts and deletes are atomic, durable and visible after recovery.
-  Deleting a missing key succeeds. No multi-key transaction or sync call is needed.
-- Errors and cancellation may leave no effect, a visible-only effect, or a durable
-  effect. No torn values are allowed; success on one key need not flush another.
-- The host enforces exclusive ownership and settles
-  every outstanding request before recovery or ownership transfer. Dropping a
-  future alone does not fence a remote request.
+  Deleting a missing key succeeds. No multi-key transaction or sync call is
+  needed.
+- Errors and cancellation may leave no effect, a visible-only effect or a
+  durable effect, but never a torn value.
+- The host enforces exclusive ownership and settles every outstanding request
+  before recovery or ownership transfer. Dropping a future does not fence a
+  remote request.
+- Each namespace uses one stable key with `PageCache::namespace`.
 
 The adapter provides no distributed lock or fencing. It is not a Restate SDK
 integration or a production backend.
@@ -89,63 +110,48 @@ integration or a production backend.
 ## Build and test
 
 ```sh
-cargo check --locked
 cargo test --locked
 cargo test --locked --features simulation
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
-cargo doc --locked --no-deps --document-private-items
-```
-
-| Location / target | Purpose | Feature |
-|---|---|---|
-| `src/` | Adapter, codecs, log and checkpoint protocol | None |
-| `src/simulation/` | MemoryKv, fault injection, latency and measurement | `simulation` |
-| `tests/public_api.rs` | Real adapter with an immediately-ready test backend | None |
-| `tests/unit/` | Private implementation tests and test-only helpers | Codec tests: none; storage tests: `simulation` |
-| `tests/integration/` | SQL, block I/O, cache and save/open failure campaigns | `simulation` |
-| `benches/` | Explicit Cargo bench targets, analysis scripts and results | `simulation` |
-| `examples/lookup.rs` | Small simulator-backed usage example | `simulation` |
-
-Unit test files are mounted with `#[cfg(test)]` module declarations to retain
-private access. Tests and checkpoint fault hooks are excluded from normal library
-builds. Default tests exercise the codec and public API without enabling simulation.
-Benchmarks are run separately; see [benches/README.md](benches/README.md).
-
-```sh
+cargo doc --locked --no-deps --all-features --document-private-items
 cargo run --locked --features simulation --example lookup
-cargo bench --locked --features simulation --bench page_compression -- 3
 ```
 
-## Storage and recovery
+| Location | Purpose | Feature |
+|---|---|---|
+| `src/` | Adapter, codecs, log, checkpoint protocol and cache | None |
+| `src/simulation/` | In-memory KV, fault injection, latency simulation, test caches | `simulation` |
+| `tests/public_api.rs` | Public API against an immediately ready backend | None |
+| `tests/unit/` | Private implementation tests | Codec and log tests: none; the rest: `simulation` |
+| `tests/integration/` | SQL, block I/O, cache, and save and open failure campaigns | `simulation` |
+| `benches/` | Benchmarks, analysis scripts and recorded results | `simulation` |
+| `examples/lookup.rs` | Small simulator-backed example | `simulation` |
 
-Logical pages are 4096 bytes. Encoded pages use adaptive LZ4 with a raw fallback,
-at most 4099 bytes including the header, both inside log segments and at page
-keys. A session keeps one decoded page and the header page. Only the current
-format (v12) is supported, with no probing or handling of other formats.
-
-Recovery is replay. Open reads `meta`, replays committed transactions from its
-log start and stops at the first absent key or debris from a failed save; on weak
-backends it confirms the tail it did not write. Checkpoints are idempotent page
-puts; `meta` only moves past a transaction once its pages are acknowledged, and
-segments are only deleted once a durable `meta` has moved past them. A large save
-(over 256 KiB of segments) checkpoints itself right after committing.
-
-See [storage format](docs/FORMAT.md), [commit/checkpoint protocol](docs/PROTOCOL.md)
-and [self-review](docs/REVIEW.md). In-source rustdoc explains the architecture in
-`src/lib.rs`, the commit records in `src/log.rs`, the save pipeline in
-`src/snapshot.rs`, the cache in `src/cache.rs` and the backend contract in
-`src/kv.rs`.
+Benchmarks run separately; see [benches/README.md](benches/README.md).
 
 ## Limits
 
-Segments are at most 1 MiB; larger saves span several. The backend must accept
-that value size. Dirty pages, private WAL, the replayed log and collected query
-results have no byte budgets. One engine step is not forcibly preemptible, and
-queries are not sandboxed. There is no payload checksum, corruption repair,
-attached-database guarantee, or process-kill/power-loss test. Each namespace must
-use one stable key with `PageCache::namespace`; the disk tier starts empty in
-every process.
+- Logical pages are 4096 bytes; encoded pages are at most 4099 bytes.
+- Log segments are at most 1 MiB, and larger saves span several. The backend
+  must accept that value size.
+- Dirty pages, the private WAL, the replayed log and query results have no
+  memory budgets.
+- One engine step cannot be preempted, and queries are not sandboxed.
+- There is no payload checksum, corruption repair or attached-database support.
+- Only the current storage format (v12) is supported.
+- Measurements use an in-memory simulator. They count KV traffic and round
+  trips, but do not model real backend latency, replication or physical storage.
+  There are no process-kill or power-loss tests.
 
-Measurements use an in-memory simulator. They count logical KV traffic and isolated
-codec time, without modeling real backend latency, replication or physical storage.
+## Further reading
+
+- [Storage format](docs/FORMAT.md)
+- [Commit, checkpoint and recovery protocol](docs/PROTOCOL.md)
+- [Review and validation](docs/REVIEW.md)
+- [Benchmarks](benches/README.md): [log shipping](benches/LOG_RESULTS.md) and
+  [cache](benches/CACHE_RESULTS.md) results
+
+The rustdoc in `src/lib.rs` describes the architecture; `src/log.rs`,
+`src/snapshot.rs`, `src/cache.rs` and `src/kv.rs` document the log, the save
+pipeline, the cache and the backend contract.
