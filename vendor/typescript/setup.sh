@@ -31,7 +31,9 @@ git -C "$build/sdk-typescript" apply "$here/patches/sdk-typescript.patch"
 
 # The core, as WebAssembly inlined into the SDK.
 bindings=$build/sdk-typescript/sdk-shared-core-wasm-bindings
-(cd "$bindings" && RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable} cargo build --release --target wasm32-unknown-unknown)
+# Its own target directory, whatever CARGO_TARGET_DIR says: the path below reads from it.
+(cd "$bindings" && CARGO_TARGET_DIR="$bindings/target" RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable} \
+  cargo build --release --target wasm32-unknown-unknown)
 wasm-bindgen --target web --out-dir "$bindings/pkg" --out-name sdk_shared_core_wasm_bindings \
   "$bindings/target/wasm32-unknown-unknown/release/sdk_shared_core_wasm_bindings.wasm"
 node "$here/inline-wasm.mjs" "$bindings/pkg" sdk_shared_core_wasm_bindings \
