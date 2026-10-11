@@ -6,10 +6,14 @@
   "description": "SQL in Restate virtual objects with the TypeScript SDK (ctx.sql), without journal replay",
   "scripts": {
     "setup": "./setup.sh",
-    "ledger": "node ledger.mjs"
+    "serve": "node examples/serve.mjs",
+    "test": "node examples/test.mjs"
   },
   "dependencies": {
     "@restatedev/restate-sdk": "file:.build/restatedev-restate-sdk-1.17.3.tgz",
-    "sqlite-kv": "file:.."
+    "sqlite-kv": "file:..",
+    "@mariozechner/pi-agent-core": "0.73.1",
+    "@mariozechner/pi-ai": "0.73.1",
+    "typebox": "^1.1.24"
   }
 }

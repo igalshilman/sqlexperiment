@@ -48,34 +48,40 @@ index 8ea15b1..3c7f475 100644
  
  /**
 diff --git a/packages/libs/restate-sdk/src/context_impl.ts b/packages/libs/restate-sdk/src/context_impl.ts
-index 2487c57..c6de13a 100644
+index 2487c57..a69b328 100644
 --- a/packages/libs/restate-sdk/src/context_impl.ts
 +++ b/packages/libs/restate-sdk/src/context_impl.ts
-@@ -71,6 +71,7 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
+@@ -71,6 +71,8 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
  import type { ContextInternal, GetProjectOptions } from "./internal.js";
  import { InputReader, OutputWriter } from "./endpoint/handlers/types.js";
  import { ExecutionOptions } from "./endpoint/components.js";
 +import { runSql, type SqlDatabase } from "./sql.js";
++import { IdempotencyKeys } from "./idempotency.js";
  
  /**
   * The runtime shape a client method needs. implement() and type manipulations respect this.
-@@ -109,6 +110,7 @@ export class ContextImpl
+@@ -109,6 +111,9 @@ export class ContextImpl
    private cancellationPromise?: SingleRestatePromise<void>;
    readonly defaultSerde: Serde<any>;
    private readonly asTerminalError?: (error: any) => TerminalError | undefined;
 +  private readonly journalReplay: boolean;
++  // Without journal replay: idempotency keys for calls and sends.
++  private readonly idempotencyKeys?: IdempotencyKeys;
  
    // If undefined, we're not tracking invocation id promises
    private readonly trackedInvocationIdPromises?: SingleRestatePromise<string>[];
-@@ -159,6 +161,7 @@ export class ContextImpl
+@@ -159,6 +164,10 @@ export class ContextImpl
      this.runInterceptor = (_name, runner) => runner();
      this.defaultSerde = executionOptions?.defaultSerde ?? serde.json;
      this.asTerminalError = executionOptions?.asTerminalError;
 +    this.journalReplay = executionOptions?.journalReplay ?? true;
++    if (!this.journalReplay) {
++      this.idempotencyKeys = new IdempotencyKeys(invocationRequest.id);
++    }
      this.trackedInvocationIdPromises = executionOptions?.explicitCancellation
        ? []
        : undefined;
-@@ -291,6 +294,10 @@ export class ContextImpl
+@@ -291,6 +300,10 @@ export class ContextImpl
      );
    }
  
@@ -86,6 +92,39 @@ index 2487c57..c6de13a 100644
    public clear(name: string): void {
      this.processNonCompletableEntry(
        WasmCommandType.ClearState,
+@@ -340,7 +353,14 @@ export class ContextImpl
+               ([key, value]) => new WasmHeader(key, value)
+             )
+           : [],
+-        call.idempotencyKey,
++        call.idempotencyKey ??
++          this.idempotencyKeys?.next(
++            "call",
++            call.service,
++            call.method,
++            call.key,
++            parameter
++          ),
+         call.scope,
+         call.limitKey,
+         call.name
+@@ -423,7 +443,15 @@ export class ContextImpl
+             )
+           : [],
+         delay !== undefined && delay > 0 ? BigInt(delay) : undefined,
+-        send.idempotencyKey,
++        send.idempotencyKey ??
++          this.idempotencyKeys?.next(
++            "send",
++            send.service,
++            send.method,
++            send.key,
++            parameter,
++            delay
++          ),
+         send.scope,
+         send.limitKey,
+         send.name
 diff --git a/packages/libs/restate-sdk/src/endpoint/components.ts b/packages/libs/restate-sdk/src/endpoint/components.ts
 index 14d8ab1..f24c370 100644
 --- a/packages/libs/restate-sdk/src/endpoint/components.ts
@@ -121,6 +160,79 @@ index f5a20a7..afc8a76 100644
      );
      const responseHead = this.coreVm.get_response_head();
      this.statusCode = responseHead.status_code;
+diff --git a/packages/libs/restate-sdk/src/idempotency.ts b/packages/libs/restate-sdk/src/idempotency.ts
+new file mode 100644
+index 0000000..9cdb273
+--- /dev/null
++++ b/packages/libs/restate-sdk/src/idempotency.ts
+@@ -0,0 +1,67 @@
++/*
++ * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
++ *
++ * This file is part of the Restate SDK for Node.js/TypeScript,
++ * which is released under the MIT license.
++ *
++ * You can find a copy of the license in file LICENSE in the root
++ * directory of this repository or package, or at
++ * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++ */
++
++// Without journal replay, a retried attempt runs the handler again from the
++// start, and each call or send it makes is a new command. So that it reaches
++// the invocation the earlier attempt started instead of starting another, a
++// call or send without an idempotency key gets one derived from this
++// invocation and the request: the same request, made the same number of times
++// before, gets the same key. Restate then attaches a repeated call to the
++// earlier invocation (and its result), and drops a repeated send.
++
++const encoder = new TextEncoder();
++
++/** A 64-bit FNV-1a hash of `parts`, in hex: two 32-bit lanes. */
++function hash(parts: (string | Uint8Array)[]): string {
++  let a = 0x811c9dc5;
++  let b = 0x050c5d1f;
++  const mix = (byte: number) => {
++    a = Math.imul(a ^ byte, 0x01000193);
++    b = Math.imul(b ^ byte, 0x01000193) ^ (a >>> 15);
++  };
++  for (const part of parts) {
++    const bytes = typeof part === "string" ? encoder.encode(part) : part;
++    for (const byte of bytes) mix(byte);
++    mix(0xff); // separator
++    mix(bytes.length & 0xff);
++  }
++  const hex = (n: number) => (n >>> 0).toString(16).padStart(8, "0");
++  return hex(a) + hex(b);
++}
++
++/** Idempotency keys for the calls and sends of one attempt. */
++export class IdempotencyKeys {
++  private readonly seen = new Map<string, number>();
++
++  constructor(private readonly invocationId: string) {}
++
++  /** The key of a request: `kind` ("call" or "send") and its target, input and delay. */
++  next(
++    kind: "call" | "send",
++    service: string,
++    method: string,
++    key: string | undefined,
++    parameter: Uint8Array,
++    delay?: number
++  ): string {
++    const digest = hash([
++      kind,
++      service,
++      method,
++      key ?? "",
++      parameter,
++      delay === undefined ? "" : String(delay),
++    ]);
++    const n = this.seen.get(digest) ?? 0;
++    this.seen.set(digest, n + 1);
++    return `${this.invocationId}:${digest}:${n}`;
++  }
++}
 diff --git a/packages/libs/restate-sdk/src/internal.ts b/packages/libs/restate-sdk/src/internal.ts
 index 7cee518..5f5bf5a 100644
 --- a/packages/libs/restate-sdk/src/internal.ts
@@ -133,90 +245,6 @@ index 7cee518..5f5bf5a 100644
  
  /**
   * Downcast the given context to {@link ContextInternal}, to access the internal APIs.
-diff --git a/packages/libs/restate-sdk/src/types/rpc.ts b/packages/libs/restate-sdk/src/types/rpc.ts
-index 9b9e22f..4515489 100644
---- a/packages/libs/restate-sdk/src/types/rpc.ts
-+++ b/packages/libs/restate-sdk/src/types/rpc.ts
-@@ -636,6 +636,16 @@ export type ServiceHandlerOpts<I, O> = {
-    * @experimental
-    */
-   onJournalMismatchErrors?: "retry" | "pause" | "fail";
-+
-+  /**
-+   * When set to `false`, a retried or resumed invocation skips the journal of its
-+   * earlier attempts: the handler runs again from the start, and every context
-+   * call executes anew, reading current state. Effects of earlier attempts may
-+   * repeat (at least once), and awakeables are unsupported.
-+   *
-+   * @experimental
-+   */
-+  journalReplay?: boolean;
- };
- 
- export type ObjectHandlerOpts<I, O> = ServiceHandlerOpts<I, O> & {
-@@ -1208,6 +1218,16 @@ export type ServiceOptions = {
-    * @experimental
-    */
-   onJournalMismatchErrors?: "retry" | "pause" | "fail";
-+
-+  /**
-+   * When set to `false`, a retried or resumed invocation skips the journal of its
-+   * earlier attempts: the handler runs again from the start, and every context
-+   * call executes anew, reading current state. Effects of earlier attempts may
-+   * repeat (at least once), and awakeables are unsupported.
-+   *
-+   * @experimental
-+   */
-+  journalReplay?: boolean;
- };
- 
- /**
-diff --git a/sdk-shared-core-wasm-bindings/Cargo.toml b/sdk-shared-core-wasm-bindings/Cargo.toml
-index ba25532..fa8eb6d 100644
---- a/sdk-shared-core-wasm-bindings/Cargo.toml
-+++ b/sdk-shared-core-wasm-bindings/Cargo.toml
-@@ -20,7 +20,7 @@ tracing-subscriber = { version = "0.3.18", default-features = false, features =
- 
- # TODO remove once restate-sdk-shared-core with protocol V8 is released
- [patch.crates-io]
--restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core.git", rev = "382649d0652aa6d971ec16e788d24b4b2c8c8b45" }
-+restate-sdk-shared-core = { path = "../../sdk-shared-core" }
- 
- [profile.release]
- opt-level = 3
-diff --git a/sdk-shared-core-wasm-bindings/src/lib.rs b/sdk-shared-core-wasm-bindings/src/lib.rs
-index f115c2b..70f2b13 100644
---- a/sdk-shared-core-wasm-bindings/src/lib.rs
-+++ b/sdk-shared-core-wasm-bindings/src/lib.rs
-@@ -5,7 +5,7 @@ use restate_sdk_shared_core::{
-     Header, HeaderMap, IdentityVerifier, ImplicitCancellationOption, Input,
-     JournalMismatchRetryBehavior, NonDeterministicChecksOption, NonEmptyValue, OnMaxAttempts,
-     ResponseHead, RetryPolicy, RunExitResult, RunHandle, SendHandle, Target, TerminalFailure,
--    UnresolvedFuture, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
-+    UnresolvedFuture, JournalReplay, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
- };
- use serde::{Deserialize, Serialize};
- use std::alloc::{GlobalAlloc, Layout, System};
-@@ -609,6 +609,7 @@ impl WasmVM {
-         disable_payload_checks: bool,
-         explicit_cancellation: bool,
-         on_journal_mismatch: WasmJournalMismatchBehavior,
-+        journal_replay: bool,
-     ) -> Result<WasmVM, WasmFailure> {
-         let log_dispatcher = Dispatch::new(log_subscriber(log_level, Some(logger_id)));
- 
-@@ -631,6 +632,11 @@ impl WasmVM {
-                     },
-                     awaiting_on_policy: Default::default(),
-                     journal_mismatch_retry_behavior: on_journal_mismatch.into(),
-+                    journal_replay: if journal_replay {
-+                        JournalReplay::Enabled
-+                    } else {
-+                        JournalReplay::Disabled
-+                    },
-                 },
-             )
-         })?;
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
 index 0000000..1c89b44
@@ -421,3 +449,93 @@ index 0000000..1c89b44
 +  if ("error" in result) throw result.error;
 +  return result.value;
 +}
+diff --git a/packages/libs/restate-sdk/src/types/rpc.ts b/packages/libs/restate-sdk/src/types/rpc.ts
+index 9b9e22f..31a08d1 100644
+--- a/packages/libs/restate-sdk/src/types/rpc.ts
++++ b/packages/libs/restate-sdk/src/types/rpc.ts
+@@ -636,6 +636,19 @@ export type ServiceHandlerOpts<I, O> = {
+    * @experimental
+    */
+   onJournalMismatchErrors?: "retry" | "pause" | "fail";
++
++  /**
++   * When set to `false`, a retried or resumed invocation skips the journal of its
++   * earlier attempts: the handler runs again from the start, and every context
++   * call executes anew, reading current state. Effects of earlier attempts may
++   * repeat (at least once), and awakeables are unsupported. A call or send
++   * without an idempotency key gets one derived from the invocation and the
++   * request, so that a retried attempt reaches the invocation the earlier one
++   * started.
++   *
++   * @experimental
++   */
++  journalReplay?: boolean;
+ };
+ 
+ export type ObjectHandlerOpts<I, O> = ServiceHandlerOpts<I, O> & {
+@@ -1208,6 +1221,19 @@ export type ServiceOptions = {
+    * @experimental
+    */
+   onJournalMismatchErrors?: "retry" | "pause" | "fail";
++
++  /**
++   * When set to `false`, a retried or resumed invocation skips the journal of its
++   * earlier attempts: the handler runs again from the start, and every context
++   * call executes anew, reading current state. Effects of earlier attempts may
++   * repeat (at least once), and awakeables are unsupported. A call or send
++   * without an idempotency key gets one derived from the invocation and the
++   * request, so that a retried attempt reaches the invocation the earlier one
++   * started.
++   *
++   * @experimental
++   */
++  journalReplay?: boolean;
+ };
+ 
+ /**
+diff --git a/sdk-shared-core-wasm-bindings/Cargo.toml b/sdk-shared-core-wasm-bindings/Cargo.toml
+index ba25532..fa8eb6d 100644
+--- a/sdk-shared-core-wasm-bindings/Cargo.toml
++++ b/sdk-shared-core-wasm-bindings/Cargo.toml
+@@ -20,7 +20,7 @@ tracing-subscriber = { version = "0.3.18", default-features = false, features =
+ 
+ # TODO remove once restate-sdk-shared-core with protocol V8 is released
+ [patch.crates-io]
+-restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core.git", rev = "382649d0652aa6d971ec16e788d24b4b2c8c8b45" }
++restate-sdk-shared-core = { path = "../../sdk-shared-core" }
+ 
+ [profile.release]
+ opt-level = 3
+diff --git a/sdk-shared-core-wasm-bindings/src/lib.rs b/sdk-shared-core-wasm-bindings/src/lib.rs
+index f115c2b..70f2b13 100644
+--- a/sdk-shared-core-wasm-bindings/src/lib.rs
++++ b/sdk-shared-core-wasm-bindings/src/lib.rs
+@@ -5,7 +5,7 @@ use restate_sdk_shared_core::{
+     Header, HeaderMap, IdentityVerifier, ImplicitCancellationOption, Input,
+     JournalMismatchRetryBehavior, NonDeterministicChecksOption, NonEmptyValue, OnMaxAttempts,
+     ResponseHead, RetryPolicy, RunExitResult, RunHandle, SendHandle, Target, TerminalFailure,
+-    UnresolvedFuture, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
++    UnresolvedFuture, JournalReplay, VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
+ };
+ use serde::{Deserialize, Serialize};
+ use std::alloc::{GlobalAlloc, Layout, System};
+@@ -609,6 +609,7 @@ impl WasmVM {
+         disable_payload_checks: bool,
+         explicit_cancellation: bool,
+         on_journal_mismatch: WasmJournalMismatchBehavior,
++        journal_replay: bool,
+     ) -> Result<WasmVM, WasmFailure> {
+         let log_dispatcher = Dispatch::new(log_subscriber(log_level, Some(logger_id)));
+ 
+@@ -631,6 +632,11 @@ impl WasmVM {
+                     },
+                     awaiting_on_policy: Default::default(),
+                     journal_mismatch_retry_behavior: on_journal_mismatch.into(),
++                    journal_replay: if journal_replay {
++                        JournalReplay::Enabled
++                    } else {
++                        JournalReplay::Disabled
++                    },
+                 },
+             )
+         })?;
