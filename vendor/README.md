@@ -1,7 +1,9 @@
 # Vendored and patched code
 
 The Restate integration needs SDK changes that are not released: an
-invocation that does not replay its journal, and a few fixes. This directory
+invocation that does not replay its journal, and a few fixes. It also needs
+the latest, unreleased Restate server, with service protocol V8 turned on
+(see [the requirements](../README.md#requirements)). This directory
 holds those changes.
 
 | | What | Version | Form |

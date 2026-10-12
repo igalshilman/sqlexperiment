@@ -67,8 +67,11 @@ their failed attempt wrote. A handler that replays its journal keeps
 make concurrency-test
 ```
 
-Both need a Restate server with service protocol V8, which is not on
+Both need the latest, unreleased Restate server, with service protocol V8
+(see [the requirements](../README.md#requirements)), which is not on
 Restate's main yet: by default the Makefile takes `restate-server` out of the
-`ghcr.io/restatedev/restate:service-protocol-v8` image with docker (set
-`RESTATE_IMAGE` for another, or `RESTATE_SERVER` to a binary). The tests start
+`ghcr.io/restatedev/restate:service-protocol-v8` image with docker on Linux,
+and on macOS builds it from the same commit (`RESTATE_REV`) with cargo. Set
+`RESTATE_FROM=source` or `image` to choose, `RESTATE_IMAGE` or `RESTATE_REV`
+for another version, or `RESTATE_SERVER` to a binary. The tests start
 it with `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true`.
