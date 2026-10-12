@@ -69,7 +69,11 @@
               jdk_headless
               python3
             ]
-            ++ lib.optionals stdenv.hostPlatform.isDarwin [ libiconv ];
+            ++ lib.optionals stdenv.hostPlatform.isDarwin [
+              libiconv
+              # ld64.lld, for a cargo config that links with -fuse-ld=lld.
+              lld
+            ];
 
           # restate-server's C dependencies probe the compiler at -O0, which
           # _FORTIFY_SOURCE turns into errors.
