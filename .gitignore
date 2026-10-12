@@ -1,4 +1,1 @@
 /target/
-spec/*_TTrace_*
-spec/states/
-/node/target/

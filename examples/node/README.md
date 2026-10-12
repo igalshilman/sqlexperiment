@@ -4,7 +4,7 @@ An experiment: a Restate virtual object whose handlers keep a SQL database in
 the object's state, with journal-based recovery turned off. The storage
 protocol of this repository provides durability and recovery; Restate provides
 the state, single-writer execution per key, and retries. It uses the
-[sqlite-kv addon](../../node/README.md) and a patched Restate TypeScript SDK
+[sqlite-kv addon](../../sqlite-kv/node/README.md) and a patched Restate TypeScript SDK
 ([`vendor/typescript`](../../vendor/README.md#typescript)).
 
 ```js

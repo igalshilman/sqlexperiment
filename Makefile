@@ -12,7 +12,8 @@ export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
 SDK_TARBALL := vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz
-ADDON := node/sqlite_kv.node
+CORE := sqlite-kv
+ADDON := $(CORE)/node/sqlite_kv.node
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
 	test test-core test-addon test-sdk-ts test-pi test-langgraph lint crash-test concurrency-test clean
@@ -25,12 +26,12 @@ help: ## List the targets
 # --- Build
 
 core: ## The sqlite-kv crate
-	$(CARGO) build --locked --release
+	cd $(CORE) && $(CARGO) build --locked --release
 
 addon: $(ADDON) ## The Node.js addon
 
-$(ADDON): $(wildcard node/src/*.rs src/*.rs src/*/*.rs) node/Cargo.toml Cargo.toml
-	cd node && npm run build
+$(ADDON): $(wildcard $(CORE)/node/src/*.rs $(CORE)/src/*.rs $(CORE)/src/*/*.rs) $(CORE)/node/Cargo.toml $(CORE)/Cargo.toml
+	cd $(CORE)/node && npm run build
 
 sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK
 
@@ -40,7 +41,7 @@ $(SDK_TARBALL): $(wildcard vendor/typescript/patches/*.patch) vendor/typescript/
 examples: examples-rust examples-js ## Every example
 
 examples-rust: ## The Rust example: the core crate's lookup
-	$(CARGO) build --locked --release --features simulation --example lookup
+	cd $(CORE) && $(CARGO) build --locked --release --features simulation --example lookup
 
 examples-js: $(ADDON) $(SDK_TARBALL) ## The JavaScript examples (node/, pi/, langgraph/), installed with the patched SDK
 	cd examples && rm -rf node_modules/@restatedev/restate-sdk package-lock.json && npm install
@@ -50,11 +51,11 @@ examples-js: $(ADDON) $(SDK_TARBALL) ## The JavaScript examples (node/, pi/, lan
 test: test-core test-addon test-sdk-ts test-pi test-langgraph ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
-	$(CARGO) test --locked
-	$(CARGO) test --locked --features simulation
+	cd $(CORE) && $(CARGO) test --locked
+	cd $(CORE) && $(CARGO) test --locked --features simulation
 
 test-addon: $(ADDON) ## The Node.js addon
-	cd node && npm test
+	cd $(CORE)/node && npm test
 
 test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests, and its type tests
 	cd vendor/typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx tsc -p test/tsconfig.types.json && npx vitest run
@@ -66,7 +67,7 @@ test-langgraph: examples-js ## LangGraph's checkpointer conformance suite on the
 	cd examples && npm run test:langgraph
 
 lint: ## Clippy on the core crate
-	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings
+	cd $(CORE) && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 
 crash-test: examples-js ## Every JavaScript example through crashes (needs RESTATE_SERVER)
 	@test -n "$(RESTATE_SERVER)" || (echo "set RESTATE_SERVER to a restate-server binary" && exit 1)
