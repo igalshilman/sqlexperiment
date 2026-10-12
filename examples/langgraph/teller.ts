@@ -5,30 +5,23 @@
 // Any LangChain chat model that calls tools takes its place, such as
 // `new ChatAnthropic({ model: 'claude-sonnet-4-5' })` from @langchain/anthropic.
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { AIMessage } from '@langchain/core/messages';
-
-const textOf = (content) =>
-  typeof content === 'string'
-    ? content
-    : content
-        .filter((c) => c.type === 'text')
-        .map((c) => c.text)
-        .join('');
+import { AIMessage, type BaseMessage } from '@langchain/core/messages';
+import type { ChatResult } from '@langchain/core/outputs';
 
 export class Teller extends BaseChatModel {
-  _llmType() {
+  override _llmType() {
     return 'teller';
   }
 
   // It knows its tools.
-  bindTools() {
+  override bindTools(_tools: unknown[]) {
     return this;
   }
 
   /** The reply to `messages`. */
-  reply(messages) {
-    const last = messages.at(-1);
-    const text = textOf(last.content);
+  reply(messages: BaseMessage[]): AIMessage {
+    const last = messages.at(-1)!;
+    const { text } = last;
     if (last.getType() === 'tool') return new AIMessage(`Done: ${text}`);
     // A tool call id, unique in the conversation, and the same when a step is
     // run again.
@@ -42,8 +35,8 @@ export class Teller extends BaseChatModel {
     return new AIMessage('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
   }
 
-  async _generate(messages) {
+  override async _generate(messages: BaseMessage[]): Promise<ChatResult> {
     const message = this.reply(messages);
-    return { generations: [{ text: textOf(message.content), message }] };
+    return { generations: [{ text: message.text, message }] };
   }
 }

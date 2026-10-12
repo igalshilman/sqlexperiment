@@ -6,16 +6,16 @@ where it stopped. Here the checkpoints live in a Restate virtual object's SQL
 database ([SQL in Restate virtual objects](../node/README.md)): one object per
 conversation, which is the LangGraph thread.
 
-- [`checkpointer.mjs`](checkpointer.mjs): `SqlCheckpointSaver`, a LangGraph
+- [`checkpointer.ts`](checkpointer.ts): `SqlCheckpointSaver`, a LangGraph
   checkpointer over the object's database (the `db` of `ctx.sqlSession`).
   Checkpoints, channel values and pending writes are rows in three tables.
   A step stores only the channels it changed, at their new versions, so a long
   conversation does not store its whole message list again at every step.
   Each `put` and `putWrites` is one SQL transaction.
-- [`agent.mjs`](agent.mjs): a GraphAgent object per conversation. Its graph is
+- [`agent.ts`](agent.ts): a GraphAgent object per conversation. Its graph is
   the usual tool-calling loop (a model node, a tools node, back to the model
   until it answers), whose tools move money in the
-  [ledger](../node/ledger.mjs):
+  [ledger](../node/ledger.ts):
 
   ```js
   new StateGraph(State)
@@ -30,13 +30,14 @@ conversation, which is the LangGraph thread.
 
   Its handler, `prompt(ctx, { id, text })`, compiles the graph with the
   checkpointer, in one `ctx.sqlSession`, and answers the prompt once per id.
-- [`teller.mjs`](teller.mjs): a scripted chat model that needs no API key, so
+
+- [`teller.ts`](teller.ts): a scripted chat model that needs no API key, so
   the agent and its tests run offline. Any LangChain chat model that calls
   tools takes its place.
-- [`checkpointer.test.mjs`](checkpointer.test.mjs): LangGraph's checkpointer
+- [`checkpointer.test.ts`](checkpointer.test.ts): LangGraph's checkpointer
   conformance suite (`@langchain/langgraph-checkpoint-validation`, 718 tests)
   on the checkpointer, over a sqlite-kv database in memory.
-- [`agent.test.mjs`](agent.test.mjs): the handler with a fake `ctx`, through
+- [`agent.test.ts`](agent.test.ts): the handler with a fake `ctx`, through
   crashes.
 
 ## Through crashes
@@ -62,7 +63,7 @@ and LangGraph carries on from the last step it stored.
   state, and a prompt asked again returns it. A run that a crash interrupted
   is finished before the next prompt starts.
 
-[`agent.test.mjs`](agent.test.mjs) checks each of these, with a crash that
+[`agent.test.ts`](agent.test.ts) checks each of these, with a crash that
 stops an attempt in a tool call and abandons it, keeping what it committed;
 with `durability: 'async'` or `'exit'`, or `ToolNode`'s default error
 handling, it fails. The [crash test](../README.md#validation) runs four
@@ -73,7 +74,7 @@ against a real server: every prompt moves money exactly once.
 
 ```sh
 make examples-js   # from the repository root
-cd examples && node langgraph/agent.mjs   # the agent and the ledger, on port 9080
+cd examples && node langgraph/agent.ts   # the agent and the ledger, on port 9080
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'

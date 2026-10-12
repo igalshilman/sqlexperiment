@@ -14,23 +14,23 @@ The example uses the harness's `next` release line, 0.2.0-rc.2, pinned
 exactly: its packages are release candidates, and require each other's exact
 versions.
 
-- [`persistence.mjs`](persistence.mjs): `SqlSessionPersistence`, the
+- [`persistence.ts`](persistence.ts): `SqlSessionPersistence`, the
   harness's session persistence over the object's database (the `db` of
   `ctx.sqlSession`): each session's header, and its event log, one row per
   event. An append is kept in memory; a flush, the harness's durability
   barrier, stores what was appended before it in one SQL transaction.
-- [`agent.mjs`](agent.mjs): a DeepSeekAgent object per conversation. Its
+- [`agent.ts`](agent.ts): a DeepSeekAgent object per conversation. Its
   handler, `prompt(ctx, { id, text })`, boots the harness in one
   `ctx.sqlSession`: the services an agent loop needs, the persistence and the
   harness's session checkpoint policy, and the model adapter. It creates the
   session, or resumes it, gives the agent its bank tools, which move money in
-  the [ledger](../node/ledger.mjs), and answers the prompt.
-- [`teller.mjs`](teller.mjs): a scripted model adapter for the harness's model
+  the [ledger](../node/ledger.ts), and answers the prompt.
+- [`teller.ts`](teller.ts): a scripted model adapter for the harness's model
   service, so the agent and its tests run without an API key. The example has
   no other model: DeepSeek's own adapter (`@deepseek-ai/dsh-llm-deepseek`,
   with `dsh-llm-deepseek-api-key`) also needs the harness's credential,
   filesystem, attachment and plugin-loader services.
-- [`agent.test.mjs`](agent.test.mjs): the handler with a fake `ctx`, through
+- [`agent.test.ts`](agent.test.ts): the handler with a fake `ctx`, through
   crashes.
 
 ## Through crashes
@@ -70,7 +70,7 @@ do about what it was doing. So:
   and a prompt asked again returns the answer of the turn that finished it. A
   prompt that a crash interrupted is finished before the next prompt starts.
 
-[`agent.test.mjs`](agent.test.mjs) checks each of these, with a crash that
+[`agent.test.ts`](agent.test.ts) checks each of these, with a crash that
 stops an attempt in a tool call and abandons it, keeping what it stored (the
 next attempt fences it, as Restate does). The teller makes a fresh tool call
 id for every call, as a model does, so a retry that started the prompt over
@@ -84,7 +84,7 @@ every prompt moves money exactly once.
 
 ```sh
 make examples-js   # from the repository root
-cd examples && node deepseek/agent.mjs   # the agent and the ledger, on port 9080
+cd examples && node deepseek/agent.ts   # the agent and the ledger, on port 9080
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'

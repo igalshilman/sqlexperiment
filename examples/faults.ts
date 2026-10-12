@@ -36,8 +36,8 @@ if (perMille > 0) {
 }
 
 /** Serve `services` when `meta` is the entry module's `import.meta`. */
-export function serveIfMain(meta, services) {
+export function serveIfMain(meta: ImportMeta, services: restate.ServeOptions['services']) {
   if (process.argv[1] && fileURLToPath(meta.url) === process.argv[1]) {
-    restate.serve({ services, port: Number(process.env.PORT ?? 9080) });
+    void restate.serve({ services, port: Number(process.env.PORT ?? 9080) });
   }
 }

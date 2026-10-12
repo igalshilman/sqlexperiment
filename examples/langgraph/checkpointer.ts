@@ -13,13 +13,23 @@
 // Each `put` and `putWrites` is one SQL transaction, so a step is stored whole,
 // in order with everything else the handler does. Operations run one at a
 // time, in call order: LangGraph writes the results of parallel tasks at once.
+import type { RunnableConfig } from '@langchain/core/runnables';
 import {
   BaseCheckpointSaver,
   copyCheckpoint,
   maxChannelVersion,
   TASKS,
   WRITES_IDX_MAP,
+  type ChannelVersions,
+  type Checkpoint,
+  type CheckpointListOptions,
+  type CheckpointMetadata,
+  type CheckpointPendingWrite,
+  type CheckpointTuple,
+  type PendingWrite,
+  type SerializerProtocol,
 } from '@langchain/langgraph-checkpoint';
+import type { SqlSession, SqlValue } from '@restatedev/restate-sdk';
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS checkpoints (
@@ -55,30 +65,42 @@ const SCHEMA = `
 
 const COLUMNS = 'thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata';
 
+/** A row of `checkpoints`, in the order of COLUMNS. */
+type CheckpointRow = [
+  threadId: string,
+  ns: string,
+  checkpointId: string,
+  parentId: string | null,
+  type: string,
+  checkpoint: Uint8Array,
+  metadata: Uint8Array,
+];
+
 // The type of a channel a step emptied.
 const EMPTY = 'empty';
 
 /** Whether `actual` has every field of `expected`, recursively (a metadata filter). */
-function matches(actual, expected) {
+function matches(actual: unknown, expected: unknown): boolean {
   if (expected === null || typeof expected !== 'object') return actual === expected;
   if (actual === null || typeof actual !== 'object') return false;
   if (Array.isArray(expected) !== Array.isArray(actual)) return false;
-  if (Array.isArray(expected) && expected.length !== actual.length) return false;
-  return Object.entries(expected).every(([key, value]) => matches(actual[key], value));
+  if (Array.isArray(expected) && expected.length !== (actual as unknown[]).length) return false;
+  return Object.entries(expected).every(([key, value]) => matches((actual as Record<string, unknown>)[key], value));
 }
 
 export class SqlCheckpointSaver extends BaseCheckpointSaver {
-  #db;
-  #ready;
-  #tail = Promise.resolve();
+  #db: SqlSession;
+  #ready: Promise<void> | undefined;
+  #tail: Promise<unknown> = Promise.resolve();
 
-  constructor(db, serde) {
+  /** `db`: a database session (the `db` of `ctx.sqlSession`). */
+  constructor(db: SqlSession, serde?: SerializerProtocol) {
     super(serde);
     this.#db = db;
   }
 
   /** Runs `operation` after the ones before it, on a database with the tables. */
-  #serial(operation) {
+  #serial<T>(operation: () => Promise<T>): Promise<T> {
     this.#ready ??= this.#db.execute(SCHEMA);
     const result = this.#tail.then(() => this.#ready).then(operation);
     this.#tail = result.catch(() => {});
@@ -86,9 +108,9 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
   }
 
   /** The values of `checkpoint`'s channels, at its versions. */
-  async #channelValues(threadId, ns, checkpoint) {
+  async #channelValues(threadId: string, ns: string, checkpoint: Checkpoint): Promise<Record<string, unknown>> {
     const versions = Object.entries(checkpoint.channel_versions ?? {});
-    const values = {};
+    const values: Record<string, unknown> = {};
     if (versions.length === 0) return values;
     const rows = await this.#db.query(
       `SELECT channel, type, value FROM channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND (${versions
@@ -96,14 +118,22 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
         .join(' OR ')})`,
       [threadId, ns, ...versions.flatMap(([channel, version]) => [channel, String(version)])],
     );
-    for (const [channel, type, value] of rows) {
+    for (const [channel, type, value] of rows as [string, string, Uint8Array][]) {
       if (type !== EMPTY) values[channel] = await this.serde.loadsTyped(type, value);
     }
     return values;
   }
 
-  async #tuple([threadId, ns, checkpointId, parentId, type, stored, metadata]) {
-    const checkpoint = await this.serde.loadsTyped(type, stored);
+  async #tuple([
+    threadId,
+    ns,
+    checkpointId,
+    parentId,
+    type,
+    stored,
+    metadata,
+  ]: CheckpointRow): Promise<CheckpointTuple> {
+    const checkpoint: Checkpoint = await this.serde.loadsTyped(type, stored);
     checkpoint.channel_values = await this.#channelValues(threadId, ns, checkpoint);
     // A checkpoint of an earlier format (v < 4) keeps its pending sends as
     // writes of its parent.
@@ -112,34 +142,38 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
       'SELECT task_id, channel, type, value FROM writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? ORDER BY rowid',
       [threadId, ns, checkpointId],
     );
-    const config = (id) => ({ configurable: { thread_id: threadId, checkpoint_ns: ns, checkpoint_id: id } });
+    const config = (id: string) => ({ configurable: { thread_id: threadId, checkpoint_ns: ns, checkpoint_id: id } });
     return {
       config: config(checkpointId),
       checkpoint,
       metadata: await this.serde.loadsTyped(type, metadata),
       parentConfig: parentId === null ? undefined : config(parentId),
       pendingWrites: await Promise.all(
-        writes.map(async ([taskId, channel, writeType, value]) => [
-          taskId,
-          channel,
-          await this.serde.loadsTyped(writeType, value),
-        ]),
+        (writes as [string, string, string, Uint8Array][]).map(
+          async ([taskId, channel, writeType, value]): Promise<CheckpointPendingWrite> => [
+            taskId,
+            channel,
+            await this.serde.loadsTyped(writeType, value),
+          ],
+        ),
       ),
     };
   }
 
-  async #migratePendingSends(checkpoint, threadId, ns, parentId) {
+  async #migratePendingSends(checkpoint: Checkpoint, threadId: string, ns: string, parentId: string) {
     const sends = await this.#db.query(
       'SELECT type, value FROM writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? AND channel = ? ORDER BY rowid',
       [threadId, ns, parentId, TASKS],
     );
-    checkpoint.channel_values[TASKS] = await Promise.all(sends.map(([type, value]) => this.serde.loadsTyped(type, value)));
+    checkpoint.channel_values[TASKS] = await Promise.all(
+      (sends as [string, Uint8Array][]).map(([type, value]) => this.serde.loadsTyped(type, value)),
+    );
     const versions = Object.values(checkpoint.channel_versions);
     checkpoint.channel_versions[TASKS] =
       versions.length > 0 ? maxChannelVersion(...versions) : this.getNextVersion(undefined);
   }
 
-  getTuple(config) {
+  getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
     return this.#serial(async () => {
       const { thread_id, checkpoint_ns = '', checkpoint_id } = config.configurable ?? {};
       const rows = checkpoint_id
@@ -151,28 +185,37 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
             `SELECT ${COLUMNS} FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? ORDER BY checkpoint_id DESC LIMIT 1`,
             [thread_id, checkpoint_ns],
           );
-      return rows.length === 0 ? undefined : this.#tuple(rows[0]);
+      return rows.length === 0 ? undefined : this.#tuple(rows[0] as CheckpointRow);
     });
   }
 
-  async *list(config, { limit, before, filter } = {}) {
+  async *list(
+    config: RunnableConfig,
+    { limit, before, filter }: CheckpointListOptions = {},
+  ): AsyncGenerator<CheckpointTuple> {
     const tuples = await this.#serial(async () => {
       const { thread_id, checkpoint_ns } = config.configurable ?? {};
-      const where = [];
-      const params = [];
-      if (thread_id !== undefined) where.push('thread_id = ?') && params.push(thread_id);
-      if (checkpoint_ns !== undefined && checkpoint_ns !== null) where.push('checkpoint_ns = ?') && params.push(checkpoint_ns);
-      const beforeId = before?.configurable?.checkpoint_id;
-      if (beforeId !== undefined) where.push('checkpoint_id < ?') && params.push(beforeId);
+      const where: string[] = [];
+      const params: SqlValue[] = [];
+      const filters: [string, SqlValue | undefined][] = [
+        ['thread_id = ?', thread_id],
+        ['checkpoint_ns = ?', checkpoint_ns ?? undefined],
+        ['checkpoint_id < ?', before?.configurable?.checkpoint_id],
+      ];
+      for (const [condition, value] of filters) {
+        if (value === undefined) continue;
+        where.push(condition);
+        params.push(value);
+      }
       const rows = await this.#db.query(
         `SELECT ${COLUMNS} FROM checkpoints ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY checkpoint_id DESC`,
         params,
       );
       const wanted = Object.fromEntries(Object.entries(filter ?? {}).filter(([, value]) => value !== undefined));
-      const found = [];
+      const found: CheckpointTuple[] = [];
       for (const row of rows) {
         if (limit !== undefined && found.length >= limit) break;
-        const tuple = await this.#tuple(row);
+        const tuple = await this.#tuple(row as CheckpointRow);
         if (matches(tuple.metadata, wanted)) found.push(tuple);
       }
       return found;
@@ -180,7 +223,12 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     yield* tuples;
   }
 
-  put(config, checkpoint, metadata, newVersions) {
+  put(
+    config: RunnableConfig,
+    checkpoint: Checkpoint,
+    metadata: CheckpointMetadata,
+    newVersions: ChannelVersions,
+  ): Promise<RunnableConfig> {
     return this.#serial(async () => {
       const { thread_id, checkpoint_ns = '', checkpoint_id: parentId } = config.configurable ?? {};
       if (!thread_id) throw new Error('Missing "thread_id" field in passed "config.configurable".');
@@ -190,11 +238,10 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
       if (type !== metadataType) throw new Error('Failed to serialize checkpoint and metadata to the same type.');
       // The channels this step changed, at their new versions.
       const changed = await Promise.all(
-        Object.entries(newVersions ?? {}).map(async ([channel, version]) => [
-          channel,
-          String(version),
-          ...(channel in values ? await this.serde.dumpsTyped(values[channel]) : [EMPTY, null]),
-        ]),
+        Object.entries(newVersions ?? {}).map(async ([channel, version]): Promise<SqlValue[]> => {
+          const [valueType, value] = channel in values ? await this.serde.dumpsTyped(values[channel]) : [EMPTY, null];
+          return [channel, String(version), valueType, value];
+        }),
       );
       await this.#db.transaction(async (tx) => {
         for (const row of changed) {
@@ -217,7 +264,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     });
   }
 
-  putWrites(config, writes, taskId) {
+  putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string): Promise<void> {
     return this.#serial(async () => {
       const { thread_id, checkpoint_ns = '', checkpoint_id } = config.configurable ?? {};
       if (!thread_id) throw new Error('Missing thread_id field in config.configurable.');
@@ -225,15 +272,19 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
       // Special writes (errors, interrupts) replace; others keep the first.
       const verb = writes.every(([channel]) => channel in WRITES_IDX_MAP) ? 'INSERT OR REPLACE' : 'INSERT OR IGNORE';
       const rows = await Promise.all(
-        writes.map(async ([channel, value], idx) => [
-          thread_id,
-          checkpoint_ns,
-          checkpoint_id,
-          taskId,
-          WRITES_IDX_MAP[channel] ?? idx,
-          channel,
-          ...(await this.serde.dumpsTyped(value)),
-        ]),
+        writes.map(async ([channel, value], idx): Promise<SqlValue[]> => {
+          const [type, stored] = await this.serde.dumpsTyped(value);
+          return [
+            thread_id,
+            checkpoint_ns,
+            checkpoint_id,
+            taskId,
+            WRITES_IDX_MAP[channel] ?? idx,
+            channel,
+            type,
+            stored,
+          ];
+        }),
       );
       await this.#db.transaction(async (tx) => {
         for (const row of rows) {
@@ -246,7 +297,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     });
   }
 
-  deleteThread(threadId) {
+  deleteThread(threadId: string): Promise<void> {
     return this.#serial(() =>
       this.#db.transaction(async (tx) => {
         for (const table of ['checkpoints', 'channel_values', 'writes']) {

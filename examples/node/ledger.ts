@@ -3,16 +3,33 @@
 // Each transfer is recorded with its id in the same SQL transaction as the
 // balances it moves, so a retried or repeated transfer moves money once.
 // Environment: PORT (default 9080), ABORT_PER_MILLE (abort the process at
-// random state requests, for crash tests; see faults.mjs) and
+// random state requests, for crash tests; see faults.ts) and
 // SQLITE_KV_CACHE_FILE.
 import * as restate from '@restatedev/restate-sdk';
-import { serveIfMain } from '../faults.mjs';
+import { serveIfMain } from '../faults.ts';
+import { row } from './sql.ts';
+
+/** A transfer of `amount` from account `from` to account `to`, by its unique `id`. */
+export interface Transfer {
+  id: string;
+  from: number;
+  to: number;
+  amount: number;
+}
+
+/** The books' totals, and the number of accounts that disagree with the transfers. */
+export interface Audit {
+  accounts: number;
+  total: number;
+  transfers: number;
+  inconsistent: number;
+}
 
 export const ledger = restate.object({
   name: 'Ledger',
   handlers: {
     /** Create the tables, and open `count` accounts with `balance` each, once. */
-    init: (ctx, [count, balance]) =>
+    init: (ctx: restate.UnjournaledObjectContext, [count, balance]: [number, number]) =>
       ctx.sql(async (db) => {
         await db.execute(
           `CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, opening INTEGER, balance INTEGER);
@@ -24,7 +41,7 @@ export const ledger = restate.object({
       }),
 
     /** Move money between accounts; false if this transfer id was applied before. */
-    transfer: (ctx, t) =>
+    transfer: (ctx: restate.UnjournaledObjectContext, t: Transfer) =>
       ctx.sql(async (db) => {
         const seen = await db.query('SELECT 1 FROM transfers WHERE id = ?', [t.id]);
         if (seen.length > 0) return false;
@@ -35,11 +52,12 @@ export const ledger = restate.object({
       }),
 
     /** Totals, and accounts that disagree with the recorded transfers. */
-    audit: (ctx) =>
-      ctx.sql(async (db) => {
-        const [[integrity]] = await db.query('PRAGMA integrity_check');
+    audit: (ctx: restate.UnjournaledObjectContext) =>
+      ctx.sql(async (db): Promise<Audit> => {
+        const [integrity] = await row<[string]>(db, 'PRAGMA integrity_check');
         if (integrity !== 'ok') throw new restate.TerminalError('integrity check failed');
-        const [[accounts, total, transfers, inconsistent]] = await db.query(
+        const [accounts, total, transfers, inconsistent] = await row<[number, number, number, number]>(
+          db,
           `SELECT (SELECT count(*) FROM accounts), (SELECT sum(balance) FROM accounts),
                   (SELECT count(*) FROM transfers),
                   (SELECT count(*) FROM accounts a WHERE a.balance != a.opening

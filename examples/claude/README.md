@@ -15,11 +15,11 @@ Claude Code's own tools (bash, read, write, edit, glob, grep) come to the
 runner as `betaAgentToolset20260401` from `@anthropic-ai/sdk/tools/agent-toolset/node`;
 this example has only its bank tools.
 
-- [`conversation.mjs`](conversation.mjs): `Conversation`, the messages over
+- [`conversation.ts`](conversation.ts): `Conversation`, the messages over
   the object's database (the `db` of `ctx.sqlSession`), in order, each with
   the id of the prompt it belongs to, and the answer to each prompt. Each
   `append` is one SQL transaction.
-- [`agent.mjs`](agent.mjs): a ClaudeAgent object per conversation. Its
+- [`agent.ts`](agent.ts): a ClaudeAgent object per conversation. Its
   handler, `prompt(ctx, { id, text })`, starts a runner with the stored
   messages, in one `ctx.sqlSession`, and stores each step:
 
@@ -38,12 +38,13 @@ this example has only its bank tools.
   }
   ```
 
-  Its tools move money in the [ledger](../node/ledger.mjs).
-- [`teller.mjs`](teller.mjs): a scripted model that needs no API key: an
+  Its tools move money in the [ledger](../node/ledger.ts).
+
+- [`teller.ts`](teller.ts): a scripted model that needs no API key: an
   Anthropic client whose `fetch` answers the Messages API itself, so the agent
   and its tests run offline. `CLAUDE_MODEL=claude-sonnet-5-5` (and
   `ANTHROPIC_API_KEY`) uses Claude instead.
-- [`agent.test.mjs`](agent.test.mjs): the handler with a fake `ctx`, through
+- [`agent.test.ts`](agent.test.ts): the handler with a fake `ctx`, through
   crashes.
 
 ## Through crashes
@@ -70,7 +71,7 @@ with the stored messages.
   last reply, and a prompt asked again returns it. A prompt that a crash
   interrupted is finished before the next prompt starts.
 
-[`agent.test.mjs`](agent.test.mjs) checks each of these, with a crash that
+[`agent.test.ts`](agent.test.ts) checks each of these, with a crash that
 stops an attempt in a tool call and abandons it, keeping what it committed;
 storing the reply with its results, after the tools, or handing a tool's
 error to the model, fails it. The [crash test](../README.md#validation) runs
@@ -82,7 +83,7 @@ once.
 
 ```sh
 make examples-js   # from the repository root
-cd examples && node claude/agent.mjs   # the agent and the ledger, on port 9080
+cd examples && node claude/agent.ts   # the agent and the ledger, on port 9080
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'

@@ -9,9 +9,9 @@ One npm package, here, on the patched Restate TypeScript SDK and the
 
 - [`node/`](node/README.md): SQL in Restate virtual objects, how it works,
   and two examples:
-  - [`ledger.mjs`](node/ledger.mjs): accounts and transfers, deduped by
+  - [`ledger.ts`](node/ledger.ts): accounts and transfers, deduped by
     transfer id;
-  - [`shop.mjs`](node/shop.mjs): warehouses and orders, each object with its
+  - [`shop.ts`](node/shop.ts): warehouses and orders, each object with its
     own database, over idempotent RPC and delayed sends.
 - [`pi/`](pi/README.md): a durable agent on pi-durable, whose storage is the
   object's database, with a fake model for running agents without a key.
@@ -23,18 +23,38 @@ One npm package, here, on the patched Restate TypeScript SDK and the
 - [`deepseek/`](deepseek/README.md): an agent on the DeepSeek Harness, whose
   event-sourced session is in the object's database, through a session
   persistence plugin.
-- [`serve.mjs`](serve.mjs): serves them in one endpoint (`npm run serve`).
-- [`faults.mjs`](faults.mjs): fault injection for the crash test.
-- [`test.mjs`](test.mjs): all of them against a real Restate server, through
+- [`serve.ts`](serve.ts): serves them in one endpoint (`npm run serve`).
+- [`faults.ts`](faults.ts): fault injection for the crash test.
+- [`test.ts`](test.ts): all of them against a real Restate server, through
   crashes.
+- [`testing.ts`](testing.ts): test support: an object's state in memory, and
+  a fake object for an agent's handler, through crashes.
+
+## TypeScript
+
+The examples are TypeScript that Node runs as it is (type stripping, Node
+22.18 or later): `node serve.ts`, `node test.ts`; vitest runs the tests. So
+they use only syntax that erases (no enums, namespaces or parameter
+properties), and import each other by their `.ts` names.
+
+- [`tsconfig.json`](tsconfig.json): type checking only, strict, with
+  `noUncheckedIndexedAccess`, by TypeScript 7 (`npm run typecheck`).
+- [`.oxlintrc.json`](.oxlintrc.json): oxlint, with type-aware rules such as
+  `no-floating-promises` (`npm run lint`).
+- [`.oxfmtrc.json`](.oxfmtrc.json): oxfmt formats the code and the docs
+  (`npm run format`).
+
+`npm run check` (or `make lint-examples`) runs all three; `make format`
+formats.
 
 ## Validation
 
-[`test.mjs`](test.mjs) runs every JavaScript example against a real server
+[`test.ts`](test.ts) runs every TypeScript example against a real server
 through crashes. The ledger and the shop run in one process, aborting at 1.5%
 of state requests; the pi agents run in another and the LangGraph agents in a
 third, aborting at 0.3% (a pi prompt makes some 200 state requests, so one
 attempt in three crashes). The server is killed twice. Meanwhile:
+
 - 60 orders are placed (a quarter twice), half of them paid, the rest
   expiring;
 - four sessions of each agent take eight transfer prompts each (a third sent
@@ -53,13 +73,14 @@ transfers, one per prompt, with 46 and 42 restarts of their process. With the
 DeepSeek Harness agents too, in a fifth process aborting at 0.3% (a prompt
 resumes the session from its stored log, some hundreds of state requests), it
 passed twice: 128 transfers, one per prompt, with 11 and 18 restarts of their
-process.
+process. In TypeScript, every example included, it passed twice again, with 10
+and 14 restarts of the DeepSeek Harness agents' process.
 
 ```sh
 make crash-test
 ```
 
-[`concurrency.mjs`](concurrency.mjs) tests the context without journal replay
+[`concurrency.ts`](concurrency.ts) tests the context without journal replay
 against a real server, with the inactivity timeout at one second: plain
 promises under `Promise.all`, `Promise.race` and a hand-written combinator; a
 call that starts unawaited, and one awaited late beside a pending 30 s sleep;

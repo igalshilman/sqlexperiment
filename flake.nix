@@ -49,7 +49,8 @@
               })
               # setup.sh needs exactly this version.
               wasm-bindgen-cli_0_2_121
-              # The SDK (node >= 22, pnpm 11) and the examples.
+              # The SDK (node >= 22, pnpm 11) and the examples (node >= 22.18,
+              # which runs their TypeScript).
               nodejs_22
               pnpm_11
               git

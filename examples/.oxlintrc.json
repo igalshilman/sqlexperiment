@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "import", "node", "promise", "vitest", "oxc"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "warn"
+  },
+  "rules": {
+    "typescript/no-floating-promises": "error",
+    "typescript/await-thenable": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/consistent-type-imports": "error",
+    "typescript/no-explicit-any": "error",
+    "eqeqeq": "error",
+    "no-var": "error",
+    "prefer-const": "error",
+    // Retries, polling and agent loops await in order, on purpose.
+    "no-await-in-loop": "off",
+    // SQL rows and JSON from the wire are typed by assertion where they arrive.
+    "typescript/no-unsafe-type-assertion": "off"
+  },
+  "ignorePatterns": ["node_modules"]
+}
