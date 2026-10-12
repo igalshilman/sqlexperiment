@@ -34,7 +34,7 @@ RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
-	test test-core test-addon test-sdk-ts test-pi test-langgraph test-claude lint crash-test concurrency-test restate-server clean
+	test test-core test-addon test-sdk-ts test-pi test-langgraph test-claude test-deepseek lint crash-test concurrency-test restate-server clean
 
 all: core addon examples ## Build everything
 
@@ -61,12 +61,12 @@ examples: examples-rust examples-js ## Every example
 examples-rust: ## The Rust example: the core crate's lookup
 	cd $(CORE) && $(CARGO) build --locked --release --features simulation --example lookup
 
-examples-js: $(ADDON) $(SDK_TARBALL) ## The JavaScript examples (node/, pi/, langgraph/, claude/), installed with the patched SDK
+examples-js: $(ADDON) $(SDK_TARBALL) ## The JavaScript examples (node/, pi/, langgraph/, claude/, deepseek/), installed with the patched SDK
 	cd examples && rm -rf node_modules/@restatedev/restate-sdk package-lock.json && npm install
 
 # --- Test
 
-test: test-core test-addon test-sdk-ts test-pi test-langgraph test-claude ## Every test that needs no Restate server
+test: test-core test-addon test-sdk-ts test-pi test-langgraph test-claude test-deepseek ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
@@ -86,6 +86,9 @@ test-langgraph: examples-js ## LangGraph's checkpointer conformance suite on the
 
 test-claude: examples-js ## The Claude agent (the Anthropic SDK's tool runner) through crashes
 	cd examples && npm run test:claude
+
+test-deepseek: examples-js ## The DeepSeek Harness agent through crashes
+	cd examples && npm run test:deepseek
 
 lint: ## Clippy on the core crate
 	cd $(CORE) && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
