@@ -57,11 +57,11 @@ RESTATE_SERVER=/path/to/restate-server make crash-test
 [`concurrency.mjs`](concurrency.mjs) tests the context without journal replay
 against a real server, with the inactivity timeout at one second: plain
 promises under `Promise.all`, `Promise.race` and a hand-written combinator; a
-`ctx.run` that starts unawaited, and one awaited late beside a pending 30 s
-sleep; failures, invocation ids, statements beside a call and a run in
-`ctx.sqlSession`; a suspension resuming on the first of two operations (the
-call at 3 s, not the sleep at 20 s); and a cancellation reaching three pending
-operations. A handler that replays its journal keeps `RestatePromise`s.
+call that starts unawaited, and one awaited late beside a pending 30 s sleep;
+`ctx.run` refused with a terminal error; failures, invocation ids, statements
+beside a call and a sleep in `ctx.sqlSession`; a suspension resuming on the
+first of two operations (the call at 3 s, not the sleep at 20 s); and a
+cancellation reaching three pending operations. A handler that replays its journal keeps `RestatePromise`s.
 
 ```sh
 RESTATE_SERVER=/path/to/restate-server make concurrency-test

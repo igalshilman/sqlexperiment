@@ -1,8 +1,8 @@
 // The context without journal replay, against a real Restate server: its
 // operations are plain promises, awaited at once and combined with native or
 // hand-written combinators; an operation starts when it is made; a suspension
-// waits for any of them, and a cancellation reaches all of them. A handler
-// that replays its journal keeps RestatePromises.
+// waits for any of them, and a cancellation reaches all of them; there is no
+// ctx.run. A handler that replays its journal keeps RestatePromises.
 //
 //   RESTATE_SERVER=/path/to/restate-server node concurrency.mjs   (or make concurrency-test)
 import * as restate from '@restatedev/restate-sdk';
@@ -30,6 +30,7 @@ const helper = restate.object({
   name: 'Helper',
   handlers: {
     slow: async (ctx, { ms, value, fail }) => {
+      reached.add(ctx.key);
       await ctx.sleep(ms);
       if (fail) throw new restate.TerminalError(fail);
       return value;
@@ -49,6 +50,8 @@ const replayed = restate.service({
 });
 
 const attempts = new Map();
+// The keys of the helpers reached: the services run in this process.
+const reached = new Set();
 const attempt = (ctx) => {
   const id = ctx.request().id;
   attempts.set(id, (attempts.get(id) ?? 0) + 1);
@@ -113,27 +116,34 @@ const conc = restate.object({
       ]);
     },
 
-    eagerRun: async (ctx) => {
-      let ran = false;
-      ctx.run('flag', () => {
-        ran = true;
-      }); // not awaited
-      await ctx.sleep(200);
-      return ran;
+    eagerCall: async (ctx) => {
+      const key = `eager-${ctx.request().id}`;
+      slow(ctx, key, { ms: 10, value: 1 }); // not awaited
+      await ctx.sleep(500);
+      return reached.has(key);
     },
+
+    noRun: async (ctx) => {
+      try {
+        ctx.run('r', () => 1);
+        return 'ran';
+      } catch (e) {
+        return { terminal: e instanceof restate.TerminalError, message: e.message };
+      }
+    },
+
+    uncaughtRun: async (ctx) => ctx.run('r', () => 1),
 
     lateRegistration: async (ctx) => {
       const n = attempt(ctx);
       ctx.sleep(30_000); // pending all along, never awaited
       await sleep(100); // not a Restate promise
-      const value = await ctx.run('late', () => 'ran');
+      const value = await slow(ctx, 'late', { ms: 10, value: 'ran' });
       return { value, attempts: n() };
     },
 
     failures: async (ctx) => {
-      ctx.run('boom', () => {
-        throw new restate.TerminalError('boom');
-      }); // fails, not awaited: no unhandled rejection
+      slow(ctx, 'boom', { ms: 10, fail: 'boom' }); // fails, not awaited: no unhandled rejection
       const reason = await slow(ctx, 'fail', { ms: 10, fail: 'nope' }).catch((e) => e.message);
       await ctx.sleep(50);
       return reason;
@@ -196,7 +206,7 @@ const db = restate.object({
         const [, h, r] = await Promise.all([
           db.execute('INSERT INTO t VALUES (1)'),
           slow(ctx, 'db', { ms: 100, value: 2 }),
-          ctx.run('r', () => 3),
+          ctx.sleep(10).then(() => 3),
           db.query('SELECT count(*) FROM t'),
         ]);
         const [[count]] = await db.query('SELECT count(*) FROM t');
@@ -289,11 +299,21 @@ await check('a hand-written combinator', async () => {
   assert.deepEqual((await call('Concurrency/custom/custom')).value, ['a', 'b']);
 });
 
-await check('ctx.run starts without an await', async () => {
-  assert.equal((await call('Concurrency/eager/eagerRun')).value, true);
+await check('an operation starts without an await', async () => {
+  assert.equal((await call('Concurrency/eager/eagerCall')).value, true);
 });
 
-await check('a run awaited late is not held up by a pending 30s sleep', async () => {
+await check('ctx.run is refused, with a terminal error', async () => {
+  assert.deepEqual((await call('Concurrency/norun/noRun')).value, {
+    terminal: true,
+    message: 'ctx.run is not available without journal replay: call the function directly',
+  });
+  const started = Date.now();
+  await assert.rejects(call('Concurrency/uncaught/uncaughtRun'), /not available without journal replay/);
+  assert.ok(Date.now() - started < 5000, 'retried'); // terminal: not retried
+});
+
+await check('a call awaited late is not held up by a pending 30s sleep', async () => {
   const { value, ms } = await call('Concurrency/late/lateRegistration');
   assert.deepEqual(value, { value: 'ran', attempts: 1 });
   assert.ok(ms < 2000, `${ms} ms`);
@@ -343,7 +363,7 @@ await check("a workflow's durable promise is a plain promise", async () => {
   assert.deepEqual(output, { promise: true, map: 'undefined', value: 'yes' });
 });
 
-await check('ctx.sqlSession with statements, a call and a run at once', async () => {
+await check('ctx.sqlSession with statements, a call and a sleep at once', async () => {
   assert.deepEqual((await call('Db/d/concurrent')).value, { h: 2, r: 3, count: 1 });
 });
 
