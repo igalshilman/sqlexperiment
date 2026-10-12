@@ -45,7 +45,7 @@ again. Here its storage is a Restate virtual object's SQL database
 ```sh
 make examples-js   # from the repository root: the addon, the patched SDK, npm install
 cd examples && npm run serve   # the agent, with the ledger its tools use
-docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true ghcr.io/restatedev/restate:service-protocol-v8   # Restate with protocol V8 (see the repository's README, Requirements), in another terminal
+docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
 curl localhost:8080/Agent/me/prompt --json '{"id": "p1", "text": "move 5 from 1 to 2"}'

@@ -1,19 +1,15 @@
 # Vendored and patched code
 
 The Restate integration needs SDK changes that are not released: an
-invocation that does not replay its journal, and a few fixes. It also needs
-the latest, unreleased Restate server, with service protocol V8 turned on
-(see [the requirements](../README.md#requirements)). This directory
-holds those changes.
+invocation that does not replay its journal, and a few fixes (see
+[the requirements](../README.md#requirements)). This directory holds those
+changes.
 
 | | What | Version | Form |
 |---|---|---|---|
 | [`typescript/`](typescript) | `@restatedev/restate-sdk` and the shared core it compiles to WebAssembly | 1.17.3 ([`02a12acb`](https://github.com/restatedev/sdk-typescript/commit/02a12acb879fcf46448d88d028304d3a3113e7e2)), shared core [`382649d`](https://github.com/restatedev/sdk-shared-core/commit/382649d0652aa6d971ec16e788d24b4b2c8c8b45) | Patches, applied to fresh clones by `setup.sh` |
 
 ## The shared core
-
-The pinned revision is the shared core's main, unreleased (the last release
-is 7.0.3): it speaks service protocol V8, with the ephemeral state get.
 
 `JournalReplay::Disabled`: after the input, the VM skips the recorded
 commands; completion ids start at `1 + 2 × known entries` (a command takes at
@@ -45,11 +41,10 @@ writes the patches back.
 | `ObjectContext.sql(body)` and `ObjectContext.sqlSession(body)`, `restate.sqlOptions`, the `SqlDatabase` and `SqlSession` types | SQL in a virtual object: the database over the object's state, through the sqlite-kv addon (an optional peer dependency, loaded on first use) | `sql.ts`, `context.ts`, `context_impl.ts` |
 | `restate.internal.setSqlStoreWrapper` | Fault injection in the crash tests | `sql.ts`, `internal.ts` |
 | Without journal replay, the handler's context has plain promises, driven by one loop | Concurrency is safe once nothing is replayed, but the protocol has one await point per invocation: a suspension, the awaiting-on hint and a cancellation each take one future. So each operation's promise is registered, when it is made, with a `PromiseSelector`, which asks the VM about all pending promises at once (one `FirstCompleted` future) and is the only one waiting for external progress, as the published SDK expects; user code gets a plain `Promise` to await and combine as it likes. See [the context](../examples/node/README.md#the-context-without-journal-replay) | `promise_selector.ts`, `unjournaled.ts`, `promises.ts`, `context_impl.ts`, `endpoint/handlers/generic.ts`, `test/promise_selector.test.ts` |
-| Without journal replay, a state read is not journaled: `ctx.get` (and so the SQL store's reads) is the shared core's ephemeral state get, which needs service protocol V8 | With nothing replayed, a recorded read is never used again: it only costs a journal entry with the value, a page for the SQL store. The read is answered from the attempt's own writes, or else by the runtime from its committed state. It has no handle, so the selector drives it with the other promises; with nothing else pending, it awaits the cancel signal, since the runtime refuses an empty future. A cancellation rejects it, and its late answer is dropped | `context_impl.ts` (`get`, `EphemeralRequestTracker`), `promise_selector.ts` (`ephemeralSelectable`), `promises.ts`, `test/promise_selector.test.ts` |
 | Without journal replay, the handler's context has its own type | Its operations return `Promise`s, not `RestatePromise`s, and it has no `awakeable` and no `run` (with nothing replayed, a run's result would not be kept; at runtime a call to it is a terminal error). `restate.service`, `object` and `workflow` take the options as a type parameter and pick the context from `journalReplay: false` (unknown option keys stay an error); handler wrappers have overloads for it; `journalReplay: false` is a member of the type, so the two contexts are not interchangeable | `context.ts`, `types/rpc.ts`, `common_api.ts`, `test/unjournaled_context.test-d.ts` |
 | Build: the bindings depend on the patched core by path; [`inline-wasm.mjs`](typescript/inline-wasm.mjs) inlines the WebAssembly; the sqlite-kv peer dependency is added before packing | The SDK's own inliner (wasm-pack-inline 0.1.4) slices wasm-bindgen's output at positions that current wasm-bindgen no longer produces | `sdk-typescript.patch`, `setup.sh` |
 
 The shared core's tests pass with the patch (280), and so do the TypeScript
-SDK's (61, of which 23 are the selector's, against a fake VM and the
+SDK's (57, of which 19 are the selector's, against a fake VM and the
 published single-waiter progress channel), and its type tests
 (`test/unjournaled_context.test-d.ts`, checked by `tsc`).
