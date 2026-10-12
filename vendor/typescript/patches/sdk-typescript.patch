@@ -34,7 +34,7 @@ index 18d3aa3..476411a 100644
    ClientSendOptions,
    RemoveVoidArgument,
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..762a9d2 100644
+index 8ea15b1..c2fa54b 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,11 +9,14 @@
@@ -90,7 +90,7 @@ index 8ea15b1..762a9d2 100644
  }
  
  /**
-@@ -1131,3 +1165,211 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
+@@ -1131,3 +1165,201 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
      WorkflowSharedContext<TState>,
      ObjectContext<TState>,
      RestateWorkflowContext {}
@@ -129,7 +129,9 @@ index 8ea15b1..762a9d2 100644
 + * `Promise.race` or any combinator, or leave them. An operation starts when it
 + * is made, whether or not it is awaited, and one loop drives all of them; there
 + * is no `map`, `orTimeout` or `RestatePromise.all`. Awakeables need journal
-+ * replay, so there are none.
++ * replay, so there are none. Nor is there `run`: with nothing replayed, its
++ * result would not be kept, and a retried attempt calls the function again
++ * anyway; call it directly.
 + *
 + * `restate.service`, `restate.object` and `restate.workflow` give a handler
 + * this context when their options set `journalReplay: false`.
@@ -139,18 +141,6 @@ index 8ea15b1..762a9d2 100644
 +export interface UnjournaledContext extends Omit<Context, JournaledOnly> {
 +  /** Always `false`: this context does not replay a journal. */
 +  readonly journalReplay: false;
-+
-+  /**
-+   * Run `action` and store its result. It starts now, whether or not the
-+   * promise is awaited. See {@link Context.run}.
-+   */
-+  run<T>(action: RunAction<T>): Promise<T>;
-+  run<T>(name: string, action: RunAction<T>): Promise<T>;
-+  run<T>(
-+    name: string,
-+    action: RunAction<T>,
-+    options: RunOptions<T>
-+  ): Promise<T>;
 +
 +  /** See {@link Context.sleep}. */
 +  sleep(duration: Duration | number, name?: string): Promise<void>;
@@ -1368,10 +1358,10 @@ index 9b9e22f..be4457f 100644
      throw new Error("workflow must contain handlers");
 diff --git a/packages/libs/restate-sdk/src/unjournaled.ts b/packages/libs/restate-sdk/src/unjournaled.ts
 new file mode 100644
-index 0000000..ce78c12
+index 0000000..8290001
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/unjournaled.ts
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,127 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 + *
@@ -1392,11 +1382,20 @@ index 0000000..ce78c12
 +// Promise.all, Promise.race, its own combinators, or a library's. Each promise
 +// is registered, when the operation is made, with the invocation's selector,
 +// which drives all of them from one await point (see promise_selector.ts). So
-+// an operation starts when it is made, `ctx.run` included, whether or not it
-+// is awaited; and RestatePromise combinators and methods (`map`,
-+// `orTimeout`) are not available, nor needed.
++// an operation starts when it is made, whether or not it is awaited; and
++// RestatePromise combinators and methods (`map`, `orTimeout`) are not
++// available, nor needed. Nor is `ctx.run`: with nothing replayed its result is
++// not kept, and a retried attempt calls the function again anyway.
 +
 +import { isRestatePromise, plainPromise } from "./promises.js";
++import { TerminalError } from "./types/errors.js";
++
++// `ctx.run`, refused: a terminal error, since a retry would fail the same way.
++function refusedRun(): never {
++  throw new TerminalError(
++    "ctx.run is not available without journal replay: call the function directly"
++  );
++}
 +
 +// Methods whose result is an object of more operations (a client, a scoped
 +// context, an invocation reference, a workflow's durable promise), wrapped the
@@ -1455,6 +1454,7 @@ index 0000000..ce78c12
 +function wrap<T extends object>(target: T, wrapAll: boolean): T {
 +  return new Proxy(target, {
 +    get(t, prop, receiver) {
++      if (!wrapAll && prop === "run") return refusedRun;
 +      const value = Reflect.get(t, prop, t);
 +      if (typeof prop !== "string") return value;
 +      if (typeof value === "function") {
@@ -1992,10 +1992,10 @@ index 0000000..8c54004
 +}
 diff --git a/packages/libs/restate-sdk/test/unjournaled_context.test-d.ts b/packages/libs/restate-sdk/test/unjournaled_context.test-d.ts
 new file mode 100644
-index 0000000..56d32c7
+index 0000000..d5be4c8
 --- /dev/null
 +++ b/packages/libs/restate-sdk/test/unjournaled_context.test-d.ts
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,213 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 + *
@@ -2040,10 +2040,6 @@ index 0000000..56d32c7
 +          expectTypeOf(ctx).toEqualTypeOf<UnjournaledContext>();
 +          expectTypeOf(ctx.journalReplay).toEqualTypeOf<false>();
 +          expectTypeOf(ctx.sleep(1)).toEqualTypeOf<Promise<void>>();
-+          expectTypeOf(ctx.run(() => 1)).toEqualTypeOf<Promise<number>>();
-+          expectTypeOf(ctx.run("r", async () => "a")).toEqualTypeOf<
-+            Promise<string>
-+          >();
 +          expectTypeOf(ctx.signal<string>("s")).toEqualTypeOf<
 +            Promise<string>
 +          >();
@@ -2051,7 +2047,9 @@ index 0000000..56d32c7
 +          void ctx.sleep(1).map(() => 1);
 +          // @ts-expect-error: awakeables need journal replay
 +          ctx.awakeable();
-+          await Promise.all([ctx.sleep(1), ctx.run(() => 1)]);
++          // @ts-expect-error: no run; call the function directly
++          void ctx.run(() => 1);
++          await Promise.all([ctx.sleep(1), ctx.signal("s")]);
 +          return input;
 +        },
 +      },
