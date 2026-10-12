@@ -230,6 +230,30 @@ const reader = restate.object({
   options: { journalReplay: false, enableLazyState: true, journalRetention: { hours: 1 } },
 });
 
+// A retried attempt reads what the failed one wrote: the server retries only
+// once it has stored the failed attempt's commands, state writes included.
+const rewriterAttempts = new Map();
+const rewriter = restate.object({
+  name: 'Rewriter',
+  handlers: {
+    write: async (ctx, keys) => {
+      const attempt = (rewriterAttempts.get(ctx.request().id) ?? 0) + 1;
+      rewriterAttempts.set(ctx.request().id, attempt);
+      if (attempt === 1) {
+        for (let i = 0; i < keys; i++) ctx.set(`k${i}`, `${ctx.key}:${i}`);
+        throw new Error('fail after the writes');
+      }
+      const values = await Promise.all(Array.from({ length: keys }, (_, i) => ctx.get(`k${i}`)));
+      return { attempt, values };
+    },
+  },
+  options: {
+    journalReplay: false,
+    enableLazyState: true,
+    retryPolicy: { initialInterval: 1, maxInterval: 10 },
+  },
+});
+
 // --- Harness
 
 const dir = mkdtempSync(join(tmpdir(), 'sqlite-kv-concurrency-'));
@@ -251,7 +275,7 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   if (await fetch(`${ADMIN}/health`).then((r) => r.ok, () => false)) break;
   if (Date.now() > deadline) throw new Error('restate-server did not start');
 }
-const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(db).bind(reader).listen(PORT);
+const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(db).bind(reader).bind(rewriter).listen(PORT);
 void endpoint;
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   const registered = await fetch(`${ADMIN}/deployments`, {
@@ -402,6 +426,17 @@ await check('state reads are not journaled', async () => {
   const types = entries.map((e) => e.type);
   assert.ok(types.some((t) => /SetState/.test(t)), `journal: ${types}`);
   assert.ok(!types.some((t) => /Get\w*State/.test(t)), `journal: ${types}`);
+});
+
+await check("a retried attempt reads the failed attempt's writes", async () => {
+  const keys = 20;
+  const results = await Promise.all(
+    Array.from({ length: 20 }, (_, n) => call(`Rewriter/w${n}/write`, keys).then((r) => [n, r.value])),
+  );
+  for (const [n, { attempt, values }] of results) {
+    assert.equal(attempt, 2);
+    assert.deepEqual(values, Array.from({ length: keys }, (_, i) => `w${n}:${i}`));
+  }
 });
 
 console.log(failed === 0 ? 'all passed' : `${failed} failed`);

@@ -59,7 +59,8 @@ beside a call and a sleep in `ctx.sqlSession`; a suspension resuming on the
 first of two operations (the call at 3 s, not the sleep at 20 s); and a
 cancellation reaching three pending operations; and state reads, of a stored
 value, a missing one and the attempt's own write, none of them in the journal
-(from the server's `sys_journal`). A handler that replays its journal keeps
+(from the server's `sys_journal`); and 20 retries that each read the 20 keys
+their failed attempt wrote. A handler that replays its journal keeps
 `RestatePromise`s.
 
 ```sh

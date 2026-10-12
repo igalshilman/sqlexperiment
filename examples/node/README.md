@@ -55,7 +55,10 @@ the sqlite-kv addon, an optional peer dependency, on first use.
 **State access.** A get is a state read that is not recorded in the journal
 (service protocol V8's ephemeral state get): the value this attempt wrote, or
 else the runtime's stored value (lazy state, so an invocation does not start by
-loading every page). A set or clear is a state write, and returns at once. Restate stores an
+loading every page). Either way it reads its own writes: the shared core
+answers a key the attempt set or cleared itself, and the runtime starts a
+retry only once the failed attempt's commands are acknowledged, which the
+partition processor does after committing their state writes. A set or clear is a state write, and returns at once. Restate stores an
 invocation's commands in order, and after a crash keeps a prefix of them, so
 writes are FIFO: a lost write takes every later command with it, including
 later writes, calls to other services and the response. The protocol's
