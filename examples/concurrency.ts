@@ -282,6 +282,16 @@ async function call(path: string, body: unknown = null): Promise<{ value: unknow
   return { value: JSON.parse(text), ms: Date.now() - started };
 }
 
+/** Start `path` without waiting for its result: its invocation id. */
+async function start(path: string): Promise<string> {
+  const r = await fetch(`${INGRESS}/${path}/send`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: 'null',
+  });
+  return ((await r.json()) as { invocationId: string }).invocationId;
+}
+
 let failed = 0;
 async function check(name: string, body: () => Promise<void>) {
   try {
@@ -358,29 +368,21 @@ await check('a suspension resumes on the first of two pending operations', async
 });
 
 await check('a cancellation reaches every pending operation', async () => {
-  const sent = await fetch(`${INGRESS}/Concurrency/cancel/cancelled/send`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: 'null',
-  }).then((r) => r.json() as Promise<{ invocationId: string }>);
+  const invocationId = await start('Concurrency/cancel/cancelled');
   await sleep(500);
-  const cancel = await fetch(`${ADMIN}/invocations/${sent.invocationId}/cancel`, { method: 'PATCH' });
+  const cancel = await fetch(`${ADMIN}/invocations/${invocationId}/cancel`, { method: 'PATCH' });
   assert.ok(cancel.ok, `cancel: ${cancel.status} ${await cancel.text()}`);
-  const output = await fetch(`${INGRESS}/restate/invocation/${sent.invocationId}/attach`, {
+  const output = await fetch(`${INGRESS}/restate/invocation/${invocationId}/attach`, {
     signal: AbortSignal.timeout(30_000),
   }).then((r) => r.json());
   assert.deepEqual(output, ['rejected:409', 'rejected:409', 'rejected:409']);
 });
 
 await check("a workflow's durable promise is a plain promise", async () => {
-  const sent = await fetch(`${INGRESS}/Flow/f/run/send`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: 'null',
-  }).then((r) => r.json() as Promise<{ invocationId: string }>);
+  const invocationId = await start('Flow/f/run');
   await sleep(200);
   assert.equal((await call('Flow/f/approve', 'yes')).value, 'undefined');
-  const output = await fetch(`${INGRESS}/restate/invocation/${sent.invocationId}/attach`, {
+  const output = await fetch(`${INGRESS}/restate/invocation/${invocationId}/attach`, {
     signal: AbortSignal.timeout(30_000),
   }).then((r) => r.json());
   assert.deepEqual(output, { promise: true, map: 'undefined', value: 'yes' });
