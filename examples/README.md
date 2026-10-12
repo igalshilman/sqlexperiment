@@ -18,6 +18,8 @@ One npm package, here, on the patched Restate TypeScript SDK and the
 - [`langgraph/`](langgraph/README.md): a LangGraph agent, whose checkpoints
   are in the object's database, through a checkpointer that passes LangGraph's
   conformance suite.
+- [`claude/`](claude/README.md): a Claude agent on the Anthropic SDK's tool
+  runner, whose conversation is in the object's database.
 - [`serve.mjs`](serve.mjs): serves them in one endpoint (`npm run serve`).
 - [`faults.mjs`](faults.mjs): fault injection for the crash test.
 - [`test.mjs`](test.mjs): all of them against a real Restate server, through
@@ -42,7 +44,9 @@ invocation per order and prompt, though their callers ran many attempts. It
 passed twice, with 109 and 108 restarts of the shop's process and 85 and 92 of
 the agents', and again on the context with plain promises (81 and 111). With
 the LangGraph agents too, it passed twice: 64 transfers, one per prompt, with
-28 and 26 restarts of their process.
+28 and 26 restarts of their process. With the Claude agents too, in a fourth process aborting
+at 1.5% (a Claude prompt makes few state requests), it passed twice: 96
+transfers, one per prompt, with 46 and 42 restarts of their process.
 
 ```sh
 make crash-test
