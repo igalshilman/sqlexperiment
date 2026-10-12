@@ -3,8 +3,8 @@
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
-#   make crash-test   the crash campaign, against RESTATE_SERVER
-#   make concurrency-test   the context without journal replay, against RESTATE_SERVER
+#   make crash-test   the crash campaign, against a Restate server
+#   make concurrency-test   the context without journal replay, against a Restate server
 #   make help         every target
 #
 # The Rust workspaces (the crate, the addon) share one target directory.
@@ -14,9 +14,16 @@ CARGO ?= cargo
 SDK_TARBALL := vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 CORE := sqlite-kv
 ADDON := $(CORE)/node/sqlite_kv.node
+# The tests against a Restate server need service protocol V8 (state reads that
+# are not journaled), which is not on restate's main yet: by default, the
+# server of its service-protocol-v8 image, taken out with docker. Or set
+# RESTATE_SERVER to a restate-server binary with V8.
+RESTATE_IMAGE ?= ghcr.io/restatedev/restate:service-protocol-v8
+RESTATE_SERVER ?= $(CARGO_TARGET_DIR)/restate/restate-server
+export RESTATE_SERVER
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
-	test test-core test-addon test-sdk-ts test-pi test-langgraph lint crash-test concurrency-test clean
+	test test-core test-addon test-sdk-ts test-pi test-langgraph lint crash-test concurrency-test restate-server clean
 
 all: core addon examples ## Build everything
 
@@ -69,13 +76,20 @@ test-langgraph: examples-js ## LangGraph's checkpointer conformance suite on the
 lint: ## Clippy on the core crate
 	cd $(CORE) && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 
-crash-test: examples-js ## Every JavaScript example through crashes (needs RESTATE_SERVER)
-	@test -n "$(RESTATE_SERVER)" || (echo "set RESTATE_SERVER to a restate-server binary" && exit 1)
+crash-test: examples-js $(RESTATE_SERVER) ## Every JavaScript example through crashes, against a Restate server
 	cd examples && node test.mjs
 
-concurrency-test: examples-js ## The context without journal replay: plain promises, one await point (needs RESTATE_SERVER)
-	@test -n "$(RESTATE_SERVER)" || (echo "set RESTATE_SERVER to a restate-server binary" && exit 1)
+concurrency-test: examples-js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
 	cd examples && node concurrency.mjs
+
+restate-server: ## Take restate-server out of RESTATE_IMAGE again (needs docker)
+	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
+
+$(RESTATE_SERVER):
+	mkdir -p $(dir $@)
+	docker pull -q $(RESTATE_IMAGE)
+	id=$$(docker create $(RESTATE_IMAGE)) && docker cp -q $$id:/usr/local/bin/restate-server $@; docker rm $$id > /dev/null
+	$@ --version
 
 clean: ## Remove build outputs
 	rm -rf $(CARGO_TARGET_DIR) $(ADDON) vendor/typescript/.build examples/node_modules
