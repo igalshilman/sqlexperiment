@@ -34,7 +34,7 @@ RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
-	test test-core test-addon test-sdk-ts test-pi test-langgraph test-claude test-deepseek lint crash-test concurrency-test restate-server clean
+	test test-core test-addon test-sdk-ts test-pi test-langgraph test-claude test-deepseek lint lint-core lint-examples format crash-test concurrency-test restate-server clean
 
 all: core addon examples ## Build everything
 
@@ -61,7 +61,7 @@ examples: examples-rust examples-js ## Every example
 examples-rust: ## The Rust example: the core crate's lookup
 	cd $(CORE) && $(CARGO) build --locked --release --features simulation --example lookup
 
-examples-js: $(ADDON) $(SDK_TARBALL) ## The JavaScript examples (node/, pi/, langgraph/, claude/, deepseek/), installed with the patched SDK
+examples-js: $(ADDON) $(SDK_TARBALL) ## The TypeScript examples (node/, pi/, langgraph/, claude/, deepseek/), installed with the patched SDK
 	cd examples && rm -rf node_modules/@restatedev/restate-sdk package-lock.json && npm install
 
 # --- Test
@@ -90,14 +90,22 @@ test-claude: examples-js ## The Claude agent (the Anthropic SDK's tool runner) t
 test-deepseek: examples-js ## The DeepSeek Harness agent through crashes
 	cd examples && npm run test:deepseek
 
-lint: ## Clippy on the core crate
+lint: lint-core lint-examples ## Every lint
+
+lint-core: ## Clippy on the core crate
 	cd $(CORE) && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 
-crash-test: examples-js $(RESTATE_SERVER) ## Every JavaScript example through crashes, against a Restate server
-	cd examples && node test.mjs
+lint-examples: examples-js ## The TypeScript examples: tsc, oxlint (type-aware) and oxfmt --check
+	cd examples && npm run check
+
+format: examples-js ## Format the TypeScript examples with oxfmt
+	cd examples && npm run format
+
+crash-test: examples-js $(RESTATE_SERVER) ## Every TypeScript example through crashes, against a Restate server
+	cd examples && node test.ts
 
 concurrency-test: examples-js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
-	cd examples && node concurrency.mjs
+	cd examples && node concurrency.ts
 
 restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker) or RESTATE_REV (cargo), per RESTATE_FROM
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)

@@ -7,7 +7,7 @@ anything is shown, and resumes unfinished work when the storage is opened
 again. Here its storage is a Restate virtual object's SQL database
 ([SQL in Restate virtual objects](../node/README.md)).
 
-- [`with-pi.mjs`](with-pi.mjs): `withPi(ctx, { models, model, tools }, work)`
+- [`with-pi.ts`](with-pi.ts): `withPi(ctx, { models, model, tools }, work)`
   runs `work` with a pi-durable Harness over the object's database, in one
   `ctx.sqlSession`, and closes it at the end. `pi.prompt(id, text)` answers a
   prompt once per id: it submits the prompt, waits for the answer, records it,
@@ -17,24 +17,25 @@ again. Here its storage is a Restate virtual object's SQL database
   - an answered prompt returns its answer;
   - unfinished work resumes: a model call is made again, and a tool call
     declared replay-safe runs again with the same call id.
-- [`agent.mjs`](agent.mjs): an Agent object per session, with one handler:
+- [`agent.ts`](agent.ts): an Agent object per session, with one handler:
 
   ```js
   prompt: (ctx, { id, text }) =>
     withPi(ctx, { models, model, tools: bank(ctx) }, async (pi) => ({ answer: await pi.prompt(id, text) })),
   ```
 
-  Its tools move money in the [ledger](../node/ledger.mjs), with the call id
+  Its tools move money in the [ledger](../node/ledger.ts), with the call id
   as the transfer id; each call to the ledger has an idempotency key made
   from the request id (`ctx.request().id`) and the tool call id.
-- [`pi-storage.mjs`](pi-storage.mjs): pi-durable's SQLite storage on the
+
+- [`pi-storage.ts`](pi-storage.ts): pi-durable's SQLite storage on the
   session's database, through the `SqliteDatabase` facade pi-durable's
   storage expects. Each pi-durable commit is an SQL transaction, stored in
   order with everything else the handler does.
-- [`pi-storage.test.mjs`](pi-storage.test.mjs): pi-durable's storage
+- [`pi-storage.test.ts`](pi-storage.test.ts): pi-durable's storage
   conformance suite on it (`npm run test:pi` in [`examples/`](..), or
   `make test-pi`): 24 tests pass.
-- [`utils.mjs`](utils.mjs): the models. A fake model for pi-ai,
+- [`utils.ts`](utils.ts): the models. A fake model for pi-ai,
   `fakeProvider(name, respond)`, whose replies a function computes from the
   conversation, so an agent runs without an API key, deterministically,
   however many model calls retried attempts make; the scripted teller built on

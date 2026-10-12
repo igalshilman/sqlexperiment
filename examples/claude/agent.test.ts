@@ -1,78 +1,15 @@
-// The agent's handler without a Restate server: a fake `ctx` with a database
-// in memory and a ledger that records its calls, through crashes of the
-// handler. A crash is an attempt that stops in a tool call and is abandoned:
-// what it committed stays, as with a crashed process, and the runner gets no
-// chance to save anything on the way out. `npm run test:claude` (or make
+// The agent's handler without a Restate server, through crashes of the
+// handler (see ../testing.ts): the runner gets no chance to save anything on
+// the way out of a crashed attempt. `npm run test:claude` (or make
 // test-claude).
-import { open } from 'sqlite-kv';
 import { describe, expect, it } from 'vitest';
-import { agent } from './agent.mjs';
-import { teller } from './teller.mjs';
-
-const prompt = agent.object.prompt;
-
-/** A conversation's object: its database lives across attempts, like the object's state. */
-async function conversation(key) {
-  const map = new Map();
-  const store = {
-    get: async (k) => map.get(k),
-    set: (k, v) => map.set(k, Uint8Array.from(v)),
-    clear: (k) => map.delete(k),
-    sync: async () => {},
-  };
-  // `crashNext`: the next transfer is recorded, and its attempt stops there.
-  // `failNext`: the next transfer is recorded, and then throws.
-  const ledger = { transfers: new Map(), calls: [], crashNext: 0, failNext: 0, crashed: null };
-  let n = 0;
-  return {
-    ledger,
-    /** One attempt of the handler, as Restate makes it, with request id `requestId`. */
-    async attempt(requestId, input) {
-      const db = await open(`claude-agent-${process.pid}-${key}-${n++}`, store);
-      const ctx = {
-        key,
-        request: () => ({ id: requestId }),
-        objectClient: () => ({
-          async transfer(args, opts) {
-            ledger.calls.push({ name: 'transfer', id: args.id, key: opts.getOpts().idempotencyKey });
-            if (!ledger.transfers.has(args.id)) ledger.transfers.set(args.id, args);
-            if (ledger.crashNext > 0) {
-              ledger.crashNext--;
-              ledger.crashed();
-              return new Promise(() => {});
-            }
-            if (ledger.failNext > 0) {
-              ledger.failNext--;
-              throw new Error('crash after the transfer');
-            }
-          },
-          async audit() {
-            return { accounts: 8, total: 8000, transfers: ledger.transfers.size, inconsistent: 0 };
-          },
-        }),
-        sqlSession: async (body) => {
-          try {
-            return await body(db);
-          } finally {
-            await db.close();
-          }
-        },
-      };
-      return prompt(ctx, input);
-    },
-    /** An attempt that crashes in its next transfer. */
-    async crash(requestId, input) {
-      ledger.crashNext = 1;
-      const crashed = new Promise((resolve) => (ledger.crashed = resolve));
-      const attempt = this.attempt(requestId, input);
-      await Promise.race([crashed, attempt.then(() => Promise.reject(new Error('did not crash')))]);
-    },
-  };
-}
+import { conversation } from '../testing.ts';
+import { prompt } from './agent.ts';
+import { teller } from './teller.ts';
 
 describe('the Claude agent', () => {
   it('answers a prompt once, by its id', async () => {
-    const c = await conversation('a');
+    const c = conversation(prompt, 'a');
     const first = await c.attempt('inv1', { id: 'p1', text: 'Please move 5 from 1 to 2' });
     expect(first).toEqual({ answer: 'Done: moved 5 from account 1 to account 2' });
     // Asked again, in a new invocation: the same answer, no new transfer.
@@ -85,7 +22,7 @@ describe('the Claude agent', () => {
   });
 
   it('resumes a crashed attempt from its last step, with the same tool call', async () => {
-    const c = await conversation('b');
+    const c = conversation(prompt, 'b');
     const calls = { model: 0 };
     const reply = teller.reply;
     teller.reply = (messages) => {
@@ -111,7 +48,7 @@ describe('the Claude agent', () => {
   });
 
   it("fails the attempt on a tool's error, rather than hand it to the model", async () => {
-    const c = await conversation('d');
+    const c = conversation(prompt, 'd');
     c.ledger.failNext = 1;
     const input = { id: 'p1', text: 'Please move 3 from 5 to 6' };
     await expect(c.attempt('inv1', input)).rejects.toThrow('crash after the transfer');
@@ -120,7 +57,7 @@ describe('the Claude agent', () => {
   });
 
   it('finishes an interrupted prompt before starting the next one', async () => {
-    const c = await conversation('c');
+    const c = conversation(prompt, 'c');
     await c.crash('inv1', { id: 'p1', text: 'Please move 1 from 0 to 1' });
     // Its caller gave up; the next prompt comes.
     const second = await c.attempt('inv2', { id: 'p2', text: 'Please move 2 from 0 to 1' });

@@ -2,16 +2,20 @@
   "name": "sqlite-kv-examples",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "description": "Examples of SQL in Restate virtual objects with the TypeScript SDK: a ledger and a shop (node/), a durable pi agent (pi/), a LangGraph agent (langgraph/), a Claude agent on the Anthropic SDK's tool runner (claude/) and a DeepSeek Harness agent (deepseek/)",
+  "type": "module",
   "scripts": {
-    "serve": "node serve.mjs",
-    "test": "node test.mjs",
-    "test:concurrency": "node concurrency.mjs",
+    "serve": "node serve.ts",
+    "test": "node test.ts",
+    "test:concurrency": "node concurrency.ts",
     "test:pi": "vitest run pi",
     "test:langgraph": "vitest run langgraph",
     "test:claude": "vitest run claude",
-    "test:deepseek": "vitest run deepseek"
+    "test:deepseek": "vitest run deepseek",
+    "typecheck": "tsc -p .",
+    "lint": "oxlint --type-aware",
+    "format": "oxfmt",
+    "check": "tsc -p . && oxlint --type-aware && oxfmt --check"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.133.0",
@@ -40,6 +44,14 @@
   },
   "devDependencies": {
     "@langchain/langgraph-checkpoint-validation": "1.1.1",
-    "vitest": "4.1.11"
+    "@types/node": "22.20.5",
+    "oxfmt": "0.72.0",
+    "oxlint": "1.87.0",
+    "oxlint-tsgolint": "7.0.2004",
+    "typescript": "7.0.2",
+    "vitest": "5.0.4"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }

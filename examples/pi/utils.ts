@@ -11,14 +11,25 @@
 // returns the assistant message, built with `say`, `callTools` or pi-ai's faux
 // helpers. Every model call is answered, however many there are, which
 // matters when a retried attempt makes a model call again.
+import type {
+  AssistantMessage,
+  Message,
+  MutableModels,
+  Provider,
+  ToolCall,
+  TranscriptContext,
+} from '@earendil-works/pi-ai';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
 
+/** A model's reply to the conversation in `context`. */
+export type Respond = (context: TranscriptContext) => AssistantMessage;
+
 /** A pi-ai provider `name`, with one model of the same id, answering with `respond`. */
-export function fakeProvider(name, respond) {
+export function fakeProvider(name: string, respond: Respond): Provider {
   const faux = fauxProvider({ provider: name, models: [{ id: name }] });
   // The faux provider answers from a queue: each reply queues the next.
-  const reply = (context) => {
+  const reply = (context: TranscriptContext): AssistantMessage => {
     faux.appendResponses([reply]);
     return respond(context);
   };
@@ -27,7 +38,7 @@ export function fakeProvider(name, respond) {
 }
 
 /** The text of a message's content. */
-export const textOf = (content) =>
+export const textOf = (content: Message['content']): string =>
   typeof content === 'string'
     ? content
     : content
@@ -36,25 +47,24 @@ export const textOf = (content) =>
         .join('');
 
 /** The text of the conversation's last message. */
-export const lastText = (context) => textOf(context.messages.at(-1).content);
+export const lastText = (context: TranscriptContext) => textOf(context.messages.at(-1)!.content);
 
 /** A reply in text. */
-export const say = (text) => fauxAssistantMessage(fauxText(text));
+export const say = (text: string) => fauxAssistantMessage(fauxText(text));
 
 /** A reply that calls tools: `calls` is a list of [name, arguments], after an optional text. */
-export const callTools = (calls, text) =>
-  fauxAssistantMessage(
-    [...(text ? [fauxText(text)] : []), ...calls.map(([name, args]) => fauxToolCall(name, args))],
-    { stopReason: 'toolUse' },
-  );
+export const callTools = (calls: [name: string, args: ToolCall['arguments']][], text?: string) =>
+  fauxAssistantMessage([...(text ? [fauxText(text)] : []), ...calls.map(([name, args]) => fauxToolCall(name, args))], {
+    stopReason: 'toolUse',
+  });
 
 /** The scripted teller: transfers and audits on request, and reports the tool's result. */
-export const teller = (context) => {
+export const teller: Respond = (context) => {
   const text = lastText(context);
-  if (context.messages.at(-1).role === 'toolResult') return say(`Done: ${text}`);
+  if (context.messages.at(-1)!.role === 'toolResult') return say(`Done: ${text}`);
   const move = /move (\d+) from (\d+) to (\d+)/i.exec(text);
   if (move) {
-    const [amount, from, to] = move.slice(1).map(Number);
+    const [amount, from, to] = move.slice(1, 4).map(Number) as [number, number, number];
     return callTools([['transfer', { from, to, amount }]], 'On it.');
   }
   if (/audit/i.test(text)) return callTools([['audit', {}]]);
@@ -66,7 +76,7 @@ export const teller = (context) => {
  * anthropic/claude-sonnet-4-5, with the provider's API key), or by default
  * the teller, which needs no key.
  */
-export async function modelFromEnv() {
+export async function modelFromEnv(): Promise<{ models: MutableModels; model: string }> {
   const models = createModels();
   const model = process.env.PI_MODEL ?? 'teller/teller';
   const [provider] = model.split('/');

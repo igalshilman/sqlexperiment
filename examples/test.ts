@@ -11,13 +11,16 @@
 // Checks: the warehouses' books balance and agree with every order, and every
 // agent prompt moved money exactly once.
 //
-//   RESTATE_SERVER=/path/to/restate-server node test.mjs   (or make crash-test)
+//   RESTATE_SERVER=/path/to/restate-server node test.ts   (or make crash-test)
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import type { ChildProcess } from 'node:child_process';
+import type { Audit } from './node/ledger.ts';
+import type { Order, Reservation } from './node/shop.ts';
 
 const SERVER = process.env.RESTATE_SERVER;
 if (!SERVER) {
@@ -28,7 +31,14 @@ const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
 const PER_MILLE = Number(process.env.ABORT_PER_MILLE ?? 15);
 const AGENT_PER_MILLE = Number(process.env.AGENT_ABORT_PER_MILLE ?? 3);
-const PROCESSES = [
+/** A service process: its name, the groups of serve.ts it serves, its port and abort rate. */
+interface Process {
+  name: string;
+  groups: string[];
+  port: number;
+  perMille: number;
+}
+const PROCESSES: Process[] = [
   { name: 'shop', groups: ['ledger', 'shop'], port: 9182, perMille: PER_MILLE },
   { name: 'agent', groups: ['agent'], port: 9183, perMille: AGENT_PER_MILLE },
   { name: 'langgraph', groups: ['langgraph'], port: 9186, perMille: AGENT_PER_MILLE },
@@ -49,8 +59,12 @@ const ACCOUNTS = 8;
 const OPENING = 1000;
 
 const dir = mkdtempSync(join(tmpdir(), 'sqlite-kv-examples-'));
-const log = (name) => openSync(join(dir, name), 'a');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const log = (name: string) => openSync(join(dir, name), 'a');
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Wait until `done()`, which other tasks make true. */
+const until = async (done: () => boolean) => {
+  while (!done()) await sleep(20);
+};
 console.error(`logs in ${dir}`);
 
 const startServer = () =>
@@ -61,18 +75,29 @@ const startServer = () =>
 
 async function healthy() {
   for (const deadline = Date.now() + 60_000; Date.now() < deadline; await sleep(200)) {
-    if (await fetch(`${ADMIN}/health`).then((r) => r.ok, () => false)) return;
+    if (
+      await fetch(`${ADMIN}/health`).then(
+        (r) => r.ok,
+        () => false,
+      )
+    )
+      return;
   }
   throw new Error('restate-server did not start');
 }
 
+/** A supervised process: how many times it started, and its current child. */
+interface Supervised {
+  starts: number;
+  stopped: boolean;
+  child: ChildProcess;
+  stop(): Promise<void>;
+}
+
 /** Keep `process` running, restarting it whenever it aborts. */
-function supervise({ name, groups, port }, perMille) {
-  const state = { starts: 0, stopped: false, child: null };
-  const start = () => {
-    if (state.stopped) return;
-    state.starts++;
-    state.child = spawn(process.execPath, [fileURLToPath(new URL('serve.mjs', import.meta.url)), ...groups], {
+function supervise({ name, groups, port }: Process, perMille: number): Supervised {
+  const run = () =>
+    spawn(process.execPath, [fileURLToPath(new URL('serve.ts', import.meta.url)), ...groups], {
       env: {
         ...process.env,
         PORT: String(port),
@@ -82,21 +107,30 @@ function supervise({ name, groups, port }, perMille) {
       },
       stdio: ['ignore', 'ignore', log(`${name}.log`)],
     });
-    state.child.on('exit', start);
+  const restart = () => {
+    if (state.stopped) return;
+    state.starts++;
+    state.child = run();
+    state.child.on('exit', restart);
   };
-  start();
-  state.stop = () =>
-    new Promise((resolve) => {
-      state.stopped = true;
-      state.child.removeAllListeners('exit');
-      state.child.on('exit', resolve);
-      state.child.kill();
-    });
+  const state: Supervised = {
+    starts: 1,
+    stopped: false,
+    child: run(),
+    stop: () =>
+      new Promise((resolve) => {
+        state.stopped = true;
+        state.child.removeAllListeners('exit');
+        state.child.on('exit', () => resolve());
+        state.child.kill();
+      }),
+  };
+  state.child.on('exit', restart);
   return state;
 }
 
 /** POST until answered with 200, through crashes of either side. */
-async function call(path, body) {
+async function call<T = unknown>(path: string, body?: unknown): Promise<T> {
   const deadline = Date.now() + 300_000;
   for (;;) {
     let response;
@@ -112,7 +146,7 @@ async function call(path, body) {
     }
     if (response?.ok) {
       const text = await response.text();
-      return text ? JSON.parse(text) : undefined;
+      return (text ? JSON.parse(text) : undefined) as T;
     }
     if (response && response.status !== 404) {
       const text = await response.text();
@@ -127,11 +161,13 @@ async function call(path, body) {
 }
 
 /** Run `tasks` (functions) with at most `width` at a time. */
-async function pool(width, tasks) {
+async function pool(width: number, tasks: (() => Promise<void>)[]) {
   const queue = [...tasks];
-  await Promise.all(Array.from({ length: width }, async () => {
-    while (queue.length > 0) await queue.shift()();
-  }));
+  await Promise.all(
+    Array.from({ length: width }, async () => {
+      for (let task = queue.shift(); task; task = queue.shift()) await task();
+    }),
+  );
 }
 
 let server = startServer();
@@ -151,7 +187,10 @@ for (const { port } of PROCESSES) {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ uri: `http://127.0.0.1:${port}`, force: true }),
-    }).then((r) => r.ok, () => false);
+    }).then(
+      (r) => r.ok,
+      () => false,
+    );
     if (registered) break;
     if (Date.now() > deadline) throw new Error('registration failed');
   }
@@ -171,38 +210,50 @@ const step = () => {
 
 // Orders: place each (some twice), then pay the even ones (which may have
 // expired first).
-const paid = new Map();
-const order = (i) => ({ id: `o${i}`, sku: SKUS[i % SKUS.length], qty: 1 + (i % 3) });
-const shop = pool(6, Array.from({ length: ORDERS }, (_, i) => async () => {
-  const { id, sku, qty } = order(i);
-  for (let n = 0; n < (i % 4 === 0 ? 2 : 1); n++) await call(`Orders/${id}/place`, { sku, qty });
-  step();
-  if (i % 2 === 0) paid.set(id, await call(`Orders/${id}/pay`));
-  step();
-}));
+const paid = new Map<string, string>();
+const order = (i: number) => ({ id: `o${i}`, sku: SKUS[i % SKUS.length]!, qty: 1 + (i % 3) });
+const shop = pool(
+  6,
+  Array.from({ length: ORDERS }, (_, i) => async () => {
+    const { id, sku, qty } = order(i);
+    for (let n = 0; n < (i % 4 === 0 ? 2 : 1); n++) await call(`Orders/${id}/place`, { sku, qty });
+    step();
+    if (i % 2 === 0) paid.set(id, await call<string>(`Orders/${id}/pay`));
+    step();
+  }),
+);
 
 // Agents: transfers, then an audit, per session of each agent.
-const sessions = AGENTS.flatMap((name) => Array.from({ length: SESSIONS }, (_, s) => [name, s]));
-const agents = pool(sessions.length, sessions.map(([name, s]) => async () => {
-  for (let p = 0; p < PROMPTS; p++) {
-    const from = (s + p) % ACCOUNTS;
-    const to = (s + 3 * p + 1) % ACCOUNTS;
-    const prompt = { id: `s${s}-p${p}`, text: `Please move ${1 + p} from ${from} to ${to === from ? (to + 1) % ACCOUNTS : to}` };
-    for (let n = 0; n < (p % 3 === 0 ? 2 : 1); n++) {
-      const { answer } = await call(`${name}/s${s}/prompt`, prompt);
-      assert.match(answer, /^Done: moved/, `${name} ${prompt.id}: ${answer}`);
+const sessions = AGENTS.flatMap((name) => Array.from({ length: SESSIONS }, (_, s) => [name, s] as const));
+const agents = pool(
+  sessions.length,
+  sessions.map(([name, s]) => async () => {
+    for (let p = 0; p < PROMPTS; p++) {
+      const from = (s + p) % ACCOUNTS;
+      const to = (s + 3 * p + 1) % ACCOUNTS;
+      const prompt = {
+        id: `s${s}-p${p}`,
+        text: `Please move ${1 + p} from ${from} to ${to === from ? (to + 1) % ACCOUNTS : to}`,
+      };
+      for (let n = 0; n < (p % 3 === 0 ? 2 : 1); n++) {
+        const { answer } = await call<{ answer: string }>(`${name}/s${s}/prompt`, prompt);
+        assert.match(answer, /^Done: moved/, `${name} ${prompt.id}: ${answer}`);
+      }
+      step();
     }
+    const { answer } = await call<{ answer: string }>(`${name}/s${s}/prompt`, {
+      id: `s${s}-audit`,
+      text: 'audit the books',
+    });
+    assert.match(answer, /"inconsistent":0/, answer);
     step();
-  }
-  const { answer } = await call(`${name}/s${s}/prompt`, { id: `s${s}-audit`, text: 'audit the books' });
-  assert.match(answer, /"inconsistent":0/, answer);
-  step();
-}));
+  }),
+);
 
 // Kill the server twice along the way.
 const kills = (async () => {
   for (const at of [total / 3, (2 * total) / 3]) {
-    while (progress < at) await sleep(20);
+    await until(() => progress >= at);
     console.error(`killing the server after ${progress} requests`);
     const exited = new Promise((r) => server.on('exit', r));
     server.kill('SIGKILL');
@@ -217,33 +268,37 @@ await Promise.all(services.map((s) => s.stop()));
 services = PROCESSES.map((p) => supervise(p, 0));
 
 // Unpaid orders expire.
-const statuses = new Map();
+const statuses = new Map<string, Order>();
 for (const deadline = Date.now() + 120_000; ; await sleep(500)) {
-  for (let i = 0; i < ORDERS; i++) statuses.set(`o${i}`, await call(`Orders/o${i}/status`));
+  for (let i = 0; i < ORDERS; i++) statuses.set(`o${i}`, await call<Order>(`Orders/o${i}/status`));
   if (![...statuses.values()].some((o) => o.status === 'reserved')) break;
   if (Date.now() > deadline) throw new Error('orders did not expire');
 }
-const expected = { paid: 'sold', expired: 'released', rejected: 'rejected' };
-const counts = {};
+const expected: Record<string, string> = { paid: 'sold', expired: 'released', rejected: 'rejected' };
+const counts: Record<string, number> = {};
 for (const sku of SKUS) {
-  const { available, restocked, reservations } = await call(`Warehouse/${sku}/report`);
+  const { available, restocked, reservations } = await call<{
+    available: number;
+    restocked: number;
+    reservations: Reservation[];
+  }>(`Warehouse/${sku}/report`);
   assert.equal(restocked, STOCK, sku);
   const sold = reservations.filter(([, , state]) => state === 'sold').reduce((sum, [, qty]) => sum + qty, 0);
   assert.equal(available + sold, restocked, `${sku}: available ${available}, sold ${sold}`);
   const mine = Array.from({ length: ORDERS }, (_, i) => order(i)).filter((o) => o.sku === sku);
   assert.equal(reservations.length, mine.length, `${sku}: one reservation per order`);
   for (const [id, qty, state] of reservations) {
-    const o = statuses.get(id);
+    const o = statuses.get(id)!;
     assert.equal(expected[o.status], state, `${id}: ${o.status} but ${state}`);
     assert.equal(o.qty, qty, id);
     counts[o.status] = (counts[o.status] ?? 0) + 1;
   }
 }
 for (const [id, answer] of paid) {
-  if (answer === 'paid') assert.equal(statuses.get(id).status, 'paid', `${id} was paid`);
+  if (answer === 'paid') assert.equal(statuses.get(id)?.status, 'paid', `${id} was paid`);
 }
 
-const audit = await call('Ledger/bank/audit');
+const audit = await call<Audit>('Ledger/bank/audit');
 assert.deepEqual(audit, {
   accounts: ACCOUNTS,
   total: ACCOUNTS * OPENING,
@@ -254,7 +309,7 @@ assert.deepEqual(audit, {
 // Retried attempts reached the invocations their first attempt started: one
 // reserve and one ledger transfer per order and prompt, though attempts of
 // Orders/place and Agent/prompt ran many times.
-const invocations = async (service, handler) => {
+const invocations = async (service: string, handler: string): Promise<number> => {
   const response = await fetch(`${ADMIN}/query`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
@@ -262,8 +317,8 @@ const invocations = async (service, handler) => {
       query: `SELECT count(*) AS n FROM sys_invocation WHERE target_service_name = '${service}' AND target_handler_name = '${handler}'`,
     }),
   });
-  const { rows } = await response.json();
-  return rows[0].n;
+  const { rows } = (await response.json()) as { rows: { n: number }[] };
+  return rows[0]!.n;
 };
 assert.equal(await invocations('Warehouse', 'reserve'), ORDERS, 'reserve invocations');
 assert.equal(await invocations('Ledger', 'transfer'), AGENTS.length * SESSIONS * PROMPTS, 'transfer invocations');
@@ -271,7 +326,7 @@ assert.equal(await invocations('Ledger', 'transfer'), AGENTS.length * SESSIONS *
 console.error(`orders: ${JSON.stringify(counts)}`);
 console.error(`ledger: ${JSON.stringify(audit)}`);
 PROCESSES.forEach((p, i) => console.error(`${p.name} process started ${starts[i]} times`));
-PROCESSES.forEach((p, i) => assert.ok(p.perMille === 0 || starts[i] > 1, `no abort happened in ${p.name}`));
+PROCESSES.forEach((p, i) => assert.ok(p.perMille === 0 || (starts[i] ?? 0) > 1, `no abort happened in ${p.name}`));
 
 await Promise.all(services.map((s) => s.stop()));
 server.kill('SIGKILL');

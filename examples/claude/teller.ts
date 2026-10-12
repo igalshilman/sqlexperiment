@@ -7,27 +7,34 @@
 // CLAUDE_MODEL=claude-sonnet-5-5 (and ANTHROPIC_API_KEY).
 import Anthropic from '@anthropic-ai/sdk';
 
-const textOf = (content) =>
+type MessageParam = Anthropic.Beta.Messages.BetaMessageParam;
+type Message = Anthropic.Beta.Messages.BetaMessage;
+
+/** The text of a message's content, and of the tool results in it. */
+const textOf = (
+  content: MessageParam['content'] | Anthropic.Beta.Messages.BetaToolResultBlockParam['content'],
+): string =>
   typeof content === 'string'
     ? content
-    : content
-        .map((c) => (c.type === 'text' ? c.text : c.type === 'tool_result' ? textOf(c.content ?? '') : ''))
+    : (content ?? [])
+        .map((c) => (c.type === 'text' ? c.text : c.type === 'tool_result' ? textOf(c.content) : ''))
         .join('');
 
 /** The teller's reply to `messages`, as a Messages API response. */
-export function reply(messages) {
-  const last = messages.at(-1);
+export function reply(messages: MessageParam[]): Message {
+  const last = messages.at(-1)!;
   const text = textOf(last.content);
-  const message = (content) => ({
-    id: `msg_${messages.length}`,
-    type: 'message',
-    role: 'assistant',
-    model: 'teller',
-    content,
-    stop_reason: content.some((c) => c.type === 'tool_use') ? 'tool_use' : 'end_turn',
-    stop_sequence: null,
-    usage: { input_tokens: 0, output_tokens: 0 },
-  });
+  const message = (content: object[]): Message =>
+    ({
+      id: `msg_${messages.length}`,
+      type: 'message',
+      role: 'assistant',
+      model: 'teller',
+      content,
+      stop_reason: content.some((c) => 'name' in c) ? 'tool_use' : 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    }) as Message;
   if (Array.isArray(last.content) && last.content.some((c) => c.type === 'tool_result')) {
     return message([{ type: 'text', text: `Done: ${text}` }]);
   }
@@ -53,15 +60,17 @@ export const teller = {
     new Anthropic({
       apiKey: 'teller',
       maxRetries: 0,
-      fetch: async (_url, init) =>
-        new Response(JSON.stringify(teller.reply(JSON.parse(init.body).messages)), {
+      fetch: async (_url, init) => {
+        if (typeof init?.body !== 'string') throw new Error('the teller reads JSON request bodies');
+        return new Response(JSON.stringify(teller.reply(JSON.parse(init.body).messages)), {
           headers: { 'content-type': 'application/json' },
-        }),
+        });
+      },
     }),
 };
 
 /** `{ client, model }`: the teller, or Claude with CLAUDE_MODEL. */
-export const clientFromEnv = () =>
+export const clientFromEnv = (): { client: Anthropic; model: string } =>
   process.env.CLAUDE_MODEL
     ? { client: new Anthropic(), model: process.env.CLAUDE_MODEL }
     : { client: teller.client(), model: 'teller' };

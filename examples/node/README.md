@@ -94,16 +94,16 @@ it.
 A retried attempt runs the handler again from the start, so every context
 operation it reaches happens again. What each one does then:
 
-| Operation | On a retried attempt |
-|---|---|
-| `ctx.sql`, `ctx.sqlSession` | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
-| Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result. |
-| Sends, delayed sends | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer. |
-| `ctx.get`, `ctx.set`, `ctx.clear` | Read the state as stored; writes are ordered, and a lost one takes the later commands with it. |
-| `ctx.run` | Not available: its result would not be kept, and a retried attempt runs the handler again anyway, so call the function directly. A call to it is a terminal error. (The SDK uses an empty run itself, as the barrier above.) |
-| `ctx.sleep` | Starts over. |
-| `attach`, `cancel` | Idempotent already. |
-| Awakeables | Refused. |
+| Operation                                                                | On a retried attempt                                                                                                                                                                                                          |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ctx.sql`, `ctx.sqlSession`                                              | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
+| Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result.                                                   |
+| Sends, delayed sends                                                     | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer.                                                                                                                      |
+| `ctx.get`, `ctx.set`, `ctx.clear`                                        | Read the state as stored; writes are ordered, and a lost one takes the later commands with it.                                                                                                                                |
+| `ctx.run`                                                                | Not available: its result would not be kept, and a retried attempt runs the handler again anyway, so call the function directly. A call to it is a terminal error. (The SDK uses an empty run itself, as the barrier above.)  |
+| `ctx.sleep`                                                              | Starts over.                                                                                                                                                                                                                  |
+| `attach`, `cancel`                                                       | Idempotent already.                                                                                                                                                                                                           |
+| Awakeables                                                               | Refused.                                                                                                                                                                                                                      |
 
 The SDK does not make up keys: a call is idempotent when the code says so,
 with `rpc.opts({ idempotencyKey })` (`rpc.sendOpts` for a send). The examples
@@ -145,8 +145,8 @@ replayed, the order things happen in needs no recording.
 - **A cancellation reaches every pending promise** (each rejects with
   `CancelledError`); what is made after it runs normally.
 
-In TypeScript this context has its own type, `UnjournaledContext`, with
-`UnjournaledObjectContext`, `UnjournaledObjectSharedContext` and the workflow
+In TypeScript this context has its own type, `SqlContext`, with
+`SqlObjectContext`, `SqlObjectSharedContext` and the workflow
 ones: their operations return `Promise`s, there is no `awakeable` and no
 `run`, and `ctx.journalReplay` is `false`. `restate.service`, `restate.object` and
 `restate.workflow` pick it from the options: an unannotated `ctx` gets it
@@ -157,11 +157,11 @@ others) takes it when its own options say `journalReplay: false`.
 
 ```ts
 const counter = restate.object({
-  name: "counter",
+  name: 'counter',
   handlers: {
-    add: async (ctx: restate.UnjournaledObjectContext, n: number) => {
-      const [, total] = await Promise.all([ctx.sleep(10), ctx.get<number>("total")]);
-      ctx.set("total", (total ?? 0) + n);
+    add: async (ctx: restate.SqlObjectContext, n: number) => {
+      const [, total] = await Promise.all([ctx.sleep(10), ctx.get<number>('total')]);
+      ctx.set('total', (total ?? 0) + n);
       return (total ?? 0) + n;
     },
   },
@@ -170,17 +170,17 @@ const counter = restate.object({
 ```
 
 A handler that replays its journal keeps the published SDK's context and
-`RestatePromise`s. [`../concurrency.mjs`](../concurrency.mjs) tests all of
+`RestatePromise`s. [`../concurrency.ts`](../concurrency.ts) tests all of
 this against a real server.
 
 ## The examples
 
-Each runs alone (`node node/shop.mjs` from [`examples/`](..)), or together
-with the others (`npm run serve` there, or `node serve.mjs ledger shop` for
+Each runs alone (`node node/shop.ts` from [`examples/`](..)), or together
+with the others (`npm run serve` there, or `node serve.ts ledger shop` for
 some, on port 9080, or `PORT`):
 
-- [`ledger.mjs`](ledger.mjs): accounts and transfers, deduped by transfer id.
-- [`shop.mjs`](shop.mjs): a Warehouse object per SKU and an Orders object per
+- [`ledger.ts`](ledger.ts): accounts and transfers, deduped by transfer id.
+- [`shop.ts`](shop.ts): a Warehouse object per SKU and an Orders object per
   order, each with its own database, over RPC. Placing an order reserves stock
   (a call) and schedules its expiry (a delayed send); paying commits the
   stock, and an unpaid order releases it when it expires.

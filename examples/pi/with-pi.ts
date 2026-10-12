@@ -5,7 +5,7 @@
 //     withPi(ctx, { models, model: 'anthropic/claude-sonnet-4-5', tools }, (pi) => pi.prompt(id, text)),
 //
 // It runs `work` in one `ctx.sqlSession`: pi-durable's storage is the object's
-// database (pi-storage.mjs), and each pi-durable commit is an SQL transaction
+// database (pi-storage.ts), and each pi-durable commit is an SQL transaction
 // in it, stored in order with everything else the handler does. The Harness
 // is opened with `tools` (made with pi-durable's `defineTool`) and closed at
 // the end. A retried attempt (a crash, a lost connection) opens it again and
@@ -14,9 +14,35 @@
 // call is made again, and a tool call declared `replay: 'safe'` runs again
 // with the same call id, which a tool passes on to stay idempotent.
 import * as restate from '@restatedev/restate-sdk';
+import type { Context } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { AssistantEntry, createRegistry, defineExtension, Harness } from '@earendil-works/pi-durable';
-import { openSqlKvStorage } from './pi-storage.mjs';
+import type { MutableModels } from '@earendil-works/pi-ai';
+import {
+  AssistantEntry,
+  createRegistry,
+  defineExtension,
+  Harness,
+  type ToolRegistration,
+} from '@earendil-works/pi-durable';
+import { textOf } from './utils.ts';
+import { openSqlKvStorage } from './pi-storage.ts';
+
+/** What `work` gets: `prompt(id, text)`, and the `harness` and chord `context` for anything else. */
+export interface Pi {
+  harness: Harness;
+  context: Context;
+  /** Answer `text`, once per prompt `id`, with the answer's text. */
+  prompt(id: string, text: string): Promise<string>;
+}
+
+export interface PiOptions {
+  /** A pi-ai model registry. */
+  models: MutableModels;
+  /** The model to use, as `provider/model-id`. */
+  model: string;
+  /** The agent's tools, made with pi-durable's `defineTool`. */
+  tools?: ToolRegistration[];
+}
 
 /**
  * Run `work(pi)` with a Harness over the object's database: `models` is a
@@ -24,9 +50,13 @@ import { openSqlKvStorage } from './pi-storage.mjs';
  * `tools` the agent's tools. `pi` has `prompt(id, text)`, and the `harness`
  * and chord `context` for anything else.
  */
-export const withPi = (ctx, { models, model, tools = [] }, work) =>
+export const withPi = <T>(
+  ctx: restate.SqlObjectContext,
+  { models, model, tools = [] }: PiOptions,
+  work: (pi: Pi) => Promise<T>,
+): Promise<T> =>
   ctx.sqlSession(async (db) => {
-    const [provider, modelId] = model.split('/');
+    const [provider = '', modelId = ''] = model.split('/');
     const context = BACKGROUND_CONTEXT;
     const registry = createRegistry();
     registry.install(defineExtension({ name: 'tools', tools }));
@@ -35,27 +65,21 @@ export const withPi = (ctx, { models, model, tools = [] }, work) =>
       return await work({
         harness,
         context,
-        /** Answer `text`, once per prompt `id`, with the answer's text. */
         async prompt(id, text) {
           const root = await harness.root(context, { agent: { model: { provider, modelId } } });
           const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
           const settled = await submission.wait(context);
-          if (settled.status !== 'done') {
+          if (settled.status !== 'done' || settled.answer === undefined) {
             throw new restate.TerminalError(`prompt ${id} unanswered: ${settled.reason ?? 'unknown'}`);
           }
-          const answer = await root.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
-          return textOf(answer.model.at(-1).content);
+          const { answer } = settled;
+          const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
+          const reply = entry?.model?.at(-1);
+          if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
+          return textOf(reply.content);
         },
       });
     } finally {
       await harness.close(context);
     }
   });
-
-const textOf = (content) =>
-  typeof content === 'string'
-    ? content
-    : content
-        .filter((c) => c.type === 'text')
-        .map((c) => c.text)
-        .join('');

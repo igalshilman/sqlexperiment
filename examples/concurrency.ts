@@ -4,13 +4,14 @@
 // waits for any of them, and a cancellation reaches all of them; there is no
 // ctx.run. A handler that replays its journal keeps RestatePromises.
 //
-//   RESTATE_SERVER=/path/to/restate-server node concurrency.mjs   (or make concurrency-test)
+//   RESTATE_SERVER=/path/to/restate-server node concurrency.ts   (or make concurrency-test)
 import * as restate from '@restatedev/restate-sdk';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
+import { row } from './node/sql.ts';
 
 const SERVER = process.env.RESTATE_SERVER;
 if (!SERVER) {
@@ -21,15 +22,41 @@ const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
 const PORT = 9184;
 const INACTIVITY = 1000; // the server's inactivity timeout: a handler idle this long suspends
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** The runtime type of `value`'s member `name`, which its static type may not have. */
+const member = (value: unknown, name: string) => typeof (value as Record<string, unknown>)[name];
+
+type Ctx = restate.SqlObjectContext;
+/** What the slow helper does: wait `ms`, then return `value` or fail with `fail`. */
+interface Slow {
+  ms: number;
+  value?: unknown;
+  fail?: string;
+}
 
 // --- Services
+
+/** A hand-written combinator: the first two of `promises` to finish, in order. */
+const firstTwo = <T>(promises: Promise<T>[]) =>
+  new Promise<T[]>((resolve, reject) => {
+    const done: T[] = [];
+    // Built on then(), on purpose.
+    /* oxlint-disable promise/always-return, promise/no-callback-in-promise */
+    for (const p of promises) {
+      p.then((v) => {
+        done.push(v);
+        if (done.length === 2) resolve(done);
+      }, reject);
+    }
+    /* oxlint-enable promise/always-return, promise/no-callback-in-promise */
+  });
 
 // A handler that replays its journal (the default): a slow, keyed helper.
 const helper = restate.object({
   name: 'Helper',
   handlers: {
-    slow: async (ctx, { ms, value, fail }) => {
+    slow: async (ctx: restate.ObjectContext, { ms, value, fail }: Slow) => {
       reached.add(ctx.key);
       await ctx.sleep(ms);
       if (fail) throw new restate.TerminalError(fail);
@@ -41,54 +68,50 @@ const helper = restate.object({
 const replayed = restate.service({
   name: 'Replayed',
   handlers: {
-    combine: async (ctx) => {
+    combine: async (ctx: restate.Context) => {
       const p = ctx.sleep(10);
       await restate.RestatePromise.all([p, ctx.sleep(20)]);
-      return { map: typeof p.map };
+      return { map: member(p, 'map') };
     },
   },
 });
 
-const attempts = new Map();
+const attempts = new Map<string, number>();
 // The keys of the helpers reached: the services run in this process.
-const reached = new Set();
-const attempt = (ctx) => {
+const reached = new Set<string>();
+const attempt = (ctx: Ctx) => {
   const id = ctx.request().id;
   attempts.set(id, (attempts.get(id) ?? 0) + 1);
   return () => attempts.get(id);
 };
 // A call to the helper, idempotent across attempts: a retried or resumed
 // attempt reaches the call the first one made.
-const slow = (ctx, key, args) =>
+const slow = (ctx: Ctx, key: string, args: Slow) =>
   ctx.objectClient(helper, key).slow(args, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${key}` }));
 
 const conc = restate.object({
   name: 'Concurrency',
   handlers: {
-    plain: async (ctx) => {
+    plain: async (ctx: Ctx) => {
       const p = ctx.sleep(10);
-      const call = slow(ctx, 'plain', { ms: 10, value: 1 });
-      await Promise.all([p, call]);
+      const helperCall = slow(ctx, 'plain', { ms: 10, value: 1 });
+      await Promise.all([p, helperCall]);
       return {
         promise: p instanceof Promise,
-        map: typeof p.map,
-        orTimeout: typeof call.orTimeout,
+        map: member(p, 'map'),
+        orTimeout: member(helperCall, 'orTimeout'),
         date: typeof (await ctx.date.now()),
         journalReplay: ctx.journalReplay,
       };
     },
 
-    all: async (ctx) => {
+    all: async (ctx: Ctx) => {
       const n = attempt(ctx);
-      const [, , h] = await Promise.all([
-        ctx.sleep(300),
-        ctx.sleep(500),
-        slow(ctx, 'all', { ms: 400, value: 'h' }),
-      ]);
+      const [, , h] = await Promise.all([ctx.sleep(300), ctx.sleep(500), slow(ctx, 'all', { ms: 400, value: 'h' })]);
       return { h, attempts: n() };
     },
 
-    race: async (ctx) => {
+    race: async (ctx: Ctx) => {
       const n = attempt(ctx);
       const winner = await Promise.race([
         slow(ctx, 'race', { ms: 5000, value: 'call' }),
@@ -97,18 +120,7 @@ const conc = restate.object({
       return { winner, attempts: n() };
     },
 
-    custom: async (ctx) => {
-      // The first two to finish, in order.
-      const firstTwo = (promises) =>
-        new Promise((resolve, reject) => {
-          const done = [];
-          for (const p of promises) {
-            p.then((v) => {
-              done.push(v);
-              if (done.length === 2) resolve(done);
-            }, reject);
-          }
-        });
+    custom: async (ctx: Ctx) => {
       return firstTwo([
         slow(ctx, 'c1', { ms: 900, value: 'c' }),
         slow(ctx, 'c2', { ms: 100, value: 'a' }),
@@ -116,51 +128,52 @@ const conc = restate.object({
       ]);
     },
 
-    eagerCall: async (ctx) => {
+    eagerCall: async (ctx: Ctx) => {
       const key = `eager-${ctx.request().id}`;
-      slow(ctx, key, { ms: 10, value: 1 }); // not awaited
+      void slow(ctx, key, { ms: 10, value: 1 }); // not awaited
       await ctx.sleep(500);
       return reached.has(key);
     },
 
-    noRun: async (ctx) => {
+    noRun: async (ctx: Ctx) => {
+      // The context's type has no `run`: the runtime refuses it too.
       try {
-        ctx.run('r', () => 1);
+        void (ctx as unknown as restate.Context).run('r', () => 1);
         return 'ran';
       } catch (e) {
-        return { terminal: e instanceof restate.TerminalError, message: e.message };
+        return { terminal: e instanceof restate.TerminalError, message: (e as Error).message };
       }
     },
 
-    uncaughtRun: async (ctx) => ctx.run('r', () => 1),
+    uncaughtRun: async (ctx: Ctx) => (ctx as unknown as restate.Context).run('r', () => 1),
 
-    lateRegistration: async (ctx) => {
+    lateRegistration: async (ctx: Ctx) => {
       const n = attempt(ctx);
-      ctx.sleep(30_000); // pending all along, never awaited
+      void ctx.sleep(30_000); // pending all along, never awaited
       await sleep(100); // not a Restate promise
       const value = await slow(ctx, 'late', { ms: 10, value: 'ran' });
       return { value, attempts: n() };
     },
 
-    failures: async (ctx) => {
-      slow(ctx, 'boom', { ms: 10, fail: 'boom' }); // fails, not awaited: no unhandled rejection
-      const reason = await slow(ctx, 'fail', { ms: 10, fail: 'nope' }).catch((e) => e.message);
+    failures: async (ctx: Ctx) => {
+      void slow(ctx, 'boom', { ms: 10, fail: 'boom' }); // fails, not awaited: no unhandled rejection
+      const reason = await slow(ctx, 'fail', { ms: 10, fail: 'nope' }).catch((e: Error) => e.message);
       await ctx.sleep(50);
       return reason;
     },
 
-    ids: async (ctx) => {
-      const call = slow(ctx, 'ids', { ms: 10, value: 1 });
+    ids: async (ctx: Ctx) => {
+      const helperCall = slow(ctx, 'ids', { ms: 10, value: 1 });
       const send = ctx
         .objectSendClient(helper, 'ids-send')
         .slow({ ms: 10, value: 1 }, restate.rpc.sendOpts({ idempotencyKey: `${ctx.request().id}:send` }));
-      const [callId, sendId, value] = await Promise.all([call.invocationId, send.invocationId, call]);
+      const [callId, sendId, value] = await Promise.all([helperCall.invocationId, send.invocationId, helperCall]);
       return { call: callId.startsWith('inv'), send: sendId.startsWith('inv'), value };
     },
 
     // Idle past the inactivity timeout: the invocation suspends, and resumes
     // (from the start) on the first of the two to complete.
-    suspend: async (ctx) => {
+    suspend: async (ctx: Ctx) => {
       const n = attempt(ctx);
       const winner = await Promise.race([
         ctx.sleep(20_000).then(() => 'sleep'),
@@ -169,7 +182,7 @@ const conc = restate.object({
       return { winner, attempts: n() };
     },
 
-    cancelled: async (ctx) => {
+    cancelled: async (ctx: Ctx) => {
       const results = await Promise.allSettled([
         ctx.sleep(20_000),
         ctx.sleep(25_000),
@@ -184,23 +197,23 @@ const conc = restate.object({
 const flow = restate.workflow({
   name: 'Flow',
   handlers: {
-    run: async (ctx) => {
-      const got = ctx.promise('approval').get();
-      return { promise: got instanceof Promise, map: typeof got.map, value: await got };
+    run: async (ctx: restate.SqlWorkflowContext) => {
+      const got = ctx.promise<string>('approval').get();
+      return { promise: got instanceof Promise, map: member(got, 'map'), value: await got };
     },
-    approve: async (ctx, value) => {
-      const resolved = ctx.promise('approval').resolve(value);
+    approve: async (ctx: restate.SqlWorkflowSharedContext, value: string) => {
+      const resolved = ctx.promise<string>('approval').resolve(value);
       await resolved;
-      return typeof resolved.map;
+      return member(resolved, 'map');
     },
   },
   options: { journalReplay: false },
 });
 
-const db = restate.object({
+const database = restate.object({
   name: 'Db',
   handlers: {
-    concurrent: async (ctx) =>
+    concurrent: async (ctx: Ctx) =>
       ctx.sqlSession(async (db) => {
         await db.execute('CREATE TABLE IF NOT EXISTS t (v INTEGER)');
         const [, h, r] = await Promise.all([
@@ -209,7 +222,7 @@ const db = restate.object({
           ctx.sleep(10).then(() => 3),
           db.query('SELECT count(*) FROM t'),
         ]);
-        const [[count]] = await db.query('SELECT count(*) FROM t');
+        const [count] = await row<[number]>(db, 'SELECT count(*) FROM t');
         return { h, r, count };
       }),
   },
@@ -232,22 +245,31 @@ const server = spawn(SERVER, ['--base-dir', join(dir, 'server')], {
 process.on('exit', () => server.kill('SIGKILL'));
 
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
-  if (await fetch(`${ADMIN}/health`).then((r) => r.ok, () => false)) break;
+  if (
+    await fetch(`${ADMIN}/health`).then(
+      (r) => r.ok,
+      () => false,
+    )
+  )
+    break;
   if (Date.now() > deadline) throw new Error('restate-server did not start');
 }
-const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(db).listen(PORT);
+const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(database).listen(PORT);
 void endpoint;
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   const registered = await fetch(`${ADMIN}/deployments`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ uri: `http://127.0.0.1:${PORT}`, force: true }),
-  }).then((r) => r.ok, () => false);
+  }).then(
+    (r) => r.ok,
+    () => false,
+  );
   if (registered) break;
   if (Date.now() > deadline) throw new Error('registration failed');
 }
 
-async function call(path, body = null) {
+async function call(path: string, body: unknown = null): Promise<{ value: unknown; ms: number }> {
   const started = Date.now();
   const r = await fetch(`${INGRESS}/${path}`, {
     method: 'POST',
@@ -260,14 +282,24 @@ async function call(path, body = null) {
   return { value: JSON.parse(text), ms: Date.now() - started };
 }
 
+/** Start `path` without waiting for its result: its invocation id. */
+async function start(path: string): Promise<string> {
+  const r = await fetch(`${INGRESS}/${path}/send`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: 'null',
+  });
+  return ((await r.json()) as { invocationId: string }).invocationId;
+}
+
 let failed = 0;
-async function check(name, body) {
+async function check(name: string, body: () => Promise<void>) {
   try {
     await body();
     console.log(`ok   ${name}`);
   } catch (e) {
     failed++;
-    console.log(`FAIL ${name}: ${e.message}`);
+    console.log(`FAIL ${name}: ${(e as Error).message}`);
   }
 }
 
@@ -328,36 +360,29 @@ await check('invocation ids of a call and a send', async () => {
 });
 
 await check('a suspension resumes on the first of two pending operations', async () => {
-  const { value, ms } = await call('Concurrency/suspend/suspend');
+  const { value: answer, ms } = await call('Concurrency/suspend/suspend');
+  const value = answer as { winner: string; attempts: number };
   assert.equal(value.winner, 'call');
   assert.ok(value.attempts >= 2, `attempts ${value.attempts}`); // it did suspend
   assert.ok(ms < 8000, `${ms} ms`); // the call (3s), not the sleep (20s)
 });
 
 await check('a cancellation reaches every pending operation', async () => {
-  const sent = await fetch(`${INGRESS}/Concurrency/cancel/cancelled/send`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: 'null',
-  }).then((r) => r.json());
+  const invocationId = await start('Concurrency/cancel/cancelled');
   await sleep(500);
-  const cancel = await fetch(`${ADMIN}/invocations/${sent.invocationId}/cancel`, { method: 'PATCH' });
+  const cancel = await fetch(`${ADMIN}/invocations/${invocationId}/cancel`, { method: 'PATCH' });
   assert.ok(cancel.ok, `cancel: ${cancel.status} ${await cancel.text()}`);
-  const output = await fetch(`${INGRESS}/restate/invocation/${sent.invocationId}/attach`, {
+  const output = await fetch(`${INGRESS}/restate/invocation/${invocationId}/attach`, {
     signal: AbortSignal.timeout(30_000),
   }).then((r) => r.json());
   assert.deepEqual(output, ['rejected:409', 'rejected:409', 'rejected:409']);
 });
 
 await check("a workflow's durable promise is a plain promise", async () => {
-  const sent = await fetch(`${INGRESS}/Flow/f/run/send`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: 'null',
-  }).then((r) => r.json());
+  const invocationId = await start('Flow/f/run');
   await sleep(200);
   assert.equal((await call('Flow/f/approve', 'yes')).value, 'undefined');
-  const output = await fetch(`${INGRESS}/restate/invocation/${sent.invocationId}/attach`, {
+  const output = await fetch(`${INGRESS}/restate/invocation/${invocationId}/attach`, {
     signal: AbortSignal.timeout(30_000),
   }).then((r) => r.json());
   assert.deepEqual(output, { promise: true, map: 'undefined', value: 'yes' });

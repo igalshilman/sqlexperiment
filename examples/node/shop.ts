@@ -13,11 +13,17 @@
 //   a key, each attempt's call would be a new one.
 //
 // Environment: PORT (default 9080), SHOP_EXPIRY_MS (how long an unpaid order
-// holds its stock, default 5000) and ABORT_PER_MILLE (see faults.mjs).
+// holds its stock, default 5000) and ABORT_PER_MILLE (see faults.ts).
 import * as restate from '@restatedev/restate-sdk';
-import { serveIfMain } from '../faults.mjs';
+import { serveIfMain } from '../faults.ts';
+import { row } from './sql.ts';
 
 const EXPIRY_MS = Number(process.env.SHOP_EXPIRY_MS ?? 5000);
+
+type Ctx = restate.SqlObjectContext;
+
+/** A reservation: the order, its quantity, and its state (held, sold, released or rejected). */
+export type Reservation = [order: string, qty: number, state: string];
 
 const WAREHOUSE = `
   CREATE TABLE IF NOT EXISTS stock(id INTEGER PRIMARY KEY CHECK (id = 0), available INTEGER NOT NULL);
@@ -30,10 +36,10 @@ export const warehouse = restate.object({
   name: 'Warehouse',
   handlers: {
     /** Add `qty` units, once per restock `id`. */
-    restock: (ctx, { id, qty }) =>
+    restock: (ctx: Ctx, { id, qty }: { id: string; qty: number }) =>
       ctx.sql(async (db) => {
         await db.execute(WAREHOUSE);
-        const [[done]] = await db.query('SELECT count(*) FROM restocks WHERE id = ?', [id]);
+        const [done] = await row<[number]>(db, 'SELECT count(*) FROM restocks WHERE id = ?', [id]);
         if (done) return false;
         await db.execute('INSERT INTO restocks VALUES(?, ?)', [id, qty]);
         await db.execute('UPDATE stock SET available = available + ?', [qty]);
@@ -41,12 +47,12 @@ export const warehouse = restate.object({
       }),
 
     /** Hold `qty` units for `order`; false if there are not enough. */
-    reserve: (ctx, { order, qty }) =>
+    reserve: (ctx: Ctx, { order, qty }: { order: string; qty: number }) =>
       ctx.sql(async (db) => {
         await db.execute(WAREHOUSE);
-        const held = await db.query('SELECT state FROM reservations WHERE orderId = ?', [order]);
-        if (held.length > 0) return held[0][0] !== 'rejected';
-        const [[available]] = await db.query('SELECT available FROM stock');
+        const [held] = await db.query('SELECT state FROM reservations WHERE orderId = ?', [order]);
+        if (held) return held[0] !== 'rejected';
+        const [available] = await row<[number]>(db, 'SELECT available FROM stock');
         const ok = available >= qty;
         if (ok) await db.execute('UPDATE stock SET available = available - ?', [qty]);
         await db.execute('INSERT INTO reservations VALUES(?, ?, ?)', [order, qty, ok ? 'held' : 'rejected']);
@@ -54,30 +60,30 @@ export const warehouse = restate.object({
       }),
 
     /** The held units of `order` are sold. */
-    commit: (ctx, { order }) =>
+    commit: (ctx: Ctx, { order }: { order: string }) =>
       ctx.sql(async (db) => {
         await db.execute(WAREHOUSE);
         await db.execute(`UPDATE reservations SET state = 'sold' WHERE orderId = ? AND state = 'held'`, [order]);
       }),
 
     /** The held units of `order` go back to stock. */
-    release: (ctx, { order }) =>
+    release: (ctx: Ctx, { order }: { order: string }) =>
       ctx.sql(async (db) => {
         await db.execute(WAREHOUSE);
-        const held = await db.query(`SELECT qty FROM reservations WHERE orderId = ? AND state = 'held'`, [order]);
-        if (held.length === 0) return;
-        await db.execute('UPDATE stock SET available = available + ?', [held[0][0]]);
+        const [held] = await db.query(`SELECT qty FROM reservations WHERE orderId = ? AND state = 'held'`, [order]);
+        if (!held) return;
+        await db.execute('UPDATE stock SET available = available + ?', [held[0]!]);
         await db.execute(`UPDATE reservations SET state = 'released' WHERE orderId = ?`, [order]);
       }),
 
     /** Stock and reservations, for audits. */
-    report: (ctx) =>
+    report: (ctx: Ctx) =>
       ctx.sql(async (db) => {
         await db.execute(WAREHOUSE);
-        const [[available]] = await db.query('SELECT available FROM stock');
-        const [[restocked]] = await db.query('SELECT coalesce(sum(qty), 0) FROM restocks');
+        const [available] = await row<[number]>(db, 'SELECT available FROM stock');
+        const [restocked] = await row<[number]>(db, 'SELECT coalesce(sum(qty), 0) FROM restocks');
         const reservations = await db.query('SELECT orderId, qty, state FROM reservations ORDER BY orderId');
-        return { available, restocked, reservations };
+        return { available, restocked, reservations: reservations as Reservation[] };
       }),
   },
   options: restate.sqlOptions,
@@ -85,10 +91,17 @@ export const warehouse = restate.object({
 
 const ORDER = `CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY CHECK (id = 0), sku TEXT, qty INTEGER, status TEXT)`;
 
-async function order(db) {
+/** An order: its SKU, quantity and status (reserved, rejected, paid or expired). */
+export interface Order {
+  sku: string;
+  qty: number;
+  status: string;
+}
+
+async function readOrder(db: restate.SqlDatabase): Promise<Order | null> {
   await db.execute(ORDER);
-  const rows = await db.query('SELECT sku, qty, status FROM orders');
-  return rows.length === 0 ? null : { sku: rows[0][0], qty: rows[0][1], status: rows[0][2] };
+  const [stored] = await db.query('SELECT sku, qty, status FROM orders');
+  return stored ? { sku: String(stored[0]), qty: Number(stored[1]), status: String(stored[2]) } : null;
 }
 
 /** One order (the object key): placed, then paid, or expired. */
@@ -96,9 +109,9 @@ export const orders = restate.object({
   name: 'Orders',
   handlers: {
     /** Reserve the stock; an unpaid order expires after SHOP_EXPIRY_MS. */
-    place: (ctx, { sku, qty }) =>
+    place: (ctx: Ctx, { sku, qty }: { sku: string; qty: number }) =>
       ctx.sql(async (db) => {
-        const placed = await order(db);
+        const placed = await readOrder(db);
         if (placed) return placed.status;
         const ok = await ctx
           .objectClient(warehouse, sku)
@@ -117,9 +130,9 @@ export const orders = restate.object({
       }),
 
     /** Pay a reserved order. */
-    pay: (ctx) =>
+    pay: (ctx: Ctx) =>
       ctx.sql(async (db) => {
-        const placed = await order(db);
+        const placed = await readOrder(db);
         if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
         await ctx
           .objectClient(warehouse, placed.sku)
@@ -129,9 +142,9 @@ export const orders = restate.object({
       }),
 
     /** Release the stock of an order still unpaid. */
-    expire: (ctx) =>
+    expire: (ctx: Ctx) =>
       ctx.sql(async (db) => {
-        const placed = await order(db);
+        const placed = await readOrder(db);
         if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
         await ctx
           .objectClient(warehouse, placed.sku)
@@ -140,7 +153,7 @@ export const orders = restate.object({
         return 'expired';
       }),
 
-    status: (ctx) => ctx.sql(order),
+    status: (ctx: Ctx) => ctx.sql(readOrder),
   },
   options: restate.sqlOptions,
 });
