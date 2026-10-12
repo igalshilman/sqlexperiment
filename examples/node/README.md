@@ -7,6 +7,9 @@ the state, single-writer execution per key, and retries. It uses the
 [sqlite-kv addon](../../sqlite-kv/node/README.md) and a patched Restate TypeScript SDK
 ([`vendor/typescript`](../../vendor/README.md#typescript)).
 
+It needs the latest, unreleased Restate server, with service protocol V8
+turned on: see [the requirements](../../README.md#requirements).
+
 ```js
 import * as restate from '@restatedev/restate-sdk';
 
@@ -193,7 +196,8 @@ storage in the object's database.
 ```sh
 make examples-js   # from the repository root: the addon, the patched SDK, npm install
 cd examples && npm run serve
-restate deployments register http://localhost:9080
+docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true ghcr.io/restatedev/restate:service-protocol-v8   # Restate with protocol V8 (see the repository's README, Requirements), in another terminal
+restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
 curl localhost:8080/Orders/o1/place --json '{"sku": "apple", "qty": 2}'
 ```
