@@ -41,7 +41,7 @@ import { CONTINUE, teller } from './teller.ts';
  * tool's error goes to `fail` (the harness would hand it to the model as the
  * tool's result).
  */
-const bank = (ctx: restate.UnjournaledObjectContext, fail: (error: unknown) => void) => {
+const bank = (ctx: restate.SqlObjectContext, fail: (error: unknown) => void) => {
   const books = ctx.objectClient(ledger, 'bank');
   const key = (id: string) => `${ctx.request().id}:${id}`;
   return [
@@ -136,7 +136,7 @@ const message = (id: string, text: string): UserMessage =>
   freezeMessage({ id: MessageId(id), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } });
 
 /** Answer prompt `text`, once per prompt `id`. */
-export const prompt = (ctx: restate.UnjournaledObjectContext, { id, text }: { id: string; text: string }) =>
+export const prompt = (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) =>
   ctx.sqlSession(async (db) => {
     const harness = await boot(db);
     // A tool's error fails the attempt, which Restate retries: the harness

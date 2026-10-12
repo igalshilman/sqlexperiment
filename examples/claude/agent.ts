@@ -36,7 +36,7 @@ const callId = (context?: BetaToolRunContext) => {
 };
 
 /** The bank tools of one invocation: they reach the ledger through `ctx`. */
-const bank = (ctx: restate.UnjournaledObjectContext): BetaRunnableTool[] => {
+const bank = (ctx: restate.SqlObjectContext): BetaRunnableTool[] => {
   const books = ctx.objectClient(ledger, 'bank');
   // One idempotency key per tool call: a prompt makes several.
   const key = (context?: BetaToolRunContext) => `${ctx.request().id}:${callId(context)}`;
@@ -99,7 +99,7 @@ const textOf = (content: Anthropic.Beta.Messages.BetaContentBlock[]) =>
 const { client, model } = clientFromEnv();
 
 /** Run prompt `id` of `conversation` until it is answered, from its stored messages. */
-async function run(ctx: restate.UnjournaledObjectContext, conversation: Conversation, id: string) {
+async function run(ctx: restate.SqlObjectContext, conversation: Conversation, id: string) {
   const { tools, check } = failing(bank(ctx));
   const runner = client.beta.messages.toolRunner({
     model,
@@ -132,7 +132,7 @@ async function run(ctx: restate.UnjournaledObjectContext, conversation: Conversa
 }
 
 /** Answer prompt `text`, once per prompt `id`. */
-export const prompt = (ctx: restate.UnjournaledObjectContext, { id, text }: { id: string; text: string }) =>
+export const prompt = (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) =>
   ctx.sqlSession(async (db) => {
     const conversation = await Conversation.open(db);
     for (;;) {

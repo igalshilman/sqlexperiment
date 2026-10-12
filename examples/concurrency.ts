@@ -27,7 +27,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** The runtime type of `value`'s member `name`, which its static type may not have. */
 const member = (value: unknown, name: string) => typeof (value as Record<string, unknown>)[name];
 
-type Ctx = restate.UnjournaledObjectContext;
+type Ctx = restate.SqlObjectContext;
 /** What the slow helper does: wait `ms`, then return `value` or fail with `fail`. */
 interface Slow {
   ms: number;
@@ -197,11 +197,11 @@ const conc = restate.object({
 const flow = restate.workflow({
   name: 'Flow',
   handlers: {
-    run: async (ctx: restate.UnjournaledWorkflowContext) => {
+    run: async (ctx: restate.SqlWorkflowContext) => {
       const got = ctx.promise<string>('approval').get();
       return { promise: got instanceof Promise, map: member(got, 'map'), value: await got };
     },
-    approve: async (ctx: restate.UnjournaledWorkflowSharedContext, value: string) => {
+    approve: async (ctx: restate.SqlWorkflowSharedContext, value: string) => {
       const resolved = ctx.promise<string>('approval').resolve(value);
       await resolved;
       return member(resolved, 'map');

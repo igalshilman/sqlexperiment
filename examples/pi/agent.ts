@@ -20,7 +20,7 @@ import { withPi } from './with-pi.ts';
 const { models, model } = await modelFromEnv();
 
 /** The bank tools of one invocation: they reach the ledger through `ctx`. */
-const bank = (ctx: restate.UnjournaledObjectContext) => {
+const bank = (ctx: restate.SqlObjectContext) => {
   const books = ctx.objectClient(ledger, 'bank');
   return [
     defineTool({
@@ -57,7 +57,7 @@ export const agent = restate.object({
   name: 'Agent',
   handlers: {
     /** Answer prompt `text`, once per prompt `id`. */
-    prompt: (ctx: restate.UnjournaledObjectContext, { id, text }: { id: string; text: string }) =>
+    prompt: (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) =>
       withPi(ctx, { models, model, tools: bank(ctx) }, async (pi) => ({ answer: await pi.prompt(id, text) })),
   },
   options: {

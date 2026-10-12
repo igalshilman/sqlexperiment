@@ -20,7 +20,7 @@ import { row } from './sql.ts';
 
 const EXPIRY_MS = Number(process.env.SHOP_EXPIRY_MS ?? 5000);
 
-type Ctx = restate.UnjournaledObjectContext;
+type Ctx = restate.SqlObjectContext;
 
 /** A reservation: the order, its quantity, and its state (held, sold, released or rejected). */
 export type Reservation = [order: string, qty: number, state: string];

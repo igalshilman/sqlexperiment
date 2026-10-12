@@ -1,20 +1,20 @@
 diff --git a/packages/libs/restate-sdk/src/common_api.ts b/packages/libs/restate-sdk/src/common_api.ts
-index 18d3aa3..476411a 100644
+index 18d3aa3..80a9ad7 100644
 --- a/packages/libs/restate-sdk/src/common_api.ts
 +++ b/packages/libs/restate-sdk/src/common_api.ts
 @@ -35,9 +35,20 @@ export type {
    Target,
    InvocationReference,
    SignalReference,
-+  UnjournaledContext,
-+  UnjournaledObjectContext,
-+  UnjournaledObjectSharedContext,
-+  UnjournaledWorkflowContext,
-+  UnjournaledWorkflowSharedContext,
-+  UnjournaledScopedContext,
-+  UnjournaledInvocationReference,
-+  UnjournaledInvocationPromise,
-+  UnjournaledDurablePromise,
++  SqlContext,
++  SqlObjectContext,
++  SqlObjectSharedContext,
++  SqlWorkflowContext,
++  SqlWorkflowSharedContext,
++  SqlScopedContext,
++  SqlInvocationReference,
++  SqlInvocationPromise,
++  SqlDurablePromise,
  } from "./context.js";
  export { InvocationIdParser, RestatePromise } from "./context.js";
  export { isRestatePromise } from "./promises.js";
@@ -27,14 +27,14 @@ index 18d3aa3..476411a 100644
    SendClient,
    ClientFromDescriptors,
    SendClientFromDescriptors,
-+  UnjournaledClient,
-+  UnjournaledClientFromDescriptors,
++  SqlClient,
++  SqlClientFromDescriptors,
 +  ContextFor,
    ClientCallOptions,
    ClientSendOptions,
    RemoveVoidArgument,
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..c2fa54b 100644
+index 8ea15b1..42fe5fb 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,11 +9,14 @@
@@ -47,8 +47,8 @@ index 8ea15b1..c2fa54b 100644
    SendClient,
    ClientFromDescriptors,
    SendClientFromDescriptors,
-+  UnjournaledClient,
-+  UnjournaledClientFromDescriptors,
++  SqlClient,
++  SqlClientFromDescriptors,
    //eslint-disable-next-line @typescript-eslint/no-unused-vars
    ClientCallOptions,
  } from "./types/rpc.js";
@@ -90,7 +90,7 @@ index 8ea15b1..c2fa54b 100644
  }
  
  /**
-@@ -1131,3 +1165,201 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
+@@ -1131,3 +1165,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
      WorkflowSharedContext<TState>,
      ObjectContext<TState>,
      RestateWorkflowContext {}
@@ -103,10 +103,10 @@ index 8ea15b1..c2fa54b 100644
 + *
 + * @experimental
 + */
-+export type UnjournaledInvocationPromise<T> = Promise<T> & InvocationHandle;
++export type SqlInvocationPromise<T> = Promise<T> & InvocationHandle;
 +
 +// The members of Context that differ without journal replay.
-+type JournaledOnly =
++type ReplayOnly =
 +  | "run"
 +  | "awakeable"
 +  | "sleep"
@@ -138,7 +138,7 @@ index 8ea15b1..c2fa54b 100644
 + *
 + * @experimental
 + */
-+export interface UnjournaledContext extends Omit<Context, JournaledOnly> {
++export interface SqlContext extends Omit<Context, ReplayOnly> {
 +  /** Always `false`: this context does not replay a journal. */
 +  readonly journalReplay: false;
 +
@@ -146,40 +146,38 @@ index 8ea15b1..c2fa54b 100644
 +  sleep(duration: Duration | number, name?: string): Promise<void>;
 +
 +  /** See {@link Context.serviceClient}. */
-+  serviceClient<D>(
-+    opts: ServiceDefinitionFrom<D>
-+  ): UnjournaledClient<Service<D>>;
++  serviceClient<D>(opts: ServiceDefinitionFrom<D>): SqlClient<Service<D>>;
 +
 +  /** See {@link Context.objectClient}. */
 +  objectClient<D>(
 +    opts: VirtualObjectDefinitionFrom<D>,
 +    key: string
-+  ): UnjournaledClient<VirtualObject<D>>;
++  ): SqlClient<VirtualObject<D>>;
 +
 +  /** See {@link Context.workflowClient}. */
 +  workflowClient<D>(
 +    opts: WorkflowDefinitionFrom<D>,
 +    key: string
-+  ): UnjournaledClient<Workflow<D>>;
++  ): SqlClient<Workflow<D>>;
 +
 +  /** See {@link Context.client}. */
 +  client<P extends string, H extends Record<string, HandlerDescriptor>>(
 +    serviceInterface: ServiceDescriptor<P, H>
-+  ): UnjournaledClientFromDescriptors<H>;
++  ): SqlClientFromDescriptors<H>;
 +  client<P extends string, H extends Record<string, HandlerDescriptor>>(
 +    objectOrWorkflowInterface:
 +      | ObjectDescriptor<P, H>
 +      | WorkflowDescriptor<P, H>,
 +    key: string
-+  ): UnjournaledClientFromDescriptors<H>;
++  ): SqlClientFromDescriptors<H>;
 +
 +  /** See {@link Context.scope}. */
-+  scope(scopeKey: string): UnjournaledScopedContext;
++  scope(scopeKey: string): SqlScopedContext;
 +
 +  /** See {@link Context.genericCall}. */
 +  genericCall<REQ = Uint8Array, RES = Uint8Array>(
 +    call: GenericCall<REQ, RES>
-+  ): UnjournaledInvocationPromise<RES>;
++  ): SqlInvocationPromise<RES>;
 +
 +  /** See {@link Context.attach}. */
 +  attach<T>(invocationId: InvocationId, serde?: Serde<T>): Promise<T>;
@@ -188,7 +186,7 @@ index 8ea15b1..c2fa54b 100644
 +  signal<T>(name: string, serde?: Serde<T>): Promise<T>;
 +
 +  /** See {@link Context.invocation}. */
-+  invocation(invocationId: InvocationId): UnjournaledInvocationReference;
++  invocation(invocationId: InvocationId): SqlInvocationReference;
 +}
 +
 +/**
@@ -196,8 +194,8 @@ index 8ea15b1..c2fa54b 100644
 + *
 + * @experimental
 + */
-+export type UnjournaledScopedContext = Pick<
-+  UnjournaledContext,
++export type SqlScopedContext = Pick<
++  SqlContext,
 +  | "serviceClient"
 +  | "serviceSendClient"
 +  | "objectClient"
@@ -213,7 +211,7 @@ index 8ea15b1..c2fa54b 100644
 + *
 + * @experimental
 + */
-+export interface UnjournaledInvocationReference extends Omit<
++export interface SqlInvocationReference extends Omit<
 +  InvocationReference,
 +  "attach"
 +> {
@@ -222,30 +220,28 @@ index 8ea15b1..c2fa54b 100644
 +}
 +
 +/**
-+ * {@link ObjectContext} without journal replay: see {@link UnjournaledContext}.
++ * {@link ObjectContext} without journal replay: see {@link SqlContext}.
 + *
 + * @experimental
 + */
-+export interface UnjournaledObjectContext<
-+  TState extends TypedState = UntypedState,
-+>
++export interface SqlObjectContext<TState extends TypedState = UntypedState>
 +  extends
-+    UnjournaledContext,
++    SqlContext,
 +    KeyValueStore<TState>,
 +    Pick<ObjectContext<TState>, "key" | "sql" | "sqlSession">,
 +    RestateObjectContext {}
 +
 +/**
 + * {@link ObjectSharedContext} without journal replay: see
-+ * {@link UnjournaledContext}.
++ * {@link SqlContext}.
 + *
 + * @experimental
 + */
-+export interface UnjournaledObjectSharedContext<
++export interface SqlObjectSharedContext<
 +  TState extends TypedState = UntypedState,
 +>
 +  extends
-+    UnjournaledContext,
++    SqlContext,
 +    Pick<ObjectSharedContext<TState>, "key" | "get" | "stateKeys">,
 +    RestateObjectSharedContext {}
 +
@@ -254,7 +250,7 @@ index 8ea15b1..c2fa54b 100644
 + *
 + * @experimental
 + */
-+export type UnjournaledDurablePromise<T> = Promise<T> & {
++export type SqlDurablePromise<T> = Promise<T> & {
 +  /** See {@link DurablePromise}. */
 +  peek(): Promise<T | undefined>;
 +  /** See {@link DurablePromise}. */
@@ -267,33 +263,31 @@ index 8ea15b1..c2fa54b 100644
 +
 +/**
 + * {@link WorkflowSharedContext} without journal replay: see
-+ * {@link UnjournaledContext}.
++ * {@link SqlContext}.
 + *
 + * @experimental
 + */
-+export interface UnjournaledWorkflowSharedContext<
++export interface SqlWorkflowSharedContext<
 +  TState extends TypedState = UntypedState,
 +>
-+  extends UnjournaledObjectSharedContext<TState>, RestateWorkflowSharedContext {
++  extends SqlObjectSharedContext<TState>, RestateWorkflowSharedContext {
 +  /** See {@link WorkflowSharedContext.promise}. */
-+  promise<T>(name: string, serde?: Serde<T>): UnjournaledDurablePromise<T>;
++  promise<T>(name: string, serde?: Serde<T>): SqlDurablePromise<T>;
 +}
 +
 +/**
 + * {@link WorkflowContext} without journal replay: see
-+ * {@link UnjournaledContext}.
++ * {@link SqlContext}.
 + *
 + * @experimental
 + */
-+export interface UnjournaledWorkflowContext<
-+  TState extends TypedState = UntypedState,
-+>
++export interface SqlWorkflowContext<TState extends TypedState = UntypedState>
 +  extends
-+    UnjournaledWorkflowSharedContext<TState>,
-+    UnjournaledObjectContext<TState>,
++    SqlWorkflowSharedContext<TState>,
++    SqlObjectContext<TState>,
 +    RestateWorkflowContext {}
 diff --git a/packages/libs/restate-sdk/src/context_impl.ts b/packages/libs/restate-sdk/src/context_impl.ts
-index 2487c57..274fecf 100644
+index 2487c57..c562e6c 100644
 --- a/packages/libs/restate-sdk/src/context_impl.ts
 +++ b/packages/libs/restate-sdk/src/context_impl.ts
 @@ -71,6 +71,8 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
@@ -301,7 +295,7 @@ index 2487c57..274fecf 100644
  import { InputReader, OutputWriter } from "./endpoint/handlers/types.js";
  import { ExecutionOptions } from "./endpoint/components.js";
 +import { runSql, type SqlDatabase, type SqlSession } from "./sql.js";
-+import { unjournaledContext } from "./unjournaled.js";
++import { sqlContext } from "./sql_context.js";
  
  /**
   * The runtime shape a client method needs. implement() and type manipulations respect this.
@@ -309,7 +303,7 @@ index 2487c57..274fecf 100644
    private cancellationPromise?: SingleRestatePromise<void>;
    readonly defaultSerde: Serde<any>;
    private readonly asTerminalError?: (error: any) => TerminalError | undefined;
-+  // Public: the context without journal replay has it (see UnjournaledContext).
++  // Public: the context without journal replay has it (see SqlContext).
 +  readonly journalReplay: boolean;
  
    // If undefined, we're not tracking invocation id promises
@@ -335,10 +329,10 @@ index 2487c57..274fecf 100644
  
 +  /**
 +   * The context the handler gets: this one, or without journal replay, this
-+   * one with plain promises (see unjournaled.ts).
++   * one with plain promises (see sql_context.ts).
 +   */
 +  userContext(): ContextImpl {
-+    return this.journalReplay ? this : unjournaledContext(this);
++    return this.journalReplay ? this : sqlContext(this);
 +  }
 +
    setRunInterceptor(
@@ -948,419 +942,11 @@ index 0000000..4f74a88
 +  if ("error" in result) throw result.error;
 +  return result.value;
 +}
-diff --git a/packages/libs/restate-sdk/src/types/rpc.ts b/packages/libs/restate-sdk/src/types/rpc.ts
-index 9b9e22f..be4457f 100644
---- a/packages/libs/restate-sdk/src/types/rpc.ts
-+++ b/packages/libs/restate-sdk/src/types/rpc.ts
-@@ -26,6 +26,12 @@ import type {
-   UntypedState,
-   WorkflowContext,
-   WorkflowSharedContext,
-+  UnjournaledContext,
-+  UnjournaledInvocationPromise,
-+  UnjournaledObjectContext,
-+  UnjournaledObjectSharedContext,
-+  UnjournaledWorkflowContext,
-+  UnjournaledWorkflowSharedContext,
- } from "../context.js";
- 
- import {
-@@ -348,6 +354,22 @@ export type Client<M> = {
-     : never;
- };
- 
-+/**
-+ * {@link Client} without journal replay: each call returns a plain promise.
-+ *
-+ * @experimental
-+ */
-+export type UnjournaledClient<M> = {
-+  [K in keyof M as M[K] extends never ? never : K]: M[K] extends (
-+    arg: any,
-+    ...args: infer P
-+  ) => PromiseLike<infer O>
-+    ? (
-+        ...args: [...P, ...[opts?: Opts<InferArg<P>, O>]]
-+      ) => UnjournaledInvocationPromise<O>
-+    : never;
-+};
-+
- export type SendClient<M> = {
-   [K in keyof M as M[K] extends never ? never : K]: M[K] extends (
-     arg: any,
-@@ -376,6 +398,25 @@ export type ClientFromDescriptors<H extends Record<string, HandlerDescriptor>> =
-         ) => InvocationPromise<InferOutput<H[K]>>;
-   };
- 
-+/**
-+ * {@link ClientFromDescriptors} without journal replay: each call returns a
-+ * plain promise.
-+ *
-+ * @experimental
-+ */
-+export type UnjournaledClientFromDescriptors<
-+  H extends Record<string, HandlerDescriptor>,
-+> = {
-+  readonly [K in keyof H]: [InferInput<H[K]>] extends [void]
-+    ? (
-+        opts?: Opts<InferInput<H[K]>, InferOutput<H[K]>>
-+      ) => UnjournaledInvocationPromise<InferOutput<H[K]>>
-+    : (
-+        input: InferInput<H[K]>,
-+        opts?: Opts<InferInput<H[K]>, InferOutput<H[K]>>
-+      ) => UnjournaledInvocationPromise<InferOutput<H[K]>>;
-+};
-+
- /**
-  * One-way (send) counterpart of {@link ClientFromDescriptors}.
-  */
-@@ -636,6 +677,19 @@ export type ServiceHandlerOpts<I, O> = {
-    * @experimental
-    */
-   onJournalMismatchErrors?: "retry" | "pause" | "fail";
-+
-+  /**
-+   * When set to `false`, a retried or resumed invocation skips the journal of its
-+   * earlier attempts: the handler runs again from the start, and every context
-+   * call executes anew, reading current state. Effects of earlier attempts may
-+   * repeat (at least once), and awakeables are unsupported. Each attempt's calls
-+   * and sends are new requests: to reach the invocation an earlier attempt
-+   * started, give one an idempotency key that is the same on every attempt,
-+   * such as one made from `ctx.request().id`.
-+   *
-+   * @experimental
-+   */
-+  journalReplay?: boolean;
- };
- 
- export type ObjectHandlerOpts<I, O> = ServiceHandlerOpts<I, O> & {
-@@ -747,14 +801,33 @@ export namespace handlers {
-    * @param opts additional configuration
-    * @param fn the actual handler code to execute
-    */
-+  export function handler<O, I = void>(
-+    opts: ServiceHandlerOpts<I, O> & { journalReplay: false },
-+    fn: (ctx: UnjournaledContext, input: I) => Promise<O>
-+  ): RemoveVoidArgument<typeof fn>;
-+
-   export function handler<O, I = void>(
-     opts: ServiceHandlerOpts<I, O>,
-     fn: (ctx: Context, input: I) => Promise<O>
--  ): RemoveVoidArgument<typeof fn> {
-+  ): RemoveVoidArgument<typeof fn>;
-+
-+  export function handler<O, I = void>(
-+    opts: ServiceHandlerOpts<I, O>,
-+    fn: (ctx: Context & UnjournaledContext, input: I) => Promise<O>
-+  ) {
-     return HandlerWrapper.from(HandlerKind.SERVICE, fn, opts).transpose();
-   }
- 
-   export namespace workflow {
-+    export function workflow<
-+      O,
-+      I = void,
-+      TState extends TypedState = UntypedState,
-+    >(
-+      opts: WorkflowHandlerOpts<I, O> & { journalReplay: false },
-+      fn: (ctx: UnjournaledWorkflowContext<TState>, input: I) => Promise<O>
-+    ): RemoveVoidArgument<typeof fn>;
-+
-     export function workflow<
-       O,
-       I = void,
-@@ -775,8 +848,12 @@ export namespace handlers {
-     export function workflow<O, I = void>(
-       optsOrFn:
-         | WorkflowHandlerOpts<I, O>
--        | ((ctx: WorkflowContext, input: I) => Promise<O>),
--      fn?: (ctx: WorkflowContext, input: I) => Promise<O>
-+        | ((ctx: WorkflowContext, input: I) => Promise<O>)
-+        | ((ctx: UnjournaledWorkflowContext, input: I) => Promise<O>),
-+      fn?: (
-+        ctx: WorkflowContext & UnjournaledWorkflowContext,
-+        input: I
-+      ) => Promise<O>
-     ) {
-       if (typeof optsOrFn === "function") {
-         return HandlerWrapper.from(HandlerKind.WORKFLOW, optsOrFn).transpose();
-@@ -797,6 +874,18 @@ export namespace handlers {
-      * @param opts additional configurations
-      * @param fn the handler to execute
-      */
-+    export function shared<
-+      O,
-+      I = void,
-+      TState extends TypedState = UntypedState,
-+    >(
-+      opts: WorkflowHandlerOpts<I, O> & { journalReplay: false },
-+      fn: (
-+        ctx: UnjournaledWorkflowSharedContext<TState>,
-+        input: I
-+      ) => Promise<O>
-+    ): RemoveVoidArgument<typeof fn>;
-+
-     export function shared<
-       O,
-       I = void,
-@@ -835,8 +924,12 @@ export namespace handlers {
-     export function shared<O, I = void>(
-       optsOrFn:
-         | WorkflowHandlerOpts<I, O>
--        | ((ctx: WorkflowSharedContext, input: I) => Promise<O>),
--      fn?: (ctx: WorkflowSharedContext, input: I) => Promise<O>
-+        | ((ctx: WorkflowSharedContext, input: I) => Promise<O>)
-+        | ((ctx: UnjournaledWorkflowSharedContext, input: I) => Promise<O>),
-+      fn?: (
-+        ctx: WorkflowSharedContext & UnjournaledWorkflowSharedContext,
-+        input: I
-+      ) => Promise<O>
-     ) {
-       if (typeof optsOrFn === "function") {
-         return HandlerWrapper.from(HandlerKind.SHARED, optsOrFn).transpose();
-@@ -858,6 +951,15 @@ export namespace handlers {
-      * @param opts additional configurations
-      * @param fn the handler to execute
-      */
-+    export function exclusive<
-+      O,
-+      I = void,
-+      TState extends TypedState = UntypedState,
-+    >(
-+      opts: ObjectHandlerOpts<I, O> & { journalReplay: false },
-+      fn: (ctx: UnjournaledObjectContext<TState>, input: I) => Promise<O>
-+    ): RemoveVoidArgument<typeof fn>;
-+
-     export function exclusive<
-       O,
-       I = void,
-@@ -903,8 +1005,12 @@ export namespace handlers {
-     export function exclusive<O, I = void>(
-       optsOrFn:
-         | ObjectHandlerOpts<I, O>
--        | ((ctx: ObjectContext, input: I) => Promise<O>),
--      fn?: (ctx: ObjectContext, input: I) => Promise<O>
-+        | ((ctx: ObjectContext, input: I) => Promise<O>)
-+        | ((ctx: UnjournaledObjectContext, input: I) => Promise<O>),
-+      fn?: (
-+        ctx: ObjectContext & UnjournaledObjectContext,
-+        input: I
-+      ) => Promise<O>
-     ) {
-       if (typeof optsOrFn === "function") {
-         return HandlerWrapper.from(HandlerKind.EXCLUSIVE, optsOrFn).transpose();
-@@ -927,6 +1033,15 @@ export namespace handlers {
-      * @param opts additional configurations
-      * @param fn the handler to execute
-      */
-+    export function shared<
-+      O,
-+      I = void,
-+      TState extends TypedState = UntypedState,
-+    >(
-+      opts: ObjectHandlerOpts<I, O> & { journalReplay: false },
-+      fn: (ctx: UnjournaledObjectSharedContext<TState>, input: I) => Promise<O>
-+    ): RemoveVoidArgument<typeof fn>;
-+
-     export function shared<
-       O,
-       I = void,
-@@ -969,8 +1084,12 @@ export namespace handlers {
-     export function shared<I, O>(
-       optsOrFn:
-         | ObjectHandlerOpts<I, O>
--        | ((ctx: ObjectSharedContext, input: I) => Promise<O>),
--      fn?: (ctx: ObjectSharedContext, input: I) => Promise<O>
-+        | ((ctx: ObjectSharedContext, input: I) => Promise<O>)
-+        | ((ctx: UnjournaledObjectSharedContext, input: I) => Promise<O>),
-+      fn?: (
-+        ctx: ObjectSharedContext & UnjournaledObjectSharedContext,
-+        input: I
-+      ) => Promise<O>
-     ) {
-       if (typeof optsOrFn === "function") {
-         return HandlerWrapper.from(HandlerKind.SHARED, optsOrFn).transpose();
-@@ -986,12 +1105,26 @@ export namespace handlers {
- 
- // ----------- services ----------------------------------------------
- 
--export type ServiceOpts<U> = {
--  [K in keyof U]: U[K] extends ServiceHandler<U[K], Context>
-+export type ServiceOpts<U, C = Context> = {
-+  [K in keyof U]: U[K] extends ServiceHandler<U[K], C>
-     ? U[K]
--    : ServiceHandler<U[K], Context>;
-+    : ServiceHandler<U[K], C>;
- };
- 
-+/**
-+ * The context of the handlers of a service with options `O`: without journal
-+ * replay when `O` sets `journalReplay: false`.
-+ */
-+export type ContextFor<O, Journaled, Unjournaled> = O extends {
-+  journalReplay: false;
-+}
-+  ? Unjournaled
-+  : Journaled;
-+
-+// The options, with no keys beyond those of T: options inferred as a type
-+// parameter skip the check for unknown properties.
-+type Exactly<O, T> = O & Record<Exclude<keyof O, keyof T>, never>;
-+
- export type RetryPolicy = {
-   /**
-    * Max number of retry attempts (including the initial).
-@@ -1208,6 +1341,19 @@ export type ServiceOptions = {
-    * @experimental
-    */
-   onJournalMismatchErrors?: "retry" | "pause" | "fail";
-+
-+  /**
-+   * When set to `false`, a retried or resumed invocation skips the journal of its
-+   * earlier attempts: the handler runs again from the start, and every context
-+   * call executes anew, reading current state. Effects of earlier attempts may
-+   * repeat (at least once), and awakeables are unsupported. Each attempt's calls
-+   * and sends are new requests: to reach the invocation an earlier attempt
-+   * started, give one an idempotency key that is the same on every attempt,
-+   * such as one made from `ctx.request().id`.
-+   *
-+   * @experimental
-+   */
-+  journalReplay?: boolean;
- };
- 
- /**
-@@ -1282,12 +1428,17 @@ const buildHandlerDescriptors = (
-   return descriptors;
- };
- 
--export const service = <P extends string, M>(service: {
-+export const service = <
-+  P extends string,
-+  M,
-+  O extends ServiceOptions = ServiceOptions,
-+>(service: {
-   name: P;
--  handlers: ServiceOpts<M> & ThisType<M>;
-+  handlers: ServiceOpts<M, ContextFor<O, Context, UnjournaledContext>> &
-+    ThisType<M>;
-   description?: string;
-   metadata?: Record<string, string>;
--  options?: ServiceOptions;
-+  options?: Exactly<O, ServiceOptions>;
- }): ServiceDefinition<P, M> => {
-   if (!service.handlers) {
-     throw new Error("service must be defined");
-@@ -1323,14 +1474,16 @@ export const service = <P extends string, M>(service: {
- 
- // ----------- objects ----------------------------------------------
- 
--export type ObjectOpts<U> = {
--  [K in keyof U]: U[K] extends ObjectHandler<U[K], ObjectContext<any>>
-+export type ObjectOpts<
-+  U,
-+  C = ObjectContext<any>,
-+  SC = ObjectSharedContext<any>,
-+> = {
-+  [K in keyof U]: U[K] extends ObjectHandler<U[K], C>
-     ? U[K]
--    : U[K] extends ObjectHandler<U[K], ObjectSharedContext<any>>
-+    : U[K] extends ObjectHandler<U[K], SC>
-       ? U[K]
--      :
--          | ObjectHandler<U[K], ObjectContext<any>>
--          | ObjectHandler<U[K], ObjectSharedContext<any>>;
-+      : ObjectHandler<U[K], C> | ObjectHandler<U[K], SC>;
- };
- 
- export type ObjectOptions = ServiceOptions & {
-@@ -1397,12 +1550,21 @@ export type ObjectOptions = ServiceOptions & {
-  * @type P the name of the object
-  * @type M the handlers for the object
-  */
--export const object = <P extends string, M>(object: {
-+export const object = <
-+  P extends string,
-+  M,
-+  O extends ObjectOptions = ObjectOptions,
-+>(object: {
-   name: P;
--  handlers: ObjectOpts<M> & ThisType<M>;
-+  handlers: ObjectOpts<
-+    M,
-+    ContextFor<O, ObjectContext<any>, UnjournaledObjectContext<any>>,
-+    ContextFor<O, ObjectSharedContext<any>, UnjournaledObjectSharedContext<any>>
-+  > &
-+    ThisType<M>;
-   description?: string;
-   metadata?: Record<string, string>;
--  options?: ObjectOptions;
-+  options?: Exactly<O, ObjectOptions>;
- }): VirtualObjectDefinition<P, M> => {
-   if (!object.handlers) {
-     throw new Error("object options must be defined");
-@@ -1447,8 +1609,12 @@ export const object = <P extends string, M>(object: {
-  * The handlers can not be named 'workflowSubmit', 'workflowAttach', 'workflowOutput' - as these are reserved.
-  * @see {@link workflow} for an example.
-  */
--export type WorkflowOpts<U> = {
--  run: (ctx: WorkflowContext<any>, argument: any) => Promise<any>;
-+export type WorkflowOpts<
-+  U,
-+  C = WorkflowContext<any>,
-+  SC = WorkflowSharedContext<any>,
-+> = {
-+  run: (ctx: C, argument: any) => Promise<any>;
- } & {
-   [K in keyof U]: K extends
-     | "workflowSubmit"
-@@ -1456,10 +1622,10 @@ export type WorkflowOpts<U> = {
-     | "workflowOutput"
-     ? `${K} is a reserved keyword`
-     : K extends "run"
--      ? U[K] extends WorkflowHandler<U[K], WorkflowContext<any>>
-+      ? U[K] extends WorkflowHandler<U[K], C>
-         ? U[K]
-         : "An handler named 'run' must take as a first argument a WorkflowContext, and must return a Promise"
--      : U[K] extends WorkflowSharedHandler<U[K], WorkflowSharedContext<any>>
-+      : U[K] extends WorkflowSharedHandler<U[K], SC>
-         ? U[K]
-         : "An handler other then 'run' must accept as a first argument a WorkflowSharedContext";
- };
-@@ -1521,12 +1687,25 @@ export type WorkflowOptions = ServiceOptions & {
-  * @param name the workflow name
-  * @param handlers the handlers for the workflow.
-  */
--export const workflow = <P extends string, M>(workflow: {
-+export const workflow = <
-+  P extends string,
-+  M,
-+  O extends WorkflowOptions = WorkflowOptions,
-+>(workflow: {
-   name: P;
--  handlers: WorkflowOpts<M> & ThisType<M>;
-+  handlers: WorkflowOpts<
-+    M,
-+    ContextFor<O, WorkflowContext<any>, UnjournaledWorkflowContext<any>>,
-+    ContextFor<
-+      O,
-+      WorkflowSharedContext<any>,
-+      UnjournaledWorkflowSharedContext<any>
-+    >
-+  > &
-+    ThisType<M>;
-   description?: string;
-   metadata?: Record<string, string>;
--  options?: WorkflowOptions;
-+  options?: Exactly<O, WorkflowOptions>;
- }): WorkflowDefinition<P, M> => {
-   if (!workflow.handlers) {
-     throw new Error("workflow must contain handlers");
-diff --git a/packages/libs/restate-sdk/src/unjournaled.ts b/packages/libs/restate-sdk/src/unjournaled.ts
+diff --git a/packages/libs/restate-sdk/src/sql_context.ts b/packages/libs/restate-sdk/src/sql_context.ts
 new file mode 100644
-index 0000000..8290001
+index 0000000..17c418d
 --- /dev/null
-+++ b/packages/libs/restate-sdk/src/unjournaled.ts
++++ b/packages/libs/restate-sdk/src/sql_context.ts
 @@ -0,0 +1,127 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
@@ -1486,9 +1072,403 @@ index 0000000..8290001
 +}
 +
 +/** The context handed to a handler without journal replay. */
-+export function unjournaledContext<T extends object>(ctx: T): T {
++export function sqlContext<T extends object>(ctx: T): T {
 +  return wrap(ctx, false);
 +}
+diff --git a/packages/libs/restate-sdk/src/types/rpc.ts b/packages/libs/restate-sdk/src/types/rpc.ts
+index 9b9e22f..1f767c5 100644
+--- a/packages/libs/restate-sdk/src/types/rpc.ts
++++ b/packages/libs/restate-sdk/src/types/rpc.ts
+@@ -26,6 +26,12 @@ import type {
+   UntypedState,
+   WorkflowContext,
+   WorkflowSharedContext,
++  SqlContext,
++  SqlInvocationPromise,
++  SqlObjectContext,
++  SqlObjectSharedContext,
++  SqlWorkflowContext,
++  SqlWorkflowSharedContext,
+ } from "../context.js";
+ 
+ import {
+@@ -348,6 +354,22 @@ export type Client<M> = {
+     : never;
+ };
+ 
++/**
++ * {@link Client} without journal replay: each call returns a plain promise.
++ *
++ * @experimental
++ */
++export type SqlClient<M> = {
++  [K in keyof M as M[K] extends never ? never : K]: M[K] extends (
++    arg: any,
++    ...args: infer P
++  ) => PromiseLike<infer O>
++    ? (
++        ...args: [...P, ...[opts?: Opts<InferArg<P>, O>]]
++      ) => SqlInvocationPromise<O>
++    : never;
++};
++
+ export type SendClient<M> = {
+   [K in keyof M as M[K] extends never ? never : K]: M[K] extends (
+     arg: any,
+@@ -376,6 +398,25 @@ export type ClientFromDescriptors<H extends Record<string, HandlerDescriptor>> =
+         ) => InvocationPromise<InferOutput<H[K]>>;
+   };
+ 
++/**
++ * {@link ClientFromDescriptors} without journal replay: each call returns a
++ * plain promise.
++ *
++ * @experimental
++ */
++export type SqlClientFromDescriptors<
++  H extends Record<string, HandlerDescriptor>,
++> = {
++  readonly [K in keyof H]: [InferInput<H[K]>] extends [void]
++    ? (
++        opts?: Opts<InferInput<H[K]>, InferOutput<H[K]>>
++      ) => SqlInvocationPromise<InferOutput<H[K]>>
++    : (
++        input: InferInput<H[K]>,
++        opts?: Opts<InferInput<H[K]>, InferOutput<H[K]>>
++      ) => SqlInvocationPromise<InferOutput<H[K]>>;
++};
++
+ /**
+  * One-way (send) counterpart of {@link ClientFromDescriptors}.
+  */
+@@ -636,6 +677,19 @@ export type ServiceHandlerOpts<I, O> = {
+    * @experimental
+    */
+   onJournalMismatchErrors?: "retry" | "pause" | "fail";
++
++  /**
++   * When set to `false`, a retried or resumed invocation skips the journal of its
++   * earlier attempts: the handler runs again from the start, and every context
++   * call executes anew, reading current state. Effects of earlier attempts may
++   * repeat (at least once), and awakeables are unsupported. Each attempt's calls
++   * and sends are new requests: to reach the invocation an earlier attempt
++   * started, give one an idempotency key that is the same on every attempt,
++   * such as one made from `ctx.request().id`.
++   *
++   * @experimental
++   */
++  journalReplay?: boolean;
+ };
+ 
+ export type ObjectHandlerOpts<I, O> = ServiceHandlerOpts<I, O> & {
+@@ -747,14 +801,33 @@ export namespace handlers {
+    * @param opts additional configuration
+    * @param fn the actual handler code to execute
+    */
++  export function handler<O, I = void>(
++    opts: ServiceHandlerOpts<I, O> & { journalReplay: false },
++    fn: (ctx: SqlContext, input: I) => Promise<O>
++  ): RemoveVoidArgument<typeof fn>;
++
+   export function handler<O, I = void>(
+     opts: ServiceHandlerOpts<I, O>,
+     fn: (ctx: Context, input: I) => Promise<O>
+-  ): RemoveVoidArgument<typeof fn> {
++  ): RemoveVoidArgument<typeof fn>;
++
++  export function handler<O, I = void>(
++    opts: ServiceHandlerOpts<I, O>,
++    fn: (ctx: Context & SqlContext, input: I) => Promise<O>
++  ) {
+     return HandlerWrapper.from(HandlerKind.SERVICE, fn, opts).transpose();
+   }
+ 
+   export namespace workflow {
++    export function workflow<
++      O,
++      I = void,
++      TState extends TypedState = UntypedState,
++    >(
++      opts: WorkflowHandlerOpts<I, O> & { journalReplay: false },
++      fn: (ctx: SqlWorkflowContext<TState>, input: I) => Promise<O>
++    ): RemoveVoidArgument<typeof fn>;
++
+     export function workflow<
+       O,
+       I = void,
+@@ -775,8 +848,9 @@ export namespace handlers {
+     export function workflow<O, I = void>(
+       optsOrFn:
+         | WorkflowHandlerOpts<I, O>
+-        | ((ctx: WorkflowContext, input: I) => Promise<O>),
+-      fn?: (ctx: WorkflowContext, input: I) => Promise<O>
++        | ((ctx: WorkflowContext, input: I) => Promise<O>)
++        | ((ctx: SqlWorkflowContext, input: I) => Promise<O>),
++      fn?: (ctx: WorkflowContext & SqlWorkflowContext, input: I) => Promise<O>
+     ) {
+       if (typeof optsOrFn === "function") {
+         return HandlerWrapper.from(HandlerKind.WORKFLOW, optsOrFn).transpose();
+@@ -797,6 +871,15 @@ export namespace handlers {
+      * @param opts additional configurations
+      * @param fn the handler to execute
+      */
++    export function shared<
++      O,
++      I = void,
++      TState extends TypedState = UntypedState,
++    >(
++      opts: WorkflowHandlerOpts<I, O> & { journalReplay: false },
++      fn: (ctx: SqlWorkflowSharedContext<TState>, input: I) => Promise<O>
++    ): RemoveVoidArgument<typeof fn>;
++
+     export function shared<
+       O,
+       I = void,
+@@ -835,8 +918,12 @@ export namespace handlers {
+     export function shared<O, I = void>(
+       optsOrFn:
+         | WorkflowHandlerOpts<I, O>
+-        | ((ctx: WorkflowSharedContext, input: I) => Promise<O>),
+-      fn?: (ctx: WorkflowSharedContext, input: I) => Promise<O>
++        | ((ctx: WorkflowSharedContext, input: I) => Promise<O>)
++        | ((ctx: SqlWorkflowSharedContext, input: I) => Promise<O>),
++      fn?: (
++        ctx: WorkflowSharedContext & SqlWorkflowSharedContext,
++        input: I
++      ) => Promise<O>
+     ) {
+       if (typeof optsOrFn === "function") {
+         return HandlerWrapper.from(HandlerKind.SHARED, optsOrFn).transpose();
+@@ -858,6 +945,15 @@ export namespace handlers {
+      * @param opts additional configurations
+      * @param fn the handler to execute
+      */
++    export function exclusive<
++      O,
++      I = void,
++      TState extends TypedState = UntypedState,
++    >(
++      opts: ObjectHandlerOpts<I, O> & { journalReplay: false },
++      fn: (ctx: SqlObjectContext<TState>, input: I) => Promise<O>
++    ): RemoveVoidArgument<typeof fn>;
++
+     export function exclusive<
+       O,
+       I = void,
+@@ -903,8 +999,9 @@ export namespace handlers {
+     export function exclusive<O, I = void>(
+       optsOrFn:
+         | ObjectHandlerOpts<I, O>
+-        | ((ctx: ObjectContext, input: I) => Promise<O>),
+-      fn?: (ctx: ObjectContext, input: I) => Promise<O>
++        | ((ctx: ObjectContext, input: I) => Promise<O>)
++        | ((ctx: SqlObjectContext, input: I) => Promise<O>),
++      fn?: (ctx: ObjectContext & SqlObjectContext, input: I) => Promise<O>
+     ) {
+       if (typeof optsOrFn === "function") {
+         return HandlerWrapper.from(HandlerKind.EXCLUSIVE, optsOrFn).transpose();
+@@ -927,6 +1024,15 @@ export namespace handlers {
+      * @param opts additional configurations
+      * @param fn the handler to execute
+      */
++    export function shared<
++      O,
++      I = void,
++      TState extends TypedState = UntypedState,
++    >(
++      opts: ObjectHandlerOpts<I, O> & { journalReplay: false },
++      fn: (ctx: SqlObjectSharedContext<TState>, input: I) => Promise<O>
++    ): RemoveVoidArgument<typeof fn>;
++
+     export function shared<
+       O,
+       I = void,
+@@ -969,8 +1075,12 @@ export namespace handlers {
+     export function shared<I, O>(
+       optsOrFn:
+         | ObjectHandlerOpts<I, O>
+-        | ((ctx: ObjectSharedContext, input: I) => Promise<O>),
+-      fn?: (ctx: ObjectSharedContext, input: I) => Promise<O>
++        | ((ctx: ObjectSharedContext, input: I) => Promise<O>)
++        | ((ctx: SqlObjectSharedContext, input: I) => Promise<O>),
++      fn?: (
++        ctx: ObjectSharedContext & SqlObjectSharedContext,
++        input: I
++      ) => Promise<O>
+     ) {
+       if (typeof optsOrFn === "function") {
+         return HandlerWrapper.from(HandlerKind.SHARED, optsOrFn).transpose();
+@@ -986,12 +1096,26 @@ export namespace handlers {
+ 
+ // ----------- services ----------------------------------------------
+ 
+-export type ServiceOpts<U> = {
+-  [K in keyof U]: U[K] extends ServiceHandler<U[K], Context>
++export type ServiceOpts<U, C = Context> = {
++  [K in keyof U]: U[K] extends ServiceHandler<U[K], C>
+     ? U[K]
+-    : ServiceHandler<U[K], Context>;
++    : ServiceHandler<U[K], C>;
+ };
+ 
++/**
++ * The context of the handlers of a service with options `O`: without journal
++ * replay when `O` sets `journalReplay: false`.
++ */
++export type ContextFor<O, Replayed, Sql> = O extends {
++  journalReplay: false;
++}
++  ? Sql
++  : Replayed;
++
++// The options, with no keys beyond those of T: options inferred as a type
++// parameter skip the check for unknown properties.
++type Exactly<O, T> = O & Record<Exclude<keyof O, keyof T>, never>;
++
+ export type RetryPolicy = {
+   /**
+    * Max number of retry attempts (including the initial).
+@@ -1208,6 +1332,19 @@ export type ServiceOptions = {
+    * @experimental
+    */
+   onJournalMismatchErrors?: "retry" | "pause" | "fail";
++
++  /**
++   * When set to `false`, a retried or resumed invocation skips the journal of its
++   * earlier attempts: the handler runs again from the start, and every context
++   * call executes anew, reading current state. Effects of earlier attempts may
++   * repeat (at least once), and awakeables are unsupported. Each attempt's calls
++   * and sends are new requests: to reach the invocation an earlier attempt
++   * started, give one an idempotency key that is the same on every attempt,
++   * such as one made from `ctx.request().id`.
++   *
++   * @experimental
++   */
++  journalReplay?: boolean;
+ };
+ 
+ /**
+@@ -1282,12 +1419,16 @@ const buildHandlerDescriptors = (
+   return descriptors;
+ };
+ 
+-export const service = <P extends string, M>(service: {
++export const service = <
++  P extends string,
++  M,
++  O extends ServiceOptions = ServiceOptions,
++>(service: {
+   name: P;
+-  handlers: ServiceOpts<M> & ThisType<M>;
++  handlers: ServiceOpts<M, ContextFor<O, Context, SqlContext>> & ThisType<M>;
+   description?: string;
+   metadata?: Record<string, string>;
+-  options?: ServiceOptions;
++  options?: Exactly<O, ServiceOptions>;
+ }): ServiceDefinition<P, M> => {
+   if (!service.handlers) {
+     throw new Error("service must be defined");
+@@ -1323,14 +1464,16 @@ export const service = <P extends string, M>(service: {
+ 
+ // ----------- objects ----------------------------------------------
+ 
+-export type ObjectOpts<U> = {
+-  [K in keyof U]: U[K] extends ObjectHandler<U[K], ObjectContext<any>>
++export type ObjectOpts<
++  U,
++  C = ObjectContext<any>,
++  SC = ObjectSharedContext<any>,
++> = {
++  [K in keyof U]: U[K] extends ObjectHandler<U[K], C>
+     ? U[K]
+-    : U[K] extends ObjectHandler<U[K], ObjectSharedContext<any>>
++    : U[K] extends ObjectHandler<U[K], SC>
+       ? U[K]
+-      :
+-          | ObjectHandler<U[K], ObjectContext<any>>
+-          | ObjectHandler<U[K], ObjectSharedContext<any>>;
++      : ObjectHandler<U[K], C> | ObjectHandler<U[K], SC>;
+ };
+ 
+ export type ObjectOptions = ServiceOptions & {
+@@ -1397,12 +1540,21 @@ export type ObjectOptions = ServiceOptions & {
+  * @type P the name of the object
+  * @type M the handlers for the object
+  */
+-export const object = <P extends string, M>(object: {
++export const object = <
++  P extends string,
++  M,
++  O extends ObjectOptions = ObjectOptions,
++>(object: {
+   name: P;
+-  handlers: ObjectOpts<M> & ThisType<M>;
++  handlers: ObjectOpts<
++    M,
++    ContextFor<O, ObjectContext<any>, SqlObjectContext<any>>,
++    ContextFor<O, ObjectSharedContext<any>, SqlObjectSharedContext<any>>
++  > &
++    ThisType<M>;
+   description?: string;
+   metadata?: Record<string, string>;
+-  options?: ObjectOptions;
++  options?: Exactly<O, ObjectOptions>;
+ }): VirtualObjectDefinition<P, M> => {
+   if (!object.handlers) {
+     throw new Error("object options must be defined");
+@@ -1447,8 +1599,12 @@ export const object = <P extends string, M>(object: {
+  * The handlers can not be named 'workflowSubmit', 'workflowAttach', 'workflowOutput' - as these are reserved.
+  * @see {@link workflow} for an example.
+  */
+-export type WorkflowOpts<U> = {
+-  run: (ctx: WorkflowContext<any>, argument: any) => Promise<any>;
++export type WorkflowOpts<
++  U,
++  C = WorkflowContext<any>,
++  SC = WorkflowSharedContext<any>,
++> = {
++  run: (ctx: C, argument: any) => Promise<any>;
+ } & {
+   [K in keyof U]: K extends
+     | "workflowSubmit"
+@@ -1456,10 +1612,10 @@ export type WorkflowOpts<U> = {
+     | "workflowOutput"
+     ? `${K} is a reserved keyword`
+     : K extends "run"
+-      ? U[K] extends WorkflowHandler<U[K], WorkflowContext<any>>
++      ? U[K] extends WorkflowHandler<U[K], C>
+         ? U[K]
+         : "An handler named 'run' must take as a first argument a WorkflowContext, and must return a Promise"
+-      : U[K] extends WorkflowSharedHandler<U[K], WorkflowSharedContext<any>>
++      : U[K] extends WorkflowSharedHandler<U[K], SC>
+         ? U[K]
+         : "An handler other then 'run' must accept as a first argument a WorkflowSharedContext";
+ };
+@@ -1521,12 +1677,21 @@ export type WorkflowOptions = ServiceOptions & {
+  * @param name the workflow name
+  * @param handlers the handlers for the workflow.
+  */
+-export const workflow = <P extends string, M>(workflow: {
++export const workflow = <
++  P extends string,
++  M,
++  O extends WorkflowOptions = WorkflowOptions,
++>(workflow: {
+   name: P;
+-  handlers: WorkflowOpts<M> & ThisType<M>;
++  handlers: WorkflowOpts<
++    M,
++    ContextFor<O, WorkflowContext<any>, SqlWorkflowContext<any>>,
++    ContextFor<O, WorkflowSharedContext<any>, SqlWorkflowSharedContext<any>>
++  > &
++    ThisType<M>;
+   description?: string;
+   metadata?: Record<string, string>;
+-  options?: WorkflowOptions;
++  options?: Exactly<O, WorkflowOptions>;
+ }): WorkflowDefinition<P, M> => {
+   if (!workflow.handlers) {
+     throw new Error("workflow must contain handlers");
 diff --git a/packages/libs/restate-sdk/test/promise_selector.test.ts b/packages/libs/restate-sdk/test/promise_selector.test.ts
 new file mode 100644
 index 0000000..e04f3df
@@ -1979,23 +1959,12 @@ index 0000000..e04f3df
 +    expect(t.errors).toEqual([]);
 +  });
 +});
-diff --git a/packages/libs/restate-sdk/test/tsconfig.types.json b/packages/libs/restate-sdk/test/tsconfig.types.json
+diff --git a/packages/libs/restate-sdk/test/sql_context.test-d.ts b/packages/libs/restate-sdk/test/sql_context.test-d.ts
 new file mode 100644
-index 0000000..8c54004
+index 0000000..cff1203
 --- /dev/null
-+++ b/packages/libs/restate-sdk/test/tsconfig.types.json
-@@ -0,0 +1,5 @@
-+{
-+  "extends": "../tsconfig.json",
-+  "compilerOptions": { "noEmit": true },
-+  "include": ["../src/**/*", "./*.test-d.ts"]
-+}
-diff --git a/packages/libs/restate-sdk/test/unjournaled_context.test-d.ts b/packages/libs/restate-sdk/test/unjournaled_context.test-d.ts
-new file mode 100644
-index 0000000..d5be4c8
---- /dev/null
-+++ b/packages/libs/restate-sdk/test/unjournaled_context.test-d.ts
-@@ -0,0 +1,213 @@
++++ b/packages/libs/restate-sdk/test/sql_context.test-d.ts
+@@ -0,0 +1,209 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 + *
@@ -2017,11 +1986,11 @@ index 0000000..d5be4c8
 +  InvocationId,
 +  ObjectContext,
 +  RestatePromise,
-+  UnjournaledContext,
-+  UnjournaledInvocationPromise,
-+  UnjournaledObjectContext,
-+  UnjournaledObjectSharedContext,
-+  UnjournaledWorkflowContext,
++  SqlContext,
++  SqlInvocationPromise,
++  SqlObjectContext,
++  SqlObjectSharedContext,
++  SqlWorkflowContext,
 +} from "../src/index.js";
 +
 +const helper = restate.object({
@@ -2037,7 +2006,7 @@ index 0000000..d5be4c8
 +      name: "S",
 +      handlers: {
 +        h: async (ctx, input: number) => {
-+          expectTypeOf(ctx).toEqualTypeOf<UnjournaledContext>();
++          expectTypeOf(ctx).toEqualTypeOf<SqlContext>();
 +          expectTypeOf(ctx.journalReplay).toEqualTypeOf<false>();
 +          expectTypeOf(ctx.sleep(1)).toEqualTypeOf<Promise<void>>();
 +          expectTypeOf(ctx.signal<string>("s")).toEqualTypeOf<
@@ -2096,7 +2065,7 @@ index 0000000..d5be4c8
 +    restate.object({
 +      name: "O",
 +      handlers: {
-+        exclusive: async (ctx: UnjournaledObjectContext) => {
++        exclusive: async (ctx: SqlObjectContext) => {
 +          expectTypeOf(ctx.get<number>("k")).toEqualTypeOf<
 +            Promise<number | null>
 +          >();
@@ -2105,10 +2074,10 @@ index 0000000..d5be4c8
 +        shared: restate.handlers.object.shared(
 +          { journalReplay: false },
 +          async (ctx) => {
-+            expectTypeOf(ctx).toEqualTypeOf<UnjournaledObjectSharedContext>();
++            expectTypeOf(ctx).toEqualTypeOf<SqlObjectSharedContext>();
 +          }
 +        ),
-+        annotated: async (ctx: UnjournaledObjectContext, key: string) => key,
++        annotated: async (ctx: SqlObjectContext, key: string) => key,
 +      },
 +      options: { ...restate.sqlOptions },
 +    });
@@ -2120,18 +2089,14 @@ index 0000000..d5be4c8
 +      handlers: {
 +        h: async (ctx) => {
 +          const call = ctx.objectClient(helper, "k").slow(1);
-+          expectTypeOf(call).toEqualTypeOf<
-+            UnjournaledInvocationPromise<number>
-+          >();
++          expectTypeOf(call).toEqualTypeOf<SqlInvocationPromise<number>>();
 +          expectTypeOf(call.invocationId).toEqualTypeOf<
 +            Promise<InvocationId>
 +          >();
 +          // @ts-expect-error: no RestatePromise methods
 +          void call.orTimeout(10);
 +          const scoped = ctx.scope("s").objectClient(helper, "k").slow(1);
-+          expectTypeOf(scoped).toEqualTypeOf<
-+            UnjournaledInvocationPromise<number>
-+          >();
++          expectTypeOf(scoped).toEqualTypeOf<SqlInvocationPromise<number>>();
 +          const send = ctx.objectSendClient(helper, "k").slow(1);
 +          expectTypeOf(send.invocationId).toEqualTypeOf<
 +            Promise<InvocationId>
@@ -2151,7 +2116,7 @@ index 0000000..d5be4c8
 +      name: "V",
 +      handlers: {
 +        run: async (ctx) => {
-+          expectTypeOf(ctx).toEqualTypeOf<UnjournaledWorkflowContext<any>>();
++          expectTypeOf(ctx).toEqualTypeOf<SqlWorkflowContext<any>>();
 +        },
 +      },
 +      options: { journalReplay: false },
@@ -2160,14 +2125,14 @@ index 0000000..d5be4c8
 +    restate.workflow({
 +      name: "W",
 +      handlers: {
-+        run: async (ctx: UnjournaledWorkflowContext) => {
++        run: async (ctx: SqlWorkflowContext) => {
 +          expectTypeOf(ctx.promise<string>("p").get()).toEqualTypeOf<
 +            Promise<string>
 +          >();
 +          return await ctx.promise<string>("p");
 +        },
 +        approve: async (
-+          ctx: restate.UnjournaledWorkflowSharedContext,
++          ctx: restate.SqlWorkflowSharedContext,
 +          value: string
 +        ) => {
 +          await ctx.promise<string>("p").resolve(value);
@@ -2190,7 +2155,7 @@ index 0000000..d5be4c8
 +      name: "O",
 +      handlers: {
 +        // @ts-expect-error: the handler expects no journal replay, the object replays
-+        h: async (_ctx: UnjournaledObjectContext) => {},
++        h: async (_ctx: SqlObjectContext) => {},
 +      },
 +    });
 +    restate.object({
@@ -2209,6 +2174,17 @@ index 0000000..d5be4c8
 +    });
 +  });
 +});
+diff --git a/packages/libs/restate-sdk/test/tsconfig.types.json b/packages/libs/restate-sdk/test/tsconfig.types.json
+new file mode 100644
+index 0000000..8c54004
+--- /dev/null
++++ b/packages/libs/restate-sdk/test/tsconfig.types.json
+@@ -0,0 +1,5 @@
++{
++  "extends": "../tsconfig.json",
++  "compilerOptions": { "noEmit": true },
++  "include": ["../src/**/*", "./*.test-d.ts"]
++}
 diff --git a/sdk-shared-core-wasm-bindings/Cargo.toml b/sdk-shared-core-wasm-bindings/Cargo.toml
 index ba25532..fa8eb6d 100644
 --- a/sdk-shared-core-wasm-bindings/Cargo.toml

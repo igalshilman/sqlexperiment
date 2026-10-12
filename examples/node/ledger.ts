@@ -29,7 +29,7 @@ export const ledger = restate.object({
   name: 'Ledger',
   handlers: {
     /** Create the tables, and open `count` accounts with `balance` each, once. */
-    init: (ctx: restate.UnjournaledObjectContext, [count, balance]: [number, number]) =>
+    init: (ctx: restate.SqlObjectContext, [count, balance]: [number, number]) =>
       ctx.sql(async (db) => {
         await db.execute(
           `CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, opening INTEGER, balance INTEGER);
@@ -41,7 +41,7 @@ export const ledger = restate.object({
       }),
 
     /** Move money between accounts; false if this transfer id was applied before. */
-    transfer: (ctx: restate.UnjournaledObjectContext, t: Transfer) =>
+    transfer: (ctx: restate.SqlObjectContext, t: Transfer) =>
       ctx.sql(async (db) => {
         const seen = await db.query('SELECT 1 FROM transfers WHERE id = ?', [t.id]);
         if (seen.length > 0) return false;
@@ -52,7 +52,7 @@ export const ledger = restate.object({
       }),
 
     /** Totals, and accounts that disagree with the recorded transfers. */
-    audit: (ctx: restate.UnjournaledObjectContext) =>
+    audit: (ctx: restate.SqlObjectContext) =>
       ctx.sql(async (db): Promise<Audit> => {
         const [integrity] = await row<[string]>(db, 'PRAGMA integrity_check');
         if (integrity !== 'ok') throw new restate.TerminalError('integrity check failed');

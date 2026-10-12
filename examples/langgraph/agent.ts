@@ -40,7 +40,7 @@ const callId = (toolCall?: ToolCall) => {
 };
 
 /** The bank tools of one invocation: they reach the ledger through `ctx`. */
-const bank = (ctx: restate.UnjournaledObjectContext) => {
+const bank = (ctx: restate.SqlObjectContext) => {
   const books = ctx.objectClient(ledger, 'bank');
   // One idempotency key per tool call: a prompt makes several.
   const key = (toolCall?: ToolCall) => `${ctx.request().id}:${callId(toolCall)}`;
@@ -82,7 +82,7 @@ const State = Annotation.Root({
 });
 
 /** The agent's graph, with the tools of this invocation. */
-function graph(ctx: restate.UnjournaledObjectContext, model: Teller) {
+function graph(ctx: restate.SqlObjectContext, model: Teller) {
   const tools = bank(ctx);
   const withTools = model.bindTools(tools);
   return (
@@ -102,7 +102,7 @@ function graph(ctx: restate.UnjournaledObjectContext, model: Teller) {
 const model = new Teller({});
 
 /** Answer prompt `text`, once per prompt `id`. */
-export const prompt = (ctx: restate.UnjournaledObjectContext, { id, text }: { id: string; text: string }) =>
+export const prompt = (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) =>
   ctx.sqlSession(async (db) => {
     const app = graph(ctx, model).compile({ checkpointer: new SqlCheckpointSaver(db) });
     const config = { configurable: { thread_id: ctx.key }, durability: 'sync' as const };

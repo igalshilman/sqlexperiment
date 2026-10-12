@@ -51,7 +51,7 @@ export interface PiOptions {
  * and chord `context` for anything else.
  */
 export const withPi = <T>(
-  ctx: restate.UnjournaledObjectContext,
+  ctx: restate.SqlObjectContext,
   { models, model, tools = [] }: PiOptions,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> =>

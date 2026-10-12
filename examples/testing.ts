@@ -34,7 +34,7 @@ export interface Prompt {
   id: string;
   text: string;
 }
-export type PromptHandler = (ctx: restate.UnjournaledObjectContext, prompt: Prompt) => Promise<{ answer: string }>;
+export type PromptHandler = (ctx: restate.SqlObjectContext, prompt: Prompt) => Promise<{ answer: string }>;
 
 /** The fake ledger of a conversation. */
 export interface FakeLedger {
@@ -103,7 +103,7 @@ export function conversation(handler: PromptHandler, key: string) {
           }
         },
       };
-      return handler(ctx as unknown as restate.UnjournaledObjectContext, prompt);
+      return handler(ctx as unknown as restate.SqlObjectContext, prompt);
     },
     /** An attempt that crashes in its next transfer. */
     async crash(requestId: string, prompt: Prompt) {

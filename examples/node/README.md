@@ -145,8 +145,8 @@ replayed, the order things happen in needs no recording.
 - **A cancellation reaches every pending promise** (each rejects with
   `CancelledError`); what is made after it runs normally.
 
-In TypeScript this context has its own type, `UnjournaledContext`, with
-`UnjournaledObjectContext`, `UnjournaledObjectSharedContext` and the workflow
+In TypeScript this context has its own type, `SqlContext`, with
+`SqlObjectContext`, `SqlObjectSharedContext` and the workflow
 ones: their operations return `Promise`s, there is no `awakeable` and no
 `run`, and `ctx.journalReplay` is `false`. `restate.service`, `restate.object` and
 `restate.workflow` pick it from the options: an unannotated `ctx` gets it
@@ -159,7 +159,7 @@ others) takes it when its own options say `journalReplay: false`.
 const counter = restate.object({
   name: 'counter',
   handlers: {
-    add: async (ctx: restate.UnjournaledObjectContext, n: number) => {
+    add: async (ctx: restate.SqlObjectContext, n: number) => {
       const [, total] = await Promise.all([ctx.sleep(10), ctx.get<number>('total')]);
       ctx.set('total', (total ?? 0) + n);
       return (total ?? 0) + n;
