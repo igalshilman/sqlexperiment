@@ -15,12 +15,20 @@ SDK_TARBALL := vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 CORE := sqlite-kv
 ADDON := $(CORE)/node/sqlite_kv.node
 # The tests against a Restate server need service protocol V8 (state reads that
-# are not journaled), which is not on restate's main yet: by default, the
-# server of its service-protocol-v8 image, taken out with docker. Or set
-# RESTATE_SERVER to a restate-server binary with V8.
+# are not journaled), which is not on restate's main yet. By default, on Linux,
+# the server of its service-protocol-v8 image, taken out with docker; on macOS
+# (where that Linux binary does not run), the server built from the same
+# commit with cargo. Or set RESTATE_SERVER to a restate-server binary with V8.
 RESTATE_IMAGE ?= ghcr.io/restatedev/restate:service-protocol-v8
+RESTATE_REV ?= aa8d448501acc79a8b27beb325f42d0ef60df451
 RESTATE_SERVER ?= $(CARGO_TARGET_DIR)/restate/restate-server
+RESTATE_CHECKOUT := $(CARGO_TARGET_DIR)/restate-checkout
 export RESTATE_SERVER
+ifeq ($(shell uname -s),Darwin)
+RESTATE_FROM ?= source
+else
+RESTATE_FROM ?= image
+endif
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
 	test test-core test-addon test-sdk-ts test-pi test-langgraph lint crash-test concurrency-test restate-server clean
@@ -82,13 +90,26 @@ crash-test: examples-js $(RESTATE_SERVER) ## Every JavaScript example through cr
 concurrency-test: examples-js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
 	cd examples && node concurrency.mjs
 
-restate-server: ## Take restate-server out of RESTATE_IMAGE again (needs docker)
+restate-server: ## Get restate-server again: from RESTATE_IMAGE (docker), or with RESTATE_FROM=source from RESTATE_REV (cargo)
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
 
+# From source: in a checkout, for restate's own cargo config (its rustflags),
+# with its own target directory; without LTO, which a test server does not need
+# and which takes most of the build's time.
 $(RESTATE_SERVER):
 	mkdir -p $(dir $@)
+ifeq ($(RESTATE_FROM),source)
+	rm -rf $(RESTATE_CHECKOUT) && git init -q $(RESTATE_CHECKOUT)
+	git -C $(RESTATE_CHECKOUT) fetch -q --depth 1 https://github.com/restatedev/restate.git $(RESTATE_REV)
+	git -C $(RESTATE_CHECKOUT) checkout -q FETCH_HEAD
+	cd $(RESTATE_CHECKOUT) && CARGO_TARGET_DIR=$(RESTATE_CHECKOUT)/target \
+		CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+		$(CARGO) build --locked --release -p restate-server
+	cp $(RESTATE_CHECKOUT)/target/release/restate-server $@
+else
 	docker pull -q $(RESTATE_IMAGE)
 	id=$$(docker create $(RESTATE_IMAGE)) && docker cp -q $$id:/usr/local/bin/restate-server $@; docker rm $$id > /dev/null
+endif
 	$@ --version
 
 clean: ## Remove build outputs

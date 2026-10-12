@@ -34,7 +34,11 @@ docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-g
 
 ## Build and test
 
+With [Nix](https://nixos.org) (flakes), `nix develop` gives a shell with every
+tool below, on macOS and Linux ([`flake.nix`](flake.nix)):
+
 ```sh
+nix develop       # or `direnv allow`, with use flake in .envrc
 make              # build everything: the crate, the addon, the patched SDK, the examples
 make test         # every test that needs no Restate server
 make crash-test         # the examples through crashes, against a Restate server
@@ -42,8 +46,13 @@ make concurrency-test   # the context without journal replay, against a Restate 
 make help
 ```
 
-Besides Rust, the Node.js parts need node 20 or later; the patched TypeScript
-SDK also needs pnpm, the `wasm32-unknown-unknown` target and `wasm-bindgen`
-0.2.121 (`cargo install wasm-bindgen-cli --version 0.2.121`). The tests against
-a Restate server need one with service protocol V8, which the Makefile takes
-out of a Restate image with docker (see [the examples](examples/README.md#validation)).
+Without Nix: besides Rust, the Node.js parts need node 22 or later; the
+patched TypeScript SDK also needs pnpm, the `wasm32-unknown-unknown` target and
+`wasm-bindgen` 0.2.121 (`cargo install wasm-bindgen-cli --version 0.2.121`).
+
+The tests against a Restate server need one with service protocol V8 (see
+[the requirements](#requirements)). The Makefile gets it on first use: on
+Linux, out of the `service-protocol-v8` image with docker; on macOS, where that
+Linux binary does not run, built from the same commit with cargo, which takes a
+while once and needs protoc, cmake and clang (the Nix shell has them). See
+[the examples](examples/README.md#validation).

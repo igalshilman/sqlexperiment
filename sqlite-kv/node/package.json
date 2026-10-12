@@ -6,8 +6,8 @@
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "build": "cargo build --release && cp ${CARGO_TARGET_DIR:-target}/release/libsqlite_kv_node.so sqlite_kv.node",
-    "build:debug": "cargo build && cp ${CARGO_TARGET_DIR:-target}/debug/libsqlite_kv_node.so sqlite_kv.node",
+    "build": "cargo build --release && node copy-addon.mjs release",
+    "build:debug": "cargo build && node copy-addon.mjs debug",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {
