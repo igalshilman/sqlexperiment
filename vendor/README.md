@@ -7,7 +7,6 @@ holds those changes.
 | | What | Version | Form |
 |---|---|---|---|
 | [`typescript/`](typescript) | `@restatedev/restate-sdk` and the shared core it compiles to WebAssembly | 1.17.3 ([`02a12acb`](https://github.com/restatedev/sdk-typescript/commit/02a12acb879fcf46448d88d028304d3a3113e7e2)), shared core [`382649d`](https://github.com/restatedev/sdk-shared-core/commit/382649d0652aa6d971ec16e788d24b4b2c8c8b45) | Patches, applied to fresh clones by `setup.sh` |
-| [`rust/restate-sdk-shared-core`](rust/restate-sdk-shared-core) | The shared core alone | 7.0.3 (from crates.io) | A full copy, patched in place |
 
 ## The shared core
 
@@ -21,11 +20,6 @@ reads would not match. The change is in `VMOptions`, `SysInput` and
 
 The TypeScript build applies it to the shared core's repository with
 [`typescript/patches/sdk-shared-core.patch`](typescript/patches/sdk-shared-core.patch).
-[`rust/restate-sdk-shared-core`](rust/restate-sdk-shared-core) is the same
-change on the published crate, from an earlier Rust integration (since
-removed); nothing builds it now. It was first committed unmodified, so
-`git log -p -- restate/vendor/restate-sdk-shared-core vendor/rust` shows the
-change.
 
 ## TypeScript
 

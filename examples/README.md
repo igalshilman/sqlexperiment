@@ -1,17 +1,11 @@
 # Examples
 
-By language and library. `make examples` builds them all (see the
-[Makefile](../Makefile)).
-
-## Rust
-
-- [`rust/lookup.rs`](rust/lookup.rs): the core crate alone, over an in-memory
-  store. `cargo run --features simulation --example lookup`.
-
-## JavaScript
+SQL in Restate virtual objects, with the patched TypeScript SDK. `make
+examples` builds them (see the [Makefile](../Makefile)); the crate's own
+example is [`sqlite-kv/examples/lookup.rs`](../sqlite-kv/examples/lookup.rs).
 
 One npm package, here, on the patched Restate TypeScript SDK and the
-[addon](../node/README.md) (`make examples-js` installs it):
+[addon](../sqlite-kv/node/README.md) (`make examples-js` installs it):
 
 - [`node/`](node/README.md): SQL in Restate virtual objects, how it works,
   and two examples:
