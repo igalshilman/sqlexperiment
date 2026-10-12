@@ -7,8 +7,7 @@ the state, single-writer execution per key, and retries. It uses the
 [sqlite-kv addon](../../sqlite-kv/node/README.md) and a patched Restate TypeScript SDK
 ([`vendor/typescript`](../../vendor/README.md#typescript)).
 
-It needs the latest, unreleased Restate server, with service protocol V8
-turned on: see [the requirements](../../README.md#requirements).
+It runs on a released Restate server: see [the requirements](../../README.md#requirements).
 
 ```js
 import * as restate from '@restatedev/restate-sdk';
@@ -55,13 +54,9 @@ the sqlite-kv addon, an optional peer dependency, on first use.
 
 ## How it works
 
-**State access.** A get is a state read that is not recorded in the journal
-(service protocol V8's ephemeral state get): the value this attempt wrote, or
-else the runtime's stored value (lazy state, so an invocation does not start by
-loading every page). Either way it reads its own writes: the shared core
-answers a key the attempt set or cleared itself, and the runtime starts a
-retry only once the failed attempt's commands are acknowledged, which the
-partition processor does after committing their state writes. A set or clear is a state write, and returns at once. Restate stores an
+**State access.** A get is a state read, from the runtime unless this attempt
+wrote the key (lazy state, so an invocation does not start by loading every
+page). A set or clear is a state write, and returns at once. Restate stores an
 invocation's commands in order, and after a crash keeps a prefix of them, so
 writes are FIFO: a lost write takes every later command with it, including
 later writes, calls to other services and the response. The protocol's
@@ -196,7 +191,7 @@ storage in the object's database.
 ```sh
 make examples-js   # from the repository root: the addon, the patched SDK, npm install
 cd examples && npm run serve
-docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true ghcr.io/restatedev/restate:service-protocol-v8   # Restate with protocol V8 (see the repository's README, Requirements), in another terminal
+docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
 curl localhost:8080/Orders/o1/place --json '{"sku": "apple", "qty": 2}'
@@ -204,17 +199,13 @@ curl localhost:8080/Orders/o1/place --json '{"sku": "apple", "qty": 2}'
 
 All the examples run through crashes against a real server: see
 [the examples' validation](../README.md#validation). 200 sequential ledger
-transfers take about 8 ms each on one local node, after as many to warm up;
-with every read journaled (service protocol V7), 9 to 10 ms on the same
-machine.
+transfers take 18.8 ms each on one local node.
 
 ## Caveats
 
-- **Needs service protocol V8.** Reads are not journaled, so reading pages
-  costs no log writes; but the runtime must speak V8, which is experimental
-  and not on Restate's main yet (see [the examples](../README.md#validation)
-  for the server the tests use). With an older protocol, a read fails the
-  attempt. Writes are journaled with their values; `sqlOptions` sets journal
+- **Every read is journaled with its value.** A state read appends the value
+  to the invocation's journal, so reading pages costs log writes, and the
+  page cache matters more than it does elsewhere. `sqlOptions` sets journal
   retention to zero so completed journals are not kept.
 - **The journal grows across attempts.** Skipped entries stay; each attempt
   appends its own.
@@ -228,8 +219,7 @@ machine.
   are a prefix of those it sent, in order (FIFO writes); an empty `ctx.run` is
   acknowledged only after the commands before it are stored (the barrier); an
   abandoned attempt's commands are never applied after a new attempt starts
-  (fencing); state a read returns is durable (the runtime answers it from
-  its committed state). The crash tests kill
+  (fencing); state a lazy read returns is durable. The crash tests kill
   processes, so they check ordering and recovery, not storage durability
   across a machine crash.
 
@@ -237,4 +227,4 @@ machine.
 
 Shared handlers, awakeables, `ctx.sql` in a handler that replays its journal,
 and request/response deployments (such as Lambda), which suspend at every await,
-since a suspension is a restart (and the runtime cannot answer a read there).
+since a suspension is a restart.

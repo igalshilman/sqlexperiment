@@ -216,44 +216,6 @@ const db = restate.object({
   options: { ...restate.sqlOptions },
 });
 
-// State reads are not journaled (protocol V8's ephemeral state get): with
-// lazy state, each read the attempt has not written goes to the server.
-const reader = restate.object({
-  name: 'Reader',
-  handlers: {
-    read: async (ctx) => {
-      const [stored, missing] = await Promise.all([ctx.get('n'), ctx.get('missing')]);
-      ctx.set('n', (stored ?? 0) + 1);
-      return { stored, missing, own: await ctx.get('n') };
-    },
-  },
-  options: { journalReplay: false, enableLazyState: true, journalRetention: { hours: 1 } },
-});
-
-// A retried attempt reads what the failed one wrote: the server retries only
-// once it has stored the failed attempt's commands, state writes included.
-const rewriterAttempts = new Map();
-const rewriter = restate.object({
-  name: 'Rewriter',
-  handlers: {
-    write: async (ctx, keys) => {
-      const attempt = (rewriterAttempts.get(ctx.request().id) ?? 0) + 1;
-      rewriterAttempts.set(ctx.request().id, attempt);
-      if (attempt === 1) {
-        for (let i = 0; i < keys; i++) ctx.set(`k${i}`, `${ctx.key}:${i}`);
-        throw new Error('fail after the writes');
-      }
-      const values = await Promise.all(Array.from({ length: keys }, (_, i) => ctx.get(`k${i}`)));
-      return { attempt, values };
-    },
-  },
-  options: {
-    journalReplay: false,
-    enableLazyState: true,
-    retryPolicy: { initialInterval: 1, maxInterval: 10 },
-  },
-});
-
 // --- Harness
 
 const dir = mkdtempSync(join(tmpdir(), 'sqlite-kv-concurrency-'));
@@ -263,8 +225,6 @@ const server = spawn(SERVER, ['--base-dir', join(dir, 'server')], {
     ...process.env,
     RESTATE_BIND_IP: '127.0.0.1',
     RESTATE_LISTEN_MODE: 'tcp',
-    // Service protocol V8: state reads that are not journaled.
-    RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8: 'true',
     RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT: `${INACTIVITY}ms`,
   },
   stdio: ['ignore', openSync(join(dir, 'server.log'), 'a'), openSync(join(dir, 'server.log'), 'a')],
@@ -275,7 +235,7 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   if (await fetch(`${ADMIN}/health`).then((r) => r.ok, () => false)) break;
   if (Date.now() > deadline) throw new Error('restate-server did not start');
 }
-const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(db).bind(reader).bind(rewriter).listen(PORT);
+const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(db).listen(PORT);
 void endpoint;
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   const registered = await fetch(`${ADMIN}/deployments`, {
@@ -285,16 +245,6 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   }).then((r) => r.ok, () => false);
   if (registered) break;
   if (Date.now() > deadline) throw new Error('registration failed');
-}
-
-async function query(sql) {
-  const r = await fetch(`${ADMIN}/query`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ query: sql }),
-  });
-  if (!r.ok) throw new Error(`query: ${r.status} ${await r.text()}`);
-  return (await r.json()).rows;
 }
 
 async function call(path, body = null) {
@@ -415,28 +365,6 @@ await check("a workflow's durable promise is a plain promise", async () => {
 
 await check('ctx.sqlSession with statements, a call and a sleep at once', async () => {
   assert.deepEqual((await call('Db/d/concurrent')).value, { h: 2, r: 3, count: 1 });
-});
-
-await check('state reads are not journaled', async () => {
-  assert.deepEqual((await call('Reader/r/read')).value, { stored: null, missing: null, own: 1 });
-  assert.deepEqual((await call('Reader/r/read')).value, { stored: 1, missing: null, own: 2 });
-  const entries = await query(
-    "SELECT j.entry_type AS type FROM sys_journal j JOIN sys_invocation i ON j.id = i.id WHERE i.target = 'Reader/r/read'",
-  );
-  const types = entries.map((e) => e.type);
-  assert.ok(types.some((t) => /SetState/.test(t)), `journal: ${types}`);
-  assert.ok(!types.some((t) => /Get\w*State/.test(t)), `journal: ${types}`);
-});
-
-await check("a retried attempt reads the failed attempt's writes", async () => {
-  const keys = 20;
-  const results = await Promise.all(
-    Array.from({ length: 20 }, (_, n) => call(`Rewriter/w${n}/write`, keys).then((r) => [n, r.value])),
-  );
-  for (const [n, { attempt, values }] of results) {
-    assert.equal(attempt, 2);
-    assert.deepEqual(values, Array.from({ length: keys }, (_, i) => `w${n}:${i}`));
-  }
 });
 
 console.log(failed === 0 ? 'all passed' : `${failed} failed`);

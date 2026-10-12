@@ -3,8 +3,8 @@
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
-#   make crash-test   the crash campaign, against a Restate server
-#   make concurrency-test   the context without journal replay, against a Restate server
+#   make crash-test   the crash campaign, against RESTATE_SERVER
+#   make concurrency-test   the context without journal replay, against RESTATE_SERVER
 #   make help         every target
 #
 # The Rust workspaces (the crate, the addon) share one target directory.
@@ -14,20 +14,23 @@ CARGO ?= cargo
 SDK_TARBALL := vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 CORE := sqlite-kv
 ADDON := $(CORE)/node/sqlite_kv.node
-# The tests against a Restate server need service protocol V8 (state reads that
-# are not journaled), which is not on restate's main yet. By default, on Linux,
-# the server of its service-protocol-v8 image, taken out with docker; on macOS
-# (where that Linux binary does not run), the server built from the same
-# commit with cargo. Or set RESTATE_SERVER to a restate-server binary with V8.
-RESTATE_IMAGE ?= ghcr.io/restatedev/restate:service-protocol-v8
-RESTATE_REV ?= aa8d448501acc79a8b27beb325f42d0ef60df451
+# The tests against a Restate server run a released restate-server: by default
+# RESTATE_VERSION's, downloaded from its GitHub release for this platform. Or
+# RESTATE_FROM=image takes it out of RESTATE_IMAGE with docker (Linux only),
+# RESTATE_FROM=source builds it from RESTATE_REV with cargo, or set
+# RESTATE_SERVER to a restate-server binary.
+RESTATE_VERSION ?= 1.7.13
+RESTATE_FROM ?= release
+RESTATE_IMAGE ?= ghcr.io/restatedev/restate:$(RESTATE_VERSION)
+RESTATE_REV ?= v$(RESTATE_VERSION)
 RESTATE_SERVER ?= $(CARGO_TARGET_DIR)/restate/restate-server
 RESTATE_CHECKOUT := $(CARGO_TARGET_DIR)/restate-checkout
 export RESTATE_SERVER
+RESTATE_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
 ifeq ($(shell uname -s),Darwin)
-RESTATE_FROM ?= source
+RESTATE_TARGET := $(RESTATE_ARCH)-apple-darwin
 else
-RESTATE_FROM ?= image
+RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
@@ -90,7 +93,7 @@ crash-test: examples-js $(RESTATE_SERVER) ## Every JavaScript example through cr
 concurrency-test: examples-js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
 	cd examples && node concurrency.mjs
 
-restate-server: ## Get restate-server again: from RESTATE_IMAGE (docker), or with RESTATE_FROM=source from RESTATE_REV (cargo)
+restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker) or RESTATE_REV (cargo), per RESTATE_FROM
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
 
 # From source: in a checkout, for restate's own cargo config (its rustflags),
@@ -106,9 +109,13 @@ ifeq ($(RESTATE_FROM),source)
 		CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
 		$(CARGO) build --locked --release -p restate-server
 	cp $(RESTATE_CHECKOUT)/target/release/restate-server $@
-else
+else ifeq ($(RESTATE_FROM),image)
 	docker pull -q $(RESTATE_IMAGE)
 	id=$$(docker create $(RESTATE_IMAGE)) && docker cp -q $$id:/usr/local/bin/restate-server $@; docker rm $$id > /dev/null
+else
+	curl -fsSL https://github.com/restatedev/restate/releases/download/v$(RESTATE_VERSION)/restate-server-$(RESTATE_TARGET).tar.xz \
+		| tar -xJ -O restate-server-$(RESTATE_TARGET)/restate-server > $@
+	chmod +x $@
 endif
 	$@ --version
 

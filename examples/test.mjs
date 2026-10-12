@@ -49,13 +49,7 @@ console.error(`logs in ${dir}`);
 
 const startServer = () =>
   spawn(SERVER, ['--base-dir', join(dir, 'server')], {
-    env: {
-      ...process.env,
-      RESTATE_BIND_IP: '127.0.0.1',
-      RESTATE_LISTEN_MODE: 'tcp',
-      // Service protocol V8: state reads that are not journaled.
-      RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8: 'true',
-    },
+    env: { ...process.env, RESTATE_BIND_IP: '127.0.0.1', RESTATE_LISTEN_MODE: 'tcp' },
     stdio: ['ignore', log('server.log'), log('server.log')],
   });
 

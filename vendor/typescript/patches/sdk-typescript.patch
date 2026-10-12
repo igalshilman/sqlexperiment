@@ -293,7 +293,7 @@ index 8ea15b1..c2fa54b 100644
 +    UnjournaledObjectContext<TState>,
 +    RestateWorkflowContext {}
 diff --git a/packages/libs/restate-sdk/src/context_impl.ts b/packages/libs/restate-sdk/src/context_impl.ts
-index 2487c57..e7b79d4 100644
+index 2487c57..274fecf 100644
 --- a/packages/libs/restate-sdk/src/context_impl.ts
 +++ b/packages/libs/restate-sdk/src/context_impl.ts
 @@ -71,6 +71,8 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
@@ -344,62 +344,7 @@ index 2487c57..e7b79d4 100644
    setRunInterceptor(
      interceptor: (name: string, runner: () => Promise<void>) => Promise<void>
    ) {
-@@ -213,6 +227,15 @@ export class ContextImpl
-   }
- 
-   public get<T>(name: string, serde?: Serde<T>): RestatePromise<T | null> {
-+    if (!this.journalReplay) {
-+      // Without journal replay, a read is not recorded: a retried attempt
-+      // reads the state again, as stored. Its context's get returns a plain
-+      // promise (see unjournaled.ts), and so does this.
-+      return this.ephemeralStateGet(
-+        name,
-+        serde ?? this.defaultSerde
-+      ) as unknown as RestatePromise<T | null>;
-+    }
-     return this.processCompletableEntry(
-       WasmCommandType.GetState,
-       () => {},
-@@ -246,9 +269,10 @@ export class ContextImpl
- 
-   /**
-    * Get the state value with an ephemeral command: neither the command nor its notification are recorded in the journal.
--   * Because of this, the returned value MUST be used only within a run closure.
-+   * Because of this, the returned value MUST be used only within a run closure, or without journal replay.
-    *
--   * The returned promise is completed only if a Restate's DurablePromise is being awaited.
-+   * The returned promise is completed only if a Restate's DurablePromise is being awaited; without journal replay,
-+   * the selector drives it.
-    */
-   private ephemeralStateGet<T>(
-     name: string,
-@@ -261,14 +285,23 @@ export class ContextImpl
-       this.abortAttempt(e);
-       return pendingPromise();
-     }
--    return this.ephemeralRequestTracker.register(
-+    const promise = this.ephemeralRequestTracker.register(
-       ephemeralCompletionId,
-       completeUsing<T | null>(
-         {},
-         VoidAsNull,
-         SuccessWithSerde(serde, this.journalValueCodec)
--      )
-+      ),
-+      // The selector is woken by the registration below instead.
-+      this.journalReplay
-     );
-+    if (!this.journalReplay) {
-+      this.promisesExecutor.driveEphemeral(
-+        ephemeralCompletionId,
-+        this.ephemeralRequestTracker
-+      );
-+    }
-+    return promise;
-   }
- 
-   public stateKeys(): RestatePromise<Array<string>> {
-@@ -291,6 +324,14 @@ export class ContextImpl
+@@ -291,6 +305,14 @@ export class ContextImpl
      );
    }
  
@@ -414,90 +359,6 @@ index 2487c57..e7b79d4 100644
    public clear(name: string): void {
      this.processNonCompletableEntry(
        WasmCommandType.ClearState,
-@@ -1161,8 +1202,13 @@ class DurablePromiseImpl<T> implements DurablePromise<T> {
- export class EphemeralRequestTracker {
-   private readonly pending = new Map<
-     number,
--    (value: AsyncResultValue) => Promise<void>
-+    {
-+      complete: (value: AsyncResultValue) => Promise<void>;
-+      reject: (e: unknown) => void;
-+    }
-   >();
-+  // Cancelled before their notification arrived: it is dropped when it does.
-+  private readonly cancelled = new Set<number>();
- 
-   constructor(private readonly channel: ExternalProgressChannel) {}
- 
-@@ -1171,29 +1217,48 @@ export class EphemeralRequestTracker {
-     completer: (
-       value: AsyncResultValue,
-       prom: PromiseWithResolvers<T>
--    ) => Promise<void>
-+    ) => Promise<void>,
-+    signal = true
-   ): Promise<T> {
-     const prom = Promise.withResolvers<T>();
--    this.pending.set(completionId, async (value) => {
--      try {
--        await completer(value, prom);
--      } catch (e) {
--        // Ephemeral results are used within run closures, propagate the error there.
--        prom.reject(e);
--      }
-+    this.pending.set(completionId, {
-+      complete: async (value) => {
-+        try {
-+          await completer(value, prom);
-+        } catch (e) {
-+          // Ephemeral results are used within run closures, propagate the error there.
-+          prom.reject(e);
-+        }
-+      },
-+      reject: prom.reject,
-     });
-     // Wake up the progress loop: it will either pick up the notification, if the VM could answer it locally,
-     // or flush the output containing the ephemeral command before waiting again for input.
--    this.channel.signal();
-+    if (signal) this.channel.signal();
-     return prom.promise;
-   }
- 
-+  /** Whether the request still waits for its notification. */
-+  isPending(completionId: number): boolean {
-+    return this.pending.has(completionId);
-+  }
-+
-+  /** Rejects the request's promise now; its notification is dropped when it arrives. */
-+  cancel(completionId: number, e: unknown) {
-+    const request = this.pending.get(completionId);
-+    if (request === undefined) return;
-+    this.pending.delete(completionId);
-+    this.cancelled.add(completionId);
-+    request.reject(e);
-+  }
-+
-   async complete(
-     completionId: number,
-     value: vm.WasmAsyncResultValue
-   ): Promise<void> {
--    const complete = this.pending.get(completionId);
--    if (complete === undefined) {
-+    if (this.cancelled.delete(completionId)) return;
-+    const request = this.pending.get(completionId);
-+    if (request === undefined) {
-       throw new Error(
-         `Ephemeral request with completion id ${completionId} doesn't exist`
-       );
-@@ -1204,7 +1269,7 @@ export class EphemeralRequestTracker {
-       );
-     }
-     this.pending.delete(completionId);
--    await complete(value);
-+    await request.complete(value);
-   }
- }
- 
 diff --git a/packages/libs/restate-sdk/src/endpoint/components.ts b/packages/libs/restate-sdk/src/endpoint/components.ts
 index 14d8ab1..f24c370 100644
 --- a/packages/libs/restate-sdk/src/endpoint/components.ts
@@ -564,10 +425,10 @@ index 7cee518..5f5bf5a 100644
   * Downcast the given context to {@link ContextInternal}, to access the internal APIs.
 diff --git a/packages/libs/restate-sdk/src/promise_selector.ts b/packages/libs/restate-sdk/src/promise_selector.ts
 new file mode 100644
-index 0000000..fb0c36b
+index 0000000..d68ce73
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/promise_selector.ts
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,155 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 + *
@@ -603,42 +464,8 @@ index 0000000..fb0c36b
 +  wake(): void;
 +  executeRun(handle: number): void;
 +  completeEphemeral(completionId: number): Promise<void>;
-+  /**
-+   * What to await when only ephemeral requests are pending: a future that is
-+   * not empty (the runtime refuses an empty one), such as the cancel signal.
-+   */
-+  idleFuture(): vm.WasmUnresolvedFuture;
 +  /** The attempt cannot go on: suspension, or an error. */
 +  onError(e: unknown): void;
-+}
-+
-+/** The ephemeral requests of an invocation, as the selector sees them. */
-+export interface EphemeralRequests {
-+  /** Whether the request still waits for its notification. */
-+  isPending(completionId: number): boolean;
-+  /** Rejects the request's promise with `e`. */
-+  cancel(completionId: number, e: unknown): void;
-+}
-+
-+/**
-+ * An ephemeral request (a state read that is not journaled) as a selectable.
-+ * It has no handle to await: while it is pending, its future is empty, and the
-+ * selector awaits the other promises, or the driver's idle future if there are
-+ * none, so that the VM reports its notification (which comes before anything
-+ * else) or waits for input.
-+ */
-+export function ephemeralSelectable(
-+  completionId: number,
-+  requests: EphemeralRequests,
-+  cancelled: () => unknown
-+): Selectable {
-+  return {
-+    // Settled by the VM's EphemeralNotificationReady, through the driver.
-+    tryComplete: () => Promise.resolve(),
-+    unresolvedFuture: () =>
-+      requests.isPending(completionId) ? { FirstCompleted: [] } : null,
-+    tryCancel: () => requests.cancel(completionId, cancelled()),
-+  };
 +}
 +
 +/**
@@ -711,21 +538,15 @@ index 0000000..fb0c36b
 +        await setImmediate();
 +
 +        const futures: vm.WasmUnresolvedFuture[] = [];
-+        let ephemeral = false;
 +        for (const promise of this.pending) {
 +          const future = promise.unresolvedFuture();
 +          if (future === null) {
 +            this.pending.delete(promise);
-+          } else if (isEmpty(future)) {
-+            ephemeral = true;
 +          } else {
 +            futures.push(future);
 +          }
 +        }
-+        if (futures.length === 0) {
-+          if (!ephemeral) return;
-+          futures.push(this.driver.idleFuture());
-+        }
++        if (futures.length === 0) return;
 +
 +        const result = this.driver.doProgress(
 +          futures.length === 1 ? futures[0]! : { FirstCompleted: futures }
@@ -763,33 +584,19 @@ index 0000000..fb0c36b
 +    }
 +  }
 +}
-+
-+// A future of no handles: an ephemeral request's.
-+function isEmpty(future: vm.WasmUnresolvedFuture): boolean {
-+  if ("Single" in future) return false;
-+  return Object.values(future)[0]!.every(isEmpty);
-+}
 diff --git a/packages/libs/restate-sdk/src/promises.ts b/packages/libs/restate-sdk/src/promises.ts
-index f14da79..16864ad 100644
+index f14da79..bdc98ec 100644
 --- a/packages/libs/restate-sdk/src/promises.ts
 +++ b/packages/libs/restate-sdk/src/promises.ts
-@@ -17,6 +17,7 @@ import type {
-   InvocationPromise,
- } from "./context.js";
- import type * as vm from "./endpoint/handlers/vm/sdk_shared_core_wasm_bindings.js";
-+import { cancel_handle } from "./endpoint/handlers/vm/sdk_shared_core_wasm_bindings.js";
- import {
-   CancelledError,
-   RestateError,
-@@ -31,6 +32,7 @@ import type {
+@@ -31,6 +31,7 @@ import type {
  import { setImmediate } from "node:timers/promises";
  import type { OutputPump } from "./io.js";
  import type { ExternalProgressChannel } from "./utils/external_progress_channel.js";
-+import { PromiseSelector, ephemeralSelectable } from "./promise_selector.js";
++import { PromiseSelector } from "./promise_selector.js";
  import type { Duration } from "@restatedev/restate-sdk-core";
  
  // A promise that is never completed
-@@ -52,6 +54,18 @@ export function isRestatePromise<T>(p: Promise<T>): p is RestatePromise<T> {
+@@ -52,6 +53,18 @@ export function isRestatePromise<T>(p: Promise<T>): p is RestatePromise<T> {
    return p instanceof InternalRestatePromise;
  }
  
@@ -808,7 +615,7 @@ index f14da79..16864ad 100644
  enum PromiseState {
    COMPLETED,
    NOT_COMPLETED,
-@@ -119,32 +133,29 @@ abstract class BaseRestatePromise<T> extends InternalRestatePromise<T> {
+@@ -119,32 +132,29 @@ abstract class BaseRestatePromise<T> extends InternalRestatePromise<T> {
      onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
      onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null
    ): Promise<TResult1 | TResult2> {
@@ -849,7 +656,7 @@ index f14da79..16864ad 100644
    }
  
    private publicPromiseOrCancelPromise(): Promise<T> {
-@@ -154,6 +165,20 @@ abstract class BaseRestatePromise<T> extends InternalRestatePromise<T> {
+@@ -154,6 +164,20 @@ abstract class BaseRestatePromise<T> extends InternalRestatePromise<T> {
      ]);
    }
  
@@ -870,7 +677,7 @@ index f14da79..16864ad 100644
    // --- RestatePromise methods
  
    orTimeout(duration: number | Duration): RestatePromise<T> {
-@@ -506,16 +531,56 @@ export class ConstRestatePromise<T> extends InternalRestatePromise<T> {
+@@ -506,16 +530,48 @@ export class ConstRestatePromise<T> extends InternalRestatePromise<T> {
   * Promises executor, gluing VM with I/O and Promises given to user space.
   */
  export class PromisesExecutor {
@@ -900,7 +707,6 @@ index f14da79..16864ad 100644
 +            completionId,
 +            coreVm.take_ephemeral_notification(completionId)
 +          ),
-+        idleFuture: () => ({ Single: cancel_handle() }),
 +        onError: errorCallback,
 +      });
 +    }
@@ -909,13 +715,6 @@ index f14da79..16864ad 100644
 +  /** At the end of the attempt. */
 +  close() {
 +    this.selector?.close();
-+  }
-+
-+  /** Without journal replay, drives an ephemeral request (a state read) with the selector. */
-+  driveEphemeral(completionId: number, tracker: EphemeralRequestTracker) {
-+    this.selector?.register(
-+      ephemeralSelectable(completionId, tracker, () => new CancelledError())
-+    );
 +  }
  
    async doProgress(restatePromise: InternalRestatePromise<unknown>) {
@@ -1692,10 +1491,10 @@ index 0000000..8290001
 +}
 diff --git a/packages/libs/restate-sdk/test/promise_selector.test.ts b/packages/libs/restate-sdk/test/promise_selector.test.ts
 new file mode 100644
-index 0000000..d44ab9e
+index 0000000..e04f3df
 --- /dev/null
 +++ b/packages/libs/restate-sdk/test/promise_selector.test.ts
-@@ -0,0 +1,590 @@
+@@ -0,0 +1,484 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 + *
@@ -1709,11 +1508,7 @@ index 0000000..d44ab9e
 +
 +import { describe, expect, it } from "vitest";
 +import { setImmediate } from "node:timers/promises";
-+import {
-+  PromiseSelector,
-+  ephemeralSelectable,
-+  type Selectable,
-+} from "../src/promise_selector.js";
++import { PromiseSelector, type Selectable } from "../src/promise_selector.js";
 +import { ExternalProgressChannel } from "../src/utils/external_progress_channel.js";
 +import type * as vm from "../src/endpoint/handlers/vm/sdk_shared_core_wasm_bindings.js";
 +
@@ -1721,9 +1516,7 @@ index 0000000..d44ab9e
 +// a ready result completes the future (AnyCompleted); else a run the future awaits
 +// and nobody started is handed out (ExecuteRun); else, with the input closed and no
 +// run of the future executing, the invocation suspends on the future; else it waits.
-+// Results stay until taken; a cancellation is reported once. A ready ephemeral
-+// notification comes before anything else; while an ephemeral request is in
-+// flight, the invocation does not suspend (the core fails it instead).
++// Results stay until taken; a cancellation is reported once.
 +
 +type Result = { ok: unknown } | { fail: Error };
 +
@@ -1752,18 +1545,11 @@ index 0000000..d44ab9e
 +  suspendedOn?: vm.WasmUnresolvedFuture;
 +  readonly progress: vm.WasmUnresolvedFuture[] = [];
 +  failWith?: Error;
-+  // Ephemeral requests: in flight, and ready to be taken.
-+  readonly ephemeralInFlight = new Set<number>();
-+  readonly ephemeralReady: number[] = [];
 +
 +  doProgress(f: vm.WasmUnresolvedFuture): vm.WasmDoProgressResult {
 +    if (this.suspendedOn) throw new Error("closed");
 +    if (this.failWith) throw this.failWith;
 +    this.progress.push(f);
-+    const ephemeral = this.ephemeralReady.shift();
-+    if (ephemeral !== undefined) {
-+      return { EphemeralNotificationReady: ephemeral };
-+    }
 +    if (this.cancelled) {
 +      this.cancelled = false;
 +      return "CancelSignalReceived";
@@ -1774,9 +1560,6 @@ index 0000000..d44ab9e
 +      this.runs.delete(run);
 +      this.executing.add(run);
 +      return { ExecuteRun: run };
-+    }
-+    if (this.inputClosed && this.ephemeralInFlight.size > 0) {
-+      throw new Error("input closed while waiting for ephemeral notifications");
 +    }
 +    if (this.inputClosed && !leaves(f).some((h) => this.executing.has(h))) {
 +      this.suspendedOn = f;
@@ -1861,30 +1644,8 @@ index 0000000..d44ab9e
 +  }
 +}
 +
-+// Shaped like EphemeralRequestTracker: a promise per request, settled by the
-+// driver's completeEphemeral with the VM's value.
-+class FakeEphemeral {
-+  readonly requests = new Map<number, PromiseWithResolvers<unknown>>();
-+  readonly values = new Map<number, unknown>();
-+  isPending(id: number) {
-+    return this.requests.has(id);
-+  }
-+  cancel(id: number, e: unknown) {
-+    this.requests.get(id)?.reject(e);
-+    this.requests.delete(id);
-+  }
-+  complete(id: number) {
-+    const request = this.requests.get(id);
-+    if (request === undefined) return Promise.resolve();
-+    this.requests.delete(id);
-+    request.resolve(this.values.get(id));
-+    return Promise.resolve();
-+  }
-+}
-+
 +function setup(opts: { onFlush?: () => void } = {}) {
 +  const fake = new FakeVm();
-+  const ephemeral = new FakeEphemeral();
 +  const channel = new ExternalProgressChannel(); // upstream's: one waiter, else it rejects
 +  const errors: unknown[] = [];
 +  const started: number[] = [];
@@ -1899,8 +1660,7 @@ index 0000000..d44ab9e
 +    awaitExternalProgress: () => channel.awaitNext(),
 +    wake: () => channel.signal(),
 +    executeRun: (h) => started.push(h),
-+    completeEphemeral: (id) => ephemeral.complete(id),
-+    idleFuture: () => ({ Single: 0 }),
++    completeEphemeral: () => Promise.resolve(),
 +    onError: (e) => errors.push(e),
 +  });
 +  let next = 1;
@@ -1921,27 +1681,6 @@ index 0000000..d44ab9e
 +      fake.runs.add(p.handle);
 +      selector.register(p);
 +      return p;
-+    },
-+    /** A state read: its notification arrives with `answer`. */
-+    read() {
-+      const id = next++;
-+      const request = Promise.withResolvers<unknown>();
-+      request.promise.catch(() => {});
-+      ephemeral.requests.set(id, request);
-+      fake.ephemeralInFlight.add(id);
-+      selector.register(
-+        ephemeralSelectable(id, ephemeral, () => new Error("cancelled"))
-+      );
-+      return {
-+        id,
-+        user: request.promise,
-+        answer(value: unknown) {
-+          ephemeral.values.set(id, value);
-+          fake.ephemeralInFlight.delete(id);
-+          fake.ephemeralReady.push(id);
-+          channel.signal();
-+        },
-+      };
 +    },
 +    complete(p: FakePromise, value: unknown) {
 +      fake.ready.set(p.handle, { ok: value });
@@ -2238,52 +1977,6 @@ index 0000000..d44ab9e
 +    ps.forEach((p, i) => t.complete(p, i));
 +    await expect(Promise.all(ps.map((p) => p.user))).resolves.toHaveLength(100);
 +    expect(t.errors).toEqual([]);
-+  });
-+
-+  it("drives a state read with nothing else pending, on the idle future", async () => {
-+    const t = setup();
-+    const read = t.read();
-+    await until(() => t.fake.progress.length === 1);
-+    expect(t.fake.progress[0]).toEqual({ Single: 0 });
-+    read.answer("v");
-+    await expect(read.user).resolves.toBe("v");
-+    await settle();
-+    expect(t.selector.size).toBe(0);
-+    expect(t.errors).toEqual([]);
-+  });
-+
-+  it("drives state reads among other promises, in the same await point", async () => {
-+    const t = setup();
-+    const p = t.promise();
-+    const read = t.read();
-+    await until(() => t.fake.progress.length === 1);
-+    // The other promise only: no empty future, which the runtime refuses.
-+    expect(t.fake.progress[0]).toEqual({ Single: p.handle });
-+    read.answer(1);
-+    await expect(read.user).resolves.toBe(1);
-+    t.complete(p, 2);
-+    await expect(p.user).resolves.toBe(2);
-+    expect(t.errors).toEqual([]);
-+  });
-+
-+  it("cancels a pending state read, and drops its notification", async () => {
-+    const t = setup();
-+    const read = t.read();
-+    await until(() => t.fake.progress.length === 1);
-+    t.cancel();
-+    await expect(read.user).rejects.toThrow("cancelled");
-+    read.answer("late");
-+    await settle();
-+    expect(t.errors).toEqual([]);
-+  });
-+
-+  it("does not suspend while a state read is in flight", async () => {
-+    const t = setup();
-+    t.read();
-+    await until(() => t.fake.progress.length === 1);
-+    t.closeInput();
-+    await until(() => t.errors.length === 1);
-+    expect(t.fake.suspendedOn).toBeUndefined();
 +  });
 +});
 diff --git a/packages/libs/restate-sdk/test/tsconfig.types.json b/packages/libs/restate-sdk/test/tsconfig.types.json
