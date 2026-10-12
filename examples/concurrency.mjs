@@ -216,6 +216,20 @@ const db = restate.object({
   options: { ...restate.sqlOptions },
 });
 
+// State reads are not journaled (protocol V8's ephemeral state get): with
+// lazy state, each read the attempt has not written goes to the server.
+const reader = restate.object({
+  name: 'Reader',
+  handlers: {
+    read: async (ctx) => {
+      const [stored, missing] = await Promise.all([ctx.get('n'), ctx.get('missing')]);
+      ctx.set('n', (stored ?? 0) + 1);
+      return { stored, missing, own: await ctx.get('n') };
+    },
+  },
+  options: { journalReplay: false, enableLazyState: true, journalRetention: { hours: 1 } },
+});
+
 // --- Harness
 
 const dir = mkdtempSync(join(tmpdir(), 'sqlite-kv-concurrency-'));
@@ -225,6 +239,8 @@ const server = spawn(SERVER, ['--base-dir', join(dir, 'server')], {
     ...process.env,
     RESTATE_BIND_IP: '127.0.0.1',
     RESTATE_LISTEN_MODE: 'tcp',
+    // Service protocol V8: state reads that are not journaled.
+    RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8: 'true',
     RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT: `${INACTIVITY}ms`,
   },
   stdio: ['ignore', openSync(join(dir, 'server.log'), 'a'), openSync(join(dir, 'server.log'), 'a')],
@@ -235,7 +251,7 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   if (await fetch(`${ADMIN}/health`).then((r) => r.ok, () => false)) break;
   if (Date.now() > deadline) throw new Error('restate-server did not start');
 }
-const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(db).listen(PORT);
+const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(db).bind(reader).listen(PORT);
 void endpoint;
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   const registered = await fetch(`${ADMIN}/deployments`, {
@@ -245,6 +261,16 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   }).then((r) => r.ok, () => false);
   if (registered) break;
   if (Date.now() > deadline) throw new Error('registration failed');
+}
+
+async function query(sql) {
+  const r = await fetch(`${ADMIN}/query`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ query: sql }),
+  });
+  if (!r.ok) throw new Error(`query: ${r.status} ${await r.text()}`);
+  return (await r.json()).rows;
 }
 
 async function call(path, body = null) {
@@ -365,6 +391,17 @@ await check("a workflow's durable promise is a plain promise", async () => {
 
 await check('ctx.sqlSession with statements, a call and a sleep at once', async () => {
   assert.deepEqual((await call('Db/d/concurrent')).value, { h: 2, r: 3, count: 1 });
+});
+
+await check('state reads are not journaled', async () => {
+  assert.deepEqual((await call('Reader/r/read')).value, { stored: null, missing: null, own: 1 });
+  assert.deepEqual((await call('Reader/r/read')).value, { stored: 1, missing: null, own: 2 });
+  const entries = await query(
+    "SELECT j.entry_type AS type FROM sys_journal j JOIN sys_invocation i ON j.id = i.id WHERE i.target = 'Reader/r/read'",
+  );
+  const types = entries.map((e) => e.type);
+  assert.ok(types.some((t) => /SetState/.test(t)), `journal: ${types}`);
+  assert.ok(!types.some((t) => /Get\w*State/.test(t)), `journal: ${types}`);
 });
 
 console.log(failed === 0 ? 'all passed' : `${failed} failed`);
