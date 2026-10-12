@@ -2,10 +2,11 @@
 // abort at random state requests, and the server is killed twice, while
 // clients place, pay and expire orders and prompt agents. The ledger and the
 // shop run in one process (ABORT_PER_MILLE, default 15), and each kind of
-// agent in its own: the pi agents and the LangGraph agents
-// (AGENT_ABORT_PER_MILLE, default 3: a pi prompt makes some 200 state
-// requests), and the Claude agents (ABORT_PER_MILLE). The agents get the same prompts. Each request is resent until
-// answered, some twice.
+// agent in its own: the pi, LangGraph and DeepSeek Harness agents
+// (AGENT_ABORT_PER_MILLE, default 3: a pi or DeepSeek Harness prompt makes
+// some hundreds of state requests), and the Claude agents (ABORT_PER_MILLE).
+// The agents get the same prompts. Each request is resent until answered,
+// some twice.
 //
 // Checks: the warehouses' books balance and agree with every order, and every
 // agent prompt moved money exactly once.
@@ -33,10 +34,11 @@ const PROCESSES = [
   { name: 'langgraph', groups: ['langgraph'], port: 9186, perMille: AGENT_PER_MILLE },
   // A Claude prompt makes few state requests: it aborts as often as the shop.
   { name: 'claude', groups: ['claude'], port: 9187, perMille: PER_MILLE },
+  { name: 'deepseek', groups: ['deepseek'], port: 9188, perMille: AGENT_PER_MILLE },
 ];
-// The agents: the pi one, the LangGraph one and the Claude one, with the same
-// prompts.
-const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent'];
+// The agents: the pi one, the LangGraph one, the Claude one and the DeepSeek
+// Harness one, with the same prompts.
+const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent', 'DeepSeekAgent'];
 const EXPIRY_MS = 1500;
 const SKUS = ['apple', 'pear', 'plum'];
 const STOCK = 20;

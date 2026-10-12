@@ -20,6 +20,9 @@ One npm package, here, on the patched Restate TypeScript SDK and the
   conformance suite.
 - [`claude/`](claude/README.md): a Claude agent on the Anthropic SDK's tool
   runner, whose conversation is in the object's database.
+- [`deepseek/`](deepseek/README.md): an agent on the DeepSeek Harness, whose
+  event-sourced session is in the object's database, through a session
+  persistence plugin.
 - [`serve.mjs`](serve.mjs): serves them in one endpoint (`npm run serve`).
 - [`faults.mjs`](faults.mjs): fault injection for the crash test.
 - [`test.mjs`](test.mjs): all of them against a real Restate server, through
@@ -46,7 +49,11 @@ the agents', and again on the context with plain promises (81 and 111). With
 the LangGraph agents too, it passed twice: 64 transfers, one per prompt, with
 28 and 26 restarts of their process. With the Claude agents too, in a fourth process aborting
 at 1.5% (a Claude prompt makes few state requests), it passed twice: 96
-transfers, one per prompt, with 46 and 42 restarts of their process.
+transfers, one per prompt, with 46 and 42 restarts of their process. With the
+DeepSeek Harness agents too, in a fifth process aborting at 0.3% (a prompt
+resumes the session from its stored log, some hundreds of state requests), it
+passed twice: 128 transfers, one per prompt, with 11 and 18 restarts of their
+process.
 
 ```sh
 make crash-test
