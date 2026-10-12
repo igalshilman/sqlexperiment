@@ -1,10 +1,11 @@
 // The examples against a real Restate server, through crashes: the services
 // abort at random state requests, and the server is killed twice, while
 // clients place, pay and expire orders and prompt agents. The ledger and the
-// shop run in one process (ABORT_PER_MILLE, default 15), the pi agents in
-// another and the LangGraph agents in a third (AGENT_ABORT_PER_MILLE, default
-// 3: a prompt makes some 200 state requests). Both agents get the same
-// prompts. Each request is resent until answered, some twice.
+// shop run in one process (ABORT_PER_MILLE, default 15), and each kind of
+// agent in its own: the pi agents and the LangGraph agents
+// (AGENT_ABORT_PER_MILLE, default 3: a pi prompt makes some 200 state
+// requests), and the Claude agents (ABORT_PER_MILLE). The agents get the same prompts. Each request is resent until
+// answered, some twice.
 //
 // Checks: the warehouses' books balance and agree with every order, and every
 // agent prompt moved money exactly once.
@@ -30,9 +31,12 @@ const PROCESSES = [
   { name: 'shop', groups: ['ledger', 'shop'], port: 9182, perMille: PER_MILLE },
   { name: 'agent', groups: ['agent'], port: 9183, perMille: AGENT_PER_MILLE },
   { name: 'langgraph', groups: ['langgraph'], port: 9186, perMille: AGENT_PER_MILLE },
+  // A Claude prompt makes few state requests: it aborts as often as the shop.
+  { name: 'claude', groups: ['claude'], port: 9187, perMille: PER_MILLE },
 ];
-// The agents: the pi one and the LangGraph one, with the same prompts.
-const AGENTS = ['Agent', 'GraphAgent'];
+// The agents: the pi one, the LangGraph one and the Claude one, with the same
+// prompts.
+const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent'];
 const EXPIRY_MS = 1500;
 const SKUS = ['apple', 'pear', 'plum'];
 const STOCK = 20;

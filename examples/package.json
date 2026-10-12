@@ -3,15 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Examples of SQL in Restate virtual objects with the TypeScript SDK: a ledger and a shop (node/), a durable pi agent (pi/) and a LangGraph agent (langgraph/)",
+  "description": "Examples of SQL in Restate virtual objects with the TypeScript SDK: a ledger and a shop (node/), a durable pi agent (pi/), a LangGraph agent (langgraph/) and a Claude agent on the Anthropic SDK's tool runner (claude/)",
   "scripts": {
     "serve": "node serve.mjs",
     "test": "node test.mjs",
     "test:concurrency": "node concurrency.mjs",
     "test:pi": "vitest run pi",
-    "test:langgraph": "vitest run langgraph"
+    "test:langgraph": "vitest run langgraph",
+    "test:claude": "vitest run claude"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.133.0",
     "@earendil-works/chord": "1.1.0",
     "@earendil-works/pi-ai": "1.1.0",
     "@earendil-works/pi-durable": "1.1.0",
