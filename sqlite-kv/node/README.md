@@ -48,8 +48,8 @@ A COMMIT that fails rolls back. An
 SQL error leaves the session usable (`isUsable()`); a storage error ends it.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
-and 1 GiB of disk in a temporary file, or the file `SQLITE_KV_CACHE_FILE`
-names. `save()` ends a session and confirms its writes (one `sync`, if it
+and 1 GiB of disk in a temporary file, unlinked once open so that it goes
+away with the process, or the file `SQLITE_KV_CACHE_FILE` names. `save()` ends a session and confirms its writes (one `sync`, if it
 wrote), so the cache may trust them. A session that ends otherwise (`close()`,
 a failed `save`, or garbage collection) makes the next session of that
 namespace in the process start cold, since its writes may be lost. The logic
