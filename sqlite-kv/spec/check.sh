@@ -7,15 +7,24 @@ cd "$(dirname "$0")"
 JAR="${TLA2TOOLS:-$HOME/.cache/tla2tools-1.8.0.jar}"
 if [ ! -f "$JAR" ]; then
     mkdir -p "$(dirname "$JAR")"
-    curl -sSL -o "$JAR" https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+    # Into place only once whole: an interrupted download is not taken as the jar.
+    curl -fsSL -o "$JAR.part" https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+    mv "$JAR.part" "$JAR"
 fi
-STATES="${TMPDIR:-/tmp}/tlc-states"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 configs=("$@")
 [ ${#configs[@]} -gt 0 ] || configs=(MC.cfg MCNoCache.cfg MCStrong.cfg)
 for config in "${configs[@]}"; do
     echo "== $config"
+    status=0
     java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto \
-        -metadir "$STATES" -config "$config" MC.tla |
-        grep -E "violated|No error has been found|distinct states found|Finished in"
-    rm -rf "$STATES"
+        -metadir "$work/states" -config "$config" MC.tla > "$work/tlc.log" 2>&1 || status=$?
+    rm -rf "$work/states"
+    if [ "$status" -ne 0 ]; then
+        # A violation (with its trace) or an error in the spec: TLC's whole output.
+        cat "$work/tlc.log"
+        exit "$status"
+    fi
+    grep -E "No error has been found|distinct states found|Finished in" "$work/tlc.log"
 done
