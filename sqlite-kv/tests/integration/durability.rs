@@ -505,3 +505,49 @@ fn a_parked_engine_does_not_hold_back_checkpoints() -> Result<()> {
         Ok(())
     })
 }
+
+#[test]
+fn the_version_grows_with_each_commit_that_changes_or_records() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+        db.execute("PRAGMA foreign_keys=ON").await?;
+        db.execute(
+            "CREATE TABLE p(id INTEGER PRIMARY KEY);
+             CREATE TABLE c(pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)",
+        )
+        .await?;
+        let v0 = db.version();
+        // A commit that changes nothing is not logged...
+        db.execute("BEGIN").await?;
+        db.execute("UPDATE p SET id = 2 WHERE id = 1").await?;
+        db.commit(false).await?;
+        assert_eq!(db.version(), v0);
+        // ...unless recorded.
+        db.execute("BEGIN").await?;
+        db.query("SELECT * FROM p").await?;
+        db.commit(true).await?;
+        let v1 = db.version();
+        assert!(v1 > v0);
+        // A rollback, or a COMMIT that fails, logs nothing.
+        db.execute("BEGIN").await?;
+        db.execute("ROLLBACK").await?;
+        db.execute("BEGIN").await?;
+        db.execute("INSERT INTO c VALUES(7)").await?;
+        assert!(db.commit(true).await.is_err());
+        db.execute("ROLLBACK").await?;
+        assert_eq!(db.version(), v1);
+        // The next commit is not recorded unless asked.
+        db.execute("SELECT 1").await?;
+        assert_eq!(db.version(), v1);
+        assert!(db.is_usable());
+        drop(db);
+        store.crash(&[]);
+
+        // The recorded commit is durable: a later open is at its version.
+        let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+        assert_eq!(db.version(), v1);
+        assert_eq!(db.query("PRAGMA integrity_check").await?[0][0].to_string(), "ok");
+        Ok(())
+    })
+}

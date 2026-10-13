@@ -568,13 +568,20 @@ impl Snapshot {
     /// cancellation. After an error, reopen; never reuse this snapshot.
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
-        Ok(self.commit(dirty, size).await?.0)
+        Ok(self.commit(dirty, size, false).await?.0)
     }
 
     /// [`Self::publish`], also returning the committed view afterwards, which a
-    /// session may continue on. This snapshot is not used again.
-    pub(crate) async fn commit(&self, dirty: Changes, size: u64) -> io::Result<(SaveReport, Self)> {
-        if dirty.is_empty() && size == self.size() {
+    /// session may continue on. This snapshot is not used again. Without
+    /// changes nothing is logged, unless `record`: then an empty transaction
+    /// is, and the log (the version) grows all the same.
+    pub(crate) async fn commit(
+        &self,
+        dirty: Changes,
+        size: u64,
+        record: bool,
+    ) -> io::Result<(SaveReport, Self)> {
+        if dirty.is_empty() && size == self.size() && !record {
             let report = SaveReport {
                 log_next: self.log.next,
                 ..SaveReport::default()

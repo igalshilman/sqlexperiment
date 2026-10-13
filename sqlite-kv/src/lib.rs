@@ -180,6 +180,9 @@ pub struct Session {
     durability: Durability,
     /// A [`Self::transaction`] body is running.
     in_body: bool,
+    /// The statement running is a [`Self::commit`] that logs even a commit
+    /// without changes.
+    record: bool,
     /// Set when a [`Self::transaction`] future is dropped or unwinds before
     /// finishing, which may leave its SQL transaction open.
     abandoned: Arc<AtomicBool>,
@@ -394,6 +397,7 @@ impl Session {
                 reusable: true,
                 durability,
                 in_body: false,
+                record: false,
                 abandoned: Arc::default(),
                 cleanup_error: None,
                 schema_bytes: Some(warm.schema_bytes),
@@ -417,6 +421,7 @@ impl Session {
             reusable: true,
             durability,
             in_body: false,
+            record: false,
             abandoned: Arc::default(),
             cleanup_error: None,
             schema_bytes: None,
@@ -530,6 +535,18 @@ impl Session {
         self.query_with(sql, params).await.map(|_| ())
     }
 
+    /// `COMMIT` the open transaction. With `record` and [`Durability::Commit`],
+    /// the commit is logged even if the transaction changed nothing (it only
+    /// read, or its writes matched no rows), so [`Self::version`] grows all
+    /// the same: a host that recorded the version before can tell from a
+    /// later open that this commit landed. A `COMMIT` that fails logs nothing.
+    pub async fn commit(&mut self, record: bool) -> Result<()> {
+        self.record = record;
+        let result = self.execute("COMMIT").await;
+        self.record = false;
+        result
+    }
+
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
     /// `Ok`, or `ROLLBACK` when it returns `Err`. With [`Durability::Commit`],
     /// `Ok` means the whole transaction is durable, as one log transaction, and
@@ -596,12 +613,12 @@ impl Session {
 
     /// Make the committed SQL state durable and continue on it. A cleanup error
     /// leaves it committed; a later commit retries the checkpoint work.
-    async fn commit(&mut self) -> Result<SaveReport> {
+    async fn publish(&mut self) -> Result<SaveReport> {
         self.checkpoint().await?;
         // Until the commit is acknowledged the engine may hold uncommitted pages,
         // so a failure must not leave it for reuse.
         self.poisoned = true;
-        let report = self.io.publish().await?;
+        let report = self.io.publish_recorded(self.record).await?;
         // Resident already, unless the page size grew. The commit is durable
         // either way; a failure here only ends the session.
         if self.io.prepare_engine().await.is_ok() {
@@ -615,8 +632,9 @@ impl Session {
         Ok(report)
     }
 
-    /// The database's version: it grows with each commit, and only then. It
-    /// is one past the log sequence of the last committed transaction this
+    /// The database's version: it grows with each commit that changes the
+    /// database, or that [`Self::commit`] records, and only then. It is one
+    /// past the log sequence of the last committed transaction this
     /// session holds (opened on, or committed itself); an open transaction
     /// does not change it. A host can record it before a commit, and tell
     /// from a later open whether that commit landed.
@@ -720,8 +738,8 @@ impl Session {
             }
             if idle
                 && self.durability == Durability::Commit
-                && !self.io.is_clean()
-                && let Some(error) = self.commit().await?.cleanup_error
+                && (!self.io.is_clean() || self.record)
+                && let Some(error) = self.publish().await?.cleanup_error
             {
                 self.cleanup_error = Some(error);
             }
@@ -792,7 +810,7 @@ impl Session {
         if !self.connection.as_ref().unwrap().get_auto_commit() {
             return Err("cannot save an open SQL transaction".into());
         }
-        let mut report = self.commit().await?;
+        let mut report = self.publish().await?;
         report.cleanup_error = report.cleanup_error.or(self.cleanup_error.take());
         if let Some(ordered) = &self.ordered {
             ordered.confirm().await?;

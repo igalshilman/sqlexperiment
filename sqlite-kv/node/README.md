@@ -47,9 +47,11 @@ body uses the handle it gets, which is invalid once the body settles; a call
 to the session from inside the body is refused, as it would wait for the body.
 A COMMIT that fails rolls back. An SQL error leaves the session usable
 (`isUsable()`); a storage error ends it. `version()` is a number that grows
-with each commit, and only then; it does not wait for queued calls, so a
-transaction's body can record it before its COMMIT, and a later session can
-tell from its own whether that commit landed.
+with each commit that changes the database, and only then; it does not wait
+for queued calls, so a transaction's body can record it before its COMMIT, and
+a later session can tell from its own whether that commit landed. A body that
+may change nothing calls `tx.recordCommit()` for that: its commit is then
+logged, and grows the version, all the same.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, unlinked once open so that it goes away

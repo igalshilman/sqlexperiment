@@ -569,7 +569,14 @@ impl KvIo {
     /// Publish once no SQL transaction remains and the private WAL is truncated.
     /// The dirty pages move into the save. On success the adapter continues on
     /// the committed view.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn publish(&self) -> io::Result<crate::SaveReport> {
+        self.publish_recorded(false).await
+    }
+
+    /// [`Self::publish`]; with `record`, a commit without changes is logged
+    /// too (see [`Snapshot::commit`]).
+    pub(crate) async fn publish_recorded(&self, record: bool) -> io::Result<crate::SaveReport> {
         if self.pending_count() != 0 {
             return Err(invalid("cannot save with pending I/O"));
         }
@@ -593,7 +600,7 @@ impl KvIo {
             }
             (dirty, state.sizes[0])
         };
-        let (report, after) = self.snapshot().commit(dirty, size).await?;
+        let (report, after) = self.snapshot().commit(dirty, size, record).await?;
         *self.log_next.lock().unwrap() = report.log_next;
         *self.snapshot.lock().unwrap() = Arc::new(after);
         Ok(report)

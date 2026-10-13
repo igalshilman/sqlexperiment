@@ -101,9 +101,10 @@ class Database {
         await rollback(native);
         throw error;
       }
+      const record = tx.recorded;
       tx.end();
       try {
-        await native.query('COMMIT');
+        await native.commit(record);
       } catch (error) {
         // A COMMIT that fails (a deferred constraint) leaves the transaction
         // open: without the rollback, the calls after it would run inside it.
@@ -115,9 +116,12 @@ class Database {
   }
 
   /**
-   * The database's version: it grows with each commit, and only then. It does
-   * not wait for queued calls, so a transaction's body may read it: before
-   * the COMMIT, it is the version that the commit would advance.
+   * The database's version: it grows with each commit that changes the
+   * database, or whose transaction called `recordCommit()`, and only then. It
+   * does not wait for queued calls, so a transaction's body may read it:
+   * before the COMMIT, it is the version that the commit would advance. It
+   * waits for a statement that is running, and rejects once the session has
+   * ended.
    */
   version() {
     return this.#native.version();
@@ -160,6 +164,8 @@ async function rollback(native) {
 class Transaction {
   #database;
   #native;
+  /** See {@link recordCommit}. */
+  recorded = false;
 
   constructor(database, nativeDatabase) {
     this.#database = database;
@@ -178,6 +184,15 @@ class Transaction {
 
   end() {
     this.#native = null;
+  }
+
+  /**
+   * Log this transaction's commit even if it changes nothing (it only reads,
+   * or its writes match no rows), so that the version grows when it commits.
+   */
+  recordCommit() {
+    this.#check();
+    this.recorded = true;
   }
 
   query(sql, params) {

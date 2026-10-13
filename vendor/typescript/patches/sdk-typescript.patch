@@ -774,10 +774,10 @@ index f14da79..bdc98ec 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..3676d21
+index 0000000..de4e3ca
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,623 @@
+@@ -0,0 +1,633 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -909,8 +909,14 @@ index 0000000..3676d21
 +  wrapStore = wrap;
 +}
 +
++/** A transaction of the addon's session. */
++interface AddonTransaction extends SqlDatabase {
++  /** Log the commit even if it changes nothing, so the version grows. */
++  recordCommit(): void;
++}
++
 +interface Session extends SqlDatabase {
-+  transaction<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
++  transaction<T>(body: (tx: AddonTransaction) => Promise<T>): Promise<T>;
 +  version(): Promise<number>;
 +  isUsable(): boolean;
 +  save(): Promise<void>;
@@ -1036,13 +1042,13 @@ index 0000000..3676d21
 +   */
 +  transaction<T>(
 +    db: Session,
-+    inner: (tx: SqlDatabase) => Promise<T>
++    inner: (tx: SqlDatabase, addon: AddonTransaction) => Promise<T>
 +  ): Promise<T> {
 +    let own: { error: unknown } | undefined;
 +    return db
 +      .transaction(async (tx) => {
 +        try {
-+          return await inner(this.view(tx));
++          return await inner(this.view(tx), tx);
 +        } catch (error) {
 +          own = { error };
 +          throw error;
@@ -1079,7 +1085,8 @@ index 0000000..3676d21
 +// commits: written before its COMMIT, with the database's version then, and
 +// cleared once they are made. The state writes are stored in order, so a
 +// later open finds them if the commit may have landed, and the version tells
-+// whether it did (it grew). Each send's idempotency key is
++// whether it did (it grew: the commit is recorded even if the transaction
++// changed nothing). Each send's idempotency key is
 +// `transaction/<id>/<index>`, with a random id of the transaction, so making
 +// them again is dropped.
 +const PENDING = "_restate_sql_sends";
@@ -1226,7 +1233,7 @@ index 0000000..3676d21
 +    let pending: Pending | undefined;
 +    let value: T;
 +    try {
-+      value = await this.#errors.transaction(db, async (sql) => {
++      value = await this.#errors.transaction(db, async (sql, addon) => {
 +        const result = await body({
 +          db: {
 +            ...sql,
@@ -1249,6 +1256,9 @@ index 0000000..3676d21
 +            new TextEncoder().encode(JSON.stringify(pending)),
 +            serde.binary
 +          );
++          // So that the version grows even if the transaction changed
++          // nothing: otherwise a later open could not tell that it committed.
++          addon.recordCommit();
 +        }
 +        return result;
 +      });
