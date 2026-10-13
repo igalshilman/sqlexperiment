@@ -22,7 +22,7 @@ import { defineTool } from '@earendil-works/pi-durable';
 import { serveIfMain } from '../faults.ts';
 import { callTools, fakeProvider, lastText, say, textOf } from '../pi/utils.ts';
 import { withPi } from '../pi/with-pi.ts';
-import { gateway } from './gateway.ts';
+import { gateway, identity } from './gateway.ts';
 
 /**
  * The scripted concierge: "where are orders 101 to 108?" looks them all up at
@@ -78,7 +78,7 @@ async function models() {
 const { models: registry, model } = await models();
 
 /** The tenant's tools, as the gateway lists them, each a call to the gateway. */
-async function gatewayTools(ctx: restate.SqlObjectContext, tenant: string) {
+async function gatewayTools(ctx: restate.SqlObjectContext, tenant: string, user: string) {
   const gw = ctx.serviceClient(gateway);
   const tools = await gw.tools({ tenant });
   return tools.map((tool) =>
@@ -89,7 +89,7 @@ async function gatewayTools(ctx: restate.SqlObjectContext, tenant: string) {
       replay: 'safe', // runs again after a crash, with the same call id
       execute: async (args, api) => {
         const result = await gw.call(
-          { tenant, caller: ctx.key, name: tool.name, arguments: args },
+          { tenant, user, caller: ctx.key, name: tool.name, arguments: args },
           restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` }),
         );
         return { content: result.content, isError: result.isError ?? false };
@@ -103,8 +103,8 @@ export const assistant = restate.object({
   handlers: {
     /** Answer prompt `text`, once per prompt `id`. */
     prompt: async (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) => {
-      const tenant = ctx.key.split('.')[0]!;
-      const tools = await gatewayTools(ctx, tenant);
+      const { tenant, user } = identity(ctx.key);
+      const tools = await gatewayTools(ctx, tenant, user);
       return withPi(ctx, { models: registry, model, tools }, async (pi) => ({ answer: await pi.prompt(id, text) }));
     },
   },

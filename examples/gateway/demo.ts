@@ -1,6 +1,6 @@
 // The tool gateway, as a demo that checks itself: a Restate server, the fake
 // outside world (upstream.ts), the tools, the gateway and the agents, each in
-// its own process, the agents crashing at random state requests. Five acts:
+// its own process, the agents crashing at random state requests. Six acts:
 //
 // 1. A burst, without a limit: an agent looks up 12 orders at once, and the
 //    order system, which serves 2 at a time per tenant, refuses the rest with
@@ -9,11 +9,15 @@
 //    everything runs: the calls over the limit wait in the tenant's scope,
 //    the order system never refuses one, and another tenant's lookups, in
 //    their own scope, pass the queue.
-// 3. Human in the loop: a refund waits for a manager; the agent is killed
+// 3. Users within a tenant: the limit key is `<tool>/<user>`, so each user's
+//    calls queue apart and take turns: erin's lookups, from an MCP client,
+//    pass alice's queued burst. Then a rule on `*/lookup_order/*` caps each
+//    user at one at a time, so no user takes the whole tenant's limit.
+// 4. Human in the loop: a refund waits for a manager; the agent is killed
 //    while it waits; the manager approves; the money moves once.
-// 4. MCP: an MCP client (globex's token) lists its tools, calls one, is
+// 5. MCP: an MCP client (globex's token) lists its tools, calls one, is
 //    refused another, and sends a call twice: one mail.
-// 5. The audit log: the tenant's SQL table of every call.
+// 6. The audit log: the tenant's SQL table of every call.
 //
 //   RESTATE_SERVER=/path/to/restate-server node gateway/demo.ts
 //
@@ -129,7 +133,9 @@ const prompt = (key: string, id: string, text: string) =>
     (r) => r.answer,
   );
 
-const limitRule = (disabled: boolean) =>
+// The limit rules: on each tenant's lookups (`*/lookup_order`), disabled or
+// not, and on each user's (`*/lookup_order/*`), if `perUser` is set.
+const limitRules = ({ disabled = false, perUser }: { disabled?: boolean; perUser?: number }) =>
   admin('PUT', '/limits/rules', [
     {
       pattern: '*/lookup_order',
@@ -137,23 +143,51 @@ const limitRule = (disabled: boolean) =>
       description: 'the order system serves 2 requests at once per API key',
       disabled,
     },
+    {
+      pattern: '*/lookup_order/*',
+      limits: perUser === undefined ? {} : { concurrency: perUser },
+      description: "no user takes the whole of a tenant's limit",
+      disabled: perUser === undefined,
+    },
   ]);
 
-/** Print what the limiter holds, as it changes, until `done`. */
-async function watch(done: () => boolean) {
+/**
+ * Print what the limiter holds, as it changes, until `done`: per tenant, its
+ * lookups running (of its limit), and per user, the user's running (of the
+ * user's limit) and queued.
+ */
+async function watch(done: () => boolean, seen: Queue[]) {
   let last = '';
   while (!done()) {
-    const rows = await query<{ scope: string; usage: number; concurrency_limit?: number; num_waiters: number }>(
-      "SELECT scope, usage, concurrency_limit, num_waiters FROM sys_user_limits WHERE l1 = 'lookup_order' ORDER BY scope",
+    const limits = await query<{ scope: string; l2?: string; usage: number; concurrency_limit?: number }>(
+      "SELECT scope, l2, usage, concurrency_limit FROM sys_user_limits WHERE l1 = 'lookup_order'",
     ).catch(() => []);
-    const queued = await query<{ scope: string; num_inbox: number; num_running: number }>(
-      "SELECT scope, num_inbox, num_running FROM sys_vqueue_meta WHERE limit_key = 'lookup_order' ORDER BY scope",
+    const queues = await query<{ scope: string; limit_key: string; num_inbox: number; num_running: number }>(
+      "SELECT scope, limit_key, num_inbox, num_running FROM sys_vqueue_meta WHERE limit_key LIKE 'lookup_order/%' ORDER BY scope, limit_key",
     ).catch(() => []);
-    const line = queued
-      .filter((q) => q.num_inbox + q.num_running > 0)
-      .map((q) => {
-        const limit = rows.find((r) => r.scope === q.scope);
-        return `${q.scope}: running ${q.num_running}${limit?.concurrency_limit ? `/${limit.concurrency_limit}` : ''}, queued ${q.num_inbox}`;
+    const active = queues.filter((q) => q.num_inbox + q.num_running > 0);
+    const at = performance.now();
+    seen.push(
+      ...active.map((q) => ({
+        at,
+        scope: q.scope,
+        user: q.limit_key.slice('lookup_order/'.length),
+        running: q.num_running,
+        queued: q.num_inbox,
+      })),
+    );
+    const line = [...new Set(active.map((q) => q.scope))]
+      .map((scope) => {
+        const tenant = limits.find((l) => l.scope === scope && !l.l2);
+        const running = active.filter((q) => q.scope === scope).reduce((n, q) => n + q.num_running, 0);
+        const users = active
+          .filter((q) => q.scope === scope)
+          .map((q) => {
+            const user = q.limit_key.slice('lookup_order/'.length);
+            const limit = limits.find((l) => l.scope === scope && l.l2 === user)?.concurrency_limit;
+            return `${user} ${of(q.num_running, limit)}${q.num_inbox ? ` +${q.num_inbox} queued` : ''}`;
+          });
+        return `${scope} ${of(running, tenant?.concurrency_limit)} (${users.join(', ')})`;
       })
       .join('   |   ');
     if (line && line !== last) say(`[limiter] ${line}`);
@@ -162,10 +196,22 @@ async function watch(done: () => boolean) {
   }
 }
 
-/** Run `work`, watching the limiter meanwhile. */
-async function watched<T>(work: Promise<T>): Promise<T> {
+/** `n`, of `limit` if there is one. */
+const of = (n: number, limit?: number) => (limit ? `${n}/${limit}` : `${n}`);
+
+/** A user's queue, as the watcher saw it. */
+interface Queue {
+  at: number;
+  scope: string;
+  user: string;
+  running: number;
+  queued: number;
+}
+
+/** Run `work`, watching the limiter meanwhile; `seen` gets what it saw. */
+async function watched<T>(work: Promise<T>, seen: Queue[] = []): Promise<T> {
   let done = false;
-  const watching = watch(() => done);
+  const watching = watch(() => done, seen);
   try {
     return await work;
   } finally {
@@ -248,14 +294,14 @@ for (const port of [9411, 9412, 9413]) {
   await waitFor(port);
   await admin('POST', '/deployments', { uri: `http://127.0.0.1:${port}` });
 }
-await limitRule(true);
+await limitRules({ disabled: true });
 
 act(
   'The cast',
   [
     '  Tools     Orders.lookup, Payments.refund, Mail.emailCustomer: plain Restate services, with the journal',
     '  Gateway   finds them by their metadata in the admin API; checks policy, holds for approval,',
-    "            calls each in the tenant's scope with the tool as limit key, and audits it",
+    "            calls each in the tenant's scope with `<tool>/<user>` as limit key, and audits it",
     '  Tenant    a virtual object per tenant whose state is SQL: the audit log and the approvals',
     "  Assistant a pi-durable agent per user, its session in its object's SQLite; it crashes at random",
     `  Upstream  a fake order system that serves ${CAPACITY} requests at once per tenant, and 429s the rest`,
@@ -284,7 +330,7 @@ act(
   `  restate rules set '*/lookup_order' --concurrency ${CAPACITY}   (here: PUT /limits/rules, no redeploy)\n` +
     '  alice asks about 16 more orders, and dan (globex) about 3, at the same time.',
 );
-await limitRule(false);
+await limitRules({});
 const refusedBefore = { acme: stats.orders.acme!.refused, globex: stats.orders.globex?.refused ?? 0 };
 for (const t of Object.values(stats.orders)) Object.assign(t, { peak: 0, first: 0, last: 0 });
 const [acme, globex] = await watched(
@@ -306,8 +352,77 @@ assert.equal(stats.orders.globex!.refused, refusedBefore.globex);
 assert.ok(stats.orders.globex!.first < stats.orders.acme!.last, "globex's calls do not wait for acme's");
 say("globex's first lookup reached the order system while acme's queue still drained");
 
-// 3. Approval.
-act('3. Human in the loop', '  bob (acme) asks for a refund; a manager must approve it.');
+// 3. Users within a tenant.
+/** Forget the peaks and times of the order system's requests so far. */
+const resetPeaks = () => {
+  for (const t of [...Object.values(stats.orders), ...Object.values(stats.users)]) {
+    Object.assign(t, { peak: 0, first: 0, last: 0 });
+  }
+};
+/** Wait until at least `n` of `user`'s lookups at acme are queued. */
+const queued = async (user: string, n: number) => {
+  for (const deadline = Date.now() + 60_000; Date.now() < deadline;) {
+    const rows = await query<{ num_inbox: number }>(
+      `SELECT num_inbox FROM sys_vqueue_meta WHERE scope = 'acme' AND limit_key = 'lookup_order/${user}'`,
+    ).catch(() => []);
+    if (rows.some((r) => r.num_inbox >= n)) return;
+    await sleep(50);
+  }
+  throw new Error(`${user}'s lookups never queued`);
+};
+// erin, of acme, from an MCP client (Claude Code, say): her lookups at once.
+const erin = mcpClient('acme.erin');
+await erin.send('initialize', {
+  protocolVersion: '2025-06-18',
+  capabilities: {},
+  clientInfo: { name: 'demo', version: '1' },
+});
+const erinLooksUp = (orders: string[]) => Promise.all(orders.map((order) => erin.call('lookup_order', { order })));
+act(
+  '3. Users within a tenant',
+  "  The limit key is `lookup_order/<user>`: each user's calls queue apart, and the queues take turns.\n" +
+    '  alice asks about 16 orders; while they queue, erin (acme too) looks up 2 from an MCP client.',
+);
+resetPeaks();
+const queues: Queue[] = [];
+await watched(
+  Promise.all([
+    prompt('acme.alice', 'p3a', 'where are orders 131 to 146?'),
+    queued('alice', 8).then(() => erinLooksUp(['151', '152'])),
+  ]),
+  queues,
+);
+// When erin's first lookup ran, how many of alice's were still queued.
+const erinRan = queues.find((q) => q.user === 'erin' && q.running > 0);
+const aliceThen = queues.find((q) => q.user === 'alice' && erinRan && q.at === erinRan.at);
+if (erinRan) say(`erin's lookups ran while ${aliceThen?.queued ?? 0} of alice's still waited`);
+assert.ok(stats.orders.acme!.peak <= CAPACITY);
+assert.ok(stats.users['acme/erin']!.first < stats.users['acme/alice']!.last, "erin's calls do not wait for alice's");
+say("erin's first lookup reached the order system while alice's queue still drained");
+
+act(
+  '   and a limit per user',
+  "  restate rules set '*/lookup_order/*' --concurrency 1   (the second level: each user)\n" +
+    '  alice asks about 6 orders, and erin looks up 2: each runs one at a time, and neither waits for the other.',
+);
+await limitRules({ perUser: 1 });
+resetPeaks();
+await watched(
+  Promise.all([
+    prompt('acme.alice', 'p3c', 'where are orders 161 to 166?'),
+    queued('alice', 3).then(() => erinLooksUp(['171', '172'])),
+  ]),
+);
+say(
+  `the order system: at most ${stats.users['acme/alice']!.peak} of alice's requests at once, ` +
+    `${stats.users['acme/erin']!.peak} of erin's, ${stats.orders.acme!.peak} of acme's`,
+);
+assert.equal(stats.users['acme/alice']!.peak, 1);
+assert.equal(stats.users['acme/erin']!.peak, 1);
+assert.ok(stats.users['acme/erin']!.first < stats.users['acme/alice']!.last);
+
+// 4. Approval.
+act('4. Human in the loop', '  bob (acme) asks for a refund; a manager must approve it.');
 const refund = prompt('acme.bob', 'p4', 'refund 30 of order 103 because it arrived broken');
 let pending: { awakeable: string; tool: string; arguments: unknown }[] = [];
 while (pending.length === 0) {
@@ -332,8 +447,11 @@ say(`the payment provider made ${stats.refunds.made.length} refund, of ${stats.r
 assert.equal(stats.refunds.made.length, 1);
 
 // 4. MCP.
-act('4. MCP', "  An MCP client with globex's token, as Claude Code would be: tools/list, tools/call.");
-const client = mcpClient('globex');
+act(
+  '5. MCP',
+  "  An MCP client with dan's token at globex (`globex.dan`), as Claude Code would be: tools/list, tools/call.",
+);
+const client = mcpClient('globex.dan');
 await client.send('initialize', {
   protocolVersion: '2025-06-18',
   capabilities: {},
@@ -357,17 +475,21 @@ say(`the mail provider sent ${stats.mails.sent - mailsBefore} mail`);
 assert.equal(stats.mails.sent - mailsBefore, 1);
 
 // 5. The audit log.
-act('5. The audit log', "  Tenant/acme/report: a query of the tenant's SQL table of calls.");
+act('6. The audit log', "  Tenant/acme/report: a query of the tenant's SQL table of calls.");
 await sleep(500); // the gateway's last records are sends
-const report = await ingress<{ tools: Record<string, unknown>[] }>('/Tenant/acme/report', {});
+const report = await ingress<{ tools: Record<string, unknown>[]; users: Record<string, unknown>[] }>(
+  '/Tenant/acme/report',
+  {},
+);
 console.table(report.tools);
+console.table(report.users);
 const globexReport = await ingress<{ tools: { tool: string; calls: number; refused: number }[] }>(
   '/Tenant/globex/report',
   {},
 );
 console.table(globexReport.tools);
 const lookups = report.tools.find((t) => t.tool === 'lookup_order');
-assert.equal(lookups?.calls, 28, 'one record per lookup, however often the agents crashed');
+assert.equal(lookups?.calls, 12 + 16 + 18 + 8, 'one record per lookup, however often the agents crashed');
 assert.equal(globexReport.tools.find((t) => t.tool === 'refund')?.refused, 1);
 
 const invocations = await query<{ target: string; n: number }>(
@@ -376,7 +498,7 @@ const invocations = await query<{ target: string; n: number }>(
 say(`tool invocations: ${invocations.map((i) => `${i.target} ${i.n}`).join(', ')}`);
 assert.deepEqual(
   Object.fromEntries(invocations.map((i) => [i.target, i.n])),
-  { 'Mail/emailCustomer': 1, 'Orders/lookup': 32, 'Payments/refund': 1 },
+  { 'Mail/emailCustomer': 1, 'Orders/lookup': 12 + 16 + 18 + 8 + 4, 'Payments/refund': 1 },
   'one tool invocation per tool call',
 );
 console.log(`\n${bold('passed')}: the agents' process restarted ${agents.restarts} times.`);

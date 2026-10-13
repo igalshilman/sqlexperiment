@@ -3,7 +3,8 @@
 //
 // - GET /orders/:id, the order system: slow (ORDER_LATENCY_MS), and it serves
 //   at most CAPACITY requests at once per tenant (its API key, the
-//   `x-tenant` header). One more is a 429, as a rate-limited API answers.
+//   `x-tenant` header). One more is a 429, as a rate-limited API answers. It
+//   also counts the requests of each of a tenant's users (`x-user`).
 // - POST /refunds, the payment provider: it refunds once per
 //   `idempotency-key`, as Stripe does, and counts the refunds it made.
 // - POST /mail, the mail provider, once per `idempotency-key` too.
@@ -27,13 +28,21 @@ export interface Page {
   awakeable: string;
 }
 
+/** Order requests served, the most in flight at once, those refused with a 429, and when the first and the last served one arrived. */
+export interface Seen {
+  served: number;
+  peak: number;
+  refused: number;
+  first: number;
+  last: number;
+}
+
 /** What the fake APIs saw. */
 export interface Stats {
-  /**
-   * Per tenant: order requests served, the most in flight at once, those
-   * refused with a 429, and when the first and the last served one arrived.
-   */
-  orders: Record<string, { served: number; peak: number; refused: number; first: number; last: number }>;
+  /** Order requests, per tenant. */
+  orders: Record<string, Seen>;
+  /** Order requests, per tenant and user (`acme/alice`). */
+  users: Record<string, Seen>;
   /** Refunds made, one per idempotency key, and the requests for them. */
   refunds: { made: { key: string; order: string; amount: number }[]; requests: number };
   mails: { sent: number; requests: number };
@@ -55,7 +64,13 @@ const body = async (req: IncomingMessage) => {
 
 /** Serve the fake APIs on `port`; `stats` is what they saw so far. */
 export function startUpstream(port: number): { server: Server; stats: Stats; ready: Promise<void> } {
-  const stats: Stats = { orders: {}, refunds: { made: [], requests: 0 }, mails: { sent: 0, requests: 0 }, pages: [] };
+  const stats: Stats = {
+    orders: {},
+    users: {},
+    refunds: { made: [], requests: 0 },
+    mails: { sent: 0, requests: 0 },
+    pages: [],
+  };
   const inFlight = new Map<string, number>();
   const mailed = new Set<string>();
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
@@ -69,19 +84,27 @@ export function startUpstream(port: number): { server: Server; stats: Stats; rea
       const orderPath = /^\/orders\/([^/]+)$/.exec(url.pathname);
       if (req.method === 'GET' && orderPath) {
         const tenant = String(req.headers['x-tenant'] ?? 'anonymous');
+        const user = `${tenant}/${String(req.headers['x-user'] ?? 'anonymous')}`;
         const seen = (stats.orders[tenant] ??= { served: 0, peak: 0, refused: 0, first: 0, last: 0 });
-        const now = (inFlight.get(tenant) ?? 0) + 1;
-        if (now > CAPACITY) {
+        const seenUser = (stats.users[user] ??= { served: 0, peak: 0, refused: 0, first: 0, last: 0 });
+        if ((inFlight.get(tenant) ?? 0) >= CAPACITY) {
           seen.refused++;
+          seenUser.refused++;
           return reply(429, { error: `at most ${CAPACITY} requests at once` });
         }
-        inFlight.set(tenant, now);
-        seen.peak = Math.max(seen.peak, now);
-        seen.last = Date.now();
-        seen.first ||= seen.last;
+        const begin = (s: Seen, counter: string) => {
+          const now = (inFlight.get(counter) ?? 0) + 1;
+          inFlight.set(counter, now);
+          s.peak = Math.max(s.peak, now);
+          s.last = Date.now();
+          s.first ||= s.last;
+        };
+        begin(seen, tenant);
+        begin(seenUser, user);
         await new Promise((r) => setTimeout(r, ORDER_LATENCY_MS));
-        inFlight.set(tenant, inFlight.get(tenant)! - 1);
+        for (const counter of [tenant, user]) inFlight.set(counter, inFlight.get(counter)! - 1);
         seen.served++;
+        seenUser.served++;
         return reply(200, order(decodeURIComponent(orderPath[1]!)));
       }
       if (req.method === 'POST' && url.pathname === '/refunds') {
