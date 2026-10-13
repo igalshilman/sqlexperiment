@@ -150,6 +150,9 @@ fn sql_error_io(error: io::Error) -> Error {
 pub struct Database {
     session: Arc<Mutex<Option<Session>>>,
     store: Arc<JsStore>,
+    /// Whether the session can still run SQL, as of the last call that ended:
+    /// read without the lock, which a running call holds.
+    usable: Arc<AtomicBool>,
 }
 
 /// Open the database of `namespace` over the store behind `dispatch`; see
@@ -182,6 +185,7 @@ pub fn open<'env>(
         Ok(Database {
             session: Arc::new(Mutex::new(Some(session))),
             store,
+            usable: Arc::new(AtomicBool::new(true)),
         })
     })
 }
@@ -211,6 +215,7 @@ impl Database {
             }
             None => session.query(&sql).await,
         };
+        self.usable.store(session.is_usable(), Ordering::Release);
         self.store.barrier().await.map_err(sql_error_io)?;
         let rows = rows.map_err(sql_error)?;
         Ok(rows
@@ -236,6 +241,7 @@ impl Database {
             .ok_or_else(|| Error::from_reason("the database is closed"))?;
         let params = params.map(|params| params.into_iter().map(|p| p.0).collect());
         let result = session.query_columns(&sql, params).await;
+        self.usable.store(session.is_usable(), Ordering::Release);
         self.store.barrier().await.map_err(sql_error_io)?;
         let (columns, rows) = result.map_err(sql_error)?;
         Ok(QueryResult {
@@ -248,12 +254,11 @@ impl Database {
     }
 
     /// Whether the session can still run SQL: an SQL error leaves it usable,
-    /// a storage error ends it.
+    /// a storage error ends it. A call that is running does not change the
+    /// answer until it ends.
     #[napi]
     pub fn is_usable(&self) -> bool {
-        self.session
-            .try_lock()
-            .is_ok_and(|session| session.as_ref().is_some_and(Session::is_usable))
+        self.usable.load(Ordering::Acquire)
     }
 
     /// The database's version: it grows with each commit, and only then (see
@@ -272,6 +277,7 @@ impl Database {
     #[napi]
     pub async fn save(&self) -> Result<()> {
         let session = self.session.lock().await.take();
+        self.usable.store(false, Ordering::Release);
         let session = session.ok_or_else(|| Error::from_reason("the database is closed"))?;
         session.save().await.map(drop).map_err(sql_error)
     }
@@ -281,6 +287,7 @@ impl Database {
     #[napi]
     pub async fn close(&self) {
         self.session.lock().await.take();
+        self.usable.store(false, Ordering::Release);
     }
 }
 
