@@ -189,6 +189,30 @@ test('a COMMIT that fails rolls the transaction back', async () => {
   await db.save();
 });
 
+test('a call running meanwhile does not make the session look unusable', async () => {
+  const db = await open(fresh(), new Backend().request());
+  await db.execute('CREATE TABLE t(id INTEGER)');
+  for (let i = 0; i < 50; i++) {
+    // The body fails while version() holds the session: the rollback still runs.
+    await assert.rejects(
+      db.transaction(async (tx) => {
+        await tx.execute('INSERT INTO t VALUES(1)');
+        for (let j = 0; j < 4; j++) void db.version();
+        throw new Error('no');
+      }),
+      /no/,
+    );
+  }
+  assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
+  // Nor while a statement runs.
+  const running = db.query('WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000) SELECT count(*) FROM n');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(db.isUsable());
+  await running;
+  await db.save();
+  assert.equal(db.isUsable(), false);
+});
+
 test('the version grows with each commit, and only then', async () => {
   const backend = new Backend();
   const namespace = fresh();
