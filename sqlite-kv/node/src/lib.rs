@@ -256,6 +256,17 @@ impl Database {
             .is_ok_and(|session| session.as_ref().is_some_and(Session::is_usable))
     }
 
+    /// The database's version: it grows with each commit, and only then (see
+    /// `Session::version`).
+    #[napi]
+    pub async fn version(&self) -> Result<i64> {
+        let session = self.session.lock().await;
+        let session = session
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("the database is closed"))?;
+        Ok(session.version() as i64)
+    }
+
     /// End the session, confirming its writes (one `sync` if it wrote) so that
     /// the page cache may trust them.
     #[napi]

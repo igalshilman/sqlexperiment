@@ -114,6 +114,15 @@ class Database {
     });
   }
 
+  /**
+   * The database's version: it grows with each commit, and only then. It does
+   * not wait for queued calls, so a transaction's body may read it: before
+   * the COMMIT, it is the version that the commit would advance.
+   */
+  version() {
+    return this.#native.version();
+  }
+
   /** Whether SQL can still run: an SQL error leaves the session usable. */
   isUsable() {
     return this.#native.isUsable();
