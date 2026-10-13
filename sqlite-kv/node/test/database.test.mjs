@@ -205,3 +205,18 @@ test('a call to the session inside its transaction is refused, not left waiting'
   assert.deepEqual(await db.query('SELECT id FROM t ORDER BY id'), [[1], [3]]);
   await db.save();
 });
+
+test('a statement resolves after its writes reached the store, however many', async () => {
+  const backend = new Backend();
+  const db = await open(fresh(), backend.request());
+  await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)');
+  // Thousands of page writes: more than Node.js dispatches from a queue in one turn.
+  await db.execute(
+    'INSERT INTO t(b) SELECT randomblob(3000) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c)',
+  );
+  const atResolve = backend.unconfirmed.length;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(atResolve > 1000);
+  assert.equal(atResolve, backend.unconfirmed.length);
+  await db.save();
+});
