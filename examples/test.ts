@@ -17,6 +17,7 @@
 //   RESTATE_SERVER=/path/to/restate-server node test.ts   (or make crash-test)
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync, rmSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,8 +102,21 @@ interface Supervised {
   stop(): Promise<void>;
 }
 
-/** Keep `process` running, restarting it whenever it aborts. */
+/** Whether something listens on `port`. */
+const listening = (port: number) =>
+  new Promise<boolean>((resolve) => {
+    const socket = connect(port, '127.0.0.1');
+    socket.once('connect', () => (socket.destroy(), resolve(true)));
+    socket.once('error', () => resolve(false));
+  });
+
+/**
+ * Keep `process` running, restarting it whenever it aborts. An abort (of
+ * faults.ts) is a SIGKILL; any other exit is a failure, such as a port taken
+ * at startup, restarted after a pause, and ending the run if it repeats.
+ */
 function supervise({ name, groups, port }: Process, perMille: number): Supervised {
+  let failures = 0;
   const run = () =>
     spawn(process.execPath, [fileURLToPath(new URL('serve.ts', import.meta.url)), ...groups], {
       env: {
@@ -118,7 +132,19 @@ function supervise({ name, groups, port }: Process, perMille: number): Supervise
     if (state.stopped) return;
     state.starts++;
     state.child = run();
-    state.child.on('exit', restart);
+    state.child.on('exit', exited);
+  };
+  const exited = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (state.stopped) return;
+    if (signal === 'SIGKILL') {
+      failures = 0;
+      return restart();
+    }
+    if (++failures >= 5) {
+      console.error(`${name} exited (${signal ?? code}) ${failures} times in a row; see ${join(dir, `${name}.log`)}`);
+      process.exit(1);
+    }
+    setTimeout(restart, 500);
   };
   const state: Supervised = {
     starts: 1,
@@ -132,7 +158,7 @@ function supervise({ name, groups, port }: Process, perMille: number): Supervise
         state.child.kill();
       }),
   };
-  state.child.on('exit', restart);
+  state.child.on('exit', exited);
   return state;
 }
 
@@ -178,7 +204,8 @@ async function pool(width: number, tasks: (() => Promise<void>)[]) {
 }
 
 // A server left running (by a run that was killed) would serve this run its
-// state: refuse to start against it.
+// state, and services left running would take the ports and run old code:
+// refuse to start against them.
 if (
   await fetch(`${ADMIN}/health`).then(
     () => true,
@@ -187,10 +214,14 @@ if (
 ) {
   throw new Error(`a Restate server already listens at ${ADMIN}; stop it first`);
 }
+for (const { name, port } of PROCESSES) {
+  if (await listening(port))
+    throw new Error(`port ${port} (${name}) is taken (by a run that was killed?): stop it first`);
+}
 let server = startServer();
 let services = PROCESSES.map((p) => supervise(p, p.perMille));
 // On failure, or when interrupted or terminated, leave nothing running.
-for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => process.exit(1));
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(signal, () => process.exit(1));
 process.on('exit', () => {
   for (const service of services) {
     service.stopped = true;
