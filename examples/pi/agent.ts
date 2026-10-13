@@ -35,8 +35,15 @@ const bank = (ctx: restate.SqlObjectContext) => {
       execute: async ({ from, to, amount }, api) => {
         // One key per tool call: an invocation makes many.
         const idempotencyKey = `${ctx.request().id}:${api.callId}`;
-        await books.transfer({ id: api.callId, from, to, amount }, restate.rpc.opts({ idempotencyKey }));
-        return { content: [{ type: 'text', text: `moved ${amount} from account ${from} to account ${to}` }] };
+        const applied = await books.transfer(
+          { id: api.callId, from, to, amount },
+          restate.rpc.opts({ idempotencyKey }),
+        );
+        return {
+          content: [
+            { type: 'text', text: `moved ${applied.amount} from account ${applied.from} to account ${applied.to}` },
+          ],
+        };
       },
     }),
     defineTool({

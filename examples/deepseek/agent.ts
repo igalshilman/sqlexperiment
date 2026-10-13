@@ -61,8 +61,12 @@ const bank = (ctx: restate.SqlObjectContext, fail: (error: unknown) => void) => 
         guard(fail, async () => {
           const callId = retryOf ?? exec.callId;
           const id = `DeepSeekAgent/${ctx.key}/${callId}`; // unique in the ledger
-          await books.transfer({ id, from, to, amount }, restate.rpc.opts({ idempotencyKey: key(callId) }));
-          return `moved ${amount} from account ${from} to account ${to}`;
+          // What moved: a retry of an earlier call gets that call's transfer.
+          const applied = await books.transfer(
+            { id, from, to, amount },
+            restate.rpc.opts({ idempotencyKey: key(callId) }),
+          );
+          return `moved ${applied.amount} from account ${applied.from} to account ${applied.to}`;
         }),
     }),
     defineTool({

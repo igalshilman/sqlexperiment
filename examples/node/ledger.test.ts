@@ -22,8 +22,18 @@ async function books() {
 describe('the ledger', () => {
   it('moves money once per transfer id', async () => {
     const b = await books();
-    expect(await b.transfer({ id: 't1', from: 0, to: 1, amount: 5 })).toBe(true);
-    expect(await b.transfer({ id: 't1', from: 0, to: 1, amount: 5 })).toBe(false);
+    const t1 = { id: 't1', from: 0, to: 1, amount: 5 };
+    expect(await b.transfer(t1)).toEqual(t1);
+    expect(await b.transfer(t1)).toEqual(t1);
+    expect(await b.audit()).toEqual({ accounts: 4, total: 400, transfers: 1, inconsistent: 0 });
+  });
+
+  it('returns the transfer as applied when its id comes again with other details', async () => {
+    const b = await books();
+    await b.transfer({ id: 't1', from: 0, to: 1, amount: 5 });
+    // A retry that names the earlier call with another amount moves nothing,
+    // and says what moved.
+    expect(await b.transfer({ id: 't1', from: 2, to: 3, amount: 50 })).toEqual({ id: 't1', from: 0, to: 1, amount: 5 });
     expect(await b.audit()).toEqual({ accounts: 4, total: 400, transfers: 1, inconsistent: 0 });
   });
 

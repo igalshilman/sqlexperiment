@@ -48,8 +48,11 @@ const bank = (ctx: restate.SqlObjectContext) => {
     tool(
       async ({ from, to, amount }, { toolCall }) => {
         const id = `GraphAgent/${ctx.key}/${callId(toolCall)}`; // unique in the ledger
-        await books.transfer({ id, from, to, amount }, restate.rpc.opts({ idempotencyKey: key(toolCall) }));
-        return `moved ${amount} from account ${from} to account ${to}`;
+        const applied = await books.transfer(
+          { id, from, to, amount },
+          restate.rpc.opts({ idempotencyKey: key(toolCall) }),
+        );
+        return `moved ${applied.amount} from account ${applied.from} to account ${applied.to}`;
       },
       {
         name: 'transfer',
