@@ -253,7 +253,7 @@ const database = restate.object({
     sqlError: async (ctx: Ctx) => ctx.db.execute('SELECT * FROM missing'),
 
     // A transaction's sends reach their target once it commits.
-    outbox: async (ctx: Ctx, n: number) =>
+    sends: async (ctx: Ctx, n: number) =>
       ctx.transaction(async ({ db, tx }) => {
         await db.execute('CREATE TABLE IF NOT EXISTS sent (n INTEGER)');
         await db.execute('INSERT INTO sent VALUES (?)', [n]);
@@ -463,7 +463,7 @@ await check('a call to ctx.db inside ctx.transaction is refused, with a terminal
 });
 
 await check("a transaction's sends reach their target", async () => {
-  await call('Db/o/outbox', 3);
+  await call('Db/o/sends', 3);
   const deadline = Date.now() + 10_000;
   let marks: unknown;
   do {

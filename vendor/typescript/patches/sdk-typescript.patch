@@ -40,7 +40,7 @@ index 18d3aa3..ca9b182 100644
    ClientSendOptions,
    RemoveVoidArgument,
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..77c449e 100644
+index 8ea15b1..1ca7781 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,11 +9,14 @@
@@ -58,7 +58,7 @@ index 8ea15b1..77c449e 100644
    //eslint-disable-next-line @typescript-eslint/no-unused-vars
    ClientCallOptions,
  } from "./types/rpc.js";
-@@ -839,6 +842,57 @@ export interface SignalReference<T> {
+@@ -839,6 +842,59 @@ export interface SignalReference<T> {
  export interface ObjectContext<TState extends TypedState = UntypedState>
    extends Context, KeyValueStore<TState>, RestateObjectContext {
    key: string;
@@ -98,12 +98,14 @@ index 8ea15b1..77c449e 100644
 +   * sends are made, even if the attempt then crashes, and those of one rolled
 +   * back are not.
 +   *
-+   * The sends are stored with the SQL, in the outbox (the `_restate_outbox`
-+   * table), and made after the commit; the session's next open makes again
-+   * those a crash may have lost, with the same idempotency keys, so each is
-+   * made once (within the target's idempotency retention). A send has no
-+   * invocation id. A call, whose result the body would wait for, is not
-+   * part of the transaction.
++   * The sends are written to the object's state (the `_restate_sql_sends`
++   * key) just before the commit, with the database's version, and cleared
++   * once they are made after it. The session's next open finds those a
++   * crash may have lost: it makes them again, with the same idempotency
++   * keys, if the version shows the commit landed, so each is made once
++   * (within the target's idempotency retention), and drops them if it did
++   * not. A send has no invocation id. A call, whose result the body would
++   * wait for, is not part of the transaction.
 +   *
 +   * The transaction waits for the calls to `ctx.db` before it, and the calls
 +   * after it wait for it; `body` uses the `db` it gets, since a call to
@@ -116,7 +118,7 @@ index 8ea15b1..77c449e 100644
  }
  
  /**
-@@ -1131,3 +1185,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
+@@ -1131,3 +1187,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
      WorkflowSharedContext<TState>,
      ObjectContext<TState>,
      RestateWorkflowContext {}
@@ -772,10 +774,10 @@ index f14da79..bdc98ec 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..2fbe251
+index 0000000..3676d21
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,656 @@
+@@ -0,0 +1,623 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -793,6 +795,7 @@ index 0000000..2fbe251
 +// with. An attempt has one session, opened on first use and saved when the
 +// handler ends.
 +
++import { Buffer } from "node:buffer";
 +import { randomUUID } from "node:crypto";
 +import {
 +  millisOrDurationToMillis,
@@ -908,6 +911,7 @@ index 0000000..2fbe251
 +
 +interface Session extends SqlDatabase {
 +  transaction<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
++  version(): Promise<number>;
 +  isUsable(): boolean;
 +  save(): Promise<void>;
 +  close(): Promise<void>;
@@ -1071,17 +1075,16 @@ index 0000000..2fbe251
 +  }
 +}
 +
-+// The outbox: a transaction's sends, stored with its SQL, and made once it
-+// commits. `_restate_db` holds a random id of the database: a send's
-+// idempotency key is `outbox/<database id>/<row id>`, unique to the database,
-+// so not that of an earlier database at the same key.
-+const OUTBOX = "_restate_outbox";
-+const OUTBOX_DDL = [
-+  `CREATE TABLE IF NOT EXISTS ${OUTBOX} (id INTEGER PRIMARY KEY AUTOINCREMENT, send TEXT NOT NULL, parameter BLOB NOT NULL)`,
-+  "CREATE TABLE IF NOT EXISTS _restate_db (id TEXT NOT NULL)",
-+];
++// A transaction's sends wait in the object's state, under PENDING, while it
++// commits: written before its COMMIT, with the database's version then, and
++// cleared once they are made. The state writes are stored in order, so a
++// later open finds them if the commit may have landed, and the version tells
++// whether it did (it grew). Each send's idempotency key is
++// `transaction/<id>/<index>`, with a random id of the transaction, so making
++// them again is dropped.
++const PENDING = "_restate_sql_sends";
 +
-+/** A send as the outbox stores it: everything but the parameter, as JSON. */
++/** A send, but its parameter, as it is stored. */
 +type StoredSend = Omit<
 +  GenericSend<unknown>,
 +  "parameter" | "inputSerde" | "delay"
@@ -1089,10 +1092,14 @@ index 0000000..2fbe251
 +  delay?: number;
 +};
 +
-+interface OutboxRow {
-+  id: number;
-+  send: StoredSend;
-+  parameter: Uint8Array;
++/** The sends of a transaction, while it commits. */
++interface Pending {
++  /** The database's version before the commit. */
++  version: number;
++  /** The transaction's random id. */
++  id: string;
++  /** Each send, its parameter in base64. */
++  sends: (StoredSend & { parameter: string })[];
 +}
 +
 +// What a recorded send returns: there is no invocation yet.
@@ -1144,19 +1151,14 @@ index 0000000..2fbe251
 +  return sends as SqlTransactionSends;
 +}
 +
-+function storedSend(send: GenericSend<unknown>): {
-+  send: StoredSend;
-+  parameter: Uint8Array;
-+} {
++function storedSend(send: GenericSend<unknown>): Pending["sends"][number] {
 +  const { parameter, inputSerde, delay, ...rest } = send;
 +  return {
-+    send: {
-+      ...rest,
-+      ...(delay !== undefined
-+        ? { delay: millisOrDurationToMillis(delay) }
-+        : {}),
-+    },
-+    parameter: (inputSerde ?? serde.binary).serialize(parameter),
++    ...rest,
++    ...(delay !== undefined ? { delay: millisOrDurationToMillis(delay) } : {}),
++    parameter: Buffer.from(
++      (inputSerde ?? serde.binary).serialize(parameter)
++    ).toString("base64"),
 +  };
 +}
 +
@@ -1178,12 +1180,9 @@ index 0000000..2fbe251
 +  readonly #ctx: SqlHost;
 +  readonly #errors = new SqlErrors();
 +  #session: Promise<Session> | undefined;
-+  // The outbox's tables exist, and the database's id, once known.
-+  #outbox = false;
-+  #databaseId: string | undefined;
-+  // The last outbox row sent: the rows up to it are deleted when the
-+  // handler ends.
-+  #sent = 0;
++  // The last ctx.transaction has made its sends: the next one writes PENDING
++  // only then, so that clearing it does not clear the next one's.
++  #made: Promise<void> = Promise.resolve();
 +  #ended = false;
 +  #cancel: () => void = () => {};
 +  /** `ctx.db`. */
@@ -1207,11 +1206,11 @@ index 0000000..2fbe251
 +
 +  /**
 +   * `ctx.transaction(body)`: one transaction of the session, whose sends are
-+   * stored in the outbox with its SQL, and made once it commits.
++   * made once it commits, and kept in the object's state until they are.
 +   */
 +  async transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T> {
 +    const db = await this.#open();
-+    const sends: ReturnType<typeof storedSend>[] = [];
++    const sends: Pending["sends"] = [];
 +    let open = true;
 +    const tx = recorder(this.#ctx, (send) => {
 +      if (!open) {
@@ -1221,9 +1220,13 @@ index 0000000..2fbe251
 +      }
 +      sends.push(storedSend(send));
 +    });
-+    let stored: { databaseId: string; rows: OutboxRow[] } | undefined;
++    const previous = this.#made;
++    let made = () => {};
++    this.#made = new Promise((resolve) => (made = resolve));
++    let pending: Pending | undefined;
++    let value: T;
 +    try {
-+      const value = await this.#errors.transaction(db, async (sql) => {
++      value = await this.#errors.transaction(db, async (sql) => {
 +        const result = await body({
 +          db: {
 +            ...sql,
@@ -1237,91 +1240,65 @@ index 0000000..2fbe251
 +          tx,
 +        });
 +        open = false;
-+        if (sends.length > 0) stored = await this.#store(sql, sends);
++        if (sends.length > 0) {
++          await previous;
++          // Before the COMMIT's writes, so stored if they are.
++          pending = { version: await db.version(), id: randomUUID(), sends };
++          this.#ctx.set(
++            PENDING,
++            new TextEncoder().encode(JSON.stringify(pending)),
++            serde.binary
++          );
++        }
 +        return result;
 +      });
-+      // Committed: the outbox, and the database's id, are as stored.
-+      if (stored !== undefined) {
-+        this.#outbox = true;
-+        this.#databaseId = stored.databaseId;
-+        this.#emit(stored.rows);
-+      }
-+      return value;
 +    } catch (error) {
++      made();
++      // A COMMIT refused with the session usable did not land; one that
++      // ended the session may have, which the next open tells.
++      if (pending !== undefined && db.isUsable()) this.#ctx.clear(PENDING);
 +      throw this.#errors.classify(error, db.isUsable());
 +    } finally {
 +      open = false;
 +    }
-+  }
-+
-+  /** Store `sends` in the outbox, in transaction `sql`. */
-+  async #store(
-+    sql: SqlDatabase,
-+    sends: ReturnType<typeof storedSend>[]
-+  ): Promise<{ databaseId: string; rows: OutboxRow[] }> {
-+    if (!this.#outbox) {
-+      for (const ddl of OUTBOX_DDL) await sql.execute(ddl);
-+      await sql.execute(
-+        "INSERT INTO _restate_db (id) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM _restate_db)",
-+        [randomUUID()]
-+      );
++    try {
++      if (pending !== undefined) this.#emit(pending);
++    } finally {
++      made();
 +    }
-+    // Not the field: a transaction rolled back would leave it set.
-+    const databaseId =
-+      this.#databaseId ??
-+      String((await sql.query("SELECT id FROM _restate_db"))[0]?.[0]);
-+    const ids = await sql.query(
-+      `INSERT INTO ${OUTBOX} (send, parameter) VALUES ${sends
-+        .map(() => "(?, ?)")
-+        .join(", ")} RETURNING id`,
-+      sends.flatMap(({ send, parameter }) => [JSON.stringify(send), parameter])
-+    );
-+    const rows = sends.map(({ send, parameter }, i) => ({
-+      id: Number(ids[i]?.[0]),
-+      send,
-+      parameter,
-+    }));
-+    return { databaseId, rows };
++    return value;
 +  }
 +
 +  /**
-+   * Make the sends of `rows`, committed: each with an idempotency key of its
-+   * row (or its own), so that sending a row again is dropped.
++   * Make the sends of `pending`, committed: each with an idempotency key of
++   * the transaction (or its own), so that making them again is dropped.
 +   */
-+  #emit(rows: OutboxRow[]) {
-+    for (const { id, send, parameter } of rows) {
++  #emit({ id, sends }: Pending) {
++    sends.forEach(({ parameter, ...send }, index) => {
 +      this.#ctx.genericSend({
 +        ...send,
-+        parameter,
++        parameter: new Uint8Array(Buffer.from(parameter, "base64")),
 +        inputSerde: serde.binary,
-+        idempotencyKey:
-+          send.idempotencyKey ?? `outbox/${this.#databaseId}/${id}`,
++        idempotencyKey: send.idempotencyKey ?? `transaction/${id}/${index}`,
 +      });
-+      this.#sent = Math.max(this.#sent, id);
-+    }
++    });
++    // After the sends: once this is stored, so are they.
++    this.#ctx.clear(PENDING);
 +  }
 +
-+  /** The rows a crashed attempt left in the outbox: send them again. */
-+  async #recover(db: Session) {
-+    const [table] = await db.query(
-+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-+      [OUTBOX]
-+    );
-+    if (table === undefined) return;
-+    this.#outbox = true;
-+    this.#databaseId = String(
-+      (await db.query("SELECT id FROM _restate_db"))[0]?.[0]
-+    );
-+    const rows = await db.query(
-+      `SELECT id, send, parameter FROM ${OUTBOX} ORDER BY id`
-+    );
-+    this.#emit(
-+      rows.map(([id, send, parameter]) => ({
-+        id: Number(id),
-+        send: JSON.parse(String(send)) as StoredSend,
-+        parameter: parameter as Uint8Array,
-+      }))
-+    );
++  /**
++   * The sends a crashed attempt left pending: made again if their
++   * transaction committed, and dropped if it did not.
++   */
++  async #recover(db: Session, store: SqlStore) {
++    const stored = await store.get(PENDING);
++    if (stored === undefined || stored === null) return;
++    const pending = JSON.parse(new TextDecoder().decode(stored)) as Pending;
++    if ((await db.version()) > pending.version) {
++      this.#emit(pending);
++    } else {
++      this.#ctx.clear(PENDING);
++    }
 +  }
 +
 +  #namespace() {
@@ -1362,7 +1339,7 @@ index 0000000..2fbe251
 +    // statement runs, and the handler's later calls fail.
 +    this.#cancel = end.onEnd(() => void db.close().catch(() => {}));
 +    try {
-+      await this.#recover(db);
++      await this.#recover(db, store);
 +    } catch (error) {
 +      await db.close();
 +      throw error;
@@ -1389,15 +1366,8 @@ index 0000000..2fbe251
 +      return settle(outcome);
 +    }
 +    this.#cancel();
-+    // The sends are before this in the journal: once it is stored, so are
-+    // they, and their rows may go.
-+    const clear = () =>
-+      this.#sent > 0 && db.isUsable()
-+        ? db.execute(`DELETE FROM ${OUTBOX} WHERE id <= ?`, [this.#sent])
-+        : Promise.resolve();
 +    if ("error" in outcome) {
 +      const error = this.#errors.classify(outcome.error, db.isUsable());
-+      await clear().catch(() => {});
 +      // The handler's error stands: its writes are stored in order before
 +      // the result, whether or not the save confirms them for the cache.
 +      await (db.isUsable() ? db.save() : db.close()).catch(() =>
@@ -1405,7 +1375,6 @@ index 0000000..2fbe251
 +      );
 +      throw error;
 +    }
-+    await clear();
 +    if (db.isUsable()) {
 +      await db.save();
 +    } else {

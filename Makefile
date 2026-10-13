@@ -75,7 +75,7 @@ test-addon: $(ADDON) ## The Node.js addon
 test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests, and its type tests
 	cd vendor/typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx tsc -p test/tsconfig.types.json && npx vitest run
 
-test-node: examples-js ## The ledger's handlers and ctx.transaction's outbox, without a Restate server
+test-node: examples-js ## The ledger's handlers and ctx.transaction's sends, without a Restate server
 	cd examples && npm run test:node
 
 test-pi: examples-js ## pi-durable's storage conformance suite on the pi example's storage
