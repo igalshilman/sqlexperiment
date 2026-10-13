@@ -272,6 +272,22 @@ test('a call to the session inside its transaction is refused, not left waiting'
   await db.save();
 });
 
+test('a call to a session inside a transaction of another, inside its own, is refused', async () => {
+  const a = await open(fresh(), new Backend().request());
+  const b = await open(fresh(), new Backend().request());
+  await a.transaction(async () => {
+    await b.transaction(async (tx) => {
+      await tx.query('SELECT 1');
+      // `a` waits for its transaction, which waits for this body.
+      await assert.rejects(a.query('SELECT 1'), /use the transaction handle/);
+    });
+    // Once b's transaction has ended, b may be used again from a's body.
+    assert.deepEqual(await b.query('SELECT 1'), [[1]]);
+  });
+  await a.save();
+  await b.save();
+});
+
 test('a statement resolves after its writes reached the store, however many', async () => {
   const backend = new Backend();
   const db = await open(fresh(), backend.request());

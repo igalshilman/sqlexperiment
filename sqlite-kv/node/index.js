@@ -44,7 +44,8 @@ async function open(namespace, store) {
   return new Database(await native.open(namespace, dispatch));
 }
 
-// The transaction whose body is running, in that body's asynchronous context.
+// The transaction whose body is running, in that body's asynchronous context:
+// the innermost, which knows the ones it runs inside.
 const running = new AsyncLocalStorage();
 
 class Database {
@@ -92,7 +93,7 @@ class Database {
     return this.#serial(async () => {
       const native = this.#native;
       await native.query('BEGIN');
-      const tx = new Transaction(this, native);
+      const tx = new Transaction(this, native, running.getStore());
       let result;
       try {
         result = await running.run(tx, () => body(tx));
@@ -164,17 +165,21 @@ async function rollback(native) {
 class Transaction {
   #database;
   #native;
+  // The transaction whose body this one's runs in, if any: of another
+  // session, since a session's own are refused.
+  #outer;
   /** See {@link recordCommit}. */
   recorded = false;
 
-  constructor(database, nativeDatabase) {
+  constructor(database, nativeDatabase, outer) {
     this.#database = database;
     this.#native = nativeDatabase;
+    this.#outer = outer;
   }
 
-  /** Whether this transaction is open and holds `database`. */
+  /** Whether this transaction, or one it runs inside, is open and holds `database`. */
   holds(database) {
-    return this.#native !== null && this.#database === database;
+    return (this.#native !== null && this.#database === database) || (this.#outer?.holds(database) ?? false);
   }
 
   #check() {
