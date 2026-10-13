@@ -64,7 +64,9 @@ const ACCOUNTS = 8;
 const OPENING = 1000;
 
 const dir = mkdtempSync(join(tmpdir(), 'sqlite-kv-examples-'));
-const log = (name: string) => openSync(join(dir, name), 'a');
+// One descriptor per log, however often its process restarts.
+const logs = new Map<string, number>();
+const log = (name: string) => logs.get(name) ?? logs.set(name, openSync(join(dir, name), 'a')).get(name)!;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** Wait until `done()`, which other tasks make true. */
 const until = async (done: () => boolean) => {
@@ -175,9 +177,20 @@ async function pool(width: number, tasks: (() => Promise<void>)[]) {
   );
 }
 
+// A server left running (by a run that was killed) would serve this run its
+// state: refuse to start against it.
+if (
+  await fetch(`${ADMIN}/health`).then(
+    () => true,
+    () => false,
+  )
+) {
+  throw new Error(`a Restate server already listens at ${ADMIN}; stop it first`);
+}
 let server = startServer();
 let services = PROCESSES.map((p) => supervise(p, p.perMille));
-// On failure too, leave nothing running.
+// On failure, or when interrupted or terminated, leave nothing running.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => process.exit(1));
 process.on('exit', () => {
   for (const service of services) {
     service.stopped = true;

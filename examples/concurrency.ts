@@ -233,6 +233,16 @@ const database = restate.object({
 
 const dir = mkdtempSync(join(tmpdir(), 'sqlite-kv-concurrency-'));
 console.error(`logs in ${dir}`);
+// A server left running (by a run that was killed) would serve this run its
+// state: refuse to start against it.
+if (
+  await fetch(`${ADMIN}/health`).then(
+    () => true,
+    () => false,
+  )
+) {
+  throw new Error(`a Restate server already listens at ${ADMIN}; stop it first`);
+}
 const server = spawn(SERVER, ['--base-dir', join(dir, 'server')], {
   env: {
     ...process.env,
@@ -242,6 +252,8 @@ const server = spawn(SERVER, ['--base-dir', join(dir, 'server')], {
   },
   stdio: ['ignore', openSync(join(dir, 'server.log'), 'a'), openSync(join(dir, 'server.log'), 'a')],
 });
+// On failure, or when interrupted or terminated, leave nothing running.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => process.exit(1));
 process.on('exit', () => server.kill('SIGKILL'));
 
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {

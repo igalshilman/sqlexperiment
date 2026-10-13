@@ -8,7 +8,8 @@ const perMille = Number(process.env.ABORT_PER_MILLE ?? 0);
 const maybeAbort = () => {
   if (Math.random() * 1000 < perMille) {
     console.error('aborting at a state request');
-    process.abort();
+    // As abruptly as process.abort(), without a core dump or a crash report.
+    process.kill(process.pid, 'SIGKILL');
   }
 };
 
