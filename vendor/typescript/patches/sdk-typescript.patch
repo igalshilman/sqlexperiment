@@ -726,10 +726,10 @@ index f14da79..bdc98ec 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..1147225
+index 0000000..bf5cc30
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,218 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -775,7 +775,8 @@ index 0000000..1147225
 +  /**
 +   * Run `body` as one SQL transaction: it commits when `body` resolves, and
 +   * rolls back when it rejects. The transaction holds the session: other
-+   * calls to the session wait until it ends, so `body` uses the `db` it gets,
++   * calls to the session wait until it ends, and a call from inside `body` is
++   * refused, as it would wait for `body`. So `body` uses the `db` it gets,
 +   * which is invalid once `body` settles.
 +   */
 +  transaction<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;

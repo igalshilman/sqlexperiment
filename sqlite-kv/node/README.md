@@ -41,8 +41,10 @@ before a later read of its key, and every write before a `sync`. A `set` or
 `open` returns a session of the namespace's database. Each SQL commit is
 durable once its writes are; `transaction` commits a body as a whole. Calls
 run one at a time, in call order, and a transaction holds the session until it
-commits or rolls back: calls made meanwhile wait, so none runs inside it, and
-the body uses the handle it gets, which is invalid once the body settles. An
+commits or rolls back: calls made meanwhile wait, so none runs inside it. The
+body uses the handle it gets, which is invalid once the body settles; a call
+to the session from inside the body is refused, as it would wait for the body.
+A COMMIT that fails rolls back. An
 SQL error leaves the session usable (`isUsable()`); a storage error ends it.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory

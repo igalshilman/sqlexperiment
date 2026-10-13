@@ -188,3 +188,20 @@ test('a COMMIT that fails rolls the transaction back', async () => {
   assert.deepEqual(await db.query('SELECT id FROM p'), [[7]]);
   await db.save();
 });
+
+test('a call to the session inside its transaction is refused, not left waiting', async () => {
+  const db = await open(fresh(), new Backend().request());
+  await db.execute('CREATE TABLE t(id INTEGER)');
+  let later;
+  await db.transaction(async (tx) => {
+    await tx.execute('INSERT INTO t VALUES(1)');
+    // It would wait for this transaction, which waits for this body.
+    await assert.rejects(db.execute('INSERT INTO t VALUES(2)'), /use the transaction handle/);
+    await assert.rejects(db.transaction(async () => {}), /use the transaction handle/);
+    // Once the body has settled, its asynchronous context may use the session.
+    later = new Promise((resolve) => setTimeout(resolve, 5)).then(() => db.execute('INSERT INTO t VALUES(3)'));
+  });
+  await later;
+  assert.deepEqual(await db.query('SELECT id FROM t ORDER BY id'), [[1], [3]]);
+  await db.save();
+});

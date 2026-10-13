@@ -23,9 +23,9 @@ export interface Transaction {
 
 /**
  * A session: calls run one at a time, in call order, and a transaction holds
- * the session until it commits or rolls back. A call to the session from
- * inside a transaction's body waits for the transaction, so the body uses its
- * `tx`.
+ * the session until it commits or rolls back. Calls made meanwhile wait, but
+ * a call to the session from inside the transaction's body is refused, as it
+ * would wait for that body: the body uses its `tx`.
  */
 export declare class Database implements Transaction {
   query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
