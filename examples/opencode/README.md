@@ -38,6 +38,53 @@ built on (4.0.1). OpenCode needs Node 24.
 - [`agent.test.ts`](agent.test.ts): the handler with a fake `ctx`, through
   crashes.
 
+## What embedded means here
+
+OpenCode runs in the handler's own Node process: no child process, no
+listening socket, no network hop. `@opencode/sdk` assembles OpenCode's
+server (sessions, the agent loop, plugins, model providers, the event log)
+as a library, and its client calls the server's HTTP router through an
+in-process `fetch`: requests and responses are objects in memory. With the
+host booted and a turn answered, the process had no child process and no
+listening socket, and OpenCode's tables (20 of them) were in the object's
+database. Each attempt boots the host (about 100 ms) and closes it at the
+end. The only traffic out is the model's: none for the teller, the
+provider's API for a real model; tools reach other services through Restate.
+
+It is OpenCode's agent core, not its terminal UI, and in the workerd
+profile it spawns nothing either: its shell, terminal, file and version
+control services are disabled or stubbed. An agent that should run commands
+needs a tool that runs them elsewhere (a sandbox, a service), idempotently,
+like the ledger tools.
+
+## What we found
+
+- **OpenCode resumes on its own.** A turn holds an execution claim from its
+  start to its end, and booting resumes every claimed turn: the same
+  recovery a Durable Object's eviction relies on is what a retried Restate
+  attempt gets.
+- **A resumed turn does not rerun a tool.** A tool call that was running
+  gets an "interrupted" result, and a synthetic message asks the model to
+  continue without repeating completed work, as the DeepSeek Harness does.
+  So a tool that must not run twice needs `retryOf` (or an equivalent).
+- **OpenCode fails a turn after ten resumes.** Under Restate the retry
+  policy decides; the first crash test run hit the limit.
+- **The database is a seam.** `Database.configuredClient` takes any Effect
+  `SqlClient`; nothing in OpenCode needed the Durable Object's synchronous
+  `exec`.
+- **The Promise API's `OpenCode.create(options)` ignores its second
+  argument** (the layer replacements), though its types declare it; the
+  Effect API's `create` honours it, and its client's calls are Effects.
+- **A prompt waits in the inbox before it is a message**, and a prompt
+  queued while a turn runs is answered in that turn's run: a prompt's answer
+  is the last assistant message before the turn's idle marker, or before the
+  next prompt.
+- **Node 24.** OpenCode's packages use `await using`, which Node 22 does not
+  parse.
+- **Cost.** A prompt makes about 230 store requests; importing OpenCode
+  takes about 2.3 s per process, which is why its crash test process aborts
+  at 0.1%.
+
 ## Through crashes
 
 The handler is not replayed: a retried attempt boots OpenCode again, on the
