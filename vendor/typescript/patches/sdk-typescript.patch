@@ -40,7 +40,7 @@ index 18d3aa3..ca9b182 100644
    ClientSendOptions,
    RemoveVoidArgument,
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..1ca7781 100644
+index 8ea15b1..c8ce707 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,11 +9,14 @@
@@ -58,7 +58,7 @@ index 8ea15b1..1ca7781 100644
    //eslint-disable-next-line @typescript-eslint/no-unused-vars
    ClientCallOptions,
  } from "./types/rpc.js";
-@@ -839,6 +842,59 @@ export interface SignalReference<T> {
+@@ -839,6 +842,62 @@ export interface SignalReference<T> {
  export interface ObjectContext<TState extends TypedState = UntypedState>
    extends Context, KeyValueStore<TState>, RestateObjectContext {
    key: string;
@@ -104,8 +104,11 @@ index 8ea15b1..1ca7781 100644
 +   * crash may have lost: it makes them again, with the same idempotency
 +   * keys, if the version shows the commit landed, so each is made once
 +   * (within the target's idempotency retention), and drops them if it did
-+   * not. A send has no invocation id. A call, whose result the body would
-+   * wait for, is not part of the transaction.
++   * not. A send has no invocation id. Only `db` and `tx` are part of the
++   * transaction: a call, whose result the body would wait for, cannot be,
++   * and one made through `ctx` inside the body is made whether or not the
++   * transaction commits, while holding it open. Make calls before it, and
++   * record their outcome in it.
 +   *
 +   * The transaction waits for the calls to `ctx.db` before it, and the calls
 +   * after it wait for it; `body` uses the `db` it gets, since a call to
@@ -118,7 +121,7 @@ index 8ea15b1..1ca7781 100644
  }
  
  /**
-@@ -1131,3 +1187,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
+@@ -1131,3 +1190,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
      WorkflowSharedContext<TState>,
      ObjectContext<TState>,
      RestateWorkflowContext {}
