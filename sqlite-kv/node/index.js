@@ -85,13 +85,18 @@ class Database {
         result = await body(tx);
       } catch (error) {
         tx.end();
-        if (native.isUsable()) {
-          await native.query('ROLLBACK');
-        }
+        await rollback(native);
         throw error;
       }
       tx.end();
-      await native.query('COMMIT');
+      try {
+        await native.query('COMMIT');
+      } catch (error) {
+        // A COMMIT that fails (a deferred constraint) leaves the transaction
+        // open: without the rollback, the calls after it would run inside it.
+        await rollback(native);
+        throw error;
+      }
       return result;
     });
   }
@@ -115,6 +120,17 @@ class Database {
    */
   close() {
     return this.#native.close();
+  }
+}
+
+/**
+ * Roll back the open transaction, unless a storage error ended the session.
+ * The caller rethrows its own error, which says why: a failing rollback only
+ * leaves the session unusable.
+ */
+async function rollback(native) {
+  if (native.isUsable()) {
+    await native.query('ROLLBACK').catch(() => {});
   }
 }
 
