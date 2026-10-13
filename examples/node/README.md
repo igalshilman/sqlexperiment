@@ -16,13 +16,13 @@ const ledger = restate.object({
   name: 'Ledger',
   handlers: {
     init: (ctx) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db }) => {
         await db.execute('CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, balance INTEGER)');
       }),
     deposit: (ctx, { id, amount }) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db }) => {
         await db.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, id]);
-      }), // one transaction: durable as a whole once ctx.sql resolves
+      }), // one transaction: durable as a whole once ctx.transaction resolves
   },
   options: restate.sqlOptions, // journalReplay: false, lazy state, no journal retention
 });
@@ -32,17 +32,22 @@ const ledger = restate.object({
 handlers inherit: the examples set it for the whole object, but a single
 handler may take it (`restate.handlers.object.exclusive({ ...restate.sqlOptions },
 handler)`), and the object's other handlers keep replaying their journals.
-`ctx.sql` needs it off in the handler that calls it.
+`ctx.db` needs it off in the handler that uses it.
 
 `ctx.db`, on the context of an exclusive object handler, is the object's
 database (namespace `service/key`) over the object's state, with the
 process's page cache. Each statement is its own transaction, and
 `db.transaction(fn)` groups several; calls run one at a time, in call order.
-`ctx.sql(body)` is `ctx.db.transaction(body)`: one transaction, which commits
-when `body` resolves and rolls back when it rejects.
+A crash between two commits keeps the first: statements that must stand or
+fall together go in one transaction.
+
+`ctx.transaction(body)` is the handler's unit of work: `body` gets
+`{ db, tx }`, one transaction's SQL and its sends, which commit together (see
+below). It commits when `body` resolves and rolls back when it rejects. A
+library that brings its own transactions uses `ctx.db.transaction`.
 
 An attempt has one session. It opens on the first call to `ctx.db` or
-`ctx.sql` (a read of `meta` and a probe of the log), stays open while the
+`ctx.transaction` (a read of `meta` and a probe of the log), stays open while the
 handler runs, however many calls it makes, and is saved when the handler
 ends: one `ctx.run`, if it wrote, so the page cache may trust the writes. A
 commit is durable once its writes are stored, which Restate does in order, so
@@ -52,10 +57,41 @@ handler's work gets `ctx.db`: the [pi example](../pi/README.md) runs
 pi-durable's storage this way.
 
 An SQL error that the handler fails with is terminal, since a retry would
-repeat it (`ctx.sql` rejects with it as a `TerminalError`); a storage error is
+repeat it (`ctx.transaction` rejects with it as a `TerminalError`); a storage error is
 retried. The handler's own errors are as in any handler: a `TerminalError` is
 terminal, and any other error, such as a failed request to a model or another
 service, is retried. Creating tables is up to the handlers, such as `init`.
+
+**Sends that commit with the SQL.** A send made with `tx`, the transaction's
+send clients, is made once the transaction commits, and only then:
+
+```js
+ctx.transaction(async ({ db, tx }) => {
+  await db.execute('UPDATE accounts SET balance = balance - ? WHERE id = ?', [amount, from]);
+  tx.objectSendClient(store, 'a').reserve(item);
+  tx.objectSendClient(store, 'b').deposit(amount);
+});
+```
+
+The sends are stored with the SQL, as rows of an outbox table
+(`_restate_outbox`) in the same transaction, and made right after the commit,
+each with an idempotency key of its row: `outbox/<database id>/<row id>`
+(`_restate_db` holds the database's random id, so a database made again at
+the same key does not reuse keys), or the send's own key. Restate stores the
+commit's writes before the sends, and keeps a prefix after a crash: so a send
+that is stored has its commit stored, while a commit may be stored without its
+sends. Those the session's next open finds, and makes again with the same keys;
+Restate drops a send whose key it has seen. The rows are deleted when the
+handler ends, after the sends in the journal. So each send of a committed
+transaction is made once, even when a retried attempt never runs the
+transaction's body again (it finds its work done, by its id), and a send of a
+transaction rolled back or lost is not made. Two limits: Restate keeps an
+idempotency key for the target's retention (a day by default), and a send made
+again after that, by an invocation that died between the sends and the end of
+its handler and whose object is not used again for that long, is made twice;
+and a send has no invocation id, which only exists once it is made. A call,
+whose result the body would wait for, cannot be part of the transaction: it
+keeps an idempotency key of its own. The shop's `expire` is such a send.
 
 The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear`, and the barrier is an empty `ctx.run`. The SDK loads
@@ -66,7 +102,7 @@ the sqlite-kv addon, an optional peer dependency, on first use.
 `ctx.clearAll()` in any handler of the object deletes the database, a handler's
 own key starting with `v12/` corrupts it, and `ctx.stateKeys()` lists its
 pages. Keep other state out of `v12/`, and do not clear all of an object that
-uses `ctx.sql`. (Reserving the prefix in the SDK is future work.)
+uses `ctx.db`. Tables whose names start with `_restate_` are the SDK's. (Reserving the prefix in the SDK is future work.)
 
 **One cluster per process.** The page cache knows a database by its namespace,
 `service/key`, and trusts what it cached while the database's `meta` and log
@@ -121,7 +157,7 @@ operation it reaches happens again. What each one does then:
 
 | Operation                                                                | On a retried attempt                                                                                                                                                                                                          |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ctx.db`, `ctx.sql`                                                      | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
+| `ctx.db`, `ctx.transaction`                                              | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
 | Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result.                                                   |
 | Sends, delayed sends                                                     | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer.                                                                                                                      |
 | `ctx.get`, `ctx.set`, `ctx.clear`                                        | Read the state as stored; writes are ordered, and a lost one takes the later commands with it.                                                                                                                                |
@@ -251,6 +287,6 @@ transfers take 18.8 ms each on one local node.
 
 ## Not supported
 
-Shared handlers, awakeables, `ctx.sql` in a handler that replays its journal,
+Shared handlers, awakeables, `ctx.db` in a handler that replays its journal,
 and request/response deployments (such as Lambda), which suspend at every await,
 since a suspension is a restart.

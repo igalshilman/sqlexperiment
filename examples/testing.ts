@@ -3,7 +3,7 @@
 // that records its calls, through crashes of the handler.
 import { randomUUID } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
-import { open, type Database, type Store, type Transaction } from 'sqlite-kv';
+import type { Store } from 'sqlite-kv';
 import type { Audit, Transfer } from './node/ledger.ts';
 
 /**
@@ -29,63 +29,63 @@ export function memoryStore(map = new Map<string, Uint8Array>(), fence = { close
   };
 }
 
+/** An attempt of a handler, for {@link sqlAttempt}. */
+export interface AttemptOptions {
+  /** The object's state, which lives across attempts. */
+  map: Map<string, Uint8Array>;
+  /** Closed, the attempt's writes and sends throw, as a fenced attempt's. */
+  fence?: { closed: boolean };
+  /** The object's key. */
+  key?: string;
+  /** The request id. */
+  id?: string;
+  /** Each send the attempt makes. */
+  send?: (send: restate.GenericSend<Uint8Array>) => void;
+}
+
 /**
- * `ctx.db` and `ctx.sql` over `db`, as an attempt has them, and `end`, which
- * ends the handler as the SDK does: an SQL error it fails with is terminal,
- * and the handler's own errors are as in any handler.
+ * `ctx.db` and `ctx.transaction` of an attempt, the SDK's own, over `map`, and
+ * `end`, which runs the handler and ends the attempt's session as the SDK
+ * does. Each attempt is a database of its own in this process (a namespace
+ * of its own), so that one a crash abandoned does not share the page cache.
  */
-export function sqlAttempt(db: Database) {
-  const sqlErrors = new WeakSet<object>();
-  const record = (error: unknown) => {
-    if (typeof error === 'object' && error !== null) sqlErrors.add(error);
-    return error;
+export function sqlAttempt({ map, fence = { closed: false }, key = 'k', id = 'inv', send = () => {} }: AttemptOptions) {
+  const check = () => {
+    if (fence.closed) throw new Error('fenced');
   };
-  const track = <T>(promise: Promise<T>) =>
-    promise.catch((error: unknown) => {
-      throw record(error);
-    });
-  const view = (target: Transaction): restate.SqlDatabase => ({
-    query: (sql, params) => track(target.query(sql, params)),
-    queryColumns: (sql, params) => track(target.queryColumns(sql, params)),
-    execute: (sql, params) => track(target.execute(sql, params)),
-  });
-  const transaction = <T>(inner: (tx: restate.SqlDatabase) => Promise<T>) => {
-    let own: { error: unknown } | undefined;
-    return db
-      .transaction(async (tx) => {
-        try {
-          return await inner(view(tx));
-        } catch (error) {
-          own = { error };
-          throw error;
-        }
-      })
-      .catch((error: unknown) => {
-        throw own?.error === error ? error : record(error);
-      });
-  };
-  const classify = (error: unknown) =>
-    db.isUsable() && error instanceof Error && !(error instanceof restate.TerminalError) && sqlErrors.has(error)
-      ? new restate.TerminalError(error.message)
-      : error;
-  const session: restate.SqlSession = { ...view(db), transaction };
-  return {
-    db: session,
-    sql: <T>(body: (tx: restate.SqlDatabase) => Promise<T>) =>
-      transaction(body).catch((error: unknown) => {
-        throw classify(error);
-      }),
-    /** The handler's result, once it ended, and the session saved. */
-    async end<T>(handler: Promise<T>): Promise<T> {
-      try {
-        const value = await handler;
-        await db.save();
-        return value;
-      } catch (error) {
-        await db.close();
-        throw classify(error);
-      }
+  const end = Promise.withResolvers<void>();
+  end.promise.catch(() => {});
+  const target = { service: `test-${randomUUID()}` };
+  const ctx = {
+    handlerKind: 1, // exclusive
+    journalReplay: false,
+    key,
+    request: () => ({ id, target }),
+    invocationEndPromise: end,
+    defaultSerde: restate.serde.json,
+    get: async (k: string) => map.get(k) ?? null,
+    set: (k: string, value: Uint8Array) => {
+      check();
+      map.set(k, Uint8Array.from(value));
     },
+    clear: (k: string) => {
+      check();
+      map.delete(k);
+    },
+    run: async () => {},
+    genericSend: (s: restate.GenericSend<Uint8Array>) => {
+      check();
+      send(s);
+    },
+  };
+  const attempt = new restate.internal.SqlAttempt(ctx);
+  return {
+    db: attempt.db,
+    transaction: <T>(body: (t: restate.SqlTransaction) => Promise<T>) => attempt.transaction(body),
+    /** `handler`'s result, once its session ended. */
+    end: <T>(handler: () => Promise<T>) => restate.internal.withSql(handler, () => attempt),
+    /** The attempt ends, as when Restate fences or suspends it. */
+    abort: () => end.reject(new Error('the attempt ended')),
   };
 }
 
@@ -121,9 +121,9 @@ export interface FakeLedger {
  */
 export function conversation(handler: PromptHandler, key: string) {
   const map = new Map<string, Uint8Array>();
-  const name = randomUUID();
   let fence = { closed: false };
-  let n = 0;
+  // Ends the attempt before: Restate fences it once the next one starts.
+  let abort: (() => void) | undefined;
   const ledger: FakeLedger = { transfers: new Map(), calls: [], crashNext: 0, failNext: 0, crashed: () => {} };
   const books = {
     async transfer(transfer: Transfer, opts: restate.Opts<Transfer, Transfer>) {
@@ -151,15 +151,17 @@ export function conversation(handler: PromptHandler, key: string) {
     async attempt(requestId: string, prompt: Prompt) {
       fence.closed = true;
       fence = { closed: false };
-      const sql = sqlAttempt(await open(`${name}-${n++}`, memoryStore(map, fence)));
+      abort?.();
+      const sql = sqlAttempt({ map, fence, key, id: requestId });
+      abort = sql.abort;
       const ctx = {
         key,
         request: () => ({ id: requestId }),
         objectClient: () => books,
         db: sql.db,
-        sql: sql.sql,
+        transaction: sql.transaction,
       };
-      return sql.end(handler(ctx as unknown as restate.SqlObjectContext, prompt));
+      return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, prompt));
     },
     /** An attempt that crashes in its next transfer. */
     async crash(requestId: string, prompt: Prompt) {
