@@ -76,7 +76,8 @@ ctx.transaction(async ({ db, tx }) => {
 The sends wait in the object's state while the transaction commits: just
 before the COMMIT, the SDK writes them under one state key
 (`_restate_sql_sends`), with the database's version (a number that grows with
-each commit, and only then) and a random id of the transaction, and once the
+each commit, and only then; the SDK has this commit logged even if it changes
+nothing) and a random id of the transaction, and once the
 commit is done it makes them, each with an idempotency key of the transaction,
 `transaction/<id>/<index>` (or the send's own key), and clears the key. Restate
 stores an attempt's writes and sends in order, and keeps a prefix after a
@@ -92,9 +93,12 @@ costs two state writes. Two limits: Restate keeps an idempotency key for the
 target's retention (a day by default), and a send made again after that, by
 an invocation that died between the commit and its sends and whose object is
 not used again for that long, is made twice; and a send has no invocation id,
-which only exists once it is made. A call, whose result the body would wait
-for, cannot be part of the transaction: it keeps an idempotency key of its
-own. The shop's `expire` is such a send.
+which only exists once it is made. Only `db` and `tx` are part of the
+transaction: a call, whose result the body would wait for, cannot be, and one
+made through `ctx` inside the body is made whether or not the transaction
+commits, while holding it open. Make calls before the transaction, with an
+idempotency key of their own, and record their outcome in it, as the shop's
+`Orders` does; its `expire` is a send of `tx`.
 
 The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear`, and the barrier is an empty `ctx.run`. The SDK loads

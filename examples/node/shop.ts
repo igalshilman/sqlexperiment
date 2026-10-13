@@ -13,6 +13,12 @@
 // - The `expire` message is a send of the transaction that stores the order
 //   (`tx` of `ctx.transaction`): it is made once the order commits, exactly
 //   once, so it needs no key of its own.
+// - A call is made outside any transaction: an `Orders` handler reads the
+//   order, calls the warehouse, then records the outcome. Only the `db` and
+//   `tx` of `ctx.transaction` are part of a transaction; a call made inside
+//   its body would be made whether or not it commits, and would hold the
+//   transaction open while it waits. The handler is exclusive, so nothing
+//   changes the order between the read and the write.
 //
 // Environment: PORT (default 9080), SHOP_EXPIRY_MS (how long an unpaid order
 // holds its stock, default 5000) and ABORT_PER_MILLE (see faults.ts).
@@ -111,47 +117,46 @@ export const orders = restate.object({
   name: 'Orders',
   handlers: {
     /** Reserve the stock; an unpaid order expires after SHOP_EXPIRY_MS. */
-    place: (ctx: Ctx, { sku, qty }: { sku: string; qty: number }) =>
-      ctx.transaction(async ({ db, tx }) => {
-        const placed = await readOrder(db);
-        if (placed) return placed.status;
-        const ok = await ctx
-          .objectClient(warehouse, sku)
-          .reserve({ order: ctx.key, qty }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:reserve` }));
-        const status = ok ? 'reserved' : 'rejected';
+    place: async (ctx: Ctx, { sku, qty }: { sku: string; qty: number }) => {
+      const placed = await readOrder(ctx.db);
+      if (placed) return placed.status;
+      const ok = await ctx
+        .objectClient(warehouse, sku)
+        .reserve({ order: ctx.key, qty }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:reserve` }));
+      const status = ok ? 'reserved' : 'rejected';
+      return ctx.transaction(async ({ db, tx }) => {
         await db.execute('INSERT INTO orders VALUES(0, ?, ?, ?)', [sku, qty, status]);
         // Sent with the order's row, once it commits: a crash after the
         // commit cannot lose it, and an order rolled back sends nothing.
         if (ok)
           tx.objectSendClient(orders, ctx.key).expire(restate.rpc.sendOpts({ delay: { milliseconds: EXPIRY_MS } }));
         return status;
-      }),
+      });
+    },
 
     /** Pay a reserved order. */
-    pay: (ctx: Ctx) =>
-      ctx.transaction(async ({ db }) => {
-        const placed = await readOrder(db);
-        if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
-        await ctx
-          .objectClient(warehouse, placed.sku)
-          .commit({ order: ctx.key }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:commit` }));
-        await db.execute(`UPDATE orders SET status = 'paid'`);
-        return 'paid';
-      }),
+    pay: async (ctx: Ctx) => {
+      const placed = await readOrder(ctx.db);
+      if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
+      await ctx
+        .objectClient(warehouse, placed.sku)
+        .commit({ order: ctx.key }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:commit` }));
+      await ctx.db.execute(`UPDATE orders SET status = 'paid'`);
+      return 'paid';
+    },
 
     /** Release the stock of an order still unpaid. */
-    expire: (ctx: Ctx) =>
-      ctx.transaction(async ({ db }) => {
-        const placed = await readOrder(db);
-        if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
-        await ctx
-          .objectClient(warehouse, placed.sku)
-          .release({ order: ctx.key }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:release` }));
-        await db.execute(`UPDATE orders SET status = 'expired'`);
-        return 'expired';
-      }),
+    expire: async (ctx: Ctx) => {
+      const placed = await readOrder(ctx.db);
+      if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
+      await ctx
+        .objectClient(warehouse, placed.sku)
+        .release({ order: ctx.key }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:release` }));
+      await ctx.db.execute(`UPDATE orders SET status = 'expired'`);
+      return 'expired';
+    },
 
-    status: (ctx: Ctx) => ctx.transaction(({ db }) => readOrder(db)),
+    status: (ctx: Ctx) => readOrder(ctx.db),
   },
   options: restate.sqlOptions,
 });
