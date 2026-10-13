@@ -7,7 +7,9 @@
 //!
 //! The store is ordered ([`KvStore::ordered`]): `set` and `clear` return
 //! nothing, and are acknowledged once queued; `sync` resolves once every write
-//! so far is stored. A process-wide page cache is built in, and
+//! so far is stored. A statement resolves once its writes have reached the
+//! store (a barrier through the same queue), so what its caller does next
+//! comes after them. A process-wide page cache is built in, and
 //! [`Database::save`] confirms a session's writes before the cache trusts them.
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -20,6 +22,7 @@ use sqlite_kv::{Durability, PageCache, PageCacheConfig, Session, StorageOptions,
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, OnceCell};
 use turso_core::Numeric;
 
@@ -27,6 +30,7 @@ const GET: u32 = 0;
 const SET: u32 = 1;
 const CLEAR: u32 = 2;
 const SYNC: u32 = 3;
+const BARRIER: u32 = 4;
 
 type Args = (u32, String, Option<Buffer>);
 type Dispatch = ThreadsafeFunction<Args, Promise<Option<Uint8Array>>, Args, Status, false, true>;
@@ -34,6 +38,8 @@ type Dispatch = ThreadsafeFunction<Args, Promise<Option<Uint8Array>>, Args, Stat
 /// The JavaScript store.
 struct JsStore {
     dispatch: Dispatch,
+    /// Writes were queued since the last barrier.
+    queued: AtomicBool,
 }
 
 fn failed(error: impl std::fmt::Display) -> io::Error {
@@ -43,6 +49,7 @@ fn failed(error: impl std::fmt::Display) -> io::Error {
 impl JsStore {
     /// Queue a write; it is acknowledged once queued.
     fn write(&self, op: u32, key: &str, value: Option<Buffer>) -> io::Result<()> {
+        self.queued.store(true, Ordering::Release);
         match self.dispatch.call(
             (op, key.to_owned(), value),
             ThreadsafeFunctionCallMode::NonBlocking,
@@ -50,6 +57,18 @@ impl JsStore {
             Status::Ok => Ok(()),
             status => Err(failed(format!("store call failed: {status}"))),
         }
+    }
+
+    /// Wait until the store has every write queued so far. The writes and a
+    /// statement's result reach JavaScript through different queues, and
+    /// Node.js dispatches a bounded batch of a queue per turn: without this,
+    /// a statement could resolve before its commit's writes reached the store,
+    /// and what the caller did next would come before them.
+    async fn barrier(&self) -> io::Result<()> {
+        if self.queued.swap(false, Ordering::AcqRel) {
+            self.request(BARRIER, "").await?;
+        }
+        Ok(())
     }
 
     async fn request(&self, op: u32, key: &str) -> io::Result<Option<Bytes>> {
@@ -114,10 +133,15 @@ fn sql_error(error: Box<dyn std::error::Error + Send + Sync>) -> Error {
     Error::from_reason(error.to_string())
 }
 
+fn sql_error_io(error: io::Error) -> Error {
+    Error::from_reason(error.to_string())
+}
+
 /// One session of a namespace's database.
 #[napi]
 pub struct Database {
     session: Arc<Mutex<Option<Session>>>,
+    store: Arc<JsStore>,
 }
 
 /// Open the database of `namespace` over the store behind `dispatch`; see
@@ -133,18 +157,23 @@ pub fn open<'env>(
         .callee_handled::<false>()
         .weak::<true>()
         .build()?;
-    let store = Arc::new(JsStore { dispatch });
+    let store = Arc::new(JsStore {
+        dispatch,
+        queued: AtomicBool::new(false),
+    });
     env.spawn_future(async move {
         let options = StorageOptions {
             cache: Some(page_cache().await?.namespace(&namespace)),
             durability: Durability::Commit,
             ..StorageOptions::default()
         };
-        let session = Session::open_with_options(store, options)
+        let session = Session::open_with_options(store.clone(), options)
             .await
             .map_err(sql_error)?;
+        store.barrier().await.map_err(sql_error_io)?;
         Ok(Database {
             session: Arc::new(Mutex::new(Some(session))),
+            store,
         })
     })
 }
@@ -152,7 +181,8 @@ pub fn open<'env>(
 #[napi]
 impl Database {
     /// Run SQL (one or more statements; parameters bind to a single one) and
-    /// return the result rows. Each commit is durable once ordered.
+    /// return the result rows. Each commit is durable once ordered: its writes
+    /// have reached the store when this resolves.
     #[napi(
         ts_args_type = "sql: string, params?: SqlValue[]",
         ts_return_type = "Promise<SqlValue[][]>"
@@ -173,6 +203,7 @@ impl Database {
             }
             None => session.query(&sql).await,
         };
+        self.store.barrier().await.map_err(sql_error_io)?;
         let rows = rows.map_err(sql_error)?;
         Ok(rows
             .into_iter()
@@ -196,10 +227,9 @@ impl Database {
             .as_mut()
             .ok_or_else(|| Error::from_reason("the database is closed"))?;
         let params = params.map(|params| params.into_iter().map(|p| p.0).collect());
-        let (columns, rows) = session
-            .query_columns(&sql, params)
-            .await
-            .map_err(sql_error)?;
+        let result = session.query_columns(&sql, params).await;
+        self.store.barrier().await.map_err(sql_error_io)?;
+        let (columns, rows) = result.map_err(sql_error)?;
         Ok(QueryResult {
             columns,
             rows: rows

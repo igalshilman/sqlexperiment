@@ -7,6 +7,7 @@ const GET = 0;
 const SET = 1;
 const CLEAR = 2;
 const SYNC = 3;
+const BARRIER = 4;
 
 /**
  * Open the database of `namespace` over `store`. Every store call goes through
@@ -33,6 +34,9 @@ async function open(namespace, store) {
       case SYNC:
         if (failure) return Promise.reject(failure);
         return Promise.resolve(store.sync()).then(() => null);
+      case BARRIER:
+        // Reached after every write queued before it.
+        return Promise.resolve(null);
       default:
         return Promise.reject(new Error(`unknown store operation ${op}`));
     }
