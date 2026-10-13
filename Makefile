@@ -113,17 +113,21 @@ concurrency-test: examples-js $(RESTATE_SERVER) ## The context without journal r
 restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
 
+# Into a temporary file, moved into place once it runs: a failed download or
+# copy leaves no binary that make would take as up to date.
 $(RESTATE_SERVER):
 	mkdir -p $(dir $@)
+	rm -f $@.tmp
 ifeq ($(RESTATE_FROM),image)
 	docker pull -q $(RESTATE_IMAGE)
-	id=$$(docker create $(RESTATE_IMAGE)) && docker cp -q $$id:/usr/local/bin/restate-server $@; docker rm $$id > /dev/null
+	id=$$(docker create $(RESTATE_IMAGE)) && { docker cp -q $$id:/usr/local/bin/restate-server $@.tmp; status=$$?; docker rm $$id > /dev/null; exit $$status; }
 else
 	curl -fsSL https://github.com/restatedev/restate/releases/download/v$(RESTATE_VERSION)/restate-server-$(RESTATE_TARGET).tar.xz \
-		| tar -xJ -O restate-server-$(RESTATE_TARGET)/restate-server > $@
-	chmod +x $@
+		| tar -xJ -O restate-server-$(RESTATE_TARGET)/restate-server > $@.tmp
 endif
-	$@ --version
+	chmod +x $@.tmp
+	$@.tmp --version
+	mv $@.tmp $@
 
 clean: ## Remove build outputs
 	rm -rf $(CARGO_TARGET_DIR) $(ADDON) vendor/typescript/.build examples/node_modules
