@@ -53,6 +53,18 @@ export function reply(messages: MessageParam[]): Message {
   return message([{ type: 'text', text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' }]);
 }
 
+/** An error response of the Messages API, for a replaced `teller.reply` to throw. */
+export class HttpError extends Error {
+  readonly status: number;
+  readonly type: string;
+
+  constructor(status: number, type: string, message: string) {
+    super(message);
+    this.status = status;
+    this.type = type;
+  }
+}
+
 /** A client of the teller. `teller.reply` can be replaced, to count or change replies. */
 export const teller = {
   reply,
@@ -62,9 +74,15 @@ export const teller = {
       maxRetries: 0,
       fetch: async (_url, init) => {
         if (typeof init?.body !== 'string') throw new Error('the teller reads JSON request bodies');
-        return new Response(JSON.stringify(teller.reply(JSON.parse(init.body).messages)), {
-          headers: { 'content-type': 'application/json' },
-        });
+        const headers = { 'content-type': 'application/json' };
+        try {
+          return new Response(JSON.stringify(teller.reply(JSON.parse(init.body).messages)), { headers });
+        } catch (error) {
+          // A reply that throws an HttpError is that response of the API.
+          if (!(error instanceof HttpError)) throw error;
+          const body = { type: 'error', error: { type: error.type, message: error.message } };
+          return new Response(JSON.stringify(body), { status: error.status, headers });
+        }
       },
     }),
 };

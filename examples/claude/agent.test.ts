@@ -6,7 +6,7 @@ import * as restate from '@restatedev/restate-sdk';
 import { describe, expect, it } from 'vitest';
 import { conversation } from '../testing.ts';
 import { prompt } from './agent.ts';
-import { teller } from './teller.ts';
+import { HttpError, teller } from './teller.ts';
 
 describe('the Claude agent', () => {
   it('answers a prompt once, by its id', async () => {
@@ -66,12 +66,14 @@ describe('the Claude agent', () => {
     const reply = teller.reply;
     teller.reply = () => {
       teller.reply = reply;
-      throw new Error('529 overloaded');
+      throw new HttpError(529, 'overloaded_error', 'Overloaded');
     };
     const input = { id: 'p1', text: 'Please move 4 from 6 to 7' };
     try {
       const failed = await c.attempt('inv1', input).catch((error: unknown) => error);
+      // The model's own error, not a terminal one: the attempt is retried.
       expect(failed).toBeInstanceOf(Error);
+      expect((failed as Error).message).toMatch(/^529 .*Overloaded/);
       expect(failed).not.toBeInstanceOf(restate.TerminalError);
     } finally {
       teller.reply = reply;
