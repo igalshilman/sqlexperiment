@@ -67,10 +67,16 @@ export function reply(prompt: LanguageModelV3Message[], tools: string[]): Reply 
         .findLast((c) => c.type === 'tool-call' && c.toolCallId === part.toolCallId);
       if (call?.type !== 'tool-call') throw new Error(`no tool call ${part.toolCallId}`);
       const input = { ...(call.input as Record<string, unknown>) };
-      if (call.toolName === 'transfer') input.retryOf ??= call.toolCallId;
-      return { call: { id, name: call.toolName, input } };
+      // OpenCode stores a tool call when its input starts: one a crash
+      // interrupted before the input was complete never ran, so the prompt
+      // is answered again.
+      if (call.toolName !== 'transfer' || 'amount' in input) {
+        if (call.toolName === 'transfer') input.retryOf ??= call.toolCallId;
+        return { call: { id, name: call.toolName, input } };
+      }
+    } else if (result) {
+      return { text: `Done: ${textOf(result)}` };
     }
-    if (result) return { text: `Done: ${textOf(result)}` };
     text = textOf(prompt[at]!);
   }
   const move = /move (\d+) from (\d+) to (\d+)/i.exec(text);
