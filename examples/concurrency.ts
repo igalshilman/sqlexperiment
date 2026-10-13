@@ -226,12 +226,12 @@ const database = restate.object({
       return { h, r, count };
     },
 
-    // ctx.sql and ctx.db share the attempt's session: two transactions
+    // ctx.transaction and ctx.db share the attempt's session: two transactions
     // started at once run one after the other, and ctx.db sees both.
     shared: async (ctx: Ctx) => {
-      await ctx.sql((db) => db.execute('CREATE TABLE IF NOT EXISTS u (v INTEGER)'));
+      await ctx.transaction(({ db }) => db.execute('CREATE TABLE IF NOT EXISTS u (v INTEGER)'));
       const insert = () =>
-        ctx.sql(async (db) => {
+        ctx.transaction(async ({ db }) => {
           const [n] = await row<[number]>(db, 'SELECT count(*) FROM u');
           await db.execute('INSERT INTO u VALUES (?)', [n]);
           return n;
@@ -243,7 +243,7 @@ const database = restate.object({
 
     nested: async (ctx: Ctx) => {
       try {
-        await ctx.sql(() => ctx.db.query('SELECT 1'));
+        await ctx.transaction(() => ctx.db.query('SELECT 1'));
         return 'ran';
       } catch (e) {
         return { terminal: e instanceof restate.TerminalError, message: (e as Error).message };
@@ -251,6 +251,27 @@ const database = restate.object({
     },
 
     sqlError: async (ctx: Ctx) => ctx.db.execute('SELECT * FROM missing'),
+
+    // A transaction's sends reach their target once it commits.
+    sends: async (ctx: Ctx, n: number) =>
+      ctx.transaction(async ({ db, tx }) => {
+        await db.execute('CREATE TABLE IF NOT EXISTS sent (n INTEGER)');
+        await db.execute('INSERT INTO sent VALUES (?)', [n]);
+        for (let i = 0; i < n; i++) {
+          tx.genericSend({ service: 'Db', method: 'mark', key: 'marks', parameter: i, inputSerde: restate.serde.json });
+        }
+        return n;
+      }),
+    mark: async (ctx: Ctx, i: number) =>
+      ctx.transaction(async ({ db }) => {
+        await db.execute('CREATE TABLE IF NOT EXISTS marks (i INTEGER)');
+        await db.execute('INSERT INTO marks VALUES (?)', [i]);
+      }),
+    marks: async (ctx: Ctx) =>
+      ctx.transaction(async ({ db }) => {
+        await db.execute('CREATE TABLE IF NOT EXISTS marks (i INTEGER)');
+        return (await db.query('SELECT i FROM marks ORDER BY i')).map(([i]) => i);
+      }),
   },
   options: { ...restate.sqlOptions },
 });
@@ -430,15 +451,27 @@ await check('ctx.db with statements, a call and a sleep at once', async () => {
   assert.deepEqual((await call('Db/d/concurrent')).value, { h: 2, r: 3, count: 1 });
 });
 
-await check('ctx.sql and ctx.db share one session; transactions queue', async () => {
+await check('ctx.transaction and ctx.db share one session; transactions queue', async () => {
   assert.deepEqual((await call('Db/s/shared')).value, { seen: [0, 1], count: 2 });
 });
 
-await check('a call to ctx.db inside ctx.sql is refused, with a terminal error', async () => {
+await check('a call to ctx.db inside ctx.transaction is refused, with a terminal error', async () => {
   assert.deepEqual((await call('Db/n/nested')).value, {
     terminal: true,
     message: 'inside a transaction, use the transaction handle its body gets',
   });
+});
+
+await check("a transaction's sends reach their target", async () => {
+  await call('Db/o/sends', 3);
+  const deadline = Date.now() + 10_000;
+  let marks: unknown;
+  do {
+    marks = (await call('Db/marks/marks')).value;
+    if (JSON.stringify(marks) === '[0,1,2]') break;
+    await sleep(100);
+  } while (Date.now() < deadline);
+  assert.deepEqual(marks, [0, 1, 2]);
 });
 
 await check('an SQL error that the handler fails with is terminal', async () => {

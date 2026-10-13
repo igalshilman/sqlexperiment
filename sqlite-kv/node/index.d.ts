@@ -32,6 +32,11 @@ export declare class Database implements Transaction {
   queryColumns(sql: string, params?: SqlValue[]): Promise<{ columns: string[]; rows: SqlValue[][] }>;
   execute(sql: string, params?: SqlValue[]): Promise<void>;
   transaction<T>(body: (tx: Transaction) => Promise<T>): Promise<T>;
+  /**
+   * The database's version: it grows with each commit, and only then. It does
+   * not wait for queued calls, so a transaction's body may read it.
+   */
+  version(): Promise<number>;
   isUsable(): boolean;
   save(): Promise<void>;
   close(): Promise<void>;

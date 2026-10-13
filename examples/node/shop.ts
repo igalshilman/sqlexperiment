@@ -5,12 +5,14 @@
 // things make that safe:
 // - Each handler dedupes on a stable id it is given (the order id, a restock
 //   id), so running it twice changes nothing the second time.
-// - Each call and send has an idempotency key made from the request id
+// - Each call has an idempotency key made from the request id
 //   (`ctx.request().id`, the same on every attempt of an invocation) and
 //   what the call is for. So a retried attempt reaches the invocation the
-//   first one started (and gets its result) instead of starting another, and
-//   a repeated `expire` message is dropped, keeping its first timer. Without
-//   a key, each attempt's call would be a new one.
+//   first one started (and gets its result) instead of starting another.
+//   Without a key, each attempt's call would be a new one.
+// - The `expire` message is a send of the transaction that stores the order
+//   (`tx` of `ctx.transaction`): it is made once the order commits, exactly
+//   once, so it needs no key of its own.
 //
 // Environment: PORT (default 9080), SHOP_EXPIRY_MS (how long an unpaid order
 // holds its stock, default 5000) and ABORT_PER_MILLE (see faults.ts).
@@ -37,7 +39,7 @@ export const warehouse = restate.object({
   handlers: {
     /** Add `qty` units, once per restock `id`. */
     restock: (ctx: Ctx, { id, qty }: { id: string; qty: number }) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db }) => {
         await db.execute(WAREHOUSE);
         const [done] = await row<[number]>(db, 'SELECT count(*) FROM restocks WHERE id = ?', [id]);
         if (done) return false;
@@ -48,7 +50,7 @@ export const warehouse = restate.object({
 
     /** Hold `qty` units for `order`; false if there are not enough. */
     reserve: (ctx: Ctx, { order, qty }: { order: string; qty: number }) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db }) => {
         await db.execute(WAREHOUSE);
         const [held] = await db.query('SELECT state FROM reservations WHERE orderId = ?', [order]);
         if (held) return held[0] !== 'rejected';
@@ -61,14 +63,14 @@ export const warehouse = restate.object({
 
     /** The held units of `order` are sold. */
     commit: (ctx: Ctx, { order }: { order: string }) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db }) => {
         await db.execute(WAREHOUSE);
         await db.execute(`UPDATE reservations SET state = 'sold' WHERE orderId = ? AND state = 'held'`, [order]);
       }),
 
     /** The held units of `order` go back to stock. */
     release: (ctx: Ctx, { order }: { order: string }) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db }) => {
         await db.execute(WAREHOUSE);
         const [held] = await db.query(`SELECT qty FROM reservations WHERE orderId = ? AND state = 'held'`, [order]);
         if (!held) return;
@@ -78,7 +80,7 @@ export const warehouse = restate.object({
 
     /** Stock and reservations, for audits. */
     report: (ctx: Ctx) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db }) => {
         await db.execute(WAREHOUSE);
         const [available] = await row<[number]>(db, 'SELECT available FROM stock');
         const [restocked] = await row<[number]>(db, 'SELECT coalesce(sum(qty), 0) FROM restocks');
@@ -110,7 +112,7 @@ export const orders = restate.object({
   handlers: {
     /** Reserve the stock; an unpaid order expires after SHOP_EXPIRY_MS. */
     place: (ctx: Ctx, { sku, qty }: { sku: string; qty: number }) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db, tx }) => {
         const placed = await readOrder(db);
         if (placed) return placed.status;
         const ok = await ctx
@@ -118,20 +120,16 @@ export const orders = restate.object({
           .reserve({ order: ctx.key, qty }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:reserve` }));
         const status = ok ? 'reserved' : 'rejected';
         await db.execute('INSERT INTO orders VALUES(0, ?, ?, ?)', [sku, qty, status]);
-        if (ok) {
-          ctx.objectSendClient(orders, ctx.key).expire(
-            restate.rpc.sendOpts({
-              delay: { milliseconds: EXPIRY_MS },
-              idempotencyKey: `${ctx.request().id}:expire`,
-            }),
-          );
-        }
+        // Sent with the order's row, once it commits: a crash after the
+        // commit cannot lose it, and an order rolled back sends nothing.
+        if (ok)
+          tx.objectSendClient(orders, ctx.key).expire(restate.rpc.sendOpts({ delay: { milliseconds: EXPIRY_MS } }));
         return status;
       }),
 
     /** Pay a reserved order. */
     pay: (ctx: Ctx) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db }) => {
         const placed = await readOrder(db);
         if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
         await ctx
@@ -143,7 +141,7 @@ export const orders = restate.object({
 
     /** Release the stock of an order still unpaid. */
     expire: (ctx: Ctx) =>
-      ctx.sql(async (db) => {
+      ctx.transaction(async ({ db }) => {
         const placed = await readOrder(db);
         if (placed?.status !== 'reserved') return placed?.status ?? 'unknown';
         await ctx
@@ -153,7 +151,7 @@ export const orders = restate.object({
         return 'expired';
       }),
 
-    status: (ctx: Ctx) => ctx.sql(readOrder),
+    status: (ctx: Ctx) => ctx.transaction(({ db }) => readOrder(db)),
   },
   options: restate.sqlOptions,
 });

@@ -1,8 +1,8 @@
 diff --git a/packages/libs/restate-sdk/src/common_api.ts b/packages/libs/restate-sdk/src/common_api.ts
-index 18d3aa3..80a9ad7 100644
+index 18d3aa3..ca9b182 100644
 --- a/packages/libs/restate-sdk/src/common_api.ts
 +++ b/packages/libs/restate-sdk/src/common_api.ts
-@@ -35,9 +35,20 @@ export type {
+@@ -35,9 +35,26 @@ export type {
    Target,
    InvocationReference,
    SignalReference,
@@ -19,11 +19,17 @@ index 18d3aa3..80a9ad7 100644
  export { InvocationIdParser, RestatePromise } from "./context.js";
  export { isRestatePromise } from "./promises.js";
 +export { sqlOptions } from "./sql.js";
-+export type { SqlDatabase, SqlSession, SqlValue } from "./sql.js";
++export type {
++  SqlDatabase,
++  SqlSession,
++  SqlTransaction,
++  SqlTransactionSends,
++  SqlValue,
++} from "./sql.js";
  
  /**
   * @deprecated Use {@link RestatePromise}
-@@ -76,6 +87,9 @@ export type {
+@@ -76,6 +93,9 @@ export type {
    SendClient,
    ClientFromDescriptors,
    SendClientFromDescriptors,
@@ -34,14 +40,14 @@ index 18d3aa3..80a9ad7 100644
    ClientSendOptions,
    RemoveVoidArgument,
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..55cebf6 100644
+index 8ea15b1..1ca7781 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,11 +9,14 @@
   * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
   */
  
-+import type { SqlDatabase, SqlSession } from "./sql.js";
++import type { SqlSession, SqlTransaction } from "./sql.js";
  import type {
    Client,
    SendClient,
@@ -52,7 +58,7 @@ index 8ea15b1..55cebf6 100644
    //eslint-disable-next-line @typescript-eslint/no-unused-vars
    ClientCallOptions,
  } from "./types/rpc.js";
-@@ -839,6 +842,44 @@ export interface SignalReference<T> {
+@@ -839,6 +842,59 @@ export interface SignalReference<T> {
  export interface ObjectContext<TState extends TypedState = UntypedState>
    extends Context, KeyValueStore<TState>, RestateObjectContext {
    key: string;
@@ -70,7 +76,7 @@ index 8ea15b1..55cebf6 100644
 +   * to the handlers, such as an `init` handler.
 +   *
 +   * An attempt has one session: it opens on the first call to `ctx.db` or
-+   * `ctx.sql`, and is saved when the handler ends. A commit is durable once
++   * `ctx.transaction`, and is saved when the handler ends. A commit is durable once
 +   * its writes are stored, which Restate does in order: a lost commit takes
 +   * everything after it, including calls and the response.
 +   *
@@ -85,19 +91,34 @@ index 8ea15b1..55cebf6 100644
 +  readonly db: SqlSession;
 +
 +  /**
-+   * Run `body` as one transaction of {@link db}: it commits, durably, when
-+   * `body` resolves, and rolls back when it rejects. It waits for the calls to
-+   * `ctx.db` before it, and the calls after it wait for it; `body` uses the
-+   * `db` it gets, since a call to `ctx.db` (or `ctx.sql`) from inside it is
-+   * refused. An SQL error rejects as a `TerminalError`.
++   * Run `body` as one transaction of {@link db}, with the sends it makes:
++   * `body` gets `{ db, tx }`, the transaction's SQL and its send clients. It
++   * commits when `body` resolves, and rolls back when it rejects; its sends
++   * are made once it commits, and only then. So a committed transaction's
++   * sends are made, even if the attempt then crashes, and those of one rolled
++   * back are not.
++   *
++   * The sends are written to the object's state (the `_restate_sql_sends`
++   * key) just before the commit, with the database's version, and cleared
++   * once they are made after it. The session's next open finds those a
++   * crash may have lost: it makes them again, with the same idempotency
++   * keys, if the version shows the commit landed, so each is made once
++   * (within the target's idempotency retention), and drops them if it did
++   * not. A send has no invocation id. A call, whose result the body would
++   * wait for, is not part of the transaction.
++   *
++   * The transaction waits for the calls to `ctx.db` before it, and the calls
++   * after it wait for it; `body` uses the `db` it gets, since a call to
++   * `ctx.db` (or `ctx.transaction`) from inside it is refused. An SQL error
++   * rejects as a `TerminalError`.
 +   *
 +   * @experimental
 +   */
-+  sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
++  transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T>;
  }
  
  /**
-@@ -1131,3 +1172,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
+@@ -1131,3 +1187,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
      WorkflowSharedContext<TState>,
      ObjectContext<TState>,
      RestateWorkflowContext {}
@@ -235,7 +256,7 @@ index 8ea15b1..55cebf6 100644
 +  extends
 +    SqlContext,
 +    KeyValueStore<TState>,
-+    Pick<ObjectContext<TState>, "key" | "sql" | "db">,
++    Pick<ObjectContext<TState>, "key" | "transaction" | "db">,
 +    RestateObjectContext {}
 +
 +/**
@@ -294,14 +315,14 @@ index 8ea15b1..55cebf6 100644
 +    SqlObjectContext<TState>,
 +    RestateWorkflowContext {}
 diff --git a/packages/libs/restate-sdk/src/context_impl.ts b/packages/libs/restate-sdk/src/context_impl.ts
-index 2487c57..cd0ced2 100644
+index 2487c57..64dbeec 100644
 --- a/packages/libs/restate-sdk/src/context_impl.ts
 +++ b/packages/libs/restate-sdk/src/context_impl.ts
 @@ -71,6 +71,8 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
  import type { ContextInternal, GetProjectOptions } from "./internal.js";
  import { InputReader, OutputWriter } from "./endpoint/handlers/types.js";
  import { ExecutionOptions } from "./endpoint/components.js";
-+import { SqlAttempt, type SqlDatabase, type SqlSession } from "./sql.js";
++import { SqlAttempt, type SqlSession, type SqlTransaction } from "./sql.js";
 +import { sqlContext } from "./sql_context.js";
  
  /**
@@ -345,19 +366,20 @@ index 2487c57..cd0ced2 100644
    setRunInterceptor(
      interceptor: (name: string, runner: () => Promise<void>) => Promise<void>
    ) {
-@@ -291,6 +305,17 @@ export class ContextImpl
+@@ -291,6 +305,18 @@ export class ContextImpl
      );
    }
  
-+  // The attempt's SQL session, from the first use of ctx.db or ctx.sql.
++  // The attempt's SQL session, from the first use of ctx.db or
++  // ctx.transaction.
 +  sqlAttempt?: SqlAttempt;
 +
 +  public get db(): SqlSession {
 +    return (this.sqlAttempt ??= new SqlAttempt(this)).db;
 +  }
 +
-+  public sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T> {
-+    return (this.sqlAttempt ??= new SqlAttempt(this)).sql(body);
++  public transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T> {
++    return (this.sqlAttempt ??= new SqlAttempt(this)).transaction(body);
 +  }
 +
    public clear(name: string): void {
@@ -428,14 +450,20 @@ index f5a20a7..41d207a 100644
      // Encode user code output
      encodedOutput = journalValueCodec.encode(output);
 diff --git a/packages/libs/restate-sdk/src/internal.ts b/packages/libs/restate-sdk/src/internal.ts
-index 7cee518..5f5bf5a 100644
+index 7cee518..6035a31 100644
 --- a/packages/libs/restate-sdk/src/internal.ts
 +++ b/packages/libs/restate-sdk/src/internal.ts
-@@ -2,6 +2,7 @@ import { Context, InvocationId, RestatePromise } from "./context.js";
+@@ -2,6 +2,13 @@ import { Context, InvocationId, RestatePromise } from "./context.js";
  import type { Serde } from "@restatedev/restate-sdk-core";
  
  export { isSuspendedError } from "./types/errors.js";
-+export { setSqlStoreWrapper, type SqlStore } from "./sql.js";
++export {
++  setSqlStoreWrapper,
++  SqlAttempt,
++  withSql,
++  type SqlHost,
++  type SqlStore,
++} from "./sql.js";
  
  /**
   * Downcast the given context to {@link ContextInternal}, to access the internal APIs.
@@ -746,10 +774,10 @@ index f14da79..bdc98ec 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..c1d2f26
+index 0000000..3676d21
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,623 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -762,19 +790,27 @@ index 0000000..c1d2f26
 + */
 +
 +// SQL in a virtual object: `ctx.db`, a database kept in the object's state,
-+// through the sqlite-kv addon, with no journal replay; and `ctx.sql(body)`,
-+// one transaction of it. An attempt has one session, opened on first use and
-+// saved when the handler ends.
++// through the sqlite-kv addon, with no journal replay; and
++// `ctx.transaction(body)`, one transaction of it with the sends it commits
++// with. An attempt has one session, opened on first use and saved when the
++// handler ends.
 +
-+import { serde } from "@restatedev/restate-sdk-core";
-+import type { ContextImpl } from "./context_impl.js";
++import { Buffer } from "node:buffer";
++import { randomUUID } from "node:crypto";
++import {
++  millisOrDurationToMillis,
++  serde,
++  type HandlerDescriptor,
++  type Serde,
++} from "@restatedev/restate-sdk-core";
++import type { Context, GenericSend, InvocationHandle } from "./context.js";
 +import { TerminalError } from "./types/errors.js";
-+import { HandlerKind } from "./types/rpc.js";
++import { HandlerKind, makeRpcSendProxy } from "./types/rpc.js";
 +
 +/** An SQL value. Integers come back as numbers, or as bigints beyond 2^53. */
 +export type SqlValue = null | number | bigint | string | Uint8Array | boolean;
 +
-+/** The object's database, inside `ctx.sql`. */
++/** SQL: the object's database, or one transaction of it. */
 +export interface SqlDatabase {
 +  /** Run SQL and return its rows; parameters bind to a single statement. */
 +  query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
@@ -804,7 +840,28 @@ index 0000000..c1d2f26
 +}
 +
 +/**
-+ * Options for an object whose handlers use `ctx.sql`: no journal replay, since
++ * The sends of a transaction: they are made once it commits, and only then.
++ * They have no invocation id.
++ */
++export type SqlTransactionSends = Pick<
++  Context,
++  | "serviceSendClient"
++  | "objectSendClient"
++  | "workflowSendClient"
++  | "sendClient"
++  | "genericSend"
++>;
++
++/** What the body of `ctx.transaction` gets. */
++export interface SqlTransaction {
++  /** The transaction's SQL. */
++  db: SqlDatabase;
++  /** The transaction's sends. */
++  tx: SqlTransactionSends;
++}
++
++/**
++ * Options for an object whose handlers use `ctx.db`: no journal replay, since
 + * a later attempt makes different reads; lazy state, so an invocation does not
 + * start by loading every page; and no journal kept after an invocation
 + * completes, since it holds every page it read.
@@ -816,6 +873,25 @@ index 0000000..c1d2f26
 +  enableLazyState: true,
 +  journalRetention: 0,
 +} as const;
++
++/**
++ * What the SQL session needs of the handler's context (the SDK's context
++ * has it). @internal
++ */
++export interface SqlHost {
++  readonly handlerKind: HandlerKind;
++  readonly journalReplay: boolean;
++  readonly key: string;
++  readonly invocationEndPromise: { readonly promise: Promise<unknown> };
++  // eslint-disable-next-line @typescript-eslint/no-explicit-any
++  readonly defaultSerde: Serde<any>;
++  request(): { readonly target: { readonly service: string } };
++  get(name: string, serde: Serde<Uint8Array>): Promise<Uint8Array | null>;
++  set(name: string, value: Uint8Array, serde: Serde<Uint8Array>): void;
++  clear(name: string): void;
++  run(name: string, action: () => void): Promise<void>;
++  genericSend(send: GenericSend<Uint8Array>): unknown;
++}
 +
 +/** An ordered store, as the sqlite-kv addon takes it. */
 +export interface SqlStore {
@@ -835,6 +911,7 @@ index 0000000..c1d2f26
 +
 +interface Session extends SqlDatabase {
 +  transaction<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
++  version(): Promise<number>;
 +  isUsable(): boolean;
 +  save(): Promise<void>;
 +  close(): Promise<void>;
@@ -854,7 +931,7 @@ index 0000000..c1d2f26
 +    (error) => {
 +      addon = undefined;
 +      throw new TerminalError(
-+        `ctx.sql needs the sqlite-kv addon installed: ${String(error)}`
++        `ctx.db needs the sqlite-kv addon installed: ${String(error)}`
 +      );
 +    }
 +  );
@@ -912,7 +989,7 @@ index 0000000..c1d2f26
 + * `sync` the attempt's end leaves waiting rejects, so the session that made it
 + * ends instead of holding its lock for the life of the process.
 + */
-+function objectStore(ctx: ContextImpl, end: AttemptEnd): SqlStore {
++function objectStore(ctx: SqlHost, end: AttemptEnd): SqlStore {
 +  return {
 +    get: async (key) =>
 +      (await end.race(ctx.get(key, serde.binary))) ?? undefined,
@@ -998,6 +1075,93 @@ index 0000000..c1d2f26
 +  }
 +}
 +
++// A transaction's sends wait in the object's state, under PENDING, while it
++// commits: written before its COMMIT, with the database's version then, and
++// cleared once they are made. The state writes are stored in order, so a
++// later open finds them if the commit may have landed, and the version tells
++// whether it did (it grew). Each send's idempotency key is
++// `transaction/<id>/<index>`, with a random id of the transaction, so making
++// them again is dropped.
++const PENDING = "_restate_sql_sends";
++
++/** A send, but its parameter, as it is stored. */
++type StoredSend = Omit<
++  GenericSend<unknown>,
++  "parameter" | "inputSerde" | "delay"
++> & {
++  delay?: number;
++};
++
++/** The sends of a transaction, while it commits. */
++interface Pending {
++  /** The database's version before the commit. */
++  version: number;
++  /** The transaction's random id. */
++  id: string;
++  /** Each send, its parameter in base64. */
++  sends: (StoredSend & { parameter: string })[];
++}
++
++// What a recorded send returns: there is no invocation yet.
++const NO_HANDLE: InvocationHandle = Object.defineProperty(
++  {} as InvocationHandle,
++  "invocationId",
++  {
++    get() {
++      throw new TerminalError(
++        "a send of ctx.transaction has no invocation id: it is made once the transaction commits"
++      );
++    },
++  }
++);
++
++/** A service, object or workflow definition, as the send clients take it. */
++type ClientTarget = {
++  name: string;
++  _kind?: string;
++  _handlers?: Record<string, HandlerDescriptor>;
++};
++
++/** Send clients that record each send with `record`. */
++function recorder(
++  ctx: SqlHost,
++  record: (send: GenericSend<unknown>) => void
++): SqlTransactionSends {
++  const genericSend = (send: GenericSend<unknown>) => {
++    record(send);
++    return NO_HANDLE;
++  };
++  const client = (def: ClientTarget, key?: string): never =>
++    makeRpcSendProxy<never>(
++      genericSend,
++      ctx.defaultSerde,
++      def.name,
++      key,
++      undefined,
++      def._handlers
++    );
++  const sends: Record<keyof SqlTransactionSends, unknown> = {
++    serviceSendClient: (def: ClientTarget) => client(def),
++    objectSendClient: (def: ClientTarget, key: string) => client(def, key),
++    workflowSendClient: (def: ClientTarget, key: string) => client(def, key),
++    sendClient: (def: ClientTarget, key?: string) =>
++      client(def, def._kind === "service" ? undefined : key),
++    genericSend,
++  };
++  return sends as SqlTransactionSends;
++}
++
++function storedSend(send: GenericSend<unknown>): Pending["sends"][number] {
++  const { parameter, inputSerde, delay, ...rest } = send;
++  return {
++    ...rest,
++    ...(delay !== undefined ? { delay: millisOrDurationToMillis(delay) } : {}),
++    parameter: Buffer.from(
++      (inputSerde ?? serde.binary).serialize(parameter)
++    ).toString("base64"),
++  };
++}
++
 +/** How a handler ended. */
 +type Outcome<T> = { value: T } | { error: unknown };
 +
@@ -1007,20 +1171,24 @@ index 0000000..c1d2f26
 +}
 +
 +/**
-+ * An attempt's SQL session: opened on its first use (`ctx.db` or `ctx.sql`),
++ * An attempt's SQL session: opened on its first use (`ctx.db` or
++ * `ctx.transaction`),
 + * shared by everything the handler does, and saved when the handler ends.
 + * See `ObjectContext.db`. @internal
 + */
 +export class SqlAttempt {
-+  readonly #ctx: ContextImpl;
++  readonly #ctx: SqlHost;
 +  readonly #errors = new SqlErrors();
 +  #session: Promise<Session> | undefined;
++  // The last ctx.transaction has made its sends: the next one writes PENDING
++  // only then, so that clearing it does not clear the next one's.
++  #made: Promise<void> = Promise.resolve();
 +  #ended = false;
 +  #cancel: () => void = () => {};
 +  /** `ctx.db`. */
 +  readonly db: SqlSession;
 +
-+  constructor(ctx: ContextImpl) {
++  constructor(ctx: SqlHost) {
 +    this.#ctx = ctx;
 +    this.db = {
 +      query: (sql, params) =>
@@ -1036,22 +1204,105 @@ index 0000000..c1d2f26
 +    };
 +  }
 +
-+  /** `ctx.sql(body)`: one transaction of the session. */
-+  async sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T> {
++  /**
++   * `ctx.transaction(body)`: one transaction of the session, whose sends are
++   * made once it commits, and kept in the object's state until they are.
++   */
++  async transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T> {
 +    const db = await this.#open();
++    const sends: Pending["sends"] = [];
++    let open = true;
++    const tx = recorder(this.#ctx, (send) => {
++      if (!open) {
++        throw new TerminalError(
++          "the transaction has ended: send from inside its body"
++        );
++      }
++      sends.push(storedSend(send));
++    });
++    const previous = this.#made;
++    let made = () => {};
++    this.#made = new Promise((resolve) => (made = resolve));
++    let pending: Pending | undefined;
++    let value: T;
 +    try {
-+      return await this.#errors.transaction(db, (tx) =>
-+        body({
-+          ...tx,
-+          transaction: () =>
-+            Promise.reject(
-+              new TerminalError("ctx.sql already runs in a transaction")
-+            ),
-+        } as SqlDatabase)
-+      );
++      value = await this.#errors.transaction(db, async (sql) => {
++        const result = await body({
++          db: {
++            ...sql,
++            transaction: () =>
++              Promise.reject(
++                new TerminalError(
++                  "ctx.transaction already runs in a transaction"
++                )
++              ),
++          } as SqlDatabase,
++          tx,
++        });
++        open = false;
++        if (sends.length > 0) {
++          await previous;
++          // Before the COMMIT's writes, so stored if they are.
++          pending = { version: await db.version(), id: randomUUID(), sends };
++          this.#ctx.set(
++            PENDING,
++            new TextEncoder().encode(JSON.stringify(pending)),
++            serde.binary
++          );
++        }
++        return result;
++      });
 +    } catch (error) {
++      made();
++      // A COMMIT refused with the session usable did not land; one that
++      // ended the session may have, which the next open tells.
++      if (pending !== undefined && db.isUsable()) this.#ctx.clear(PENDING);
 +      throw this.#errors.classify(error, db.isUsable());
++    } finally {
++      open = false;
 +    }
++    try {
++      if (pending !== undefined) this.#emit(pending);
++    } finally {
++      made();
++    }
++    return value;
++  }
++
++  /**
++   * Make the sends of `pending`, committed: each with an idempotency key of
++   * the transaction (or its own), so that making them again is dropped.
++   */
++  #emit({ id, sends }: Pending) {
++    sends.forEach(({ parameter, ...send }, index) => {
++      this.#ctx.genericSend({
++        ...send,
++        parameter: new Uint8Array(Buffer.from(parameter, "base64")),
++        inputSerde: serde.binary,
++        idempotencyKey: send.idempotencyKey ?? `transaction/${id}/${index}`,
++      });
++    });
++    // After the sends: once this is stored, so are they.
++    this.#ctx.clear(PENDING);
++  }
++
++  /**
++   * The sends a crashed attempt left pending: made again if their
++   * transaction committed, and dropped if it did not.
++   */
++  async #recover(db: Session, store: SqlStore) {
++    const stored = await store.get(PENDING);
++    if (stored === undefined || stored === null) return;
++    const pending = JSON.parse(new TextDecoder().decode(stored)) as Pending;
++    if ((await db.version()) > pending.version) {
++      this.#emit(pending);
++    } else {
++      this.#ctx.clear(PENDING);
++    }
++  }
++
++  #namespace() {
++    return `${this.#ctx.request().target.service}/${this.#ctx.key}`;
 +  }
 +
 +  #open(): Promise<Session> {
@@ -1067,16 +1318,16 @@ index 0000000..c1d2f26
 +  async #start(): Promise<Session> {
 +    const ctx = this.#ctx;
 +    if (ctx.handlerKind !== HandlerKind.EXCLUSIVE) {
-+      throw new TerminalError("ctx.sql is for exclusive object handlers");
++      throw new TerminalError("ctx.db is for exclusive object handlers");
 +    }
 +    if (ctx.journalReplay) {
 +      throw new TerminalError(
-+        "ctx.sql needs the object's options to include restate.sqlOptions: " +
++        "ctx.db needs the object's options to include restate.sqlOptions: " +
 +          "a replayed journal would not match the reads of a later attempt"
 +      );
 +    }
 +    const sqliteKv = await loadAddon();
-+    const namespace = `${ctx.request().target.service}/${ctx.key}`;
++    const namespace = this.#namespace();
 +    const end = new AttemptEnd(ctx.invocationEndPromise.promise);
 +    const store = objectStore(ctx, end);
 +    const db = await sqliteKv.open(
@@ -1087,6 +1338,12 @@ index 0000000..c1d2f26
 +    // model request, say) keeps the session no longer: it closes once no
 +    // statement runs, and the handler's later calls fail.
 +    this.#cancel = end.onEnd(() => void db.close().catch(() => {}));
++    try {
++      await this.#recover(db, store);
++    } catch (error) {
++      await db.close();
++      throw error;
++    }
 +    return db;
 +  }
 +
@@ -2220,10 +2477,10 @@ index 0000000..92d684a
 +});
 diff --git a/packages/libs/restate-sdk/test/sql_context.test-d.ts b/packages/libs/restate-sdk/test/sql_context.test-d.ts
 new file mode 100644
-index 0000000..76fb24a
+index 0000000..32ebb97
 --- /dev/null
 +++ b/packages/libs/restate-sdk/test/sql_context.test-d.ts
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,218 @@
 +/*
 + * Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 + *
@@ -2329,6 +2586,15 @@ index 0000000..76fb24a
 +            Promise<number | null>
 +          >();
 +          await ctx.db.query("SELECT 1");
++          expectTypeOf(ctx.db).toEqualTypeOf<restate.SqlSession>();
++          const n = await ctx.transaction(async ({ db, tx }) => {
++            expectTypeOf(db).toEqualTypeOf<restate.SqlDatabase>();
++            tx.objectSendClient<{
++              m: (ctx: unknown, n: number) => Promise<void>;
++            }>({ name: "O" }, "k").m(1);
++            return 1;
++          });
++          expectTypeOf(n).toEqualTypeOf<number>();
 +        },
 +        shared: restate.handlers.object.shared(
 +          { journalReplay: false },

@@ -189,6 +189,39 @@ test('a COMMIT that fails rolls the transaction back', async () => {
   await db.save();
 });
 
+test('the version grows with each commit, and only then', async () => {
+  const backend = new Backend();
+  const namespace = fresh();
+  const db = await open(namespace, backend.request());
+  const v0 = await db.version();
+  await db.execute('CREATE TABLE t(id INTEGER)');
+  const v1 = await db.version();
+  assert.ok(v1 > v0);
+  await db.query('SELECT * FROM t');
+  assert.equal(await db.version(), v1);
+  let inside;
+  await db.transaction(async (tx) => {
+    await tx.execute('INSERT INTO t VALUES(1)');
+    inside = await db.version();
+  });
+  assert.equal(inside, v1);
+  const v2 = await db.version();
+  assert.ok(v2 > v1);
+  await assert.rejects(
+    db.transaction(async (tx) => {
+      await tx.execute('INSERT INTO t VALUES(2)');
+      throw new Error('no');
+    }),
+    /no/,
+  );
+  assert.equal(await db.version(), v2);
+  await db.save();
+  // A later session opens at the same version.
+  const again = await open(namespace, backend.request());
+  assert.equal(await again.version(), v2);
+  await again.save();
+});
+
 test('a call to the session inside its transaction is refused, not left waiting', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER)');

@@ -615,6 +615,15 @@ impl Session {
         Ok(report)
     }
 
+    /// The database's version: it grows with each commit, and only then. It
+    /// is one past the log sequence of the last committed transaction this
+    /// session holds (opened on, or committed itself); an open transaction
+    /// does not change it. A host can record it before a commit, and tell
+    /// from a later open whether that commit landed.
+    pub fn version(&self) -> u64 {
+        self.io.log_next()
+    }
+
     /// Whether the session can run more SQL. An SQL error (a syntax error, a
     /// constraint, a missing table) leaves it usable: the failed statement had
     /// no effect, and an open transaction continues. A storage error, a

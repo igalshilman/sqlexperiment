@@ -3,7 +3,7 @@
 SQL over a key/value store implemented in JavaScript: a native addon
 ([napi-rs](https://napi.rs)) around `sqlite-kv`, for the Restate TypeScript
 SDK, where the store is an object's state: the patched SDK
-([`vendor/typescript`](../../vendor/README.md#typescript)) builds `ctx.sql` on it,
+([`vendor/typescript`](../../vendor/README.md#typescript)) builds `ctx.db` on it,
 and [`examples`](../../examples/README.md) has the examples.
 
 ```js
@@ -21,7 +21,7 @@ await db.transaction(async (tx) => {
 await db.save(); // confirms the session's writes for the page cache
 ```
 
-This is the shape of the store. With the Restate SDK, use `ctx.sql` instead,
+This is the shape of the store. With the Restate SDK, use `ctx.db` instead,
 which builds the store inside the SDK.
 
 ## The store
@@ -46,7 +46,10 @@ commits or rolls back: calls made meanwhile wait, so none runs inside it. The
 body uses the handle it gets, which is invalid once the body settles; a call
 to the session from inside the body is refused, as it would wait for the body.
 A COMMIT that fails rolls back. An SQL error leaves the session usable
-(`isUsable()`); a storage error ends it.
+(`isUsable()`); a storage error ends it. `version()` is a number that grows
+with each commit, and only then; it does not wait for queued calls, so a
+transaction's body can record it before its COMMIT, and a later session can
+tell from its own whether that commit landed.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, unlinked once open so that it goes away
