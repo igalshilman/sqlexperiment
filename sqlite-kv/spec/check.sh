@@ -26,5 +26,11 @@ for config in "${configs[@]}"; do
         cat "$work/tlc.log"
         exit "$status"
     fi
+    if ! grep -q "No error has been found" "$work/tlc.log"; then
+        # TLC succeeded without saying the check passed: show what it said.
+        cat "$work/tlc.log"
+        echo "TLC did not report that no error was found" >&2
+        exit 1
+    fi
     grep -E "No error has been found|distinct states found|Finished in" "$work/tlc.log"
 done
