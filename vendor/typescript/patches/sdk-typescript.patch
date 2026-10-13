@@ -34,7 +34,7 @@ index 18d3aa3..80a9ad7 100644
    ClientSendOptions,
    RemoveVoidArgument,
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..8096ec1 100644
+index 8ea15b1..e64f1f0 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,11 +9,14 @@
@@ -52,7 +52,7 @@ index 8ea15b1..8096ec1 100644
    //eslint-disable-next-line @typescript-eslint/no-unused-vars
    ClientCallOptions,
  } from "./types/rpc.js";
-@@ -839,6 +842,39 @@ export interface SignalReference<T> {
+@@ -839,6 +842,41 @@ export interface SignalReference<T> {
  export interface ObjectContext<TState extends TypedState = UntypedState>
    extends Context, KeyValueStore<TState>, RestateObjectContext {
    key: string;
@@ -67,8 +67,10 @@ index 8ea15b1..8096ec1 100644
 +   * start against the state as it is (at least once). Creating tables is up
 +   * to the handlers, such as an `init` handler.
 +   *
-+   * An SQL error, or the body's own, is terminal, since a retry would repeat
-+   * it; a storage error is retried. Needs the `sqlite-kv` addon.
++   * An SQL error is terminal, since a retry would repeat it; a storage error
++   * is retried. The body's own errors are as in any handler: a
++   * `TerminalError` is terminal, and any other error is retried, such as a
++   * request to another service that failed. Needs the `sqlite-kv` addon.
 +   *
 +   * @experimental
 +   */
@@ -92,7 +94,7 @@ index 8ea15b1..8096ec1 100644
  }
  
  /**
-@@ -1131,3 +1167,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
+@@ -1131,3 +1169,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
      WorkflowSharedContext<TState>,
      ObjectContext<TState>,
      RestateWorkflowContext {}
@@ -726,10 +728,10 @@ index f14da79..bdc98ec 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..bf5cc30
+index 0000000..b2a93cb
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,277 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -855,11 +857,79 @@ index 0000000..bf5cc30
 +  };
 +}
 +
-+const view = (db: SqlDatabase): SqlDatabase => ({
-+  query: (sql, params) => db.query(sql, params),
-+  queryColumns: (sql, params) => db.queryColumns(sql, params),
-+  execute: (sql, params) => db.execute(sql, params),
-+});
++/**
++ * The errors of a session's database calls: SQL errors, which a retry would
++ * repeat, unless the session has ended (a storage error).
++ */
++/** @internal */
++export class SqlErrors {
++  readonly #errors = new WeakSet<object>();
++
++  /** `promise`, its rejection recorded as the database's. */
++  track<T>(promise: Promise<T>): Promise<T> {
++    return promise.catch((error: unknown) => {
++      throw this.#record(error);
++    });
++  }
++
++  #record(error: unknown): unknown {
++    if (typeof error === "object" && error !== null) this.#errors.add(error);
++    return error;
++  }
++
++  /** `db`'s calls, their errors recorded. */
++  view(db: SqlDatabase): SqlDatabase {
++    return {
++      query: (sql, params) => this.track(db.query(sql, params)),
++      queryColumns: (sql, params) => this.track(db.queryColumns(sql, params)),
++      execute: (sql, params) => this.track(db.execute(sql, params)),
++    };
++  }
++
++  /**
++   * `inner` as one transaction of `db`: the body's own error passes as it is,
++   * the transaction's (a failed COMMIT) is recorded.
++   */
++  transaction<T>(
++    db: Session,
++    inner: (tx: SqlDatabase) => Promise<T>
++  ): Promise<T> {
++    let own: { error: unknown } | undefined;
++    return db
++      .transaction(async (tx) => {
++        try {
++          return await inner(this.view(tx));
++        } catch (error) {
++          own = { error };
++          throw error;
++        }
++      })
++      .catch((error: unknown) => {
++        throw own !== undefined && own.error === error
++          ? error
++          : this.#record(error);
++      });
++  }
++
++  /**
++   * What a session's body rejecting with `error` fails with: an SQL error
++   * becomes terminal, since a retry would repeat it. Anything else is as for
++   * any handler: a {@link TerminalError} is terminal, and other errors (a
++   * storage error, which ends the session, or the body's own, such as a
++   * failed request to another service) are retried.
++   */
++  classify(error: unknown, usable: boolean): unknown {
++    if (
++      usable &&
++      error instanceof Error &&
++      !(error instanceof TerminalError) &&
++      this.#errors.has(error)
++    ) {
++      return new TerminalError(error.message);
++    }
++    return error;
++  }
++}
 +
 +// Invocations with an open session: one at a time per invocation.
 +const open = new WeakSet<ContextImpl>();
@@ -908,36 +978,27 @@ index 0000000..bf5cc30
 +    namespace,
 +    wrapStore ? wrapStore(store) : store
 +  );
++  const errors = new SqlErrors();
 +  let result: { value: T } | { error: unknown };
 +  try {
 +    result = {
 +      value: session
 +        ? await body({
-+            ...view(db),
-+            transaction: (inner) => db.transaction((tx) => inner(view(tx))),
++            ...errors.view(db),
++            transaction: (inner) => errors.transaction(db, inner),
 +          })
-+        : await db.transaction((tx) =>
++        : await errors.transaction(db, (tx) =>
 +            body({
-+              ...view(tx),
++              ...tx,
 +              transaction: () =>
 +                Promise.reject(
-+                  new Error("ctx.sql already runs in a transaction")
++                  new TerminalError("ctx.sql already runs in a transaction")
 +                ),
 +            })
 +          ),
 +    };
 +  } catch (error) {
-+    // While the session is usable this was an SQL error, or the body's own,
-+    // which a retry would repeat; a storage error ends the session, and the
-+    // handler is retried.
-+    result = {
-+      error:
-+        db.isUsable() && !(error instanceof TerminalError)
-+          ? new TerminalError(
-+              error instanceof Error ? error.message : String(error)
-+            )
-+          : error,
-+    };
++    result = { error: errors.classify(error, db.isUsable()) };
 +  }
 +  // Saving confirms the session's writes (an empty ctx.run, if it wrote), so
 +  // that the page cache may trust them. A session that does not get here
@@ -2178,6 +2239,119 @@ index 0000000..cff1203
 +      // @ts-expect-error: an unknown option
 +      options: { journalReplay: false, journalReplayy: false },
 +    });
++  });
++});
+diff --git a/packages/libs/restate-sdk/test/sql_errors.test.ts b/packages/libs/restate-sdk/test/sql_errors.test.ts
+new file mode 100644
+index 0000000..2d9b44c
+--- /dev/null
++++ b/packages/libs/restate-sdk/test/sql_errors.test.ts
+@@ -0,0 +1,107 @@
++/*
++ * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
++ *
++ * This file is part of the Restate SDK for Node.js/TypeScript,
++ * which is released under the MIT license.
++ *
++ * You can find a copy of the license in file LICENSE in the root
++ * directory of this repository or package, or at
++ * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++ */
++
++import { describe, expect, it } from "vitest";
++import { SqlErrors, type SqlDatabase } from "../src/sql.js";
++import { TerminalError } from "../src/types/errors.js";
++
++/** A database whose statements fail with `error` when they contain "bad". */
++function fakeSession(commitError?: Error) {
++  const db: SqlDatabase = {
++    query: (sql) =>
++      sql.includes("bad")
++        ? Promise.reject(new Error("no such table: bad"))
++        : Promise.resolve([]),
++    queryColumns: () => Promise.resolve({ columns: [], rows: [] }),
++    execute: (sql) =>
++      sql.includes("bad")
++        ? Promise.reject(new Error("no such table: bad"))
++        : Promise.resolve(),
++  };
++  return {
++    ...db,
++    async transaction<T>(body: (tx: SqlDatabase) => Promise<T>): Promise<T> {
++      const result = await body(db);
++      if (commitError) throw commitError;
++      return result;
++    },
++    isUsable: () => true,
++    save: () => Promise.resolve(),
++  };
++}
++
++async function failure(promise: Promise<unknown>): Promise<unknown> {
++  return promise.then(
++    () => expect.unreachable(),
++    (error: unknown) => error
++  );
++}
++
++describe("SqlErrors", () => {
++  it("makes an SQL error terminal", async () => {
++    const errors = new SqlErrors();
++    const db = errors.view(fakeSession());
++    const error = await failure(db.execute("SELECT * FROM bad"));
++    const classified = errors.classify(error, true);
++    expect(classified).toBeInstanceOf(TerminalError);
++    expect((classified as Error).message).toBe("no such table: bad");
++  });
++
++  it("makes an SQL error terminal when the body rethrows it", async () => {
++    const errors = new SqlErrors();
++    const session = fakeSession();
++    const error = await failure(
++      errors.transaction(session, async (tx) => {
++        try {
++          await tx.execute("bad");
++        } catch (e) {
++          throw e;
++        }
++      })
++    );
++    expect(errors.classify(error, true)).toBeInstanceOf(TerminalError);
++  });
++
++  it("retries the body's own error, such as a failed request", async () => {
++    const errors = new SqlErrors();
++    const own = new Error("529 overloaded");
++    const error = await failure(
++      errors.transaction(fakeSession(), async (tx) => {
++        await tx.execute("INSERT INTO t VALUES(1)");
++        throw own;
++      })
++    );
++    expect(errors.classify(error, true)).toBe(own);
++  });
++
++  it("keeps the body's TerminalError", async () => {
++    const errors = new SqlErrors();
++    const own = new TerminalError("rejected");
++    expect(errors.classify(own, true)).toBe(own);
++  });
++
++  it("makes a failed COMMIT terminal", async () => {
++    const errors = new SqlErrors();
++    const commit = new Error("FOREIGN KEY constraint failed");
++    const error = await failure(
++      errors.transaction(fakeSession(commit), async () => {})
++    );
++    expect(errors.classify(error, true)).toBeInstanceOf(TerminalError);
++  });
++
++  it("retries an error once the session has ended (a storage error)", async () => {
++    const errors = new SqlErrors();
++    const error = await failure(
++      errors.view(fakeSession()).execute("SELECT * FROM bad")
++    );
++    expect(errors.classify(error, false)).toBe(error);
 +  });
 +});
 diff --git a/packages/libs/restate-sdk/test/tsconfig.types.json b/packages/libs/restate-sdk/test/tsconfig.types.json
