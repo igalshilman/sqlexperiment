@@ -86,6 +86,27 @@ describe('the DeepSeek Harness agent', () => {
     expect(c.ledger.transfers.size).toBe(1);
   });
 
+  it('fails the attempt on a failed model request, and the retry asks again', async () => {
+    const c = conversation(prompt, 'f');
+    const input = { id: 'p1', text: 'Please move 4 from 6 to 7' };
+    const reply = teller.reply;
+    teller.reply = () => {
+      teller.reply = reply;
+      throw new Error('529 overloaded');
+    };
+    try {
+      await expect(c.attempt('inv1', input)).rejects.toThrow("the agent's turn failed");
+    } finally {
+      teller.reply = reply;
+    }
+    // The failed turn is in the stored log: the retry continues past it, and
+    // so does the next prompt.
+    expect(await c.attempt('inv1', input)).toEqual({ answer: 'Done: moved 4 from account 6 to account 7' });
+    expect(c.ledger.transfers.size).toBe(1);
+    const audit = await c.attempt('inv2', { id: 'p2', text: 'audit the books' });
+    expect(audit.answer).toMatch(/^Done: .*"transfers":1/);
+  });
+
   it('finishes an interrupted prompt before starting the next one', async () => {
     const c = conversation(prompt, 'c');
     await c.crash('inv1', { id: 'p1', text: 'Please move 1 from 0 to 1' });

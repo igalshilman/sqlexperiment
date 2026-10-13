@@ -65,7 +65,10 @@ do about what it was doing. So:
 - **A failed turn fails the attempt**: a model request that failed, or a
   checkpoint that could not store the log, ends the agent's turn with an
   error; the handler then throws rather than ask the agent to continue, and
-  Restate retries.
+  Restate retries. The failed turn's end may be stored by then, so only a
+  turn of the current attempt fails it: the retry, or the next prompt,
+  continues past the stored failure like an interrupted turn and asks the
+  model again.
 - **A prompt is answered once per id**: the prompt's message carries its id,
   and a prompt asked again returns the answer of the turn that finished it. A
   prompt that a crash interrupted is finished before the next prompt starts.
