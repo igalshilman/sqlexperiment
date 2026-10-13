@@ -34,7 +34,7 @@ index 18d3aa3..80a9ad7 100644
    ClientSendOptions,
    RemoveVoidArgument,
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..e64f1f0 100644
+index 8ea15b1..55cebf6 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,11 +9,14 @@
@@ -52,14 +52,16 @@ index 8ea15b1..e64f1f0 100644
    //eslint-disable-next-line @typescript-eslint/no-unused-vars
    ClientCallOptions,
  } from "./types/rpc.js";
-@@ -839,6 +842,41 @@ export interface SignalReference<T> {
+@@ -839,6 +842,44 @@ export interface SignalReference<T> {
  export interface ObjectContext<TState extends TypedState = UntypedState>
    extends Context, KeyValueStore<TState>, RestateObjectContext {
    key: string;
 +
 +  /**
-+   * Run `body` against the object's SQL database as one transaction: it
-+   * commits, durably, when `body` resolves, and rolls back when it rejects.
++   * The object's SQL database, for the whole handler: each statement is its
++   * own transaction, and `db.transaction` groups several. Calls run one at a
++   * time, in call order, and a transaction holds the database until it ends.
++   * Hand it to a library that wants a database for the handler's work.
 +   *
 +   * The database lives in the object's state, and a page cache shared by the
 +   * process's objects is built in. The object's options must include
@@ -67,34 +69,35 @@ index 8ea15b1..e64f1f0 100644
 +   * start against the state as it is (at least once). Creating tables is up
 +   * to the handlers, such as an `init` handler.
 +   *
-+   * An SQL error is terminal, since a retry would repeat it; a storage error
-+   * is retried. The body's own errors are as in any handler: a
-+   * `TerminalError` is terminal, and any other error is retried, such as a
-+   * request to another service that failed. Needs the `sqlite-kv` addon.
++   * An attempt has one session: it opens on the first call to `ctx.db` or
++   * `ctx.sql`, and is saved when the handler ends. A commit is durable once
++   * its writes are stored, which Restate does in order: a lost commit takes
++   * everything after it, including calls and the response.
++   *
++   * An SQL error that the handler fails with is terminal, since a retry would
++   * repeat it; a storage error is retried. The handler's own errors are as in
++   * any handler: a `TerminalError` is terminal, and any other error is
++   * retried, such as a request to another service that failed. Needs the
++   * `sqlite-kv` addon.
++   *
++   * @experimental
++   */
++  readonly db: SqlSession;
++
++  /**
++   * Run `body` as one transaction of {@link db}: it commits, durably, when
++   * `body` resolves, and rolls back when it rejects. It waits for the calls to
++   * `ctx.db` before it, and the calls after it wait for it; `body` uses the
++   * `db` it gets, since a call to `ctx.db` (or `ctx.sql`) from inside it is
++   * refused. An SQL error rejects as a `TerminalError`.
 +   *
 +   * @experimental
 +   */
 +  sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
-+
-+  /**
-+   * Run `body` with the object's SQL database for longer work, such as a whole
-+   * handler: each statement is its own transaction, and `db.transaction`
-+   * groups several. Calls run one at a time, in call order, and a
-+   * transaction holds the session until it ends. A commit is durable once its
-+   * writes are stored, which Restate does in order: a lost commit takes
-+   * everything after it, including calls and the response. The session is
-+   * saved when `body` resolves.
-+   *
-+   * Errors are classified as for {@link sql}. `ctx.sql` and `ctx.sqlSession`
-+   * cannot run inside one another.
-+   *
-+   * @experimental
-+   */
-+  sqlSession<T>(body: (db: SqlSession) => Promise<T>): Promise<T>;
  }
  
  /**
-@@ -1131,3 +1169,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
+@@ -1131,3 +1172,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
      WorkflowSharedContext<TState>,
      ObjectContext<TState>,
      RestateWorkflowContext {}
@@ -232,7 +235,7 @@ index 8ea15b1..e64f1f0 100644
 +  extends
 +    SqlContext,
 +    KeyValueStore<TState>,
-+    Pick<ObjectContext<TState>, "key" | "sql" | "sqlSession">,
++    Pick<ObjectContext<TState>, "key" | "sql" | "db">,
 +    RestateObjectContext {}
 +
 +/**
@@ -291,14 +294,14 @@ index 8ea15b1..e64f1f0 100644
 +    SqlObjectContext<TState>,
 +    RestateWorkflowContext {}
 diff --git a/packages/libs/restate-sdk/src/context_impl.ts b/packages/libs/restate-sdk/src/context_impl.ts
-index 2487c57..c562e6c 100644
+index 2487c57..cd0ced2 100644
 --- a/packages/libs/restate-sdk/src/context_impl.ts
 +++ b/packages/libs/restate-sdk/src/context_impl.ts
 @@ -71,6 +71,8 @@ import { ExternalProgressChannel } from "./utils/external_progress_channel.js";
  import type { ContextInternal, GetProjectOptions } from "./internal.js";
  import { InputReader, OutputWriter } from "./endpoint/handlers/types.js";
  import { ExecutionOptions } from "./endpoint/components.js";
-+import { runSql, type SqlDatabase, type SqlSession } from "./sql.js";
++import { SqlAttempt, type SqlDatabase, type SqlSession } from "./sql.js";
 +import { sqlContext } from "./sql_context.js";
  
  /**
@@ -342,16 +345,19 @@ index 2487c57..c562e6c 100644
    setRunInterceptor(
      interceptor: (name: string, runner: () => Promise<void>) => Promise<void>
    ) {
-@@ -291,6 +305,14 @@ export class ContextImpl
+@@ -291,6 +305,17 @@ export class ContextImpl
      );
    }
  
-+  public sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T> {
-+    return runSql(this, this.journalReplay, false, body);
++  // The attempt's SQL session, from the first use of ctx.db or ctx.sql.
++  sqlAttempt?: SqlAttempt;
++
++  public get db(): SqlSession {
++    return (this.sqlAttempt ??= new SqlAttempt(this)).db;
 +  }
 +
-+  public sqlSession<T>(body: (db: SqlSession) => Promise<T>): Promise<T> {
-+    return runSql(this, this.journalReplay, true, body);
++  public sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T> {
++    return (this.sqlAttempt ??= new SqlAttempt(this)).sql(body);
 +  }
 +
    public clear(name: string): void {
@@ -379,10 +385,18 @@ index 14d8ab1..f24c370 100644
  }
  
 diff --git a/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts b/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts
-index f5a20a7..bfe3d6d 100644
+index f5a20a7..41d207a 100644
 --- a/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts
 +++ b/packages/libs/restate-sdk/src/endpoint/handlers/generic.ts
-@@ -302,7 +302,8 @@ class RestateInvokeResponse implements RestateResponse {
+@@ -29,6 +29,7 @@ import {
+ import { parseUrlComponents } from "../components.js";
+ import { X_RESTATE_SERVER } from "../../user_agent.js";
+ import { CommandError, ContextImpl } from "../../context_impl.js";
++import { withSql } from "../../sql.js";
+ import { restoreError, sanitizeError } from "../../error_sanitization.js";
+ import type { InvocationId, Request } from "../../context.js";
+ import * as vm from "./vm/sdk_shared_core_wasm_bindings.js";
+@@ -302,7 +303,8 @@ class RestateInvokeResponse implements RestateResponse {
        handler.executionOptions.explicitCancellation ?? false,
        onJournalMismatchErrorsToWasm(
          handler.executionOptions.onJournalMismatchErrors
@@ -392,7 +406,7 @@ index f5a20a7..bfe3d6d 100644
      );
      const responseHead = this.coreVm.get_response_head();
      this.statusCode = responseHead.status_code;
-@@ -507,6 +508,7 @@ class RestateInvokeResponse implements RestateResponse {
+@@ -507,6 +509,7 @@ class RestateInvokeResponse implements RestateResponse {
      } catch (e) {
        notifyError(e, ctx, this.handler.executionOptions.asTerminalError);
      } finally {
@@ -400,12 +414,16 @@ index f5a20a7..bfe3d6d 100644
        try {
          await flushAndClose(
            this.coreVm,
-@@ -592,7 +594,7 @@ async function startUserHandler(
+@@ -592,7 +595,11 @@ async function startUserHandler(
        );
  
      // Then run user code
 -    const output = await handler.invoke(ctx, decodedInput);
-+    const output = await handler.invoke(ctx.userContext(), decodedInput);
++    // Its SQL session, if it opened one, ends with it.
++    const output = await withSql(
++      () => handler.invoke(ctx.userContext(), decodedInput),
++      () => ctx.sqlAttempt
++    );
  
      // Encode user code output
      encodedOutput = journalValueCodec.encode(output);
@@ -728,10 +746,10 @@ index f14da79..bdc98ec 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..d9493dc
+index 0000000..c1d2f26
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,394 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -743,9 +761,10 @@ index 0000000..d9493dc
 + * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
 + */
 +
-+// SQL in a virtual object: `ctx.sql(body)` and `ctx.sqlSession(body)` run
-+// `body` against a database kept in the object's state, through the sqlite-kv
-+// addon, with no journal replay.
++// SQL in a virtual object: `ctx.db`, a database kept in the object's state,
++// through the sqlite-kv addon, with no journal replay; and `ctx.sql(body)`,
++// one transaction of it. An attempt has one session, opened on first use and
++// saved when the handler ends.
 +
 +import { serde } from "@restatedev/restate-sdk-core";
 +import type { ContextImpl } from "./context_impl.js";
@@ -769,9 +788,9 @@ index 0000000..d9493dc
 +}
 +
 +/**
-+ * The object's database for a whole handler, inside `ctx.sqlSession`: each
-+ * statement outside {@link transaction} is its own transaction. Calls run one
-+ * at a time, in call order.
++ * The object's database, `ctx.db`, for the whole handler: each statement
++ * outside {@link transaction} is its own transaction. Calls run one at a
++ * time, in call order.
 + */
 +export interface SqlSession extends SqlDatabase {
 +  /**
@@ -979,103 +998,151 @@ index 0000000..d9493dc
 +  }
 +}
 +
-+// Invocations with an open session: one at a time per invocation.
-+const open = new WeakSet<ContextImpl>();
++/** How a handler ended. */
++type Outcome<T> = { value: T } | { error: unknown };
++
++function settle<T>(outcome: Outcome<T>): T {
++  if ("error" in outcome) throw outcome.error;
++  return outcome.value;
++}
 +
 +/**
-+ * `ctx.sql(body)` or, with `session`, `ctx.sqlSession(body)`; see
-+ * `ObjectContext.sql` and `ObjectContext.sqlSession`.
++ * An attempt's SQL session: opened on its first use (`ctx.db` or `ctx.sql`),
++ * shared by everything the handler does, and saved when the handler ends.
++ * See `ObjectContext.db`. @internal
 + */
-+export async function runSql<T>(
-+  ctx: ContextImpl,
-+  journalReplay: boolean,
-+  session: boolean,
-+  body: (db: SqlSession) => Promise<T>
-+): Promise<T> {
-+  if (ctx.handlerKind !== HandlerKind.EXCLUSIVE) {
-+    throw new TerminalError("ctx.sql is for exclusive object handlers");
-+  }
-+  if (journalReplay) {
-+    throw new TerminalError(
-+      "ctx.sql needs the object's options to include restate.sqlOptions: " +
-+        "a replayed journal would not match the reads of a later attempt"
-+    );
-+  }
-+  if (open.has(ctx)) {
-+    throw new TerminalError(
-+      "ctx.sql and ctx.sqlSession cannot run inside one another"
-+    );
-+  }
-+  open.add(ctx);
-+  try {
-+    return await withSession(ctx, session, body);
-+  } finally {
-+    open.delete(ctx);
-+  }
-+}
++export class SqlAttempt {
++  readonly #ctx: ContextImpl;
++  readonly #errors = new SqlErrors();
++  #session: Promise<Session> | undefined;
++  #ended = false;
++  #cancel: () => void = () => {};
++  /** `ctx.db`. */
++  readonly db: SqlSession;
 +
-+async function withSession<T>(
-+  ctx: ContextImpl,
-+  session: boolean,
-+  body: (db: SqlSession) => Promise<T>
-+): Promise<T> {
-+  const sqliteKv = await loadAddon();
-+  const namespace = `${ctx.request().target.service}/${ctx.key}`;
-+  const end = new AttemptEnd(ctx.invocationEndPromise.promise);
-+  const store = objectStore(ctx, end);
-+  const db = await sqliteKv.open(
-+    namespace,
-+    wrapStore ? wrapStore(store) : store
-+  );
-+  // A body still waiting for something else when the attempt ends (a model
-+  // request, say) keeps the session no longer: it closes once no statement
-+  // runs, and the body's later calls fail.
-+  const cancel = end.onEnd(() => void db.close().catch(() => {}));
-+  try {
-+    return await runBody(db, session, body);
-+  } finally {
-+    cancel();
-+  }
-+}
-+
-+async function runBody<T>(
-+  db: Session,
-+  session: boolean,
-+  body: (db: SqlSession) => Promise<T>
-+): Promise<T> {
-+  const errors = new SqlErrors();
-+  let result: { value: T } | { error: unknown };
-+  try {
-+    result = {
-+      value: session
-+        ? await body({
-+            ...errors.view(db),
-+            transaction: (inner) => errors.transaction(db, inner),
-+          })
-+        : await errors.transaction(db, (tx) =>
-+            body({
-+              ...tx,
-+              transaction: () =>
-+                Promise.reject(
-+                  new TerminalError("ctx.sql already runs in a transaction")
-+                ),
-+            })
-+          ),
++  constructor(ctx: ContextImpl) {
++    this.#ctx = ctx;
++    this.db = {
++      query: (sql, params) =>
++        this.#open().then((db) => this.#errors.track(db.query(sql, params))),
++      queryColumns: (sql, params) =>
++        this.#open().then((db) =>
++          this.#errors.track(db.queryColumns(sql, params))
++        ),
++      execute: (sql, params) =>
++        this.#open().then((db) => this.#errors.track(db.execute(sql, params))),
++      transaction: (inner) =>
++        this.#open().then((db) => this.#errors.transaction(db, inner)),
 +    };
++  }
++
++  /** `ctx.sql(body)`: one transaction of the session. */
++  async sql<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T> {
++    const db = await this.#open();
++    try {
++      return await this.#errors.transaction(db, (tx) =>
++        body({
++          ...tx,
++          transaction: () =>
++            Promise.reject(
++              new TerminalError("ctx.sql already runs in a transaction")
++            ),
++        } as SqlDatabase)
++      );
++    } catch (error) {
++      throw this.#errors.classify(error, db.isUsable());
++    }
++  }
++
++  #open(): Promise<Session> {
++    if (this.#ended) {
++      return Promise.reject(
++        new Error("the handler has ended: its SQL session is closed")
++      );
++    }
++    this.#session ??= this.#start();
++    return this.#session;
++  }
++
++  async #start(): Promise<Session> {
++    const ctx = this.#ctx;
++    if (ctx.handlerKind !== HandlerKind.EXCLUSIVE) {
++      throw new TerminalError("ctx.sql is for exclusive object handlers");
++    }
++    if (ctx.journalReplay) {
++      throw new TerminalError(
++        "ctx.sql needs the object's options to include restate.sqlOptions: " +
++          "a replayed journal would not match the reads of a later attempt"
++      );
++    }
++    const sqliteKv = await loadAddon();
++    const namespace = `${ctx.request().target.service}/${ctx.key}`;
++    const end = new AttemptEnd(ctx.invocationEndPromise.promise);
++    const store = objectStore(ctx, end);
++    const db = await sqliteKv.open(
++      namespace,
++      wrapStore ? wrapStore(store) : store
++    );
++    // A handler still waiting for something else when the attempt ends (a
++    // model request, say) keeps the session no longer: it closes once no
++    // statement runs, and the handler's later calls fail.
++    this.#cancel = end.onEnd(() => void db.close().catch(() => {}));
++    return db;
++  }
++
++  /**
++   * The handler ended with `outcome`: an SQL error that escaped it becomes
++   * terminal, then the session is saved. Saving confirms its writes (an empty
++   * ctx.run, if it wrote), so that the page cache may trust them; a session
++   * that is not saved makes the next one in this process start cold. One that
++   * a storage error ended closes now, rather than when it is collected.
++   */
++  async end<T>(outcome: Outcome<T>): Promise<T> {
++    this.#ended = true;
++    const session = this.#session;
++    if (session === undefined) return settle(outcome);
++    let db: Session;
++    try {
++      db = await session;
++    } catch {
++      // The open failed, and its error went to the call that made it.
++      return settle(outcome);
++    }
++    this.#cancel();
++    if ("error" in outcome) {
++      const error = this.#errors.classify(outcome.error, db.isUsable());
++      // The handler's error stands: its writes are stored in order before
++      // the result, whether or not the save confirms them for the cache.
++      await (db.isUsable() ? db.save() : db.close()).catch(() =>
++        db.close().catch(() => {})
++      );
++      throw error;
++    }
++    if (db.isUsable()) {
++      await db.save();
++    } else {
++      await db.close();
++    }
++    return outcome.value;
++  }
++}
++
++/**
++ * Run `handler`, then end the attempt's SQL session, if it opened one
++ * (see {@link SqlAttempt.end}). @internal
++ */
++export async function withSql<T>(
++  handler: () => Promise<T>,
++  attempt: () => SqlAttempt | undefined
++): Promise<T> {
++  let outcome: Outcome<T>;
++  try {
++    outcome = { value: await handler() };
 +  } catch (error) {
-+    result = { error: errors.classify(error, db.isUsable()) };
++    outcome = { error };
 +  }
-+  // Saving confirms the session's writes (an empty ctx.run, if it wrote), so
-+  // that the page cache may trust them. A session that does not get here
-+  // makes the next one in this process start cold. One that a storage error
-+  // ended closes now, rather than when it is collected.
-+  if (db.isUsable()) {
-+    await db.save();
-+  } else {
-+    await db.close();
-+  }
-+  if ("error" in result) throw result.error;
-+  return result.value;
++  const sql = attempt();
++  return sql === undefined ? settle(outcome) : sql.end(outcome);
 +}
 diff --git a/packages/libs/restate-sdk/src/sql_context.ts b/packages/libs/restate-sdk/src/sql_context.ts
 new file mode 100644
@@ -2153,7 +2220,7 @@ index 0000000..92d684a
 +});
 diff --git a/packages/libs/restate-sdk/test/sql_context.test-d.ts b/packages/libs/restate-sdk/test/sql_context.test-d.ts
 new file mode 100644
-index 0000000..cff1203
+index 0000000..76fb24a
 --- /dev/null
 +++ b/packages/libs/restate-sdk/test/sql_context.test-d.ts
 @@ -0,0 +1,209 @@
@@ -2261,7 +2328,7 @@ index 0000000..cff1203
 +          expectTypeOf(ctx.get<number>("k")).toEqualTypeOf<
 +            Promise<number | null>
 +          >();
-+          await ctx.sqlSession(async (db) => db.query("SELECT 1"));
++          await ctx.db.query("SELECT 1");
 +        },
 +        shared: restate.handlers.object.shared(
 +          { journalReplay: false },

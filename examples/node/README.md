@@ -34,22 +34,28 @@ handler may take it (`restate.handlers.object.exclusive({ ...restate.sqlOptions 
 handler)`), and the object's other handlers keep replaying their journals.
 `ctx.sql` needs it off in the handler that calls it.
 
-`ctx.sql(body)`, on the context of an exclusive object handler, opens the
-object's database (namespace `service/key`) over the object's state, with the
-process's page cache, runs `body` as one SQL transaction, and ends the session
-with `save()` (one `ctx.run`, if it wrote, so the page cache may trust the
-writes). An SQL error is terminal, since a retry would repeat it; a storage
-error is retried. The body's own errors are as in any handler: a
-`TerminalError` is terminal, and any other error, such as a failed request to
-a model or another service, is retried. Creating tables is up to the handlers,
-such as `init`.
+`ctx.db`, on the context of an exclusive object handler, is the object's
+database (namespace `service/key`) over the object's state, with the
+process's page cache. Each statement is its own transaction, and
+`db.transaction(fn)` groups several; calls run one at a time, in call order.
+`ctx.sql(body)` is `ctx.db.transaction(body)`: one transaction, which commits
+when `body` resolves and rolls back when it rejects.
 
-`ctx.sqlSession(body)` keeps the database for longer work, such as a whole
-handler: each statement is its own transaction, and `db.transaction(fn)`
-groups several. A commit is durable once its writes are stored, which Restate
-does in order, so it needs no barrier of its own: a lost commit takes
-everything after it, including calls and the response. The session is saved
-once, at the end. The [pi example](../pi/README.md) runs pi-durable's storage this way.
+An attempt has one session. It opens on the first call to `ctx.db` or
+`ctx.sql` (a read of `meta` and a probe of the log), stays open while the
+handler runs, however many calls it makes, and is saved when the handler
+ends: one `ctx.run`, if it wrote, so the page cache may trust the writes. A
+commit is durable once its writes are stored, which Restate does in order, so
+it needs no barrier of its own: a lost commit takes everything after it,
+including calls and the response. A library that wants a database for the
+handler's work gets `ctx.db`: the [pi example](../pi/README.md) runs
+pi-durable's storage this way.
+
+An SQL error that the handler fails with is terminal, since a retry would
+repeat it (`ctx.sql` rejects with it as a `TerminalError`); a storage error is
+retried. The handler's own errors are as in any handler: a `TerminalError` is
+terminal, and any other error, such as a failed request to a model or another
+service, is retried. Creating tables is up to the handlers, such as `init`.
 
 The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear`, and the barrier is an empty `ctx.run`. The SDK loads
@@ -115,7 +121,7 @@ operation it reaches happens again. What each one does then:
 
 | Operation                                                                | On a retried attempt                                                                                                                                                                                                          |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ctx.sql`, `ctx.sqlSession`                                              | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
+| `ctx.db`, `ctx.sql`                                                      | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
 | Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result.                                                   |
 | Sends, delayed sends                                                     | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer.                                                                                                                      |
 | `ctx.get`, `ctx.set`, `ctx.clear`                                        | Read the state as stored; writes are ordered, and a lost one takes the later commands with it.                                                                                                                                |

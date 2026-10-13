@@ -30,45 +30,63 @@ export function memoryStore(map = new Map<string, Uint8Array>(), fence = { close
 }
 
 /**
- * `db` as `ctx.sqlSession` gives it, with its errors classified as there: an
- * SQL error is terminal, and the body's own errors are as in any handler.
+ * `ctx.db` and `ctx.sql` over `db`, as an attempt has them, and `end`, which
+ * ends the handler as the SDK does: an SQL error it fails with is terminal,
+ * and the handler's own errors are as in any handler.
  */
-function sqlSession(db: Database) {
+export function sqlAttempt(db: Database) {
   const sqlErrors = new WeakSet<object>();
+  const record = (error: unknown) => {
+    if (typeof error === 'object' && error !== null) sqlErrors.add(error);
+    return error;
+  };
   const track = <T>(promise: Promise<T>) =>
     promise.catch((error: unknown) => {
-      if (typeof error === 'object' && error !== null) sqlErrors.add(error);
-      throw error;
+      throw record(error);
     });
   const view = (target: Transaction): restate.SqlDatabase => ({
     query: (sql, params) => track(target.query(sql, params)),
     queryColumns: (sql, params) => track(target.queryColumns(sql, params)),
     execute: (sql, params) => track(target.execute(sql, params)),
   });
-  const session: restate.SqlSession = {
-    ...view(db),
-    transaction: <T>(inner: (tx: restate.SqlDatabase) => Promise<T>) => {
-      let own: { error: unknown } | undefined;
-      return db
-        .transaction(async (tx) => {
-          try {
-            return await inner(view(tx));
-          } catch (error) {
-            own = { error };
-            throw error;
-          }
-        })
-        .catch((error: unknown) => {
-          if (own?.error !== error && typeof error === 'object' && error !== null) sqlErrors.add(error);
+  const transaction = <T>(inner: (tx: restate.SqlDatabase) => Promise<T>) => {
+    let own: { error: unknown } | undefined;
+    return db
+      .transaction(async (tx) => {
+        try {
+          return await inner(view(tx));
+        } catch (error) {
+          own = { error };
           throw error;
-        });
-    },
+        }
+      })
+      .catch((error: unknown) => {
+        throw own?.error === error ? error : record(error);
+      });
   };
   const classify = (error: unknown) =>
     db.isUsable() && error instanceof Error && !(error instanceof restate.TerminalError) && sqlErrors.has(error)
       ? new restate.TerminalError(error.message)
       : error;
-  return { session, classify };
+  const session: restate.SqlSession = { ...view(db), transaction };
+  return {
+    db: session,
+    sql: <T>(body: (tx: restate.SqlDatabase) => Promise<T>) =>
+      transaction(body).catch((error: unknown) => {
+        throw classify(error);
+      }),
+    /** The handler's result, once it ended, and the session saved. */
+    async end<T>(handler: Promise<T>): Promise<T> {
+      try {
+        const value = await handler;
+        await db.save();
+        return value;
+      } catch (error) {
+        await db.close();
+        throw classify(error);
+      }
+    },
+  };
 }
 
 /** A prompt to an agent, and its answer. */
@@ -133,23 +151,15 @@ export function conversation(handler: PromptHandler, key: string) {
     async attempt(requestId: string, prompt: Prompt) {
       fence.closed = true;
       fence = { closed: false };
-      const db = await open(`${name}-${n++}`, memoryStore(map, fence));
+      const sql = sqlAttempt(await open(`${name}-${n++}`, memoryStore(map, fence)));
       const ctx = {
         key,
         request: () => ({ id: requestId }),
         objectClient: () => books,
-        sqlSession: async <T>(body: (db: restate.SqlSession) => Promise<T>) => {
-          const { session, classify } = sqlSession(db);
-          try {
-            return await body(session);
-          } catch (error) {
-            throw classify(error);
-          } finally {
-            await db.close();
-          }
-        },
+        db: sql.db,
+        sql: sql.sql,
       };
-      return handler(ctx as unknown as restate.SqlObjectContext, prompt);
+      return sql.end(handler(ctx as unknown as restate.SqlObjectContext, prompt));
     },
     /** An attempt that crashes in its next transfer. */
     async crash(requestId: string, prompt: Prompt) {

@@ -140,54 +140,54 @@ const message = (id: string, text: string): UserMessage =>
   freezeMessage({ id: MessageId(id), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } });
 
 /** Answer prompt `text`, once per prompt `id`. */
-export const prompt = (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) =>
-  ctx.sqlSession(async (db) => {
-    const harness = await boot(db);
-    // A tool's error fails the attempt, which Restate retries: the harness
-    // stores nothing more, so the retry finds the tool's call without a result.
-    const { promise: failed, reject: fail } = Promise.withResolvers<never>();
-    failed.catch(() => {});
-    try {
-      const sessionId = SessionId(ctx.key);
-      const options = {
-        agentOptions: { provider: 'teller', model: 'teller' },
-        setup: (agentCtx: Context) => bank(ctx, fail).forEach((tool) => agentCtx.tools.register(tool)),
-      };
-      // Resuming closes a turn a crash left open.
-      const { agent } = (await harness.sessionPersistence.stat(sessionId))
-        ? await harness.agents.resume({ resumeSessionId: sessionId, ...options })
-        : await harness.agents.create({ sessionId, ...options });
-      // The log as this attempt found it: a turn that failed before is
-      // continued like an interrupted one.
-      const found = agent.session.snapshotEvents().length;
-      for (;;) {
-        const events = agent.session.snapshotEvents();
-        const answer = answerOf(events, promptId(id));
-        if (answer !== undefined) return { answer };
-        // A turn of this attempt that failed (the model's request, or a
-        // checkpoint) fails the attempt. Its end may be stored already, so
-        // only this attempt's turns count: the retry asks the model again.
-        const end = events.slice(found).findLast((e): e is SessionEvent<'turn/end'> => e.type === 'turn/end')
-          ?.data.reason;
-        if (end?.kind === 'error') throw new Error(`the agent's turn failed: ${JSON.stringify(end.error)}`);
-        // Finish an unfinished prompt first (this one's, after a crash), then
-        // start this one.
-        const last = lastPrompt(events);
-        if (last !== undefined && answerOf(events, last) === undefined) {
-          agent.followup(message(`continue:${events.length}`, CONTINUE));
-        } else {
-          agent.followup(message(promptId(id), text));
-        }
-        await Promise.race([agent.whenIdle(), failed]);
-        await harness.sessions.flush(agent.session);
+export const prompt = async (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) => {
+  const db = ctx.db;
+  const harness = await boot(db);
+  // A tool's error fails the attempt, which Restate retries: the harness
+  // stores nothing more, so the retry finds the tool's call without a result.
+  const { promise: failed, reject: fail } = Promise.withResolvers<never>();
+  failed.catch(() => {});
+  try {
+    const sessionId = SessionId(ctx.key);
+    const options = {
+      agentOptions: { provider: 'teller', model: 'teller' },
+      setup: (agentCtx: Context) => bank(ctx, fail).forEach((tool) => agentCtx.tools.register(tool)),
+    };
+    // Resuming closes a turn a crash left open.
+    const { agent } = (await harness.sessionPersistence.stat(sessionId))
+      ? await harness.agents.resume({ resumeSessionId: sessionId, ...options })
+      : await harness.agents.create({ sessionId, ...options });
+    // The log as this attempt found it: a turn that failed before is
+    // continued like an interrupted one.
+    const found = agent.session.snapshotEvents().length;
+    for (;;) {
+      const events = agent.session.snapshotEvents();
+      const answer = answerOf(events, promptId(id));
+      if (answer !== undefined) return { answer };
+      // A turn of this attempt that failed (the model's request, or a
+      // checkpoint) fails the attempt. Its end may be stored already, so
+      // only this attempt's turns count: the retry asks the model again.
+      const end = events.slice(found).findLast((e): e is SessionEvent<'turn/end'> => e.type === 'turn/end')
+        ?.data.reason;
+      if (end?.kind === 'error') throw new Error(`the agent's turn failed: ${JSON.stringify(end.error)}`);
+      // Finish an unfinished prompt first (this one's, after a crash), then
+      // start this one.
+      const last = lastPrompt(events);
+      if (last !== undefined && answerOf(events, last) === undefined) {
+        agent.followup(message(`continue:${events.length}`, CONTINUE));
+      } else {
+        agent.followup(message(promptId(id), text));
       }
-    } catch (e) {
-      (harness.sessionPersistence as SqlSessionPersistence).abandon();
-      throw e;
-    } finally {
-      await harness.fiber.dispose();
+      await Promise.race([agent.whenIdle(), failed]);
+      await harness.sessions.flush(agent.session);
     }
-  });
+  } catch (e) {
+    (harness.sessionPersistence as SqlSessionPersistence).abandon();
+    throw e;
+  } finally {
+    await harness.fiber.dispose();
+  }
+};
 
 export const agent = restate.object({
   name: 'DeepSeekAgent',

@@ -12,8 +12,8 @@ The example pins OpenCode 2.0.27 exactly, with the Effect release it is
 built on (4.0.1). OpenCode needs Node 24.
 
 - [`opencode-db.ts`](opencode-db.ts): `openOpenCode(db, fence, options)`
-  boots OpenCode's embedded host with its database in `db`, the database of
-  `ctx.sqlSession`. The host is OpenCode's workerd profile (no local
+  boots OpenCode's embedded host with its database in `db`, the object's database,
+  `ctx.db`. The host is OpenCode's workerd profile (no local
   filesystem, shell, terminal or version control; config inline; plugins in
   code) but for its database. The workerd profile reads a Durable Object's
   SQLite, whose `exec` is synchronous; here OpenCode gets an Effect
@@ -23,8 +23,8 @@ built on (4.0.1). OpenCode needs Node 24.
   transaction. (The Promise API's `OpenCode.create` drops its replacements,
   so the host is booted with the Effect API's.)
 - [`with-opencode.ts`](with-opencode.ts): `withOpenCode(ctx, { plugins,
-  model, tools }, work)` runs `work` with OpenCode for one invocation, in one
-  `ctx.sqlSession`, and `prompt(id, text)` answers a prompt in the object's
+  model, tools }, work)` runs `work` with OpenCode for one invocation, over
+  `ctx.db`, and `prompt(id, text)` answers a prompt in the object's
   session. The agent's tools replace OpenCode's own.
 - [`agent.ts`](agent.ts): the OpenCodeAgent object. Its handler,
   `prompt(ctx, { id, text })`, gives the agent its bank tools, which move

@@ -16,12 +16,12 @@ runner as `betaAgentToolset20260401` from `@anthropic-ai/sdk/tools/agent-toolset
 this example has only its bank tools.
 
 - [`conversation.ts`](conversation.ts): `Conversation`, the messages over
-  the object's database (the `db` of `ctx.sqlSession`), in order, each with
+  the object's database (`ctx.db`), in order, each with
   the id of the prompt it belongs to, and the answer to each prompt. Each
   `append` is one SQL transaction.
 - [`agent.ts`](agent.ts): a ClaudeAgent object per conversation. Its
   handler, `prompt(ctx, { id, text })`, starts a runner with the stored
-  messages, in one `ctx.sqlSession`, and stores each step:
+  messages in `ctx.db`, and stores each step:
 
   ```js
   for await (const message of runner) {

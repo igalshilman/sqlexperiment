@@ -4,7 +4,7 @@
 //   prompt: (ctx, { id, text }) =>
 //     withPi(ctx, { models, model: 'anthropic/claude-sonnet-4-5', tools }, (pi) => pi.prompt(id, text)),
 //
-// It runs `work` in one `ctx.sqlSession`: pi-durable's storage is the object's
+// It runs `work` over `ctx.db`: pi-durable's storage is the object's
 // database (pi-storage.ts), and each pi-durable commit is an SQL transaction
 // in it, stored in order with everything else the handler does. The Harness
 // is opened with `tools` (made with pi-durable's `defineTool`) and closed at
@@ -50,36 +50,36 @@ export interface PiOptions {
  * `tools` the agent's tools. `pi` has `prompt(id, text)`, and the `harness`
  * and chord `context` for anything else.
  */
-export const withPi = <T>(
+export const withPi = async <T>(
   ctx: restate.SqlObjectContext,
   { models, model, tools = [] }: PiOptions,
   work: (pi: Pi) => Promise<T>,
-): Promise<T> =>
-  ctx.sqlSession(async (db) => {
-    const [provider = '', modelId = ''] = model.split('/');
-    const context = BACKGROUND_CONTEXT;
-    const registry = createRegistry();
-    registry.install(defineExtension({ name: 'tools', tools }));
-    const harness = await Harness.open(await openSqlKvStorage(db), { models, registry }, context);
-    try {
-      return await work({
-        harness,
-        context,
-        async prompt(id, text) {
-          const root = await harness.root(context, { agent: { model: { provider, modelId } } });
-          const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
-          const settled = await submission.wait(context);
-          if (settled.status !== 'done' || settled.answer === undefined) {
-            throw new restate.TerminalError(`prompt ${id} unanswered: ${settled.reason ?? 'unknown'}`);
-          }
-          const { answer } = settled;
-          const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
-          const reply = entry?.model?.at(-1);
-          if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
-          return textOf(reply.content);
-        },
-      });
-    } finally {
-      await harness.close(context);
-    }
-  });
+): Promise<T> => {
+  const db = ctx.db;
+  const [provider = '', modelId = ''] = model.split('/');
+  const context = BACKGROUND_CONTEXT;
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: 'tools', tools }));
+  const harness = await Harness.open(await openSqlKvStorage(db), { models, registry }, context);
+  try {
+    return await work({
+      harness,
+      context,
+      async prompt(id, text) {
+        const root = await harness.root(context, { agent: { model: { provider, modelId } } });
+        const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
+        const settled = await submission.wait(context);
+        if (settled.status !== 'done' || settled.answer === undefined) {
+          throw new restate.TerminalError(`prompt ${id} unanswered: ${settled.reason ?? 'unknown'}`);
+        }
+        const { answer } = settled;
+        const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
+        const reply = entry?.model?.at(-1);
+        if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
+        return textOf(reply.content);
+      },
+    });
+  } finally {
+    await harness.close(context);
+  }
+};

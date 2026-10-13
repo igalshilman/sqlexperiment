@@ -1,5 +1,5 @@
 // A LangGraph checkpointer on a sqlite-kv database: `SqlCheckpointSaver`, over
-// a database session `db` (in Restate, the `db` of `ctx.sqlSession`), which
+// a database session `db` (in Restate, `ctx.db`), which
 // has `query`, `execute` and `transaction(body)`.
 //
 // Three tables, with values as LangGraph's serializer writes them:
@@ -97,7 +97,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
   #ready: Promise<void> | undefined;
   #tail: Promise<unknown> = Promise.resolve();
 
-  /** `db`: a database session (the `db` of `ctx.sqlSession`). */
+  /** `db`: a database session (`ctx.db`). */
   constructor(db: SqlSession, serde?: SerializerProtocol) {
     super(serde);
     this.#db = db;

@@ -1,6 +1,6 @@
 // pi-durable storage on a sqlite-kv database: the `SqliteDatabase` facade of
 // @earendil-works/pi-durable/storage/sqlite, over a database session `db`
-// (in Restate, the `db` of `ctx.sqlSession`), which has `query`,
+// (in Restate, `ctx.db`), which has `query`,
 // `queryColumns`, `execute` and `transaction(body)`.
 //
 // The facade's operations must run one at a time, a transaction excluding
