@@ -1,7 +1,7 @@
 // The Effect SqlClient of opencode-db.ts over a sqlite-kv database in memory.
 // `npm run test:opencode` (or make test-opencode).
 import type { SqlSession } from '@restatedev/restate-sdk';
-import { Effect, Exit } from 'effect';
+import { Effect, Exit, Fiber } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { open } from 'sqlite-kv';
 import { describe, expect, it } from 'vitest';
@@ -43,5 +43,22 @@ describe('the OpenCode SqlClient', () => {
       }),
     );
     expect(rows).toEqual([{ id: 1 }]);
+  });
+
+  it('rolls back a transaction whose fiber is interrupted, and goes on', async () => {
+    const rows = await run((sql) =>
+      Effect.gen(function* () {
+        yield* sql.unsafe('CREATE TABLE t(id INTEGER)');
+        const fiber = yield* Effect.forkChild(
+          sql.withTransaction(Effect.andThen(sql.unsafe('INSERT INTO t VALUES(1)'), Effect.sleep('1 second'))),
+        );
+        yield* Effect.sleep('20 millis');
+        yield* Fiber.interrupt(fiber);
+        // The session is not left held by the transaction, and none of it stays.
+        yield* sql.withTransaction(sql.unsafe('INSERT INTO t VALUES(2)'));
+        return yield* sql.unsafe('SELECT id FROM t');
+      }),
+    );
+    expect(rows).toEqual([{ id: 2 }]);
   });
 });
