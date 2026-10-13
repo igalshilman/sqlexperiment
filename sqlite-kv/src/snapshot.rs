@@ -144,7 +144,8 @@ impl Default for StorageOptions {
 /// garbage work that failed after the commit; a later save retries it.
 #[derive(Debug, Default)]
 pub struct SaveReport {
-    /// Pages written in place by this save's checkpoint slice.
+    /// Pages written in place by this save's checkpoint slice; 0 when its
+    /// checkpoint work failed.
     pub checkpointed_pages: usize,
     /// Committed, but checkpoint work failed. Do not replay SQL.
     pub cleanup_error: Option<io::Error>,
@@ -676,8 +677,9 @@ impl Snapshot {
             if let Some(cache) = cache {
                 cache.forget_meta(next);
             }
+            // The log keeps covering those pages: none counts as checkpointed.
             let report = SaveReport {
-                checkpointed_pages,
+                checkpointed_pages: 0,
                 cleanup_error: Some(error),
                 log_next: next,
             };
