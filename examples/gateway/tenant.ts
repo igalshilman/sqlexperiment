@@ -1,165 +1,107 @@
-// A Tenant virtual object per tenant, whose state is SQL: the gateway's audit
-// log of the tenant's tool calls, and the approvals they wait for.
+// A Tenant virtual object per tenant, whose state is SQL: the audit log of
+// the tenant's tool calls, and the calls held for approval.
 //
-// The gateway (gateway.ts) sends it a record of each call, and of each call
-// held for approval. A manager decides with `decide`, which resolves the
-// awakeable the gateway waits on. The log is a table to query: `report` is
-// what the tenant's tools did, how often, how fast, and what was refused.
+// The gateway (gateway.ts) records each call that ended, and each call it
+// holds. A manager lists the held ones (`pending`) and decides (`decide`),
+// which resolves the awakeable the gateway waits on.
 //
 // Environment: PORT and ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
 import { serveIfMain } from '../faults.ts';
 
-/** What became of a tool call. */
-export type Outcome = 'ok' | 'error' | 'denied' | 'rejected';
-
-/** A tool call, as the gateway records it once it has ended. */
+/** A tool call, recorded once it has ended; `call` is the gateway's invocation id. */
 export interface CallRecord {
-  /** The gateway's invocation id: one record per call, however often it is sent. */
   call: string;
-  at: number;
   user: string;
-  caller: string;
   tool: string;
-  arguments: unknown;
-  outcome: Outcome;
+  outcome: 'ok' | 'error' | 'denied';
   detail: string;
   ms: number;
 }
 
 /** A call held for approval, until `decide` resolves its awakeable. */
-export interface Approval {
+export interface Held {
   awakeable: string;
-  call: string;
-  at: number;
   user: string;
-  caller: string;
   tool: string;
   arguments: unknown;
 }
 
-/** A manager's decision on a held call. */
-export interface Decision {
-  approved: boolean;
-  by: string;
-}
-
 const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS calls(call TEXT PRIMARY KEY, at INTEGER, user TEXT, caller TEXT, tool TEXT,
-    arguments TEXT, outcome TEXT, detail TEXT, ms INTEGER);
-  CREATE TABLE IF NOT EXISTS approvals(awakeable TEXT PRIMARY KEY, call TEXT, at INTEGER, user TEXT, caller TEXT,
-    tool TEXT, arguments TEXT, approved INTEGER, by TEXT);`;
+  CREATE TABLE IF NOT EXISTS calls(call TEXT PRIMARY KEY, user TEXT, tool TEXT, outcome TEXT, detail TEXT, ms INTEGER);
+  CREATE TABLE IF NOT EXISTS held(awakeable TEXT PRIMARY KEY, user TEXT, tool TEXT, arguments TEXT, approved INTEGER);`;
 
 export const tenant = restate.object({
   name: 'Tenant',
   handlers: {
-    /** Record a call that ended, once per call. */
     record: (ctx: restate.SqlObjectContext, r: CallRecord) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
-        await db.execute('INSERT OR IGNORE INTO calls VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+        await db.execute('INSERT OR IGNORE INTO calls VALUES(?, ?, ?, ?, ?, ?)', [
           r.call,
-          r.at,
           r.user,
-          r.caller,
           r.tool,
-          JSON.stringify(r.arguments),
           r.outcome,
           r.detail,
           r.ms,
         ]);
       }),
 
-    /** Record a call held for approval. */
-    hold: (ctx: restate.SqlObjectContext, a: Approval) =>
+    hold: (ctx: restate.SqlObjectContext, h: Held) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
-        await db.execute('INSERT OR IGNORE INTO approvals VALUES(?, ?, ?, ?, ?, ?, ?, NULL, NULL)', [
-          a.awakeable,
-          a.call,
-          a.at,
-          a.user,
-          a.caller,
-          a.tool,
-          JSON.stringify(a.arguments),
+        await db.execute('INSERT OR IGNORE INTO held VALUES(?, ?, ?, ?, NULL)', [
+          h.awakeable,
+          h.user,
+          h.tool,
+          JSON.stringify(h.arguments),
         ]);
       }),
 
     /** The calls waiting for a decision. */
     pending: (ctx: restate.SqlObjectContext) =>
-      ctx.transaction(async ({ db }) => {
+      ctx.transaction(async ({ db }): Promise<Held[]> => {
         await db.execute(SCHEMA);
-        const rows = await db.query(
-          'SELECT awakeable, call, at, user, caller, tool, arguments FROM approvals WHERE approved IS NULL ORDER BY at',
-        );
-        return rows.map(([awakeable, call, at, user, caller, tool, args]) => ({
-          awakeable,
-          call,
-          at,
-          user,
-          caller,
-          tool,
+        const rows = await db.query('SELECT awakeable, user, tool, arguments FROM held WHERE approved IS NULL');
+        return rows.map(([awakeable, user, tool, args]) => ({
+          awakeable: awakeable as string,
+          user: user as string,
+          tool: tool as string,
           arguments: JSON.parse(args as string) as unknown,
-        })) as Approval[];
+        }));
       }),
 
-    /**
-     * Decide on a held call, and let it go on. The first decision stands: a
-     * second one, or this one sent again, resolves the awakeable with it.
-     */
-    decide: async (ctx: restate.SqlObjectContext, { awakeable, approved, by }: { awakeable: string } & Decision) => {
-      const decision = await ctx.transaction(async ({ db }): Promise<Decision> => {
+    /** Approve or deny a held call. The first decision stands; sent again, it resolves the awakeable again, harmlessly. */
+    decide: async (
+      ctx: restate.SqlObjectContext,
+      { awakeable, approved }: { awakeable: string; approved: boolean },
+    ) => {
+      const decided = await ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
-        const [held] = await db.query('SELECT approved, by FROM approvals WHERE awakeable = ?', [awakeable]);
-        if (!held) throw new restate.TerminalError(`no call waits on ${awakeable}`);
-        if (held[0] !== null) return { approved: held[0] === 1, by: held[1] as string };
-        await db.execute('UPDATE approvals SET approved = ?, by = ? WHERE awakeable = ?', [
+        await db.execute('UPDATE held SET approved = ? WHERE awakeable = ? AND approved IS NULL', [
           approved ? 1 : 0,
-          by,
           awakeable,
         ]);
-        return { approved, by };
+        const [row] = await db.query('SELECT approved FROM held WHERE awakeable = ?', [awakeable]);
+        if (!row) throw new restate.TerminalError(`no call waits on ${awakeable}`);
+        return row[0] === 1;
       });
-      // Outside the transaction: the decision is stored, and resolving again is harmless.
-      ctx.resolveAwakeable(awakeable, decision);
-      return decision;
+      ctx.resolveAwakeable(awakeable, decided);
+      return decided;
     },
 
-    /** What the tenant's tools did: per tool, per user and tool, and the last calls. */
+    /** The tenant's calls, per user and tool. */
     report: (ctx: restate.SqlObjectContext) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
-        const tools = await db.query(
-          `SELECT tool, count(*), sum(outcome = 'ok'), sum(outcome = 'error'), sum(outcome IN ('denied', 'rejected')),
-                  cast(avg(ms) AS INTEGER), max(ms)
-             FROM calls GROUP BY tool ORDER BY tool`,
-        );
-        const users = await db.query(
-          `SELECT user, tool, count(*), cast(avg(ms) AS INTEGER), max(ms)
+        const rows = await db.query(
+          `SELECT user, tool, count(*), sum(outcome = 'ok'), sum(outcome != 'ok'), cast(avg(ms) AS INTEGER)
              FROM calls GROUP BY user, tool ORDER BY user, tool`,
         );
-        const last = await db.query(
-          'SELECT tool, user, caller, outcome, ms, detail FROM calls ORDER BY at DESC, call LIMIT 10',
-        );
-        return {
-          tools: tools.map(([tool, calls, ok, errors, refused, avgMs, maxMs]) => ({
-            tool,
-            calls,
-            ok,
-            errors,
-            refused,
-            avgMs,
-            maxMs,
-          })),
-          users: users.map(([user, tool, calls, avgMs, maxMs]) => ({ user, tool, calls, avgMs, maxMs })),
-          last: last.map(([tool, user, caller, outcome, ms, detail]) => ({ tool, user, caller, outcome, ms, detail })),
-        };
+        return rows.map(([user, tool, calls, ok, failed, avgMs]) => ({ user, tool, calls, ok, failed, avgMs }));
       }),
   },
-  options: {
-    ...restate.sqlOptions,
-    retryPolicy: { initialInterval: 50, maxInterval: 500 },
-  },
+  options: { ...restate.sqlOptions, retryPolicy: { initialInterval: 50, maxInterval: 500 } },
 });
 
 serveIfMain(import.meta, [tenant]);
