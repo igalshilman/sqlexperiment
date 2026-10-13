@@ -1,5 +1,6 @@
 'use strict';
 // SQL over a key/value store implemented in JavaScript. See index.d.ts.
+const { AsyncLocalStorage } = require('node:async_hooks');
 const native = require('./sqlite_kv.node');
 
 const GET = 0;
@@ -39,6 +40,9 @@ async function open(namespace, store) {
   return new Database(await native.open(namespace, dispatch));
 }
 
+// The transaction whose body is running, in that body's asynchronous context.
+const running = new AsyncLocalStorage();
+
 class Database {
   #native;
   // Calls run one at a time, in call order: a transaction holds the session
@@ -50,6 +54,11 @@ class Database {
   }
 
   #serial(operation) {
+    // A call to the session from inside one of its transactions' bodies would
+    // wait for that transaction, which waits for the body: refuse it.
+    if (running.getStore()?.holds(this)) {
+      return Promise.reject(new Error('inside a transaction, use the transaction handle its body gets'));
+    }
     const result = this.#tail.then(operation);
     this.#tail = result.catch(() => {});
     return result;
@@ -79,10 +88,10 @@ class Database {
     return this.#serial(async () => {
       const native = this.#native;
       await native.query('BEGIN');
-      const tx = new Transaction(native);
+      const tx = new Transaction(this, native);
       let result;
       try {
-        result = await body(tx);
+        result = await running.run(tx, () => body(tx));
       } catch (error) {
         tx.end();
         await rollback(native);
@@ -136,10 +145,17 @@ async function rollback(native) {
 
 /** SQL in one transaction, until it ends. */
 class Transaction {
+  #database;
   #native;
 
-  constructor(nativeDatabase) {
+  constructor(database, nativeDatabase) {
+    this.#database = database;
     this.#native = nativeDatabase;
+  }
+
+  /** Whether this transaction is open and holds `database`. */
+  holds(database) {
+    return this.#native !== null && this.#database === database;
   }
 
   #check() {
