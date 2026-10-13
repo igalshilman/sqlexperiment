@@ -176,7 +176,10 @@ fn commit_and_checkpoint_errors_drain_and_keep_the_outcome() -> Result<()> {
                 assert_eq!(store.active(), 0, "the failed phase must drain");
                 store.disarm();
                 if prefix == "v12/page/" {
-                    assert!(result?.cleanup_error.is_some());
+                    let report = result?;
+                    assert!(report.cleanup_error.is_some());
+                    // The checkpoint failed: no page counts as checkpointed.
+                    assert_eq!(report.checkpointed_pages, 0);
                     assert!((2..=16).contains(&store.max_active()), "page puts overlap");
                 } else {
                     assert!(result.is_err());
