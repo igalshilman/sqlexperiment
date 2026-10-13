@@ -8,6 +8,7 @@
     "serve": "node serve.ts",
     "test": "node test.ts",
     "test:concurrency": "node concurrency.ts",
+    "test:node": "vitest run node",
     "test:pi": "vitest run pi",
     "test:langgraph": "vitest run langgraph",
     "test:claude": "vitest run claude",

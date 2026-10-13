@@ -31,7 +31,7 @@ RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
-	test test-core test-addon test-sdk-ts test-pi test-langgraph test-claude test-deepseek test-opencode lint lint-core lint-examples format crash-test concurrency-test restate-server clean
+	test test-core test-addon test-sdk-ts test-node test-pi test-langgraph test-claude test-deepseek test-opencode lint lint-core lint-examples format crash-test concurrency-test restate-server clean
 
 all: core addon examples ## Build everything
 
@@ -63,7 +63,7 @@ examples-js: $(ADDON) $(SDK_TARBALL) ## The TypeScript examples (node/, pi/, lan
 
 # --- Test
 
-test: test-core test-addon test-sdk-ts test-pi test-langgraph test-claude test-deepseek test-opencode ## Every test that needs no Restate server
+test: test-core test-addon test-sdk-ts test-node test-pi test-langgraph test-claude test-deepseek test-opencode ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
@@ -74,6 +74,9 @@ test-addon: $(ADDON) ## The Node.js addon
 
 test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests, and its type tests
 	cd vendor/typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx tsc -p test/tsconfig.types.json && npx vitest run
+
+test-node: examples-js ## The ledger's handlers, without a Restate server
+	cd examples && npm run test:node
 
 test-pi: examples-js ## pi-durable's storage conformance suite on the pi example's storage
 	cd examples && npm run test:pi
