@@ -23,7 +23,7 @@ export class Conversation {
     this.#db = db;
   }
 
-  /** The conversation in `db` (the `db` of `ctx.sqlSession`). */
+  /** The conversation in `db` (`ctx.db`). */
   static async open(db: SqlSession): Promise<Conversation> {
     await db.execute(SCHEMA);
     return new Conversation(db);

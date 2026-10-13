@@ -15,13 +15,12 @@ exactly: its packages are release candidates, and require each other's exact
 versions.
 
 - [`persistence.ts`](persistence.ts): `SqlSessionPersistence`, the
-  harness's session persistence over the object's database (the `db` of
-  `ctx.sqlSession`): each session's header, and its event log, one row per
+  harness's session persistence over the object's database (`ctx.db`): each session's header, and its event log, one row per
   event. An append is kept in memory; a flush, the harness's durability
   barrier, stores what was appended before it in one SQL transaction.
 - [`agent.ts`](agent.ts): a DeepSeekAgent object per conversation. Its
-  handler, `prompt(ctx, { id, text })`, boots the harness in one
-  `ctx.sqlSession`: the services an agent loop needs, the persistence and the
+  handler, `prompt(ctx, { id, text })`, boots the harness over
+  `ctx.db`: the services an agent loop needs, the persistence and the
   harness's session checkpoint policy, and the model adapter. It creates the
   session, or resumes it, gives the agent its bank tools, which move money in
   the [ledger](../node/ledger.ts), and answers the prompt.

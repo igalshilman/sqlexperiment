@@ -7,7 +7,7 @@ database ([SQL in Restate virtual objects](../node/README.md)): one object per
 conversation, which is the LangGraph thread.
 
 - [`checkpointer.ts`](checkpointer.ts): `SqlCheckpointSaver`, a LangGraph
-  checkpointer over the object's database (the `db` of `ctx.sqlSession`).
+  checkpointer over the object's database (`ctx.db`).
   Checkpoints, channel values and pending writes are rows in three tables.
   A step stores only the channels it changed, at their new versions, so a long
   conversation does not store its whole message list again at every step.
@@ -29,7 +29,7 @@ conversation, which is the LangGraph thread.
   ```
 
   Its handler, `prompt(ctx, { id, text })`, compiles the graph with the
-  checkpointer, in one `ctx.sqlSession`, and answers the prompt once per id.
+  checkpointer over `ctx.db`, and answers the prompt once per id.
 
 - [`teller.ts`](teller.ts): a scripted chat model that needs no API key, so
   the agent and its tests run offline. Any LangChain chat model that calls

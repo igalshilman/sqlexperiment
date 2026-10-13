@@ -57,7 +57,7 @@ export class SqlSessionPersistence extends SessionPersistence {
   handles = new Set<SqlSessionHandle>();
   abandoned = false;
 
-  /** `config.db`: the object's database (the `db` of `ctx.sqlSession`). */
+  /** `config.db`: the object's database (`ctx.db`). */
   constructor(ctx: Context, config: { db: SqlSession }) {
     super(ctx);
     this.db = config.db;

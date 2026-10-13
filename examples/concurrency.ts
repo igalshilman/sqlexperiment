@@ -213,18 +213,44 @@ const flow = restate.workflow({
 const database = restate.object({
   name: 'Db',
   handlers: {
-    concurrent: async (ctx: Ctx) =>
-      ctx.sqlSession(async (db) => {
-        await db.execute('CREATE TABLE IF NOT EXISTS t (v INTEGER)');
-        const [, h, r] = await Promise.all([
-          db.execute('INSERT INTO t VALUES (1)'),
-          slow(ctx, 'db', { ms: 100, value: 2 }),
-          ctx.sleep(10).then(() => 3),
-          db.query('SELECT count(*) FROM t'),
-        ]);
-        const [count] = await row<[number]>(db, 'SELECT count(*) FROM t');
-        return { h, r, count };
-      }),
+    concurrent: async (ctx: Ctx) => {
+      const db = ctx.db;
+      await db.execute('CREATE TABLE IF NOT EXISTS t (v INTEGER)');
+      const [, h, r] = await Promise.all([
+        db.execute('INSERT INTO t VALUES (1)'),
+        slow(ctx, 'db', { ms: 100, value: 2 }),
+        ctx.sleep(10).then(() => 3),
+        db.query('SELECT count(*) FROM t'),
+      ]);
+      const [count] = await row<[number]>(db, 'SELECT count(*) FROM t');
+      return { h, r, count };
+    },
+
+    // ctx.sql and ctx.db share the attempt's session: two transactions
+    // started at once run one after the other, and ctx.db sees both.
+    shared: async (ctx: Ctx) => {
+      await ctx.sql((db) => db.execute('CREATE TABLE IF NOT EXISTS u (v INTEGER)'));
+      const insert = () =>
+        ctx.sql(async (db) => {
+          const [n] = await row<[number]>(db, 'SELECT count(*) FROM u');
+          await db.execute('INSERT INTO u VALUES (?)', [n]);
+          return n;
+        });
+      const seen = await Promise.all([insert(), insert()]);
+      const [count] = await row<[number]>(ctx.db, 'SELECT count(*) FROM u');
+      return { seen, count };
+    },
+
+    nested: async (ctx: Ctx) => {
+      try {
+        await ctx.sql(() => ctx.db.query('SELECT 1'));
+        return 'ran';
+      } catch (e) {
+        return { terminal: e instanceof restate.TerminalError, message: (e as Error).message };
+      }
+    },
+
+    sqlError: async (ctx: Ctx) => ctx.db.execute('SELECT * FROM missing'),
   },
   options: { ...restate.sqlOptions },
 });
@@ -400,8 +426,25 @@ await check("a workflow's durable promise is a plain promise", async () => {
   assert.deepEqual(output, { promise: true, map: 'undefined', value: 'yes' });
 });
 
-await check('ctx.sqlSession with statements, a call and a sleep at once', async () => {
+await check('ctx.db with statements, a call and a sleep at once', async () => {
   assert.deepEqual((await call('Db/d/concurrent')).value, { h: 2, r: 3, count: 1 });
+});
+
+await check('ctx.sql and ctx.db share one session; transactions queue', async () => {
+  assert.deepEqual((await call('Db/s/shared')).value, { seen: [0, 1], count: 2 });
+});
+
+await check('a call to ctx.db inside ctx.sql is refused, with a terminal error', async () => {
+  assert.deepEqual((await call('Db/n/nested')).value, {
+    terminal: true,
+    message: 'inside a transaction, use the transaction handle its body gets',
+  });
+});
+
+await check('an SQL error that the handler fails with is terminal', async () => {
+  const started = Date.now();
+  await assert.rejects(call('Db/e/sqlError'), /no such table: missing/);
+  assert.ok(Date.now() - started < 5000, 'retried'); // terminal: not retried
 });
 
 console.log(failed === 0 ? 'all passed' : `${failed} failed`);

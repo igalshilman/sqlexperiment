@@ -1,6 +1,6 @@
 // OpenCode on the object's database: `openOpenCode(db, options)` boots
 // OpenCode 2.0's embedded host (@opencode/sdk) with its database in a
-// sqlite-kv session, `ctx.sqlSession`'s database.
+// sqlite-kv session, `ctx.db`.
 //
 // The host is OpenCode's workerd profile, the one it boots in a Cloudflare
 // Durable Object: no local filesystem, shell, terminal or version control,

@@ -4,7 +4,7 @@
 //   prompt: (ctx, { id, text }) =>
 //     withOpenCode(ctx, { plugins, model, tools }, (opencode) => opencode.prompt(id, text)),
 //
-// It runs `work` in one `ctx.sqlSession`: OpenCode's tables are the object's
+// It runs `work` over `ctx.db`: OpenCode's tables are the object's
 // database (opencode-db.ts), and each OpenCode transaction is an SQL
 // transaction in it, stored in order with everything else the handler does.
 // OpenCode is booted with `plugins` and a plugin of the `tools`, and closed at
@@ -168,69 +168,69 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
  * `tools` the agent's tools. `opencode` has `prompt(id, text)`, and the
  * OpenCode `host` for anything else.
  */
-export const withOpenCode = <T>(
+export const withOpenCode = async <T>(
   ctx: restate.SqlObjectContext,
   { plugins = [], model, tools = [] }: OpenCodeOptions,
   work: (opencode: OpenCodeSession) => Promise<T>,
-): Promise<T> =>
-  ctx.sqlSession(async (db) => {
-    const fence: Fence = { closed: false };
-    let failed!: (error: unknown) => void;
-    const failure = new Promise<never>((_, reject) => (failed = reject));
-    failure.catch(() => {});
-    // A tool's error ends the attempt: nothing more is stored, and the tool
-    // call never returns, so OpenCode does not go on without it.
-    const fail = (error: unknown) => {
-      fence.closed = true;
-      failed(error);
-      return new Promise<never>(() => {});
-    };
-    const host = await openOpenCode(db, fence, {
-      plugins: [...plugins, toolsPlugin(tools, fail)],
-      config: { default_agent: 'build' },
-    });
-    try {
-      return await Promise.race([
-        failure,
-        work({
-          host,
-          async prompt(id, text) {
-            const messageId = `msg_${id}`;
-            const { session } = host.client;
-            const sessionID = SESSION as never;
-            try {
-              await host.call(session.get({ sessionID }));
-            } catch {
-              await host.call(session.create({ id: sessionID, model: model as never, agent: 'build' as never }));
-            }
-            // The outcome of prompt `of`, once its turn has ended.
-            const settled = async (of: string) => {
-              for (;;) {
-                const now = await outcome(host, of);
-                if (now.state !== 'running') return now;
-                await host.call(session.wait({ sessionID }));
-                // A turn resumed at boot may not have started yet.
-                const active: Record<string, unknown> = await host.call(session.active());
-                if (active[SESSION] === undefined) await new Promise((r) => setTimeout(r, 20));
-              }
-            };
-            if ((await outcome(host, messageId)).state === 'absent') {
-              // A prompt a crash interrupted finishes first: queued now, the
-              // new prompt would join its resumed turn.
-              const last = await lastPrompt(host);
-              if (last !== undefined) await settled(last);
-              await host.call(
-                session.prompt({ sessionID, id: messageId as never, text, delivery: 'queue', resume: true }),
-              );
-            }
-            const now = await settled(messageId);
-            if (now.state === 'answered') return now.text;
-            if (now.state === 'failed') throw new restate.TerminalError(`prompt ${id} unanswered: ${now.reason}`);
-            throw new Error(`prompt ${id} is not in the session`);
-          },
-        }),
-      ]);
-    } finally {
-      await host.close();
-    }
+): Promise<T> => {
+  const db = ctx.db;
+  const fence: Fence = { closed: false };
+  let failed!: (error: unknown) => void;
+  const failure = new Promise<never>((_, reject) => (failed = reject));
+  failure.catch(() => {});
+  // A tool's error ends the attempt: nothing more is stored, and the tool
+  // call never returns, so OpenCode does not go on without it.
+  const fail = (error: unknown) => {
+    fence.closed = true;
+    failed(error);
+    return new Promise<never>(() => {});
+  };
+  const host = await openOpenCode(db, fence, {
+    plugins: [...plugins, toolsPlugin(tools, fail)],
+    config: { default_agent: 'build' },
   });
+  try {
+    return await Promise.race([
+      failure,
+      work({
+        host,
+        async prompt(id, text) {
+          const messageId = `msg_${id}`;
+          const { session } = host.client;
+          const sessionID = SESSION as never;
+          try {
+            await host.call(session.get({ sessionID }));
+          } catch {
+            await host.call(session.create({ id: sessionID, model: model as never, agent: 'build' as never }));
+          }
+          // The outcome of prompt `of`, once its turn has ended.
+          const settled = async (of: string) => {
+            for (;;) {
+              const now = await outcome(host, of);
+              if (now.state !== 'running') return now;
+              await host.call(session.wait({ sessionID }));
+              // A turn resumed at boot may not have started yet.
+              const active: Record<string, unknown> = await host.call(session.active());
+              if (active[SESSION] === undefined) await new Promise((r) => setTimeout(r, 20));
+            }
+          };
+          if ((await outcome(host, messageId)).state === 'absent') {
+            // A prompt a crash interrupted finishes first: queued now, the
+            // new prompt would join its resumed turn.
+            const last = await lastPrompt(host);
+            if (last !== undefined) await settled(last);
+            await host.call(
+              session.prompt({ sessionID, id: messageId as never, text, delivery: 'queue', resume: true }),
+            );
+          }
+          const now = await settled(messageId);
+          if (now.state === 'answered') return now.text;
+          if (now.state === 'failed') throw new restate.TerminalError(`prompt ${id} unanswered: ${now.reason}`);
+          throw new Error(`prompt ${id} is not in the session`);
+        },
+      }),
+    ]);
+  } finally {
+    await host.close();
+  }
+};

@@ -8,8 +8,8 @@ again. Here its storage is a Restate virtual object's SQL database
 ([SQL in Restate virtual objects](../node/README.md)).
 
 - [`with-pi.ts`](with-pi.ts): `withPi(ctx, { models, model, tools }, work)`
-  runs `work` with a pi-durable Harness over the object's database, in one
-  `ctx.sqlSession`, and closes it at the end. `pi.prompt(id, text)` answers a
+  runs `work` with a pi-durable Harness over the object's database, `ctx.db`,
+  and closes it at the end. `pi.prompt(id, text)` answers a
   prompt once per id: it submits the prompt, waits for the answer, records it,
   and returns its text. A retried attempt (a crash, a lost connection) opens
   the Harness again and carries on:

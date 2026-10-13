@@ -135,22 +135,22 @@ async function run(ctx: restate.SqlObjectContext, conversation: Conversation, id
 }
 
 /** Answer prompt `text`, once per prompt `id`. */
-export const prompt = (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) =>
-  ctx.sqlSession(async (db) => {
-    const conversation = await Conversation.open(db);
-    for (;;) {
-      const answer = await conversation.answer(id);
-      if (answer !== undefined) return { answer };
-      // Finish an interrupted prompt first (this one's, after a crash),
-      // then start this one.
-      let pending = await conversation.pending();
-      if (pending === undefined) {
-        await conversation.append(id, [{ role: 'user', content: text }]);
-        pending = id;
-      }
-      await run(ctx, conversation, pending);
+export const prompt = async (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) => {
+  const db = ctx.db;
+  const conversation = await Conversation.open(db);
+  for (;;) {
+    const answer = await conversation.answer(id);
+    if (answer !== undefined) return { answer };
+    // Finish an interrupted prompt first (this one's, after a crash),
+    // then start this one.
+    let pending = await conversation.pending();
+    if (pending === undefined) {
+      await conversation.append(id, [{ role: 'user', content: text }]);
+      pending = id;
     }
-  });
+    await run(ctx, conversation, pending);
+  }
+};
 
 export const agent = restate.object({
   name: 'ClaudeAgent',

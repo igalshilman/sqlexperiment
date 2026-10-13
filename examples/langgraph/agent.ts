@@ -105,19 +105,19 @@ function graph(ctx: restate.SqlObjectContext, model: Teller) {
 const model = new Teller({});
 
 /** Answer prompt `text`, once per prompt `id`. */
-export const prompt = (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) =>
-  ctx.sqlSession(async (db) => {
-    const app = graph(ctx, model).compile({ checkpointer: new SqlCheckpointSaver(db) });
-    const config = { configurable: { thread_id: ctx.key }, durability: 'sync' as const };
-    for (;;) {
-      const state = await app.getState(config);
-      const answer = state.values.answers?.[id];
-      if (answer !== undefined) return { answer };
-      // Finish an interrupted run first (this prompt's, after a crash),
-      // then start this prompt's.
-      await app.invoke(state.next.length > 0 ? null : { messages: [new HumanMessage(text)], prompt: id }, config);
-    }
-  });
+export const prompt = async (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) => {
+  const db = ctx.db;
+  const app = graph(ctx, model).compile({ checkpointer: new SqlCheckpointSaver(db) });
+  const config = { configurable: { thread_id: ctx.key }, durability: 'sync' as const };
+  for (;;) {
+    const state = await app.getState(config);
+    const answer = state.values.answers?.[id];
+    if (answer !== undefined) return { answer };
+    // Finish an interrupted run first (this prompt's, after a crash),
+    // then start this prompt's.
+    await app.invoke(state.next.length > 0 ? null : { messages: [new HumanMessage(text)], prompt: id }, config);
+  }
+};
 
 export const agent = restate.object({
   name: 'GraphAgent',
