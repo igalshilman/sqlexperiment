@@ -23,6 +23,9 @@ One npm package, here, on the patched Restate TypeScript SDK and the
 - [`deepseek/`](deepseek/README.md): an agent on the DeepSeek Harness, whose
   event-sourced session is in the object's database, through a session
   persistence plugin.
+- [`opencode/`](opencode/README.md): OpenCode 2.0, embedded, whose database
+  (sessions, messages, durable events) is the object's database, through an
+  injected SQL client.
 - [`serve.ts`](serve.ts): serves them in one endpoint (`npm run serve`).
 - [`faults.ts`](faults.ts): fault injection for the crash test.
 - [`test.ts`](test.ts): all of them against a real Restate server, through
@@ -32,9 +35,9 @@ One npm package, here, on the patched Restate TypeScript SDK and the
 
 ## TypeScript
 
-The examples are TypeScript that Node runs as it is (type stripping, Node
-22.18 or later): `node serve.ts`, `node test.ts`; vitest runs the tests. So
-they use only syntax that erases (no enums, namespaces or parameter
+The examples are TypeScript that Node runs as it is (type stripping, Node 24
+or later, which OpenCode needs): `node serve.ts`, `node test.ts`; vitest runs
+the tests. So they use only syntax that erases (no enums, namespaces or parameter
 properties), and import each other by their `.ts` names.
 
 - [`tsconfig.json`](tsconfig.json): type checking only, strict, with
@@ -74,7 +77,12 @@ DeepSeek Harness agents too, in a fifth process aborting at 0.3% (a prompt
 resumes the session from its stored log, some hundreds of state requests), it
 passed twice: 128 transfers, one per prompt, with 11 and 18 restarts of their
 process. In TypeScript, every example included, it passed twice again, with 10
-and 14 restarts of the DeepSeek Harness agents' process.
+and 14 restarts of the DeepSeek Harness agents' process. With the OpenCode
+agents too, in a sixth process aborting at 0.1% (a prompt makes some hundreds
+of state requests, and the process takes seconds to start), it passed twice on
+Node 24: 160 transfers, one per prompt, with 44 and 32 restarts of their
+process. Its first run found that OpenCode gives up on a turn after ten
+resumes; see [`opencode/`](opencode/README.md#through-crashes).
 
 ```sh
 make crash-test
