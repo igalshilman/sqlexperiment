@@ -94,33 +94,45 @@ export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.S
       return Effect.callback<A, E | SqlError, R>((resume) => {
         const rollback = new Error('rollback');
         let interrupted = false;
-        const committed: Promise<void> = db
-          .transaction(
-            (tx) =>
-              new Promise<void>((resolve, reject) => {
-                if (interrupted) return reject(rollback);
-                const inner = Effect.provideContext(
-                  effect,
-                  Context.add(fiber.context, InTransaction, [connectionOf(tx), 0]),
-                );
-                resume(
-                  Effect.onExit(inner, (exit) => {
-                    if (Exit.isFailure(exit)) reject(rollback);
-                    else resolve();
-                    // The commit is part of the transaction.
-                    return Effect.tryPromise({ try: () => committed, catch: (e) => error('commit', e) }).pipe(
-                      Effect.ignore,
+        let resumed = false;
+        // Settles when the transaction has committed, or rejects: with
+        // `rollback` once `effect` failed, or with the error of BEGIN or COMMIT.
+        const ended: Promise<void> = db.transaction(
+          (tx) =>
+            new Promise<void>((resolve, reject) => {
+              if (interrupted) return reject(rollback);
+              const inner = Effect.provideContext(
+                effect,
+                Context.add(fiber.context, InTransaction, [connectionOf(tx), 0]),
+              );
+              resumed = true;
+              resume(
+                Effect.flatMap(Effect.exit(inner), (exit) => {
+                  if (Exit.isFailure(exit)) {
+                    reject(rollback);
+                    return Effect.flatMap(
+                      Effect.promise(() => settled),
+                      () => exit,
                     );
-                  }),
-                );
-              }),
-          )
-          .catch((cause: unknown) => {
-            if (cause !== rollback) resume(Effect.fail(error('transaction', cause)));
-          });
+                  }
+                  resolve();
+                  // The commit is part of the transaction: if it fails, so
+                  // does the transaction.
+                  return Effect.flatMap(
+                    Effect.tryPromise({ try: () => ended, catch: (e) => error('commit', e) }),
+                    () => exit,
+                  );
+                }),
+              );
+            }),
+        );
+        const settled = ended.catch((cause: unknown) => {
+          // BEGIN failed: `effect` never ran.
+          if (!resumed && cause !== rollback) resume(Effect.fail(error('transaction', cause)));
+        });
         return Effect.suspend(() => {
           interrupted = true;
-          return Effect.promise(() => committed);
+          return Effect.promise(() => settled);
         });
       });
     });
