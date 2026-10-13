@@ -56,9 +56,9 @@ including calls and the response. A library that wants a database for the
 handler's work gets `ctx.db`: the [pi example](../pi/README.md) runs
 pi-durable's storage this way.
 
-An SQL error that the handler fails with is terminal, since a retry would
-repeat it (`ctx.transaction` rejects with it as a `TerminalError`); a storage error is
-retried. The handler's own errors are as in any handler: a `TerminalError` is
+An SQL error rejects as a `TerminalError` (its `cause` the SQL error), from
+`ctx.db` and `ctx.transaction` alike, since a retry would repeat it; a storage
+error, which ends the session, is retried. The handler's own errors are as in any handler: a `TerminalError` is
 terminal, and any other error, such as a failed request to a model or another
 service, is retried. Creating tables is up to the handlers, such as `init`.
 
