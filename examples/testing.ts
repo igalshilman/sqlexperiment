@@ -108,19 +108,20 @@ export function conversation(handler: PromptHandler, key: string) {
   let n = 0;
   const ledger: FakeLedger = { transfers: new Map(), calls: [], crashNext: 0, failNext: 0, crashed: () => {} };
   const books = {
-    async transfer(transfer: Transfer, opts: restate.Opts<Transfer, boolean>) {
+    async transfer(transfer: Transfer, opts: restate.Opts<Transfer, Transfer>) {
       ledger.calls.push({ name: 'transfer', id: transfer.id, key: opts.getOpts().idempotencyKey });
       if (!ledger.transfers.has(transfer.id)) ledger.transfers.set(transfer.id, transfer);
+      const applied = ledger.transfers.get(transfer.id)!;
       if (ledger.crashNext > 0) {
         ledger.crashNext--;
         ledger.crashed();
-        return new Promise<boolean>(() => {});
+        return new Promise<Transfer>(() => {});
       }
       if (ledger.failNext > 0) {
         ledger.failNext--;
         throw new Error('crash after the transfer');
       }
-      return true;
+      return applied;
     },
     async audit(): Promise<Audit> {
       return { accounts: 8, total: 8000, transfers: ledger.transfers.size, inconsistent: 0 };

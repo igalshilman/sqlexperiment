@@ -55,7 +55,9 @@ do about what it was doing. So:
   dedupes on; so a retried transfer moves the money once. Its call to the
   ledger has an idempotency key made from the request id
   (`ctx.request().id`, the same on every attempt) and the transfer id, so a
-  retried attempt reaches the call the first one made.
+  retried attempt reaches the call the first one made. The tool reports the
+  transfer the ledger applied, so a retry whose details differ from the call
+  it names says what really moved.
 - **A tool's error fails the attempt**, and Restate retries it. By default the
   harness would hand the error to the model as the tool's result. The failed
   attempt stores nothing more (`abandon()`), so its retry finds the call

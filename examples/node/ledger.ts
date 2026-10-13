@@ -40,15 +40,19 @@ export const handlers = {
     }),
 
   /**
-   * Move money between two accounts; false if this transfer id was applied
-   * before. A transfer that would create or destroy money is refused: an
-   * account that does not exist, or an amount that is not a positive
-   * integer.
+   * Move money between two accounts, once per transfer id, and return the
+   * transfer as applied: a transfer id applied before returns the stored
+   * transfer, whatever this request says, so the caller reports what moved.
+   * A transfer that would create or destroy money is refused: an account that
+   * does not exist, or an amount that is not a positive integer.
    */
   transfer: (ctx: restate.SqlObjectContext, t: Transfer) =>
-    ctx.sql(async (db) => {
-      const seen = await db.query('SELECT 1 FROM transfers WHERE id = ?', [t.id]);
-      if (seen.length > 0) return false;
+    ctx.sql(async (db): Promise<Transfer> => {
+      const [seen] = await db.query('SELECT src, dst, amount FROM transfers WHERE id = ?', [t.id]);
+      if (seen) {
+        const [from, to, amount] = seen as [number, number, number];
+        return { id: t.id, from, to, amount };
+      }
       if (!Number.isSafeInteger(t.amount) || t.amount <= 0) {
         throw new restate.TerminalError(`transfer ${t.id}: the amount ${t.amount} is not a positive integer`);
       }
@@ -58,7 +62,7 @@ export const handlers = {
       await db.execute('INSERT INTO transfers VALUES(?, ?, ?, ?)', [t.id, t.from, t.to, t.amount]);
       await db.execute('UPDATE accounts SET balance = balance - ?1 WHERE id = ?2', [t.amount, t.from]);
       await db.execute('UPDATE accounts SET balance = balance + ?1 WHERE id = ?2', [t.amount, t.to]);
-      return true;
+      return { id: t.id, from: t.from, to: t.to, amount: t.amount };
     }),
 
   /** Totals, and accounts that disagree with the recorded transfers. */

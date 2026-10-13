@@ -51,8 +51,11 @@ const bank = (ctx: restate.SqlObjectContext): BetaRunnableTool[] => {
       }),
       run: async ({ from, to, amount }, context) => {
         const id = `ClaudeAgent/${ctx.key}/${callId(context)}`; // unique in the ledger
-        await books.transfer({ id, from, to, amount }, restate.rpc.opts({ idempotencyKey: key(context) }));
-        return `moved ${amount} from account ${from} to account ${to}`;
+        const applied = await books.transfer(
+          { id, from, to, amount },
+          restate.rpc.opts({ idempotencyKey: key(context) }),
+        );
+        return `moved ${applied.amount} from account ${applied.from} to account ${applied.to}`;
       },
     }),
     betaZodTool({
