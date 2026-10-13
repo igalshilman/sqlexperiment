@@ -16,15 +16,12 @@ CORE := sqlite-kv
 ADDON := $(CORE)/node/sqlite_kv.node
 # The tests against a Restate server run a released restate-server: by default
 # RESTATE_VERSION's, downloaded from its GitHub release for this platform. Or
-# RESTATE_FROM=image takes it out of RESTATE_IMAGE with docker (Linux only),
-# RESTATE_FROM=source builds it from RESTATE_REV with cargo, or set
-# RESTATE_SERVER to a restate-server binary.
+# RESTATE_FROM=image takes it out of RESTATE_IMAGE with docker (Linux only), or
+# set RESTATE_SERVER to a restate-server binary.
 RESTATE_VERSION ?= 1.7.13
 RESTATE_FROM ?= release
 RESTATE_IMAGE ?= ghcr.io/restatedev/restate:$(RESTATE_VERSION)
-RESTATE_REV ?= v$(RESTATE_VERSION)
 RESTATE_SERVER ?= $(CARGO_TARGET_DIR)/restate/restate-server
-RESTATE_CHECKOUT := $(CARGO_TARGET_DIR)/restate-checkout
 export RESTATE_SERVER
 RESTATE_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
 ifeq ($(shell uname -s),Darwin)
@@ -110,23 +107,12 @@ crash-test: examples-js $(RESTATE_SERVER) ## Every TypeScript example through cr
 concurrency-test: examples-js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
 	cd examples && node concurrency.ts
 
-restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker) or RESTATE_REV (cargo), per RESTATE_FROM
+restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
 
-# From source: in a checkout, for restate's own cargo config (its rustflags),
-# with its own target directory; without LTO, which a test server does not need
-# and which takes most of the build's time.
 $(RESTATE_SERVER):
 	mkdir -p $(dir $@)
-ifeq ($(RESTATE_FROM),source)
-	rm -rf $(RESTATE_CHECKOUT) && git init -q $(RESTATE_CHECKOUT)
-	git -C $(RESTATE_CHECKOUT) fetch -q --depth 1 https://github.com/restatedev/restate.git $(RESTATE_REV)
-	git -C $(RESTATE_CHECKOUT) checkout -q FETCH_HEAD
-	cd $(RESTATE_CHECKOUT) && CARGO_TARGET_DIR=$(RESTATE_CHECKOUT)/target \
-		CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-		$(CARGO) build --locked --release -p restate-server
-	cp $(RESTATE_CHECKOUT)/target/release/restate-server $@
-else ifeq ($(RESTATE_FROM),image)
+ifeq ($(RESTATE_FROM),image)
 	docker pull -q $(RESTATE_IMAGE)
 	id=$$(docker create $(RESTATE_IMAGE)) && docker cp -q $$id:/usr/local/bin/restate-server $@; docker rm $$id > /dev/null
 else

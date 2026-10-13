@@ -104,6 +104,5 @@ make concurrency-test
 
 Both run a released Restate server (see [the requirements](../README.md#requirements)):
 by default the Makefile downloads `restate-server` from the `RESTATE_VERSION`
-release for this platform. Set `RESTATE_FROM=image` (docker, from
-`RESTATE_IMAGE`) or `source` (cargo, from `RESTATE_REV`) to get it otherwise,
-or `RESTATE_SERVER` to a binary.
+release for this platform. Set `RESTATE_FROM=image` to take it out of
+`RESTATE_IMAGE` with docker instead, or `RESTATE_SERVER` to a binary.
