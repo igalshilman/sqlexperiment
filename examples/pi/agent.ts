@@ -2,8 +2,9 @@
 // whose pi-durable storage is the object's database (see with-pi.ts).
 //
 // Its tools move money in the ledger (../node/ledger.ts), with the tool call
-// id as the transfer id, so a tool call run again after a crash moves the
-// money once. Each call to the ledger has an idempotency key made from the
+// id as the transfer id (prefixed with the agent's key: the ledger is shared,
+// and a model's call ids need not be unique beyond its session), so a tool
+// call run again after a crash moves the money once. Each call to the ledger has an idempotency key made from the
 // request id (`ctx.request().id`, the same on every attempt) and the tool
 // call id, so a retried attempt reaches the call the first one made.
 //
@@ -36,7 +37,7 @@ const bank = (ctx: restate.SqlObjectContext) => {
         // One key per tool call: an invocation makes many.
         const idempotencyKey = `${ctx.request().id}:${api.callId}`;
         const applied = await books.transfer(
-          { id: api.callId, from, to, amount },
+          { id: `Agent/${ctx.key}/${api.callId}`, from, to, amount }, // unique in the ledger
           restate.rpc.opts({ idempotencyKey }),
         );
         return {
