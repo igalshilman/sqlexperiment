@@ -55,6 +55,22 @@ The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear`, and the barrier is an empty `ctx.run`. The SDK loads
 the sqlite-kv addon, an optional peer dependency, on first use.
 
+**The database is the object's state.** Its keys (`v12/meta`, `v12/log/…`,
+`v12/page/…`, `v12/hint`) sit next to the object's other state keys, so
+`ctx.clearAll()` in any handler of the object deletes the database, a handler's
+own key starting with `v12/` corrupts it, and `ctx.stateKeys()` lists its
+pages. Keep other state out of `v12/`, and do not clear all of an object that
+uses `ctx.sql`. (Reserving the prefix in the SDK is future work.)
+
+**One cluster per process.** The page cache knows a database by its namespace,
+`service/key`, and trusts what it cached while the database's `meta` and log
+look as it left them; nothing identifies the database itself. A process
+registered with two Restate clusters (staging and production, or a dev
+cluster wiped and recreated) could take one cluster's `Ledger/bank` for the
+other's and serve its cached pages. Run one process per cluster, or give each
+its own `SQLITE_KV_CACHE_FILE` and restart it after recreating a cluster.
+(A database id in `meta` is future work.)
+
 ## How it works
 
 **State access.** A get is a state read, from the runtime unless this attempt
