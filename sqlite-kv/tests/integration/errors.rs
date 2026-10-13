@@ -261,3 +261,27 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
         Ok(())
     })
 }
+
+/// A `transaction` whose `BEGIN` fails with an SQL error, inside a transaction
+/// the caller began: the error is returned, and the session goes on.
+#[test]
+fn a_transaction_whose_begin_fails_leaves_the_session_usable() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let mut db = Session::open_with_options(store, options(Durability::Commit)).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
+            .await?;
+        db.execute("BEGIN").await?;
+        let error = db
+            .transaction(async |db| db.execute("INSERT INTO t VALUES(1, 1)").await)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("transaction"), "{error}");
+        assert!(db.is_usable());
+        // The caller's transaction is still open, and commits.
+        db.execute("INSERT INTO t VALUES(2, 2)").await?;
+        db.execute("COMMIT").await?;
+        assert_eq!(rows(&mut db).await?, vec![(2, 2)]);
+        Ok(())
+    })
+}

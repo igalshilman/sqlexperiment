@@ -550,7 +550,12 @@ impl Session {
             abandoned: self.abandoned.clone(),
             finished: false,
         };
-        self.execute("BEGIN").await?;
+        if let Err(error) = self.execute("BEGIN").await {
+            // No transaction began: an SQL error (such as one already open)
+            // leaves the session usable, and a storage error has ended it.
+            guard.finished = true;
+            return Err(error);
+        }
         self.in_body = true;
         let result = body(self).await;
         self.in_body = false;
