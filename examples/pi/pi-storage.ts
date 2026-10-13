@@ -3,8 +3,10 @@
 // (in Restate, the `db` of `ctx.sqlSession`), which has `query`,
 // `queryColumns`, `execute` and `transaction(body)`.
 //
-// Operations run one at a time, in call order, as the facade requires. A
-// statement outside a transaction is its own transaction.
+// The facade's operations must run one at a time, a transaction excluding
+// every other: the session does that, and a transaction's handle is invalid
+// once its body settles. A statement outside a transaction is its own
+// transaction.
 import type { SqlDatabase, SqlSession } from '@restatedev/restate-sdk';
 import {
   SqliteStorage,
@@ -13,95 +15,45 @@ import {
   type SqliteValue,
 } from '@earendil-works/pi-durable/storage/sqlite';
 
-/** Runs operations one at a time in call order. */
-class SerialQueue {
-  tail: Promise<unknown> = Promise.resolve();
-  run<T>(operation: () => T | Promise<T>): Promise<T> {
-    const result = this.tail.then(operation);
-    this.tail = result.catch(() => {});
-    return result;
-  }
-}
-
 const objects = <T>({ columns, rows }: { columns: string[]; rows: unknown[][] }): T[] =>
   rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]])) as T);
 
-/** SQL through one transaction's `db`. */
+/** SQL through `db`: the session, or one transaction's. */
 class Executor implements SqliteExecutor {
   readonly db: SqlDatabase;
   constructor(db: SqlDatabase) {
     this.db = db;
   }
-  check() {}
   async exec(sql: string) {
-    this.check();
     await this.db.execute(sql);
   }
   async run(sql: string, ...params: SqliteValue[]) {
-    this.check();
     await this.db.execute(sql, params);
   }
   async get<T extends object>(sql: string, ...params: SqliteValue[]): Promise<T | undefined> {
     return (await this.all<T>(sql, ...params))[0];
   }
   async all<T extends object>(sql: string, ...params: SqliteValue[]): Promise<T[]> {
-    this.check();
     return objects<T>(await this.db.queryColumns(sql, params));
   }
 }
 
-/** The handle a transaction callback receives; invalid once the callback settles. */
-class Transaction extends Executor {
-  active = true;
-  override check() {
-    if (!this.active) throw new Error('SQLite transaction handle is no longer active');
-  }
-}
-
 /** The `SqliteDatabase` facade over the session `db`. */
-export class SqlKvDatabase implements SqliteDatabase {
-  #queue = new SerialQueue();
-  #db: SqlSession;
+export class SqlKvDatabase extends Executor implements SqliteDatabase {
+  readonly #session: SqlSession;
 
   constructor(db: SqlSession) {
-    this.#db = db;
-  }
-
-  #one<T>(operation: (executor: Executor) => Promise<T>): Promise<T> {
-    return this.#queue.run(() => operation(new Executor(this.#db)));
-  }
-
-  exec(sql: string) {
-    return this.#one((executor) => executor.exec(sql));
-  }
-  run(sql: string, ...params: SqliteValue[]) {
-    return this.#one((executor) => executor.run(sql, ...params));
-  }
-  get<T extends object>(sql: string, ...params: SqliteValue[]) {
-    return this.#one((executor) => executor.get<T>(sql, ...params));
-  }
-  all<T extends object>(sql: string, ...params: SqliteValue[]) {
-    return this.#one((executor) => executor.all<T>(sql, ...params));
+    super(db);
+    this.#session = db;
   }
 
   /** Commits when the callback resolves; rolls back, and rejects with its error, when it rejects. */
   transaction<T>(callback: (transaction: SqliteExecutor) => Promise<T>): Promise<T> {
-    return this.#queue.run(() =>
-      this.#db.transaction(async (db) => {
-        const transaction = new Transaction(db);
-        try {
-          return await callback(transaction);
-        } finally {
-          transaction.active = false;
-        }
-      }),
-    );
+    return this.#session.transaction((tx) => callback(new Executor(tx)));
   }
 
-  /** Waits for queued work; the session is the caller's to end. */
-  close() {
-    return this.#queue.run(() => {});
-  }
+  /** The session is the caller's to end, after the calls made before. */
+  async close() {}
 }
 
 /** Open pi-durable storage on the session `db`. */

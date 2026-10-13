@@ -142,6 +142,26 @@ async function outcome(host: Host, messageId: string) {
   return { state: 'running' } as const;
 }
 
+/** The id of the session's latest prompt, if any. */
+async function lastPrompt(host: Host): Promise<string | undefined> {
+  const { session, message } = host.client;
+  const inbox: { id: string }[] = await host.call(session.inbox.list({ sessionID: SESSION as never }));
+  if (inbox.length > 0) return inbox.at(-1)!.id;
+  for (let cursor: string | undefined; ;) {
+    const page: { data: Message[]; cursor: { next?: string | null } } = await host.call(
+      message.list(
+        cursor === undefined
+          ? { sessionID: SESSION as never, order: 'desc', limit: 50 }
+          : { sessionID: SESSION as never, cursor },
+      ),
+    );
+    const user = page.data.find((m) => m.type === 'user');
+    if (user) return user.id;
+    cursor = page.cursor.next ?? undefined;
+    if (cursor === undefined) return undefined;
+  }
+}
+
 /**
  * Run `work(opencode)` with OpenCode over the object's database: `model` is
  * the session's model, `plugins` OpenCode plugins (such as the model's), and
@@ -183,21 +203,30 @@ export const withOpenCode = <T>(
             } catch {
               await host.call(session.create({ id: sessionID, model: model as never, agent: 'build' as never }));
             }
+            // The outcome of prompt `of`, once its turn has ended.
+            const settled = async (of: string) => {
+              for (;;) {
+                const now = await outcome(host, of);
+                if (now.state !== 'running') return now;
+                await host.call(session.wait({ sessionID }));
+                // A turn resumed at boot may not have started yet.
+                const active: Record<string, unknown> = await host.call(session.active());
+                if (active[SESSION] === undefined) await new Promise((r) => setTimeout(r, 20));
+              }
+            };
             if ((await outcome(host, messageId)).state === 'absent') {
+              // A prompt a crash interrupted finishes first: queued now, the
+              // new prompt would join its resumed turn.
+              const last = await lastPrompt(host);
+              if (last !== undefined) await settled(last);
               await host.call(
                 session.prompt({ sessionID, id: messageId as never, text, delivery: 'queue', resume: true }),
               );
             }
-            for (;;) {
-              const now = await outcome(host, messageId);
-              if (now.state === 'answered') return now.text;
-              if (now.state === 'failed') throw new restate.TerminalError(`prompt ${id} unanswered: ${now.reason}`);
-              if (now.state === 'absent') throw new Error(`prompt ${id} is not in the session`);
-              await host.call(session.wait({ sessionID }));
-              // A turn resumed at boot may not have started yet.
-              const active: Record<string, unknown> = await host.call(session.active());
-              if (active[SESSION] === undefined) await new Promise((r) => setTimeout(r, 20));
-            }
+            const now = await settled(messageId);
+            if (now.state === 'answered') return now.text;
+            if (now.state === 'failed') throw new restate.TerminalError(`prompt ${id} unanswered: ${now.reason}`);
+            throw new Error(`prompt ${id} is not in the session`);
           },
         }),
       ]);

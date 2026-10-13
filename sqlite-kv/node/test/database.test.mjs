@@ -149,3 +149,24 @@ test('a write the store rejects is reported by the next sync', async () => {
   await db.execute('CREATE TABLE t(id INTEGER)');
   await assert.rejects(db.save(), /state is closed/);
 });
+
+test('a transaction holds the session: other calls wait until it ends', async () => {
+  const db = await open(fresh(), new Backend().request());
+  await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY)');
+  let handle;
+  const rolledBack = db.transaction(async (tx) => {
+    handle = tx;
+    await tx.execute('INSERT INTO t VALUES(1)');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    throw new Error('abort');
+  });
+  // Issued while the transaction waits: neither runs inside it.
+  const write = db.execute('INSERT INTO t VALUES(2)');
+  const committed = db.transaction(async (tx) => tx.execute('INSERT INTO t VALUES(3)'));
+  await assert.rejects(rolledBack, /abort/);
+  await write;
+  await committed;
+  assert.deepEqual(await db.query('SELECT id FROM t ORDER BY id'), [[2], [3]]);
+  await assert.rejects(async () => handle.query('SELECT 1'), /the transaction has ended/);
+  await db.save();
+});

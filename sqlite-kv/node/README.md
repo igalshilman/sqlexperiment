@@ -39,8 +39,11 @@ before a later read of its key, and every write before a `sync`. A `set` or
 ## Sessions and the page cache
 
 `open` returns a session of the namespace's database. Each SQL commit is
-durable once its writes are; `transaction` commits a body as a whole. An SQL
-error leaves the session usable (`isUsable()`); a storage error ends it.
+durable once its writes are; `transaction` commits a body as a whole. Calls
+run one at a time, in call order, and a transaction holds the session until it
+commits or rolls back: calls made meanwhile wait, so none runs inside it, and
+the body uses the handle it gets, which is invalid once the body settles. An
+SQL error leaves the session usable (`isUsable()`); a storage error ends it.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, or the file `SQLITE_KV_CACHE_FILE`

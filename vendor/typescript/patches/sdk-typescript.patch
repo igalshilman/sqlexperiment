@@ -34,7 +34,7 @@ index 18d3aa3..80a9ad7 100644
    ClientSendOptions,
    RemoveVoidArgument,
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..42fe5fb 100644
+index 8ea15b1..8096ec1 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,11 +9,14 @@
@@ -52,7 +52,7 @@ index 8ea15b1..42fe5fb 100644
    //eslint-disable-next-line @typescript-eslint/no-unused-vars
    ClientCallOptions,
  } from "./types/rpc.js";
-@@ -839,6 +842,37 @@ export interface SignalReference<T> {
+@@ -839,6 +842,39 @@ export interface SignalReference<T> {
  export interface ObjectContext<TState extends TypedState = UntypedState>
    extends Context, KeyValueStore<TState>, RestateObjectContext {
    key: string;
@@ -77,9 +77,11 @@ index 8ea15b1..42fe5fb 100644
 +  /**
 +   * Run `body` with the object's SQL database for longer work, such as a whole
 +   * handler: each statement is its own transaction, and `db.transaction`
-+   * groups several. A commit is durable once its writes are stored, which
-+   * Restate does in order: a lost commit takes everything after it, including
-+   * calls and the response. The session is saved when `body` resolves.
++   * groups several. Calls run one at a time, in call order, and a
++   * transaction holds the session until it ends. A commit is durable once its
++   * writes are stored, which Restate does in order: a lost commit takes
++   * everything after it, including calls and the response. The session is
++   * saved when `body` resolves.
 +   *
 +   * Errors are classified as for {@link sql}. `ctx.sql` and `ctx.sqlSession`
 +   * cannot run inside one another.
@@ -90,7 +92,7 @@ index 8ea15b1..42fe5fb 100644
  }
  
  /**
-@@ -1131,3 +1165,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
+@@ -1131,3 +1167,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
      WorkflowSharedContext<TState>,
      ObjectContext<TState>,
      RestateWorkflowContext {}
@@ -724,10 +726,10 @@ index f14da79..bdc98ec 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..4f74a88
+index 0000000..1147225
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,217 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -766,12 +768,15 @@ index 0000000..4f74a88
 +
 +/**
 + * The object's database for a whole handler, inside `ctx.sqlSession`: each
-+ * statement outside {@link transaction} is its own transaction.
++ * statement outside {@link transaction} is its own transaction. Calls run one
++ * at a time, in call order.
 + */
 +export interface SqlSession extends SqlDatabase {
 +  /**
 +   * Run `body` as one SQL transaction: it commits when `body` resolves, and
-+   * rolls back when it rejects. Not inside another transaction.
++   * rolls back when it rejects. The transaction holds the session: other
++   * calls to the session wait until it ends, so `body` uses the `db` it gets,
++   * which is invalid once `body` settles.
 +   */
 +  transaction<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
 +}
@@ -807,7 +812,7 @@ index 0000000..4f74a88
 +}
 +
 +interface Session extends SqlDatabase {
-+  transaction<T>(body: (db: Session) => Promise<T>): Promise<T>;
++  transaction<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
 +  isUsable(): boolean;
 +  save(): Promise<void>;
 +}

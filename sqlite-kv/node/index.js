@@ -41,43 +41,59 @@ async function open(namespace, store) {
 
 class Database {
   #native;
+  // Calls run one at a time, in call order: a transaction holds the session
+  // from BEGIN to COMMIT or ROLLBACK, so no other call runs inside it.
+  #tail = Promise.resolve();
 
   constructor(nativeDatabase) {
     this.#native = nativeDatabase;
   }
 
+  #serial(operation) {
+    const result = this.#tail.then(operation);
+    this.#tail = result.catch(() => {});
+    return result;
+  }
+
   /** Run SQL and return its rows; parameters bind to a single statement. */
   query(sql, params) {
-    return this.#native.query(sql, params);
+    return this.#serial(() => this.#native.query(sql, params));
   }
 
   /** Run SQL and return its rows with the column names of their statement. */
   queryColumns(sql, params) {
-    return this.#native.queryColumns(sql, params);
+    return this.#serial(() => this.#native.queryColumns(sql, params));
   }
 
   /** Run SQL, discarding rows. */
   async execute(sql, params) {
-    await this.#native.query(sql, params);
+    await this.query(sql, params);
   }
 
   /**
    * Run `body` as one SQL transaction: it commits when `body` resolves, and
-   * rolls back when it rejects.
+   * rolls back when it rejects. Calls to the database wait until it ends, so
+   * `body` uses the handle it gets, which is invalid once `body` settles.
    */
-  async transaction(body) {
-    await this.execute('BEGIN');
-    let result;
-    try {
-      result = await body(this);
-    } catch (error) {
-      if (this.isUsable()) {
-        await this.execute('ROLLBACK');
+  transaction(body) {
+    return this.#serial(async () => {
+      const native = this.#native;
+      await native.query('BEGIN');
+      const tx = new Transaction(native);
+      let result;
+      try {
+        result = await body(tx);
+      } catch (error) {
+        tx.end();
+        if (native.isUsable()) {
+          await native.query('ROLLBACK');
+        }
+        throw error;
       }
-      throw error;
-    }
-    await this.execute('COMMIT');
-    return result;
+      tx.end();
+      await native.query('COMMIT');
+      return result;
+    });
   }
 
   /** Whether SQL can still run: an SQL error leaves the session usable. */
@@ -85,14 +101,50 @@ class Database {
     return this.#native.isUsable();
   }
 
-  /** End the session, confirming its writes so that the page cache may trust them. */
+  /**
+   * End the session, after the calls before it, confirming its writes so that
+   * the page cache may trust them.
+   */
   save() {
-    return this.#native.save();
+    return this.#serial(() => this.#native.save());
   }
 
-  /** End the session without confirming: the next one in this process starts cold. */
+  /**
+   * End the session without confirming: the next one in this process starts
+   * cold. It does not wait for queued calls, which then fail.
+   */
   close() {
     return this.#native.close();
+  }
+}
+
+/** SQL in one transaction, until it ends. */
+class Transaction {
+  #native;
+
+  constructor(nativeDatabase) {
+    this.#native = nativeDatabase;
+  }
+
+  #check() {
+    if (this.#native === null) throw new Error('the transaction has ended');
+    return this.#native;
+  }
+
+  end() {
+    this.#native = null;
+  }
+
+  query(sql, params) {
+    return this.#check().query(sql, params);
+  }
+
+  queryColumns(sql, params) {
+    return this.#check().queryColumns(sql, params);
+  }
+
+  async execute(sql, params) {
+    await this.query(sql, params);
   }
 }
 
