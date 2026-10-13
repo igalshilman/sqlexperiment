@@ -40,9 +40,9 @@ make concurrency-test   # the context without journal replay, against a Restate 
 make help
 ```
 
-Without Nix: besides Rust, the Node.js parts need node 22.18 or later (the
-examples are TypeScript that node runs as it is); the patched TypeScript SDK
-also needs pnpm, the `wasm32-unknown-unknown` target and
+Without Nix: besides Rust, the Node.js parts need node 24 or later (the
+examples are TypeScript that node runs as it is, and OpenCode needs 24); the
+patched TypeScript SDK also needs pnpm, the `wasm32-unknown-unknown` target and
 `wasm-bindgen` 0.2.121 (`cargo install wasm-bindgen-cli --version 0.2.121`).
 
 The tests against a Restate server download its release binary on first use

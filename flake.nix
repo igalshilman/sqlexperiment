@@ -49,9 +49,9 @@
               })
               # setup.sh needs exactly this version.
               wasm-bindgen-cli_0_2_121
-              # The SDK (node >= 22, pnpm 11) and the examples (node >= 22.18,
-              # which runs their TypeScript).
-              nodejs_22
+              # The SDK (node >= 22, pnpm 11) and the examples (node >= 24,
+              # which runs their TypeScript, and which OpenCode needs).
+              nodejs_24
               pnpm_11
               git
               curl

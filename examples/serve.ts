@@ -1,5 +1,5 @@
 // Examples in one endpoint: every one, or the groups named on the command
-// line (ledger, shop, agent, langgraph, claude, deepseek), such as
+// line (ledger, shop, agent, langgraph, claude, deepseek, opencode), such as
 // `node serve.ts ledger shop`.
 import * as restate from '@restatedev/restate-sdk';
 
@@ -15,6 +15,7 @@ const groups: Record<string, () => Promise<Services>> = {
   langgraph: async () => [(await import('./langgraph/agent.ts')).agent],
   claude: async () => [(await import('./claude/agent.ts')).agent],
   deepseek: async () => [(await import('./deepseek/agent.ts')).agent],
+  opencode: async () => [(await import('./opencode/agent.ts')).agent],
 };
 const names = process.argv.length > 2 ? process.argv.slice(2) : Object.keys(groups);
 const services = (

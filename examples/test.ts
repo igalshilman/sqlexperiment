@@ -4,7 +4,10 @@
 // shop run in one process (ABORT_PER_MILLE, default 15), and each kind of
 // agent in its own: the pi, LangGraph and DeepSeek Harness agents
 // (AGENT_ABORT_PER_MILLE, default 3: a pi or DeepSeek Harness prompt makes
-// some hundreds of state requests), and the Claude agents (ABORT_PER_MILLE).
+// some hundreds of state requests), the Claude agents (ABORT_PER_MILLE), and
+// the OpenCode agents (OPENCODE_ABORT_PER_MILLE, default 1: an OpenCode prompt
+// makes some hundreds of state requests too, and its process takes seconds to
+// start).
 // The agents get the same prompts. Each request is resent until answered,
 // some twice.
 //
@@ -31,6 +34,7 @@ const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
 const PER_MILLE = Number(process.env.ABORT_PER_MILLE ?? 15);
 const AGENT_PER_MILLE = Number(process.env.AGENT_ABORT_PER_MILLE ?? 3);
+const OPENCODE_PER_MILLE = Number(process.env.OPENCODE_ABORT_PER_MILLE ?? 1);
 /** A service process: its name, the groups of serve.ts it serves, its port and abort rate. */
 interface Process {
   name: string;
@@ -45,10 +49,11 @@ const PROCESSES: Process[] = [
   // A Claude prompt makes few state requests: it aborts as often as the shop.
   { name: 'claude', groups: ['claude'], port: 9187, perMille: PER_MILLE },
   { name: 'deepseek', groups: ['deepseek'], port: 9188, perMille: AGENT_PER_MILLE },
+  { name: 'opencode', groups: ['opencode'], port: 9189, perMille: OPENCODE_PER_MILLE },
 ];
-// The agents: the pi one, the LangGraph one, the Claude one and the DeepSeek
-// Harness one, with the same prompts.
-const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent', 'DeepSeekAgent'];
+// The agents: the pi one, the LangGraph one, the Claude one, the DeepSeek
+// Harness one and the OpenCode one, with the same prompts.
+const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent', 'DeepSeekAgent', 'OpenCodeAgent'];
 const EXPIRY_MS = 1500;
 const SKUS = ['apple', 'pear', 'plum'];
 const STOCK = 20;
