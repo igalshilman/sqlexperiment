@@ -21,6 +21,15 @@ export interface Transaction {
   execute(sql: string, params?: SqlValue[]): Promise<void>;
 }
 
+/** The handle a transaction's body gets. */
+export interface TransactionHandle extends Transaction {
+  /**
+   * Log this transaction's commit even if it changes nothing (it only reads,
+   * or its writes match no rows), so that `version()` grows when it commits.
+   */
+  recordCommit(): void;
+}
+
 /**
  * A session: calls run one at a time, in call order, and a transaction holds
  * the session until it commits or rolls back. Calls made meanwhile wait, but
@@ -31,10 +40,13 @@ export declare class Database implements Transaction {
   query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
   queryColumns(sql: string, params?: SqlValue[]): Promise<{ columns: string[]; rows: SqlValue[][] }>;
   execute(sql: string, params?: SqlValue[]): Promise<void>;
-  transaction<T>(body: (tx: Transaction) => Promise<T>): Promise<T>;
+  transaction<T>(body: (tx: TransactionHandle) => Promise<T>): Promise<T>;
   /**
-   * The database's version: it grows with each commit, and only then. It does
-   * not wait for queued calls, so a transaction's body may read it.
+   * The database's version: it grows with each commit that changes the
+   * database, or whose transaction called `recordCommit()`, and only then. It
+   * does not wait for queued calls, so a transaction's body may read it; it
+   * waits for a statement that is running, and rejects once the session has
+   * ended.
    */
   version(): Promise<number>;
   isUsable(): boolean;

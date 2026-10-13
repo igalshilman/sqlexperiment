@@ -143,6 +143,27 @@ describe('the sends of ctx.transaction', () => {
     expect(await balance(o)).toBe(1);
   });
 
+  it('sends again what a crash lost of a transaction that changed nothing', async () => {
+    const o = object();
+    const setup = o.attempt();
+    await setup.end(() => setup.db.execute('CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)'));
+    const crashed = o.attempt({ crash: true });
+    // It only reads, and its update matches no rows: still, it committed.
+    const decide = crashed.transaction(async ({ db, tx }) => {
+      const [[v]] = (await db.query('SELECT v FROM t')) as [[number]];
+      await db.execute('UPDATE t SET v = 2 WHERE v = 99');
+      if (v === 1) tx.objectSendClient(store, 'a').reserve('book');
+    });
+    await expect(decide).rejects.toThrow('crashed');
+    crashed.abort();
+    const lost = o.pending();
+    expect(lost).toHaveLength(1);
+    const next = o.attempt();
+    await next.end(() => next.db.query('SELECT 1'));
+    expect(next.sent.map((s) => s.idempotencyKey)).toEqual(lost);
+    expect(o.map.has(PENDING)).toBe(false);
+  });
+
   it('drops the sends of a commit that a crash lost', async () => {
     // The state stores the pending sends, then nothing more: not the commit.
     const o = object();

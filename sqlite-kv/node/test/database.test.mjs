@@ -239,10 +239,19 @@ test('the version grows with each commit, and only then', async () => {
     /no/,
   );
   assert.equal(await db.version(), v2);
+  // A commit that changes nothing grows it only when recorded.
+  await db.transaction((tx) => tx.query('SELECT * FROM t'));
+  assert.equal(await db.version(), v2);
+  await db.transaction(async (tx) => {
+    await tx.execute('UPDATE t SET id = 5 WHERE id = 99');
+    tx.recordCommit();
+  });
+  const v3 = await db.version();
+  assert.ok(v3 > v2);
   await db.save();
   // A later session opens at the same version.
   const again = await open(namespace, backend.request());
-  assert.equal(await again.version(), v2);
+  assert.equal(await again.version(), v3);
   await again.save();
 });
 

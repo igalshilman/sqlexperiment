@@ -253,6 +253,20 @@ impl Database {
         })
     }
 
+    /// `COMMIT` the open transaction; with `record`, log it even if it changed
+    /// nothing, so that the version grows (see `Session::commit`).
+    #[napi]
+    pub async fn commit(&self, record: bool) -> Result<()> {
+        let mut session = self.session.lock().await;
+        let session = session
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("the database is closed"))?;
+        let result = session.commit(record).await;
+        self.usable.store(session.is_usable(), Ordering::Release);
+        self.store.barrier().await.map_err(sql_error_io)?;
+        result.map_err(sql_error)
+    }
+
     /// Whether the session can still run SQL: an SQL error leaves it usable,
     /// a storage error ends it. A call that is running does not change the
     /// answer until it ends.
@@ -261,8 +275,8 @@ impl Database {
         self.usable.load(Ordering::Acquire)
     }
 
-    /// The database's version: it grows with each commit, and only then (see
-    /// `Session::version`).
+    /// The database's version: it grows with each commit that changes the
+    /// database or is recorded, and only then (see `Session::version`).
     #[napi]
     pub async fn version(&self) -> Result<i64> {
         let session = self.session.lock().await;

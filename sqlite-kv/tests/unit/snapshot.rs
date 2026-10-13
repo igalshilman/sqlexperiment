@@ -716,7 +716,7 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
             let mut rewrite = Changes::from([(5, Some(page(500)))]);
             for round in 0..12u64 {
                 let size = PREFETCH_PAGES * 4096;
-                let (_, next) = snapshot.commit(rewrite.clone(), size).await?;
+                let (_, next) = snapshot.commit(rewrite.clone(), size, false).await?;
                 model.apply(&rewrite, size);
                 snapshot = next;
                 rewrite = Changes::from([(round % 3, Some(page(1000 + round)))]);
