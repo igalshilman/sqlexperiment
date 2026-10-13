@@ -73,25 +73,28 @@ ctx.transaction(async ({ db, tx }) => {
 });
 ```
 
-The sends are stored with the SQL, as rows of an outbox table
-(`_restate_outbox`) in the same transaction, and made right after the commit,
-each with an idempotency key of its row: `outbox/<database id>/<row id>`
-(`_restate_db` holds the database's random id, so a database made again at
-the same key does not reuse keys), or the send's own key. Restate stores the
-commit's writes before the sends, and keeps a prefix after a crash: so a send
-that is stored has its commit stored, while a commit may be stored without its
-sends. Those the session's next open finds, and makes again with the same keys;
-Restate drops a send whose key it has seen. The rows are deleted when the
-handler ends, after the sends in the journal. So each send of a committed
-transaction is made once, even when a retried attempt never runs the
-transaction's body again (it finds its work done, by its id), and a send of a
-transaction rolled back or lost is not made. Two limits: Restate keeps an
-idempotency key for the target's retention (a day by default), and a send made
-again after that, by an invocation that died between the sends and the end of
-its handler and whose object is not used again for that long, is made twice;
-and a send has no invocation id, which only exists once it is made. A call,
-whose result the body would wait for, cannot be part of the transaction: it
-keeps an idempotency key of its own. The shop's `expire` is such a send.
+The sends wait in the object's state while the transaction commits: just
+before the COMMIT, the SDK writes them under one state key
+(`_restate_sql_sends`), with the database's version (a number that grows with
+each commit, and only then) and a random id of the transaction, and once the
+commit is done it makes them, each with an idempotency key of the transaction,
+`transaction/<id>/<index>` (or the send's own key), and clears the key. Restate
+stores an attempt's writes and sends in order, and keeps a prefix after a
+crash: so the commit is stored only with its pending sends, and the sends are
+stored before they are cleared. Pending sends that the session's next open
+finds are made again, with the same keys, if the database's version grew past
+theirs (the commit landed; Restate drops a send whose key it has seen), and
+dropped if it did not. So each send of a committed transaction is made once,
+even when a retried attempt never runs the transaction's body again (it finds
+its work done, by its id), and a send of a transaction rolled back or lost is
+not made. A transaction without sends writes nothing more; one with sends
+costs two state writes. Two limits: Restate keeps an idempotency key for the
+target's retention (a day by default), and a send made again after that, by
+an invocation that died between the commit and its sends and whose object is
+not used again for that long, is made twice; and a send has no invocation id,
+which only exists once it is made. A call, whose result the body would wait
+for, cannot be part of the transaction: it keeps an idempotency key of its
+own. The shop's `expire` is such a send.
 
 The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear`, and the barrier is an empty `ctx.run`. The SDK loads
@@ -102,7 +105,8 @@ the sqlite-kv addon, an optional peer dependency, on first use.
 `ctx.clearAll()` in any handler of the object deletes the database, a handler's
 own key starting with `v12/` corrupts it, and `ctx.stateKeys()` lists its
 pages. Keep other state out of `v12/`, and do not clear all of an object that
-uses `ctx.db`. Tables whose names start with `_restate_` are the SDK's. (Reserving the prefix in the SDK is future work.)
+uses `ctx.db`. The state key `_restate_sql_sends` is the SDK's too.
+(Reserving these keys in the SDK is future work.)
 
 **One cluster per process.** The page cache knows a database by its namespace,
 `service/key`, and trusts what it cached while the database's `meta` and log

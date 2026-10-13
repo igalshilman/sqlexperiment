@@ -153,10 +153,12 @@ describe('the sends of ctx.transaction', () => {
       if (key === PENDING) crashed.fence.closed = true;
       return o.map;
     };
-    await crashed.transaction(async ({ db, tx }) => {
-      await db.execute('CREATE TABLE t (v INTEGER)');
-      tx.objectSendClient(store, 'a').reserve('book');
-    }).catch(() => {});
+    await crashed
+      .transaction(async ({ db, tx }) => {
+        await db.execute('CREATE TABLE t (v INTEGER)');
+        tx.objectSendClient(store, 'a').reserve('book');
+      })
+      .catch(() => {});
     crashed.abort();
     o.map.set = set;
     expect(o.pending()).toHaveLength(1);
