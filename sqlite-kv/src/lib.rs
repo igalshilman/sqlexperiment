@@ -482,7 +482,8 @@ impl Session {
     /// A string of several statements runs them in order, each as if executed
     /// on its own.
     ///
-    /// There is no result byte limit or streaming cursor. With
+    /// There is no streaming cursor: the rows are limited to
+    /// [`StorageOptions::max_result_bytes`]. With
     /// [`Durability::Save`], SQL writes remain private until [`Self::save`]. With
     /// [`Durability::Commit`], a statement that ends a write transaction returns
     /// once that transaction is durable. An SQL error (syntax, a constraint, a

@@ -39,7 +39,8 @@ before a later read of its key, and every write before a `sync`. A `set` or
 ## Sessions and the page cache
 
 `open` returns a session of the namespace's database. Each SQL commit is
-durable once its writes are; `transaction` commits a body as a whole. Calls
+durable once the store has stored its writes (a statement resolves once they
+reached the store, and `save()` waits until they are stored); `transaction` commits a body as a whole. Calls
 run one at a time, in call order, and a transaction holds the session until it
 commits or rolls back: calls made meanwhile wait, so none runs inside it. The
 body uses the handle it gets, which is invalid once the body settles; a call

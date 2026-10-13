@@ -3,7 +3,7 @@ name = "sqlite-kv"
 version = "0.11.0"
 edition = "2024"
 publish = false
-description = "SQLite over asynchronous KV with atomic snapshot publication"
+description = "SQLite over an asynchronous key/value store, with a durable log and checkpoints"
 
 [features]
 default = []

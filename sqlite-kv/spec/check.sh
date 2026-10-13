@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Model-check the protocol spec with TLC.
 # Usage: spec/check.sh [config ...]; by default the quick configurations.
-# MCDeep.cfg (three transactions) takes about an hour on four cores.
+# MCDeep.cfg (three transactions) takes about half an hour on four cores.
 set -euo pipefail
 cd "$(dirname "$0")"
 JAR="${TLA2TOOLS:-$HOME/.cache/tla2tools-1.8.0.jar}"
