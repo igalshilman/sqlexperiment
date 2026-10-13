@@ -14,11 +14,24 @@ export interface Store {
   sync(): Promise<void> | void;
 }
 
-export declare class Database {
+/** SQL in one transaction: invalid once the transaction's body settles. */
+export interface Transaction {
   query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
   queryColumns(sql: string, params?: SqlValue[]): Promise<{ columns: string[]; rows: SqlValue[][] }>;
   execute(sql: string, params?: SqlValue[]): Promise<void>;
-  transaction<T>(body: (db: Database) => Promise<T>): Promise<T>;
+}
+
+/**
+ * A session: calls run one at a time, in call order, and a transaction holds
+ * the session until it commits or rolls back. A call to the session from
+ * inside a transaction's body waits for the transaction, so the body uses its
+ * `tx`.
+ */
+export declare class Database implements Transaction {
+  query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
+  queryColumns(sql: string, params?: SqlValue[]): Promise<{ columns: string[]; rows: SqlValue[][] }>;
+  execute(sql: string, params?: SqlValue[]): Promise<void>;
+  transaction<T>(body: (tx: Transaction) => Promise<T>): Promise<T>;
   isUsable(): boolean;
   save(): Promise<void>;
   close(): Promise<void>;

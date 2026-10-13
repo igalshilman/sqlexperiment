@@ -8,13 +8,13 @@
 // workerd profile reads a Durable Object's SQLite, whose `exec` is
 // synchronous; here OpenCode gets an Effect SqlClient instead, which is
 // asynchronous, through `Database.configuredClient`, the seam OpenCode keeps
-// for an injected client. Statements run one at a time, as in OpenCode's own
-// clients, and each transaction is a sqlite-kv transaction.
+// for an injected client. Each transaction is a sqlite-kv transaction, and the
+// session runs statements one at a time, as OpenCode's own clients do.
 //
 // `fence.closed` refuses every statement from then on: an attempt that is
 // giving up stores nothing more, as Restate fences an attempt that a newer
 // one replaced.
-import { Context, Effect, Exit, Layer, Option, Scope, Semaphore } from 'effect';
+import { Context, Effect, Exit, Layer, Option, Scope } from 'effect';
 import { Reactivity } from 'effect/reactivity';
 import { SqlClient, Statement } from 'effect/sql';
 import { SqlError, UnknownError } from 'effect/sql/SqlError';
@@ -48,12 +48,9 @@ const InTransaction = Context.Service<SqlClient.TransactionConnection, SqlClient
 
 /** An Effect SqlClient over `db`, with its statements refused once `fence` closes. */
 export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.SqlClient> {
-  const make = Effect.gen(function* () {
-    // One statement or transaction at a time: a session runs one at a time.
-    const semaphore = yield* Semaphore.make(1);
-    // The database statements go to: `db`, or the open transaction.
-    let target: SqlDatabase = db;
-
+  // Statements through `target`: the session, which runs one call at a time
+  // and holds them while a transaction runs, or that transaction's database.
+  const connectionOf = (target: SqlDatabase): Connection => {
     const exec = (sql: string, params: readonly unknown[]) =>
       Effect.tryPromise({
         try: async () => {
@@ -66,22 +63,13 @@ export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.S
         },
         catch: (cause) => error('execute', cause),
       });
-    // A statement outside a transaction holds the session; one inside runs
-    // in the transaction, which holds it already.
-    const serial = <A>(effect: Effect.Effect<A, SqlError>) =>
-      Effect.withFiber((fiber) =>
-        Option.isSome(Context.getOption(fiber.context, InTransaction)) ? effect : semaphore.withPermits(1)(effect),
-      );
     const run = (sql: string, params: readonly unknown[] = []) =>
-      serial(
-        Effect.map(exec(sql, params), ({ columns, rows }) =>
-          rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]]))),
-        ),
+      Effect.map(exec(sql, params), ({ columns, rows }) =>
+        rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]]))),
       );
     const runValues = (sql: string, params: readonly unknown[] = []) =>
-      serial(Effect.map(exec(sql, params), ({ rows }) => rows));
-
-    const connection: Connection = {
+      Effect.map(exec(sql, params), ({ rows }) => rows);
+    return {
       execute: (sql, params, transformRows) =>
         transformRows ? Effect.map(run(sql, params), transformRows) : run(sql, params),
       executeRaw: (sql, params) => run(sql, params),
@@ -93,51 +81,53 @@ export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.S
         throw new Error('executeStream is not supported');
       },
     };
+  };
 
-    // `effect` as one sqlite-kv transaction: it commits when `effect`
-    // succeeds and rolls back when it fails.
-    const withTransaction = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-      Effect.withFiber<A, E | SqlError, R>((fiber) => {
-        if (Option.isSome(Context.getOption(fiber.context, InTransaction))) {
-          return Effect.fail(error('transaction', new Error('nested transactions are not supported')));
-        }
-        const inner = Effect.provideContext(effect, Context.add(fiber.context, InTransaction, [connection, 0]));
-        return semaphore.withPermits(1)(
-          Effect.callback<A, E | SqlError, R>((resume) => {
-            const rollback = new Error('rollback');
-            let interrupted = false;
-            const committed: Promise<void> = db
-              .transaction(
-                (tx) =>
-                  new Promise<void>((resolve, reject) => {
-                    if (interrupted) return reject(rollback);
-                    target = tx;
-                    resume(
-                      Effect.onExit(inner, (exit) => {
-                        target = db;
-                        if (Exit.isFailure(exit)) reject(rollback);
-                        else resolve();
-                        // The commit is part of the transaction.
-                        return Effect.tryPromise({ try: () => committed, catch: (e) => error('commit', e) }).pipe(
-                          Effect.ignore,
-                        );
-                      }),
+  // `effect` as one sqlite-kv transaction: it commits when `effect` succeeds
+  // and rolls back when it fails. Its statements go to the transaction's
+  // database.
+  const withTransaction = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Effect.withFiber<A, E | SqlError, R>((fiber) => {
+      if (Option.isSome(Context.getOption(fiber.context, InTransaction))) {
+        return Effect.fail(error('transaction', new Error('nested transactions are not supported')));
+      }
+      return Effect.callback<A, E | SqlError, R>((resume) => {
+        const rollback = new Error('rollback');
+        let interrupted = false;
+        const committed: Promise<void> = db
+          .transaction(
+            (tx) =>
+              new Promise<void>((resolve, reject) => {
+                if (interrupted) return reject(rollback);
+                const inner = Effect.provideContext(
+                  effect,
+                  Context.add(fiber.context, InTransaction, [connectionOf(tx), 0]),
+                );
+                resume(
+                  Effect.onExit(inner, (exit) => {
+                    if (Exit.isFailure(exit)) reject(rollback);
+                    else resolve();
+                    // The commit is part of the transaction.
+                    return Effect.tryPromise({ try: () => committed, catch: (e) => error('commit', e) }).pipe(
+                      Effect.ignore,
                     );
                   }),
-              )
-              .catch((cause: unknown) => {
-                if (cause !== rollback) resume(Effect.fail(error('transaction', cause)));
-              });
-            return Effect.suspend(() => {
-              interrupted = true;
-              return Effect.promise(() => committed);
-            });
-          }),
-        );
+                );
+              }),
+          )
+          .catch((cause: unknown) => {
+            if (cause !== rollback) resume(Effect.fail(error('transaction', cause)));
+          });
+        return Effect.suspend(() => {
+          interrupted = true;
+          return Effect.promise(() => committed);
+        });
       });
+    });
 
+  const make = Effect.gen(function* () {
     const client = yield* SqlClient.make({
-      acquirer: Effect.succeed(connection),
+      acquirer: Effect.succeed(connectionOf(db)),
       compiler: Statement.makeCompilerSqlite(),
       spanAttributes: [['db.system.name', 'sqlite']],
       transactionService: InTransaction,

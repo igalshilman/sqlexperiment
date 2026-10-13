@@ -78,7 +78,8 @@ like the ledger tools.
 - **A prompt waits in the inbox before it is a message**, and a prompt
   queued while a turn runs is answered in that turn's run: a prompt's answer
   is the last assistant message before the turn's idle marker, or before the
-  next prompt.
+  next prompt. So a new prompt waits for an unfinished one: queued into a
+  resumed turn, it would be answered in place of the rest of it.
 - **Node 24.** OpenCode's packages use `await using`, which Node 22 does not
   parse.
 - **Cost.** A prompt makes about 230 store requests; importing OpenCode
@@ -119,7 +120,8 @@ at a time, so a claim found at boot is always one a dead attempt left.
 - **A prompt is answered once per id**: the prompt's id is its OpenCode
   message id, and a prompt asked again returns the answer of the turn that
   answered it. A prompt that a crash interrupted is finished before the next
-  prompt starts: OpenCode resumes it at boot, and queues the next one.
+  prompt starts: OpenCode resumes it at boot, and a new prompt waits for it,
+  since one queued while it runs would join its turn.
 
 [`agent.test.ts`](agent.test.ts) checks each of these, with a crash that
 stops an attempt in a tool call and abandons it, keeping what it stored (the
