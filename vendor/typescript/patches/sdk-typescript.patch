@@ -728,10 +728,10 @@ index f14da79..bdc98ec 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..b2a93cb
+index 0000000..d9493dc
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,345 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -818,6 +818,7 @@ index 0000000..b2a93cb
 +  transaction<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
 +  isUsable(): boolean;
 +  save(): Promise<void>;
++  close(): Promise<void>;
 +}
 +
 +type Addon = {
@@ -842,17 +843,64 @@ index 0000000..b2a93cb
 +}
 +
 +/**
++ * The end of an attempt, as `ctx.invocationEndPromise` rejects with it, for the
++ * requests that would otherwise wait for it. @internal
++ */
++export class AttemptEnd {
++  #ended: Error | undefined;
++  readonly #waiting = new Set<(error: Error) => void>();
++  readonly #listeners = new Set<() => void>();
++
++  constructor(end: Promise<unknown>) {
++    end.catch((error: unknown) => {
++      // abortAttempt rejects with an Error.
++      const ended = error instanceof Error ? error : new Error(String(error));
++      this.#ended = ended;
++      for (const reject of this.#waiting) reject(ended);
++      this.#waiting.clear();
++      for (const listener of this.#listeners) listener();
++      this.#listeners.clear();
++    });
++  }
++
++  /**
++   * `promise`, or a rejection once the attempt ends: an attempt that is
++   * suspended or aborted never settles what it was waiting for.
++   */
++  race<T>(promise: Promise<T>): Promise<T> {
++    if (this.#ended) return Promise.reject(this.#ended);
++    return new Promise<T>((resolve, reject) => {
++      this.#waiting.add(reject);
++      promise.finally(() => this.#waiting.delete(reject)).then(resolve, reject);
++    });
++  }
++
++  /** Call `listener` when the attempt ends; the returned function cancels it. */
++  onEnd(listener: () => void): () => void {
++    if (this.#ended) {
++      listener();
++      return () => {};
++    }
++    this.#listeners.add(listener);
++    return () => this.#listeners.delete(listener);
++  }
++}
++
++/**
 + * The object's state as an ordered store: `set` and `clear` are state writes,
 + * which return at once and which the runtime stores in order; `sync` is an
-+ * empty `ctx.run`, acknowledged after the commands before it.
++ * empty `ctx.run`, acknowledged after the commands before it. A `get` or
++ * `sync` the attempt's end leaves waiting rejects, so the session that made it
++ * ends instead of holding its lock for the life of the process.
 + */
-+function objectStore(ctx: ContextImpl): SqlStore {
++function objectStore(ctx: ContextImpl, end: AttemptEnd): SqlStore {
 +  return {
-+    get: async (key) => (await ctx.get(key, serde.binary)) ?? undefined,
++    get: async (key) =>
++      (await end.race(ctx.get(key, serde.binary))) ?? undefined,
 +    set: (key, value) => ctx.set(key, value, serde.binary),
 +    clear: (key) => ctx.clear(key),
 +    sync: async () => {
-+      await ctx.run("sync", () => {});
++      await end.race(ctx.run("sync", () => {}));
 +    },
 +  };
 +}
@@ -973,11 +1021,28 @@ index 0000000..b2a93cb
 +): Promise<T> {
 +  const sqliteKv = await loadAddon();
 +  const namespace = `${ctx.request().target.service}/${ctx.key}`;
-+  const store = objectStore(ctx);
++  const end = new AttemptEnd(ctx.invocationEndPromise.promise);
++  const store = objectStore(ctx, end);
 +  const db = await sqliteKv.open(
 +    namespace,
 +    wrapStore ? wrapStore(store) : store
 +  );
++  // A body still waiting for something else when the attempt ends (a model
++  // request, say) keeps the session no longer: it closes once no statement
++  // runs, and the body's later calls fail.
++  const cancel = end.onEnd(() => void db.close().catch(() => {}));
++  try {
++    return await runBody(db, session, body);
++  } finally {
++    cancel();
++  }
++}
++
++async function runBody<T>(
++  db: Session,
++  session: boolean,
++  body: (db: SqlSession) => Promise<T>
++): Promise<T> {
 +  const errors = new SqlErrors();
 +  let result: { value: T } | { error: unknown };
 +  try {
@@ -1002,9 +1067,12 @@ index 0000000..b2a93cb
 +  }
 +  // Saving confirms the session's writes (an empty ctx.run, if it wrote), so
 +  // that the page cache may trust them. A session that does not get here
-+  // makes the next one in this process start cold.
++  // makes the next one in this process start cold. One that a storage error
++  // ended closes now, rather than when it is collected.
 +  if (db.isUsable()) {
 +    await db.save();
++  } else {
++    await db.close();
 +  }
 +  if ("error" in result) throw result.error;
 +  return result.value;
@@ -2024,6 +2092,63 @@ index 0000000..e04f3df
 +    ps.forEach((p, i) => t.complete(p, i));
 +    await expect(Promise.all(ps.map((p) => p.user))).resolves.toHaveLength(100);
 +    expect(t.errors).toEqual([]);
++  });
++});
+diff --git a/packages/libs/restate-sdk/test/sql_attempt_end.test.ts b/packages/libs/restate-sdk/test/sql_attempt_end.test.ts
+new file mode 100644
+index 0000000..92d684a
+--- /dev/null
++++ b/packages/libs/restate-sdk/test/sql_attempt_end.test.ts
+@@ -0,0 +1,51 @@
++/*
++ * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
++ *
++ * This file is part of the Restate SDK for Node.js/TypeScript,
++ * which is released under the MIT license.
++ *
++ * You can find a copy of the license in file LICENSE in the root
++ * directory of this repository or package, or at
++ * https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++ */
++
++import { describe, expect, it } from "vitest";
++import { AttemptEnd } from "../src/sql.js";
++
++const never = () => new Promise<never>(() => {});
++
++describe("AttemptEnd", () => {
++  it("passes a request's outcome through while the attempt runs", async () => {
++    const end = new AttemptEnd(never());
++    await expect(end.race(Promise.resolve(1))).resolves.toBe(1);
++    await expect(end.race(Promise.reject(new Error("no")))).rejects.toThrow(
++      "no"
++    );
++  });
++
++  it("rejects a request still waiting when the attempt ends", async () => {
++    const attempt = Promise.withResolvers<void>();
++    const end = new AttemptEnd(attempt.promise);
++    // A suspended attempt never answers this get.
++    const get = end.race(never());
++    attempt.reject(new Error("suspended"));
++    await expect(get).rejects.toThrow("suspended");
++    // And what is asked afterwards fails at once.
++    await expect(end.race(never())).rejects.toThrow("suspended");
++  });
++
++  it("calls a listener when the attempt ends, unless cancelled", async () => {
++    const attempt = Promise.withResolvers<void>();
++    const end = new AttemptEnd(attempt.promise);
++    const calls: string[] = [];
++    end.onEnd(() => calls.push("close"));
++    const cancel = end.onEnd(() => calls.push("cancelled"));
++    cancel();
++    attempt.reject(new Error("aborted"));
++    await expect(end.race(never())).rejects.toThrow("aborted");
++    expect(calls).toEqual(["close"]);
++    // A listener added after the end runs at once.
++    end.onEnd(() => calls.push("late"));
++    expect(calls).toEqual(["close", "late"]);
 +  });
 +});
 diff --git a/packages/libs/restate-sdk/test/sql_context.test-d.ts b/packages/libs/restate-sdk/test/sql_context.test-d.ts
