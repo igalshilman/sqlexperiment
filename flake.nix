@@ -37,8 +37,7 @@
           packages =
             with pkgs;
             [
-              # The crate and the addon; the shared core, to WebAssembly. The
-              # version restate pins too, for building restate-server.
+              # The crate and the addon; the shared core, to WebAssembly.
               (rust-bin.stable."1.98.1".default.override {
                 extensions = [
                   "rust-src"
@@ -57,15 +56,6 @@
               curl
               gnumake
 
-              # restate-server from source (the Makefile's default on macOS):
-              # protobuf, RocksDB, librdkafka, OpenSSL.
-              protobuf
-              cmake
-              pkg-config
-              openssl
-              perl
-              zlib
-
               # The TLA+ check (sqlite-kv/spec/check.sh) and the benchmark scripts.
               jdk_headless
               python3
@@ -75,12 +65,6 @@
               # ld64.lld, for a cargo config that links with -fuse-ld=lld.
               lld
             ];
-
-          # restate-server's C dependencies probe the compiler at -O0, which
-          # _FORTIFY_SOURCE turns into errors.
-          hardeningDisable = [ "fortify" ];
-          # bindgen, for RocksDB's bindings.
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         };
       });
 
