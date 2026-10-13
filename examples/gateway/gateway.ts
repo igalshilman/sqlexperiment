@@ -1,46 +1,32 @@
 // The tool gateway: one door to every tool, for an agent's RPC (agent.ts) and
 // for MCP clients (mcp.ts). A plain Restate service, with the journal.
 //
-// - `tools({ tenant })` is the registry: the handlers whose metadata names a
-//   tool (`mcp.tool`, see tools.ts), read from the admin API, that the
-//   tenant's policy allows. Deploy a service with tools, and they are listed.
-// - `call({ tenant, caller, name, arguments })` runs one:
-//   1. the policy: a tool the tenant may not use is refused;
-//   2. approval, for a tool that requires it (`mcp.approval: required`): the
-//      call is held on an awakeable, recorded in the tenant's object, and the
-//      manager paged, until a decision (Tenant.decide) or a timeout. It costs
-//      nothing meanwhile: the invocation is suspended, and the agent's too;
-//   3. the call, in the tenant's scope, with `<tool>/<user>` as limit key:
-//      the server's limit rules (`*/lookup_order` at 2, say) hold the calls
-//      over the limit in the scope's queue until one ends, so the upstream
-//      API never sees more than its limit, and one tenant's burst does not
-//      queue another tenant's calls. Each user's calls queue apart and take
-//      turns, so one user's burst does not hold up another's either; and a
-//      rule on `*/lookup_order/*` caps what each user runs at once;
-//   4. a record of the call in the tenant's audit log (tenant.ts).
+// - `tools({ tenant })`: the handlers whose metadata names a tool (see
+//   tools.ts), from the admin API, that the tenant may use.
+// - `call({ tenant, user, name, arguments })` runs one:
+//   1. policy: a tool the tenant may not use is denied;
+//   2. approval, if the tool requires it: the call waits on an awakeable,
+//      held in the tenant's object, until a manager decides. Meanwhile it is
+//      suspended, and costs nothing;
+//   3. the call, in the tenant's scope, with `<tool>/<user>` as limit key.
+//      The server's rules hold the calls over a limit in a queue: per
+//      tenant (`*/lookup_order`) and per user (`*/lookup_order/*`). Each
+//      user's calls have a queue of their own, and the queues take turns;
+//   4. a record in the tenant's audit log.
+//   A tool's failure is a result with `isError`, for the model to read.
 //
-//   It returns an MCP tool result: a tool's failure (a terminal error) is a
-//   result with `isError`, for the model to read, not a failed call.
+// The journal makes each step once. The caller makes `call` once, with an
+// idempotency key.
 //
-// The journal makes each step once: a retried attempt of `call` does not ask
-// again for approval, call the tool again, or record it twice. The caller
-// makes `call` once with an idempotency key (agent.ts, mcp.ts).
-//
-// Environment: RESTATE_ADMIN_URL (default http://127.0.0.1:9070),
-// UPSTREAM_URL (the pager, default http://127.0.0.1:9300),
-// APPROVAL_TIMEOUT_MS (default 10 minutes) and PORT.
+// Environment: PORT.
 import * as restate from '@restatedev/restate-sdk';
 import { serveIfMain } from '../faults.ts';
-import { tenant as tenantObject, type Decision, type Outcome } from './tenant.ts';
-
-const ADMIN = process.env.RESTATE_ADMIN_URL ?? 'http://127.0.0.1:9070';
-const UPSTREAM = process.env.UPSTREAM_URL ?? 'http://127.0.0.1:9300';
-const APPROVAL_TIMEOUT_MS = Number(process.env.APPROVAL_TIMEOUT_MS ?? 10 * 60_000);
+import { tenant as tenantObject, type CallRecord } from './tenant.ts';
 
 /** The tools each tenant may use; a tenant not listed has none. */
-export const POLICY: Record<string, '*' | string[]> = {
-  acme: '*',
-  globex: ['lookup_order', 'email_customer'],
+export const POLICY: Record<string, string[]> = {
+  acme: ['lookup_order', 'refund'],
+  globex: ['lookup_order'],
 };
 
 /** A tool, as MCP lists it, and the handler that runs it. */
@@ -61,108 +47,59 @@ export interface ToolResult {
 
 export interface CallRequest {
   tenant: string;
-  /** The tenant's user on whose behalf the tool runs: the second level of its limit key. */
   user: string;
-  /** Who calls, for the audit log: an agent's key, an MCP session. */
-  caller: string;
   name: string;
   arguments: Record<string, unknown>;
 }
 
-/** A handler, as the admin API describes it. */
-export interface AdminHandler {
-  name: string;
-  documentation?: string;
-  metadata?: Record<string, string>;
-  input_json_schema?: object;
-}
-
-/** The tools among the services of the admin API's `GET /services`. */
-export function toolsOf({ services }: { services: { name: string; handlers: AdminHandler[] }[] }): Tool[] {
-  return services.flatMap((service) =>
-    service.handlers.flatMap((h) => {
-      const name = h.metadata?.['mcp.tool'];
-      if (!name) return [];
-      // MCP's input schema: the handler's, without the dialect line.
-      const { $schema: _, ...inputSchema } = (h.input_json_schema ?? { type: 'object' }) as Record<string, unknown>;
-      return [
-        {
-          name,
-          description: h.documentation ?? '',
-          inputSchema,
-          approval: h.metadata?.['mcp.approval'] === 'required',
-          service: service.name,
-          handler: h.name,
-        },
-      ];
-    }),
-  );
-}
-
-/** Every tool deployed, from the admin API. */
-async function registry(): Promise<Tool[]> {
-  const res = await fetch(`${ADMIN}/services`);
-  if (!res.ok) throw new Error(`admin API: ${res.status}`);
-  return toolsOf((await res.json()) as Parameters<typeof toolsOf>[0]);
-}
-
-/** The tenant and the user of `<tenant>.<user>` (an agent's key, an MCP token); a user of `anonymous` without one. */
+/** The tenant and the user of `<tenant>.<user>` (an agent's key, an MCP token). */
 export function identity(of: string): { tenant: string; user: string } {
-  const dot = of.indexOf('.');
-  return dot < 0 ? { tenant: of, user: 'anonymous' } : { tenant: of.slice(0, dot), user: of.slice(dot + 1) };
+  const [tenant = '', user = 'anonymous'] = of.split('.', 2);
+  return { tenant, user };
 }
 
-/** What a scope or a limit key's level may be. */
-const KEY = /^[\w.-]{1,36}$/;
-
-const allowed = (tenant: string, tool: string) => {
-  const policy = POLICY[tenant];
-  return policy === '*' || (policy?.includes(tool) ?? false);
+type AdminServices = {
+  services: {
+    name: string;
+    handlers: { name: string; documentation?: string; metadata?: Record<string, string>; input_json_schema?: object }[];
+  }[];
 };
 
-const text = (value: unknown) => (typeof value === 'string' ? value : JSON.stringify(value));
+/** The tools among the services of the admin API's `GET /services`. */
+export const toolsOf = ({ services }: AdminServices): Tool[] =>
+  services.flatMap((s) =>
+    s.handlers.flatMap((h) => {
+      const name = h.metadata?.['mcp.tool'];
+      if (!name) return [];
+      const { $schema: _, ...inputSchema } = (h.input_json_schema ?? { type: 'object' }) as Record<string, unknown>;
+      const approval = h.metadata?.['mcp.approval'] === 'required';
+      return [{ name, description: h.documentation ?? '', inputSchema, approval, service: s.name, handler: h.name }];
+    }),
+  );
+
+const registry = async () => toolsOf((await (await fetch('http://127.0.0.1:9070/services')).json()) as AdminServices);
+
+const allowed = (tenant: string, tool: string) => POLICY[tenant]?.includes(tool) ?? false;
 
 export const gateway = restate.service({
   name: 'Gateway',
   handlers: {
-    /** The tools `tenant` may use. */
     tools: async (ctx: restate.Context, { tenant }: { tenant: string }): Promise<Tool[]> =>
       (await ctx.run('registry', registry)).filter((t) => allowed(tenant, t.name)),
 
-    /** Run tool `name` for `tenant`: policy, approval, the call in the tenant's scope, and the audit log. */
     call: async (ctx: restate.Context, req: CallRequest): Promise<ToolResult> => {
       const started = await ctx.date.now();
-      const { outcome, detail } = await (async (): Promise<{ outcome: Outcome; detail: string }> => {
+      const run = async (): Promise<Pick<CallRecord, 'outcome' | 'detail'>> => {
         const tool = (await ctx.run('registry', registry)).find((t) => t.name === req.name);
         if (!tool || !allowed(req.tenant, tool.name)) {
           return { outcome: 'denied', detail: `${req.tenant} has no tool ${req.name}` };
         }
-        if (!KEY.test(req.user)) return { outcome: 'denied', detail: `no user ${JSON.stringify(req.user)}` };
         if (tool.approval) {
-          const { id, promise } = ctx.awakeable<Decision>();
-          const held = {
-            awakeable: id,
-            call: ctx.request().id,
-            at: started,
-            user: req.user,
-            caller: req.caller,
-            tool: tool.name,
-          };
-          ctx.objectSendClient(tenantObject, req.tenant).hold({ ...held, arguments: req.arguments });
-          await ctx.run('page the manager', async () => {
-            const res = await fetch(`${UPSTREAM}/pages`, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ tenant: req.tenant, tool: tool.name, arguments: req.arguments, awakeable: id }),
-            });
-            if (!res.ok) throw new Error(`pager: ${res.status}`);
-          });
-          const decision = await promise.orTimeout(APPROVAL_TIMEOUT_MS).catch((e: unknown) => {
-            if (e instanceof restate.TimeoutError) return { approved: false, by: 'nobody, in time' };
-            throw e;
-          });
-          if (!decision.approved)
-            return { outcome: 'rejected', detail: `${tool.name} was not approved by ${decision.by}` };
+          const { id, promise } = ctx.awakeable<boolean>();
+          ctx
+            .objectSendClient(tenantObject, req.tenant)
+            .hold({ awakeable: id, user: req.user, tool: tool.name, arguments: req.arguments });
+          if (!(await promise)) return { outcome: 'denied', detail: `${tool.name} was not approved` };
         }
         try {
           const result = await ctx.genericCall({
@@ -172,39 +109,25 @@ export const gateway = restate.service({
             inputSerde: restate.serde.json,
             outputSerde: restate.serde.json,
             scope: req.tenant,
-            // Two levels: the tool, then the user. A rule on `*/<tool>`
-            // limits the tenant's calls, one on `*/<tool>/*` each user's.
             limitKey: `${tool.name}/${req.user}`,
             headers: { 'x-on-behalf-of': req.user },
           });
-          return { outcome: 'ok', detail: text(result) };
+          return { outcome: 'ok', detail: JSON.stringify(result) };
         } catch (e) {
           if (e instanceof restate.TerminalError) return { outcome: 'error', detail: e.message };
           throw e;
         }
-      })();
-      const ended = await ctx.date.now();
-      ctx.objectSendClient(tenantObject, req.tenant).record({
-        call: ctx.request().id,
-        at: started,
-        user: req.user,
-        caller: req.caller,
-        tool: req.name,
-        arguments: req.arguments,
-        outcome,
-        detail,
-        ms: ended - started,
-      });
-      return outcome === 'ok'
-        ? { content: [{ type: 'text', text: detail }] }
-        : { content: [{ type: 'text', text: detail }], isError: true };
+      };
+      const { outcome, detail } = await run();
+      const ms = (await ctx.date.now()) - started;
+      ctx
+        .objectSendClient(tenantObject, req.tenant)
+        .record({ call: ctx.request().id, user: req.user, tool: req.name, outcome, detail, ms });
+      return { content: [{ type: 'text', text: detail }], ...(outcome === 'ok' ? {} : { isError: true }) };
     },
   },
-  options: {
-    // A call waiting (for approval, for a tool) suspends soon: it holds no
-    // process, and a restart of the gateway's process does not disturb it.
-    inactivityTimeout: { seconds: 1 },
-  },
+  // A waiting call suspends soon, and holds no process.
+  options: { inactivityTimeout: { seconds: 1 } },
 });
 
 serveIfMain(import.meta, [gateway, tenantObject]);
