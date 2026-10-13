@@ -10,8 +10,10 @@
 //! futures on the host executor. Adjacent reads overlap in bounded batches; writes,
 //! truncation and sync serialize the queue into ordered phases. Within a read batch,
 //! completion order may differ from submission order. A single multi-page file read
-//! fetches its pages sequentially. There is no speculative prefetch; cross-session reuse comes from
-//! the optional [`crate::PageCache`].
+//! fetches its pages sequentially. This layer does not prefetch: the snapshot does
+//! (a small database whole, or the working-set hint, at open; readahead after
+//! consecutive misses), and cross-session reuse comes from the optional
+//! [`crate::PageCache`].
 //!
 //! Read buffers are staged privately until the read succeeds. `Completing` retires
 //! in-flight accounting and aborts incomplete engine callbacks even if a dequeued
@@ -176,7 +178,8 @@ pub struct KvIo {
 }
 
 impl KvIo {
-    /// Recover a pending save, load the head, then fetch nodes/blocks on demand.
+    /// Open the snapshot (`meta`, then the log's replay), then fetch pages on
+    /// demand.
     pub async fn mount(store: Arc<dyn KvStore>) -> io::Result<Arc<Self>> {
         Self::mount_with_options(store, StorageOptions::default()).await
     }

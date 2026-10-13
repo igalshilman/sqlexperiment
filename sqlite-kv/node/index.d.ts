@@ -39,6 +39,8 @@ export declare class Database implements Transaction {
 
 /**
  * Open the database of `namespace` over `store`. One process-wide page cache
- * serves every namespace; each SQL commit is durable once its writes are.
+ * serves every namespace. Each SQL commit is durable once the store has stored
+ * its writes: a statement resolves once they reach the store, in order, and
+ * `save()` waits until they are stored.
  */
 export declare function open(namespace: string, store: Store): Promise<Database>;
