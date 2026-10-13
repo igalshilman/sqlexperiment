@@ -119,11 +119,19 @@ static CACHE: OnceCell<PageCache> = OnceCell::const_new();
 async fn page_cache() -> Result<&'static PageCache> {
     CACHE
         .get_or_try_init(async || {
-            let file = std::env::var_os("SQLITE_KV_CACHE_FILE").map_or_else(
-                || std::env::temp_dir().join(format!("sqlite-kv-{}.cache", std::process::id())),
-                PathBuf::from,
-            );
-            PageCache::open(PageCacheConfig::new(file, 256 << 20, 1 << 30)).await
+            let named = std::env::var_os("SQLITE_KV_CACHE_FILE").map(PathBuf::from);
+            let file = named.clone().unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("sqlite-kv-{}.cache", std::process::id()))
+            });
+            let cache = PageCache::open(PageCacheConfig::new(&file, 256 << 20, 1 << 30)).await?;
+            // The cache keeps the file open, and nothing else uses the
+            // temporary one: unlinked now, it goes away with the process
+            // however it ends, rather than staying behind (where unlinking an
+            // open file is refused, it stays).
+            if named.is_none() {
+                let _ = std::fs::remove_file(&file);
+            }
+            Ok::<_, io::Error>(cache)
         })
         .await
         .map_err(|e| Error::from_reason(e.to_string()))
