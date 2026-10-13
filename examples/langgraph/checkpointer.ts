@@ -108,8 +108,15 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
    * versions compare as their counts do, and a random part, so that branches
    * of a thread never share one. A string: LangGraph compares string versions
    * as strings, though `compile` types a saver's versions as numbers.
+   *
+   * A thread of the earlier saver has numbers, which LangGraph compares with
+   * a string as neither greater nor smaller, so its steps would stop running:
+   * it goes on with numbers. (LangGraph advances every channel from the
+   * greatest version of the checkpoint, so a thread keeps one kind.) Its
+   * forks share versions with the branch they forked from, as before.
    */
   override getNextVersion(current: number | undefined): number {
+    if (typeof current === 'number') return current + 1;
     const count = current === undefined ? 0 : Number.parseInt(String(current).split('.')[0]!, 10);
     return `${String(count + 1).padStart(32, '0')}.${randomUUID()}` as unknown as number;
   }
