@@ -5,6 +5,7 @@
 #   make test         unit and integration tests (no Restate server needed)
 #   make crash-test   the crash campaign, against RESTATE_SERVER
 #   make concurrency-test   the context without journal replay, against RESTATE_SERVER
+#   make gateway-demo the tool gateway's demo, against RESTATE_SERVER
 #   make help         every target
 #
 # The Rust workspaces (the crate, the addon) share one target directory.
@@ -31,7 +32,7 @@ RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
 .PHONY: all help core addon sdk-ts examples examples-rust examples-js \
-	test test-core test-addon test-sdk-ts test-node test-pi test-langgraph test-claude test-deepseek test-opencode lint lint-core lint-examples format crash-test concurrency-test restate-server clean
+	test test-core test-addon test-sdk-ts test-node test-pi test-langgraph test-claude test-deepseek test-opencode test-gateway lint lint-core lint-examples format crash-test concurrency-test gateway-demo restate-server clean
 
 all: core addon examples ## Build everything
 
@@ -63,7 +64,7 @@ examples-js: $(ADDON) $(SDK_TARBALL) ## The TypeScript examples (node/, pi/, lan
 
 # --- Test
 
-test: test-core test-addon test-sdk-ts test-node test-pi test-langgraph test-claude test-deepseek test-opencode ## Every test that needs no Restate server
+test: test-core test-addon test-sdk-ts test-node test-pi test-langgraph test-claude test-deepseek test-opencode test-gateway ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
@@ -93,6 +94,9 @@ test-deepseek: examples-js ## The DeepSeek Harness agent through crashes
 test-opencode: examples-js ## The OpenCode 2.0 agent through crashes
 	cd examples && npm run test:opencode
 
+test-gateway: examples-js ## The tool gateway's registry, MCP endpoint and scripted model
+	cd examples && npm run test:gateway
+
 lint: lint-core lint-examples ## Every lint
 
 lint-core: ## Clippy on the core crate
@@ -109,6 +113,9 @@ crash-test: examples-js $(RESTATE_SERVER) ## Every TypeScript example through cr
 
 concurrency-test: examples-js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
 	cd examples && node concurrency.ts
+
+gateway-demo: examples-js $(RESTATE_SERVER) ## The tool gateway's demo, which checks itself, against a Restate server
+	cd examples && node gateway/demo.ts
 
 restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
