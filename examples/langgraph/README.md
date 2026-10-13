@@ -37,6 +37,8 @@ conversation, which is the LangGraph thread.
 - [`checkpointer.test.ts`](checkpointer.test.ts): LangGraph's checkpointer
   conformance suite (`@langchain/langgraph-checkpoint-validation`, 718 tests)
   on the checkpointer, over a sqlite-kv database in memory.
+- [`fork.test.ts`](fork.test.ts): a thread forked from an earlier checkpoint,
+  which the suite does not cover: each branch keeps its own values.
 - [`agent.test.ts`](agent.test.ts): the handler with a fake `ctx`, through
   crashes.
 

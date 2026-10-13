@@ -7,12 +7,16 @@
 // - `channel_values`: each channel's value at each version, stored when a
 //   step changes it. A checkpoint's values are those at its channel versions,
 //   so a step stores only what it changed, not the whole state again (an
-//   agent's message list, say).
+//   agent's message list, say). Versions are unique, as in LangGraph's own
+//   savers (a count and a random part): a thread forked from an earlier
+//   checkpoint takes the same counts again, and its values must not replace
+//   those of the branch it forked from.
 // - `writes`: the pending writes of each checkpoint's tasks.
 //
 // Each `put` and `putWrites` is one SQL transaction, so a step is stored whole,
 // in order with everything else the handler does. Operations run one at a
 // time, in call order: LangGraph writes the results of parallel tasks at once.
+import { randomUUID } from 'node:crypto';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import {
   BaseCheckpointSaver,
@@ -97,6 +101,17 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
   constructor(db: SqlSession, serde?: SerializerProtocol) {
     super(serde);
     this.#db = db;
+  }
+
+  /**
+   * The version after `current`: its count plus one, zero-padded so that
+   * versions compare as their counts do, and a random part, so that branches
+   * of a thread never share one. A string: LangGraph compares string versions
+   * as strings, though `compile` types a saver's versions as numbers.
+   */
+  override getNextVersion(current: number | undefined): number {
+    const count = current === undefined ? 0 : Number.parseInt(String(current).split('.')[0]!, 10);
+    return `${String(count + 1).padStart(32, '0')}.${randomUUID()}` as unknown as number;
   }
 
   /** Runs `operation` after the ones before it, on a database with the tables. */
