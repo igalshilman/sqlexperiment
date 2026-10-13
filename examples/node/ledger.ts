@@ -25,48 +25,62 @@ export interface Audit {
   inconsistent: number;
 }
 
-export const ledger = restate.object({
-  name: 'Ledger',
-  handlers: {
-    /** Create the tables, and open `count` accounts with `balance` each, once. */
-    init: (ctx: restate.SqlObjectContext, [count, balance]: [number, number]) =>
-      ctx.sql(async (db) => {
-        await db.execute(
-          `CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, opening INTEGER, balance INTEGER);
+/** The ledger's handlers. */
+export const handlers = {
+  /** Create the tables, and open `count` accounts with `balance` each, once. */
+  init: (ctx: restate.SqlObjectContext, [count, balance]: [number, number]) =>
+    ctx.sql(async (db) => {
+      await db.execute(
+        `CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, opening INTEGER, balance INTEGER);
            CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, src INTEGER, dst INTEGER, amount INTEGER);`,
-        );
-        for (let id = 0; id < count; id++) {
-          await db.execute('INSERT OR IGNORE INTO accounts VALUES(?, ?, ?)', [id, balance, balance]);
-        }
-      }),
+      );
+      for (let id = 0; id < count; id++) {
+        await db.execute('INSERT OR IGNORE INTO accounts VALUES(?, ?, ?)', [id, balance, balance]);
+      }
+    }),
 
-    /** Move money between accounts; false if this transfer id was applied before. */
-    transfer: (ctx: restate.SqlObjectContext, t: Transfer) =>
-      ctx.sql(async (db) => {
-        const seen = await db.query('SELECT 1 FROM transfers WHERE id = ?', [t.id]);
-        if (seen.length > 0) return false;
-        await db.execute('INSERT INTO transfers VALUES(?, ?, ?, ?)', [t.id, t.from, t.to, t.amount]);
-        await db.execute('UPDATE accounts SET balance = balance - ?1 WHERE id = ?2', [t.amount, t.from]);
-        await db.execute('UPDATE accounts SET balance = balance + ?1 WHERE id = ?2', [t.amount, t.to]);
-        return true;
-      }),
+  /**
+   * Move money between two accounts; false if this transfer id was applied
+   * before. A transfer that would create or destroy money is refused: an
+   * account that does not exist, or an amount that is not a positive
+   * integer.
+   */
+  transfer: (ctx: restate.SqlObjectContext, t: Transfer) =>
+    ctx.sql(async (db) => {
+      const seen = await db.query('SELECT 1 FROM transfers WHERE id = ?', [t.id]);
+      if (seen.length > 0) return false;
+      if (!Number.isSafeInteger(t.amount) || t.amount <= 0) {
+        throw new restate.TerminalError(`transfer ${t.id}: the amount ${t.amount} is not a positive integer`);
+      }
+      if (t.from === t.to) throw new restate.TerminalError(`transfer ${t.id}: from and to are one account`);
+      const [accounts] = await row<[number]>(db, 'SELECT count(*) FROM accounts WHERE id IN (?, ?)', [t.from, t.to]);
+      if (accounts !== 2) throw new restate.TerminalError(`transfer ${t.id}: no account ${t.from} or ${t.to}`);
+      await db.execute('INSERT INTO transfers VALUES(?, ?, ?, ?)', [t.id, t.from, t.to, t.amount]);
+      await db.execute('UPDATE accounts SET balance = balance - ?1 WHERE id = ?2', [t.amount, t.from]);
+      await db.execute('UPDATE accounts SET balance = balance + ?1 WHERE id = ?2', [t.amount, t.to]);
+      return true;
+    }),
 
-    /** Totals, and accounts that disagree with the recorded transfers. */
-    audit: (ctx: restate.SqlObjectContext) =>
-      ctx.sql(async (db): Promise<Audit> => {
-        const [integrity] = await row<[string]>(db, 'PRAGMA integrity_check');
-        if (integrity !== 'ok') throw new restate.TerminalError('integrity check failed');
-        const [accounts, total, transfers, inconsistent] = await row<[number, number, number, number]>(
-          db,
-          `SELECT (SELECT count(*) FROM accounts), (SELECT sum(balance) FROM accounts),
+  /** Totals, and accounts that disagree with the recorded transfers. */
+  audit: (ctx: restate.SqlObjectContext) =>
+    ctx.sql(async (db): Promise<Audit> => {
+      const [integrity] = await row<[string]>(db, 'PRAGMA integrity_check');
+      if (integrity !== 'ok') throw new restate.TerminalError('integrity check failed');
+      const [accounts, total, transfers, inconsistent] = await row<[number, number, number, number]>(
+        db,
+        `SELECT (SELECT count(*) FROM accounts), (SELECT sum(balance) FROM accounts),
                   (SELECT count(*) FROM transfers),
                   (SELECT count(*) FROM accounts a WHERE a.balance != a.opening
                       - (SELECT coalesce(sum(amount), 0) FROM transfers WHERE src = a.id)
                       + (SELECT coalesce(sum(amount), 0) FROM transfers WHERE dst = a.id))`,
-        );
-        return { accounts, total, transfers, inconsistent };
-      }),
-  },
+      );
+      return { accounts, total, transfers, inconsistent };
+    }),
+};
+
+export const ledger = restate.object({
+  name: 'Ledger',
+  handlers,
   options: {
     ...restate.sqlOptions,
     retryPolicy: { initialInterval: 50, maxInterval: 500 },
