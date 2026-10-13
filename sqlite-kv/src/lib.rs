@@ -579,13 +579,33 @@ impl Session {
         self.in_body = false;
         let open = !self.is_poisoned() && !self.connection.as_ref().unwrap().get_auto_commit();
         let result = match result {
-            Ok(value) if open => self.execute("COMMIT").await.map(|()| value),
+            Ok(value) if open => match self.execute("COMMIT").await {
+                Ok(()) => Ok(value),
+                // A COMMIT that fails (a deferred constraint) leaves the
+                // transaction open: without the rollback, the statements
+                // after it would run inside it.
+                Err(error) => self.rollback(error).await,
+            },
             Ok(_) => Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into()),
-            Err(error) if open => self.execute("ROLLBACK").await.and(Err(error)),
+            Err(error) if open => self.rollback(error).await,
             Err(error) => Err(error),
         };
         guard.finished = true;
         result
+    }
+
+    /// Roll back the open transaction of [`Self::transaction`], which fails
+    /// with `error`: a failing rollback does not replace it, but ends the
+    /// session if the transaction is still open.
+    async fn rollback<T>(&mut self, error: Box<dyn std::error::Error + Send + Sync>) -> Result<T> {
+        if !self.is_poisoned()
+            && !self.connection.as_ref().unwrap().get_auto_commit()
+            && self.execute("ROLLBACK").await.is_err()
+            && !self.connection.as_ref().unwrap().get_auto_commit()
+        {
+            self.poisoned = true;
+        }
+        Err(error)
     }
 
     /// Note what `sql` may change besides the database: connection state, which

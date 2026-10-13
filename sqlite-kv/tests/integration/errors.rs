@@ -285,3 +285,32 @@ fn a_transaction_whose_begin_fails_leaves_the_session_usable() -> Result<()> {
         Ok(())
     })
 }
+
+/// A `transaction` whose `COMMIT` fails (a deferred constraint) rolls back:
+/// the error is returned, nothing of it stays, and the session goes on.
+#[test]
+fn a_transaction_whose_commit_fails_rolls_back() -> Result<()> {
+    futures::executor::block_on(async {
+        for durability in [Durability::Commit, Durability::Save] {
+            let store = Arc::new(MemoryKv::default());
+            let mut db = Session::open_with_options(store, options(durability)).await?;
+            db.execute("PRAGMA foreign_keys=ON").await?;
+            db.execute(
+                "CREATE TABLE p(id INTEGER PRIMARY KEY);
+                 CREATE TABLE c(pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)",
+            )
+            .await?;
+            let error = db
+                .transaction(async |db| db.execute("INSERT INTO c VALUES(7)").await)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("FOREIGN KEY"), "{error}");
+            assert!(db.is_usable());
+            assert!(db.query("SELECT * FROM c").await?.is_empty());
+            db.transaction(async |db| db.execute("INSERT INTO p VALUES(7)").await)
+                .await?;
+            db.save().await?;
+        }
+        Ok(())
+    })
+}
