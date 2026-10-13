@@ -170,3 +170,21 @@ test('a transaction holds the session: other calls wait until it ends', async ()
   await assert.rejects(async () => handle.query('SELECT 1'), /the transaction has ended/);
   await db.save();
 });
+
+test('a COMMIT that fails rolls the transaction back', async () => {
+  const db = await open(fresh(), new Backend().request());
+  await db.execute('PRAGMA foreign_keys=ON');
+  await db.execute('CREATE TABLE p(id INTEGER PRIMARY KEY)');
+  await db.execute('CREATE TABLE c(pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)');
+  // The deferred constraint fails at COMMIT, not at the INSERT.
+  await assert.rejects(
+    db.transaction(async (tx) => tx.execute('INSERT INTO c VALUES(7)')),
+    /FOREIGN KEY constraint failed/,
+  );
+  assert.ok(db.isUsable());
+  // Nothing of it is left, and the next transaction can begin.
+  assert.deepEqual(await db.query('SELECT * FROM c'), []);
+  await db.transaction(async (tx) => tx.execute('INSERT INTO p VALUES(7)'));
+  assert.deepEqual(await db.query('SELECT id FROM p'), [[7]]);
+  await db.save();
+});
