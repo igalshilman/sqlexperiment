@@ -24,6 +24,42 @@ user, and audits each call.
               fake order system and payments (upstream.ts)
 ```
 
+Where each part runs: every call goes through the Restate server, which
+pushes each invocation to the endpoint that serves it. No part calls
+another directly, and none keeps state of its own.
+
+```
+  ┌─ VM ──────────────────────┐            ┌─ anywhere ────────────────┐
+  │ agent.ts                  │            │ MCP client (Claude Code)  │
+  │  Assistant/acme.alice     │            │        │                  │
+  │  pi-durable, SQLite pages │            │        ▼                  │
+  │  cached; none kept here   │            │ mcp.ts (MCP → ingress)    │
+  └─────────────▲─────────────┘            └────────┬──────────────────┘
+                │ invocations (HTTP/2)              │ HTTP
+                │ and the pages it reads, writes    │
+  ┌─────────────┴───────────────────────────────────▼──────────────────────┐
+  │ Restate server                                                         │
+  │  ingress :8080 · admin :9070 (services and their metadata, rules, SQL) │
+  │  journals of the gateway and tools                                     │
+  │  state of the objects: the agent's and Tenant's SQLite pages           │
+  │  scopes and vqueues: calls over a limit wait here, per tenant and user │
+  │  awakeables: a call held for approval is suspended here                │
+  └─────────────┬──────────────────────────────────────────┬───────────────┘
+                │ invocations                             │ invocations
+  ┌─ host ──────▼──────────────┐            ┌─ elsewhere ──▼──────────────┐
+  │ gateway.ts                 │            │ tools.ts                    │
+  │  Gateway (reads admin API) │            │  Orders, Payments           │
+  │  Tenant (SQL)              │            │  (a container, a function)  │
+  └────────────────────────────┘            └──────────────┬──────────────┘
+                                                           │ HTTP, ctx.run
+                                                           ▼
+                                             order system, payment provider
+```
+
+Kill the VM in the middle of a prompt and the agent resumes on any other:
+its session is in Restate, and its unfinished tool call reaches the same
+gateway call by its idempotency key.
+
 Run it:
 
 ```sh
