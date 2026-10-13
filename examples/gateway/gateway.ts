@@ -10,11 +10,13 @@
 //      call is held on an awakeable, recorded in the tenant's object, and the
 //      manager paged, until a decision (Tenant.decide) or a timeout. It costs
 //      nothing meanwhile: the invocation is suspended, and the agent's too;
-//   3. the call, in the tenant's scope, with the tool's name as limit key:
+//   3. the call, in the tenant's scope, with `<tool>/<user>` as limit key:
 //      the server's limit rules (`*/lookup_order` at 2, say) hold the calls
 //      over the limit in the scope's queue until one ends, so the upstream
 //      API never sees more than its limit, and one tenant's burst does not
-//      queue another tenant's calls;
+//      queue another tenant's calls. Each user's calls queue apart and take
+//      turns, so one user's burst does not hold up another's either; and a
+//      rule on `*/lookup_order/*` caps what each user runs at once;
 //   4. a record of the call in the tenant's audit log (tenant.ts).
 //
 //   It returns an MCP tool result: a tool's failure (a terminal error) is a
@@ -59,6 +61,8 @@ export interface ToolResult {
 
 export interface CallRequest {
   tenant: string;
+  /** The tenant's user on whose behalf the tool runs: the second level of its limit key. */
+  user: string;
   /** Who calls, for the audit log: an agent's key, an MCP session. */
   caller: string;
   name: string;
@@ -102,6 +106,15 @@ async function registry(): Promise<Tool[]> {
   return toolsOf((await res.json()) as Parameters<typeof toolsOf>[0]);
 }
 
+/** The tenant and the user of `<tenant>.<user>` (an agent's key, an MCP token); a user of `anonymous` without one. */
+export function identity(of: string): { tenant: string; user: string } {
+  const dot = of.indexOf('.');
+  return dot < 0 ? { tenant: of, user: 'anonymous' } : { tenant: of.slice(0, dot), user: of.slice(dot + 1) };
+}
+
+/** What a scope or a limit key's level may be. */
+const KEY = /^[\w.-]{1,36}$/;
+
 const allowed = (tenant: string, tool: string) => {
   const policy = POLICY[tenant];
   return policy === '*' || (policy?.includes(tool) ?? false);
@@ -124,9 +137,17 @@ export const gateway = restate.service({
         if (!tool || !allowed(req.tenant, tool.name)) {
           return { outcome: 'denied', detail: `${req.tenant} has no tool ${req.name}` };
         }
+        if (!KEY.test(req.user)) return { outcome: 'denied', detail: `no user ${JSON.stringify(req.user)}` };
         if (tool.approval) {
           const { id, promise } = ctx.awakeable<Decision>();
-          const held = { awakeable: id, call: ctx.request().id, at: started, caller: req.caller, tool: tool.name };
+          const held = {
+            awakeable: id,
+            call: ctx.request().id,
+            at: started,
+            user: req.user,
+            caller: req.caller,
+            tool: tool.name,
+          };
           ctx.objectSendClient(tenantObject, req.tenant).hold({ ...held, arguments: req.arguments });
           await ctx.run('page the manager', async () => {
             const res = await fetch(`${UPSTREAM}/pages`, {
@@ -151,7 +172,10 @@ export const gateway = restate.service({
             inputSerde: restate.serde.json,
             outputSerde: restate.serde.json,
             scope: req.tenant,
-            limitKey: tool.name,
+            // Two levels: the tool, then the user. A rule on `*/<tool>`
+            // limits the tenant's calls, one on `*/<tool>/*` each user's.
+            limitKey: `${tool.name}/${req.user}`,
+            headers: { 'x-on-behalf-of': req.user },
           });
           return { outcome: 'ok', detail: text(result) };
         } catch (e) {
@@ -163,6 +187,7 @@ export const gateway = restate.service({
       ctx.objectSendClient(tenantObject, req.tenant).record({
         call: ctx.request().id,
         at: started,
+        user: req.user,
         caller: req.caller,
         tool: req.name,
         arguments: req.arguments,

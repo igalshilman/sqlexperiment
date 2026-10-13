@@ -1,11 +1,12 @@
 // The gateway as an MCP server, for any MCP client: Claude Code, the MCP
 // Inspector, another agent. Streamable HTTP, answering each request with JSON.
 //
-//   claude mcp add --transport http restate-tools http://127.0.0.1:9400/mcp --header "Authorization: Bearer acme"
+//   claude mcp add --transport http restate-tools http://127.0.0.1:9400/mcp --header "Authorization: Bearer acme.alice"
 //
 // A thin shim: it speaks MCP's JSON-RPC and calls the gateway through
 // Restate's ingress, where everything else happens (gateway.ts). The bearer
-// token is the tenant. `tools/list` is Gateway.tools; `tools/call` is
+// token is the tenant and the user, `<tenant>.<user>` (or `<tenant>`, for
+// an anonymous user). `tools/list` is Gateway.tools; `tools/call` is
 // Gateway.call with an idempotency key made from the MCP session and the
 // request's JSON-RPC id, so a client that sends a call again (a lost
 // response, a reconnect) gets the first call's result, not a second refund.
@@ -15,7 +16,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import type { CallRequest, Tool, ToolResult } from './gateway.ts';
+import { identity, type CallRequest, type Tool, type ToolResult } from './gateway.ts';
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
@@ -58,8 +59,13 @@ class RpcError extends Error {
   }
 }
 
-/** The answer to one MCP request of `tenant` in `session`. */
-export async function answer(gateway: GatewayClient, tenant: string, session: string, req: JsonRpcRequest) {
+/** The answer to one MCP request of `user` of `tenant` in `session`. */
+export async function answer(
+  gateway: GatewayClient,
+  { tenant, user }: { tenant: string; user: string },
+  session: string,
+  req: JsonRpcRequest,
+) {
   switch (req.method) {
     case 'initialize': {
       const asked = req.params?.protocolVersion;
@@ -81,8 +87,8 @@ export async function answer(gateway: GatewayClient, tenant: string, session: st
       if (typeof name !== 'string') throw new RpcError(-32602, 'tools/call needs a tool name');
       const args = (req.params?.arguments ?? {}) as Record<string, unknown>;
       return gateway.call(
-        { tenant, caller: `mcp:${session}`, name, arguments: args },
-        `mcp:${tenant}:${session}:${String(req.id)}`,
+        { tenant, user, caller: `mcp:${session}`, name, arguments: args },
+        `mcp:${tenant}.${user}:${session}:${String(req.id)}`,
       );
     }
     default:
@@ -107,8 +113,8 @@ export function mcpHandler(gateway: GatewayClient) {
     if (url.pathname !== '/mcp') return json(404, { error: 'not found' });
     // No stream of server messages, and sessions end on their own.
     if (req.method !== 'POST') return json(405, { error: 'POST only' }, { allow: 'POST' });
-    const tenant = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
-    if (!tenant) return json(401, { error: 'a bearer token (the tenant) is required' });
+    const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
+    if (!token) return json(401, { error: 'a bearer token (`<tenant>.<user>`) is required' });
     let message: JsonRpcRequest;
     try {
       message = JSON.parse(await read(req)) as JsonRpcRequest;
@@ -124,7 +130,7 @@ export function mcpHandler(gateway: GatewayClient) {
       return res.end();
     }
     try {
-      const result = await answer(gateway, tenant, session, message);
+      const result = await answer(gateway, identity(token), session, message);
       json(200, { jsonrpc: '2.0', id: message.id, result }, headers);
     } catch (e) {
       const code = e instanceof RpcError ? e.code : -32603;

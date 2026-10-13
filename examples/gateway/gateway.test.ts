@@ -6,7 +6,7 @@ import type { AddressInfo } from 'node:net';
 import type { TranscriptContext } from '@earendil-works/pi-ai';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { concierge } from './agent.ts';
-import { toolsOf, type CallRequest } from './gateway.ts';
+import { identity, toolsOf, type CallRequest } from './gateway.ts';
 import { mcpHandler, type GatewayClient } from './mcp.ts';
 
 describe('the registry', () => {
@@ -42,6 +42,14 @@ describe('the registry', () => {
         handler: 'refund',
       },
     ]);
+  });
+});
+
+describe('identity', () => {
+  it('is the tenant and the user of `<tenant>.<user>`', () => {
+    expect(identity('acme.alice')).toEqual({ tenant: 'acme', user: 'alice' });
+    expect(identity('acme.a.b')).toEqual({ tenant: 'acme', user: 'a.b' });
+    expect(identity('acme')).toEqual({ tenant: 'acme', user: 'anonymous' });
   });
 });
 
@@ -81,7 +89,7 @@ describe('the MCP endpoint', () => {
   const rpc = async (method: string, params?: unknown, session?: string) => {
     const res = await post(
       { jsonrpc: '2.0', id: 7, method, params },
-      { authorization: 'Bearer acme', ...(session ? { 'mcp-session-id': session } : {}) },
+      { authorization: 'Bearer acme.alice', ...(session ? { 'mcp-session-id': session } : {}) },
     );
     return { session: res.headers.get('mcp-session-id')!, body: (await res.json()) as Record<string, unknown> };
   };
@@ -106,14 +114,14 @@ describe('the MCP endpoint', () => {
     });
   });
 
-  it('calls a tool once per session and request id', async () => {
+  it("calls a tool for the token's user, once per session and request id", async () => {
     calls.length = 0;
     const { body } = await rpc('tools/call', { name: 'acme_tool', arguments: { a: 1 } }, 's1');
     expect(body.result).toEqual({ content: [{ type: 'text', text: 'ran acme_tool' }] });
     expect(calls).toEqual([
       {
-        req: { tenant: 'acme', caller: 'mcp:s1', name: 'acme_tool', arguments: { a: 1 } },
-        idempotencyKey: 'mcp:acme:s1:7',
+        req: { tenant: 'acme', user: 'alice', caller: 'mcp:s1', name: 'acme_tool', arguments: { a: 1 } },
+        idempotencyKey: 'mcp:acme.alice:s1:7',
       },
     ]);
   });

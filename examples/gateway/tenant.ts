@@ -18,6 +18,7 @@ export interface CallRecord {
   /** The gateway's invocation id: one record per call, however often it is sent. */
   call: string;
   at: number;
+  user: string;
   caller: string;
   tool: string;
   arguments: unknown;
@@ -31,6 +32,7 @@ export interface Approval {
   awakeable: string;
   call: string;
   at: number;
+  user: string;
   caller: string;
   tool: string;
   arguments: unknown;
@@ -43,9 +45,9 @@ export interface Decision {
 }
 
 const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS calls(call TEXT PRIMARY KEY, at INTEGER, caller TEXT, tool TEXT,
+  CREATE TABLE IF NOT EXISTS calls(call TEXT PRIMARY KEY, at INTEGER, user TEXT, caller TEXT, tool TEXT,
     arguments TEXT, outcome TEXT, detail TEXT, ms INTEGER);
-  CREATE TABLE IF NOT EXISTS approvals(awakeable TEXT PRIMARY KEY, call TEXT, at INTEGER, caller TEXT,
+  CREATE TABLE IF NOT EXISTS approvals(awakeable TEXT PRIMARY KEY, call TEXT, at INTEGER, user TEXT, caller TEXT,
     tool TEXT, arguments TEXT, approved INTEGER, by TEXT);`;
 
 export const tenant = restate.object({
@@ -55,9 +57,10 @@ export const tenant = restate.object({
     record: (ctx: restate.SqlObjectContext, r: CallRecord) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
-        await db.execute('INSERT OR IGNORE INTO calls VALUES(?, ?, ?, ?, ?, ?, ?, ?)', [
+        await db.execute('INSERT OR IGNORE INTO calls VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)', [
           r.call,
           r.at,
+          r.user,
           r.caller,
           r.tool,
           JSON.stringify(r.arguments),
@@ -71,10 +74,11 @@ export const tenant = restate.object({
     hold: (ctx: restate.SqlObjectContext, a: Approval) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
-        await db.execute('INSERT OR IGNORE INTO approvals VALUES(?, ?, ?, ?, ?, ?, NULL, NULL)', [
+        await db.execute('INSERT OR IGNORE INTO approvals VALUES(?, ?, ?, ?, ?, ?, ?, NULL, NULL)', [
           a.awakeable,
           a.call,
           a.at,
+          a.user,
           a.caller,
           a.tool,
           JSON.stringify(a.arguments),
@@ -86,12 +90,13 @@ export const tenant = restate.object({
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
         const rows = await db.query(
-          'SELECT awakeable, call, at, caller, tool, arguments FROM approvals WHERE approved IS NULL ORDER BY at',
+          'SELECT awakeable, call, at, user, caller, tool, arguments FROM approvals WHERE approved IS NULL ORDER BY at',
         );
-        return rows.map(([awakeable, call, at, caller, tool, args]) => ({
+        return rows.map(([awakeable, call, at, user, caller, tool, args]) => ({
           awakeable,
           call,
           at,
+          user,
           caller,
           tool,
           arguments: JSON.parse(args as string) as unknown,
@@ -120,7 +125,7 @@ export const tenant = restate.object({
       return decision;
     },
 
-    /** What the tenant's tools did: per tool, and the last calls. */
+    /** What the tenant's tools did: per tool, per user and tool, and the last calls. */
     report: (ctx: restate.SqlObjectContext) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
@@ -129,8 +134,12 @@ export const tenant = restate.object({
                   cast(avg(ms) AS INTEGER), max(ms)
              FROM calls GROUP BY tool ORDER BY tool`,
         );
+        const users = await db.query(
+          `SELECT user, tool, count(*), cast(avg(ms) AS INTEGER), max(ms)
+             FROM calls GROUP BY user, tool ORDER BY user, tool`,
+        );
         const last = await db.query(
-          'SELECT tool, caller, outcome, ms, detail FROM calls ORDER BY at DESC, call LIMIT 10',
+          'SELECT tool, user, caller, outcome, ms, detail FROM calls ORDER BY at DESC, call LIMIT 10',
         );
         return {
           tools: tools.map(([tool, calls, ok, errors, refused, avgMs, maxMs]) => ({
@@ -142,7 +151,8 @@ export const tenant = restate.object({
             avgMs,
             maxMs,
           })),
-          last: last.map(([tool, caller, outcome, ms, detail]) => ({ tool, caller, outcome, ms, detail })),
+          users: users.map(([user, tool, calls, avgMs, maxMs]) => ({ user, tool, calls, avgMs, maxMs })),
+          last: last.map(([tool, user, caller, outcome, ms, detail]) => ({ tool, user, caller, outcome, ms, detail })),
         };
       }),
   },
