@@ -107,22 +107,23 @@ export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.S
               );
               resumed = true;
               resume(
-                Effect.flatMap(Effect.exit(inner), (exit) => {
-                  if (Exit.isFailure(exit)) {
-                    reject(rollback);
-                    return Effect.flatMap(
-                      Effect.promise(() => settled),
-                      () => exit,
-                    );
+                // A finalizer, so that the body settles however `effect`
+                // ends, an interruption included: otherwise the transaction
+                // would hold the session for good.
+                Effect.onExit(inner, (exit) => {
+                  if (Exit.isSuccess(exit)) {
+                    resolve();
+                    return Effect.void;
                   }
-                  resolve();
+                  reject(rollback);
+                  return Effect.promise(() => settled);
+                }).pipe(
                   // The commit is part of the transaction: if it fails, so
                   // does the transaction.
-                  return Effect.flatMap(
-                    Effect.tryPromise({ try: () => ended, catch: (e) => error('commit', e) }),
-                    () => exit,
-                  );
-                }),
+                  Effect.flatMap((value) =>
+                    Effect.as(Effect.tryPromise({ try: () => ended, catch: (e) => error('commit', e) }), value),
+                  ),
+                ),
               );
             }),
         );
