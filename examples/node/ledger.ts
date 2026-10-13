@@ -29,7 +29,7 @@ export interface Audit {
 export const handlers = {
   /** Create the tables, and open `count` accounts with `balance` each, once. */
   init: (ctx: restate.SqlObjectContext, [count, balance]: [number, number]) =>
-    ctx.sql(async (db) => {
+    ctx.transaction(async ({ db }) => {
       await db.execute(
         `CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, opening INTEGER, balance INTEGER);
            CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, src INTEGER, dst INTEGER, amount INTEGER);`,
@@ -47,7 +47,7 @@ export const handlers = {
    * does not exist, or an amount that is not a positive integer.
    */
   transfer: (ctx: restate.SqlObjectContext, t: Transfer) =>
-    ctx.sql(async (db): Promise<Transfer> => {
+    ctx.transaction(async ({ db }): Promise<Transfer> => {
       const [seen] = await db.query('SELECT src, dst, amount FROM transfers WHERE id = ?', [t.id]);
       if (seen) {
         const [from, to, amount] = seen as [number, number, number];
@@ -67,7 +67,7 @@ export const handlers = {
 
   /** Totals, and accounts that disagree with the recorded transfers. */
   audit: (ctx: restate.SqlObjectContext) =>
-    ctx.sql(async (db): Promise<Audit> => {
+    ctx.transaction(async ({ db }): Promise<Audit> => {
       const [integrity] = await row<[string]>(db, 'PRAGMA integrity_check');
       if (integrity !== 'ok') throw new restate.TerminalError('integrity check failed');
       const [accounts, total, transfers, inconsistent] = await row<[number, number, number, number]>(

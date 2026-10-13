@@ -1,17 +1,17 @@
-// The ledger's handlers without a Restate server, with a fake `ctx` whose
-// `ctx.sql` runs its body as one transaction of a sqlite-kv database in memory.
+// The ledger's handlers without a Restate server: each call an attempt with
+// the SDK's `ctx.db` and `ctx.transaction` over the object's state in memory.
 import * as restate from '@restatedev/restate-sdk';
-import { open } from 'sqlite-kv';
 import { describe, expect, it } from 'vitest';
-import { memoryStore } from '../testing.ts';
+import { sqlAttempt } from '../testing.ts';
 import { handlers, type Transfer } from './ledger.ts';
 
-let n = 0;
 async function books() {
-  const db = await open(`ledger-${process.pid}-${n++}`, memoryStore());
-  const ctx = { sql: <T>(body: (db: restate.SqlDatabase) => Promise<T>) => db.transaction(body) };
-  const call = <A, R>(handler: (ctx: restate.SqlObjectContext, arg: A) => Promise<R>, arg: A) =>
-    handler(ctx as unknown as restate.SqlObjectContext, arg);
+  const map = new Map<string, Uint8Array>();
+  const call = <A, R>(handler: (ctx: restate.SqlObjectContext, arg: A) => Promise<R>, arg: A) => {
+    const sql = sqlAttempt({ map });
+    const ctx = { db: sql.db, transaction: sql.transaction };
+    return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, arg));
+  };
   await call(handlers.init, [4, 100] as [number, number]);
   return {
     transfer: (t: Transfer) => call(handlers.transfer, t),
