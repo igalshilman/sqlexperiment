@@ -38,8 +38,11 @@ handler)`), and the object's other handlers keep replaying their journals.
 object's database (namespace `service/key`) over the object's state, with the
 process's page cache, runs `body` as one SQL transaction, and ends the session
 with `save()` (one `ctx.run`, if it wrote, so the page cache may trust the
-writes). An SQL error, or the body's own, is terminal; a storage error is
-retried. Creating tables is up to the handlers, such as `init`.
+writes). An SQL error is terminal, since a retry would repeat it; a storage
+error is retried. The body's own errors are as in any handler: a
+`TerminalError` is terminal, and any other error, such as a failed request to
+a model or another service, is retried. Creating tables is up to the handlers,
+such as `init`.
 
 `ctx.sqlSession(body)` keeps the database for longer work, such as a whole
 handler: each statement is its own transaction, and `db.transaction(fn)`

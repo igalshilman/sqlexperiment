@@ -2,8 +2,8 @@
 // state in memory, and a fake object for an agent's handler, with a ledger
 // that records its calls, through crashes of the handler.
 import { randomUUID } from 'node:crypto';
-import type * as restate from '@restatedev/restate-sdk';
-import { open, type Store } from 'sqlite-kv';
+import * as restate from '@restatedev/restate-sdk';
+import { open, type Database, type Store, type Transaction } from 'sqlite-kv';
 import type { Audit, Transfer } from './node/ledger.ts';
 
 /**
@@ -27,6 +27,48 @@ export function memoryStore(map = new Map<string, Uint8Array>(), fence = { close
     },
     sync: async () => {},
   };
+}
+
+/**
+ * `db` as `ctx.sqlSession` gives it, with its errors classified as there: an
+ * SQL error is terminal, and the body's own errors are as in any handler.
+ */
+function sqlSession(db: Database) {
+  const sqlErrors = new WeakSet<object>();
+  const track = <T>(promise: Promise<T>) =>
+    promise.catch((error: unknown) => {
+      if (typeof error === 'object' && error !== null) sqlErrors.add(error);
+      throw error;
+    });
+  const view = (target: Transaction): restate.SqlDatabase => ({
+    query: (sql, params) => track(target.query(sql, params)),
+    queryColumns: (sql, params) => track(target.queryColumns(sql, params)),
+    execute: (sql, params) => track(target.execute(sql, params)),
+  });
+  const session: restate.SqlSession = {
+    ...view(db),
+    transaction: <T>(inner: (tx: restate.SqlDatabase) => Promise<T>) => {
+      let own: { error: unknown } | undefined;
+      return db
+        .transaction(async (tx) => {
+          try {
+            return await inner(view(tx));
+          } catch (error) {
+            own = { error };
+            throw error;
+          }
+        })
+        .catch((error: unknown) => {
+          if (own?.error !== error && typeof error === 'object' && error !== null) sqlErrors.add(error);
+          throw error;
+        });
+    },
+  };
+  const classify = (error: unknown) =>
+    db.isUsable() && error instanceof Error && !(error instanceof restate.TerminalError) && sqlErrors.has(error)
+      ? new restate.TerminalError(error.message)
+      : error;
+  return { session, classify };
 }
 
 /** A prompt to an agent, and its answer. */
@@ -96,8 +138,11 @@ export function conversation(handler: PromptHandler, key: string) {
         request: () => ({ id: requestId }),
         objectClient: () => books,
         sqlSession: async <T>(body: (db: restate.SqlSession) => Promise<T>) => {
+          const { session, classify } = sqlSession(db);
           try {
-            return await body(db);
+            return await body(session);
+          } catch (error) {
+            throw classify(error);
           } finally {
             await db.close();
           }

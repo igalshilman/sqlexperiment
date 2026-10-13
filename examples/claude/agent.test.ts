@@ -2,6 +2,7 @@
 // handler (see ../testing.ts): the runner gets no chance to save anything on
 // the way out of a crashed attempt. `npm run test:claude` (or make
 // test-claude).
+import * as restate from '@restatedev/restate-sdk';
 import { describe, expect, it } from 'vitest';
 import { conversation } from '../testing.ts';
 import { prompt } from './agent.ts';
@@ -51,8 +52,31 @@ describe('the Claude agent', () => {
     const c = conversation(prompt, 'd');
     c.ledger.failNext = 1;
     const input = { id: 'p1', text: 'Please move 3 from 5 to 6' };
-    await expect(c.attempt('inv1', input)).rejects.toThrow('crash after the transfer');
+    const failed = await c.attempt('inv1', input).catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(Error);
+    expect((failed as Error).message).toMatch('crash after the transfer');
+    // Not terminal: Restate retries the attempt.
+    expect(failed).not.toBeInstanceOf(restate.TerminalError);
     expect(await c.attempt('inv1', input)).toEqual({ answer: 'Done: moved 3 from account 5 to account 6' });
+    expect(c.ledger.transfers.size).toBe(1);
+  });
+
+  it('fails the attempt on a failed model request, and the retry goes on', async () => {
+    const c = conversation(prompt, 'e');
+    const reply = teller.reply;
+    teller.reply = () => {
+      teller.reply = reply;
+      throw new Error('529 overloaded');
+    };
+    const input = { id: 'p1', text: 'Please move 4 from 6 to 7' };
+    try {
+      const failed = await c.attempt('inv1', input).catch((error: unknown) => error);
+      expect(failed).toBeInstanceOf(Error);
+      expect(failed).not.toBeInstanceOf(restate.TerminalError);
+    } finally {
+      teller.reply = reply;
+    }
+    expect(await c.attempt('inv1', input)).toEqual({ answer: 'Done: moved 4 from account 6 to account 7' });
     expect(c.ledger.transfers.size).toBe(1);
   });
 
