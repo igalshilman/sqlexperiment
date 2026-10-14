@@ -1,9 +1,8 @@
 // The tools: plain Restate services, with the journal. Nothing in them knows
 // about SQL or agents.
 //
-// PREBUILT is their catalog: the tools a tenant's gateway registers by name
-// (`Gateway/acme/register {"name": "refund"}`), with the JSON schema of each
-// handler's zod input. The gateway calls a tool in the tenant's scope, so a
+// PREBUILT is the gateway's tools: each one's handler, and the JSON schema of
+// its zod input. The gateway calls a tool in the tenant's scope, so a
 // tool knows its tenant from `ctx.request().scope`, and the user it runs for
 // from a header.
 //
