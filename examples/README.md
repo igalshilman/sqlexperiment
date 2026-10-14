@@ -28,8 +28,8 @@ One npm package, here, on the patched Restate TypeScript SDK and the
   injected SQL client.
 - [`gateway/`](gateway/README.md): a tool gateway for agents and MCP clients:
   tools as plain journaled services, found by their metadata, held for
-  approval, limited per tenant with scopes and limit rules, and audited in
-  SQL; with a demo that checks itself against a server.
+  approval, and limited per tenant and user with scopes and limit rules;
+  with a demo that checks itself against a server.
 - [`serve.ts`](serve.ts): serves them in one endpoint (`npm run serve`).
 - [`faults.ts`](faults.ts): fault injection for the crash test.
 - [`test.ts`](test.ts): all of them against a real Restate server, through

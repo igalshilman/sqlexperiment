@@ -5,7 +5,7 @@
 //
 // A thin shim over Restate's ingress; everything else happens in the gateway
 // (gateway.ts). The bearer token is `<tenant>.<user>`. `tools/list` is
-// Gateway.tools; `tools/call` is Gateway.call, with an idempotency key made
+// the tenant's Gateway.tools; `tools/call` its Gateway.call, with an idempotency key made
 // from the token, the MCP session and the JSON-RPC id: a call sent again
 // gets the first one's result.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -13,26 +13,27 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { identity, type CallRequest, type Tool, type ToolResult } from './gateway.ts';
 
-/** The gateway's two handlers. */
+/** The two handlers of a tenant's gateway. */
 export interface GatewayClient {
   tools(tenant: string): Promise<Tool[]>;
-  call(req: CallRequest, idempotencyKey: string): Promise<ToolResult>;
+  call(tenant: string, req: CallRequest, idempotencyKey: string): Promise<ToolResult>;
 }
 
 /** The gateway through Restate's ingress. */
 export function ingressGateway(ingress = 'http://127.0.0.1:8080'): GatewayClient {
-  const post = async <T>(handler: string, body: unknown, headers: Record<string, string> = {}) => {
-    const res = await fetch(`${ingress}/Gateway/${handler}`, {
+  const post = async <T>(path: string, body: unknown, headers: Record<string, string> = {}) => {
+    const res = await fetch(`${ingress}/Gateway/${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...headers },
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`Gateway/${handler}: ${res.status} ${await res.text()}`);
+    if (!res.ok) throw new Error(`Gateway/${path}: ${res.status} ${await res.text()}`);
     return (await res.json()) as T;
   };
   return {
-    tools: (tenant) => post('tools', { tenant }),
-    call: (req, idempotencyKey) => post('call', req, { 'idempotency-key': idempotencyKey }),
+    tools: (tenant) => post(`${encodeURIComponent(tenant)}/tools`, {}),
+    call: (tenant, req, idempotencyKey) =>
+      post(`${encodeURIComponent(tenant)}/call`, req, { 'idempotency-key': idempotencyKey }),
   };
 }
 
@@ -64,8 +65,8 @@ async function answer(gateway: GatewayClient, token: string, session: string, re
       };
     case 'tools/call':
       return gateway.call(
+        tenant,
         {
-          tenant,
           user,
           name: String(req.params?.name),
           arguments: (req.params?.arguments ?? {}) as Record<string, unknown>,

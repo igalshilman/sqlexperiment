@@ -11,7 +11,7 @@
 // 4. Approval: a refund waits for a manager; the agents' process is killed
 //    meanwhile; the manager approves; one refund.
 // 5. MCP: a client's tools/list and tools/call, with the tenant's policy.
-// 6. The audit log, and one tool invocation per tool call.
+// 6. What ran: the server's invocations, one tool invocation per tool call.
 //
 //   RESTATE_SERVER=/path/to/restate-server node gateway/demo.ts
 //
@@ -187,7 +187,7 @@ for (const port of [9070, 9411, 9412, 9413]) await listening(port);
 for (const port of [9411, 9412, 9413])
   await post('http://127.0.0.1:9070/deployments', { uri: `http://127.0.0.1:${port}` });
 await rules(false);
-const tools = (await ingress<{ name: string }[]>('/Gateway/tools', { tenant: 'acme' })).map((t) => t.name);
+const tools = (await ingress<{ name: string }[]>('/Gateway/acme/tools')).map((t) => t.name);
 say(`acme's tools, from the handlers' metadata: ${tools.join(', ')}`);
 
 // ---- 1. without a limit ----
@@ -267,17 +267,17 @@ assert.ok(orders['acme/erin']!.first < orders['acme/alice']!.last);
 act('4. Human in the loop', '  bob (acme) asks for a refund, which a manager approves.');
 const refund = prompt('acme.bob', 'p5', 'refund 30 of order 103');
 let held: { awakeable: string; tool: string; arguments: unknown }[] = [];
-while (held.length === 0) held = await sleep(200).then(() => ingress('/Tenant/acme/pending'));
+while (held.length === 0) held = await sleep(200).then(() => ingress('/Gateway/acme/pending'));
 say(`held: ${held[0]!.tool} ${JSON.stringify(held[0]!.arguments)}`);
 await sleep(1500);
 const waiting = await query<{ target: string; status: string }>(
   "SELECT target, status FROM sys_invocation WHERE target_service_name IN ('Assistant', 'Gateway') AND status != 'completed'",
 );
 say(`meanwhile: ${waiting.map((w) => `${w.target} ${w.status}`).join(', ')}`);
-say("kill -9 the agents' process, then approve: curl localhost:8080/Tenant/acme/decide --json '{…}'");
+say("kill -9 the agents' process, then approve: curl localhost:8080/Gateway/acme/decide --json '{…}'");
 agents.child?.kill('SIGKILL');
 await sleep(1000);
-await ingress('/Tenant/acme/decide', { awakeable: held[0]!.awakeable, approved: true });
+await ingress('/Gateway/acme/decide', { awakeable: held[0]!.awakeable, approved: true });
 say(`bob's answer: ${await refund}; the payment provider made ${refunds.length} refund`);
 assert.equal(refunds.length, 1);
 
@@ -296,30 +296,22 @@ assert.deepEqual(
 );
 assert.equal(denied.isError, true);
 
-// ---- 6. the audit log ----
+// ---- 6. what ran ----
 
-act('6. The audit log', "  Tenant/acme/report: a query of acme's SQL table of calls.");
-await sleep(500); // the last records are sends
-const report = await ingress<{ user: string; tool: string; calls: number }[]>('/Tenant/acme/report');
-console.table(report);
-const invocations = await query<{ target: string; n: number }>(
-  "SELECT target, count(*) AS n FROM sys_invocation WHERE target_service_name IN ('Orders', 'Payments') GROUP BY target ORDER BY target",
+act('6. What ran', "  The server's invocations, by SQL on the admin API: each tenant's gateway calls, and the tools'.");
+const invocations = await query<{ target: string; key: string | null; n: number }>(
+  `SELECT target, target_service_key AS key, count(*) AS n FROM sys_invocation
+    WHERE target IN ('Gateway/call', 'Orders/lookup', 'Payments/refund') GROUP BY target, key ORDER BY target, key`,
 );
-say(`tool invocations: ${invocations.map((i) => `${i.target} ${i.n}`).join(', ')}`);
-// One record and one invocation per tool call, however often the agents crashed.
+console.table(invocations);
+// One invocation per tool call, however often the agents crashed.
 assert.deepEqual(
-  report.map((r) => [r.user, r.tool, r.calls]),
+  invocations.map((i) => [i.target, i.key, i.n]),
   [
-    ['alice', 'lookup_order', 12 + 16 + 6],
-    ['bob', 'refund', 1],
-    ['erin', 'lookup_order', 2],
-  ],
-);
-assert.deepEqual(
-  invocations.map((i) => [i.target, i.n]),
-  [
-    ['Orders/lookup', 12 + 16 + 6 + 2 + 3],
-    ['Payments/refund', 1],
+    ['Gateway/call', 'acme', 12 + 16 + 6 + 2 + 1],
+    ['Gateway/call', 'globex', 3 + 1],
+    ['Orders/lookup', null, 12 + 16 + 6 + 2 + 3],
+    ['Payments/refund', null, 1],
   ],
 );
 console.log(`\npassed; the agents' process restarted ${agents.restarts} times`);

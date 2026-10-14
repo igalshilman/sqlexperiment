@@ -17,13 +17,12 @@ const groups: Record<string, () => Promise<Services>> = {
   deepseek: async () => [(await import('./deepseek/agent.ts')).agent],
   opencode: async () => [(await import('./opencode/agent.ts')).agent],
   gateway: async () => {
-    const [{ tools }, { gateway }, { tenant }, { assistant }] = await Promise.all([
+    const [{ tools }, { gateway }, { assistant }] = await Promise.all([
       import('./gateway/tools.ts'),
       import('./gateway/gateway.ts'),
-      import('./gateway/tenant.ts'),
       import('./gateway/agent.ts'),
     ]);
-    return [...tools, gateway, tenant, assistant];
+    return [...tools, gateway, assistant];
   },
 };
 const names = process.argv.length > 2 ? process.argv.slice(2) : Object.keys(groups);
