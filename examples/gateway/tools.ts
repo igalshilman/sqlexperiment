@@ -6,9 +6,8 @@
 // tool knows its tenant from `ctx.request().scope`, and the user it runs for
 // from a header.
 //
-// The outside world is faked in this process: an order system that is slow
-// and serves at most 2 lookups at once per tenant (one more fails, like a
-// 429), and a payment provider with one refund per idempotency key. Each
+// The outside world is faked in this process: an order system, a payment
+// provider with one refund per idempotency key, and a ticket system. Each
 // request to it is a `ctx.run`: retried until it succeeds, and journaled
 // once it has.
 //
@@ -25,20 +24,8 @@ const orderOf = (id: string) => {
   return { id, status, total: 20 + (n % 80) };
 };
 
-const inFlight = new Map<string, number>();
-
-/** The fake order system: 400 ms a lookup, and at most 2 at once per tenant. */
-async function fetchOrder(tenant: string, id: string) {
-  const n = inFlight.get(tenant) ?? 0;
-  if (n >= 2) throw new Error('order system: 429, too many requests'); // retried
-  inFlight.set(tenant, n + 1);
-  try {
-    await new Promise((r) => setTimeout(r, 400));
-    return orderOf(id);
-  } finally {
-    inFlight.set(tenant, inFlight.get(tenant)! - 1);
-  }
-}
+/** The fake order system. */
+const fetchOrder = async (id: string) => orderOf(id);
 
 const refunds: string[] = [];
 const tickets: string[] = [];
@@ -80,7 +67,7 @@ export const orders = restate.service({
         input: restate.serde.schema(LookupOrder),
       },
       async (ctx: restate.Context, { order }: z.infer<typeof LookupOrder>) =>
-        ctx.run('GET /orders', () => fetchOrder(ctx.request().scope ?? '', order)),
+        ctx.run('GET /orders', () => fetchOrder(order)),
     ),
   },
 });
@@ -94,7 +81,7 @@ export const payments = restate.service({
         input: restate.serde.schema(Refund),
       },
       async (ctx: restate.Context, { order, amount }: z.infer<typeof Refund>) => {
-        const { total } = await ctx.run('GET /orders', () => fetchOrder(ctx.request().scope ?? '', order));
+        const { total } = await ctx.run('GET /orders', () => fetchOrder(order));
         if (amount > total) throw new restate.TerminalError(`order ${order} totals ${total}, less than ${amount}`);
         const idempotencyKey = ctx.request().id; // the same on every attempt
         return ctx.run('POST /refunds', () => makeRefund(idempotencyKey));
