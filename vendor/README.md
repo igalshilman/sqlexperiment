@@ -37,6 +37,7 @@ writes the patches back.
 | Change | Why | Where |
 |---|---|---|
 | `JournalReplay::Disabled` | See [the shared core](#the-shared-core) | `sdk-shared-core.patch` |
+| State commands (get, set, clear) are named after their key | Tooling can hide them by name, such as a SQL database's pages and log (`dev.restate.tooling.journal.hidden.name.prefix`); a journal recorded with unnamed state commands no longer replays | `sdk-shared-core.patch` |
 | A `journalReplay` service and handler option, passed to the WebAssembly VM's new constructor argument | Turns it on per service | `types/rpc.ts`, `endpoint/components.ts`, `endpoint/handlers/generic.ts`, the bindings' `lib.rs` |
 | `ObjectContext.db` and `ObjectContext.transaction(body)` (SQL and the sends it commits with, pending in the object's state while it commits), `restate.sqlOptions`, the `SqlDatabase`, `SqlSession`, `SqlTransaction` and `SqlTransactionSends` types | SQL in a virtual object: the database over the object's state, through the sqlite-kv addon (an optional peer dependency, loaded on first use) | `sql.ts`, `context.ts`, `context_impl.ts` |
 | `restate.internal.setSqlStoreWrapper` | Fault injection in the crash tests | `sql.ts`, `internal.ts` |
