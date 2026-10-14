@@ -26,10 +26,9 @@ One npm package, here, on the patched Restate TypeScript SDK and the
 - [`opencode/`](opencode/README.md): OpenCode 2.0, embedded, whose database
   (sessions, messages, durable events) is the object's database, through an
   injected SQL client.
-- [`gateway/`](gateway/README.md): a tool gateway for agents and MCP clients:
-  tools as plain journaled services, found by their metadata, held for
-  approval, and limited per tenant and user with scopes and limit rules;
-  with a demo that checks itself against a server.
+- [`gateway/`](gateway/README.md): a tool gateway for agents: tools as
+  plain journaled services, found by their metadata, held for approval,
+  and limited per tenant and user with scopes and limit rules.
 - [`serve.ts`](serve.ts): serves them in one endpoint (`npm run serve`).
 - [`faults.ts`](faults.ts): fault injection for the crash test.
 - [`test.ts`](test.ts): all of them against a real Restate server, through

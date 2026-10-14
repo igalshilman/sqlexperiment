@@ -1,36 +1,51 @@
 // The tools: plain Restate services, with the journal. Nothing in them knows
-// about SQL, agents or MCP.
+// about SQL or agents.
 //
 // A handler is a tool when its metadata says so (`mcp.tool`); its
 // description and the JSON schema of its zod input are the tool's. The
 // gateway calls it in the tenant's scope, so a tool knows its tenant from
 // `ctx.request().scope`, and the user it runs for from a header.
 //
-// Each request to the outside world is a `ctx.run`: retried until it
-// succeeds (a 429 included), and journaled once it has. A refund carries the
-// invocation id as idempotency key, the same on every attempt.
+// The outside world is faked in this process: an order system that is slow
+// and serves at most 2 lookups at once per tenant (one more fails, like a
+// 429), and a payment provider with one refund per idempotency key. Each
+// request to it is a `ctx.run`: retried until it succeeds, and journaled
+// once it has.
 //
-// Environment: PORT, UPSTREAM_URL (http://127.0.0.1:9300).
+// Environment: PORT.
 import * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
 import { serveIfMain } from '../faults.ts';
 
-const UPSTREAM = process.env.UPSTREAM_URL ?? 'http://127.0.0.1:9300';
+/** Order `id`: made up, the same every time. */
+const orderOf = (id: string) => {
+  const n = id.split('').reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 1009, 7);
+  const status = ['shipped', 'delayed at customs', 'waiting for stock', 'delivered'][n % 4]!;
+  return { id, status, total: 20 + (n % 80) };
+};
 
-/** A request to the outside world (upstream.ts), as the tenant and the user: a 429 is retried, any other failure is terminal. */
-async function api<T>(ctx: restate.Context, path: string, method = 'GET', headers: Record<string, string> = {}) {
-  const res = await fetch(`${UPSTREAM}${path}`, {
-    method,
-    headers: {
-      'x-tenant': ctx.request().scope ?? '',
-      'x-user': ctx.request().headers.get('x-on-behalf-of') ?? '',
-      ...headers,
-    },
-  });
-  if (res.status === 429) throw new Error(`${path}: 429`);
-  if (!res.ok) throw new restate.TerminalError(`${path}: ${res.status}`);
-  return (await res.json()) as T;
+const inFlight = new Map<string, number>();
+
+/** The fake order system: 400 ms a lookup, and at most 2 at once per tenant. */
+async function fetchOrder(tenant: string, id: string) {
+  const n = inFlight.get(tenant) ?? 0;
+  if (n >= 2) throw new Error('order system: 429, too many requests'); // retried
+  inFlight.set(tenant, n + 1);
+  try {
+    await new Promise((r) => setTimeout(r, 400));
+    return orderOf(id);
+  } finally {
+    inFlight.set(tenant, inFlight.get(tenant)! - 1);
+  }
 }
+
+const refunds: string[] = [];
+
+/** The fake payment provider: one refund per idempotency key, as Stripe does. */
+const makeRefund = async (idempotencyKey: string) => {
+  if (!refunds.includes(idempotencyKey)) refunds.push(idempotencyKey);
+  return { refund: `re_${refunds.indexOf(idempotencyKey)}` };
+};
 
 const LookupOrder = z.object({ order: z.string().describe('The order id, such as "101"') });
 const Refund = z.object({
@@ -48,7 +63,7 @@ export const orders = restate.service({
         input: restate.serde.schema(LookupOrder),
       },
       async (ctx: restate.Context, { order }: z.infer<typeof LookupOrder>) =>
-        ctx.run('GET /orders', () => api<object>(ctx, `/orders/${encodeURIComponent(order)}`)),
+        ctx.run('GET /orders', () => fetchOrder(ctx.request().scope ?? '', order)),
     ),
   },
 });
@@ -63,14 +78,10 @@ export const payments = restate.service({
         input: restate.serde.schema(Refund),
       },
       async (ctx: restate.Context, { order, amount }: z.infer<typeof Refund>) => {
-        const { total } = await ctx.run('GET /orders', () =>
-          api<{ total: number }>(ctx, `/orders/${encodeURIComponent(order)}`),
-        );
+        const { total } = await ctx.run('GET /orders', () => fetchOrder(ctx.request().scope ?? '', order));
         if (amount > total) throw new restate.TerminalError(`order ${order} totals ${total}, less than ${amount}`);
-        const idempotencyKey = ctx.request().id;
-        return ctx.run('POST /refunds', () =>
-          api<{ refund: string }>(ctx, '/refunds', 'POST', { 'idempotency-key': idempotencyKey }),
-        );
+        const idempotencyKey = ctx.request().id; // the same on every attempt
+        return ctx.run('POST /refunds', () => makeRefund(idempotencyKey));
       },
     ),
   },

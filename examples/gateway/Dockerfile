@@ -1,15 +1,11 @@
-# The tool gateway's endpoints in one image. Build it from the repository's root:
+# The tool gateway's endpoint. Build it from the repository's root:
 #
 #   docker build -f examples/gateway/Dockerfile -t tool-gateway .
 #
-# It runs the Restate services (Orders, Payments, Gateway, Assistant) on 9080:
+# It serves the endpoint (Orders, Payments, Gateway, Assistant) on 9080:
 #
-#   docker run -p 9080:9080 -e RESTATE_ADMIN_URL=http://restate:9070 -e UPSTREAM_URL=http://upstream:9300 tool-gateway
-#
-# or one part, such as the fake order system or the MCP endpoint:
-#
-#   docker run -p 9300:9300 -e HOST=0.0.0.0 tool-gateway node gateway/upstream.ts
-#   docker run -p 9400:9400 -e HOST=0.0.0.0 -e RESTATE_INGRESS_URL=http://restate:8080 tool-gateway node gateway/mcp.ts
+#   docker run -p 9080:9080 -e RESTATE_ADMIN_URL=http://restate:9070 \
+#     -e PI_MODEL=openai/gpt-5.4-mini -e OPENAI_API_KEY tool-gateway
 #
 # Needs the patched SDK's tarball, vendor/typescript/.build (`make sdk-ts`).
 
