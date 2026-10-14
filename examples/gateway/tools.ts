@@ -10,14 +10,16 @@
 // succeeds (a 429 included), and journaled once it has. A refund carries the
 // invocation id as idempotency key, the same on every attempt.
 //
-// Environment: PORT.
+// Environment: PORT, UPSTREAM_URL (http://127.0.0.1:9300).
 import * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
 import { serveIfMain } from '../faults.ts';
 
+const UPSTREAM = process.env.UPSTREAM_URL ?? 'http://127.0.0.1:9300';
+
 /** A request to the outside world (upstream.ts), as the tenant and the user: a 429 is retried, any other failure is terminal. */
 async function api<T>(ctx: restate.Context, path: string, method = 'GET', headers: Record<string, string> = {}) {
-  const res = await fetch(`http://127.0.0.1:9300${path}`, {
+  const res = await fetch(`${UPSTREAM}${path}`, {
     method,
     headers: {
       'x-tenant': ctx.request().scope ?? '',

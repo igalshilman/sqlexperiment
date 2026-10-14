@@ -8,6 +8,8 @@
 // the tenant's Gateway.tools; `tools/call` its Gateway.call, with an idempotency key made
 // from the token, the MCP session and the JSON-RPC id: a call sent again
 // gets the first one's result.
+//
+// Environment: RESTATE_INGRESS_URL (http://127.0.0.1:8080), HOST (127.0.0.1).
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +22,7 @@ export interface GatewayClient {
 }
 
 /** The gateway through Restate's ingress. */
-export function ingressGateway(ingress = 'http://127.0.0.1:8080'): GatewayClient {
+export function ingressGateway(ingress = process.env.RESTATE_INGRESS_URL ?? 'http://127.0.0.1:8080'): GatewayClient {
   const post = async <T>(path: string, body: unknown, headers: Record<string, string> = {}) => {
     const res = await fetch(`${ingress}/Gateway/${path}`, {
       method: 'POST',
@@ -107,7 +109,9 @@ export function mcpHandler(gateway: GatewayClient) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  createServer((req, res) => void mcpHandler(ingressGateway())(req, res)).listen(9400, '127.0.0.1', () =>
-    console.error('MCP on http://127.0.0.1:9400/mcp'),
+  createServer((req, res) => void mcpHandler(ingressGateway())(req, res)).listen(
+    9400,
+    process.env.HOST ?? '127.0.0.1',
+    () => console.error(`MCP on http://${process.env.HOST ?? '127.0.0.1'}:9400/mcp`),
   );
 }

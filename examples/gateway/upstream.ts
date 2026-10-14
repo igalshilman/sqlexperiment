@@ -8,7 +8,7 @@
 // - POST /refunds, the payment provider: one refund per `idempotency-key`,
 //   as Stripe does.
 //
-//   node gateway/upstream.ts   (on 9300)
+//   node gateway/upstream.ts   (on 9300; HOST, 127.0.0.1 by default)
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
@@ -40,7 +40,10 @@ export const order = (id: string) => {
 };
 
 /** Serve the fake APIs on `port`. */
-export function startUpstream(port: number): { server: Server; stats: Stats; ready: Promise<void> } {
+export function startUpstream(
+  port: number,
+  host = process.env.HOST ?? '127.0.0.1',
+): { server: Server; stats: Stats; ready: Promise<void> } {
   const stats: Stats = { orders: {}, served: {}, refunds: [] };
   const inFlight = new Map<string, number>();
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
@@ -78,11 +81,11 @@ export function startUpstream(port: number): { server: Server; stats: Stats; rea
     reply(404, { error: 'not found' });
   };
   const server = createServer((req, res) => void handle(req, res));
-  const ready = new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+  const ready = new Promise<void>((resolve) => server.listen(port, host, resolve));
   return { server, stats, ready };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   await startUpstream(9300).ready;
-  console.error('fake APIs on http://127.0.0.1:9300');
+  console.error(`fake APIs on http://${process.env.HOST ?? '127.0.0.1'}:9300`);
 }
