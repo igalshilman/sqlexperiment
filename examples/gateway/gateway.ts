@@ -123,7 +123,7 @@ export const gateway = restate.object({
     },
   },
   // A waiting call suspends soon, and holds no process.
-  options: { inactivityTimeout: { seconds: 1 } },
+  options: { inactivityTimeout: { seconds: 1 }, journalRetention: { hours: 1 } },
 });
 
 serveIfMain(import.meta, [gateway]);
