@@ -37,7 +37,8 @@ export function sentence(text: string): string {
 
 /**
  * The scripted model: "where are orders 101 to 108?" looks them all up at
- * once, "refund 30 of order 103" refunds, and it reports what the tools
+ * once, "refund 30 of order 103" refunds, "open a ticket for order 104: …"
+ * opens one, and it reports what the tools
  * answered, a sentence each.
  */
 export function concierge(context: TranscriptContext) {
@@ -48,17 +49,28 @@ export function concierge(context: TranscriptContext) {
   const text = lastText(context);
   const refund = /refund (\d+) of order (\d+)/i.exec(text);
   if (refund) return callTools([['refund', { order: refund[2]!, amount: Number(refund[1]) }]]);
+  const ticket = /ticket for order (\d+):?\s*(.*)/i.exec(text);
+  if (ticket) return callTools([['open_ticket', { order: ticket[1]!, summary: ticket[2] || 'no summary' }]]);
   const range = /orders? (\d+)(?: to (\d+))?/i.exec(text);
   if (range) {
     const first = Number(range[1]);
     const ids = Array.from({ length: Number(range[2] ?? first) - first + 1 }, (_, i) => String(first + i));
     return callTools(ids.map((order) => ['lookup_order', { order }]));
   }
-  return say('Ask me "where are orders 101 to 108?" or "refund 30 of order 103".');
+  return say(`Ask me, for example: ${EXAMPLES.map((e) => `"${e}"`).join(', ')}`);
 }
 
+/** Prompts to try, which the scripted model understands too. */
+export const EXAMPLES = [
+  'Where are orders 101 to 105, and what did they cost?',
+  'Where is order 201?',
+  'Refund 30 of order 103, it arrived damaged.',
+  'Open a ticket for order 104: the box was empty.',
+  'Where are orders 101 to 112?',
+];
+
 const Prompt = z.object({
-  text: z.string().default('Where are orders 101 to 105, and what did they cost?').describe('What the customer asks'),
+  text: z.string().default(EXAMPLES[0]!).describe('What the customer asks').meta({ examples: EXAMPLES }),
   id: z.string().optional().describe('The prompt id: a prompt is answered once per id. By default, the invocation id'),
 });
 const Answer = z.object({ answer: z.string().describe("The assistant's answer") });
@@ -78,7 +90,13 @@ export const assistant = restate.object({
   handlers: {
     prompt: restate.handlers.object.exclusive(
       {
-        description: 'Answer prompt `text`, once per prompt `id`.',
+        description: [
+          'Answer prompt `text`, once per prompt `id`, with the tools of the tenant of the key `<tenant>.<user>` (such as `acme.alice`).',
+          'Prompts to try:',
+          ...EXAMPLES.map((e) => `- ${e}`),
+          'A refund waits for a manager: `Gateway/<tenant>/pending`, then `Gateway/<tenant>/decide`.',
+        ].join('\n'),
+        metadata: Object.fromEntries(EXAMPLES.map((e, i) => [`example.${i + 1}`, e])),
         input: restate.serde.schema(Prompt),
         output: restate.serde.schema(Answer),
         journalReplay: false,
