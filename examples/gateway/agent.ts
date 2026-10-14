@@ -2,7 +2,7 @@
 // object per user, keyed `<tenant>.<user>` (`acme.alice`), whose pi-durable
 // storage is the object's database (../pi/with-pi.ts).
 //
-// Each attempt asks the gateway for the tenant's tools, and a tool call is
+// Each attempt asks the tenant's gateway for its tools, and a tool call is
 // one Gateway.call, with an idempotency key made from the request id (the
 // same on every attempt) and the tool call id. The agent has no journal: a
 // retried attempt reopens pi-durable from the database, runs an unfinished
@@ -59,8 +59,8 @@ export const assistant = restate.object({
     /** Answer prompt `text`, once per prompt `id`. */
     prompt: async (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) => {
       const { tenant, user } = identity(ctx.key);
-      const gw = ctx.serviceClient(gateway);
-      const tools = (await gw.tools({ tenant })).map((tool) =>
+      const gw = ctx.objectClient(gateway, tenant);
+      const tools = (await gw.tools()).map((tool) =>
         defineTool({
           name: tool.name,
           description: tool.description,
@@ -68,7 +68,7 @@ export const assistant = restate.object({
           replay: 'safe', // runs again after a crash, with the same call id
           execute: async (args, api) => {
             const { content, isError = false } = await gw.call(
-              { tenant, user, name: tool.name, arguments: args },
+              { user, name: tool.name, arguments: args },
               restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` }),
             );
             return { content, isError };

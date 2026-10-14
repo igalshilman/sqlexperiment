@@ -1,8 +1,8 @@
 # A tool gateway on Restate
 
-A pi agent and MCP clients call tools through one gateway, which checks
-policy, holds dangerous calls for approval, limits calls per tenant and per
-user, and audits each call.
+A pi agent and MCP clients call tools through one gateway per tenant, which
+checks policy, holds dangerous calls for approval, and limits calls per
+tenant and per user.
 
 ```
   ┌──────────────────────────┐        ┌──────────────────────────┐
@@ -12,9 +12,9 @@ user, and audits each call.
                │ RPC                               │ HTTP
                ▼                                   ▼
   ┌─────────────────────────────────────────────────────────────┐
-  │ Gateway  (gateway.ts, journaled)                            │
-  │ registry · policy · approval · scope + limit key · audit    │──▶ Tenant (tenant.ts, SQL)
-  └────────────────────────────┬────────────────────────────────┘    audit log, held calls
+  │ Gateway/<tenant>  (gateway.ts, journaled)                   │
+  │ registry · policy · approval · scope + limit key            │
+  └────────────────────────────┬────────────────────────────────┘
                                │ scope: tenant, limit key: tool/user
                                ▼
   ┌─────────────────────────────────────────────────────────────┐
@@ -41,7 +41,7 @@ another directly, and none keeps state of its own.
   │ Restate server                                                         │
   │  ingress :8080 · admin :9070 (services and their metadata, rules, SQL) │
   │  journals of the gateway and tools                                     │
-  │  state of the objects: the agent's and Tenant's SQLite pages           │
+  │  state of the objects: the agent's SQLite pages, the held calls       │
   │  scopes and vqueues: calls over a limit wait here, per tenant and user │
   │  awakeables: a call held for approval is suspended here                │
   └─────────────┬──────────────────────────────────────────┬───────────────┘
@@ -49,7 +49,7 @@ another directly, and none keeps state of its own.
   ┌─ host ──────▼──────────────┐            ┌─ elsewhere ──▼──────────────┐
   │ gateway.ts                 │            │ tools.ts                    │
   │  Gateway (reads admin API) │            │  Orders, Payments           │
-  │  Tenant (SQL)              │            │  (a container, a function)  │
+  │                            │            │  (a container, a function)  │
   └────────────────────────────┘            └──────────────┬──────────────┘
                                                            │ HTTP, ctx.run
                                                            ▼
@@ -66,10 +66,15 @@ Run it:
 make examples-js && make gateway-demo
 ```
 
-[`demo.ts`](demo.ts) plays six acts against a Restate server, with the
-agents crashing at random, and checks each one: a burst without limits, a
-limit per tenant, a limit per user, an approval, an MCP client, and the
-audit log.
+[`demo.ts`](demo.ts) plays five acts against a Restate server, with the
+agents crashing at random, and checks each one:
+
+1. Tools are just handlers: each tenant's tools, found by their metadata.
+2. Crash anytime: a burst of lookups through crashes and 429s, each order
+   served once.
+3. Limits without code: a rule per tenant, then per user.
+4. Human in the loop: a refund held for approval while the agents are killed.
+5. Any client: an MCP client, with the same policy and idempotency.
 
 Limits are Restate rules on the tool and user, for example:
 

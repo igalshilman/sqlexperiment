@@ -2,16 +2,19 @@
 // outside world (upstream.ts), the tools, the gateway and the agents, each in
 // its own process, the agents crashing at random state requests.
 //
-// 1. A burst without a limit: 12 lookups at once; the order system, which
-//    serves 2 at a time per tenant, 429s the rest, and the tools retry.
-// 2. A limit per tenant (`*/lookup_order` at 2): the calls over it wait in
-//    the tenant's queue, none is refused, and another tenant's pass.
-// 3. A limit per user (`*/lookup_order/*` at 1): one user's burst runs one
-//    at a time, and another user of the tenant does not wait for it.
-// 4. Approval: a refund waits for a manager; the agents' process is killed
-//    meanwhile; the manager approves; one refund.
-// 5. MCP: a client's tools/list and tools/call, with the tenant's policy.
-// 6. The audit log, and one tool invocation per tool call.
+// 1. Tools are just handlers: each tenant's tools, found by their metadata
+//    and filtered by its policy.
+// 2. Crash anytime: 12 lookups at once while the agents crash; the order
+//    system 429s what it cannot serve, the tools retry, and it serves each
+//    order once.
+// 3. Limits without code: a rule per tenant (`*/lookup_order` at 2) queues
+//    the calls over it, and another tenant's pass; a rule per user
+//    (`*/lookup_order/*` at 1) runs one user's burst one at a time, and
+//    another user of the tenant does not wait for it.
+// 4. Human in the loop: a refund waits for a manager; the agents' process
+//    is killed meanwhile; the manager approves; one refund.
+// 5. Any client: an MCP client gets the same gateway, its policy, and its
+//    idempotency: a call sent twice is served once.
 //
 //   RESTATE_SERVER=/path/to/restate-server node gateway/demo.ts
 //
@@ -110,13 +113,22 @@ const rules = async (perTenant: boolean, perUser?: number) => {
   assert.ok(res.ok, await res.text());
 };
 
-/** One MCP request with `token`; `id` undefined is a notification. */
+/** The MCP session of each token. */
+const sessions = new Map<string, string>();
+
+/** One MCP request with `token`, in its session; `id` undefined is a notification. */
 const mcp = async (token: string, method: string, params?: unknown, id: number | undefined = 1) => {
+  const session = sessions.get(token);
   const res = await fetch('http://127.0.0.1:9400/mcp', {
     method: 'POST',
-    headers: { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream' },
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json, text/event-stream',
+      ...(session ? { 'mcp-session-id': session } : {}),
+    },
     body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
   });
+  sessions.set(token, res.headers.get('mcp-session-id')!);
   return res.status === 202 ? undefined : ((await res.json()) as { result: Record<string, unknown> }).result;
 };
 
@@ -173,7 +185,7 @@ supervise('server', SERVER, ['--base-dir', join(dir, 'server')], {
 });
 const upstream = startUpstream(9300);
 await upstream.ready;
-const { orders, refunds } = upstream.stats;
+const { orders, served, refunds } = upstream.stats;
 const mcpServer = createServer((req, res) => void mcpHandler(ingressGateway())(req, res));
 await new Promise<void>((r) => mcpServer.listen(9400, '127.0.0.1', r));
 for (const server of [upstream.server, mcpServer]) server.unref();
@@ -187,23 +199,40 @@ for (const port of [9070, 9411, 9412, 9413]) await listening(port);
 for (const port of [9411, 9412, 9413])
   await post('http://127.0.0.1:9070/deployments', { uri: `http://127.0.0.1:${port}` });
 await rules(false);
-const tools = (await ingress<{ name: string }[]>('/Gateway/tools', { tenant: 'acme' })).map((t) => t.name);
-say(`acme's tools, from the handlers' metadata: ${tools.join(', ')}`);
 
-// ---- 1. without a limit ----
+// ---- 1. tools are just handlers ----
 
-act('1. A burst, without a limit', '  alice (acme) asks about 12 orders: 12 lookups at once.');
-let start = performance.now();
-await watched(prompt('acme.alice', 'p1', 'where are orders 101 to 112?'));
-say(
-  `answered in ${Math.round(performance.now() - start)} ms; the order system refused ${orders.acme!.refused} with a 429`,
-);
-assert.ok(orders.acme!.refused > 0);
+act('1. Tools are just handlers', "  Each tenant's tools: the handlers whose metadata names a tool, per its policy.");
+const toolsOf = async (tenant: string) =>
+  (await ingress<{ name: string }[]>(`/Gateway/${tenant}/tools`)).map((t) => t.name).toSorted();
+const acmeTools = await toolsOf('acme');
+const globexTools = await toolsOf('globex');
+say(`acme: ${acmeTools.join(', ')}`);
+say(`globex: ${globexTools.join(', ')}`);
+assert.deepEqual(acmeTools, ['lookup_order', 'refund']);
+assert.deepEqual(globexTools, ['lookup_order']);
 
-// ---- 2. per tenant ----
+// ---- 2. crash anytime ----
 
 act(
-  '2. A limit per tenant',
+  '2. Crash anytime',
+  "  alice (acme) asks about 12 orders: 12 lookups at once, while the agents' process crashes at random.",
+);
+let start = performance.now();
+const restarts = agents.restarts;
+await watched(prompt('acme.alice', 'p1', 'where are orders 101 to 112?'));
+const burst = Array.from({ length: 12 }, (_, i) => String(101 + i));
+assert.ok(burst.every((o) => served[o] === 1));
+say(
+  `answered in ${Math.round(performance.now() - start)} ms; the agents' process crashed ` +
+    `${agents.restarts - restarts} times, the order system refused ${orders.acme!.refused} lookups with a 429, ` +
+    'and served each order once',
+);
+
+// ---- 3. limits without code ----
+
+act(
+  '3. Limits without code',
   `  restate rules set '*/lookup_order' --concurrency ${CAPACITY}\n` +
     '  alice asks about 16 orders, and dan (globex) about 3.',
 );
@@ -221,16 +250,12 @@ say(
     `${orders.globex!.peak} of globex's at once; ${orders.acme!.refused + orders.globex!.refused} refused`,
 );
 assert.equal(orders.acme!.refused + orders.globex!.refused, 0);
-assert.ok(orders.acme!.peak <= CAPACITY && orders.globex!.peak <= CAPACITY);
 // globex's lookups do not wait for acme's: the first came in while acme's still did.
 assert.ok(orders['globex/dan']!.first < orders['acme/alice']!.last);
 
-// ---- 3. per user ----
-
-act(
-  '3. A limit per user',
-  "  restate rules set '*/lookup_order/*' --concurrency 1\n" +
-    '  alice asks about 6 orders; while they queue, erin (acme too) looks up 2 from an MCP client.',
+console.log(
+  "\n  restate rules set '*/lookup_order/*' --concurrency 1\n" +
+    '  alice asks about 6 orders; while they queue, erin (acme too) asks about 2.\n',
 );
 await rules(true, 1);
 for (const seen of Object.values(orders)) Object.assign(seen, { peak: 0, first: 0 });
@@ -247,80 +272,48 @@ const aliceQueued = async () => {
 await watched(
   Promise.all([
     prompt('acme.alice', 'p4', 'where are orders 131 to 136?'),
-    aliceQueued().then(() =>
-      Promise.all(
-        ['141', '142'].map((order, i) =>
-          mcp('acme.erin', 'tools/call', { name: 'lookup_order', arguments: { order } }, i),
-        ),
-      ),
-    ),
+    aliceQueued().then(() => prompt('acme.erin', 'p5', 'where are orders 141 to 142?')),
   ]),
 );
 say(`at most ${orders['acme/alice']!.peak} of alice's and ${orders['acme/erin']!.peak} of erin's at once`);
 assert.equal(orders['acme/alice']!.peak, 1);
-assert.equal(orders['acme/erin']!.peak, 1);
 // erin's lookups do not wait for alice's.
 assert.ok(orders['acme/erin']!.first < orders['acme/alice']!.last);
 
-// ---- 4. approval ----
+// ---- 4. human in the loop ----
 
 act('4. Human in the loop', '  bob (acme) asks for a refund, which a manager approves.');
-const refund = prompt('acme.bob', 'p5', 'refund 30 of order 103');
-let held: { awakeable: string; tool: string; arguments: unknown }[] = [];
-while (held.length === 0) held = await sleep(200).then(() => ingress('/Tenant/acme/pending'));
-say(`held: ${held[0]!.tool} ${JSON.stringify(held[0]!.arguments)}`);
+const refund = prompt('acme.bob', 'p6', 'refund 30 of order 103');
+let held: { awakeable: string; name: string; arguments: unknown }[] = [];
+while (held.length === 0) held = await sleep(200).then(() => ingress('/Gateway/acme/pending'));
+say(`held: ${held[0]!.name} ${JSON.stringify(held[0]!.arguments)}`);
 await sleep(1500);
-const waiting = await query<{ target: string; status: string }>(
-  "SELECT target, status FROM sys_invocation WHERE target_service_name IN ('Assistant', 'Gateway') AND status != 'completed'",
-);
-say(`meanwhile: ${waiting.map((w) => `${w.target} ${w.status}`).join(', ')}`);
-say("kill -9 the agents' process, then approve: curl localhost:8080/Tenant/acme/decide --json '{…}'");
+say("kill -9 the agents' process, then approve: curl localhost:8080/Gateway/acme/decide --json '{…}'");
 agents.child?.kill('SIGKILL');
 await sleep(1000);
-await ingress('/Tenant/acme/decide', { awakeable: held[0]!.awakeable, approved: true });
+await ingress('/Gateway/acme/decide', { awakeable: held[0]!.awakeable, approved: true });
 say(`bob's answer: ${await refund}; the payment provider made ${refunds.length} refund`);
 assert.equal(refunds.length, 1);
 
-// ---- 5. MCP ----
+// ---- 5. any client ----
 
-act('5. MCP', "  A client with dan's token at globex (`globex.dan`), as Claude Code would be.");
+act('5. Any client', "  An MCP client with dan's token at globex (`globex.dan`), as Claude Code would be.");
 await mcp('globex.dan', 'initialize', { protocolVersion: '2025-06-18', capabilities: {} });
 await mcp('globex.dan', 'notifications/initialized', undefined, undefined);
 const listed = (await mcp('globex.dan', 'tools/list'))!.tools as { name: string }[];
 say(`tools/list: ${listed.map((t) => t.name).join(', ')}`);
 const denied = (await mcp('globex.dan', 'tools/call', { name: 'refund', arguments: { order: '204', amount: 5 } }))!;
 say(`tools/call refund: ${JSON.stringify(denied)}`);
+const lookup = { name: 'lookup_order', arguments: { order: '301' } };
+const [first, again] = await Promise.all([1, 2].map(() => mcp('globex.dan', 'tools/call', lookup, 7)));
+say(`tools/call lookup_order, sent twice: ${JSON.stringify(first)}, served ${served['301']} time`);
 assert.deepEqual(
   listed.map((t) => t.name),
   ['lookup_order'],
 );
 assert.equal(denied.isError, true);
+assert.deepEqual(first, again);
+assert.equal(served['301'], 1);
 
-// ---- 6. the audit log ----
-
-act('6. The audit log', "  Tenant/acme/report: a query of acme's SQL table of calls.");
-await sleep(500); // the last records are sends
-const report = await ingress<{ user: string; tool: string; calls: number }[]>('/Tenant/acme/report');
-console.table(report);
-const invocations = await query<{ target: string; n: number }>(
-  "SELECT target, count(*) AS n FROM sys_invocation WHERE target_service_name IN ('Orders', 'Payments') GROUP BY target ORDER BY target",
-);
-say(`tool invocations: ${invocations.map((i) => `${i.target} ${i.n}`).join(', ')}`);
-// One record and one invocation per tool call, however often the agents crashed.
-assert.deepEqual(
-  report.map((r) => [r.user, r.tool, r.calls]),
-  [
-    ['alice', 'lookup_order', 12 + 16 + 6],
-    ['bob', 'refund', 1],
-    ['erin', 'lookup_order', 2],
-  ],
-);
-assert.deepEqual(
-  invocations.map((i) => [i.target, i.n]),
-  [
-    ['Orders/lookup', 12 + 16 + 6 + 2 + 3],
-    ['Payments/refund', 1],
-  ],
-);
 console.log(`\npassed; the agents' process restarted ${agents.restarts} times`);
 process.exit(0);

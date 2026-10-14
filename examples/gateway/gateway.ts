@@ -1,27 +1,26 @@
 // The tool gateway: one door to every tool, for an agent's RPC (agent.ts) and
-// for MCP clients (mcp.ts). A plain Restate service, with the journal.
+// for MCP clients (mcp.ts). A Gateway virtual object per tenant
+// (`Gateway/acme`), with the journal.
 //
-// - `tools({ tenant })`: the handlers whose metadata names a tool (see
-//   tools.ts), from the admin API, that the tenant may use.
-// - `call({ tenant, user, name, arguments })` runs one:
+// - `tools()`: the handlers whose metadata names a tool (see tools.ts), from
+//   the admin API, that the tenant may use.
+// - `call({ user, name, arguments })` runs one:
 //   1. policy: a tool the tenant may not use is denied;
 //   2. approval, if the tool requires it: the call waits on an awakeable,
-//      held in the tenant's object, until a manager decides. Meanwhile it is
-//      suspended, and costs nothing;
+//      held in the object's state, until a manager decides (`pending`,
+//      `decide`). Meanwhile it is suspended, and costs nothing;
 //   3. the call, in the tenant's scope, with `<tool>/<user>` as limit key.
 //      The server's rules hold the calls over a limit in a queue: per
 //      tenant (`*/lookup_order`) and per user (`*/lookup_order/*`). Each
-//      user's calls have a queue of their own, and the queues take turns;
-//   4. a record in the tenant's audit log.
+//      user's calls have a queue of their own, and the queues take turns.
 //   A tool's failure is a result with `isError`, for the model to read.
 //
-// The journal makes each step once. The caller makes `call` once, with an
-// idempotency key.
+// `tools`, `call` and `pending` are shared: a tenant's calls run at once,
+// and one waiting for approval holds up no other.
 //
 // Environment: PORT.
 import * as restate from '@restatedev/restate-sdk';
 import { serveIfMain } from '../faults.ts';
-import { tenant as tenantObject, type CallRecord } from './tenant.ts';
 
 /** The tools each tenant may use; a tenant not listed has none. */
 export const POLICY: Record<string, string[]> = {
@@ -45,11 +44,16 @@ export interface ToolResult {
   isError?: boolean;
 }
 
+/** A tool call of a tenant's user. */
 export interface CallRequest {
-  tenant: string;
   user: string;
   name: string;
   arguments: Record<string, unknown>;
+}
+
+/** A call held for approval, until `decide` resolves its awakeable. */
+export interface Held extends CallRequest {
+  awakeable: string;
 }
 
 /** The tenant and the user of `<tenant>.<user>` (an agent's key, an MCP token). */
@@ -81,53 +85,76 @@ const registry = async () => toolsOf((await (await fetch('http://127.0.0.1:9070/
 
 const allowed = (tenant: string, tool: string) => POLICY[tenant]?.includes(tool) ?? false;
 
-export const gateway = restate.service({
+const result = (text: string, isError = false): ToolResult => ({
+  content: [{ type: 'text', text }],
+  ...(isError ? { isError } : {}),
+});
+
+const HELD = 'held';
+
+export const gateway = restate.object({
   name: 'Gateway',
   handlers: {
-    tools: async (ctx: restate.Context, { tenant }: { tenant: string }): Promise<Tool[]> =>
-      (await ctx.run('registry', registry)).filter((t) => allowed(tenant, t.name)),
+    tools: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext): Promise<Tool[]> =>
+      (await ctx.run('registry', registry)).filter((t) => allowed(ctx.key, t.name)),
+    ),
 
-    call: async (ctx: restate.Context, req: CallRequest): Promise<ToolResult> => {
-      const started = await ctx.date.now();
-      const run = async (): Promise<Pick<CallRecord, 'outcome' | 'detail'>> => {
-        const tool = (await ctx.run('registry', registry)).find((t) => t.name === req.name);
-        if (!tool || !allowed(req.tenant, tool.name)) {
-          return { outcome: 'denied', detail: `${req.tenant} has no tool ${req.name}` };
-        }
-        if (tool.approval) {
-          const { id, promise } = ctx.awakeable<boolean>();
-          ctx
-            .objectSendClient(tenantObject, req.tenant)
-            .hold({ awakeable: id, user: req.user, tool: tool.name, arguments: req.arguments });
-          if (!(await promise)) return { outcome: 'denied', detail: `${tool.name} was not approved` };
-        }
-        try {
-          const result = await ctx.genericCall({
-            service: tool.service,
-            method: tool.handler,
-            parameter: req.arguments,
-            inputSerde: restate.serde.json,
-            outputSerde: restate.serde.json,
-            scope: req.tenant,
-            limitKey: `${tool.name}/${req.user}`,
-            headers: { 'x-on-behalf-of': req.user },
-          });
-          return { outcome: 'ok', detail: JSON.stringify(result) };
-        } catch (e) {
-          if (e instanceof restate.TerminalError) return { outcome: 'error', detail: e.message };
-          throw e;
-        }
-      };
-      const { outcome, detail } = await run();
-      const ms = (await ctx.date.now()) - started;
-      ctx
-        .objectSendClient(tenantObject, req.tenant)
-        .record({ call: ctx.request().id, user: req.user, tool: req.name, outcome, detail, ms });
-      return { content: [{ type: 'text', text: detail }], ...(outcome === 'ok' ? {} : { isError: true }) };
+    call: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext, req: CallRequest) => {
+      const tool = (await ctx.run('registry', registry)).find((t) => t.name === req.name);
+      if (!tool || !allowed(ctx.key, tool.name)) return result(`${ctx.key} has no tool ${req.name}`, true);
+      if (tool.approval) {
+        const { id, promise } = ctx.awakeable<boolean>();
+        ctx.genericSend<Held>({
+          service: 'Gateway',
+          key: ctx.key,
+          method: 'hold',
+          parameter: { ...req, awakeable: id },
+          inputSerde: restate.serde.json,
+        });
+        if (!(await promise)) return result(`${tool.name} was not approved`, true);
+      }
+      try {
+        const output = await ctx.genericCall({
+          service: tool.service,
+          method: tool.handler,
+          parameter: req.arguments,
+          inputSerde: restate.serde.json,
+          outputSerde: restate.serde.json,
+          scope: ctx.key,
+          limitKey: `${tool.name}/${req.user}`,
+          headers: { 'x-on-behalf-of': req.user },
+        });
+        return result(JSON.stringify(output));
+      } catch (e) {
+        if (e instanceof restate.TerminalError) return result(e.message, true);
+        throw e;
+      }
+    }),
+
+    hold: async (ctx: restate.ObjectContext, held: Held) => {
+      ctx.set(HELD, [...((await ctx.get<Held[]>(HELD)) ?? []), held]);
+    },
+
+    /** The calls waiting for a decision. */
+    pending: restate.handlers.object.shared(
+      async (ctx: restate.ObjectSharedContext) => (await ctx.get<Held[]>(HELD)) ?? [],
+    ),
+
+    /** Approve or deny a held call. */
+    decide: async (ctx: restate.ObjectContext, { awakeable, approved }: { awakeable: string; approved: boolean }) => {
+      const held = (await ctx.get<Held[]>(HELD)) ?? [];
+      if (!held.some((h) => h.awakeable === awakeable))
+        throw new restate.TerminalError(`no call waits on ${awakeable}`);
+      ctx.set(
+        HELD,
+        held.filter((h) => h.awakeable !== awakeable),
+      );
+      ctx.resolveAwakeable(awakeable, approved);
+      return approved;
     },
   },
   // A waiting call suspends soon, and holds no process.
   options: { inactivityTimeout: { seconds: 1 } },
 });
 
-serveIfMain(import.meta, [gateway, tenantObject]);
+serveIfMain(import.meta, [gateway]);

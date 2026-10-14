@@ -3,7 +3,8 @@
 //
 // - GET /orders/:id, the order system: slow (400 ms), and it serves at most
 //   CAPACITY requests at once per tenant (its API key, `x-tenant`). One more
-//   is a 429. It counts the requests of each tenant and each user (`x-user`).
+//   is a 429. It counts the requests of each tenant and each user (`x-user`),
+//   and the times it served each order.
 // - POST /refunds, the payment provider: one refund per `idempotency-key`,
 //   as Stripe does.
 //
@@ -25,6 +26,8 @@ export interface Seen {
 /** What the fake APIs saw. */
 export interface Stats {
   orders: Record<string, Seen>;
+  /** The times each order was served. */
+  served: Record<string, number>;
   /** The idempotency key of each refund made. */
   refunds: string[];
 }
@@ -38,7 +41,7 @@ export const order = (id: string) => {
 
 /** Serve the fake APIs on `port`. */
 export function startUpstream(port: number): { server: Server; stats: Stats; ready: Promise<void> } {
-  const stats: Stats = { orders: {}, refunds: [] };
+  const stats: Stats = { orders: {}, served: {}, refunds: [] };
   const inFlight = new Map<string, number>();
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
     const reply = (status: number, value: unknown) => {
@@ -63,7 +66,9 @@ export function startUpstream(port: number): { server: Server; stats: Stats; rea
       });
       await new Promise((r) => setTimeout(r, 400));
       for (const c of counters) inFlight.set(c, inFlight.get(c)! - 1);
-      return reply(200, order(decodeURIComponent(id)));
+      const served = decodeURIComponent(id);
+      stats.served[served] = (stats.served[served] ?? 0) + 1;
+      return reply(200, order(served));
     }
     if (req.method === 'POST' && req.url === '/refunds') {
       const key = String(req.headers['idempotency-key']);

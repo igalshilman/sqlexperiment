@@ -46,13 +46,13 @@ describe('the registry', () => {
 });
 
 describe('the MCP endpoint', () => {
-  const calls: { req: CallRequest; idempotencyKey: string }[] = [];
+  const calls: { tenant: string; req: CallRequest; idempotencyKey: string }[] = [];
   const gateway: GatewayClient = {
     tools: async (tenant) => [
       { name: `${tenant}_tool`, description: 'A tool.', inputSchema: {}, approval: false, service: 'S', handler: 'h' },
     ],
-    call: async (req, idempotencyKey) => {
-      calls.push({ req, idempotencyKey });
+    call: async (tenant, req, idempotencyKey) => {
+      calls.push({ tenant, req, idempotencyKey });
       return { content: [{ type: 'text', text: `ran ${req.name}` }] };
     },
   };
@@ -86,7 +86,8 @@ describe('the MCP endpoint', () => {
       content: [{ type: 'text', text: 'ran acme_tool' }],
     });
     expect(calls.at(-1)).toEqual({
-      req: { tenant: 'acme', user: 'alice', name: 'acme_tool', arguments: { a: 1 } },
+      tenant: 'acme',
+      req: { user: 'alice', name: 'acme_tool', arguments: { a: 1 } },
       idempotencyKey: 'mcp:acme.alice:s1:7',
     });
   });
