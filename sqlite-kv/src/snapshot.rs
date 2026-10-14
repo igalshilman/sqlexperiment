@@ -108,6 +108,10 @@ pub struct StorageOptions {
     pub cache: Option<NamespaceCache>,
     /// Transactions kept in the log before saves start checkpointing the oldest.
     pub checkpoint_after: u32,
+    /// [`crate::Session::save`] checkpoints the whole log (see
+    /// [`Snapshot::compact`]), so a session's commits write each changed page
+    /// once, at its end. Pair it with a large `checkpoint_after`.
+    pub checkpoint_on_save: bool,
     /// A cold open (no warm cache pages) fetches every page of a database of
     /// at most this many pages, alongside replay.
     pub prefetch_pages: u64,
@@ -131,6 +135,7 @@ impl Default for StorageOptions {
             page_compression: PageCompression::default(),
             cache: None,
             checkpoint_after: 4,
+            checkpoint_on_save: false,
             prefetch_pages: PREFETCH_PAGES,
             hint_pages: HINT_PAGES,
             durability: Durability::Save,
@@ -262,7 +267,12 @@ impl Snapshot {
         options: StorageOptions,
     ) -> io::Result<Self> {
         let cache = options.cache.as_ref();
-        let batch = log::batch(u64::from(options.checkpoint_after));
+        // A log checkpointed at each save is empty after a session that ended.
+        let expected_segments = match options.checkpoint_on_save {
+            true => 0,
+            false => u64::from(options.checkpoint_after),
+        };
+        let batch = log::batch(expected_segments);
         let expected = cache.and_then(NamespaceCache::expected_start);
         let first_round = async {
             match expected {
@@ -762,6 +772,99 @@ impl Snapshot {
             checkpointed_pages,
             cleanup_error,
             log_next: next,
+        };
+        Ok((report, after.registered()))
+    }
+
+    /// Checkpoint the whole log, and continue on the result: each page's latest
+    /// image once, then `meta` past the log, then the segments it covered,
+    /// then `meta` past those. Only puts and deletes, each round after the one
+    /// before is acknowledged, so a crash anywhere leaves a state that replay
+    /// reads correctly, and on an ordered store nothing waits for a reply.
+    /// Nothing to do without a log, or while another session's view still
+    /// needs it. A failure is a [`SaveReport::cleanup_error`]: the log keeps
+    /// covering the pages, and a later save retries.
+    pub(crate) async fn compact(&self) -> io::Result<(SaveReport, Self)> {
+        let unchanged = |cleanup_error| {
+            let report = SaveReport {
+                cleanup_error,
+                log_next: self.log.next,
+                ..SaveReport::default()
+            };
+            let after = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
+            (report, after.registered())
+        };
+        let cache = self.options.cache.as_ref();
+        let own = cache.is_none_or(|cache| cache.committed() == Some(self.log.next));
+        if self.log.transactions.is_empty() || !own || self.checkpoint_limit() != u64::MAX {
+            return Ok(unchanged(None));
+        }
+        let store = &*self.store;
+        let checkpoint = Checkpoint {
+            log_start: self.log.next,
+            size: self.size(),
+            images: self.log.images.clone(),
+        };
+        let hint = self.hint();
+        let mut pages = checkpoint.mutations();
+        if let Some(hint) = &hint {
+            pages.push(Mutation::Put(HINT.to_owned(), hint.clone().into()));
+        }
+        let failed = |error| {
+            if let Some(cache) = cache {
+                cache.forget_meta(self.log.next);
+            }
+            Ok(unchanged(Some(error)))
+        };
+        if let Err(error) = concurrently(store, pages).await {
+            return failed(error);
+        }
+        // `meta` passes the log only now that its pages are acknowledged.
+        let moved = Meta {
+            log_start: checkpoint.log_start,
+            deleted_below: self.meta.deleted_below,
+            size: checkpoint.size,
+        };
+        let moved_bytes: Bytes = moved.encode().into();
+        if let Err(error) = store.put(META, moved_bytes.clone()).await {
+            return failed(error);
+        }
+        // Then the segments below it, and a `meta` that says so.
+        let garbage = moved.deleted_below..moved.log_start;
+        let deletes = garbage.map(|seq| Mutation::Delete(log_key(seq))).collect();
+        let collected = Meta {
+            deleted_below: moved.log_start,
+            ..moved
+        };
+        let collected_bytes: Bytes = collected.encode().into();
+        let (durable, durable_bytes, cleanup_error) = match concurrently(store, deletes).await {
+            Ok(()) => match store.put(META, collected_bytes.clone()).await {
+                Ok(()) => (collected, collected_bytes, None),
+                Err(error) => (moved, moved_bytes, Some(error)),
+            },
+            Err(error) => (moved, moved_bytes, Some(error)),
+        };
+        if let Some(cache) = cache {
+            for (&index, image) in &checkpoint.images {
+                match image {
+                    Some(image) => cache.replace(index, image.clone()),
+                    None => cache.remove(index),
+                }
+            }
+            cache.record(Some(durable_bytes.clone()), None, self.log.next);
+            if let Some(hint) = &hint {
+                cache.wrote_hint(hint.clone());
+            }
+        }
+        let mut after = self.continued(durable, Some(durable_bytes), None);
+        if let Some(hint) = hint {
+            after.hint = Some(Bytes::from(hint));
+        }
+        after.log.drop_before(durable.log_start);
+        let report = SaveReport {
+            checkpointed_pages: checkpoint.images.len(),
+            cleanup_error,
+            log_next: self.log.next,
         };
         Ok((report, after.registered()))
     }

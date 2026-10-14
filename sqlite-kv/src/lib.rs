@@ -831,6 +831,11 @@ impl Session {
             return Err("cannot save an open SQL transaction".into());
         }
         let mut report = self.publish().await?;
+        if self.io.snapshot().options().checkpoint_on_save {
+            let compacted = self.io.compact().await?;
+            report.checkpointed_pages += compacted.checkpointed_pages;
+            report.cleanup_error = report.cleanup_error.or(compacted.cleanup_error);
+        }
         report.cleanup_error = report.cleanup_error.or(self.cleanup_error.take());
         if let Some(ordered) = &self.ordered {
             ordered.confirm().await?;

@@ -732,3 +732,135 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
         Ok(())
     })
 }
+
+/// With `checkpoint_on_save`, commits only append, and compacting writes each
+/// changed page once, empties the log and leaves a `meta` past it.
+#[test]
+fn compacting_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
+    futures::executor::block_on(async {
+        for cached in [false, true] {
+            let cache = cached.then(fresh_namespace);
+            let store = Arc::new(MemoryKv::default());
+            let opts = StorageOptions {
+                checkpoint_on_save: true,
+                ..options(64, cache.as_ref())
+            };
+            let mut model = Model::default();
+            let mut snapshot = open(&store, &opts).await?;
+            for round in 0..12 {
+                let (changes, size) = dirty(round);
+                let (report, after) = snapshot.commit(changes.clone(), size, false).await?;
+                assert_eq!(report.checkpointed_pages, 0);
+                model.apply(&changes, size);
+                snapshot = after;
+            }
+            assert!(keys(&store, PAGE_PREFIX).is_empty(), "commits only append");
+            assert_eq!(keys(&store, LOG_PREFIX).len(), 12);
+
+            store.reset_stats();
+            let (report, after) = snapshot.compact().await?;
+            assert!(report.cleanup_error.is_none());
+            let distinct = model.pages.len();
+            assert_eq!(report.checkpointed_pages, distinct);
+            // Each page once, `meta` twice, and the hint if it changed.
+            let hinted = store.stats().write_keys.contains(HINT) as u64;
+            assert_eq!(store.stats().puts, distinct as u64 + 2 + hinted);
+            assert_eq!(keys(&store, PAGE_PREFIX).len(), distinct);
+            assert!(keys(&store, LOG_PREFIX).is_empty());
+            let meta = Meta::decode(&store.get(META).await?.unwrap())?;
+            assert_eq!((meta.log_start, meta.deleted_below), (13, 13));
+            assert!(model.check(&after).await?);
+            let cold = StorageOptions {
+                cache: None,
+                ..opts.clone()
+            };
+            assert!(model.check(&open(&store, &cold).await?).await?);
+
+            // Nothing left to do.
+            store.reset_stats();
+            let (report, after) = after.compact().await?;
+            assert_eq!((report.checkpointed_pages, store.stats().puts), (0, 0u64));
+            // The next commit appends to the empty log.
+            let (changes, size) = dirty(12);
+            after.publish(changes.clone(), size).await?;
+            model.apply(&changes, size);
+            assert_eq!(keys(&store, LOG_PREFIX), [log_key(13)]);
+            assert!(model.check(&open(&store, &cold).await?).await?);
+        }
+        Ok(())
+    })
+}
+
+/// Fail every mutation of a compaction in every outcome, with and without a
+/// crash: the database reads the same, a later commit works, and nothing
+/// below the collected log survives.
+#[test]
+fn every_compact_mutation_is_crash_safe() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let mut cases = 0;
+        for cached in [false, true] {
+            for operation in [Operation::Put, Operation::Delete] {
+                'ordinal: for nth in 1.. {
+                    for effect in [Effect::None, Effect::Visible, Effect::After] {
+                        for crash in [false, true] {
+                            let cache = cached.then(fresh_namespace);
+                            let store = Arc::new(MonitorKv::seeded(
+                                FaultKv::new(MemoryKv::default(), 0),
+                                Vec::new(),
+                            ));
+                            let mut opts = StorageOptions {
+                                page_compression: PageCompression::Raw,
+                                checkpoint_on_save: true,
+                                ..options(64, cache.as_ref())
+                            };
+                            let mut model = Model::default();
+                            let mut snapshot = open(&store, &opts).await?;
+                            for round in 0..6 {
+                                let (changes, size) = dirty(round);
+                                snapshot = snapshot.commit(changes.clone(), size, false).await?.1;
+                                model.apply(&changes, size);
+                            }
+                            let _gate = store.arm(Failpoint {
+                                operation,
+                                key_prefix: String::new(),
+                                nth,
+                                effect,
+                                cancel: false,
+                            });
+                            let result = snapshot.compact().await;
+                            let faulted = store.events().iter().any(|e| e.faulted);
+                            store.disarm();
+                            if !faulted {
+                                assert!(result?.0.cleanup_error.is_none());
+                                break 'ordinal;
+                            }
+                            cases += 1;
+                            if crash {
+                                store.inner.inner.crash(&[]);
+                                opts.cache = cached.then(fresh_namespace);
+                            }
+                            let reopened = open(&store, &opts).await?;
+                            assert!(model.check(&reopened).await?, "{operation:?} {nth} {effect:?} {crash}");
+                            let (changes, size) = dirty(51);
+                            reopened.publish(changes.clone(), size).await?;
+                            model.apply(&changes, size);
+                            // The follow-up commit survives a crash, and a
+                            // compaction after it completes.
+                            store.inner.inner.crash(&[]);
+                            opts.cache = cached.then(fresh_namespace);
+                            let (report, after) = open(&store, &opts).await?.compact().await?;
+                            assert!(report.cleanup_error.is_none());
+                            assert!(model.check(&after).await?);
+                            assert!(model.check(&open(&store, &opts).await?).await?);
+                            assert_collected(&store.inner.inner).await?;
+                            assert_eq!(store.violations(), Vec::<String>::new());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(cases > 40, "{cases}");
+        println!("interrupted compactions: {cases} cases");
+        Ok(())
+    })
+}
