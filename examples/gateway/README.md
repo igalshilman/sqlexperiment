@@ -66,10 +66,15 @@ Run it:
 make examples-js && make gateway-demo
 ```
 
-[`demo.ts`](demo.ts) plays six acts against a Restate server, with the
-agents crashing at random, and checks each one: a burst without limits, a
-limit per tenant, a limit per user, an approval, an MCP client, and the
-invocations the server recorded.
+[`demo.ts`](demo.ts) plays five acts against a Restate server, with the
+agents crashing at random, and checks each one:
+
+1. Tools are just handlers: each tenant's tools, found by their metadata.
+2. Crash anytime: a burst of lookups through crashes and 429s, each order
+   served once.
+3. Limits without code: a rule per tenant, then per user.
+4. Human in the loop: a refund held for approval while the agents are killed.
+5. Any client: an MCP client, with the same policy and idempotency.
 
 Limits are Restate rules on the tool and user, for example:
 
