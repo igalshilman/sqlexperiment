@@ -1,9 +1,9 @@
 //! An ordered store (as Restate state writes are): writes are acknowledged once
 //! ordered, stored in order, and a failed request loses its unconfirmed tail
 //! while the process, and its owner cache, live on. A session confirms its
-//! writes in `save`, and one that did not makes the next start cold. A store
-//! that hid its ordering would let a later save record a checkpoint whose pages
-//! were lost.
+//! writes in `save`, and one that did not makes the next start cold. A save
+//! records a checkpoint only after writing its pages itself, so even a store
+//! that hid its ordering loses whole requests only.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use sqlite_kv::{
@@ -175,13 +175,13 @@ async fn an_ordered_store_keeps_every_loss_consistent() -> Result<()> {
     Ok(())
 }
 
-/// The hazard: a store that acknowledges before storing but does not say so.
+/// A store that acknowledges before storing but does not say so: no save
+/// records a checkpoint whose pages an earlier, lost request wrote.
 #[tokio::test]
-async fn a_hidden_ordered_store_corrupts_the_database() -> Result<()> {
-    let mut corrupt = 0;
+async fn a_hidden_ordered_store_loses_whole_requests_only() -> Result<()> {
     for lost in 1..15 {
-        corrupt += usize::from(!consistent_after_loss(lost, false, Failure::Confirm).await?);
+        let consistent = consistent_after_loss(lost, false, Failure::Confirm).await?;
+        assert!(consistent, "lost request {lost}");
     }
-    assert!(corrupt > 0, "no loss reached a checkpoint");
     Ok(())
 }

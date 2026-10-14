@@ -18,10 +18,13 @@
 //!    known log start.
 //! 5. **Overwrite only what the log covers**: a page key gets only an image of
 //!    a known committed transaction at or after the known log start.
+//! 6. **Chain from the log start**: a segment's compression chain starts at
+//!    or after the known log start, so replay from there can decode it.
 use crate::{
     format::{LOG_PREFIX, META, PAGE_PREFIX},
     kv::KvStore,
-    log::{self, Images, Meta},
+    log::{self, Chain, Images, Meta},
+    page_codec,
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -67,23 +70,30 @@ impl Known {
         self.meta.unwrap_or_default()
     }
 
-    fn segment(&self, seq: u64) -> Option<log::Segment> {
+    fn segment(&self, seq: u64) -> Option<log::Header> {
         self.log
             .get(&seq)
-            .and_then(|bytes| log::decode(bytes, seq).ok())
+            .and_then(|bytes| log::header(bytes, seq).ok())
+            .map(|(header, _)| header)
     }
 
-    /// Known committed transactions from `start`, in order.
+    /// Known committed transactions from `start`, in order, as replay from
+    /// there decodes them.
     fn committed(&self, start: u64) -> Vec<Transaction> {
         let mut transactions = Vec::new();
         let (mut seq, mut first, mut images) = (start, start, Images::new());
-        while let Some(segment) = self.segment(seq) {
-            if segment.first != first {
+        let mut chain = Chain::new(start);
+        while let Some(bytes) = self.log.get(&seq) {
+            if self.segment(seq).is_none_or(|header| header.first != first) {
                 break;
             }
+            let Ok(segment) = log::decode(bytes, seq, &mut chain) else {
+                break;
+            };
             images.extend(segment.images);
             seq += 1;
             if segment.commit {
+                chain.images.extend(images.clone());
                 transactions.push(Transaction {
                     end: seq,
                     images: std::mem::take(&mut images),
@@ -94,6 +104,14 @@ impl Known {
         transactions
     }
 
+    /// The logical image a page key's value holds; `None` for a hole.
+    fn image(value: &Option<Bytes>) -> Option<Option<Bytes>> {
+        match value {
+            Some(value) => page_codec::decode_bytes(value).ok().map(Some),
+            None => Some(None),
+        }
+    }
+
     fn violation(&mut self, message: String) {
         self.violations.push(message);
     }
@@ -102,7 +120,7 @@ impl Known {
     fn check_put(&mut self, key: &str, value: &Bytes) {
         self.checked += 1;
         if let Some(seq) = parse(key, LOG_PREFIX) {
-            let Ok(segment) = log::decode(value, seq) else {
+            let Ok((segment, _)) = log::header(value, seq) else {
                 return self.violation(format!("{key}: undecodable segment"));
             };
             if self.log.get(&seq) == Some(value) {
@@ -118,6 +136,10 @@ impl Known {
                         "{key}: part {part} of its transaction is not known"
                     ));
                 }
+            }
+            // 6: its chain starts at or after the known log start
+            if segment.base < self.meta().log_start {
+                self.violation(format!("{key}: chain starts before the known log start"));
             }
             // 2: a new transaction starts where a known commit ends
             if segment.first == seq {
@@ -161,7 +183,12 @@ impl Known {
                     .filter_map(|t| t.images.get(&page))
                     .collect();
                 let held = self.pages.get(&page).map_or(&[][..], Vec::as_slice);
-                if held.is_empty() || !held.iter().all(|value| allowed.contains(&value)) {
+                let held: Vec<_> = held.iter().map(Self::image).collect();
+                if held.is_empty()
+                    || !held
+                        .iter()
+                        .all(|image| image.as_ref().is_some_and(|i| allowed.contains(&i)))
+                {
                     self.violation(format!(
                         "meta to {}: page {page} not known at its key",
                         meta.log_start
@@ -174,11 +201,14 @@ impl Known {
     /// 5: a page key gets an image of a known committed transaction still in
     /// the log.
     fn check_image(&mut self, key: &str, page: u64, value: Option<&Bytes>) {
+        let Some(value) = Self::image(&value.cloned()) else {
+            return self.violation(format!("{key}: undecodable page"));
+        };
         let covered = self
             .committed(self.meta().log_start)
             .iter()
             .filter_map(|t| t.images.get(&page))
-            .any(|image| image.as_ref() == value);
+            .any(|image| *image == value);
         if !covered {
             self.violation(format!("{key}: image of no known committed transaction"));
         }

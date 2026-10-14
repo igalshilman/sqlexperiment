@@ -78,8 +78,8 @@ fn a_different_meta_forgets_claims_and_keeps_pages_to_refresh() {
             Reuse::Changed(Some(5))
         );
         assert_eq!(cache.expected_start(), Some(5), "the claim is forgotten");
-        cache.refresh(Some(&Images::from([(1, None), (3, Some(value(2)))])));
-        assert_eq!(cache.get(1).await, None, "a hole");
+        cache.refresh(Some(&std::collections::BTreeSet::from([1, 3])));
+        assert_eq!(cache.get(1).await, None, "changed pages are dropped");
         assert_eq!(cache.get(3).await, None, "uncached pages stay uncached");
         assert_eq!(cache.get(2).await, Some(value(4)), "unchanged pages stay");
         assert_eq!(cache.generation(), generation);

@@ -19,7 +19,7 @@
 //! | Layer | Representation | Survives dropping the session? |
 //! |---|---|---|
 //! | SQL working state | Dirty 4096-byte pages and private engine WAL | No |
-//! | Log | Segments of committed page images, one transaction per save | Yes, after acknowledged save |
+//! | Log | Segments of committed page images, compressed against their previous images, one transaction per save | Yes, after acknowledged save |
 //! | Pages | `page/<n>`, overwritten in place by checkpoints | Yes |
 //! | Checkpoint record | `meta`: where replay starts and garbage ends | Yes |
 //!
@@ -40,16 +40,17 @@
 //! See `docs/DESIGN.md` and the private `snapshot` and `log` modules.
 //!
 //! The costs are writing each page twice (log, then checkpoint) and replaying the
-//! log on open, which checkpoints keep short. This is not MVCC: one owner reads
+//! log on open. A logged page costs about what changed in it since its previous
+//! image, so checkpoints can be rare. This is not MVCC: one owner reads
 //! and writes the namespace.
 //!
 //! # Ownership and concurrency
 //!
 //! The host grants one owner exclusive use of a namespace, including settlement
 //! of cancelled requests before reopening or handing ownership to another session.
-//! There is no distributed lock or fence here. A save issues its commit and its
-//! checkpoint slice concurrently, at most 64 mutations of distinct keys at a time
-//! per group. Open reads `meta` and probes the log, together when a
+//! There is no distributed lock or fence here. A save issues its commit, then,
+//! when the log is long, checkpoints it: at most 64 mutations of distinct keys
+//! at a time per group. Open reads `meta` and probes the log, together when a
 //! [`PageCache`] knows where the log starts. The I/O pump batches adjacent file
 //! reads without crossing write, truncate or sync barriers.
 //!
@@ -129,7 +130,8 @@ pub use hint::MAX_HINT_PAGES;
 pub use log::MAX_SEGMENT_BYTES;
 pub use page_codec::PageCompression;
 pub use snapshot::{
-    CHECKPOINT_PAGES, Durability, MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport, StorageOptions,
+    CHECKPOINT_LOG_BYTES, Durability, MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport,
+    StorageOptions,
 };
 /// SQL values, as returned in rows and bound as parameters.
 pub use turso_core::Value;
@@ -831,11 +833,6 @@ impl Session {
             return Err("cannot save an open SQL transaction".into());
         }
         let mut report = self.publish().await?;
-        if self.io.snapshot().options().checkpoint_on_save {
-            let compacted = self.io.compact().await?;
-            report.checkpointed_pages += compacted.checkpointed_pages;
-            report.cleanup_error = report.cleanup_error.or(compacted.cleanup_error);
-        }
         report.cleanup_error = report.cleanup_error.or(self.cleanup_error.take());
         if let Some(ordered) = &self.ordered {
             ordered.confirm().await?;

@@ -55,14 +55,17 @@ async fn populated() -> Result<Arc<ControlledKv>> {
     db.execute("INSERT INTO t VALUES(1,10)").await?;
     db.checkpoint().await?;
     db.save().await?;
-    // A save that checkpoints the first and leaves `t` out of the log, so
-    // reading it goes to the backend.
+    // A save that checkpoints the log, so reading `t` goes to the backend,
+    // then one that leaves the schema page in the log, for open to read.
     let all = StorageOptions {
         checkpoint_after: 0,
         ..StorageOptions::default()
     };
     let mut db = Session::open_with_options(store.clone(), all).await?;
     db.execute("CREATE TABLE other(x)").await?;
+    db.save().await?;
+    let mut db = Session::open(store.clone()).await?;
+    db.execute("CREATE TABLE another(x)").await?;
     db.save().await?;
     Ok(store)
 }

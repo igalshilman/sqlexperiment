@@ -9,23 +9,24 @@
 //!
 //! # Save
 //!
-//! A save commits its changed pages as one log transaction (see [`crate::log`])
-//! and, in the same round trip, does a bounded slice of checkpoint work:
+//! A save commits its changed pages as one log transaction (see [`crate::log`]):
 //!
 //! - **Commit:** the transaction's segments at [`Log::next`]; multi-segment
 //!   transactions write their commit part after the other parts.
-//! - **Checkpoint:** when more than [`StorageOptions::checkpoint_after`]
-//!   transactions are in the log, the latest images of the pages changed by the
-//!   oldest transactions (about [`CHECKPOINT_PAGES`]) are put to `page/<n>`.
-//!   Overwriting in place is safe: until `meta` moves past those transactions,
-//!   replay applies their images over whatever is there. Holes are deletes.
-//! - **Meta:** `meta.log_start` may only pass a transaction once its pages are
-//!   acknowledged. With a [`crate::PageCache`], the owner remembers acknowledged
-//!   checkpoints and records them in the next save's round trip. Without one, a
-//!   checkpointing save writes `meta` in a second round trip.
+//! - **Checkpoint:** once more than [`StorageOptions::checkpoint_after`]
+//!   transactions or [`StorageOptions::checkpoint_log_bytes`] are in the log,
+//!   the save then checkpoints the whole log ([`Snapshot::compact`]): the latest
+//!   image of every page it changed is put to `page/<n>`. Overwriting in place
+//!   is safe: until `meta` moves past the log, replay applies its images over
+//!   whatever is there. Holes are deletes. The log's compression chain
+//!   restarts once those pages are acknowledged.
+//! - **Meta:** `meta.log_start` passes the log only once its pages are
+//!   acknowledged.
 //! - **Garbage:** segments in `[deleted_below, log_start)` of the durable `meta`
 //!   are deleted. They can only be deleted after a durable `meta` has moved past
-//!   them, otherwise replay could start at a deleted segment.
+//!   them, otherwise replay could start at a deleted segment. With a
+//!   [`crate::PageCache`], garbage a checkpoint left is deleted in the next
+//!   save's round trip, which records it in `meta` in the save after.
 //!
 //! Every step is idempotent, and a crash at any point leaves state that replay
 //! reads correctly. There are no object IDs, no intent and no orphans: pages are
@@ -44,7 +45,7 @@ use crate::{
     format::{HINT, META, log_key, page_key},
     hint::{self, Usage},
     kv::KvStore,
-    log::{self, Images, Log, Meta},
+    log::{self, Chain, Images, Log, Meta},
     page_codec::{self, Page, PageCompression},
 };
 use bytes::Bytes;
@@ -58,8 +59,7 @@ use std::{
 /// Logical page replacements from the session; `None` is a hole.
 type Changes = BTreeMap<u64, Option<Page>>;
 
-/// Upper bound on concurrent backend mutations of each save group: enough for a
-/// commit, a checkpoint slice of whole transactions and garbage in one round trip.
+/// Upper bound on concurrent backend mutations of each save group.
 pub(crate) const MAX_MUTATIONS_IN_FLIGHT: usize = 64;
 /// Default [`StorageOptions::prefetch_pages`].
 pub const PREFETCH_PAGES: u64 = 16;
@@ -74,16 +74,8 @@ const PAGE: u64 = crate::io::BLOCK_SIZE as u64;
 const READAHEAD_AFTER: u32 = 3;
 /// Largest readahead window, in pages.
 const MAX_READAHEAD: u64 = 64;
-/// Pages a save checkpoints, rounded up to whole transactions.
-pub const CHECKPOINT_PAGES: usize = 12;
-/// Logged bytes that trigger checkpointing; a larger save checkpoints itself.
+/// Default [`StorageOptions::checkpoint_log_bytes`].
 pub const CHECKPOINT_LOG_BYTES: usize = 256 * 1024;
-/// Logged bytes beyond which a checkpoint slice covers up to
-/// [`CATCH_UP_PAGES`], so a log grown by failed checkpoints shrinks again and
-/// replay at open stays bounded.
-const CATCH_UP_LOG_BYTES: usize = 16 * CHECKPOINT_LOG_BYTES;
-/// Pages of a catch-up checkpoint slice: a few round trips of mutations.
-const CATCH_UP_PAGES: usize = 4 * MAX_MUTATIONS_IN_FLIGHT;
 
 /// When a session's SQL changes become durable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -106,12 +98,12 @@ pub struct StorageOptions {
     pub page_compression: PageCompression,
     /// This namespace's handle on the process-wide [`crate::PageCache`].
     pub cache: Option<NamespaceCache>,
-    /// Transactions kept in the log before saves start checkpointing the oldest.
+    /// Transactions kept in the log: a save that logs more checkpoints the
+    /// whole log. Replay at open reads them all.
     pub checkpoint_after: u32,
-    /// [`crate::Session::save`] checkpoints the whole log (see
-    /// [`Snapshot::compact`]), so a session's commits write each changed page
-    /// once, at its end. Pair it with a large `checkpoint_after`.
-    pub checkpoint_on_save: bool,
+    /// Encoded bytes kept in the log: a save that logs more checkpoints the
+    /// whole log.
+    pub checkpoint_log_bytes: usize,
     /// A cold open (no warm cache pages) fetches every page of a database of
     /// at most this many pages, alongside replay.
     pub prefetch_pages: u64,
@@ -135,7 +127,7 @@ impl Default for StorageOptions {
             page_compression: PageCompression::default(),
             cache: None,
             checkpoint_after: 4,
-            checkpoint_on_save: false,
+            checkpoint_log_bytes: CHECKPOINT_LOG_BYTES,
             prefetch_pages: PREFETCH_PAGES,
             hint_pages: HINT_PAGES,
             durability: Durability::Save,
@@ -149,8 +141,8 @@ impl Default for StorageOptions {
 /// garbage work that failed after the commit; a later save retries it.
 #[derive(Debug, Default)]
 pub struct SaveReport {
-    /// Pages written in place by this save's checkpoint slice; 0 when its
-    /// checkpoint work failed.
+    /// Pages written in place by this save's checkpoint; 0 when it did not
+    /// checkpoint, or its checkpoint failed.
     pub checkpointed_pages: usize,
     /// Committed, but checkpoint work failed. Do not replay SQL.
     pub cleanup_error: Option<io::Error>,
@@ -267,12 +259,8 @@ impl Snapshot {
         options: StorageOptions,
     ) -> io::Result<Self> {
         let cache = options.cache.as_ref();
-        // A log checkpointed at each save is empty after a session that ended.
-        let expected_segments = match options.checkpoint_on_save {
-            true => 0,
-            false => u64::from(options.checkpoint_after),
-        };
-        let batch = log::batch(expected_segments);
+        // A log of unknown length: replay starts small and doubles.
+        let batch = log::batch(0);
         let expected = cache.and_then(NamespaceCache::expected_start);
         let first_round = async {
             match expected {
@@ -439,7 +427,7 @@ impl Snapshot {
         let cache = self.options.cache.as_ref();
         let page = if let Some(image) = self.log.images.get(&index) {
             let Some(image) = image else { return Ok(None) };
-            page_codec::decode_bytes(image)?
+            image.clone()
         } else if let Some((cache, value)) = match cache {
             Some(cache) => cache.get(index).await.map(|value| (cache, value)),
             None => None,
@@ -515,61 +503,12 @@ impl Snapshot {
         (hint::decode(&hint, limit).is_some_and(|pages| !pages.is_empty())).then_some(hint)
     }
 
-    /// Oldest transactions to checkpoint before this save commits.
-    ///
-    /// Once more than `checkpoint_after` transactions or [`CHECKPOINT_LOG_BYTES`]
-    /// are logged, take whole transactions from the oldest until about
-    /// [`CHECKPOINT_PAGES`] pages are covered. This often empties the log, so the
-    /// next saves only append.
-    fn checkpoint_plan(&self) -> Option<Checkpoint> {
-        let transactions = &self.log.transactions;
-        if transactions.len() <= self.options.checkpoint_after as usize
-            && self.log.bytes <= CHECKPOINT_LOG_BYTES
-        {
-            return None;
-        }
-        // A page's image is its latest; another open session may only see it
-        // if that transaction ends within the session's log position.
-        let limit = self.checkpoint_limit();
-        let mut latest = HashMap::new();
-        for transaction in transactions {
-            for &page in &transaction.pages {
-                latest.insert(page, transaction.end);
-            }
-        }
-        let budget = match self.log.bytes > CATCH_UP_LOG_BYTES {
-            true => CATCH_UP_PAGES,
-            false => CHECKPOINT_PAGES,
-        };
-        let mut images = Images::new();
-        let mut covered = 0;
-        for transaction in transactions {
-            // Pages already in the slice cost nothing more: their latest image
-            // is written once, whichever transactions it covers.
-            let new = transaction
-                .pages
-                .iter()
-                .filter(|page| !images.contains_key(*page));
-            if covered > 0 && images.len() + new.count() > budget {
-                break;
-            }
-            if transaction.pages.iter().any(|page| latest[page] > limit) {
-                break;
-            }
-            for &page in &transaction.pages {
-                images.insert(page, self.log.images[&page].clone());
-            }
-            covered += 1;
-        }
-        if covered == 0 {
-            return None;
-        }
-        let last = &transactions[covered - 1];
-        Some(Checkpoint {
-            log_start: last.end,
-            size: last.size,
-            images,
-        })
+    /// Whether the log is long enough to checkpoint.
+    fn wants_checkpoint(&self) -> bool {
+        let log = &self.log;
+        !log.transactions.is_empty()
+            && (log.transactions.len() > self.options.checkpoint_after as usize
+                || log.bytes > self.options.checkpoint_log_bytes)
     }
 
     /// Commit `dirty` pages as one log transaction and advance checkpointing.
@@ -584,7 +523,8 @@ impl Snapshot {
     /// [`Self::publish`], also returning the committed view afterwards, which a
     /// session may continue on. This snapshot is not used again. Without
     /// changes nothing is logged, unless `record`: then an empty transaction
-    /// is, and the log (the version) grows all the same.
+    /// is, and the log (the version) grows all the same. A commit that leaves
+    /// the log long checkpoints it ([`Self::compact`]).
     pub(crate) async fn commit(
         &self,
         dirty: Changes,
@@ -608,20 +548,9 @@ impl Snapshot {
                 "another session committed since this one opened; reopen",
             ));
         }
-        let mut images = Images::new();
-        for (index, page) in dirty {
-            let image = match page {
-                Some(page) => Some(Bytes::from(page_codec::encode(
-                    &page,
-                    self.options.page_compression,
-                )?)),
-                None => None,
-            };
-            images.insert(index, image);
-        }
-        let segments = log::encode_transaction(self.log.next, size, &images);
+        let images: Images = dirty;
+        let segments = log::encode_transaction(self.log.next, size, &images, &self.log.chain)?;
         let logged_bytes = segments.iter().map(Vec::len).sum::<usize>();
-        let large = logged_bytes > CHECKPOINT_LOG_BYTES;
         let next = self.log.next + segments.len() as u64;
         let mut parts: Vec<_> = segments
             .into_iter()
@@ -634,12 +563,11 @@ impl Snapshot {
             Mutation::Delete(_) => unreachable!("a commit part is a put"),
         };
 
-        // Round trip of the commit: checkpoint pages, garbage and a pending claim.
+        // Round trip of the commit: with a cache, garbage and a pending claim.
         let cache = self.options.cache.as_ref();
-        let plan = if large { None } else { self.checkpoint_plan() };
-        let mut maintenance = plan.as_ref().map_or_else(Vec::new, Checkpoint::mutations);
+        let mut maintenance = Vec::new();
         let garbage = self.meta.deleted_below..self.meta.log_start;
-        let collect = !garbage.is_empty() && (cache.is_some() || plan.is_some() || large);
+        let collect = !garbage.is_empty() && cache.is_some();
         if collect {
             maintenance.extend(garbage.clone().map(|seq| Mutation::Delete(log_key(seq))));
         }
@@ -650,130 +578,71 @@ impl Snapshot {
         if let Some(claim) = early_meta {
             maintenance.push(Mutation::Put(META.to_owned(), claim.encode().into()));
         }
-        // A checkpointing save also refreshes the working-set hint, if it changed.
-        let hint = match plan.is_some() || large {
-            true => self.hint(),
-            false => None,
-        };
-        if let Some(hint) = &hint {
-            maintenance.push(Mutation::Put(HINT.to_owned(), hint.clone().into()));
-        }
         let store = &*self.store;
         let commit = async {
             concurrently(store, parts).await?;
             apply(store, commit_part).await
         };
-        let (committed, mut cleanup) = futures::join!(commit, concurrently(store, maintenance));
+        let (committed, cleanup) = futures::join!(commit, concurrently(store, maintenance));
         if let Err(error) = committed {
             if let Some(cache) = cache {
                 cache.forget();
             }
             return Err(error);
         }
-
-        // A large transaction is checkpointed right away, with the whole log, so
-        // later opens do not replay it.
-        let alone = self.checkpoint_limit() == u64::MAX;
-        let plan = match (large, cleanup.is_ok() && alone) {
-            (true, true) => {
-                let mut all = self.log.images.clone();
-                all.extend(images.clone());
-                let checkpoint = Checkpoint {
-                    log_start: next,
-                    size,
-                    images: all,
-                };
-                cleanup = concurrently(store, checkpoint.mutations()).await;
-                Some(checkpoint)
-            }
-            _ => plan,
-        };
-        let checkpointed_pages = plan.as_ref().map_or(0, |plan| plan.images.len());
         let committed = (next, size, images, logged_bytes, tail);
         if let Err(error) = cleanup {
             if let Some(cache) = cache {
                 cache.forget_meta(next);
             }
-            // The log keeps covering those pages: none counts as checkpointed.
             let report = SaveReport {
                 checkpointed_pages: 0,
                 cleanup_error: Some(error),
                 log_next: next,
             };
-            // Keep what was durable before: the log still covers every page
-            // the failed checkpoint may have written.
             let mut after = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
-            after.extend(committed, None);
+            after.extend(committed);
             return Ok((report, after.registered()));
         }
 
-        // Everything acknowledged is durable. Work out what `meta` may say: past
-        // the checkpointed transactions, and past the deleted garbage.
+        // Everything acknowledged is durable: the claim, and the deleted garbage,
+        // which the next save's round trip records.
         let (durable, durable_bytes) = match early_meta {
             Some(claim) => (claim, Some(claim.encode().into())),
             None => (self.meta, self.meta_bytes.clone()),
         };
-        let deleted_below = if collect {
-            garbage.end.max(durable.deleted_below)
-        } else {
-            durable.deleted_below
-        };
-        let target = match &plan {
-            Some(plan) => Meta {
-                log_start: plan.log_start,
-                deleted_below,
-                size: plan.size,
+        let target = Meta {
+            deleted_below: match collect {
+                true => garbage.end.max(durable.deleted_below),
+                false => durable.deleted_below,
             },
-            None => Meta {
-                deleted_below,
-                ..durable
-            },
+            ..durable
         };
-        // An owner with a cache records the claim in its next save's round trip.
-        // Without one, or after a large save that already took extra round trips,
-        // write it now so that no other process replays a bulk load.
-        let mut claim = None;
-        let mut cleanup_error = None;
-        let (mut durable, mut durable_bytes) = (durable, durable_bytes);
-        if target != durable {
-            if cache.is_some() && !large {
-                claim = Some(target);
-            } else {
-                match store.put(META, target.encode().into()).await {
-                    Ok(()) => (durable, durable_bytes) = (target, Some(target.encode().into())),
-                    Err(error) => cleanup_error = Some(error),
-                }
-            }
-        }
+        let claim = (target != durable).then_some(target);
         if let Some(cache) = cache {
-            if let Some(plan) = &plan {
-                for (&index, image) in &plan.images {
-                    match image {
-                        Some(image) => cache.replace(index, image.clone()),
-                        None => cache.remove(index),
-                    }
-                }
-            }
-            if cleanup_error.is_some() {
-                cache.forget_meta(next);
-            } else {
-                cache.record(durable_bytes.clone(), claim, next);
-                if let Some(hint) = &hint {
-                    cache.wrote_hint(hint.clone());
-                }
-            }
+            cache.record(durable_bytes.clone(), claim, next);
         }
-        // The log now starts at the recorded or claimed checkpoint. If `meta`
-        // could not be written, it keeps the checkpointed transactions.
         let mut after = self.continued(durable, durable_bytes, claim);
-        after.extend(committed, hint.map(Bytes::from));
-        after.log.drop_before(after.base().log_start);
+        after.extend(committed);
+        let after = after.registered();
         let report = SaveReport {
-            checkpointed_pages,
-            cleanup_error,
+            checkpointed_pages: 0,
+            cleanup_error: None,
             log_next: next,
         };
-        Ok((report, after.registered()))
+        if !after.wants_checkpoint() {
+            return Ok((report, after));
+        }
+        // This view is not used again: it must not hold the checkpoint back.
+        drop(self.reader.lock().unwrap().take());
+        let (checkpoint, after) = after.compact().await?;
+        Ok((
+            SaveReport {
+                log_next: next,
+                ..checkpoint
+            },
+            after,
+        ))
     }
 
     /// Checkpoint the whole log, and continue on the result: each page's latest
@@ -781,53 +650,55 @@ impl Snapshot {
     /// then `meta` past those. Only puts and deletes, each round after the one
     /// before is acknowledged, so a crash anywhere leaves a state that replay
     /// reads correctly, and on an ordered store nothing waits for a reply.
+    /// Once the pages are acknowledged the compression chain restarts at the
+    /// log's end, before `meta` may pass it.
     /// Nothing to do without a log, or while another session's view still
     /// needs it. A failure is a [`SaveReport::cleanup_error`]: the log keeps
     /// covering the pages, and a later save retries.
     pub(crate) async fn compact(&self) -> io::Result<(SaveReport, Self)> {
-        let unchanged = |cleanup_error| {
+        let unchanged = |cleanup_error, restart: bool| {
             let report = SaveReport {
                 cleanup_error,
                 log_next: self.log.next,
                 ..SaveReport::default()
             };
-            let after = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
+            let mut after = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
+            if restart {
+                after.log.chain = Chain::new(self.log.next);
+            }
             (report, after.registered())
         };
         let cache = self.options.cache.as_ref();
         let own = cache.is_none_or(|cache| cache.committed() == Some(self.log.next));
         if self.log.transactions.is_empty() || !own || self.checkpoint_limit() != u64::MAX {
-            return Ok(unchanged(None));
+            return Ok(unchanged(None, false));
         }
         let store = &*self.store;
-        let checkpoint = Checkpoint {
-            log_start: self.log.next,
-            size: self.size(),
-            images: self.log.images.clone(),
-        };
+        let checkpoint = Checkpoint::new(&self.log.images, self.options.page_compression)?;
         let hint = self.hint();
         let mut pages = checkpoint.mutations();
         if let Some(hint) = &hint {
             pages.push(Mutation::Put(HINT.to_owned(), hint.clone().into()));
         }
-        let failed = |error| {
+        let failed = |error, restart| {
             if let Some(cache) = cache {
                 cache.forget_meta(self.log.next);
             }
-            Ok(unchanged(Some(error)))
+            Ok(unchanged(Some(error), restart))
         };
         if let Err(error) = concurrently(store, pages).await {
-            return failed(error);
+            return failed(error, false);
         }
         // `meta` passes the log only now that its pages are acknowledged.
         let moved = Meta {
-            log_start: checkpoint.log_start,
+            log_start: self.log.next,
             deleted_below: self.meta.deleted_below,
-            size: checkpoint.size,
+            size: self.size(),
         };
         let moved_bytes: Bytes = moved.encode().into();
         if let Err(error) = store.put(META, moved_bytes.clone()).await {
-            return failed(error);
+            // It may have landed: later segments must not need the log.
+            return failed(error, true);
         }
         // Then the segments below it, and a `meta` that says so.
         let garbage = moved.deleted_below..moved.log_start;
@@ -845,10 +716,10 @@ impl Snapshot {
             Err(error) => (moved, moved_bytes, Some(error)),
         };
         if let Some(cache) = cache {
-            for (&index, image) in &checkpoint.images {
+            for (index, image) in &checkpoint.images {
                 match image {
-                    Some(image) => cache.replace(index, image.clone()),
-                    None => cache.remove(index),
+                    Some(image) => cache.replace(*index, image.clone()),
+                    None => cache.remove(*index),
                 }
             }
             cache.record(Some(durable_bytes.clone()), None, self.log.next);
@@ -861,6 +732,7 @@ impl Snapshot {
             after.hint = Some(Bytes::from(hint));
         }
         after.log.drop_before(durable.log_start);
+        after.log.chain = Chain::new(self.log.next);
         let report = SaveReport {
             checkpointed_pages: checkpoint.images.len(),
             cleanup_error,
@@ -888,6 +760,7 @@ impl Snapshot {
             next: self.log.next,
             tail: self.log.tail.clone(),
             bytes: self.log.bytes,
+            chain: self.log.chain.clone(),
         };
         Self {
             store: self.store.clone(),
@@ -910,13 +783,7 @@ impl Snapshot {
     /// pages fetched ahead, usage or reader registration.
     pub(crate) fn idle(&self) -> Self {
         let mut idle = self.continued(self.meta, self.meta_bytes.clone(), self.claim);
-        idle.log = Log {
-            transactions: Vec::new(),
-            images: Images::new(),
-            next: self.log.next,
-            tail: None,
-            bytes: 0,
-        };
+        idle.log = Log::new(self.log.next);
         idle.fetched = Mutex::default();
         idle.usage = Mutex::default();
         idle
@@ -944,36 +811,41 @@ impl Snapshot {
 
     /// Add this owner's acknowledged transaction to the log. Values fetched
     /// ahead for its pages are stale once a checkpoint drops it from the log.
-    fn extend(
-        &mut self,
-        (end, size, images, bytes, tail): (u64, u64, Images, usize, Bytes),
-        hint: Option<Bytes>,
-    ) {
+    fn extend(&mut self, (end, size, images, bytes, tail): (u64, u64, Images, usize, Bytes)) {
         let fetched = self.fetched.get_mut().unwrap();
         for page in images.keys() {
             fetched.remove(page);
         }
         self.log.append(end, size, images, bytes, tail);
-        if hint.is_some() {
-            self.hint = hint;
-        }
     }
 }
 
-/// Pages to write in place and the log position they make redundant.
+/// A checkpoint's page values: each page's latest image, encoded.
 struct Checkpoint {
-    log_start: u64,
-    size: u64,
-    images: Images,
+    images: Vec<(u64, Option<Bytes>)>,
 }
 
 impl Checkpoint {
+    fn new(images: &Images, compression: PageCompression) -> io::Result<Self> {
+        let images = images
+            .iter()
+            .map(|(&index, image)| {
+                let value = match image {
+                    Some(page) => Some(Bytes::from(page_codec::encode(page, compression)?)),
+                    None => None,
+                };
+                Ok((index, value))
+            })
+            .collect::<io::Result<_>>()?;
+        Ok(Self { images })
+    }
+
     fn mutations(&self) -> Vec<Mutation> {
         self.images
             .iter()
-            .map(|(&index, image)| match image {
-                Some(image) => Mutation::Put(page_key(index), image.clone()),
-                None => Mutation::Delete(page_key(index)),
+            .map(|(index, image)| match image {
+                Some(image) => Mutation::Put(page_key(*index), image.clone()),
+                None => Mutation::Delete(page_key(*index)),
             })
             .collect()
     }

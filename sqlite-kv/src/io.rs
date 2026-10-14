@@ -605,16 +605,6 @@ impl KvIo {
         *self.snapshot.lock().unwrap() = Arc::new(after);
         Ok(report)
     }
-
-    /// Checkpoint the whole committed log (see `Snapshot::compact`).
-    pub(crate) async fn compact(&self) -> io::Result<crate::SaveReport> {
-        if self.pending_count() != 0 {
-            return Err(invalid("cannot compact with pending I/O"));
-        }
-        let (report, after) = self.snapshot().compact().await?;
-        *self.snapshot.lock().unwrap() = Arc::new(after);
-        Ok(report)
-    }
 }
 
 impl Clock for KvIo {

@@ -19,6 +19,8 @@ bytes = "1.10"
 # The engine retains an owned schema lock across open-time I/O. Allow that
 # guard to move with the host future between executor threads, without a worker.
 parking_lot = { version = "0.12", features = ["send_guard"] }
+# Log segments: zstd frames against the previous images of their pages.
+zstd-safe = { version = "7.2", default-features = false, features = ["std"] }
 lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 # Pinned with its subcrates in Cargo.lock: 0.22.4 to 0.22.6 print a debug line
 # to stdout whenever a file device opens.
