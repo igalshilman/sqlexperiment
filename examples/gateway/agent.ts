@@ -69,7 +69,12 @@ export const EXAMPLES = [
   'Where are orders 101 to 112?',
 ];
 
-const Prompt = z.string().default(EXAMPLES[0]!).describe('What the customer asks').meta({ examples: EXAMPLES });
+// The suggestion is a JSON schema `default` only: a zod `.default()` would
+// accept an empty body, and the SDK would then announce no input at all.
+export const PROMPT_SCHEMA = z
+  .string()
+  .describe('What the customer asks')
+  .meta({ default: EXAMPLES[0], examples: EXAMPLES });
 const Answer = z.object({ answer: z.string().describe("The assistant's answer") });
 
 const models = createModels();
@@ -94,11 +99,11 @@ export const assistant = restate.object({
           'A refund waits for a manager: `Gateway/<tenant>/pending`, then `Gateway/<tenant>/decide`.',
         ].join('\n'),
         metadata: Object.fromEntries(EXAMPLES.map((e, i) => [`example.${i + 1}`, e])),
-        input: restate.serde.schema(Prompt),
+        input: restate.serde.schema(PROMPT_SCHEMA),
         output: restate.serde.schema(Answer),
         journalReplay: false,
       },
-      async (ctx: restate.SqlObjectContext, text: z.infer<typeof Prompt>) => {
+      async (ctx: restate.SqlObjectContext, text: z.infer<typeof PROMPT_SCHEMA>) => {
         const { tenant, user } = identity(ctx.key);
         const gw = ctx.objectClient(gateway, tenant);
         const tools = (await gw.tools()).map((tool) =>
