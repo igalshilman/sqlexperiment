@@ -45,11 +45,427 @@ index 351ce1c..470118f 100644
      fn sys_state_set(&mut self, key: String, value: Bytes, options: PayloadOptions)
          -> VMResult<()>;
  
+diff --git a/src/tests/async_result.rs b/src/tests/async_result.rs
+index 8673448..67947e5 100644
+--- a/src/tests/async_result.rs
++++ b/src/tests/async_result.rs
+@@ -1007,6 +1007,7 @@ mod reverse_await_order {
+             output.next_decoded::<SetStateCommandMessage>().unwrap(),
+             SetStateCommandMessage {
+                 key: Bytes::from_static(b"A2"),
++                name: "A2".to_string(),
+                 value: Some(Bytes::from_static(b"TILL").into()),
+                 ..Default::default()
+             }
+@@ -1074,6 +1075,7 @@ mod reverse_await_order {
+             output.next_decoded::<SetStateCommandMessage>().unwrap(),
+             SetStateCommandMessage {
+                 key: Bytes::from_static(b"A2"),
++                name: "A2".to_string(),
+                 value: Some(Bytes::from_static(b"TILL").into()),
+                 ..Default::default()
+             }
+@@ -1135,6 +1137,7 @@ mod reverse_await_order {
+             output.next_decoded::<SetStateCommandMessage>().unwrap(),
+             SetStateCommandMessage {
+                 key: Bytes::from_static(b"A2"),
++                name: "A2".to_string(),
+                 value: Some(Bytes::from_static(b"TILL").into()),
+                 ..Default::default()
+             }
+diff --git a/src/tests/ephemeral_state_get.rs b/src/tests/ephemeral_state_get.rs
+index 85b2046..6c08800 100644
+--- a/src/tests/ephemeral_state_get.rs
++++ b/src/tests/ephemeral_state_get.rs
+@@ -221,6 +221,7 @@ mod local {
+             .input(input_entry_message(b"my-data"))
+             .input(SetStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 value: Some(Bytes::from_static(b"Francesco").into()),
+                 ..Default::default()
+             })
+diff --git a/src/tests/failures.rs b/src/tests/failures.rs
+index c60dcce..cecebb4 100644
+--- a/src/tests/failures.rs
++++ b/src/tests/failures.rs
+@@ -139,11 +139,13 @@ mod journal_mismatch {
+         expect_mismatch_on_replay(
+             GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"my-key"),
++                name: "my-key".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             },
+             GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"another-key"),
++                name: "another-key".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             },
+@@ -153,9 +155,12 @@ mod journal_mismatch {
+ 
+     #[test]
+     fn set_state_mismatch() {
+-        expect_mismatch_on_replay(
++        // Named after the key of the set the code attempted.
++        expect_named_mismatch_on_replay(
++            Some("my-key"),
+             SetStateCommandMessage {
+                 key: Bytes::from_static(b"my-key"),
++                name: "my-key".to_string(),
+                 value: Some(messages::Value {
+                     content: Bytes::from_static(b"my-value"),
+                 }),
+@@ -163,6 +168,7 @@ mod journal_mismatch {
+             },
+             SetStateCommandMessage {
+                 key: Bytes::from_static(b"my-key"),
++                name: "my-key".to_string(),
+                 value: Some(messages::Value {
+                     content: Bytes::from_static(b"another-value"),
+                 }),
+@@ -269,6 +275,19 @@ mod journal_mismatch {
+         expected: M,
+         actual: M,
+         user_code: impl FnOnce(&mut CoreVM) -> Result<T, Error>,
++    ) {
++        expect_named_mismatch_on_replay(None, expected, actual, user_code)
++    }
++
++    /// As expect_mismatch_on_replay, with the name of the command the error relates to.
++    fn expect_named_mismatch_on_replay<
++        M: RestateMessage + RestateEncodableMessage + CommandMessageHeaderDiff + Clone,
++        T: fmt::Debug,
++    >(
++        related_name: Option<&'static str>,
++        expected: M,
++        actual: M,
++        user_code: impl FnOnce(&mut CoreVM) -> Result<T, Error>,
+     ) {
+         let mut output = VMTestCase::new()
+             .input(StartMessage {
+@@ -288,7 +307,10 @@ mod journal_mismatch {
+                     expected.clone(),
+                     actual.clone(),
+                 ))
+-                .with_related_command_metadata(CommandMetadata::new(1, M::ty()));
++                .with_related_command_metadata(match related_name {
++                    None => CommandMetadata::new(1, M::ty()),
++                    Some(name) => CommandMetadata::new_named(name, 1, M::ty()),
++                });
+                 assert_that!(user_code(vm), err(eq(expected_error)));
+             });
+ 
+@@ -456,6 +478,7 @@ mod journal_mismatch {
+         })
+         .input(SetStateCommandMessage {
+             key: Bytes::from_static(b"my-key"),
++            name: "my-key".to_string(),
+             value: Some(messages::Value {
+                 content: Bytes::from_static(b"123"),
+             }),
+@@ -463,6 +486,7 @@ mod journal_mismatch {
+         })
+         .input(GetEagerStateCommandMessage {
+             key: Bytes::from_static(b"STATE"),
++            name: "STATE".to_string(),
+             result: Some(messages::get_eager_state_command_message::Result::Value(
+                 messages::Value {
+                     content: Bytes::from_static(b"123"),
+@@ -630,6 +654,7 @@ mod journal_mismatch {
+             .input(input_entry_message(b"my-data"))
+             .input(SetStateCommandMessage {
+                 key: Bytes::from_static(b"my-key"),
++                name: "my-key".to_string(),
+                 value: Some(messages::Value {
+                     content: Bytes::from_static(b"123"),
+                 }),
+@@ -676,6 +701,7 @@ mod journal_mismatch {
+             .input(input_entry_message(b"my-data"))
+             .input(GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"my-key"),
++                name: "my-key".to_string(),
+                 result: Some(messages::get_eager_state_command_message::Result::Value(
+                     messages::Value {
+                         content: Bytes::from_static(b"123"),
 diff --git a/src/tests/state.rs b/src/tests/state.rs
-index 9904374..0d98697 100644
+index 9904374..e60e3b1 100644
 --- a/src/tests/state.rs
 +++ b/src/tests/state.rs
-@@ -1376,3 +1376,104 @@ mod state_keys {
+@@ -56,6 +56,7 @@ mod only_lazy_state {
+             .input(input_entry_message(b"Till"))
+             .input(GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             })
+@@ -94,6 +95,7 @@ mod only_lazy_state {
+                 .input(input_entry_message(b"Till"))
+                 .input(GetLazyStateCommandMessage {
+                     key: Bytes::from_static(b"STATE"),
++                    name: "STATE".to_string(),
+                     result_completion_id: 1,
+                     ..Default::default()
+                 })
+@@ -135,6 +137,7 @@ mod only_lazy_state {
+             output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+             GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             }
+@@ -160,6 +163,7 @@ mod only_lazy_state {
+             .input(input_entry_message(b"Till"))
+             .input(GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             })
+@@ -186,6 +190,7 @@ mod only_lazy_state {
+             .input(input_entry_message(b"Till"))
+             .input(GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             })
+@@ -235,6 +240,7 @@ mod only_lazy_state {
+             output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+             GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             }
+@@ -307,6 +313,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -341,6 +348,7 @@ mod eager {
+             output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+             GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             }
+@@ -366,6 +374,7 @@ mod eager {
+             .input(InputCommandMessage::default())
+             .input(GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default(),
+                 )),
+@@ -407,6 +416,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Value(
+                     Bytes::from_static(b"Francesco").into()
+                 )),
+@@ -448,6 +458,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Value(
+                     Bytes::from_static(b"Francesco").into()
+                 )),
+@@ -482,6 +493,7 @@ mod eager {
+             output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+             GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             }
+@@ -587,6 +599,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Value(
+                     Bytes::from_static(b"Francesco").into()
+                 )),
+@@ -597,6 +610,7 @@ mod eager {
+             output.next_decoded::<SetStateCommandMessage>().unwrap(),
+             SetStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 value: Some(Bytes::from_static(b"FrancescoTill").into()),
+                 ..Default::default()
+             }
+@@ -607,6 +621,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Value(
+                     Bytes::from_static(b"FrancescoTill").into()
+                 )),
+@@ -649,6 +664,7 @@ mod eager {
+             output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+             GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             }
+@@ -657,6 +673,7 @@ mod eager {
+             output.next_decoded::<SetStateCommandMessage>().unwrap(),
+             SetStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 value: Some(Bytes::from_static(b"FrancescoTill").into()),
+                 ..Default::default()
+             }
+@@ -667,6 +684,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Value(
+                     Bytes::from_static(b"FrancescoTill").into()
+                 )),
+@@ -753,6 +771,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Value(
+                     Bytes::from_static(b"Francesco").into()
+                 )),
+@@ -763,6 +782,7 @@ mod eager {
+             output.next_decoded::<ClearStateCommandMessage>().unwrap(),
+             ClearStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 ..Default::default()
+             }
+         );
+@@ -772,6 +792,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -814,6 +835,7 @@ mod eager {
+             output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+             GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             }
+@@ -822,6 +844,7 @@ mod eager {
+             output.next_decoded::<ClearStateCommandMessage>().unwrap(),
+             ClearStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 ..Default::default()
+             }
+         );
+@@ -831,6 +854,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -922,6 +946,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Value(
+                     Bytes::from_static(b"Francesco").into()
+                 )),
+@@ -940,6 +965,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -952,6 +978,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"ANOTHER_STATE"),
++                name: "ANOTHER_STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -994,6 +1021,7 @@ mod eager {
+             output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+             GetLazyStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result_completion_id: 1,
+                 ..Default::default()
+             }
+@@ -1010,6 +1038,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -1022,6 +1051,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"ANOTHER_STATE"),
++                name: "ANOTHER_STATE".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -1080,6 +1110,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"key-0"),
++                name: "key-0".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -1092,6 +1123,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"key-0"),
++                name: "key-0".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -1121,6 +1153,7 @@ mod eager {
+             .input(InputCommandMessage::default())
+             .input(GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"key-0"),
++                name: "key-0".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default(),
+                 )),
+@@ -1134,6 +1167,7 @@ mod eager {
+                 .unwrap(),
+             GetEagerStateCommandMessage {
+                 key: Bytes::from_static(b"key-0"),
++                name: "key-0".to_string(),
+                 result: Some(get_eager_state_command_message::Result::Void(
+                     Default::default()
+                 )),
+@@ -1376,3 +1410,108 @@ mod state_keys {
          assert_eq!(output.next(), None);
      }
  }
@@ -81,11 +497,13 @@ index 9904374..0d98697 100644
 +            .input(input_entry_message(b"Till"))
 +            .input(SetStateCommandMessage {
 +                key: Bytes::from_static(b"OTHER"),
++                name: "OTHER".to_string(),
 +                value: Some(Bytes::from_static(b"x").into()),
 +                ..Default::default()
 +            })
 +            .input(GetLazyStateCommandMessage {
 +                key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
 +                result_completion_id: 1,
 +                ..Default::default()
 +            })
@@ -103,6 +521,7 @@ index 9904374..0d98697 100644
 +            output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
 +            GetLazyStateCommandMessage {
 +                key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
 +                result_completion_id: 9,
 +                ..Default::default()
 +            }
@@ -132,6 +551,7 @@ index 9904374..0d98697 100644
 +            output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
 +            GetLazyStateCommandMessage {
 +                key: Bytes::from_static(b"STATE"),
++                name: "STATE".to_string(),
 +                result_completion_id: 1,
 +                ..Default::default()
 +            }
@@ -154,6 +574,26 @@ index 9904374..0d98697 100644
 +        assert!(vm.sys_awakeable().is_err());
 +    }
 +}
+diff --git a/src/tests/suspensions.rs b/src/tests/suspensions.rs
+index 2da1933..3e87a5b 100644
+--- a/src/tests/suspensions.rs
++++ b/src/tests/suspensions.rs
+@@ -35,6 +35,7 @@ fn trigger_suspension_with_get_state() {
+         output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+         GetLazyStateCommandMessage {
+             key: Bytes::from_static(b"Personaggio"),
++            name: "Personaggio".to_string(),
+             result_completion_id: 1,
+             ..Default::default()
+         }
+@@ -113,6 +114,7 @@ fn await_many_notifications() {
+         output.next_decoded::<GetLazyStateCommandMessage>().unwrap(),
+         GetLazyStateCommandMessage {
+             key: Bytes::from_static(b"Personaggio"),
++            name: "Personaggio".to_string(),
+             result_completion_id: 1,
+             ..Default::default()
+         }
 diff --git a/src/vm/context.rs b/src/vm/context.rs
 index db97978..cbaec35 100644
 --- a/src/vm/context.rs
@@ -283,7 +723,7 @@ index 8cf26e7..0ca3f6a 100644
          let signal_id = self.context.journal.next_signal_notification_id();
  
 diff --git a/src/vm/transitions/journal.rs b/src/vm/transitions/journal.rs
-index d07a453..0b051ff 100644
+index d07a453..890e419 100644
 --- a/src/vm/transitions/journal.rs
 +++ b/src/vm/transitions/journal.rs
 @@ -21,8 +21,8 @@ use crate::vm::errors::{
@@ -309,3 +749,68 @@ index d07a453..0b051ff 100644
          let start_info = context.expect_start_info();
  
          Ok((
+@@ -334,9 +339,9 @@ impl TransitionAndReturn<Context, SysStateGet> for State {
+                 if let Some((get_state_result, notification_result)) = result {
+                     // Eager state case, we're good let's prepare the ready notification and send the get eager state entry
+                     let new_entry = GetEagerStateCommandMessage {
++                        name: key.clone(),
+                         key: Bytes::from(key),
+                         result: Some(get_state_result),
+-                        ..Default::default()
+                     };
+                     let new_notification = Notification {
+                         id: NotificationId::CompletionId(completion_id),
+@@ -351,9 +356,9 @@ impl TransitionAndReturn<Context, SysStateGet> for State {
+                     Ok((self, handle))
+                 } else {
+                     let new_entry = GetLazyStateCommandMessage {
++                        name: key.clone(),
+                         key: Bytes::from(key),
+                         result_completion_id: completion_id,
+-                        ..Default::default()
+                     };
+                     let handle = async_results
+                         .create_handle_mapping(NotificationId::CompletionId(completion_id));
+@@ -426,9 +431,9 @@ fn process_get_entry_during_replay(
+                 context.journal.command_index(),
+                 &get_eager_state_command,
+                 &GetEagerStateCommandMessage {
++                    name: key.clone(),
+                     key: key.into_bytes().into(),
+                     result: get_eager_state_command.result.clone(),
+-                    name: "".to_string(),
+                 },
+                 ignore_payload_equality,
+             )?;
+@@ -454,9 +459,9 @@ fn process_get_entry_during_replay(
+                 context.journal.command_index(),
+                 &get_lazy_state_command,
+                 &GetLazyStateCommandMessage {
++                    name: key.clone(),
+                     key: key.into_bytes().into(),
+                     result_completion_id: completion_id,
+-                    name: "".to_string(),
+                 },
+                 ignore_payload_equality,
+             )?;
+@@ -659,9 +664,9 @@ impl Transition<Context, SysStateSet> for State {
+             context,
+             SysNonCompletableEntry(
+                 SetStateCommandMessage {
++                    name: key.clone(),
+                     key: key.into_bytes().into(),
+                     value: Some(value.into()),
+-                    ..SetStateCommandMessage::default()
+                 },
+                 options,
+             ),
+@@ -684,8 +689,8 @@ impl Transition<Context, SysStateClear> for State {
+             context,
+             SysNonCompletableEntry(
+                 ClearStateCommandMessage {
++                    name: key.clone(),
+                     key: key.into_bytes().into(),
+-                    ..ClearStateCommandMessage::default()
+                 },
+                 PayloadOptions::default(),
+             ),
