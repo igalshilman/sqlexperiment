@@ -90,7 +90,7 @@ if (provider === 'concierge') {
 export const assistant = restate.object({
   name: 'Assistant',
   handlers: {
-    prompt: restate.handlers.object.exclusive(
+    prompt: restate.createObjectHandler(
       {
         description: [
           'Answer a prompt, with the tools of the tenant of the key `<tenant>.<user>` (such as `acme.alice`).',
