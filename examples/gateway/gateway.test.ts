@@ -1,38 +1,21 @@
-// The gateway's parts without a Restate server: the registry and the
+// The gateway's parts without a Restate server: the prebuilt tools and the
 // scripted model. Against a server: demo.sh.
 import type { TranscriptContext } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
 import { concierge } from './agent.ts';
-import { identity, toolsOf } from './gateway.ts';
+import { identity } from './gateway.ts';
+import { PREBUILT } from './tools.ts';
 
-describe('the registry', () => {
-  it('lists the handlers that name a tool, with their schema and approval', () => {
-    const tools = toolsOf({
-      services: [
-        {
-          name: 'Payments',
-          handlers: [
-            {
-              name: 'refund',
-              documentation: 'Refund an order.',
-              metadata: { 'mcp.tool': 'refund', 'mcp.approval': 'required' },
-              input_json_schema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object' },
-            },
-            { name: 'internal' },
-          ],
-        },
-      ],
+describe('the gateway', () => {
+  it('has prebuilt tools, with the JSON schema of their zod input', () => {
+    expect(Object.keys(PREBUILT)).toEqual(['lookup_order', 'refund', 'open_ticket']);
+    expect(PREBUILT.refund).toMatchObject({ approval: true, service: 'Payments', handler: 'refund' });
+    expect(PREBUILT.lookup_order!.inputSchema).toEqual({
+      type: 'object',
+      properties: { order: { type: 'string', description: 'The order id, such as "101"' } },
+      required: ['order'],
+      additionalProperties: false,
     });
-    expect(tools).toEqual([
-      {
-        name: 'refund',
-        description: 'Refund an order.',
-        inputSchema: { type: 'object' },
-        approval: true,
-        service: 'Payments',
-        handler: 'refund',
-      },
-    ]);
   });
 
   it('takes the tenant and the user from `<tenant>.<user>`', () => {

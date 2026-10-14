@@ -4,8 +4,7 @@
 #
 # It serves the endpoint (Orders, Payments, Gateway, Assistant) on 9080:
 #
-#   docker run -p 9080:9080 -e RESTATE_ADMIN_URL=http://restate:9070 \
-#     -e PI_MODEL=openai/gpt-5.4-mini -e OPENAI_API_KEY tool-gateway
+#   docker run -p 9080:9080 -e PI_MODEL=openai/gpt-5.4-mini -e OPENAI_API_KEY tool-gateway
 #
 # Needs the patched SDK's tarball, vendor/typescript/.build (`make sdk-ts`).
 
