@@ -69,10 +69,7 @@ export const EXAMPLES = [
   'Where are orders 101 to 112?',
 ];
 
-const Prompt = z.object({
-  text: z.string().default(EXAMPLES[0]!).describe('What the customer asks').meta({ examples: EXAMPLES }),
-  id: z.string().optional().describe('The prompt id: a prompt is answered once per id. By default, the invocation id'),
-});
+const Prompt = z.string().default(EXAMPLES[0]!).describe('What the customer asks').meta({ examples: EXAMPLES });
 const Answer = z.object({ answer: z.string().describe("The assistant's answer") });
 
 const models = createModels();
@@ -91,7 +88,7 @@ export const assistant = restate.object({
     prompt: restate.handlers.object.exclusive(
       {
         description: [
-          'Answer prompt `text`, once per prompt `id`, with the tools of the tenant of the key `<tenant>.<user>` (such as `acme.alice`).',
+          'Answer a prompt, with the tools of the tenant of the key `<tenant>.<user>` (such as `acme.alice`).',
           'Prompts to try:',
           ...EXAMPLES.map((e) => `- ${e}`),
           'A refund waits for a manager: `Gateway/<tenant>/pending`, then `Gateway/<tenant>/decide`.',
@@ -101,7 +98,7 @@ export const assistant = restate.object({
         output: restate.serde.schema(Answer),
         journalReplay: false,
       },
-      async (ctx: restate.SqlObjectContext, { id = ctx.request().id, text }: z.infer<typeof Prompt>) => {
+      async (ctx: restate.SqlObjectContext, text: z.infer<typeof Prompt>) => {
         const { tenant, user } = identity(ctx.key);
         const gw = ctx.objectClient(gateway, tenant);
         const tools = (await gw.tools()).map((tool) =>
@@ -119,7 +116,10 @@ export const assistant = restate.object({
             },
           }),
         );
-        return withPi(ctx, { models, model, tools }, async (pi) => ({ answer: await pi.prompt(id, text) }));
+        // Submitted once: a retried attempt resumes the prompt of the same invocation id.
+        return withPi(ctx, { models, model, tools }, async (pi) => ({
+          answer: await pi.prompt(ctx.request().id, text),
+        }));
       },
     ),
   },
