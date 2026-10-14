@@ -138,14 +138,18 @@ fn a_long_session_checkpoints_and_reads_its_writes() -> Result<()> {
     })
 }
 
-/// With an owner cache, a write transaction costs one round trip, including
-/// the checkpoint work that rides along with it.
+/// With an owner cache, a write transaction costs one round trip until the
+/// log is long enough to checkpoint.
 #[test]
 fn a_commit_is_one_round_trip_with_a_cache() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
         let cache = fresh_namespace();
-        let mut db = Session::open_with_options(store.clone(), options(Some(cache))).await?;
+        let options = StorageOptions {
+            checkpoint_after: 32,
+            ..options(Some(cache))
+        };
+        let mut db = Session::open_with_options(store.clone(), options).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         for i in 0..20 {
@@ -197,7 +201,7 @@ async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize
         .await?;
     let _signal = store.arm(Failpoint {
         operation,
-        key_prefix: "v12/".into(),
+        key_prefix: "v13/".into(),
         nth,
         effect,
         cancel: false,
@@ -361,7 +365,7 @@ fn commit_cleanup_errors_are_reported() -> Result<()> {
             .await?;
         let _signal = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v12/page/".into(),
+            key_prefix: "v13/page/".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,
@@ -547,7 +551,10 @@ fn the_version_grows_with_each_commit_that_changes_or_records() -> Result<()> {
         // The recorded commit is durable: a later open is at its version.
         let mut db = Session::open_with_options(store.clone(), options(None)).await?;
         assert_eq!(db.version(), v1);
-        assert_eq!(db.query("PRAGMA integrity_check").await?[0][0].to_string(), "ok");
+        assert_eq!(
+            db.query("PRAGMA integrity_check").await?[0][0].to_string(),
+            "ok"
+        );
         Ok(())
     })
 }

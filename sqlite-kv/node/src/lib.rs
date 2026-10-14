@@ -176,10 +176,13 @@ pub fn open<'env>(
         let options = StorageOptions {
             cache: Some(page_cache().await?.namespace(&namespace)),
             durability: Durability::Commit,
-            // Commits only append; the save at the attempt's end writes each
-            // changed page once (the log's size still bounds it in between).
-            checkpoint_after: 64,
-            checkpoint_on_save: true,
+            // Commits only append, compressed against the pages' previous
+            // images, until the log holds 60 transactions or 256 KiB: then a
+            // commit writes each changed page once. Open replays the log: a
+            // cold one reads at most 64 keys (meta, the hint, and probes of
+            // 2, 4, 8, 16 and 32 log keys).
+            checkpoint_after: 60,
+            checkpoint_log_bytes: 256 * 1024,
             ..StorageOptions::default()
         };
         let session = Session::open_with_options(store.clone(), options)

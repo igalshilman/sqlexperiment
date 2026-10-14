@@ -10,12 +10,12 @@ use std::sync::Arc;
 fn options(cache: Option<&NamespaceCache>) -> StorageOptions {
     StorageOptions {
         cache: cache.cloned(),
-        checkpoint_after: 1,
+        checkpoint_after: 0,
         ..StorageOptions::default()
     }
 }
 
-/// Saves leave the log one transaction long, so the next save checkpoints.
+/// Every save checkpoints the log.
 async fn baseline(cache: Option<&NamespaceCache>) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());

@@ -46,7 +46,7 @@
 use crate::{
     WarmEngine,
     hint::Usage,
-    log::{Images, Meta},
+    log::Meta,
     page_codec::{self, Page},
 };
 use foyer::{
@@ -287,19 +287,15 @@ impl NamespaceCache {
         }
     }
 
-    /// Bring cached pages up to date with the latest images of the transactions
-    /// between the base and the new log start, as read by open after
-    /// [`Reuse::Changed`]; `None` means they could not be read.
-    pub(crate) fn refresh(&self, changes: Option<&Images>) {
+    /// Drop the cached pages that the transactions between the base and the
+    /// new log start changed, as read by open after [`Reuse::Changed`]; `None`
+    /// means they could not be read, and drops every page.
+    pub(crate) fn refresh(&self, changes: Option<&std::collections::BTreeSet<u64>>) {
         let Some(changes) = changes else {
             return self.owner().clear(&self.shared.ids);
         };
-        for (&index, image) in changes {
-            let cached = self.shared.pages.memory().contains(&self.key(index));
-            match image {
-                Some(image) if cached => self.replace(index, image.clone()),
-                _ => self.remove(index),
-            }
+        for &index in changes {
+            self.remove(index);
         }
     }
 

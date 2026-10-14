@@ -161,7 +161,7 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v12/log/".into(),
+            key_prefix: "v13/log/".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,
@@ -175,13 +175,13 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
     })
 }
 
-/// A brief other owner that checkpoints leaves this owner's cache warm: open
-/// refreshes the pages it checkpointed from its still present log segments. Once
-/// garbage collection has deleted them, the cache drops its pages.
+/// A brief other owner that does not checkpoint leaves this owner's cache
+/// warm: the log it appended overrides the cached pages. Once it checkpoints
+/// (and deletes the log), the cache drops its pages.
 #[test]
 fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
     futures::executor::block_on(async {
-        for (saves, warm) in [(6, true), (12, false)] {
+        for (saves, warm) in [(3, true), (6, false)] {
             let store = Arc::new(LatencyKv::new(MemoryKv::default()));
             let cache = fresh_namespace();
             create(store.clone(), cached(&cache)).await?;

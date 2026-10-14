@@ -1828,6 +1828,7 @@ dependencies = [
  "parking_lot",
  "tokio",
  "turso_core",
+ "zstd-safe",
 ]
 
 [[package]]

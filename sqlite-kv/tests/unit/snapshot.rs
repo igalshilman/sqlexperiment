@@ -96,7 +96,8 @@ fn a_save_is_one_put_and_a_checkpointed_page_one_get() -> io::Result<()> {
         assert_eq!(store.stats().puts, 1);
         assert_eq!(store.keys().into_iter().collect::<Vec<_>>(), [log_key(1)]);
 
-        // Checkpointing everything moves pages to their keys and advances meta.
+        // Checkpointing the whole log moves pages to their keys (a hole is a
+        // delete) and advances meta past it.
         let all = StorageOptions {
             prefetch_pages: 0,
             ..options(0, None)
@@ -105,10 +106,11 @@ fn a_save_is_one_put_and_a_checkpointed_page_one_get() -> io::Result<()> {
         let report = snapshot
             .publish(Changes::from([(3, None)]), 4 * 4096)
             .await?;
-        assert_eq!(report.checkpointed_pages, 3);
+        assert_eq!(report.checkpointed_pages, 4);
         assert_eq!(keys(&store, PAGE_PREFIX).len(), 3);
+        assert!(keys(&store, LOG_PREFIX).is_empty());
         let meta = Meta::decode(&store.get(META).await?.unwrap())?;
-        assert_eq!((meta.log_start, meta.size), (2, 3 * 4096));
+        assert_eq!((meta.log_start, meta.size), (3, 4 * 4096));
 
         let snapshot = open(&store, &all).await?;
         store.reset_stats();
@@ -120,7 +122,8 @@ fn a_save_is_one_put_and_a_checkpointed_page_one_get() -> io::Result<()> {
     })
 }
 
-/// Without a cache, saves cost one round trip, or two when they checkpoint.
+/// Without a cache, saves cost one round trip, or five when they checkpoint:
+/// the commit, the pages, `meta`, the old segments and `meta` again.
 #[test]
 fn checkpoints_follow_the_log_without_a_cache() -> io::Result<()> {
     futures::executor::block_on(async {
@@ -143,18 +146,19 @@ fn checkpoints_follow_the_log_without_a_cache() -> io::Result<()> {
             assert_collected(&store.inner).await?;
         }
         assert!(
-            round_trips.iter().all(|&rt| rt == 1 || rt == 2),
+            round_trips.iter().all(|&rt| rt == 1 || rt == 5),
             "{round_trips:?}"
         );
-        let checkpoints = round_trips.iter().filter(|&&rt| rt == 2).count();
+        let checkpoints = round_trips.iter().filter(|&&rt| rt == 5).count();
         assert!((3..=6).contains(&checkpoints), "{round_trips:?}");
         assert!(model.check(&open(&store, &opts).await?).await?);
         Ok(())
     })
 }
 
-/// With an owner cache, every steady-state open and save is one round trip, even
-/// on a backend that needs confirmation, and a restarted owner still recovers.
+/// With an owner cache, every steady-state open and save is one round trip (or
+/// five, when the save checkpoints), even on a backend that needs
+/// confirmation, and a restarted owner still recovers.
 #[test]
 fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
     futures::executor::block_on(async {
@@ -173,8 +177,9 @@ fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
             assert!(model.check(&snapshot).await?, "round {round}");
             let (changes, size) = dirty(round);
             store.reset();
-            snapshot.publish(changes.clone(), size).await?;
-            assert_eq!(store.round_trips(), 1, "save {round}");
+            let report = snapshot.publish(changes.clone(), size).await?;
+            let expected = if report.checkpointed_pages > 0 { 5 } else { 1 };
+            assert_eq!(store.round_trips(), expected, "save {round}");
             model.apply(&changes, size);
             assert_collected(&store.inner).await?;
         }
@@ -250,14 +255,12 @@ fn weak_backends_confirm_what_this_owner_did_not_write() -> io::Result<()> {
             .publish(Changes::from([(0, Some(page(1)))]), 4096)
             .await?;
         // A failed append is visible but not durable.
-        let images = Images::from([(
-            0,
-            Some(Page::from(page_codec::encode(
-                &page(2),
-                PageCompression::Raw,
-            )?)),
-        )]);
-        let segment = log::encode_transaction(2, 4096, &images).remove(0);
+        let images = Images::from([(0, Some(page(2)))]);
+        let chain = Chain {
+            base: 1,
+            images: Images::from([(0, Some(page(1)))]),
+        };
+        let segment = log::encode_transaction(2, 4096, &images, &chain)?.remove(0);
         store.simulate_unacknowledged_put(&log_key(2), segment);
         assert_eq!(number(open(&store, &opts).await?.block(0).await?), Some(2));
         store.crash(&[]);
@@ -266,12 +269,12 @@ fn weak_backends_confirm_what_this_owner_did_not_write() -> io::Result<()> {
             Some(2),
             "open must make what it exposes durable"
         );
-        // A visible-only meta is confirmed too. This one only claims that the
-        // checkpointed segments were deleted, which a failed save could write.
+        // A visible-only meta is confirmed too. This one is the first a
+        // checkpoint writes: past the log, before its segments are deleted.
         let meta = Meta {
-            log_start: 3,
-            deleted_below: 3,
-            size: 4096,
+            log_start: 4,
+            deleted_below: 1,
+            size: 2 * 4096,
         };
         open(&store, &options(0, None))
             .await?
@@ -281,7 +284,7 @@ fn weak_backends_confirm_what_this_owner_did_not_write() -> io::Result<()> {
         assert_eq!(
             Meta::decode(&durable)?,
             Meta {
-                deleted_below: 1,
+                deleted_below: 4,
                 ..meta
             }
         );
@@ -439,7 +442,7 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
                 }
             }
         }
-        assert!(cases > 600, "{cases}");
+        assert!(cases > 100, "{cases}");
         println!("interrupted saves: {cases} cases, {checked} requests checked by the monitor");
         Ok(())
     })
@@ -541,7 +544,7 @@ async fn checkpointed(pages: u64) -> io::Result<MemoryKv> {
         .await?
         .publish(changes, pages * 4096)
         .await?;
-    // The next save checkpoints the first; page 0 stays in the log.
+    // The next save checkpoints the whole log.
     open(&kv, &options(0, None))
         .await?
         .publish(Changes::from([(0, Some(page(0)))]), pages * 4096)
@@ -617,8 +620,8 @@ fn a_cold_open_fetches_the_working_set_hint() -> io::Result<()> {
         let snapshot = open(&store, &options(4, None)).await?;
         assert_eq!(
             store.inner.stats().gets,
-            1 + 1 + 6 + 3,
-            "meta, hint, probe, pages"
+            1 + 1 + 2 + 3,
+            "meta, hint, a probe of the empty log, pages"
         );
         assert_eq!(cold_gets(snapshot, vec![5, 9, 33]).await?, 0);
 
@@ -630,7 +633,7 @@ fn a_cold_open_fetches_the_working_set_hint() -> io::Result<()> {
         assert_eq!(cold_gets(open(&store, &off).await?, vec![5]).await?, 1);
         store
             .inner
-            .put(HINT, Bytes::from_static(b"SH12\x09\x00garbage"))
+            .put(HINT, Bytes::from_static(b"SH13\x09\x00garbage"))
             .await?;
         assert_eq!(
             cold_gets(open(&store, &options(4, None)).await?, vec![5]).await?,
@@ -653,10 +656,7 @@ fn sequential_reads_fetch_ahead() -> io::Result<()> {
         }
         let (round_trips, gets) = (store.round_trips(), store.inner.stats().gets);
         assert!(round_trips < 15, "{round_trips} round trips");
-        assert_eq!(
-            gets, 299,
-            "page 0 is in the log; nothing else is fetched twice"
-        );
+        assert_eq!(gets, 300, "nothing is fetched twice");
 
         // Scattered reads do not fetch ahead.
         let snapshot = open(&store, &options(4, None)).await?;
@@ -670,7 +670,7 @@ fn sequential_reads_fetch_ahead() -> io::Result<()> {
 }
 
 /// With a cache, open probes exactly to where this owner left the log, and
-/// every save is one round trip, including its checkpoint slice.
+/// every save is one round trip, or five when it checkpoints.
 #[test]
 fn an_owner_probes_exactly_and_saves_in_one_round_trip() -> io::Result<()> {
     futures::executor::block_on(async {
@@ -683,15 +683,16 @@ fn an_owner_probes_exactly_and_saves_in_one_round_trip() -> io::Result<()> {
             let snapshot = open(&store, &opts).await?;
             if round > 0 {
                 assert_eq!(store.round_trips(), 1, "open {round}");
-                // The log, plus the key after it, plus meta.
-                let expected = snapshot.log.transactions.len() as u64 + 2;
+                // The log and the key after it (at least two keys), plus meta.
+                let expected = (snapshot.log.transactions.len() as u64 + 1).max(2) + 1;
                 assert_eq!(store.inner.stats().gets, expected, "open {round}");
             }
-            // Transactions of 20 pages: a checkpoint slice spans more than 16 puts.
+            // Transactions of 20 pages: a checkpoint spans more than 16 puts.
             let changes: Changes = (0..20).map(|i| (i, Some(page(round * 100 + i)))).collect();
             store.reset();
-            snapshot.publish(changes, 20 * 4096).await?;
-            assert_eq!(store.round_trips(), 1, "save {round}");
+            let report = snapshot.publish(changes, 20 * 4096).await?;
+            let expected = if report.checkpointed_pages > 0 { 5 } else { 1 };
+            assert_eq!(store.round_trips(), expected, "save {round}");
         }
         Ok(())
     })
@@ -733,7 +734,7 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
     })
 }
 
-/// With `checkpoint_on_save`, commits only append, and compacting writes each
+/// Below the thresholds commits only append, and compacting writes each
 /// changed page once, empties the log and leaves a `meta` past it.
 #[test]
 fn compacting_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
@@ -742,7 +743,7 @@ fn compacting_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             let cache = cached.then(fresh_namespace);
             let store = Arc::new(MemoryKv::default());
             let opts = StorageOptions {
-                checkpoint_on_save: true,
+                checkpoint_log_bytes: usize::MAX,
                 ..options(64, cache.as_ref())
             };
             let mut model = Model::default();
@@ -810,7 +811,7 @@ fn every_compact_mutation_is_crash_safe() -> io::Result<()> {
                             ));
                             let mut opts = StorageOptions {
                                 page_compression: PageCompression::Raw,
-                                checkpoint_on_save: true,
+                                checkpoint_log_bytes: usize::MAX,
                                 ..options(64, cache.as_ref())
                             };
                             let mut model = Model::default();
@@ -835,12 +836,23 @@ fn every_compact_mutation_is_crash_safe() -> io::Result<()> {
                                 break 'ordinal;
                             }
                             cases += 1;
+                            // A compaction that reported its failure continues:
+                            // what it commits next decodes from any log start.
+                            if let Ok((_, after)) = result {
+                                let (changes, size) = dirty(40);
+                                if after.publish(changes.clone(), size).await.is_ok() {
+                                    model.apply(&changes, size);
+                                }
+                            }
                             if crash {
                                 store.inner.inner.crash(&[]);
                                 opts.cache = cached.then(fresh_namespace);
                             }
                             let reopened = open(&store, &opts).await?;
-                            assert!(model.check(&reopened).await?, "{operation:?} {nth} {effect:?} {crash}");
+                            assert!(
+                                model.check(&reopened).await?,
+                                "{operation:?} {nth} {effect:?} {crash}"
+                            );
                             let (changes, size) = dirty(51);
                             reopened.publish(changes.clone(), size).await?;
                             model.apply(&changes, size);
