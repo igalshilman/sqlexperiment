@@ -128,6 +128,13 @@ export const assistant = restate.object({
       },
     ),
   },
+  // Hide the SQL storage from the UI's journal view: the database's pages,
+  // log and header in the object's state (`v12/...`), the sends pending with
+  // a transaction, and the `sync` run before an attempt ends.
+  metadata: {
+    'dev.restate.tooling.journal.hidden.names': 'sync,_restate_sql_sends',
+    'dev.restate.tooling.journal.hidden.name.prefix': 'v12/',
+  },
   options: {
     ...restate.sqlOptions,
     // A prompt is long work, and each attempt resumes from storage.
