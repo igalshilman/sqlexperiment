@@ -18,7 +18,7 @@
 // `tools`, `call` and `pending` are shared: a tenant's calls run at once,
 // and one waiting for approval holds up no other.
 //
-// Environment: PORT.
+// Environment: PORT, RESTATE_ADMIN_URL (http://127.0.0.1:9070).
 import * as restate from '@restatedev/restate-sdk';
 import { serveIfMain } from '../faults.ts';
 
@@ -81,7 +81,8 @@ export const toolsOf = ({ services }: AdminServices): Tool[] =>
     }),
   );
 
-const registry = async () => toolsOf((await (await fetch('http://127.0.0.1:9070/services')).json()) as AdminServices);
+const ADMIN = process.env.RESTATE_ADMIN_URL ?? 'http://127.0.0.1:9070';
+const registry = async () => toolsOf((await (await fetch(`${ADMIN}/services`)).json()) as AdminServices);
 
 const allowed = (tenant: string, tool: string) => POLICY[tenant]?.includes(tool) ?? false;
 

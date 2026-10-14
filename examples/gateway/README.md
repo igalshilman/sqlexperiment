@@ -83,5 +83,11 @@ restate rules set '*/lookup_order' --concurrency 2     # per tenant
 restate rules set '*/lookup_order/*' --concurrency 1   # per user
 ```
 
+In Docker, one image runs every part: [`Dockerfile`](Dockerfile), published
+as `ghcr.io/igalshilman/tool-gateway`. Its default command serves the
+Restate services on 9080; `node gateway/upstream.ts` and
+`node gateway/mcp.ts` run the others. `RESTATE_ADMIN_URL`, `UPSTREAM_URL`,
+`RESTATE_INGRESS_URL` and `HOST` say where the parts are.
+
 On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`.
