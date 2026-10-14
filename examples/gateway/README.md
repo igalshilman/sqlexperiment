@@ -48,5 +48,10 @@ key; or a real one, such as `openai/gpt-5.4-mini` with `OPENAI_API_KEY`.
 On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`.
 
+Or as two deployments: `node serve.ts gateway-tools` (the tools and the
+Gateway: stateless, so anywhere, such as your laptop) and
+`node serve.ts gateway-assistant` (the Assistant, keyed per user: in a
+sandbox). Register both with the same Restate server.
+
 In Docker: [`Dockerfile`](Dockerfile), published as
 `ghcr.io/igalshilman/tool-gateway`, serves the endpoint on 9080.

@@ -6,6 +6,9 @@
 #
 #   docker run -p 9080:9080 -e PI_MODEL=openai/gpt-5.4-mini -e OPENAI_API_KEY tool-gateway
 #
+# or a part: `node serve.ts gateway-assistant` (the Assistant), or
+# `node serve.ts gateway-tools` (the tools and the Gateway).
+#
 # Needs the patched SDK's tarball, vendor/typescript/.build (`make sdk-ts`).
 
 # The sqlite-kv addon, for Linux.

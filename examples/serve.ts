@@ -1,5 +1,6 @@
 // Examples in one endpoint: every one, or the groups named on the command
-// line (ledger, shop, agent, langgraph, claude, deepseek, opencode, gateway), such as
+// line (ledger, shop, agent, langgraph, claude, deepseek, opencode, gateway,
+// gateway-tools, gateway-assistant), such as
 // `node serve.ts ledger shop`.
 import * as restate from '@restatedev/restate-sdk';
 
@@ -24,6 +25,13 @@ const groups: Record<string, () => Promise<Services>> = {
     ]);
     return [...tools, gateway, assistant];
   },
+  // The gateway in two deployments: its tools and Gateway (stateless, light,
+  // anywhere), and the Assistant (keyed per user, with pi and SQLite).
+  'gateway-tools': async () => {
+    const [{ tools }, { gateway }] = await Promise.all([import('./gateway/tools.ts'), import('./gateway/gateway.ts')]);
+    return [...tools, gateway];
+  },
+  'gateway-assistant': async () => [(await import('./gateway/agent.ts')).assistant],
 };
 const names = process.argv.length > 2 ? process.argv.slice(2) : Object.keys(groups);
 const services = (
