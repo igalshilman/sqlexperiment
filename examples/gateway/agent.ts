@@ -45,10 +45,7 @@ export function concierge(context: TranscriptContext) {
 }
 
 const Prompt = z.object({
-  text: z
-    .string()
-    .default('Hi, where are my orders 101 and 105, and what did they cost?')
-    .describe('What the customer asks'),
+  text: z.string().default('Where are orders 101 to 105, and what did they cost?').describe('What the customer asks'),
   id: z.string().optional().describe('The prompt id: a prompt is answered once per id. By default, the invocation id'),
 });
 const Answer = z.object({ answer: z.string().describe("The assistant's answer") });

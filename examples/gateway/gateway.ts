@@ -1,5 +1,5 @@
-// The tool gateway: one door to every tool, for an agent's RPC (agent.ts) and
-// for MCP clients (mcp.ts). A Gateway virtual object per tenant
+// The tool gateway: one door to every tool, for the agents (agent.ts). A
+// Gateway virtual object per tenant
 // (`Gateway/acme`), with the journal.
 //
 // - `tools()`: the handlers whose metadata names a tool (see tools.ts), from
@@ -28,7 +28,7 @@ export const POLICY: Record<string, string[]> = {
   globex: ['lookup_order'],
 };
 
-/** A tool, as MCP lists it, and the handler that runs it. */
+/** A tool, as a model sees it, and the handler that runs it. */
 export interface Tool {
   name: string;
   description: string;
@@ -38,7 +38,7 @@ export interface Tool {
   handler: string;
 }
 
-/** An MCP tool result. */
+/** A tool's result, as a model reads it. */
 export interface ToolResult {
   content: { type: 'text'; text: string }[];
   isError?: boolean;
@@ -56,7 +56,7 @@ export interface Held extends CallRequest {
   awakeable: string;
 }
 
-/** The tenant and the user of `<tenant>.<user>` (an agent's key, an MCP token). */
+/** The tenant and the user of `<tenant>.<user>` (an agent's key). */
 export function identity(of: string): { tenant: string; user: string } {
   const [tenant = '', user = 'anonymous'] = of.split('.', 2);
   return { tenant, user };

@@ -2,7 +2,7 @@
   "name": "sqlite-kv-examples",
   "version": "0.1.0",
   "private": true,
-  "description": "Examples of SQL in Restate virtual objects with the TypeScript SDK: a ledger and a shop (node/), a durable pi agent (pi/), a LangGraph agent (langgraph/), a Claude agent on the Anthropic SDK's tool runner (claude/), a DeepSeek Harness agent (deepseek/) an OpenCode 2.0 agent (opencode/), and a tool gateway with MCP, approvals and limits (gateway/)",
+  "description": "Examples of SQL in Restate virtual objects with the TypeScript SDK: a ledger and a shop (node/), a durable pi agent (pi/), a LangGraph agent (langgraph/), a Claude agent on the Anthropic SDK's tool runner (claude/), a DeepSeek Harness agent (deepseek/) an OpenCode 2.0 agent (opencode/), and a tool gateway with approvals and limits (gateway/)",
   "type": "module",
   "scripts": {
     "serve": "node serve.ts",
@@ -15,7 +15,6 @@
     "test:deepseek": "vitest run deepseek",
     "test:opencode": "vitest run opencode",
     "test:gateway": "vitest run gateway",
-    "demo:gateway": "node gateway/demo.ts",
     "typecheck": "tsc -p .",
     "lint": "oxlint --type-aware",
     "format": "oxfmt",
