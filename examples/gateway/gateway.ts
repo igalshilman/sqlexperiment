@@ -143,12 +143,14 @@ export const gateway = restate.object({
     /** Approve or deny a held call. */
     decide: async (ctx: restate.ObjectContext, { awakeable, approved }: { awakeable: string; approved: boolean }) => {
       const held = (await ctx.get<Held[]>(HELD)) ?? [];
-      if (!held.some((h) => h.awakeable === awakeable)) throw new restate.TerminalError(`no call waits on ${awakeable}`);
+      if (!held.some((h) => h.awakeable === awakeable))
+        throw new restate.TerminalError(`no call waits on ${awakeable}`);
       ctx.set(
         HELD,
         held.filter((h) => h.awakeable !== awakeable),
       );
       ctx.resolveAwakeable(awakeable, approved);
+      return approved;
     },
   },
   // A waiting call suspends soon, and holds no process.

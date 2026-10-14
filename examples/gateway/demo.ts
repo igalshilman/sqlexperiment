@@ -266,9 +266,9 @@ assert.ok(orders['acme/erin']!.first < orders['acme/alice']!.last);
 
 act('4. Human in the loop', '  bob (acme) asks for a refund, which a manager approves.');
 const refund = prompt('acme.bob', 'p5', 'refund 30 of order 103');
-let held: { awakeable: string; tool: string; arguments: unknown }[] = [];
+let held: { awakeable: string; name: string; arguments: unknown }[] = [];
 while (held.length === 0) held = await sleep(200).then(() => ingress('/Gateway/acme/pending'));
-say(`held: ${held[0]!.tool} ${JSON.stringify(held[0]!.arguments)}`);
+say(`held: ${held[0]!.name} ${JSON.stringify(held[0]!.arguments)}`);
 await sleep(1500);
 const waiting = await query<{ target: string; status: string }>(
   "SELECT target, status FROM sys_invocation WHERE target_service_name IN ('Assistant', 'Gateway') AND status != 'completed'",
@@ -299,19 +299,20 @@ assert.equal(denied.isError, true);
 // ---- 6. what ran ----
 
 act('6. What ran', "  The server's invocations, by SQL on the admin API: each tenant's gateway calls, and the tools'.");
-const invocations = await query<{ target: string; key: string | null; n: number }>(
-  `SELECT target, target_service_key AS key, count(*) AS n FROM sys_invocation
-    WHERE target IN ('Gateway/call', 'Orders/lookup', 'Payments/refund') GROUP BY target, key ORDER BY target, key`,
+const invocations = await query<{ target: string; n: number }>(
+  `SELECT target, count(*) AS n FROM sys_invocation
+    WHERE target LIKE 'Gateway/%/call' OR target IN ('Orders/lookup', 'Payments/refund')
+    GROUP BY target ORDER BY target`,
 );
 console.table(invocations);
 // One invocation per tool call, however often the agents crashed.
 assert.deepEqual(
-  invocations.map((i) => [i.target, i.key, i.n]),
+  invocations.map((i) => [i.target, i.n]),
   [
-    ['Gateway/call', 'acme', 12 + 16 + 6 + 2 + 1],
-    ['Gateway/call', 'globex', 3 + 1],
-    ['Orders/lookup', null, 12 + 16 + 6 + 2 + 3],
-    ['Payments/refund', null, 1],
+    ['Gateway/acme/call', 12 + 16 + 6 + 2 + 1],
+    ['Gateway/globex/call', 3 + 1],
+    ['Orders/lookup', 12 + 16 + 6 + 2 + 3],
+    ['Payments/refund', 1],
   ],
 );
 console.log(`\npassed; the agents' process restarted ${agents.restarts} times`);
