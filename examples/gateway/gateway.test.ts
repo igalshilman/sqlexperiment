@@ -2,7 +2,7 @@
 // scripted model. Against a server: demo.sh.
 import type { TranscriptContext } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
-import { concierge, sentence } from './agent.ts';
+import { concierge, EXAMPLES, sentence } from './agent.ts';
 import { identity } from './gateway.ts';
 import { PREBUILT } from './tools.ts';
 
@@ -40,6 +40,13 @@ describe('the scripted model', () => {
       ['lookup_order', { order: '103' }],
     ]);
     expect(toolCalls(user('refund 30 of order 103'))).toEqual([['refund', { order: '103', amount: 30 }]]);
+    expect(toolCalls(user('Open a ticket for order 104: the box was empty.'))).toEqual([
+      ['open_ticket', { order: '104', summary: 'the box was empty.' }],
+    ]);
+  });
+
+  it('understands every example prompt', () => {
+    for (const example of EXAMPLES) expect(toolCalls(user(example)).length).toBeGreaterThan(0);
   });
 
   it('says what a tool answered, in a sentence', () => {
