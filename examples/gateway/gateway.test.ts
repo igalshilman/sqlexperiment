@@ -2,7 +2,8 @@
 // scripted model. Against a server: demo.sh.
 import type { TranscriptContext } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
-import { concierge, EXAMPLES, sentence } from './agent.ts';
+import { z } from 'zod';
+import { concierge, EXAMPLES, PROMPT_SCHEMA, sentence } from './agent.ts';
 import { identity } from './gateway.ts';
 import { PREBUILT } from './tools.ts';
 
@@ -31,6 +32,14 @@ const toolCalls = (...messages: unknown[]) =>
   );
 
 const result = (text: string) => ({ role: 'toolResult', content: [{ type: 'text', text }], isError: false });
+
+describe('the prompt', () => {
+  it('takes a string, and suggests the first example', () => {
+    // An input the SDK announces: an empty body is not one.
+    expect(PROMPT_SCHEMA['~standard'].validate(undefined)).toHaveProperty('issues');
+    expect(z.toJSONSchema(PROMPT_SCHEMA)).toMatchObject({ type: 'string', default: EXAMPLES[0], examples: EXAMPLES });
+  });
+});
 
 describe('the scripted model', () => {
   it('looks up a range of orders at once, and refunds', () => {
