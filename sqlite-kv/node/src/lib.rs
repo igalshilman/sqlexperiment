@@ -176,6 +176,10 @@ pub fn open<'env>(
         let options = StorageOptions {
             cache: Some(page_cache().await?.namespace(&namespace)),
             durability: Durability::Commit,
+            // Commits only append; the save at the attempt's end writes each
+            // changed page once (the log's size still bounds it in between).
+            checkpoint_after: 64,
+            checkpoint_on_save: true,
             ..StorageOptions::default()
         };
         let session = Session::open_with_options(store.clone(), options)

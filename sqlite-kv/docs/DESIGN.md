@@ -91,6 +91,15 @@ and commits them:
    itself, right after committing, then writes `meta`. Later opens do not replay
    a bulk load.
 
+6. **Checkpoint on save** (`checkpoint_on_save`, off by default). With a
+   large `checkpoint_after`, a session's commits only append, and
+   `Session::save` checkpoints the whole log once: each page's latest image,
+   then `meta` past the log, then the segments below it, then `meta` past
+   those. Each round only puts or deletes after the one before is
+   acknowledged, so it needs no read, every prefix is a valid state, and a
+   session's hot pages are written once instead of once per checkpoint slice.
+   Opens then probe `2` log keys: the log is empty after a session that ended.
+
 At most 64 mutations of distinct keys are in flight per group, so a commit
 and its checkpoint slice, garbage and `meta` take one round trip. `Ok(SaveReport)`
 means committed. `cleanup_error` means committed but checkpoint work failed; a
@@ -148,7 +157,7 @@ acknowledged work when a later step fails.
 1. Read `meta`. With a cache, also read the log keys at the expected start in
    the same round trip: exactly to where this owner left the log, plus one.
 2. Replay from `log_start` (or the cache's claim) in concurrent batches of
-   `checkpoint_after + 2` keys (at most 64). Apply a transaction at its commit
+   `checkpoint_after + 2` keys (at most 64; 2 with `checkpoint_on_save`). Apply a transaction at its commit
    segment. Stop at the first absent key, or at a segment that does not continue
    the current transaction: that is debris from a failed save, which the next
    commit overwrites.
