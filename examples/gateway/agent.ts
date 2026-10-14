@@ -22,16 +22,29 @@ import { callTools, fakeProvider, lastText, say, textOf } from '../pi/utils.ts';
 import { withPi } from '../pi/with-pi.ts';
 import { gateway, identity } from './gateway.ts';
 
+/** A tool's result, in a sentence: an order, a refund or a ticket, or else the text as it is. */
+export function sentence(text: string): string {
+  try {
+    const r = JSON.parse(text) as Partial<Record<'id' | 'status' | 'refund' | 'ticket', string> & { total: number }>;
+    if (r.status && r.total !== undefined) return `Order ${r.id} is ${r.status}, $${r.total}.`;
+    if (r.refund) return `Refund ${r.refund} is made.`;
+    if (r.ticket) return `Ticket ${r.ticket} is open.`;
+  } catch {
+    // not JSON
+  }
+  return text;
+}
+
 /**
  * The scripted model: "where are orders 101 to 108?" looks them all up at
  * once, "refund 30 of order 103" refunds, and it reports what the tools
- * answered.
+ * answered, a sentence each.
  */
 export function concierge(context: TranscriptContext) {
   const { messages } = context;
   const results = [];
   for (let i = messages.length - 1; messages[i]?.role === 'toolResult'; i--) results.unshift(messages[i]!);
-  if (results.length > 0) return say(results.map((r) => textOf(r.content)).join('\n'));
+  if (results.length > 0) return say(results.map((r) => sentence(textOf(r.content))).join('\n'));
   const text = lastText(context);
   const refund = /refund (\d+) of order (\d+)/i.exec(text);
   if (refund) return callTools([['refund', { order: refund[2]!, amount: Number(refund[1]) }]]);

@@ -2,7 +2,7 @@
 // scripted model. Against a server: demo.sh.
 import type { TranscriptContext } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
-import { concierge } from './agent.ts';
+import { concierge, sentence } from './agent.ts';
 import { identity } from './gateway.ts';
 import { PREBUILT } from './tools.ts';
 
@@ -40,6 +40,12 @@ describe('the scripted model', () => {
       ['lookup_order', { order: '103' }],
     ]);
     expect(toolCalls(user('refund 30 of order 103'))).toEqual([['refund', { order: '103', amount: 30 }]]);
+  });
+
+  it('says what a tool answered, in a sentence', () => {
+    expect(sentence('{"id":"101","status":"delivered","total":99}')).toBe('Order 101 is delivered, $99.');
+    expect(sentence('{"refund":"re_0"}')).toBe('Refund re_0 is made.');
+    expect(sentence('globex has no tool refund')).toBe('globex has no tool refund');
   });
 
   it("reports the last round's results", () => {
