@@ -2,21 +2,18 @@
 // Gateway virtual object per tenant
 // (`Gateway/acme`), with the journal.
 //
-// - `register({ name })`: gives the tenant a prebuilt tool (`catalog()`,
-//   see tools.ts); `unregister` takes it away.
-// - `tools()`: the tenant's tools; their names are in the object's state.
+// - `tools()`: the prebuilt tools (see tools.ts).
 // - `call({ user, name, arguments })` runs one:
-//   1. policy: a tool the tenant has not registered is denied;
-//   2. approval, if the tool requires it: the call waits on an awakeable,
+//   1. approval, if the tool requires it: the call waits on an awakeable,
 //      held in the object's state, until a manager decides (`pending`,
 //      `decide`). Meanwhile it is suspended, and costs nothing;
-//   3. the call, in the tenant's scope, with `<tool>/<user>` as limit key.
+//   2. the call, in the tenant's scope, with `<tool>/<user>` as limit key.
 //      The server's rules hold the calls over a limit in a queue: per
 //      tenant (`*/lookup_order`) and per user (`*/lookup_order/*`). Each
 //      user's calls have a queue of their own, and the queues take turns.
 //   A tool's failure is a result with `isError`, for the model to read.
 //
-// `catalog`, `tools`, `call` and `pending` are shared: a tenant's calls run at once,
+// `tools`, `call` and `pending` are shared: a tenant's calls run at once,
 // and one waiting for approval holds up no other.
 //
 // Environment: PORT.
@@ -58,11 +55,7 @@ export function identity(of: string): { tenant: string; user: string } {
   return { tenant, user };
 }
 
-const TOOLS = 'tools';
 const HELD = 'held';
-
-/** The names of the tenant's tools. */
-const namesOf = async (ctx: restate.ObjectSharedContext) => (await ctx.get<string[]>(TOOLS)) ?? [];
 
 const result = (text: string, isError = false): ToolResult => ({
   content: [{ type: 'text', text }],
@@ -72,31 +65,11 @@ const result = (text: string, isError = false): ToolResult => ({
 export const gateway = restate.object({
   name: 'Gateway',
   handlers: {
-    /** Give the tenant prebuilt tool `name`. */
-    register: async (ctx: restate.ObjectContext, { name }: { name: string }) => {
-      if (!PREBUILT[name]) throw new restate.TerminalError(`no tool ${name}: ${Object.keys(PREBUILT).join(', ')}`);
-      const names = await namesOf(ctx);
-      if (!names.includes(name)) ctx.set(TOOLS, [...names, name]);
-    },
-
-    /** Take tool `name` from the tenant. */
-    unregister: async (ctx: restate.ObjectContext, { name }: { name: string }) => {
-      ctx.set(
-        TOOLS,
-        (await namesOf(ctx)).filter((n) => n !== name),
-      );
-    },
-
-    /** The tools any tenant can register. */
-    catalog: restate.handlers.object.shared(async (): Promise<Tool[]> => Object.values(PREBUILT)),
-
-    /** The tenant's tools. */
-    tools: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext): Promise<Tool[]> =>
-      (await namesOf(ctx)).map((name) => PREBUILT[name]!),
-    ),
+    /** The tools. */
+    tools: restate.handlers.object.shared(async (): Promise<Tool[]> => Object.values(PREBUILT)),
 
     call: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext, req: CallRequest) => {
-      const tool = (await namesOf(ctx)).includes(req.name) ? PREBUILT[req.name] : undefined;
+      const tool = PREBUILT[req.name];
       if (!tool) return result(`${ctx.key} has no tool ${req.name}`, true);
       if (tool.approval) {
         const { id, promise } = ctx.awakeable<boolean>();
