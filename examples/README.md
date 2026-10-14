@@ -27,7 +27,7 @@ One npm package, here, on the patched Restate TypeScript SDK and the
   (sessions, messages, durable events) is the object's database, through an
   injected SQL client.
 - [`gateway/`](gateway/README.md): a tool gateway for agents: tools as
-  plain journaled services, found by their metadata, held for approval,
+  plain journaled services, registered per tenant, held for approval,
   and limited per tenant and user with scopes and limit rules.
 - [`serve.ts`](serve.ts): serves them in one endpoint (`npm run serve`).
 - [`faults.ts`](faults.ts): fault injection for the crash test.

@@ -13,20 +13,21 @@ user. It is one endpoint, and everything else is Restate.
                                ▼
   ┌─────────────────────────────────────────────────────────────┐
   │ Gateway/<tenant>  (gateway.ts, journaled)                   │
-  │ registry · policy · approval · scope + limit key            │
+  │ its tools · approval · scope + limit key                    │
   └────────────────────────────┬────────────────────────────────┘
                                │ scope: tenant, limit key: tool/user
                                ▼
   ┌─────────────────────────────────────────────────────────────┐
   │ Tools  (tools.ts, journaled): Orders.lookup, Payments.refund│
-  │ over a fake order system and payment provider, in process   │
+  │ Support.ticket, over fake outside systems, in process       │
   └─────────────────────────────────────────────────────────────┘
 ```
 
 Restate holds the rest:
 
-- the registry: the tools are the handlers whose metadata names one
-  (`mcp.tool`), read from the admin API;
+- each tenant's tools, in its Gateway's state: prebuilt tools
+  (`lookup_order`, `refund`, `open_ticket`), registered by name. A tenant
+  can call only its tools;
 - the agent's session, as the object's SQLite pages in its state;
 - the held calls, each suspended on an awakeable until a manager decides;
 - the limits: calls over a rule wait in Restate's queues, per tenant and per
@@ -35,14 +36,15 @@ Restate holds the rest:
 Run the endpoint, register it, and play the demo against it:
 
 ```sh
-PI_MODEL=openai/gpt-5.4-mini RESTATE_ADMIN_URL=http://localhost:9070 node serve.ts gateway
+PI_MODEL=openai/gpt-5.4-mini node serve.ts gateway
 restate deployments register http://localhost:9080
+curl localhost:8080/Gateway/acme/register --json '{"name":"lookup_order"}'
 gateway/demo.sh
 ```
 
 [`demo.sh`](demo.sh) plays four acts through Restate's ingress and admin API:
 
-1. Tools are just handlers: each tenant's tools, and a prompt that uses them.
+1. Tools are just handlers: registered per tenant, and a prompt that uses them.
 2. Limits without code: a rule per tenant and one per user.
 3. Human in the loop: a refund held until a manager approves it.
 4. Policy per tenant: a tenant without the refund tool cannot refund.

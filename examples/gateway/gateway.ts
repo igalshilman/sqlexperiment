@@ -2,10 +2,11 @@
 // Gateway virtual object per tenant
 // (`Gateway/acme`), with the journal.
 //
-// - `tools()`: the handlers whose metadata names a tool (see tools.ts), from
-//   the admin API, that the tenant may use.
+// - `register({ name })`: gives the tenant a prebuilt tool (`catalog()`,
+//   see tools.ts); `unregister` takes it away.
+// - `tools()`: the tenant's tools; their names are in the object's state.
 // - `call({ user, name, arguments })` runs one:
-//   1. policy: a tool the tenant may not use is denied;
+//   1. policy: a tool the tenant has not registered is denied;
 //   2. approval, if the tool requires it: the call waits on an awakeable,
 //      held in the object's state, until a manager decides (`pending`,
 //      `decide`). Meanwhile it is suspended, and costs nothing;
@@ -15,18 +16,13 @@
 //      user's calls have a queue of their own, and the queues take turns.
 //   A tool's failure is a result with `isError`, for the model to read.
 //
-// `tools`, `call` and `pending` are shared: a tenant's calls run at once,
+// `catalog`, `tools`, `call` and `pending` are shared: a tenant's calls run at once,
 // and one waiting for approval holds up no other.
 //
-// Environment: PORT, RESTATE_ADMIN_URL (http://127.0.0.1:9070).
+// Environment: PORT.
 import * as restate from '@restatedev/restate-sdk';
 import { serveIfMain } from '../faults.ts';
-
-/** The tools each tenant may use; a tenant not listed has none. */
-export const POLICY: Record<string, string[]> = {
-  acme: ['lookup_order', 'refund'],
-  globex: ['lookup_order'],
-};
+import { PREBUILT } from './tools.ts';
 
 /** A tool, as a model sees it, and the handler that runs it. */
 export interface Tool {
@@ -62,47 +58,46 @@ export function identity(of: string): { tenant: string; user: string } {
   return { tenant, user };
 }
 
-type AdminServices = {
-  services: {
-    name: string;
-    handlers: { name: string; documentation?: string; metadata?: Record<string, string>; input_json_schema?: object }[];
-  }[];
-};
+const TOOLS = 'tools';
+const HELD = 'held';
 
-/** The tools among the services of the admin API's `GET /services`. */
-export const toolsOf = ({ services }: AdminServices): Tool[] =>
-  services.flatMap((s) =>
-    s.handlers.flatMap((h) => {
-      const name = h.metadata?.['mcp.tool'];
-      if (!name) return [];
-      const { $schema: _, ...inputSchema } = (h.input_json_schema ?? { type: 'object' }) as Record<string, unknown>;
-      const approval = h.metadata?.['mcp.approval'] === 'required';
-      return [{ name, description: h.documentation ?? '', inputSchema, approval, service: s.name, handler: h.name }];
-    }),
-  );
-
-const ADMIN = process.env.RESTATE_ADMIN_URL ?? 'http://127.0.0.1:9070';
-const registry = async () => toolsOf((await (await fetch(`${ADMIN}/services`)).json()) as AdminServices);
-
-const allowed = (tenant: string, tool: string) => POLICY[tenant]?.includes(tool) ?? false;
+/** The names of the tenant's tools. */
+const namesOf = async (ctx: restate.ObjectSharedContext) => (await ctx.get<string[]>(TOOLS)) ?? [];
 
 const result = (text: string, isError = false): ToolResult => ({
   content: [{ type: 'text', text }],
   ...(isError ? { isError } : {}),
 });
 
-const HELD = 'held';
-
 export const gateway = restate.object({
   name: 'Gateway',
   handlers: {
+    /** Give the tenant prebuilt tool `name`. */
+    register: async (ctx: restate.ObjectContext, { name }: { name: string }) => {
+      if (!PREBUILT[name]) throw new restate.TerminalError(`no tool ${name}: ${Object.keys(PREBUILT).join(', ')}`);
+      const names = await namesOf(ctx);
+      if (!names.includes(name)) ctx.set(TOOLS, [...names, name]);
+    },
+
+    /** Take tool `name` from the tenant. */
+    unregister: async (ctx: restate.ObjectContext, { name }: { name: string }) => {
+      ctx.set(
+        TOOLS,
+        (await namesOf(ctx)).filter((n) => n !== name),
+      );
+    },
+
+    /** The tools any tenant can register. */
+    catalog: restate.handlers.object.shared(async (): Promise<Tool[]> => Object.values(PREBUILT)),
+
+    /** The tenant's tools. */
     tools: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext): Promise<Tool[]> =>
-      (await ctx.run('registry', registry)).filter((t) => allowed(ctx.key, t.name)),
+      (await namesOf(ctx)).map((name) => PREBUILT[name]!),
     ),
 
     call: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext, req: CallRequest) => {
-      const tool = (await ctx.run('registry', registry)).find((t) => t.name === req.name);
-      if (!tool || !allowed(ctx.key, tool.name)) return result(`${ctx.key} has no tool ${req.name}`, true);
+      const tool = (await namesOf(ctx)).includes(req.name) ? PREBUILT[req.name] : undefined;
+      if (!tool) return result(`${ctx.key} has no tool ${req.name}`, true);
       if (tool.approval) {
         const { id, promise } = ctx.awakeable<boolean>();
         ctx.genericSend<Held>({

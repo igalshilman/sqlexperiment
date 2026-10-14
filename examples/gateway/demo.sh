@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The tool gateway's demo, in four acts, against a Restate server that has
 # the gateway's endpoint (`node serve.ts gateway`) registered. Everything
-# goes through Restate: its ingress and its admin API.
+# goes through Restate: its ingress, and its admin API for the limits.
 #
 #   INGRESS=http://localhost:8080 ADMIN=http://localhost:9070 gateway/demo.sh
 #
@@ -27,8 +27,15 @@ queues() { # this run's tool calls that are running or waiting, per tenant and u
     jq -r '.rows[]? | "  \(.scope) \(.limit_key): \(.num_running) running, \(.num_inbox) waiting"'
 }
 
-bold "1. Tools are just handlers"
-dim "Restate services whose metadata names a tool; each tenant sees what its policy allows."
+register() { # tenant tool
+  curl -sf "$INGRESS/Gateway/$1/register" --json "{\"name\":\"$2\"}" >/dev/null
+}
+
+bold "1. Tools are just handlers, registered per tenant"
+printf 'prebuilt: '
+curl -s "$INGRESS/Gateway/acme/catalog" --json '{}' | jq -r '[.[].name] | join(", ")'
+for tool in lookup_order refund open_ticket; do register acme $tool; done
+register globex lookup_order
 for t in acme globex; do
   printf '%s: ' "$t"
   curl -s "$INGRESS/Gateway/$t/tools" --json '{}' | jq -r '[.[].name] | sort | join(", ")'
@@ -66,5 +73,5 @@ curl -s "$INGRESS/Gateway/acme/decide" \
 wait
 pause
 
-bold "4. Policy per tenant: globex may look orders up, not refund"
+bold "4. Policy per tenant: globex has lookup_order, and no refund"
 ask globex.dan d1 "Refund 10 of order 301, please."
