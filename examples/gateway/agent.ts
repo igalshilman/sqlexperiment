@@ -16,6 +16,7 @@ import * as restate from '@restatedev/restate-sdk';
 import { Type, type TranscriptContext } from '@earendil-works/pi-ai';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { defineTool } from '@earendil-works/pi-durable';
+import { z } from 'zod';
 import { serveIfMain } from '../faults.ts';
 import { callTools, fakeProvider, lastText, say, textOf } from '../pi/utils.ts';
 import { withPi } from '../pi/with-pi.ts';
@@ -43,6 +44,15 @@ export function concierge(context: TranscriptContext) {
   return say('Ask me "where are orders 101 to 108?" or "refund 30 of order 103".');
 }
 
+const Prompt = z.object({
+  text: z
+    .string()
+    .default('Hi, where are my orders 101 and 105, and what did they cost?')
+    .describe('What the customer asks'),
+  id: z.string().optional().describe('The prompt id: a prompt is answered once per id. By default, the invocation id'),
+});
+const Answer = z.object({ answer: z.string().describe("The assistant's answer") });
+
 const models = createModels();
 const model = process.env.PI_MODEL ?? 'concierge/concierge';
 const [provider] = model.split('/');
@@ -56,27 +66,34 @@ if (provider === 'concierge') {
 export const assistant = restate.object({
   name: 'Assistant',
   handlers: {
-    /** Answer prompt `text`, once per prompt `id`. */
-    prompt: async (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) => {
-      const { tenant, user } = identity(ctx.key);
-      const gw = ctx.objectClient(gateway, tenant);
-      const tools = (await gw.tools()).map((tool) =>
-        defineTool({
-          name: tool.name,
-          description: tool.description,
-          parameters: Type.Unsafe<Record<string, unknown>>(tool.inputSchema),
-          replay: 'safe', // runs again after a crash, with the same call id
-          execute: async (args, api) => {
-            const { content, isError = false } = await gw.call(
-              { user, name: tool.name, arguments: args },
-              restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` }),
-            );
-            return { content, isError };
-          },
-        }),
-      );
-      return withPi(ctx, { models, model, tools }, async (pi) => ({ answer: await pi.prompt(id, text) }));
-    },
+    prompt: restate.handlers.object.exclusive(
+      {
+        description: 'Answer prompt `text`, once per prompt `id`.',
+        input: restate.serde.schema(Prompt),
+        output: restate.serde.schema(Answer),
+        journalReplay: false,
+      },
+      async (ctx: restate.SqlObjectContext, { id = ctx.request().id, text }: z.infer<typeof Prompt>) => {
+        const { tenant, user } = identity(ctx.key);
+        const gw = ctx.objectClient(gateway, tenant);
+        const tools = (await gw.tools()).map((tool) =>
+          defineTool({
+            name: tool.name,
+            description: tool.description,
+            parameters: Type.Unsafe<Record<string, unknown>>(tool.inputSchema),
+            replay: 'safe', // runs again after a crash, with the same call id
+            execute: async (args, api) => {
+              const { content, isError = false } = await gw.call(
+                { user, name: tool.name, arguments: args },
+                restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` }),
+              );
+              return { content, isError };
+            },
+          }),
+        );
+        return withPi(ctx, { models, model, tools }, async (pi) => ({ answer: await pi.prompt(id, text) }));
+      },
+    ),
   },
   options: {
     ...restate.sqlOptions,
