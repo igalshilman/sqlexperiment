@@ -60,6 +60,7 @@ const DESCRIPTION = {
 
 export const orders = restate.service({
   name: 'Orders',
+  options: { journalRetention: { hours: 1 } },
   handlers: {
     lookup: restate.handlers.handler(
       {
@@ -74,6 +75,7 @@ export const orders = restate.service({
 
 export const payments = restate.service({
   name: 'Payments',
+  options: { journalRetention: { hours: 1 } },
   handlers: {
     refund: restate.handlers.handler(
       {
@@ -92,6 +94,7 @@ export const payments = restate.service({
 
 export const support = restate.service({
   name: 'Support',
+  options: { journalRetention: { hours: 1 } },
   handlers: {
     ticket: restate.handlers.handler(
       { description: DESCRIPTION.ticket, input: restate.serde.schema(OpenTicket) },

@@ -139,6 +139,8 @@ export const assistant = restate.object({
     ...restate.sqlOptions,
     // A prompt is long work, and each attempt resumes from storage.
     retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
+    // Kept an hour, to look at in the UI (sqlOptions keeps none).
+    journalRetention: { hours: 1 },
   },
 });
 
