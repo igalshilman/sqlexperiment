@@ -40,7 +40,7 @@ COPY examples/gateway/*.ts gateway/
 ENV PORT=9080
 # Each agent object's files, in a directory of its own below this: a
 # sandbox's disk. `-e WORKSPACE=` leaves the agents without files.
-ENV WORKSPACE=/workspace
-RUN mkdir -p /workspace
+ENV WORKSPACE=/data/workspace
+RUN mkdir -p /data/workspace
 EXPOSE 9080
 CMD ["node", "serve.ts", "gateway"]
