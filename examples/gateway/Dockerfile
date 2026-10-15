@@ -38,5 +38,9 @@ COPY examples/serve.ts examples/faults.ts ./
 COPY examples/pi/utils.ts examples/pi/with-pi.ts examples/pi/pi-storage.ts pi/
 COPY examples/gateway/*.ts gateway/
 ENV PORT=9080
+# Each agent object's files, in a directory of its own below this: a
+# sandbox's disk. `-e WORKSPACE=` leaves the agents without files.
+ENV WORKSPACE=/workspace
+RUN mkdir -p /workspace
 EXPOSE 9080
 CMD ["node", "serve.ts", "gateway"]

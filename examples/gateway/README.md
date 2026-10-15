@@ -66,5 +66,12 @@ Gateway: stateless, so anywhere, such as your laptop) and
 `node serve.ts gateway-assistant` (the Assistant, keyed per user, and the
 Case, keyed per order: in a sandbox). Register both with the same Restate server.
 
+With `WORKSPACE` set, each agent object gets a directory of its own,
+`$WORKSPACE/<service>/<key>`, and pi's coding tools over it: `read`, `write`,
+`edit` and `bash`, on the local file system. The scripted model understands
+`Write notes.md: …`, `Read notes.md` and `Run: ls -la`. The files are on the
+disk, not in Restate: the conversation outlives a lost disk, its files do
+not. `bash` runs any command, so run it in a sandbox.
+
 In Docker: [`Dockerfile`](Dockerfile), published as
 `ghcr.io/igalshilman/tool-gateway`, serves the endpoint on 9080.
