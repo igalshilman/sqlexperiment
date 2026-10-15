@@ -4,7 +4,7 @@
 #
 # It serves the endpoint (Orders, Payments, Gateway, Assistant) on 9080:
 #
-#   docker run -p 9080:9080 -e PI_MODEL=openai/gpt-5.4-mini -e OPENAI_API_KEY tool-gateway
+#   docker run -p 9080:9080 -e OPENAI_API_KEY tool-gateway
 #
 # or a part: `node serve.ts gateway-assistant` (the Assistant and Case),
 # `node serve.ts gateway-coder` (the coding agents, OpenCode), or
@@ -50,6 +50,9 @@ COPY examples/pi/utils.ts examples/pi/with-pi.ts examples/pi/pi-storage.ts pi/
 COPY examples/opencode/opencode-db.ts examples/opencode/with-opencode.ts examples/opencode/teller.ts opencode/
 COPY examples/gateway/*.ts gateway/
 ENV PORT=9080
+# The agents' model, for the Assistant, Case and Coder: give OPENAI_API_KEY.
+# `-e PI_MODEL=` falls back to the scripted models (the Coder has none).
+ENV PI_MODEL=openai/gpt-6-luna
 # Each agent object's files, in a directory of its own below this: a
 # sandbox's disk. `-e WORKSPACE=` leaves the agents without files.
 ENV WORKSPACE=/data/workspace

@@ -13,7 +13,7 @@
 // reported as interrupted, not run again.
 //
 // Environment: OPENCODE_MODEL, or else PI_MODEL, as provider/model-id (such as
-// openai/gpt-5.4-mini, with OPENAI_API_KEY): the same model as the Assistant,
+// openai/gpt-6-luna, with OPENAI_API_KEY): the same model as the Assistant,
 // which OpenCode's own providers serve. A real model only: without one, a
 // task fails. WORKSPACE, PORT.
 import * as restate from '@restatedev/restate-sdk';
@@ -35,7 +35,7 @@ export function workspaceOf(service: string, key: string, root = process.env.WOR
 }
 
 /** The model, OPENCODE_MODEL or else PI_MODEL, as OpenCode names it. */
-function modelOf(name = process.env.OPENCODE_MODEL ?? process.env.PI_MODEL) {
+function modelOf(name = process.env.OPENCODE_MODEL || process.env.PI_MODEL) {
   const [providerID = '', ...id] = (name ?? '').split('/');
   if (!providerID || id.length === 0) return undefined;
   return { providerID, id: id.join('/') };

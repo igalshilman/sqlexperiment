@@ -166,7 +166,7 @@ const CaseReport = z.object({
 /** pi-ai models, with `name` the scripted model, unless PI_MODEL names a real one. */
 async function modelOr(name: string, respond: Respond) {
   const models = createModels();
-  const model = process.env.PI_MODEL ?? `${name}/${name}`;
+  const model = process.env.PI_MODEL || `${name}/${name}`;
   const [provider] = model.split('/');
   if (provider === name) {
     models.setProvider(fakeProvider(name, respond));

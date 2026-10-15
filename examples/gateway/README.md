@@ -39,7 +39,7 @@ Restate holds the rest:
 Run the endpoint, register it, and play the demo against it:
 
 ```sh
-PI_MODEL=openai/gpt-5.4-mini node serve.ts gateway
+PI_MODEL=openai/gpt-6-luna node serve.ts gateway
 restate deployments register http://localhost:9080
 gateway/demo.sh
 ```
@@ -56,7 +56,7 @@ gateway/demo.sh
    another tenant's order of the same number is another object, empty.
 
 `PI_MODEL` is the agent's model: by default a scripted one, which needs no
-key; or a real one, such as `openai/gpt-5.4-mini` with `OPENAI_API_KEY`.
+key; or a real one, such as `openai/gpt-6-luna` with `OPENAI_API_KEY`.
 On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`.
 
@@ -89,6 +89,8 @@ With `WORKSPACE` set, each agent object gets a directory of its own,
 `Write notes.md: …`, `Read notes.md` and `Run: ls -la`. The files are on the
 disk, not in Restate: the conversation outlives a lost disk, its files do
 not. `bash` runs any command, so run it in a sandbox.
+
+The image's model is `openai/gpt-6-luna`: give it `OPENAI_API_KEY`.
 
 In Docker: [`Dockerfile`](Dockerfile), published as
 `ghcr.io/igalshilman/tool-gateway`, serves the endpoint on 9080.
