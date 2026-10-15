@@ -27,17 +27,20 @@ const groups: Record<string, () => Promise<Services>> = {
     return [...tools, gateway, assistant, caseAgent, coder];
   },
   // The gateway in two deployments: its tools and Gateway (stateless, light,
-  // anywhere), and the agents (Assistant per user and Case per order, with pi
-  // and SQLite).
+  // anywhere), and the agents (Assistant per user, Case per order and Coder
+  // per coding task, with pi or OpenCode, and SQLite).
   'gateway-tools': async () => {
     const [{ tools }, { gateway }] = await Promise.all([import('./gateway/tools.ts'), import('./gateway/gateway.ts')]);
     return [...tools, gateway];
   },
-  // The coding agent alone, to deploy where each object gets a machine.
+  // The coding agent alone, for a deployment of its own.
   'gateway-coder': async () => [(await import('./gateway/coder.ts')).coder],
   'gateway-assistant': async () => {
-    const { assistant, caseAgent } = await import('./gateway/agent.ts');
-    return [assistant, caseAgent];
+    const [{ assistant, caseAgent }, { coder }] = await Promise.all([
+      import('./gateway/agent.ts'),
+      import('./gateway/coder.ts'),
+    ]);
+    return [assistant, caseAgent, coder];
   },
 };
 const names = process.argv.length > 2 ? process.argv.slice(2) : Object.keys(groups);

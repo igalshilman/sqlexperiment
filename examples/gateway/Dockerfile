@@ -6,7 +6,7 @@
 #
 #   docker run -p 9080:9080 -e OPENAI_API_KEY tool-gateway
 #
-# or a part: `node serve.ts gateway-assistant` (the Assistant and Case),
+# or a part: `node serve.ts gateway-assistant` (the Assistant, Case and Coder),
 # `node serve.ts gateway-coder` (the coding agents, OpenCode), or
 # `node serve.ts gateway-tools` (the tools and the Gateway).
 #

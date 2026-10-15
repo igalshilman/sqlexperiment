@@ -62,8 +62,8 @@ On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 
 Or as two deployments: `node serve.ts gateway-tools` (the tools and the
 Gateway: stateless, so anywhere, such as your laptop) and
-`node serve.ts gateway-assistant` (the Assistant, keyed per user, and the
-Case, keyed per order: in a sandbox). Register both with the same Restate server.
+`node serve.ts gateway-assistant` (the Assistant, keyed per user, the Case,
+keyed per order, and the Coder, keyed per coding task: in a sandbox). Register both with the same Restate server.
 
 **Coding agents.** The Assistant's `code` tool hands a coding task to a
 coding agent of its own: [OpenCode](../opencode/README.md) in a `Coder`
