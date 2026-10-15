@@ -18,20 +18,24 @@ const groups: Record<string, () => Promise<Services>> = {
   deepseek: async () => [(await import('./deepseek/agent.ts')).agent],
   opencode: async () => [(await import('./opencode/agent.ts')).agent],
   gateway: async () => {
-    const [{ tools }, { gateway }, { assistant }] = await Promise.all([
+    const [{ tools }, { gateway }, { assistant, caseAgent }] = await Promise.all([
       import('./gateway/tools.ts'),
       import('./gateway/gateway.ts'),
       import('./gateway/agent.ts'),
     ]);
-    return [...tools, gateway, assistant];
+    return [...tools, gateway, assistant, caseAgent];
   },
   // The gateway in two deployments: its tools and Gateway (stateless, light,
-  // anywhere), and the Assistant (keyed per user, with pi and SQLite).
+  // anywhere), and the agents (Assistant per user and Case per order, with pi
+  // and SQLite).
   'gateway-tools': async () => {
     const [{ tools }, { gateway }] = await Promise.all([import('./gateway/tools.ts'), import('./gateway/gateway.ts')]);
     return [...tools, gateway];
   },
-  'gateway-assistant': async () => [(await import('./gateway/agent.ts')).assistant],
+  'gateway-assistant': async () => {
+    const { assistant, caseAgent } = await import('./gateway/agent.ts');
+    return [assistant, caseAgent];
+  },
 };
 const names = process.argv.length > 2 ? process.argv.slice(2) : Object.keys(groups);
 const services = (

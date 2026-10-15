@@ -7,9 +7,16 @@ dangerous calls for approval, and limits calls per tenant and per user. It is on
   ┌─────────────────────────────────────────────────────────────┐
   │ Assistant/<tenant>.<user>  (agent.ts)                       │
   │ pi agent, its session in the object's SQL database          │
-  └────────────────────────────┬────────────────────────────────┘
-                               │ RPC: Gateway.tools, Gateway.call
-                               ▼
+  └───────┬──────────────────────────────────┬──────────────────┘
+          │                                  │ "Investigate …" only:
+          │                                  │ RPC: Case.report, per order
+          │                                  ▼
+          │                ┌────────────────────────────────────┐
+          │                │ Case/<tenant>.<order>  (agent.ts)  │
+          │                │ pi agent per order, own database   │
+          │                └─────────────────┬──────────────────┘
+          │ RPC: Gateway.tools, Gateway.call │
+          ▼                                  ▼
   ┌─────────────────────────────────────────────────────────────┐
   │ Gateway/<tenant>  (gateway.ts, journaled)                   │
   │ prebuilt tools · approval · scope + limit key               │
@@ -37,11 +44,17 @@ restate deployments register http://localhost:9080
 gateway/demo.sh
 ```
 
-[`demo.sh`](demo.sh) plays three acts through Restate's ingress and admin API:
+[`demo.sh`](demo.sh) plays four acts through Restate's ingress and admin API:
 
 1. Tools are just handlers: the prebuilt tools, and a prompt that uses them.
 2. Limits without code: a rule per tenant and one per user.
 3. Human in the loop: a refund held until a manager approves it.
+4. Sub-agents: a prompt that begins "Investigate", and only such a prompt,
+   gets an `investigate` tool, which hands each order to its case agent,
+   `Case/<tenant>.<order>`: a pi agent per order, with a database of its own.
+   Two orders are two objects, which run at once; another user's report on
+   the same order reaches the same object, which remembers the first; and
+   another tenant's order of the same number is another object, empty.
 
 `PI_MODEL` is the agent's model: by default a scripted one, which needs no
 key; or a real one, such as `openai/gpt-5.4-mini` with `OPENAI_API_KEY`.
@@ -50,8 +63,8 @@ On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 
 Or as two deployments: `node serve.ts gateway-tools` (the tools and the
 Gateway: stateless, so anywhere, such as your laptop) and
-`node serve.ts gateway-assistant` (the Assistant, keyed per user: in a
-sandbox). Register both with the same Restate server.
+`node serve.ts gateway-assistant` (the Assistant, keyed per user, and the
+Case, keyed per order: in a sandbox). Register both with the same Restate server.
 
 In Docker: [`Dockerfile`](Dockerfile), published as
 `ghcr.io/igalshilman/tool-gateway`, serves the endpoint on 9080.
