@@ -21,15 +21,33 @@
 //! and refreshes the cached pages they changed. If any is gone, or there are more
 //! than one probe batch, the namespace drops all its pages instead.
 //!
+//! `meta` also names its database with a random id. A namespace whose `meta`
+//! names another database than the one its pages came from (its state was
+//! emptied and written again) drops all its pages.
+//!
 //! # Keys are never reused
 //!
 //! The disk tier writes entries in the background, and a delete does not stop a
 //! write already queued. So a page is never changed or invalidated under its
 //! key. A key is (generation, page, version): replacing or invalidating a page
-//! bumps its version, and dropping all of a namespace's pages starts a new
-//! generation. Stale entries are unreachable and age out. Generations come from a
-//! process-wide counter, and the disk tier starts empty in every process, so keys
-//! never collide across namespaces or runs.
+//! gives it a new version, and dropping all of a namespace's pages starts a new
+//! generation. Stale entries are unreachable and age out. Generations and
+//! versions both come from a process-wide counter that starts at a random
+//! 63-bit number, so keys never collide across namespaces, or across the runs
+//! that share a persistent disk tier.
+//!
+//! # Persistence
+//!
+//! A [`PageCacheConfig::persistent`] cache keeps its disk tier across
+//! processes: it writes each page to disk as it is cached, recovers the disk
+//! tier on open, and keeps each namespace's keys (generation, versions, base
+//! and database id) in a small file of its own, rewritten when they change.
+//! A namespace that a process has not seen yet starts from that file, as if
+//! its `meta` had changed: open refreshes the pages changed since the base,
+//! or drops them all. So a file that lags behind the disk tier, or behind the
+//! namespace, is safe: what it names was current as of its base. Only one
+//! process may use a persistent cache at a time; another one that tries
+//! falls back to a temporary disk tier.
 //!
 //! # Durability knowledge
 //!
@@ -51,12 +69,12 @@ use crate::{
 };
 use foyer::{
     BlockEngineConfig, Cache, CacheBuilder, Code, DeviceBuilder, FileDeviceBuilder, HybridCache,
-    HybridCacheBuilder, RecoverMode, Spawner,
+    HybridCacheBuilder, HybridCachePolicy, RecoverMode, Spawner,
 };
 use std::{
     collections::{BTreeMap, HashMap},
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -72,7 +90,8 @@ const ENTRY_OVERHEAD: usize = 64;
 /// Sizes and location of a [`PageCache`].
 #[derive(Clone, Debug)]
 pub struct PageCacheConfig {
-    /// File of the disk tier. Its previous contents are discarded.
+    /// File of the disk tier. Its previous contents are discarded, unless the
+    /// cache is persistent.
     pub file: PathBuf,
     /// Bytes of pages kept in memory.
     pub memory: usize,
@@ -89,6 +108,10 @@ pub struct PageCacheConfig {
     /// estimate: a parked engine holds its parsed schema, about 48 KiB plus 16
     /// bytes per byte of schema SQL. Least recently parked go first.
     pub engine_bytes: usize,
+    /// Keep the disk tier for the next process: see the module docs. Next to
+    /// `file`, it keeps the namespaces' keys in the directory `<file>.owners`
+    /// and a lock in `<file>.lock`.
+    pub persistent: bool,
 }
 
 impl PageCacheConfig {
@@ -101,6 +124,7 @@ impl PageCacheConfig {
             decoded: false,
             namespaces: 1 << 16,
             engine_bytes: 64 << 20,
+            persistent: false,
         }
     }
 }
@@ -122,8 +146,10 @@ struct Shared {
     /// Every namespace state a handle still holds, so that one namespace never
     /// has two states while a session uses it, even after LRU eviction.
     live: Mutex<HashMap<String, Weak<Mutex<Owner>>>>,
-    /// Source of namespace state identities and page generations.
+    /// Source of namespace state identities, page generations and versions.
     ids: AtomicU64,
+    /// Where namespaces' keys are kept, for a persistent cache.
+    owners: Option<Owners>,
     /// Keeps the disk tier's own runtime alive when the host has none.
     _runtime: Option<Spawner>,
 }
@@ -142,18 +168,45 @@ impl PageCache {
                     .build()?,
             ),
         };
-        let device = FileDeviceBuilder::new(&config.file)
+        let owners = match config.persistent {
+            true => Owners::lock(&config.file)?,
+            false => None,
+        };
+        let file = match (&owners, config.persistent) {
+            // Another process has the persistent cache: a temporary one of its own.
+            (None, true) => {
+                let mut name = config.file.clone().into_os_string();
+                name.push(format!(".{}", std::process::id()));
+                PathBuf::from(name)
+            }
+            _ => config.file.clone(),
+        };
+        let device = FileDeviceBuilder::new(&file)
             .with_capacity(config.disk)
             .build()
             .map_err(io::Error::other)?;
+        if owners.is_none() && config.persistent {
+            // Nothing else uses the temporary file: unlinked now, it goes away
+            // with the process (where unlinking an open file is refused, it stays).
+            let _ = std::fs::remove_file(&file);
+        }
         let pages = HybridCacheBuilder::new()
             .with_name("sqlite-kv-pages")
+            // A persistent cache writes each page to disk at once: a process
+            // may end without a chance to write what memory holds.
+            .with_policy(match owners {
+                Some(_) => HybridCachePolicy::WriteOnInsertion,
+                None => HybridCachePolicy::WriteOnEviction,
+            })
             .memory(config.memory)
             .with_weighter(|_, page: &Page| page.len() + ENTRY_OVERHEAD)
             .storage()
             .with_engine_config(BlockEngineConfig::new(device).with_block_size(config.disk_block))
-            // Namespace state is not persisted, so earlier entries are unusable.
-            .with_recover_mode(RecoverMode::None)
+            // Without namespaces' keys, earlier entries are unreachable.
+            .with_recover_mode(match owners {
+                Some(_) => RecoverMode::Quiet,
+                None => RecoverMode::None,
+            })
             .with_spawner(spawner.clone())
             .build()
             .await
@@ -166,7 +219,8 @@ impl PageCache {
                 live: Mutex::default(),
                 // Distinct per instance, so two caches sharing a disk file by
                 // mistake still never share keys.
-                ids: AtomicU64::new(random_start()),
+                ids: AtomicU64::new(crate::log::random_id() >> 1),
+                owners,
                 _runtime: matches!(spawner, Spawner::Runtime(_)).then_some(spawner),
             }),
             engines: Arc::new(Mutex::new(Engines::new(config.engine_bytes))),
@@ -180,10 +234,13 @@ impl PageCache {
         let owner = match self.shared.namespaces.get(key) {
             Some(entry) => entry.value().clone(),
             None => {
-                let owner = live
-                    .get(key)
-                    .and_then(Weak::upgrade)
-                    .unwrap_or_else(|| Arc::new(Mutex::new(Owner::new(&self.shared.ids))));
+                let owner = live.get(key).and_then(Weak::upgrade).unwrap_or_else(|| {
+                    let mut owner = Owner::new(&self.shared.ids);
+                    if let Some(kept) = self.shared.owners.as_ref().and_then(|o| o.load(key)) {
+                        owner.restore(kept);
+                    }
+                    Arc::new(Mutex::new(owner))
+                });
                 self.shared.namespaces.insert(key.to_owned(), owner.clone());
                 owner
             }
@@ -195,7 +252,14 @@ impl PageCache {
             shared: self.shared.clone(),
             engines: Arc::downgrade(&self.engines),
             owner,
+            key: key.into(),
         }
+    }
+
+    /// Wait for the disk tier's pending writes, and close it: later pages are
+    /// not cached. Dropping the last clone closes it too, without waiting.
+    pub async fn close(&self) -> io::Result<()> {
+        self.shared.pages.close().await.map_err(io::Error::other)
     }
 
     /// Bytes of pages held in memory.
@@ -210,6 +274,7 @@ pub struct NamespaceCache {
     shared: Arc<Shared>,
     engines: Weak<Mutex<Engines>>,
     owner: Arc<Mutex<Owner>>,
+    key: Arc<str>,
 }
 
 /// Per-namespace state.
@@ -219,7 +284,12 @@ struct Owner {
     /// Generation of its page keys; a new one drops every page.
     generation: u64,
     /// Version of each page replaced or invalidated in this generation.
-    versions: HashMap<u64, u32>,
+    versions: HashMap<u64, u64>,
+    /// The id of the database the pages are of, as of the base: zero before
+    /// its first checkpoint; `None` when unknown.
+    database: Option<u64>,
+    /// The keys changed since they were last kept, for a persistent cache.
+    unkept: bool,
     /// `meta` bytes as last read or written by this owner; `None` when absent.
     meta: Option<Page>,
     /// Cached pages are current unless changed by a committed transaction at or
@@ -270,16 +340,18 @@ impl NamespaceCache {
         owner.claim.map(|claim| claim.log_start).or(owner.base)
     }
 
-    /// Compare the durable `meta` that open read, with log start `log_start`, to
-    /// what this owner last saw.
-    pub(crate) fn validate(&self, meta: Option<&[u8]>, log_start: u64) -> Reuse {
+    /// Compare the durable `meta` that open read, of database `id` with log
+    /// start `log_start`, to what this owner last saw.
+    pub(crate) fn validate(&self, meta: Option<&[u8]>, id: u64, log_start: u64) -> Reuse {
         let mut owner = self.owner();
         if owner.meta.as_deref() == meta {
             return Reuse::Known(owner.claim, owner.committed);
         }
         self.forget_locked(&mut owner);
         match owner.base {
-            Some(base) if base <= log_start => Reuse::Changed(Some(base)),
+            Some(base) if base <= log_start && owner.database == Some(id) => {
+                Reuse::Changed(Some(base))
+            }
             _ => {
                 owner.clear(&self.shared.ids);
                 Reuse::Changed(None)
@@ -303,16 +375,33 @@ impl NamespaceCache {
     /// commit. Cached pages must be current as of the log start of `meta`.
     pub(crate) fn record(&self, meta: Option<Page>, claim: Option<Meta>, committed: u64) {
         let mut owner = self.owner();
-        owner.base = match &meta {
-            Some(bytes) => Meta::decode(bytes).ok().map(|meta| meta.log_start),
-            None => Some(Meta::default().log_start),
+        let durable = match &meta {
+            Some(bytes) => Meta::decode(bytes).ok(),
+            None => Some(Meta::default()),
         };
-        if owner.base.is_none() {
+        let (base, database) = (durable.map(|m| m.log_start), durable.map(|m| m.id));
+        if base.is_none() {
             owner.clear(&self.shared.ids);
         }
+        owner.unkept |= (owner.base, owner.database) != (base, database);
+        (owner.base, owner.database) = (base, database);
         owner.meta = meta;
         owner.claim = claim;
         owner.committed = Some(committed);
+        self.keep(owner);
+    }
+
+    /// Keep the namespace's keys for the next process, if they changed.
+    fn keep(&self, mut owner: std::sync::MutexGuard<'_, Owner>) {
+        let Some(owners) = &self.shared.owners else {
+            return;
+        };
+        if !std::mem::take(&mut owner.unkept) {
+            return;
+        }
+        let kept = owner.kept();
+        drop(owner);
+        owners.save(&self.key, kept.as_ref());
     }
 
     /// Before a session of an ordered store opens: if an earlier session's
@@ -489,7 +578,10 @@ impl NamespaceCache {
         if owner.versions.len() >= MAX_VERSIONED_PAGES {
             owner.clear(&self.shared.ids);
         }
-        *owner.versions.entry(page).or_default() += 1;
+        owner
+            .versions
+            .insert(page, self.shared.ids.fetch_add(1, Relaxed));
+        owner.unkept = true;
     }
 
     /// The generation of its page keys; it changes when every page is dropped.
@@ -505,6 +597,8 @@ impl Owner {
             id: ids.fetch_add(1, Relaxed),
             generation: ids.fetch_add(1, Relaxed),
             versions: HashMap::new(),
+            database: None,
+            unkept: false,
             // Knows nothing yet: the first open neither probes speculatively
             // nor refreshes pages it does not have.
             meta: Some(Page::new()),
@@ -524,19 +618,165 @@ impl Owner {
         self.generation = ids.fetch_add(1, Relaxed);
         self.versions.clear();
         self.base = None;
+        self.database = None;
+        self.unkept = true;
+    }
+
+    /// The keys to keep for the next process: `None` when no page is current.
+    fn kept(&self) -> Option<Kept> {
+        Some(Kept {
+            generation: self.generation,
+            base: self.base?,
+            database: self.database?,
+            versions: self.versions.iter().map(|(&p, &v)| (p, v)).collect(),
+        })
+    }
+
+    /// Start from keys an earlier process kept. `meta` stays unknown, so the
+    /// first open refreshes the pages changed since the base.
+    fn restore(&mut self, kept: Kept) {
+        self.generation = kept.generation;
+        self.base = Some(kept.base);
+        self.database = Some(kept.database);
+        self.versions = kept.versions.into_iter().collect();
     }
 }
 
-/// A random starting point for identities, leaving room to count up.
-fn random_start() -> u64 {
-    use std::hash::{BuildHasher, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |time| time.as_nanos()),
-    );
-    hasher.finish() >> 1
+/// A namespace's keys, as kept for the next process.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Kept {
+    generation: u64,
+    base: u64,
+    database: u64,
+    versions: Vec<(u64, u64)>,
+}
+
+const KEPT_MAGIC: &[u8; 4] = b"SK14";
+
+impl Kept {
+    /// `SK14`, the namespace key's length u32 LE and bytes, generation, base,
+    /// database id, the version count u32 LE and (page, version) pairs as u64
+    /// LE, then an FNV-1a hash of all before it, u64 LE.
+    fn encode(&self, key: &str) -> Vec<u8> {
+        let mut out = KEPT_MAGIC.to_vec();
+        out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        out.extend_from_slice(key.as_bytes());
+        for n in [self.generation, self.base, self.database] {
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.versions.len() as u32).to_le_bytes());
+        for &(page, version) in &self.versions {
+            out.extend_from_slice(&page.to_le_bytes());
+            out.extend_from_slice(&version.to_le_bytes());
+        }
+        out.extend_from_slice(&fnv1a(&out).to_le_bytes());
+        out
+    }
+
+    /// The keys in `bytes`, if they are well formed and of namespace `key`.
+    fn decode(bytes: &[u8], key: &str) -> Option<Self> {
+        let (body, hash) = bytes.split_last_chunk::<8>()?;
+        if fnv1a(body) != u64::from_le_bytes(*hash) {
+            return None;
+        }
+        let mut rest = body.strip_prefix(KEPT_MAGIC)?;
+        let mut take = |n: usize| {
+            let (head, tail) = rest.split_at_checked(n)?;
+            rest = tail;
+            Some(head)
+        };
+        let u32_le = |b: &[u8]| u32::from_le_bytes(b.try_into().unwrap()) as usize;
+        let u64_le = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap());
+        let len = u32_le(take(4)?);
+        if take(len)? != key.as_bytes() {
+            return None;
+        }
+        let (generation, base, database) = (u64_le(take(8)?), u64_le(take(8)?), u64_le(take(8)?));
+        let count = u32_le(take(4)?);
+        if count > MAX_VERSIONED_PAGES {
+            return None;
+        }
+        let mut versions = Vec::with_capacity(count);
+        for _ in 0..count {
+            versions.push((u64_le(take(8)?), u64_le(take(8)?)));
+        }
+        if !rest.is_empty() {
+            return None;
+        }
+        Some(Self {
+            generation,
+            base,
+            database,
+            versions,
+        })
+    }
+}
+
+/// FNV-1a: stable across builds, unlike the standard library's hashers.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// The directory of a persistent cache's namespace keys, a file each, named
+/// by a hash of the namespace key, and the lock that makes the cache this
+/// process's own.
+struct Owners {
+    dir: PathBuf,
+    _lock: std::fs::File,
+    /// Distinguishes temporary files.
+    writes: AtomicU64,
+}
+
+impl Owners {
+    /// Take the cache at `file` for this process: `None` if another has it.
+    fn lock(file: &Path) -> io::Result<Option<Self>> {
+        let with = |suffix: &str| {
+            let mut name = file.as_os_str().to_owned();
+            name.push(suffix);
+            PathBuf::from(name)
+        };
+        let dir = with(".owners");
+        std::fs::create_dir_all(&dir)?;
+        let lock = std::fs::File::create(with(".lock"))?;
+        match lock.try_lock() {
+            Ok(()) => Ok(Some(Self {
+                dir,
+                _lock: lock,
+                writes: AtomicU64::new(0),
+            })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
+    fn path(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{:016x}", fnv1a(key.as_bytes())))
+    }
+
+    fn load(&self, key: &str) -> Option<Kept> {
+        Kept::decode(&std::fs::read(self.path(key)).ok()?, key)
+    }
+
+    /// Replace a namespace's keys, or remove them for `None`. Best effort: a
+    /// lost write leaves older keys, or none, which only makes it colder.
+    fn save(&self, key: &str, kept: Option<&Kept>) {
+        let path = self.path(key);
+        let Some(kept) = kept else {
+            let _ = std::fs::remove_file(path);
+            return;
+        };
+        let n = self.writes.fetch_add(1, Relaxed);
+        let temporary = self
+            .dir
+            .join(format!("{:016x}.{n}.tmp", fnv1a(key.as_bytes())));
+        if std::fs::write(&temporary, kept.encode(key)).is_err()
+            || std::fs::rename(&temporary, &path).is_err()
+        {
+            let _ = std::fs::remove_file(temporary);
+        }
+    }
 }
 
 /// An open session's registration at its log position; dropping it ends it.
@@ -606,7 +846,7 @@ impl Engines {
 pub(crate) struct PageKey {
     generation: u64,
     page: u64,
-    version: u32,
+    version: u64,
 }
 
 impl Code for PageKey {
@@ -620,12 +860,12 @@ impl Code for PageKey {
         Ok(Self {
             generation: u64::decode(reader)?,
             page: u64::decode(reader)?,
-            version: u32::decode(reader)?,
+            version: u64::decode(reader)?,
         })
     }
 
     fn estimated_size(&self) -> usize {
-        20
+        24
     }
 }
 

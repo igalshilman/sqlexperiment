@@ -262,7 +262,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
 
 async fn pages(store: &MemoryKv) -> Result<Vec<Vec<u8>>> {
     let mut pages = Vec::new();
-    for key in store.keys().iter().filter(|k| k.starts_with("v13/page/")) {
+    for key in store.keys().iter().filter(|k| k.starts_with("v14/page/")) {
         pages.push(page_codec::decode(&store.get(key).await?.unwrap())?);
     }
     Ok(pages)

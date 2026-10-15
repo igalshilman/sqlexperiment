@@ -45,6 +45,7 @@ fn a_different_meta_forgets_claims_and_keeps_pages_to_refresh() {
             log_start: 5,
             deleted_below: 2,
             size: 4096,
+            id: 77,
         };
         let claim = Meta {
             log_start: 7,
@@ -53,12 +54,12 @@ fn a_different_meta_forgets_claims_and_keeps_pages_to_refresh() {
         let cache = fresh_namespace();
         assert_eq!(cache.expected_start(), None, "a fresh owner knows nothing");
         assert_eq!(
-            cache.validate(Some(&meta.encode()), 5),
+            cache.validate(Some(&meta.encode()), 77, 5),
             Reuse::Changed(None)
         );
         cache.record(None, None, 1);
         assert_eq!(
-            cache.validate(None, 1),
+            cache.validate(None, 0, 1),
             Reuse::Known(None, Some(1)),
             "absent meta"
         );
@@ -67,14 +68,14 @@ fn a_different_meta_forgets_claims_and_keeps_pages_to_refresh() {
         cache.record(Some(meta.encode().into()), Some(claim), 9);
         assert_eq!(cache.expected_start(), Some(7));
         assert_eq!(
-            cache.validate(Some(&meta.encode()), 5),
+            cache.validate(Some(&meta.encode()), 77, 5),
             Reuse::Known(Some(claim), Some(9))
         );
 
         // Another writer moved meta: refresh what it changed from the base.
         let generation = cache.generation();
         assert_eq!(
-            cache.validate(Some(&claim.encode()), 7),
+            cache.validate(Some(&claim.encode()), 77, 7),
             Reuse::Changed(Some(5))
         );
         assert_eq!(cache.expected_start(), Some(5), "the claim is forgotten");
@@ -84,14 +85,14 @@ fn a_different_meta_forgets_claims_and_keeps_pages_to_refresh() {
         assert_eq!(cache.get(2).await, Some(value(4)), "unchanged pages stay");
         assert_eq!(cache.generation(), generation);
         assert_eq!(
-            cache.validate(Some(&claim.encode()), 7),
+            cache.validate(Some(&claim.encode()), 77, 7),
             Reuse::Changed(Some(5)),
             "until recorded"
         );
         cache.record(Some(claim.encode().into()), None, 9);
         cache.forget();
         assert_eq!(
-            cache.validate(Some(&claim.encode()), 7),
+            cache.validate(Some(&claim.encode()), 77, 7),
             Reuse::Changed(Some(7))
         );
 
@@ -102,11 +103,59 @@ fn a_different_meta_forgets_claims_and_keeps_pages_to_refresh() {
         cache.insert(1, value(4));
         cache.record(Some(claim.encode().into()), None, 9);
         assert_eq!(
-            cache.validate(Some(&meta.encode()), 5),
+            cache.validate(Some(&meta.encode()), 77, 5),
             Reuse::Changed(None)
         );
         assert_eq!(cache.get(1).await, None);
     })
+}
+
+/// Pages of one database are never served for another under the same key,
+/// such as one written after the namespace was emptied.
+#[test]
+fn another_database_drops_every_page() {
+    futures::executor::block_on(async {
+        let meta = Meta {
+            log_start: 5,
+            deleted_below: 2,
+            size: 4096,
+            id: 77,
+        };
+        let cache = fresh_namespace();
+        cache.validate(Some(&meta.encode()), 77, 5);
+        cache.record(Some(meta.encode().into()), None, 9);
+        cache.insert(1, value(4));
+        cache.forget();
+        let other = Meta { id: 78, ..meta };
+        assert_eq!(
+            cache.validate(Some(&other.encode()), 78, 5),
+            Reuse::Changed(None)
+        );
+        assert_eq!(cache.get(1).await, None);
+    })
+}
+
+#[test]
+fn kept_keys_round_trip_and_reject_anything_else() {
+    let kept = Kept {
+        generation: 3,
+        base: 5,
+        database: 77,
+        versions: vec![(1, 9), (4, 12)],
+    };
+    let bytes = kept.encode("Assistant/acme.alice");
+    assert_eq!(Kept::decode(&bytes, "Assistant/acme.alice"), Some(kept));
+    assert_eq!(
+        Kept::decode(&bytes, "Assistant/acme.bob"),
+        None,
+        "another key"
+    );
+    for n in 0..bytes.len() {
+        assert_eq!(Kept::decode(&bytes[..n], "Assistant/acme.alice"), None);
+        let mut flipped = bytes.clone();
+        flipped[n] ^= 1;
+        assert_eq!(Kept::decode(&flipped, "Assistant/acme.alice"), None);
+    }
 }
 
 /// A parked engine refers back to its namespace's handle; dropping the last

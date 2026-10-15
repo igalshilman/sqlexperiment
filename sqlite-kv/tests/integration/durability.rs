@@ -201,7 +201,7 @@ async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize
         .await?;
     let _signal = store.arm(Failpoint {
         operation,
-        key_prefix: "v13/".into(),
+        key_prefix: "v14/".into(),
         nth,
         effect,
         cancel: false,
@@ -365,7 +365,7 @@ fn commit_cleanup_errors_are_reported() -> Result<()> {
             .await?;
         let _signal = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v13/page/".into(),
+            key_prefix: "v14/page/".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,

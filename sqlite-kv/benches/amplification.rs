@@ -349,25 +349,25 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
         (
             "commit_lost",
             Operation::Put,
-            "v13/log/",
+            "v14/log/",
             Effect::None,
             false,
         ),
         (
             "commit_ack_lost",
             Operation::Put,
-            "v13/log/",
+            "v14/log/",
             Effect::After,
             true,
         ),
         (
             "checkpoint_error",
             Operation::Put,
-            "v13/page/",
+            "v14/page/",
             Effect::None,
             true,
         ),
-        ("meta_error", Operation::Put, "v13/meta", Effect::None, true),
+        ("meta_error", Operation::Put, "v14/meta", Effect::None, true),
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
         let mut db = Session::open_with_options(store.clone(), checkpoint_all()).await?;
@@ -387,7 +387,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
         let result = db.save().await;
         let hit = store.events().iter().any(|e| e.faulted);
         assert!(hit, "recovery failpoint was not reached");
-        if prefix == "v13/log/" {
+        if prefix == "v14/log/" {
             assert!(result.is_err());
         } else {
             assert!(result?.cleanup_error.is_some());

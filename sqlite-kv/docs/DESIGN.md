@@ -38,10 +38,10 @@ A namespace holds three kinds of keys:
 
 | Key | Holds |
 |---|---|
-| `v13/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
-| `v13/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
-| `v13/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
-| `v13/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
+| `v14/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), the database size at `log_start`, and the database's random id, chosen by its first checkpoint. Absent means start 1, empty. |
+| `v14/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
+| `v14/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
+| `v14/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
 
 **Read rule.** Page *n* is its latest image in the committed log from
 `meta.log_start`, else `page/<n>`, else zeros.
@@ -172,7 +172,7 @@ acknowledged work when a later step fails.
 
 **Cold opens prefetch.** The engine reads one dependent page at a time, so
 without warm cache pages each B-tree level of a query would cost a round trip.
-An owner that knows nothing about the namespace therefore reads `v13/hint`
+An owner that knows nothing about the namespace therefore reads `v14/hint`
 together with `meta`, and fetches pages alongside replay:
 
 - a database of at most `prefetch_pages` pages (default 16) whole;
@@ -281,9 +281,25 @@ version): changing or invalidating a page bumps its version, and dropping all of
 a namespace's pages starts a new generation. Stale entries are unreachable and
 age out. A value read from the backend is cached under the key taken before the
 read, and only if that key is still current, so a read that raced a
-replacement cannot store the old value under the new version. The disk tier
-starts empty in every process, because the per-namespace state that validates
-it is not persisted.
+replacement cannot store the old value under the new version. Generations and
+versions come from one process-wide counter that starts at a random 63-bit
+number, so two processes never make the same key.
+
+**Another database.** The pages are of one database, named by `meta`'s id. If
+open reads a `meta` of another id (the namespace was emptied and written again,
+or belongs to another Restate cluster), the namespace drops all its pages.
+
+**Persistence.** By default the disk tier starts empty in every process. With
+`PageCacheConfig::persistent`, it is kept: each page is written to disk as it is
+cached (not only on eviction from memory), the disk tier is recovered on open,
+and each namespace's keys (generation, versions, base and database id) are kept
+in a small file of its own under `<file>.owners`, rewritten when they change. A
+namespace starts from its file as if another writer had moved `meta`: open
+refreshes the pages changed since the base, or drops them all. The file only
+has to be one this namespace once wrote, however old: what it names was current
+as of its base, so a lost or late rewrite only makes the next process colder.
+A lock (`<file>.lock`) keeps it to one process; another gets a temporary disk
+tier.
 
 **Sessions of one owner.** Sessions may overlap, such as a writer and readers
 for a virtual object's shared handlers, if they share the namespace's handle;
@@ -373,7 +389,7 @@ checkpoint. Measurements: [log shipping](../benches/LOG_RESULTS.md),
   numbers, so a bug cannot overflow arithmetic or size a huge view. A log
   segment's zstd frame has a checksum, which also catches a segment decoded
   against the wrong previous images; pages have none.
-- **Format.** Only v13, with no migration.
+- **Format.** Only v14, with no migration.
 - **Compression chain.** Invariant 6 is checked by the simulator's monitor;
   the TLA+ specification does not model compression.
 - **Validation.** The protocol is specified in TLA+ and model-checked within

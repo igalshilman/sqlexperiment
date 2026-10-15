@@ -113,17 +113,24 @@ impl KvStore for JsStore {
 
 /// The page cache shared by the process's databases: 256 MiB of memory and
 /// 1 GiB of disk, in a file under the temporary directory, or the file
-/// `SQLITE_KV_CACHE_FILE` names.
+/// `SQLITE_KV_CACHE_FILE` names (unless empty). A named file is persistent: the next process
+/// starts with what this one cached (see `PageCacheConfig::persistent`).
 static CACHE: OnceCell<PageCache> = OnceCell::const_new();
 
 async fn page_cache() -> Result<&'static PageCache> {
     CACHE
         .get_or_try_init(async || {
-            let named = std::env::var_os("SQLITE_KV_CACHE_FILE").map(PathBuf::from);
+            let named = std::env::var_os("SQLITE_KV_CACHE_FILE")
+                .filter(|file| !file.is_empty())
+                .map(PathBuf::from);
             let file = named.clone().unwrap_or_else(|| {
                 std::env::temp_dir().join(format!("sqlite-kv-{}.cache", std::process::id()))
             });
-            let cache = PageCache::open(PageCacheConfig::new(&file, 256 << 20, 1 << 30)).await?;
+            let cache = PageCache::open(PageCacheConfig {
+                persistent: named.is_some(),
+                ..PageCacheConfig::new(&file, 256 << 20, 1 << 30)
+            })
+            .await?;
             // The cache keeps the file open, and nothing else uses the
             // temporary one: unlinked now, it goes away with the process
             // however it ends, rather than staying behind (where unlinking an

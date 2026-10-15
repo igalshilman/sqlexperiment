@@ -198,11 +198,11 @@ async function gatewayTools(ctx: restate.SqlObjectContext, tenant: string, user:
 }
 
 // Hide the SQL storage from the UI's journal view: the database's pages,
-// log and header in the object's state (`v13/...`), the sends pending with
+// log and header in the object's state (`v14/...`), the sends pending with
 // a transaction, and the `sync` run before an attempt ends.
 const metadata = {
   'dev.restate.tooling.journal.hidden.names': 'sync,_restate_sql_sends',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v13/',
+  'dev.restate.tooling.journal.hidden.name.prefix': 'v14/',
 };
 const options = {
   ...restate.sqlOptions,

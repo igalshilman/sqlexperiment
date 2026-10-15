@@ -271,16 +271,17 @@ fn weak_backends_confirm_what_this_owner_did_not_write() -> io::Result<()> {
         );
         // A visible-only meta is confirmed too. This one is the first a
         // checkpoint writes: past the log, before its segments are deleted.
-        let meta = Meta {
-            log_start: 4,
-            deleted_below: 1,
-            size: 2 * 4096,
-        };
         open(&store, &options(0, None))
             .await?
             .publish(Changes::from([(1, Some(page(9)))]), 2 * 4096)
             .await?;
         let durable = store.get(META).await?.unwrap();
+        let meta = Meta {
+            log_start: 4,
+            deleted_below: 1,
+            size: 2 * 4096,
+            id: Meta::decode(&durable)?.id, // the first checkpoint's choice
+        };
         assert_eq!(
             Meta::decode(&durable)?,
             Meta {
@@ -633,7 +634,7 @@ fn a_cold_open_fetches_the_working_set_hint() -> io::Result<()> {
         assert_eq!(cold_gets(open(&store, &off).await?, vec![5]).await?, 1);
         store
             .inner
-            .put(HINT, Bytes::from_static(b"SH13\x09\x00garbage"))
+            .put(HINT, Bytes::from_static(b"SH14\x09\x00garbage"))
             .await?;
         assert_eq!(
             cold_gets(open(&store, &options(4, None)).await?, vec![5]).await?,

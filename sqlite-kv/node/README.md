@@ -55,7 +55,9 @@ logged, and grows the version, all the same.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, unlinked once open so that it goes away
-with the process, or the file `SQLITE_KV_CACHE_FILE` names. `save()` ends a
+with the process. Or, in the file `SQLITE_KV_CACHE_FILE` names, a persistent
+one: the next process with the same file starts warm, for example on a
+sandbox's persistent disk (see `PageCacheConfig::persistent`). `save()` ends a
 session and confirms its writes (one `sync`, if it wrote), so the cache may
 trust them. A session that ends otherwise (`close()`,
 a failed `save`, or garbage collection) makes the next session of that

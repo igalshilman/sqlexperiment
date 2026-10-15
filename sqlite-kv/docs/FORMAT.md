@@ -1,6 +1,6 @@
 # Current storage format
 
-Only this format (v13) is implemented. Use a dedicated namespace. Constants and
+Only this format (v14) is implemented. Use a dedicated namespace. Constants and
 key construction live in `src/format.rs`; there is no migration or format
 discovery. Storage is assumed reliable (a value reads back as written), so
 pages have no checksums; decoding checks structure and the bounds below. A log
@@ -8,10 +8,10 @@ segment's zstd frame carries one.
 
 | Key | Value |
 |---|---|
-| `v13/meta` | Checkpoint record; absent until the first checkpoint |
-| `v13/log/<16-digit hex sequence>` | Log segment |
-| `v13/page/<16-digit hex page number>` | Checkpointed page, overwritten in place |
-| `v13/hint` | Working-set hint; advisory, may be absent or stale |
+| `v14/meta` | Checkpoint record; absent until the first checkpoint |
+| `v14/log/<16-digit hex sequence>` | Log segment |
+| `v14/page/<16-digit hex page number>` | Checkpointed page, overwritten in place |
+| `v14/hint` | Working-set hint; advisory, may be absent or stale |
 
 ## Pages
 
@@ -31,7 +31,7 @@ are LEB128 varints.
 
 | Field | Encoding |
 |---|---|
-| Magic | `SL13` |
+| Magic | `SL14` |
 | Flags | u8; bit 0 marks the commit segment, other bits must be zero |
 | Sequence number | Must equal the key's sequence |
 | Back to the transaction's first sequence | At most the sequence number |
@@ -52,7 +52,7 @@ invalid. A segment is at most 1 MiB.
 
 | Field | Encoding |
 |---|---|
-| Magic | `SH13` |
+| Magic | `SH14` |
 | Entry count | u16 LE; at most 256 |
 | Pages | Ascending page numbers as LEB128 deltas, the first from zero |
 
@@ -62,13 +62,14 @@ Readers ignore a malformed hint.
 
 | Field | Encoding |
 |---|---|
-| Magic | `SM13` |
+| Magic | `SM14` |
 | Log start | u64 LE; replay starts here; at most 2^62 |
 | Deleted below | u64 LE; nonzero and at most the log start |
 | Database byte length | u64 LE, as of the log start; a multiple of 512, at most 2^44 |
+| Database id | u64 LE, nonzero: random, chosen by the first checkpoint and kept by every later one |
 
 Segments before the log start are checkpointed into pages; those before
 "deleted below" are deleted too. A missing record means log start 1, deleted
-below 1 and an empty database. The value is exactly 28 bytes.
+below 1 and an empty database. The value is exactly 36 bytes.
 
 See [DESIGN.md](DESIGN.md) for commit, replay, checkpoint and recovery rules.

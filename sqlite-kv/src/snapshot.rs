@@ -290,7 +290,7 @@ impl Snapshot {
             Some(bytes) => Meta::decode(bytes)?,
             None => Meta::default(),
         };
-        let reuse = cache.map(|c| c.validate(meta_bytes.as_deref(), meta.log_start));
+        let reuse = cache.map(|c| c.validate(meta_bytes.as_deref(), meta.id, meta.log_start));
         let (claim, committed, meta_known, since) = match reuse {
             Some(Reuse::Known(claim, committed)) => (claim, committed, true, None),
             Some(Reuse::Changed(since)) => (None, None, false, since),
@@ -694,6 +694,11 @@ impl Snapshot {
             log_start: self.log.next,
             deleted_below: self.meta.deleted_below,
             size: self.size(),
+            // The first checkpoint names the database.
+            id: match self.meta.id {
+                0 => crate::log::random_id(),
+                id => id,
+            },
         };
         let moved_bytes: Bytes = moved.encode().into();
         if let Err(error) = store.put(META, moved_bytes.clone()).await {

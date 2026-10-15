@@ -118,7 +118,7 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
     let mut bytes = valid.clone();
     bytes[0] ^= 1;
     invalid.push(bytes);
-    // `SL13`, flags, sequence 9, first and base 0 before, 24 units, 2 entries.
+    // `SL14`, flags, sequence 9, first and base 0 before, 24 units, 2 entries.
     assert_eq!(valid[4..12], [1, 9, 0, 0, 24, 2, 3, 0]);
     let mut bytes = valid.clone();
     bytes[4] = 2;
@@ -154,6 +154,7 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
         log_start: 9,
         deleted_below: 4,
         size: 8192,
+        id: 77,
     };
     assert_eq!(Meta::decode(&meta.encode())?, meta);
     for bad in [
@@ -165,10 +166,11 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
             deleted_below: 0,
             ..meta
         },
+        Meta { id: 0, ..meta },
     ] {
         assert!(Meta::decode(&bad.encode()).is_err());
     }
-    assert!(Meta::decode(&meta.encode()[..27]).is_err());
+    assert!(Meta::decode(&meta.encode()[..35]).is_err());
     Ok(())
 }
 
@@ -228,6 +230,7 @@ fn implausible_numbers_are_rejected() -> io::Result<()> {
             log_start,
             deleted_below: 1,
             size,
+            id: 1,
         }
         .encode()
     };

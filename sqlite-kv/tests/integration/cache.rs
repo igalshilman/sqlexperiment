@@ -161,7 +161,7 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v13/log/".into(),
+            key_prefix: "v14/log/".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,
@@ -462,4 +462,153 @@ fn parked_engines_are_weighed_by_schema() -> Result<()> {
         assert!(kept < 4, "the big engine displaced small ones: {kept} kept");
         Ok(())
     })
+}
+
+/// A persistent cache serves the next process: a new cache over the same file
+/// starts warm, and never serves pages of another database under the same
+/// namespace, nor pages its namespace's kept keys no longer describe.
+#[test]
+fn a_persistent_cache_starts_the_next_process_warm() -> Result<()> {
+    use sqlite_kv::{
+        PageCache, PageCacheConfig,
+        simulation::{cache_config, open_cache},
+    };
+    let config = PageCacheConfig {
+        persistent: true,
+        ..cache_config(64 << 20, 64 << 20)
+    };
+    // A "process": a cache over the file, closed at the end.
+    let run = |work: &dyn Fn(&PageCache) -> Result<()>| -> Result<()> {
+        let cache = open_cache(config.clone());
+        work(&cache)?;
+        futures::executor::block_on(cache.close())?;
+        Ok(())
+    };
+    let store = Arc::new(LatencyKv::new(MemoryKv::default()));
+    let expected = 400 * 900 + 400 * 401 / 2;
+    run(&|cache| {
+        futures::executor::block_on(create(store.clone(), cached(&cache.namespace("a"))))
+    })?;
+
+    // Warm: every page from disk.
+    run(&|cache| {
+        futures::executor::block_on(async {
+            store.inner.reset_stats();
+            let sum = payload_sum(store.clone(), cached(&cache.namespace("a"))).await?;
+            assert_eq!(sum, expected);
+            assert_eq!(
+                store.inner.stats().kind("page").gets,
+                0,
+                "warm after a restart"
+            );
+            Ok(())
+        })
+    })?;
+
+    // The namespace's state emptied and written again: another database, of
+    // the same history (so the same `meta` but for its id) and other bytes.
+    let other = Arc::new(LatencyKv::new(MemoryKv::default()));
+    futures::executor::block_on(create(other.clone(), StorageOptions::default()))?;
+    let digest = "SELECT group_concat(hex(substr(payload, 1, 8))) FROM t";
+    let cold = futures::executor::block_on(async {
+        let mut db = Session::open(other.clone()).await?;
+        Result::Ok(db.query(digest).await?[0][0].to_string())
+    })?;
+    run(&|cache| {
+        futures::executor::block_on(async {
+            let mut db =
+                Session::open_with_options(other.clone(), cached(&cache.namespace("a"))).await?;
+            let warm = db.query(digest).await?[0][0].to_string();
+            assert!(warm == cold, "pages of the earlier database");
+            Ok(())
+        })
+    })?;
+
+    // Another process meanwhile checkpointed changes: refreshed, not stale.
+    futures::executor::block_on(async {
+        let options = StorageOptions {
+            checkpoint_after: 0,
+            ..StorageOptions::default()
+        };
+        let mut db = Session::open_with_options(store.clone(), options).await?;
+        db.execute("UPDATE t SET payload = printf('%0800d', id) WHERE id % 4 = 0")
+            .await?;
+        db.save().await
+    })?;
+    run(&|cache| {
+        futures::executor::block_on(async {
+            let sum = payload_sum(store.clone(), cached(&cache.namespace("a"))).await?;
+            assert_eq!(sum, expected - 100 * 100);
+            Ok(())
+        })
+    })?;
+
+    // While one process has the file, another gets a cache of its own.
+    let first = open_cache(config.clone());
+    let second = open_cache(config.clone());
+    futures::executor::block_on(async {
+        let sum = payload_sum(other.clone(), cached(&second.namespace("a"))).await?;
+        assert_eq!(sum, expected);
+        Result::Ok(())
+    })?;
+    drop((first, second));
+    Ok(())
+}
+
+/// Kept keys that lag behind the disk tier, as after a crash between a
+/// checkpoint and their rewrite, only make the next process colder.
+#[test]
+fn stale_kept_keys_are_never_served_stale() -> Result<()> {
+    use sqlite_kv::{
+        PageCacheConfig,
+        simulation::{cache_config, open_cache},
+    };
+    let config = PageCacheConfig {
+        persistent: true,
+        ..cache_config(64 << 20, 64 << 20)
+    };
+    let owners = {
+        let mut name = config.file.clone().into_os_string();
+        name.push(".owners");
+        std::path::PathBuf::from(name)
+    };
+    let copy = |from: &std::path::Path, to: &std::path::Path| -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), to.join(entry.file_name()))?;
+        }
+        Ok(())
+    };
+    let store = Arc::new(MemoryKv::default());
+    let options = |cache: &sqlite_kv::PageCache| StorageOptions {
+        cache: Some(cache.namespace("a")),
+        checkpoint_after: 0,
+        ..StorageOptions::default()
+    };
+    let cache = open_cache(config.clone());
+    futures::executor::block_on(create(store.clone(), options(&cache)))?;
+    let old = config.file.with_extension("old-owners");
+    copy(&owners, &old)?;
+    // Checkpoints through the cache that the kept keys will not know of.
+    for round in 0..3 {
+        futures::executor::block_on(async {
+            let mut db = Session::open_with_options(store.clone(), options(&cache)).await?;
+            db.execute(&format!(
+                "UPDATE t SET payload = printf('%0800d', id) WHERE id % 4 = {round}"
+            ))
+            .await?;
+            db.save().await
+        })?;
+    }
+    futures::executor::block_on(cache.close())?;
+    drop(cache);
+    std::fs::remove_dir_all(&owners)?;
+    copy(&old, &owners)?;
+    std::fs::remove_dir_all(&old)?;
+
+    let cache = open_cache(config);
+    let sum = futures::executor::block_on(payload_sum(store, options(&cache)))?;
+    assert_eq!(sum, 400 * 900 + 400 * 401 / 2 - 3 * 100 * 100);
+    Ok(())
 }

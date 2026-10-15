@@ -104,11 +104,11 @@ The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear`, and the barrier is an empty `ctx.run`. The SDK loads
 the sqlite-kv addon, an optional peer dependency, on first use.
 
-**The database is the object's state.** Its keys (`v13/meta`, `v13/log/…`,
-`v13/page/…`, `v13/hint`) sit next to the object's other state keys, so
+**The database is the object's state.** Its keys (`v14/meta`, `v14/log/…`,
+`v14/page/…`, `v14/hint`) sit next to the object's other state keys, so
 `ctx.clearAll()` in any handler of the object deletes the database, a handler's
-own key starting with `v13/` corrupts it, and `ctx.stateKeys()` lists its
-pages. Keep other state out of `v13/`, and do not clear all of an object that
+own key starting with `v14/` corrupts it, and `ctx.stateKeys()` lists its
+pages. Keep other state out of `v14/`, and do not clear all of an object that
 uses `ctx.db`. The state key `_restate_sql_sends` is the SDK's too.
 (Reserving these keys in the SDK is future work.)
 

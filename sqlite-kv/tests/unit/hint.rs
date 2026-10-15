@@ -8,11 +8,11 @@ fn hints_round_trip_and_reject_malformed_input() {
     assert_eq!(decode(&bytes, 3), None, "longer than the limit");
     assert_eq!(decode(&encode(&[]), 32), Some(vec![]));
     for bad in [
-        &b"SH13"[..],
+        &b"SH14"[..],
         &b"XX12\x01\x00\x00"[..],
         &bytes[..bytes.len() - 1],
         &[&bytes[..], &[0]].concat()[..],
-        &b"SH13\x01\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01"[..],
+        &b"SH14\x01\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01"[..],
     ] {
         assert_eq!(decode(bad, MAX_HINT_PAGES), None, "{bad:?}");
     }

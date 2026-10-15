@@ -41,6 +41,9 @@ ENV PORT=9080
 # Each agent object's files, in a directory of its own below this: a
 # sandbox's disk. `-e WORKSPACE=` leaves the agents without files.
 ENV WORKSPACE=/data/workspace
-RUN mkdir -p /data/workspace
+# The databases' page cache, kept on that disk too: a restarted endpoint
+# starts warm. `-e SQLITE_KV_CACHE_FILE=` keeps it in a temporary file.
+ENV SQLITE_KV_CACHE_FILE=/data/sqlite-kv/pages.cache
+RUN mkdir -p /data/workspace /data/sqlite-kv
 EXPOSE 9080
 CMD ["node", "serve.ts", "gateway"]

@@ -108,7 +108,7 @@ fn a_duplicate_request_rolls_back_and_the_session_goes_on() -> Result<()> {
 #[test]
 fn storage_errors_end_the_session() -> Result<()> {
     futures::executor::block_on(async {
-        for (operation, prefix) in [(Operation::Get, "v13/page/"), (Operation::Put, "v13/log/")] {
+        for (operation, prefix) in [(Operation::Get, "v14/page/"), (Operation::Put, "v14/log/")] {
             let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
             let mut db =
                 Session::open_with_options(store.clone(), options(Durability::Commit)).await?;

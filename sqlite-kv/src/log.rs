@@ -29,7 +29,7 @@
 //! after any log start `meta` may hold, and replay from that log start has the
 //! whole chain. A segment with a later base than the chain so far restarts it.
 //!
-//! Segment encoding: `SL13`, flags u8 (bit 0: commit), then LEB128 varints:
+//! Segment encoding: `SL14`, flags u8 (bit 0: commit), then LEB128 varints:
 //! the sequence, how far its transaction's first sequence is before it, how
 //! far the chain base is before that, the database size in 512-byte units and
 //! the entry count; per entry in ascending page order, the gap from the
@@ -318,14 +318,19 @@ pub(crate) fn decode(bytes: &Bytes, seq: u64, chain: &mut Chain) -> io::Result<S
 
 /// The checkpoint record at `meta`.
 ///
-/// Encoding: `SM13`, log start u64 LE, deleted-below u64 LE, size u64 LE. Segments
-/// before `log_start` are checkpointed into pages; those before `deleted_below`
-/// are also deleted. `size` is the database size at `log_start`.
+/// Encoding: `SM14`, log start u64 LE, deleted-below u64 LE, size u64 LE,
+/// database id u64 LE. Segments before `log_start` are checkpointed into pages;
+/// those before `deleted_below` are also deleted. `size` is the database size at
+/// `log_start`. `id` is random, chosen by the first checkpoint and kept by every
+/// later one: a cache can tell this database from another under the same key,
+/// such as one written after the namespace was emptied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Meta {
     pub log_start: u64,
     pub deleted_below: u64,
     pub size: u64,
+    /// Nonzero in a stored record; zero only in the default for an absent one.
+    pub id: u64,
 }
 
 impl Default for Meta {
@@ -334,6 +339,7 @@ impl Default for Meta {
             log_start: 1,
             deleted_below: 1,
             size: 0,
+            id: 0,
         }
     }
 }
@@ -341,14 +347,14 @@ impl Default for Meta {
 impl Meta {
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = META_MAGIC.to_vec();
-        for n in [self.log_start, self.deleted_below, self.size] {
+        for n in [self.log_start, self.deleted_below, self.size, self.id] {
             out.extend_from_slice(&n.to_le_bytes());
         }
         out
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() != 28 || &bytes[..4] != META_MAGIC {
+        if bytes.len() != 36 || &bytes[..4] != META_MAGIC {
             return Err(invalid("checkpoint record"));
         }
         let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
@@ -356,8 +362,10 @@ impl Meta {
             log_start: u64_at(4),
             deleted_below: u64_at(12),
             size: u64_at(20),
+            id: u64_at(28),
         };
-        if meta.deleted_below == 0
+        if meta.id == 0
+            || meta.deleted_below == 0
             || meta.deleted_below > meta.log_start
             || meta.log_start > MAX_SEQUENCE
             || !valid_size(meta.size)
@@ -366,6 +374,19 @@ impl Meta {
         }
         Ok(meta)
     }
+}
+
+/// A random nonzero 64-bit number: a database id, or a starting point for
+/// identities that count up.
+pub(crate) fn random_id() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |time| time.as_nanos()),
+    );
+    hasher.finish().max(1)
 }
 
 /// A committed transaction found by replay.
