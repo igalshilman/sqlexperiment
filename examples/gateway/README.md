@@ -8,7 +8,7 @@ dangerous calls for approval, and limits calls per tenant and per user. It is on
   │ Assistant/<tenant>.<user>  (agent.ts)                       │
   │ pi agent, its session in the object's SQL database          │
   └───────┬──────────────────────────────────┬──────────────────┘
-          │                                  │ "Investigate …" only:
+          │                                  │ investigate:
           │                                  │ RPC: Case.report, per order
           │                                  ▼
           │                ┌────────────────────────────────────┐
@@ -49,8 +49,7 @@ gateway/demo.sh
 1. Tools are just handlers: the prebuilt tools, and a prompt that uses them.
 2. Limits without code: a rule per tenant and one per user.
 3. Human in the loop: a refund held until a manager approves it.
-4. Sub-agents: a prompt that begins "Investigate", and only such a prompt,
-   gets an `investigate` tool, which hands each order to its case agent,
+4. Sub-agents: the `investigate` tool hands each order to its case agent,
    `Case/<tenant>.<order>`: a pi agent per order, with a database of its own.
    Two orders are two objects, which run at once; another user's report on
    the same order reaches the same object, which remembers the first; and

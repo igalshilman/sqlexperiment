@@ -9,8 +9,7 @@
 // tool call again with the same call id, and so reaches the gateway call
 // the first attempt made.
 //
-// Sub-agents: a prompt that begins "Investigate" (and only such a prompt)
-// gets one more tool, `investigate`, which hands an order to its case agent:
+// Sub-agents: the `investigate` tool hands an order to its case agent:
 // a Case object per order, keyed `<tenant>.<order>` (`acme.103`), a pi agent
 // of its own, with its own database and the gateway's tools. Each order is
 // another object: they run at once, and one holds no other up. The same
@@ -56,9 +55,6 @@ export function sentence(text: string): string {
   return text;
 }
 
-/** Whether a prompt asks for case agents: it begins "Investigate". */
-export const investigates = (text: string) => /^\s*investigate\b/i.test(text);
-
 /** The results of the last round of tool calls, a sentence each. */
 function lastResults({ messages }: TranscriptContext) {
   const results = [];
@@ -97,7 +93,7 @@ export function concierge(context: TranscriptContext) {
       }),
     );
   }
-  if (investigates(text)) {
+  if (/^\s*investigate\b/i.test(text)) {
     const [orders = '', question = text] = text.split(/:\s*/, 2);
     return callTools((orders.match(/\d+/g) ?? []).map((order) => ['investigate', { order, question }]));
   }
@@ -280,36 +276,34 @@ export const prompt = async (ctx: restate.SqlObjectContext, text: z.infer<typeof
       },
     }),
   );
-  // Only a prompt that asks for case agents gets them.
-  if (investigates(text))
-    tools.push(
-      defineTool({
-        name: 'investigate',
-        description:
-          "Hand an order to its case agent, which looks into it and remembers every report on it; answer with the case agent's answer. One call per order: they run at once.",
-        parameters: Type.Object({
-          order: Type.String({
-            description: 'The order id, such as "103"',
-          }),
-          question: Type.String({
-            description: "What happened to the order, in the customer's words",
-          }),
+  tools.push(
+    defineTool({
+      name: 'investigate',
+      description:
+        "Hand an order to its case agent, which looks into it and remembers every report on it; answer with the case agent's answer. One call per order: they run at once.",
+      parameters: Type.Object({
+        order: Type.String({
+          description: 'The order id, such as "103"',
         }),
-        replay: 'safe',
-        execute: async ({ order, question }, api) => {
-          const { answer } = await ctx.objectClient(caseAgent, `${tenant}.${order}`).report(
-            { user, question },
-            restate.rpc.opts({
-              idempotencyKey: `${ctx.request().id}:${api.callId}`,
-            }),
-          );
-          return {
-            content: [{ type: 'text', text: answer }],
-            isError: false,
-          };
-        },
+        question: Type.String({
+          description: "What happened to the order, in the customer's words",
+        }),
       }),
-    );
+      replay: 'safe',
+      execute: async ({ order, question }, api) => {
+        const { answer } = await ctx.objectClient(caseAgent, `${tenant}.${order}`).report(
+          { user, question },
+          restate.rpc.opts({
+            idempotencyKey: `${ctx.request().id}:${api.callId}`,
+          }),
+        );
+        return {
+          content: [{ type: 'text', text: answer }],
+          isError: false,
+        };
+      },
+    }),
+  );
   // Submitted once: a retried attempt resumes the prompt of the same invocation id.
   const workspace = workspaceOf('Assistant', ctx.key);
   return withPi(ctx, { ...assistantModel, tools, workspace }, async (pi) => ({
@@ -327,7 +321,7 @@ export const assistant = restate.object({
           'Prompts to try:',
           ...EXAMPLES.map((e) => `- ${e}`),
           'A refund waits for a manager: `Gateway/<tenant>/pending`, then `Gateway/<tenant>/decide`.',
-          'A prompt that begins "Investigate" hands each order to its case agent, `Case/<tenant>.<order>`.',
+          'Investigating an order hands it to its case agent, `Case/<tenant>.<order>`.',
           'Coding tasks go to a coding agent each, `Coder/<tenant>.<user>.<task>`.',
         ].join('\n'),
         metadata: Object.fromEntries(EXAMPLES.map((e, i) => [`example.${i + 1}`, e])),
