@@ -1,6 +1,6 @@
 // Examples in one endpoint: every one, or the groups named on the command
 // line (ledger, shop, agent, langgraph, claude, deepseek, opencode, gateway,
-// gateway-tools, gateway-assistant), such as
+// gateway-tools, gateway-assistant, gateway-coder), such as
 // `node serve.ts ledger shop`.
 import * as restate from '@restatedev/restate-sdk';
 
@@ -18,12 +18,13 @@ const groups: Record<string, () => Promise<Services>> = {
   deepseek: async () => [(await import('./deepseek/agent.ts')).agent],
   opencode: async () => [(await import('./opencode/agent.ts')).agent],
   gateway: async () => {
-    const [{ tools }, { gateway }, { assistant, caseAgent }] = await Promise.all([
+    const [{ tools }, { gateway }, { assistant, caseAgent }, { coder }] = await Promise.all([
       import('./gateway/tools.ts'),
       import('./gateway/gateway.ts'),
       import('./gateway/agent.ts'),
+      import('./gateway/coder.ts'),
     ]);
-    return [...tools, gateway, assistant, caseAgent];
+    return [...tools, gateway, assistant, caseAgent, coder];
   },
   // The gateway in two deployments: its tools and Gateway (stateless, light,
   // anywhere), and the agents (Assistant per user and Case per order, with pi
@@ -32,6 +33,8 @@ const groups: Record<string, () => Promise<Services>> = {
     const [{ tools }, { gateway }] = await Promise.all([import('./gateway/tools.ts'), import('./gateway/gateway.ts')]);
     return [...tools, gateway];
   },
+  // The coding agent alone, to deploy where each object gets a machine.
+  'gateway-coder': async () => [(await import('./gateway/coder.ts')).coder],
   'gateway-assistant': async () => {
     const { assistant, caseAgent } = await import('./gateway/agent.ts');
     return [assistant, caseAgent];

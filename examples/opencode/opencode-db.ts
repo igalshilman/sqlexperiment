@@ -155,6 +155,12 @@ export interface OpenOptions {
   plugins?: Plugin.Plugin[];
   /** OpenCode's config (opencode.json), inline. */
   config?: Record<string, unknown>;
+  /**
+   * OpenCode's own filesystem, search and shell, on the local machine, for
+   * its built-in tools (read, write, edit, bash, glob, grep...) in a
+   * session's directory. Without it, the workerd profile has none.
+   */
+  local?: boolean;
 }
 
 /** OpenCode's client, whose calls return Effects. */
@@ -174,14 +180,18 @@ export interface Host {
 export async function openOpenCode(
   db: SqlSession,
   fence: Fence,
-  { plugins = [], config = {} }: OpenOptions,
+  { plugins = [], config = {}, local = false }: OpenOptions,
 ): Promise<Host> {
   // The workerd profile, but for its database, which comes first. (The
   // Promise API's OpenCode.create takes no replacements; the Effect API's does.)
   // OpenCode stops resuming a turn that crashed ten times, and fails it;
   // here Restate's retry policy decides how often an attempt is retried.
   const profile = { storage: undefined as never, models: { fetch: false } };
-  const [, ...rest] = ServerWorkerd.replacements(profile);
+  // In 2.0.27's order: database, process spawner, snapshot, version control,
+  // filesystem, filesystem search, pty, plugin discovery. Local keeps the
+  // stubs of snapshots, the pty and plugin discovery only.
+  const [, spawner, snapshot, vcs, fs, search, pty, discovery] = ServerWorkerd.replacements(profile);
+  const rest = local ? [snapshot, pty, discovery] : [spawner, snapshot, vcs, fs, search, pty, discovery];
   const scope = Scope.makeUnsafe();
   const client = await Effect.runPromise(
     OpenCode.create(

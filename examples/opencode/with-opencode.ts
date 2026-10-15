@@ -56,16 +56,23 @@ export interface OpenCodeOptions {
   model: ModelRef;
   /** The agent's tools, which replace OpenCode's own. */
   tools?: Tool[];
+  /**
+   * A directory of the local machine: OpenCode keeps its own tools (read,
+   * write, edit, bash, glob, grep...) there, besides `tools`, and the
+   * session works in it.
+   */
+  directory?: string;
 }
 
 /** An OpenCode plugin whose tools are `tools`, and only those. */
-function toolsPlugin(tools: Tool[], fail: (error: unknown) => Promise<never>): Plugin.Plugin {
+function toolsPlugin(tools: Tool[], fail: (error: unknown) => Promise<never>, builtins = false): Plugin.Plugin {
   return {
     id: 'examples.tools',
     async setup(ctx) {
       const transform = await ctx.tool.transform((editor) => {
-        // No filesystem, shell or web: the agent acts through its tools.
-        for (const { id } of editor.list()) editor.remove(id);
+        // Without a directory, no filesystem, shell or web: the agent acts
+        // through its tools.
+        if (!builtins) for (const { id } of editor.list()) editor.remove(id);
         for (const t of tools) {
           editor.add({
             name: t.name,
@@ -170,7 +177,7 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
  */
 export const withOpenCode = async <T>(
   ctx: restate.SqlObjectContext,
-  { plugins = [], model, tools = [] }: OpenCodeOptions,
+  { plugins = [], model, tools = [], directory }: OpenCodeOptions,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
   const db = ctx.db;
@@ -186,8 +193,9 @@ export const withOpenCode = async <T>(
     return new Promise<never>(() => {});
   };
   const host = await openOpenCode(db, fence, {
-    plugins: [...plugins, toolsPlugin(tools, fail)],
+    plugins: [...plugins, toolsPlugin(tools, fail, directory !== undefined)],
     config: { default_agent: 'build' },
+    local: directory !== undefined,
   });
   try {
     return await Promise.race([
@@ -201,7 +209,14 @@ export const withOpenCode = async <T>(
           try {
             await host.call(session.get({ sessionID }));
           } catch {
-            await host.call(session.create({ id: sessionID, model: model as never, agent: 'build' as never }));
+            await host.call(
+              session.create({
+                id: sessionID,
+                model: model as never,
+                agent: 'build' as never,
+                ...(directory ? { location: { directory: directory as never } } : {}),
+              }),
+            );
           }
           // The outcome of prompt `of`, once its turn has ended.
           const settled = async (of: string) => {
