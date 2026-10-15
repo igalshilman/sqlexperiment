@@ -3,7 +3,7 @@
 import type { TranscriptContext } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { concierge, EXAMPLES, PROMPT_SCHEMA, sentence } from './agent.ts';
+import { caseworker, concierge, EXAMPLES, investigates, PROMPT_SCHEMA, sentence } from './agent.ts';
 import { identity } from './gateway.ts';
 import { PREBUILT } from './tools.ts';
 
@@ -29,6 +29,10 @@ const user = (content: string) => ({ role: 'user', content, timestamp: 0 });
 const toolCalls = (...messages: unknown[]) =>
   concierge({ messages } as TranscriptContext).content.flatMap((c) =>
     c.type === 'toolCall' ? [[c.name, c.arguments]] : [],
+  );
+const replyText = (model: typeof concierge, ...messages: unknown[]) =>
+  model({ messages } as unknown as TranscriptContext).content.flatMap((c) =>
+    c.type === 'text' ? [c.text as unknown] : c.type === 'toolCall' ? [[c.name, c.arguments]] : [],
   );
 
 const result = (text: string) => ({ role: 'toolResult', content: [{ type: 'text', text }], isError: false });
@@ -67,5 +71,32 @@ describe('the scripted model', () => {
   it("reports the last round's results", () => {
     const reply = concierge({ messages: [user('…'), result('one'), result('two')] } as unknown as TranscriptContext);
     expect(reply.content).toEqual([{ type: 'text', text: 'one\ntwo' }]);
+  });
+});
+
+describe('case agents', () => {
+  it('are asked for only by a prompt that begins "Investigate"', () => {
+    expect(investigates('Investigate orders 103 and 104: crushed.')).toBe(true);
+    expect(investigates('Where are orders 101 to 103? Investigate them.')).toBe(false);
+    expect(toolCalls(user('Investigate orders 103 and 104: the boxes arrived crushed.'))).toEqual([
+      ['investigate', { order: '103', question: 'the boxes arrived crushed.' }],
+      ['investigate', { order: '104', question: 'the boxes arrived crushed.' }],
+    ]);
+  });
+
+  it('look the order up, open a ticket, and remember earlier reports', () => {
+    const first = user('Order 103, from alice: crushed.');
+    expect(replyText(caseworker, first)).toEqual([
+      ['lookup_order', { order: '103' }],
+      ['open_ticket', { order: '103', summary: 'alice: crushed.' }],
+    ]);
+    const results = [result('{"id":"103","status":"shipped","total":40}'), result('{"ticket":"T-1000"}')];
+    expect(replyText(caseworker, first, ...results)).toEqual([
+      'Case 103: Order 103 is shipped, $40. Ticket T-1000 is open. The first report on it.',
+    ]);
+    const second = user('Order 103, from bob: still crushed.');
+    expect(replyText(caseworker, first, ...results, { role: 'assistant' }, second, ...results)).toEqual([
+      'Case 103: Order 103 is shipped, $40. Ticket T-1000 is open. Reported before: alice: "crushed.".',
+    ]);
   });
 });

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The tool gateway's demo, in three acts, against a Restate server that has
+# The tool gateway's demo, in four acts, against a Restate server that has
 # the gateway's endpoint (`node serve.ts gateway`) registered. Everything
 # goes through Restate: its ingress, and its admin API for the limits.
 #
@@ -61,3 +61,15 @@ fi
 curl -s "$INGRESS/Gateway/acme/decide" \
   --json "$(jq -nc --arg a "$(jq -r '.[0].awakeable' <<<"$held")" --argjson ok "$approved" '{awakeable:$a,approved:$ok}')" >/dev/null
 wait
+pause
+
+bold "4. Sub-agents: a case agent per order, a virtual object per key"
+dim "only a prompt that begins \"Investigate\" gets the investigate tool"
+# Orders of this run, so that each run's cases start empty.
+A=$((RANDOM % 800 + 100)) B=$((A + 1))
+ask acme.alice "Investigate orders $A and $B: the boxes arrived crushed."
+dim "Case/acme.$A and Case/acme.$B, at once: two objects, a database each"
+ask acme.dave "Investigate order $A: mine too, the corner is dented."
+dim "the same key, the same Case/acme.$A: it remembers alice's report"
+ask globex.erin "Investigate order $A: the label is wrong."
+dim "another tenant, another key: Case/globex.$A starts empty"
