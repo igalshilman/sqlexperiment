@@ -3,7 +3,7 @@
 import type { TranscriptContext } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { caseworker, concierge, EXAMPLES, investigates, PROMPT_SCHEMA, sentence, workspaceOf } from './agent.ts';
+import { caseworker, concierge, EXAMPLES, PROMPT_SCHEMA, sentence, workspaceOf } from './agent.ts';
 import { identity } from './gateway.ts';
 import { PREBUILT } from './tools.ts';
 
@@ -75,9 +75,7 @@ describe('the scripted model', () => {
 });
 
 describe('case agents', () => {
-  it('are asked for only by a prompt that begins "Investigate"', () => {
-    expect(investigates('Investigate orders 103 and 104: crushed.')).toBe(true);
-    expect(investigates('Where are orders 101 to 103? Investigate them.')).toBe(false);
+  it('take each order of an "Investigate" prompt, in the scripted model', () => {
     expect(toolCalls(user('Investigate orders 103 and 104: the boxes arrived crushed.'))).toEqual([
       ['investigate', { order: '103', question: 'the boxes arrived crushed.' }],
       ['investigate', { order: '104', question: 'the boxes arrived crushed.' }],
@@ -115,5 +113,14 @@ describe('the workspace', () => {
     ]);
     expect(toolCalls(user('Read notes.md'))).toEqual([['read', { path: 'notes.md' }]]);
     expect(toolCalls(user('Run: ls -la && cat notes.md'))).toEqual([['bash', { command: 'ls -la && cat notes.md' }]]);
+  });
+});
+
+describe('coding tasks', () => {
+  it('go to a coder each, by name, in the scripted model', () => {
+    expect(toolCalls(user('Code: fizzbuzz: write fizzbuzz.py; primes: write primes.py'))).toEqual([
+      ['code', { name: 'fizzbuzz', task: 'write fizzbuzz.py' }],
+      ['code', { name: 'primes', task: 'write primes.py' }],
+    ]);
   });
 });

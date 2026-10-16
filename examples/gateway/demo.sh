@@ -64,7 +64,6 @@ wait
 pause
 
 bold "4. Sub-agents: a case agent per order, a virtual object per key"
-dim "only a prompt that begins \"Investigate\" gets the investigate tool"
 # Orders of this run, so that each run's cases start empty.
 A=$((RANDOM % 800 + 100)) B=$((A + 1))
 ask acme.alice "Investigate orders $A and $B: the boxes arrived crushed."
