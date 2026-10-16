@@ -16,10 +16,17 @@
 // another object: they run at once, and one holds no other up. The same
 // order is the same object for every user, and remembers each report on it.
 //
+// Files: with WORKSPACE set, each object gets a directory of its own,
+// `$WORKSPACE/<service>/<key>`, and pi-durable's coding tools over it
+// (read, write, edit, bash; see ../pi/with-pi.ts). Run it in a sandbox:
+// `bash` runs any command, within the directory or outside it.
+//
 // Environment: PORT, PI_MODEL (the scripted `concierge/concierge` and
 // `caseworker/caseworker` below by default, or a real one for both, such as
-// anthropic/claude-sonnet-4-5) and ABORT_PER_MILLE (see ../faults.ts).
+// anthropic/claude-sonnet-4-5), WORKSPACE and ABORT_PER_MILLE (see
+// ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
+import { join } from 'node:path';
 import { Type, type TranscriptContext } from '@earendil-works/pi-ai';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
@@ -53,7 +60,8 @@ function lastResults({ messages }: TranscriptContext) {
 }
 
 /**
- * The scripted model: "investigate orders 103 and 104: …" hands each order
+ * The scripted model: "write notes.md: …", "read notes.md" and "run: ls -l"
+ * use the workspace's files, "investigate orders 103 and 104: …" hands each order
  * to its case agent at once, "where are orders 101 to 108?" looks them all
  * up at once, "refund 30 of order 103" refunds, "open a ticket for order
  * 104: …" opens one, and it reports what the tools answered, a sentence each.
@@ -62,6 +70,12 @@ export function concierge(context: TranscriptContext) {
   const results = lastResults(context);
   if (results.length > 0) return say(results.join('\n'));
   const text = lastText(context);
+  const write = /^write ([^\s:]+):\s*([^]*)$/i.exec(text);
+  if (write) return callTools([['write', { path: write[1]!, content: write[2]! }]]);
+  const read = /^read (\S+)$/i.exec(text.trim());
+  if (read) return callTools([['read', { path: read[1]! }]]);
+  const run = /^run:?\s+([^]+)$/i.exec(text);
+  if (run) return callTools([['bash', { command: run[1]! }]]);
   if (investigates(text)) {
     const [orders = '', question = text] = text.split(/:\s*/, 2);
     return callTools((orders.match(/\d+/g) ?? []).map((order) => ['investigate', { order, question }]));
@@ -110,6 +124,10 @@ export const EXAMPLES = [
   'Open a ticket for order 104: the box was empty.',
   'Where are orders 101 to 112?',
   'Investigate orders 103 and 104: the boxes arrived crushed.',
+  // With a workspace only.
+  ...(process.env.WORKSPACE
+    ? ['Write notes.md: order 103 arrived crushed, refund pending.', 'Read notes.md', 'Run: ls -la && cat notes.md']
+    : []),
 ];
 
 // The suggestion is a JSON schema `default` only: a zod `.default()` would
@@ -142,6 +160,16 @@ async function modelOr(name: string, respond: Respond) {
 }
 const assistantModel = await modelOr('concierge', concierge);
 const caseModel = await modelOr('caseworker', caseworker);
+
+/**
+ * The object's own directory in WORKSPACE, if set: `<service>/<key>`, the
+ * key's characters other than letters, digits, `.`, `_` and `-` as `_`.
+ */
+export function workspaceOf(service: string, key: string, root = process.env.WORKSPACE): string | undefined {
+  if (!root) return undefined;
+  const name = key.replace(/[^\w.-]/g, '_');
+  return join(root, service, /^\.*$/.test(name) ? `_${name}` : name);
+}
 
 /**
  * The tenant's gateway tools, for `user`. A call is one Gateway.call, with
@@ -200,7 +228,8 @@ export const caseAgent = restate.object({
       async (ctx: restate.SqlObjectContext, { user, question }: z.infer<typeof CaseReport>) => {
         const [tenant = '', order = ''] = ctx.key.split('.', 2);
         const tools = await gatewayTools(ctx, tenant, user);
-        return withPi(ctx, { ...caseModel, tools }, async (pi) => ({
+        const workspace = workspaceOf('Case', ctx.key);
+        return withPi(ctx, { ...caseModel, tools, workspace }, async (pi) => ({
           answer: await pi.prompt(ctx.request().id, `Order ${order}, from ${user}: ${question}`),
         }));
       },
@@ -261,7 +290,8 @@ export const assistant = restate.object({
             }),
           );
         // Submitted once: a retried attempt resumes the prompt of the same invocation id.
-        return withPi(ctx, { ...assistantModel, tools }, async (pi) => ({
+        const workspace = workspaceOf('Assistant', ctx.key);
+        return withPi(ctx, { ...assistantModel, tools, workspace }, async (pi) => ({
           answer: await pi.prompt(ctx.request().id, text),
         }));
       },
