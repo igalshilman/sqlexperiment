@@ -34,6 +34,13 @@ export const nextPromptId = (ctx: restate.SqlObjectContext) => {
  */
 export const modelOf = (model: string | undefined, fallback: string) => model || process.env.MODEL || fallback;
 
+/**
+ * The error code of a message the model's provider refused (a missing or
+ * wrong API key, an unknown model): 424, Failed Dependency, as its HTTP
+ * status.
+ */
+export const REFUSED = 424;
+
 /** What to check when a model's provider refuses a request. */
 export const CHECK_MODEL = "check the agent's model (its `model` option, or MODEL) and its provider's API key";
 
@@ -111,7 +118,9 @@ export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: str
         // Any other error fails the attempt, and Restate retries the turn.
         if (!refused(error)) throw error;
         ctx.clear(TURN);
-        throw new restate.TerminalError(`the model's provider refused the request: ${CHECK_MODEL}. ${String(error)}`);
+        throw new restate.TerminalError(`the model's provider refused the request: ${CHECK_MODEL}. ${String(error)}`, {
+          errorCode: REFUSED,
+        });
       }
       ctx.clear(TURN);
       return answered;
@@ -150,10 +159,14 @@ export interface ChatMessage {
   parts: Part[];
 }
 
-/** What a message says: text, or a tool call with its output once it ran. */
+/**
+ * What a message says: text, or a tool call with its output once it ran,
+ * and `error: true` if the output is the tool's error (`Error: <message>` of
+ * a `restate.TerminalError`, say).
+ */
 export type Part =
   | { type: 'text'; text: string }
-  | { type: 'tool'; id: string; name: string; input: unknown; output?: string };
+  | { type: 'tool'; id: string; name: string; input: unknown; output?: string; error?: true };
 
 /** Which messages to read: the latest `limit`, or those before or after a message. */
 export interface MessagesRequest {
@@ -194,10 +207,12 @@ export class Transcript {
     this.#calls.set(id, part);
   }
 
-  /** The output of tool call `id`. */
-  result(id: string, output: string) {
+  /** The output of tool call `id`; an error's if the framework says so, or it is a tool's `Error: <message>`. */
+  result(id: string, output: string, error = false) {
     const call = this.#calls.get(id);
-    if (call) call.output = output;
+    if (!call) return;
+    call.output = output;
+    if (error || output.startsWith('Error: ')) call.error = true;
   }
 
   /** The page of `request`. */

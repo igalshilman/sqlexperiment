@@ -202,7 +202,8 @@ export const messages = () =>
       if (typeof m.content === 'string') continue;
       for (const block of m.content) {
         if (block.type === 'tool_use') transcript.call(block.id, block.name, block.input);
-        if (block.type === 'tool_result') transcript.result(block.tool_use_id, storedText(block.content));
+        if (block.type === 'tool_result')
+          transcript.result(block.tool_use_id, storedText(block.content), block.is_error === true);
       }
     }
   });

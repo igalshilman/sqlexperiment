@@ -18,6 +18,8 @@ import { join } from 'node:path';
 import * as restate from '@restatedev/restate-sdk';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { call, signal, signals, workflow, type Messages, type Status, type Waiting } from 'restate-agents';
+import * as clients from '@restatedev/restate-sdk-clients';
+import { agent } from 'restate-agents/client';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
@@ -128,12 +130,12 @@ try {
     return text ? (JSON.parse(text) as unknown) : undefined;
   };
 
-  /** The waits of `agent`, once there is one. */
-  const waits = async (agent: string) => {
+  /** The waits of `object` (such as `support/alice`), once there is one. */
+  const waits = async (object: string) => {
     for (let i = 0; ; i++) {
-      const pending = (await post(`${agent}/pending`)) as Waiting[];
+      const pending = (await post(`${object}/pending`)) as Waiting[];
       if (pending.length > 0) return pending;
-      if (i > 300) throw new Error(`${agent} does not wait for the approval`);
+      if (i > 300) throw new Error(`${object} does not wait for the approval`);
       await sleep(100);
     }
   };
@@ -214,10 +216,16 @@ try {
 
   // Sent without waiting, and its answer fetched later: by the invocation's
   // id, or by the idempotency key it was sent with.
-  await post('support/henry/signal', { name: 'approval', value: 'approved', keep: true });
-  const henry = (await post('support/henry/chat/send', 'Refund order 103')) as { invocationId: string };
-  const attached = await fetch(`${INGRESS}/restate/invocation/${henry.invocationId}/attach`);
-  assert.equal(await attached.json(), 'order 103: delivered / approved / refunded 103');
+  // Through Restate's client, with the agent's types of restate-agents/client.
+  const ingress = clients.connect({ url: INGRESS });
+  const henry = ingress.objectClient(agent('support'), 'henry');
+  assert.deepEqual(await henry.signal({ name: 'approval', value: 'approved', keep: true }), { resolved: null });
+  const henrys = await ingress
+    .objectSendClient(agent('support'), 'henry')
+    .chat('Refund order 103', clients.rpc.sendOpts({ idempotencyKey: 'msg-henry' }));
+  assert.equal(await ingress.result(henrys), 'order 103: delivered / approved / refunded 103');
+  assert.deepEqual(await henry.status(), { answering: null, waiting: [] });
+  assert.equal((await henry.messages({ limit: 1 })).messages[0]?.parts[0]?.type, 'text');
   await post('support/ivy/signal', { name: 'approval', value: 'approved', keep: true });
   const keyed = await fetch(`${INGRESS}/support/ivy/chat/send`, {
     method: 'POST',

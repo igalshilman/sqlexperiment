@@ -1,6 +1,6 @@
 // pi's chat without a Restate server or an API key: Anthropic's provider is a
 // fake model (../fakes/pi.ts).
-import type * as restate from '@restatedev/restate-sdk';
+import * as restate from '@restatedev/restate-sdk';
 import { subagent, tool } from 'restate-agents';
 import { z } from 'zod';
 import * as pi from 'restate-agents/pi';
@@ -28,6 +28,7 @@ vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
         return say(Object.values(system?.sections ?? {}).join('\n'));
       }
       if (textOf(last.content) === 'Break it') return callTools([['boom', {}]]);
+      if (textOf(last.content) === 'Look it up') return callTools([['lookup', {}]]);
       if (textOf(last.content).startsWith('delegate')) {
         return callTools([
           ['coder', { name: 'fizzbuzz', task: 'write fizzbuzz.py' }],
@@ -78,6 +79,23 @@ function object(key: string) {
 const said = (id: number, role: string, text: string) => ({ id, role, parts: [{ type: 'text', text }] });
 
 describe('pi.messages', () => {
+  it("marks a tool's error", async () => {
+    const alice = object('alice');
+    const lookup = tool({
+      name: 'lookup',
+      description: 'Finds nothing.',
+      input: z.object({}),
+      run: () => {
+        throw new restate.TerminalError('no such page');
+      },
+    });
+    await alice.invoke(pi.chat({ tools: [lookup] }), 'inv1', 'Look it up');
+    const { messages } = await alice.invoke(pi.messages(), 'read', {});
+    expect(messages[1]?.parts).toEqual([
+      { type: 'tool', id: expect.any(String), name: 'lookup', input: {}, output: 'Error: no such page', error: true },
+    ]);
+  });
+
   it("reads without MODEL's provider", async () => {
     const alice = object('alice');
     await alice.invoke(pi.chat(), 'inv1', 'Hi, I am Alice');

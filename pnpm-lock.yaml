@@ -176,6 +176,9 @@ importers:
       '@restatedev/restate-sdk':
         specifier: file:../sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
         version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)
+      '@restatedev/restate-sdk-core':
+        specifier: 1.17.3
+        version: 1.17.3
       '@standard-schema/spec':
         specifier: 1.1.0
         version: 1.1.0
@@ -315,6 +318,9 @@ importers:
       '@restatedev/restate-sdk':
         specifier: file:../packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
         version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)
+      '@restatedev/restate-sdk-clients':
+        specifier: 1.17.3
+        version: 1.17.3
       '@standard-schema/spec':
         specifier: 1.1.0
         version: 1.1.0
@@ -1884,11 +1890,14 @@ packages:
     peerDependencies:
       '@redis/client': ^6.3.0
 
+  '@restatedev/restate-sdk-clients@1.17.3':
+    resolution: {integrity: sha512-h3uepEAVRIs4mhBqDyGUG23M0QzmQZ05UTogu3PlTQga9jNnlrf4fK+l5DNR4IDE5PMyN7AIu+l0csgK+bxMzQ==}
+
   '@restatedev/restate-sdk-core@1.17.3':
     resolution: {integrity: sha512-KZxRF7eitdb/QgTiPLbFifwLtk0AeqQPzWV8be7rOjaQ8jdXjiaCQIszDh4BuyJb+4KMaDd8/muSWbAY+A3XhA==}
 
   '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz':
-    resolution: {integrity: sha512-tFLGCoPABOcg/M9i7rjPbRhtSvNv/gLquIVjDFX9UAUR1iZAlqxFuH32wUPHGtADvbUf/3g3yJnZdetGGfjomA==, tarball: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz}
+    resolution: {integrity: sha512-bq/gIDZzkHQYWjwCZ8x1JAIYmqFEZjHc8tI+Opla8bemk9TWt7Hmpgg0VHcKjAwL6EBT9l5CFBN3LsVxgtdZmg==, tarball: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz}
     version: 1.17.3
     peerDependencies:
       sqlite-kv: '*'
@@ -5997,13 +6006,17 @@ snapshots:
     dependencies:
       '@redis/client': 6.3.0(@opentelemetry/api@1.9.0)
 
+  '@restatedev/restate-sdk-clients@1.17.3':
+    dependencies:
+      '@restatedev/restate-sdk-core': 1.17.3
+
   '@restatedev/restate-sdk-core@1.17.3': {}
 
   '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)':
     dependencies:
       '@restatedev/restate-sdk-core': 1.17.3
     optionalDependencies:
-      sqlite-kv: link:packages/sql
+      sqlite-kv: link:packages/sql-node
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     optional: true

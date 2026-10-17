@@ -85,7 +85,9 @@ curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'       # "Hello Alic
 ```
 
 A key answers one message at a time: a message sent while another is
-answered waits for it.
+answered waits for it. A message that fails for good answers with an error:
+HTTP 424 if the model's provider refused it (a missing or wrong API key, an
+unknown model), 500 otherwise.
 
 **Send now, fetch the answer later.** A turn can take longer than an HTTP
 request should wait (a tool that waits for a person, say). Add `/send` to
@@ -148,7 +150,9 @@ own storage as stored, with the tool calls made so far.
 
 **What it is doing.** `status` says which message the agent answers, if
 any (its invocation id, to attach to its answer, and since when), and what
-its tools wait for ([Signals](#signals)):
+its tools wait for ([Signals](#signals)). The message is in the object's
+state, `restate-agents.turn`, which `chat` sets when it starts and clears
+when it answers or fails for good (Restate's UI shows it):
 
 ```sh
 curl localhost:8080/support/alice/status
@@ -163,21 +167,40 @@ curl localhost:8080/support/alice/status
 }
 ```
 
+In a tool part, `error: true` says the output is the tool's error (`Error:
+<message>`), for a UI to show it as one.
+
 **From code.** From a Restate handler, through the agent's definition:
 
 ```ts
 const answer = await ctx.objectClient(assistant, 'alice').chat('Hi, I am Alice');
 ```
 
-From any other code, with Restate's client (`npm install
-@restatedev/restate-sdk-clients`, [its docs](https://docs.restate.dev/develop/ts/clients)):
+From any other code, a web app included, with Restate's own client
+([`@restatedev/restate-sdk-clients`](https://docs.restate.dev/develop/ts/clients)).
+`agent(name)` of `restate-agents/client` is the agent's definition as the
+client takes it: its name, typed with an agent's handlers. It imports
+nothing but types, so a web app bundles it without the agent's code or the
+SDK:
 
 ```ts
 import * as clients from '@restatedev/restate-sdk-clients';
+import { agent } from 'restate-agents/client';
 
 const restate = clients.connect({ url: 'http://localhost:8080' });
-const answer = await restate.objectClient(assistant, 'alice').chat('Hi, I am Alice');
+const alice = restate.objectClient(agent('assistant'), 'alice');
+
+const sent = await restate
+  .objectSendClient(agent('assistant'), 'alice')
+  .chat('Plan my week', clients.rpc.sendOpts({ idempotencyKey: 'msg-1' }));
+const { answering, waiting } = await alice.status(); // while it works
+const { messages } = await alice.messages({ limit: 20 }); // the tool calls so far
+const answer = await restate.result(sent); // once it answered
 ```
+
+`restate-agents/client` also has the types of what the handlers answer
+(`Messages`, `Status`, `Waiting`...); `agent<H>(name)` types an object of
+your own with its handlers `H`.
 
 ## Tools
 
@@ -212,9 +235,10 @@ invocation's id and the call id), as Restate's tools do with each call they
 make: run again, it is the same call. OpenCode and the DeepSeek Harness tell
 the model that a cut-off tool call was interrupted instead, and the model
 makes it again as a new tool call: Restate's tools then make the same call,
-if the input is the same (so a wait for an approval outlasts a restart); a
-tool of your own needs a way for the model to name the call it retries
-(see their READMEs).
+if the input is the same (so a wait for an approval outlasts a restart). They
+keep the calls they wait for in the object's state, `restate-agents.calls`,
+for this. A tool of your own needs a way for the model to name the call it
+retries (see their READMEs).
 
 **Tools for each invocation** (each user's, say) come with the options of
 `chat`: `pi.chat(async (ctx) => ({ tools: await toolsOf(ctx) }))`.

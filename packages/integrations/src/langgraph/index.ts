@@ -149,7 +149,7 @@ export const messages = () =>
         transcript.say('assistant', m.text);
         for (const call of m.tool_calls ?? []) transcript.call(call.id ?? '', call.name, call.args);
       }
-      if (ToolMessage.isInstance(m)) transcript.result(m.tool_call_id, m.text);
+      if (ToolMessage.isInstance(m)) transcript.result(m.tool_call_id, m.text, m.status === 'error');
     }
   });
 

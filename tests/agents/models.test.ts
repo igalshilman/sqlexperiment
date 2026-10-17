@@ -3,7 +3,7 @@
 // caller waits. LangGraph's agent takes a chat model of its own, here one that
 // fails as a provider would.
 import * as restate from '@restatedev/restate-sdk';
-import { chatHandler, tool } from 'restate-agents';
+import { chatHandler, REFUSED, tool } from 'restate-agents';
 import * as deepseek from 'restate-agents/deepseek';
 import * as langgraph from 'restate-agents/langgraph';
 import * as opencode from 'restate-agents/opencode';
@@ -47,6 +47,7 @@ describe('a wrong model', () => {
     const refused = answer(new Failing(new AuthenticationError('invalid x-api-key')));
     await expect(refused).rejects.toBeInstanceOf(restate.TerminalError);
     await expect(refused).rejects.toThrow(/check the agent's model .* API key.*invalid x-api-key/);
+    await expect(refused).rejects.toMatchObject({ code: REFUSED });
     await expect(answer(new Failing(new Error('Anthropic API key not found')))).rejects.toBeInstanceOf(
       restate.TerminalError,
     );
