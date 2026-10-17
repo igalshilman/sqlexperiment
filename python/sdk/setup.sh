@@ -2,7 +2,7 @@
 # Prepare the patched Restate Python SDK (see README.md).
 #
 # Clones the SDK and its shared core at the pinned revisions into .build/, and
-# applies patches/ and the shared core's patch (packages/sdk-shared-core). The SDK's
+# applies patches/ and the shared core's patch (core/sdk-shared-core). The SDK's
 # Cargo.toml takes the core from the clone next to it. The uv workspace
 # (python/pyproject.toml) builds the SDK from .build/sdk-python with
 # maturin and installs it (`make py`).
@@ -32,7 +32,7 @@ unsaved() { # dir patch paths...
   git -C "$dir" add -N -- "$@" 2> /dev/null
   ! git -C "$dir" diff -- "$@" | cmp -s - "$patch"
 }
-if unsaved "$build/sdk-shared-core" ../../packages/sdk-shared-core/sdk-shared-core.patch src Cargo.toml ||
+if unsaved "$build/sdk-shared-core" ../../core/sdk-shared-core/sdk-shared-core.patch src Cargo.toml ||
   unsaved "$build/sdk-python" patches/sdk-python.patch src python tests Cargo.toml pyproject.toml; then
   echo "$build has edits that the patches do not: run patches/regenerate.sh first, or remove .build/ to drop them" >&2
   exit 1
@@ -40,7 +40,7 @@ fi
 
 mkdir -p "$build"
 checkout https://github.com/restatedev/sdk-shared-core.git $SHARED_CORE_REV "$build/sdk-shared-core"
-git -C "$build/sdk-shared-core" apply "$here/../../packages/sdk-shared-core/sdk-shared-core.patch"
+git -C "$build/sdk-shared-core" apply "$here/../../core/sdk-shared-core/sdk-shared-core.patch"
 checkout https://github.com/restatedev/sdk-python.git $SDK_PYTHON_REV "$build/sdk-python"
 git -C "$build/sdk-python" apply "$here/patches/sdk-python.patch"
 # What make takes as the SDK being prepared.

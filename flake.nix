@@ -61,7 +61,7 @@
               curl
               gnumake
 
-              # The TLA+ check (sqlite-kv/spec/check.sh); the benchmark scripts
+              # The TLA+ check (core/sqlite-kv/spec/check.sh); the benchmark scripts
               # run on the Python above.
               jdk_headless
             ]

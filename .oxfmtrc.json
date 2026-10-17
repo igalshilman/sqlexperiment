@@ -1,13 +1,13 @@
 {
-  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "$schema": "./typescript/node_modules/oxfmt/configuration_schema.json",
   "printWidth": 120,
   "singleQuote": true,
   "ignorePatterns": [
     "**/node_modules",
     "**/.venv",
-    "packages/sdk-typescript/.build",
+    "typescript/packages/sdk-typescript/.build",
     "python/sdk/.build",
     "**/target",
-    "pnpm-lock.yaml"
+    "**/pnpm-lock.yaml"
   ]
 }

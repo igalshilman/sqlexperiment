@@ -1,0 +1,10 @@
+{
+  // The page runs in the browser: the DOM's types, not Node's. `pnpm typecheck`.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "types": ["vite/client"]
+  },
+  "include": ["*.ts"],
+  "exclude": []
+}
