@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import threading
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import timedelta
@@ -168,11 +169,25 @@ def service() -> str:
         raise RuntimeError("not in a handler of an agent's object") from None
 
 
-def serve(*services: restate.Service | restate.VirtualObject | restate.Workflow) -> None:
-    """Serve ``services``, and the agents' ``signals``, over HTTP/2, on PORT or 9080, until interrupted."""
+def serve(*services: restate.Service | restate.VirtualObject | restate.Workflow, background: bool = False) -> None:
+    """
+    Serve ``services``, and the agents' ``signals``, over HTTP/2, on PORT or
+    9080, until interrupted; or, with ``background``, on a thread of its own,
+    for as long as the process lives, returning at once (in a Modal Server's
+    ``@modal.enter()``, say).
+    """
     config = hypercorn.config.Config()
     config.bind = [f"0.0.0.0:{os.environ.get('PORT', '9080')}"]
-    asyncio.run(hypercorn.asyncio.serve(app(*services), config))  # type: ignore[arg-type]
+    if not background:
+        asyncio.run(hypercorn.asyncio.serve(app(*services), config))  # type: ignore[arg-type]
+        return
+
+    async def forever() -> None:
+        # Off the main thread, hypercorn cannot wait for a signal to stop: the process's end stops it.
+        await asyncio.Event().wait()
+
+    server = hypercorn.asyncio.serve(app(*services), config, shutdown_trigger=forever)  # type: ignore[arg-type]
+    threading.Thread(target=asyncio.run, args=(server,), name="restate", daemon=True).start()
 
 
 def app(*services: restate.Service | restate.VirtualObject | restate.Workflow, **options: Any) -> Any:

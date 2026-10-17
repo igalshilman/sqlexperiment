@@ -2,7 +2,7 @@
 The support agent (support.py) on Modal, as a Modal Server: Restate calls it
 over HTTP/2, end to end, as the agents need (each attempt runs its handler
 again from the start, so it cannot work over HTTP/1.1's request-response
-mode).
+mode, which is all Modal's web endpoints speak).
 
     make wheels                                                  # at the repository's root: dist/
     uvx modal secret create anthropic ANTHROPIC_API_KEY=...
@@ -14,8 +14,6 @@ The Modal-Key and Modal-Secret are a proxy token's (modal.com/settings/proxy-aut
 only Restate calls the agent. Then talk to it through Restate, as support.py says.
 """
 
-import subprocess
-import sys
 from pathlib import Path
 
 import modal
@@ -27,7 +25,7 @@ image = (
     # The patched Restate SDK, the SQL extension and restate-agents: built here, not on PyPI.
     .add_local_dir(HERE.parent / "dist", "/wheels", copy=True)
     .run_commands("pip install /wheels/*.whl")
-    .add_local_file(HERE / "support.py", "/root/support.py")
+    .add_local_python_source("support")
 )
 
 app = modal.App("restate-support", image=image)
@@ -44,8 +42,7 @@ app = modal.App("restate-support", image=image)
 class Support:
     @modal.enter()
     def start(self):
-        self.process = subprocess.Popen([sys.executable, "/root/support.py"])  # serve(...) on PORT, or 9080
+        from restate_agents import serve
+        from support import orders, refund, support
 
-    @modal.exit()
-    def stop(self):
-        self.process.terminate()
+        serve(orders, refund, support, background=True)  # on port 9080, in this process

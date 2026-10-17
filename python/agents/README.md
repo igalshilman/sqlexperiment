@@ -129,7 +129,9 @@ and the SQL storage hidden from the journal in Restate's UI.
 `@assistant.handler` adds a handler, which takes `ctx`, then its input: one
 parameter, or several, which a JSON object gives by name
 ([`examples-py/memory.py`](../../examples-py/memory.py)). `serve(*services)`
-serves them on `PORT`, or 9080.
+serves them on `PORT`, or 9080; with `background=True`, on a thread of its
+own, returning at once, as in a Modal Server
+([`examples-py/on_modal.py`](../../examples-py/on_modal.py)).
 
 ## Tests
 
