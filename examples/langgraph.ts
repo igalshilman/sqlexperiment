@@ -9,20 +9,18 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  */
-import { tool } from '@langchain/core/tools';
-import { serve } from 'restate-agents';
+import { serve, tool } from 'restate-agents';
 import * as langgraph from 'restate-agents/langgraph';
 import { z } from 'zod';
 
-const weather = tool(
+// A tool, for any framework's agent (the framework's own tools work too).
+const weather = tool({
+  name: 'get_weather',
+  description: 'The current weather in a city.',
+  input: z.object({ city: z.string() }),
   // A stand-in for a real weather API.
-  async ({ city }) => `Sunny and 21°C in ${city}`,
-  {
-    name: 'get_weather',
-    description: 'The current weather in a city.',
-    schema: z.object({ city: z.string() }),
-  },
-);
+  run: async ({ city }) => `Sunny and 21°C in ${city}`,
+});
 
 const assistant = langgraph.agent({ name: 'assistant', tools: [weather] });
 
