@@ -248,6 +248,8 @@ const answer = await restate.result(sent); // once it answered
 `restate-agents/client` also has the types of what the handlers answer
 (`Messages`, `Status`, `Waiting`...); `agent<H>(name)` types an object of
 your own with its handlers `H`.
+[`examples/ui`](../../examples/ui/app.ts) is a chat page on it: the
+conversation as the agent works, its approvals, steering and Stop.
 
 ## Tools
 

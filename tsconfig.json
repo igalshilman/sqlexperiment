@@ -20,5 +20,5 @@
     "skipLibCheck": true
   },
   "include": ["**/*.ts"],
-  "exclude": ["**/node_modules", "packages/sdk-typescript/.build", "python/sdk/.build", "target"]
+  "exclude": ["**/node_modules", "packages/sdk-typescript/.build", "python/sdk/.build", "target", "examples/ui"]
 }

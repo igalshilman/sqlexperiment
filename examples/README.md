@@ -19,6 +19,7 @@ the integrations they use.
 | [`team.ts`](team.ts)            | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                       |
 | [`followup.ts`](followup.ts)    | An agent that schedules a check-in for a day later: `send` with a delay                                                                       |
 | [`triage.ts`](triage.ts)        | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review                                               |
+| [`ui/`](ui/app.ts)              | A chat page for `support.ts` on Restate's own client: the conversation as the agent works, Approve and Reject, Steer, Stop (`npx vite ui`)    |
 | [`notes.ts`](notes.ts)          | SQL in a virtual object, with `ctx.db`                                                                                                        |
 | [`gateway/`](gateway/README.md) | A tool gateway for agents: approvals, and limits per tenant and user                                                                          |
 
