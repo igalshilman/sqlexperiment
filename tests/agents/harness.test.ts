@@ -2,7 +2,7 @@
 // Restate server: each user's model and persona from its database, and the
 // conversation compacted and reset.
 import type * as restate from '@restatedev/restate-sdk';
-import { chatHandler, tool } from 'restate-agents';
+import { tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -43,13 +43,13 @@ async function settingsOf(ctx: restate.SqlObjectContext): Promise<Settings> {
   return row ? (JSON.parse(String(row[0])) as Settings) : {};
 }
 const clock = tool({ name: 'clock', description: 'The time.', input: z.object({}), run: async () => '12:00' });
-const options = async (ctx: restate.SqlObjectContext): Promise<pi.PiOptions> => {
+const options = async (ctx: restate.SqlObjectContext): Promise<pi.Options> => {
   const { model, persona } = await settingsOf(ctx);
   return { model, system: persona ?? 'You are a helpful assistant.', tools: [clock] };
 };
 
 // The handlers of examples/harness.ts.
-const chat = chatHandler(async (ctx, message) => pi.prompt(ctx, message, await options(ctx)));
+const chat = pi.chat(options);
 const configure = async (ctx: restate.SqlObjectContext, settings: Settings) => {
   const next = { ...(await settingsOf(ctx)), ...settings };
   await ctx.db.execute('INSERT OR REPLACE INTO settings (id, json) VALUES (0, ?)', [JSON.stringify(next)]);

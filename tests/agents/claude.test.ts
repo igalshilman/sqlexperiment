@@ -6,9 +6,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { conversation, crashedAnywhere, SAID } from '../testing.ts';
 import { HttpError, teller } from '../fakes/claude.ts';
 import * as claude from 'restate-agents/claude';
+import { bank } from './bank.ts';
 import { prompt } from './claude.ts';
 
 vi.mock('@anthropic-ai/sdk', () => import('../fakes/claude.ts'));
+
+/** A handler that prompts twice, with the bank's tools. */
+const twice = async (ctx: restate.SqlObjectContext) =>
+  JSON.stringify([
+    await claude.prompt(ctx, 'Please move 5 from 1 to 2', { tools: bank('ClaudeAgent') }),
+    await claude.prompt(ctx, 'Hello', { tools: bank('ClaudeAgent') }),
+  ]);
 
 describe('the Claude agent', () => {
   it('answers a message once after a crash at any of its state requests', async () => {
@@ -49,6 +57,17 @@ describe('the Claude agent', () => {
     // The next prompt goes on in the same thread.
     const audit = await c.attempt('inv3', 'audit the books');
     expect(audit).toMatch(/^Done: .*"transfers":1/);
+  });
+
+  it('answers each prompt of an invocation, and each once', async () => {
+    const c = conversation(twice, 't');
+    const both = JSON.stringify([
+      'Done: moved 5 from account 1 to account 2',
+      'Ask me to "move 5 from 1 to 2", or to "audit" the books.',
+    ]);
+    expect(await c.attempt('inv1', '')).toBe(both);
+    expect(await c.attempt('inv1', '')).toBe(both);
+    expect(c.ledger.calls).toHaveLength(1);
   });
 
   it('resumes a crashed attempt from its last step, with the same tool call', async () => {

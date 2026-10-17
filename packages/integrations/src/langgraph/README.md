@@ -23,7 +23,10 @@ await serve(assistant);
 | `tools`  | `tool()`s and Restate's tools of `restate-agents`, or LangChain's tools                                                                                            |
 
 For an object of your own, `langgraph.chat(options)` and
-`langgraph.messages()` are the handlers. The graph is the usual tool-calling
+`langgraph.messages()` are the handlers; `options` may be a function of the
+invocation's context (each user's system prompt, say). `langgraph.prompt(ctx,
+text, options)` answers a prompt in a handler of your own, once, however
+often the handler runs; each prompt of an invocation is a prompt of its own. The graph is the usual tool-calling
 loop: a model node, a tools node, and back to the model until it answers.
 
 ## Through crashes

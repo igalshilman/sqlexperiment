@@ -11,11 +11,11 @@ export {
   type Messages,
   type MessagesRequest,
   type Part,
-  type PerCall,
+  type Configure,
 } from './common.ts';
 export { object } from './object.ts';
 export { signals, type Resolved, type Signal, type Waiting } from './signals.ts';
-export { call, send, signal, subagent, tool, workflow, type Tool, type ToolContext } from './tools.ts';
+export { call, send, signal, subagent, tool, workflow, type Tool, type ToolCall, type ToolContext } from './tools.ts';
 
 /**
  * Serve `services` on PORT (default 9080), with what the agents need beside

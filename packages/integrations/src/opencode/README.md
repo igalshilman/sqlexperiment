@@ -14,7 +14,7 @@ OpenCode needs Node 24.
 import { serve } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 
-const coder = opencode.agent({ name: 'coder', workspace: (ctx) => `/work/${ctx.key}` });
+const coder = opencode.agent({ name: 'coder', workspace: '/work/coder' });
 await serve(coder);
 ```
 
@@ -22,13 +22,21 @@ await serve(coder);
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)                                      |
 | `system`    | The system prompt                                                                                                                                                       |
-| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`Tool`)                                                                               |
+| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`OpenCodeTool`)                                                                       |
 | `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...); use a sandbox. Without one, the agent has only `tools` |
 
 For an object of your own, `opencode.chat(options)` and
-`opencode.messages()` are the handlers. For more than a prompt,
-`withOpenCode(ctx, options, work)` runs `work` with OpenCode, and
-`session.prompt(text)` answers a prompt once per invocation.
+`opencode.messages()` are the handlers; `options` may be a function of the
+invocation's context, such as a directory for each key:
+
+```ts
+chat: opencode.chat((ctx) => ({ workspace: `/work/${ctx.key}` })),
+```
+
+`opencode.prompt(ctx, text, options)` answers a prompt in a handler of your
+own. For more than a prompt, `withOpenCode(ctx, options, work)` runs `work`
+with OpenCode: `prompt(text)` answers a prompt once, and `host` is OpenCode's
+client.
 
 ## Through crashes
 
