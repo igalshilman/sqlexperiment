@@ -120,6 +120,11 @@ try {
   await post('support/alice/signal', { name: 'approval', value: 'approved by Kim' });
   assert.equal(await answer, 'order 103: delivered / approved by Kim / refunded 103');
   assert.deepEqual(await post('support/alice/pending'), []);
+  // The conversation: what was said, without the tool calls.
+  assert.deepEqual(await post('support/alice/messages'), [
+    { role: 'user', text: 'Refund order 103, please' },
+    { role: 'assistant', text: 'order 103: delivered / approved by Kim / refunded 103' },
+  ]);
 
   // A signal resolved before the agent waits for it is kept for it.
   await post('support/bob/signal', { name: 'approval', value: 'approved early' });

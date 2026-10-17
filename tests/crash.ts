@@ -282,15 +282,19 @@ const shop = pool(
 );
 
 // Agents: transfers, then an audit, per session of each agent.
+/** Session `s`'s prompt `p`: a transfer. */
+function promptText(s: number, p: number) {
+  const from = (s + p) % ACCOUNTS;
+  const to = (s + 3 * p + 1) % ACCOUNTS;
+  return `Please move ${1 + p} from ${from} to ${to === from ? (to + 1) % ACCOUNTS : to}`;
+}
 const sessions = AGENTS.flatMap((name) => Array.from({ length: SESSIONS }, (_, s) => [name, s] as const));
 const agents = pool(
   sessions.length,
   sessions.map(([name, s]) => async () => {
     for (let p = 0; p < PROMPTS; p++) {
-      const from = (s + p) % ACCOUNTS;
-      const to = (s + 3 * p + 1) % ACCOUNTS;
       const id = `s${s}-p${p}`;
-      const text = `Please move ${1 + p} from ${from} to ${to === from ? (to + 1) % ACCOUNTS : to}`;
+      const text = promptText(s, p);
       // Sent again, by its idempotency key: the same invocation, and answer.
       for (let n = 0; n < (p % 3 === 0 ? 2 : 1); n++) {
         const answer = await call<string>(`${name}/s${s}/chat`, text, { 'idempotency-key': id });
@@ -320,6 +324,18 @@ await Promise.all([shop, agents, kills]);
 const starts = services.map((s) => s.starts);
 await Promise.all(services.map((s) => s.stop()));
 services = PROCESSES.map((p) => supervise(p, 0));
+
+// Each agent's conversation has each prompt once, in order, however often
+// its attempts crashed and its messages were sent again.
+for (const [name, s] of sessions) {
+  const said = await call<{ role: string; text: string }[]>(`${name}/s${s}/messages`);
+  const asked = said.filter((m) => m.role === 'user').map((m) => m.text);
+  assert.deepEqual(
+    asked,
+    [...Array.from({ length: PROMPTS }, (_, p) => promptText(s, p)), 'audit the books'],
+    `${name}/s${s}`,
+  );
+}
 
 // Unpaid orders expire.
 const statuses = new Map<string, Order>();

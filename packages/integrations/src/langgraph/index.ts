@@ -25,11 +25,11 @@
 import type * as restate from '@restatedev/restate-sdk';
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { type BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { type StructuredToolInterface, tool } from '@langchain/core/tools';
 import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
-import { chatHandler, forCall, modelIdOf, modelOf, type PerCall } from '../common.ts';
+import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, said, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 
@@ -119,9 +119,22 @@ const respond =
  */
 export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
-/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+/** A handler of the thread: what was said, in order, from its last checkpoint. */
+export const messages = () =>
+  messagesHandler(async (ctx) => {
+    const saved = await new SqlCheckpointSaver(ctx.db).getTuple({ configurable: { thread_id: ctx.key } });
+    const stored = (saved?.checkpoint.channel_values.messages ?? []) as BaseMessage[];
+    return stored.flatMap((m) => {
+      if (m.getType() === 'human') return said('user', m.text);
+      if (m.getType() === 'ai') return said('assistant', m.text);
+      return [];
+    });
+  });
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });
+}: ChatOptions & { name: P; description?: string }) =>
+  object({ name, description, handlers: { chat: chat(options), messages: messages() } });

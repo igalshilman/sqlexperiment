@@ -45,7 +45,7 @@ import {
 } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
-import { chatHandler, forCall, modelOf, type PerCall } from '../common.ts';
+import { chatHandler, forCall, messagesHandler, modelOf, said, type ChatMessage, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
@@ -186,9 +186,29 @@ const respond =
  */
 export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
-/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+/** A handler of the conversation: what was said, in order, from pi-durable's entries. */
+export const messages = () =>
+  messagesHandler((ctx) =>
+    withPi(ctx, {}, async ({ harness, context }) => {
+      const root = await harness.root(context);
+      const conversation: ChatMessage[] = [];
+      for (let cursor: Parameters<typeof root.entries>[2]; ;) {
+        const page = await root.entries({ order: 'ascending' }, 100, cursor, context);
+        for (const entry of page.items) {
+          for (const m of entry.model ?? []) {
+            if (m.role === 'user' || m.role === 'assistant') conversation.push(...said(m.role, textOf(m.content)));
+          }
+        }
+        cursor = page.next;
+        if (cursor === undefined) return conversation;
+      }
+    }),
+  );
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });
+}: ChatOptions & { name: P; description?: string }) =>
+  object({ name, description, handlers: { chat: chat(options), messages: messages() } });

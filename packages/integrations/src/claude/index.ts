@@ -22,7 +22,7 @@
 import type * as restate from '@restatedev/restate-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
-import { chatHandler, forCall, modelIdOf, modelOf, type PerCall } from '../common.ts';
+import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, said, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -158,9 +158,23 @@ const respond = ({ model: named, system, tools = [] }: ChatOptions = {}) => {
  */
 export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
-/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+/** The text of a stored message's content, without its tool calls and results. */
+const storedText = (content: Anthropic.Beta.Messages.BetaMessageParam['content']) =>
+  typeof content === 'string' ? content : content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
+
+/** A handler of the conversation: what was said, in order. */
+export const messages = () =>
+  messagesHandler(async (ctx) => {
+    const conversation = await Conversation.open(ctx.db);
+    return (await conversation.messages()).flatMap((m) =>
+      m.role === 'system' ? [] : said(m.role, storedText(m.content)),
+    );
+  });
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });
+}: ChatOptions & { name: P; description?: string }) =>
+  object({ name, description, handlers: { chat: chat(options), messages: messages() } });

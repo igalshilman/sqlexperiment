@@ -42,11 +42,11 @@ import {
   type ToolRunContext,
   ToolRuntime,
 } from '@deepseek-ai/dsh-tools';
-import { chatHandler, forCall, modelIdOf, modelOf, type PerCall } from '../common.ts';
+import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, said, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
-import { SqlSessionPersistence } from './persistence.ts';
+import { SqlSessionPersistence, storedEvents } from './persistence.ts';
 
 export { SqlSessionPersistence };
 
@@ -263,9 +263,21 @@ const respond =
  */
 export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
-/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+/** A handler of the session: what was said, in order, from its log. */
+export const messages = () =>
+  messagesHandler(async (ctx) =>
+    (await storedEvents(ctx.db, SessionId(ctx.key))).flatMap((e) => {
+      // The prompts, not the requests to continue an interrupted turn.
+      if (e.type === 'user/message' && e.data.id.startsWith('prompt:')) return said('user', textOf(e.data));
+      if (e.type === 'assistant/message') return said('assistant', textOf(e.data.message));
+      return [];
+    }),
+  );
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });
+}: ChatOptions & { name: P; description?: string }) =>
+  object({ name, description, handlers: { chat: chat(options), messages: messages() } });

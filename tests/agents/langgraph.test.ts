@@ -2,7 +2,7 @@
 // handler (see ../testing.ts): LangGraph gets no chance to save anything on the
 // way out of a crashed attempt. `make test-ts T=langgraph`. Its model is the teller (../fakes/langgraph.ts).
 import { describe, expect, it, vi } from 'vitest';
-import { conversation } from '../testing.ts';
+import { conversation, SAID } from '../testing.ts';
 import { Teller } from '../fakes/langgraph.ts';
 import * as langgraph from 'restate-agents/langgraph';
 import { prompt } from './langgraph.ts';
@@ -10,6 +10,14 @@ import { prompt } from './langgraph.ts';
 vi.mock('@langchain/anthropic', () => import('../fakes/langgraph.ts'));
 
 describe('the LangGraph agent', () => {
+  it('gives the conversation: what was said, in order, without tool calls', async () => {
+    const c = conversation(prompt, 'm');
+    await c.attempt('inv1', 'Please move 5 from 1 to 2');
+    await c.attempt('inv2', 'audit the books');
+    const said = await c.read(langgraph.messages());
+    expect(said).toEqual(SAID);
+  });
+
   it('gives the model its system prompt', async () => {
     const c = conversation(langgraph.chat({ system: 'You are Ada.' }), 'ada');
     expect(await c.attempt('inv1', 'Who are you?')).toBe('You are Ada.');

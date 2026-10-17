@@ -160,6 +160,16 @@ export function conversation(handler: PromptHandler, key: string) {
       };
       return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, prompt));
     },
+    /** Another handler of the object, without input (such as `messages`), in an attempt of its own. */
+    async read<T>(other: (ctx: restate.SqlObjectContext) => Promise<T>, requestId = 'read') {
+      fence.closed = true;
+      fence = { closed: false };
+      abort?.();
+      const sql = sqlAttempt({ map, fence, key, id: requestId });
+      abort = sql.abort;
+      const ctx = { key, request: () => ({ id: requestId }), db: sql.db, transaction: sql.transaction };
+      return sql.end(() => other(ctx as unknown as restate.SqlObjectContext));
+    },
     /** An attempt that crashes in its next transfer. */
     async crash(requestId: string, prompt: string) {
       ledger.crashNext = 1;
@@ -169,3 +179,12 @@ export function conversation(handler: PromptHandler, key: string) {
     },
   };
 }
+
+/** What `messages` gives after the bank conversation of the agents' tests: a transfer, then an audit. */
+export const SAID = [
+  { role: 'user', text: 'Please move 5 from 1 to 2' },
+  { role: 'assistant', text: 'On it.' },
+  { role: 'assistant', text: 'Done: moved 5 from account 1 to account 2' },
+  { role: 'user', text: 'audit the books' },
+  { role: 'assistant', text: 'Done: {"accounts":8,"total":8000,"transfers":1,"inconsistent":0}' },
+];
