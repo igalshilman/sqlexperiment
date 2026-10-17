@@ -57,7 +57,8 @@ example's docstring has its requests.
 ## Run on Modal
 
 [`on_modal.py`](on_modal.py) deploys `support.py` to Modal, as a Modal Server
-(`@app.server(h2_enabled=True)`): Restate calls it over HTTP/2, end to end.
+(`@app.server(h2_enabled=True)`), which serves the agent in its own process
+(`serve(..., background=True)`): Restate calls it over HTTP/2, end to end.
 The agents need that: an attempt that waits runs its handler again from the
 start, so HTTP/1.1's request-response mode (Modal's web endpoints, AWS
 Lambda) cannot serve them. Its image installs the wheels of `make wheels`
