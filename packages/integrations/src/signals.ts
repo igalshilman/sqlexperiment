@@ -8,6 +8,9 @@
 // before anyone waits is kept for the next `wait`.
 import * as restate from '@restatedev/restate-sdk';
 
+/** The key of the signals of the object `service`'s key `key`. */
+export const signalsOf = (service: string, key: string) => `${service}:${key}`;
+
 /** The awakeables waiting for each signal, and the values resolved before anyone waited. */
 interface State {
   waiting: Record<string, string[]>;

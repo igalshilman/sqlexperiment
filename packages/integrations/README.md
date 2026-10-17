@@ -63,14 +63,15 @@ Each Restate call has an idempotency key made of the invocation's id and the
 model's tool call id: a crash runs an unfinished tool call again, and it
 makes the same call, once.
 
-A signal is resolved through the `signals` object, keyed `<agent>:<key>`;
-`pending` lists what an agent waits for, and a signal resolved before the
-agent waits is kept for it:
+Every agent (every `object()`) has a `signal` handler, which resolves a
+signal, and `pending`, which lists what it waits for; both run while the
+agent waits. A signal resolved before the agent waits is kept for it:
 
 ```sh
-curl localhost:8080/signals/support:alice/pending
-curl localhost:8080/signals/support:alice/resolve --json '{"name": "approval", "value": "approved"}'
+curl localhost:8080/support/alice/pending
+curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'
 ```
 
-`serve(...services)` serves the agents with the `signals` object, on PORT
+Underneath, signals are kept by the `signals` object, keyed
+`<agent>:<key>`; `serve(...services)` serves the agents with it, on PORT
 (default 9080). See [`examples/support.ts`](../../examples/support.ts).
