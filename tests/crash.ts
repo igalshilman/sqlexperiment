@@ -127,8 +127,8 @@ function supervise({ name, groups, port }: Process, perMille: number): Supervise
     spawn(process.execPath, ['--import', FAKES, fileURLToPath(new URL('serve.ts', import.meta.url)), ...groups], {
       env: {
         ...process.env,
-        PI_MODEL: 'teller/teller',
-        OPENCODE_MODEL: 'teller/teller',
+        // pi's and OpenCode's model: the teller (the others' are faked by name).
+        ...(['agent', 'opencode'].includes(name) ? { MODEL: 'teller/teller' } : {}),
         PORT: String(port),
         ABORT_PER_MILLE: String(perMille),
         ...(first && perMille > 0 ? { ABORT_AT: String(20 + Math.floor(Math.random() * 180)) } : {}),

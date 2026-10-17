@@ -20,7 +20,7 @@
 // (read, write, edit, bash; see restate-agents/pi). Run it in a sandbox:
 // `bash` runs any command, within the directory or outside it.
 //
-// Environment: PORT, PI_MODEL (see restate-agents/pi) with its provider's
+// Environment: PORT, MODEL (see restate-agents/pi) with its provider's
 // API key, and WORKSPACE.
 import * as restate from '@restatedev/restate-sdk';
 import { Type } from '@earendil-works/pi-ai';

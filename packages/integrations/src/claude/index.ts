@@ -6,7 +6,7 @@
 //
 // or a handler of an object of your own: `handlers: { chat: claude.chat() }`
 //
-// The model is `model`, or else CLAUDE_MODEL (default claude-sonnet-5-5),
+// The model is `model`, or else MODEL, or else anthropic/claude-sonnet-5-5,
 // with ANTHROPIC_API_KEY.
 //
 // The handler is not replayed: a retried attempt (a crash, a lost connection)
@@ -22,7 +22,7 @@
 import type * as restate from '@restatedev/restate-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
-import { chatHandler, forCall, type PerCall } from '../common.ts';
+import { chatHandler, forCall, modelIdOf, modelOf, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -31,7 +31,7 @@ import { Conversation } from './conversation.ts';
 export { Conversation };
 
 /** The default model. */
-export const DEFAULT_MODEL = 'claude-sonnet-5-5';
+export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
 
 /** The id of the tool call a tool runs for: the runner always passes it. */
 export const callId = (context?: BetaToolRunContext) => {
@@ -120,7 +120,7 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): BetaRunnableTool =>
   });
 
 export interface ChatOptions {
-  /** The model: CLAUDE_MODEL, or else {@link DEFAULT_MODEL}. */
+  /** The model, as `anthropic/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** The system prompt. */
   system?: string;
@@ -129,8 +129,9 @@ export interface ChatOptions {
 }
 
 /** The answer to a message, each message an invocation, the conversation in the object's database. */
-const respond = ({ model = process.env.CLAUDE_MODEL ?? DEFAULT_MODEL, system, tools = [] }: ChatOptions = {}) => {
+const respond = ({ model: named, system, tools = [] }: ChatOptions = {}) => {
   const client = new Anthropic();
+  const model = modelIdOf(modelOf(named, DEFAULT_MODEL), 'anthropic');
   return async (ctx: restate.SqlObjectContext, message: string): Promise<string> => {
     const agent = { client, model, system, tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))) };
     const id = ctx.request().id;

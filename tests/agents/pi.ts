@@ -7,7 +7,7 @@
 // request id (`ctx.request().id`, the same on every attempt) and the tool
 // call id, so a retried attempt reaches the call the first one made.
 //
-// Environment: PORT (default 9080), PI_MODEL with its provider's API key,
+// Environment: PORT (default 9080), MODEL with its provider's API key,
 // and ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
 import { object } from 'restate-agents';

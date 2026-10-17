@@ -6,9 +6,9 @@
 // or a handler of an object of your own: `handlers: { chat: langgraph.chat() }`
 //
 // The graph is the usual tool-calling loop: a model node, a tools node, and
-// back to the model until it answers. The model is `model`, or else
-// ChatAnthropic with LANGGRAPH_MODEL (default claude-sonnet-5-5) and
-// ANTHROPIC_API_KEY.
+// back to the model until it answers. The model is `model` (a chat model, or
+// `anthropic/model-id`), or else MODEL, or else anthropic/claude-sonnet-5-5,
+// with ANTHROPIC_API_KEY.
 //
 // The handler is not replayed: a retried attempt (a crash, a lost connection)
 // runs again from the start, and LangGraph carries on from the last step it
@@ -29,7 +29,7 @@ import { HumanMessage } from '@langchain/core/messages';
 import { type StructuredToolInterface, tool } from '@langchain/core/tools';
 import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
-import { chatHandler, forCall, type PerCall } from '../common.ts';
+import { chatHandler, forCall, modelIdOf, modelOf, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 
@@ -38,7 +38,7 @@ import { SqlCheckpointSaver } from './checkpointer.ts';
 export { SqlCheckpointSaver };
 
 /** The default model, of Anthropic. */
-export const DEFAULT_MODEL = 'claude-sonnet-5-5';
+export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
 
 const State = Annotation.Root({
   ...MessagesAnnotation.spec,
@@ -73,8 +73,11 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): StructuredToolInterf
   );
 
 export interface ChatOptions {
-  /** A chat model that calls tools, or for an invocation; by default ChatAnthropic. */
-  model?: PerCall<BaseChatModel>;
+  /**
+   * The model: `anthropic/model-id` (MODEL, or else {@link DEFAULT_MODEL}),
+   * or a chat model that calls tools, or for an invocation.
+   */
+  model?: PerCall<string | BaseChatModel>;
   /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or LangChain's, or for an invocation. */
   tools?: (PerCall<StructuredToolInterface> | AnyTool)[];
 }
@@ -83,9 +86,11 @@ export interface ChatOptions {
 const respond =
   ({ model, tools = [] }: ChatOptions = {}) =>
   async (ctx: restate.SqlObjectContext, message: string): Promise<string> => {
-    const llm = model
-      ? forCall(model, ctx)
-      : new ChatAnthropic({ model: process.env.LANGGRAPH_MODEL ?? DEFAULT_MODEL });
+    const chosen = model === undefined ? undefined : forCall(model, ctx);
+    const llm =
+      typeof chosen === 'object'
+        ? chosen
+        : new ChatAnthropic({ model: modelIdOf(modelOf(chosen, DEFAULT_MODEL), 'anthropic') });
     const app = graph(
       llm,
       tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),

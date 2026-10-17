@@ -5,7 +5,7 @@
 #
 #   INGRESS=http://localhost:8080 ADMIN=http://localhost:9070 gateway/demo.sh
 #
-# The agent's model is the endpoint's PI_MODEL, such as openai/gpt-6-luna.
+# The agent's model is the endpoint's MODEL, such as openai/gpt-6-luna.
 # Press enter between acts.
 set -euo pipefail
 INGRESS=${INGRESS:-http://localhost:8080}

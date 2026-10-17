@@ -1,7 +1,7 @@
 // The bank agent on the DeepSeek Harness (restate-agents/deepseek): a DeepSeekAgent object per conversation, whose tools
 // (./bank.ts) move money in the ledger.
 //
-// Environment: PORT (default 9080), DEEPSEEK_API_KEY, DEEPSEEK_MODEL, and ABORT_PER_MILLE (see
+// Environment: PORT (default 9080), DEEPSEEK_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
 import { object } from 'restate-agents';
 import * as deepseek from 'restate-agents/deepseek';

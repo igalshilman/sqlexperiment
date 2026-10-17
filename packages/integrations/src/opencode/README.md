@@ -43,7 +43,7 @@ built on (4.0.1). OpenCode needs Node 24.
   [`examples/coding.ts`](../../../../examples/coding.ts), OpenCode coders,
   each with a directory, under a pi coordinator.
 
-The model is `model`, or else `OPENCODE_MODEL=provider/model-id`, by default
+The model is `model`, or else `MODEL`, as `provider/model-id`, by default
 `anthropic/claude-sonnet-5-5` (with `ANTHROPIC_API_KEY`), which OpenCode's
 own providers serve.
 
