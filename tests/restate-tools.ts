@@ -3,8 +3,8 @@
 // model, which looks the order up, waits for approval, then refunds.
 //
 // Checks: the agent waits for the signal (`pending` lists it) until it is
-// resolved, then answers with every tool's result; and a signal resolved
-// before the agent waits for it is kept for it.
+// resolved, then answers with every tool's result; a signal resolved before
+// the agent waits for it is kept for it; and a message may be plain text.
 //
 //   RESTATE_SERVER=/path/to/restate-server node restate-tools.ts   (or make tools-test)
 import assert from 'node:assert/strict';
@@ -118,6 +118,15 @@ try {
     await post('support/bob/chat', 'Refund order 103'),
     'order 103: delivered / approved early / refunded 103',
   );
+
+  // A message as plain text, as `curl -d` sends it.
+  await post('support/carol/signal', { name: 'approval', value: 'approved' });
+  const plain = await fetch(`${INGRESS}/support/carol/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: 'Refund order 103',
+  });
+  assert.equal(await plain.json(), 'order 103: delivered / approved / refunded 103');
   console.log('ok');
 } finally {
   server.kill('SIGKILL');

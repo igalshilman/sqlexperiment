@@ -29,7 +29,7 @@ import { HumanMessage } from '@langchain/core/messages';
 import { type StructuredToolInterface, tool } from '@langchain/core/tools';
 import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
-import { forCall, type PerCall } from '../common.ts';
+import { chatHandler, forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 
@@ -79,8 +79,8 @@ export interface ChatOptions {
   tools?: (PerCall<StructuredToolInterface> | AnyTool)[];
 }
 
-/** A chat handler: each message an invocation, the thread (the object's key) in the object's database. */
-export const chat =
+/** The answer to a message, each message an invocation, the thread (the object's key) in the object's database. */
+const respond =
   ({ model, tools = [] }: ChatOptions = {}) =>
   async (ctx: restate.SqlObjectContext, message: string): Promise<string> => {
     const llm = model
@@ -101,6 +101,13 @@ export const chat =
       await app.invoke(state.next.length > 0 ? null : { messages: [new HumanMessage(message)], prompt: id }, config);
     }
   };
+
+/**
+ * A chat handler: each message an invocation, the thread (the object's key) in the object's database.
+ * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
+ * (`curl --json '"Hi"'`).
+ */
+export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
 export const agent = <P extends string>({

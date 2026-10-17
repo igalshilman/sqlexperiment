@@ -7,8 +7,8 @@
  *
  *   ANTHROPIC_API_KEY=… node chat.ts
  *   restate deployments register http://localhost:9080
- *   curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice. Is it warm in Lisbon?"'
- *   curl localhost:8080/assistant/alice/chat --json '"What is my name?"'
+ *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
+ *   curl localhost:8080/assistant/alice/chat -d 'What is my name?'
  */
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';

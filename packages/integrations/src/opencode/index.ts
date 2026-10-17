@@ -35,7 +35,7 @@ import * as restate from '@restatedev/restate-sdk';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
-import { forCall, type PerCall } from '../common.ts';
+import { chatHandler, forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 
@@ -293,8 +293,8 @@ export interface ChatOptions {
   directory?: PerCall<string | undefined>;
 }
 
-/** A chat handler: each message an invocation, the session in the object's database. */
-export const chat =
+/** The answer to a message, each message an invocation, the session in the object's database. */
+const respond =
   ({ model, tools = [], directory }: ChatOptions = {}) =>
   (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
     prompt(ctx, message, {
@@ -311,6 +311,13 @@ export const chat =
       ),
       directory: directory === undefined ? undefined : forCall(directory, ctx),
     });
+
+/**
+ * A chat handler: each message an invocation, the session in the object's database.
+ * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
+ * (`curl --json '"Hi"'`).
+ */
+export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
 export const agent = <P extends string>({

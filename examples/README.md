@@ -7,7 +7,7 @@ call it:
 ```sh
 ANTHROPIC_API_KEY=… node chat.ts
 restate deployments register http://localhost:9080
-curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice"'
+curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
 ```
 
 | File                            | What                                                                                                           |

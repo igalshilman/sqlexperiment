@@ -8,7 +8,7 @@
  *
  *   ANTHROPIC_API_KEY=… WORKSPACE=/tmp/coding node coding.ts
  *   restate deployments register http://localhost:9080
- *   curl localhost:8080/coordinator/alice/chat --json '"Write fizzbuzz.py and primes.py, and run them"'
+ *   curl localhost:8080/coordinator/alice/chat -d 'Write fizzbuzz.py and primes.py, and run them'
  */
 import { serve, subagent } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
