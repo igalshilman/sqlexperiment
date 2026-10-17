@@ -108,6 +108,11 @@ pub struct Runtime {
     /// any store whose catalog names that version.
     goldens: Mutex<HashMap<String, Arc<Vec<u8>>>>,
 }
+// The source hash is hexadecimal: no `/` in it, so the key is unambiguous.
+fn golden_key(application: &Application) -> String {
+    format!("{}/{}", application.source_hash, application.id)
+}
+
 struct Host {
     now: u64,
     seed: [u8; 32],
@@ -149,21 +154,19 @@ impl Runtime {
         })
     }
 
-    /// The application's golden memory, decompressed by `load` only the first
-    /// time this runtime meets the application version.
-    pub(crate) fn golden_memory(
-        &self,
-        application: &Application,
-        load: impl FnOnce() -> anyhow::Result<Vec<u8>>,
-    ) -> anyhow::Result<Arc<Vec<u8>>> {
-        // The source hash is hexadecimal: no `/` in it, so the key is unambiguous.
-        let key = format!("{}/{}", application.source_hash, application.id);
-        if let Some(memory) = self.goldens.lock().unwrap().get(&key) {
-            return Ok(memory.clone());
-        }
-        let memory = Arc::new(load()?);
-        self.goldens.lock().unwrap().insert(key, memory.clone());
-        Ok(memory)
+    /// The application's golden memory, if this runtime has decompressed it.
+    pub(crate) fn cached_golden(&self, application: &Application) -> Option<Arc<Vec<u8>>> {
+        self.goldens
+            .lock()
+            .unwrap()
+            .get(&golden_key(application))
+            .cloned()
+    }
+    pub(crate) fn cache_golden(&self, application: &Application, memory: Vec<u8>) -> Arc<Vec<u8>> {
+        let memory = Arc::new(memory);
+        let mut goldens = self.goldens.lock().unwrap();
+        goldens.insert(golden_key(application), memory.clone());
+        memory
     }
     pub fn build_id(&self) -> &str {
         &self.build

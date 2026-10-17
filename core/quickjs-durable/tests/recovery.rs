@@ -11,7 +11,7 @@ fn runtime() -> Arc<Runtime> {
 }
 fn engine(source: &str) -> Engine<MemoryTransaction> {
     let mut e = Engine::new(MemoryTransaction::default(), runtime());
-    e.register("v1", source).expect("register");
+    futures_executor::block_on(e.register("v1", source)).expect("register");
     e
 }
 fn value(outcome: &Option<Outcome>) -> Value {
@@ -48,7 +48,10 @@ fn closure_cycles_map_and_cold_resume() -> Result<()> {
         1002,
     ))?;
     assert_eq!(value(&done.state.outcome), json!({"n":42,"identity":true}));
-    assert_eq!(e.recover("run")?.checkpoint_id, done.checkpoint_id);
+    assert_eq!(
+        futures_executor::block_on(e.recover("run"))?.checkpoint_id,
+        done.checkpoint_id
+    );
     assert_eq!(
         futures_executor::block_on(e.complete("run", "run/0", Outcome::success(999), 1003))?
             .checkpoint_id,
@@ -65,19 +68,18 @@ fn closure_cycles_map_and_cold_resume() -> Result<()> {
 fn golden_versions_and_invocation_isolation() -> Result<()> {
     let source = "const shared={n:10}; async function main(input){ shared.n+=input; await durable.call('observe'); return shared.n; }";
     let mut e = engine(source);
-    e.register("v1", source)?;
+    futures_executor::block_on(e.register("v1", source))?;
     let registered = e.into_storage()?;
     let mut invalid = Engine::new(registered.clone(), runtime());
     assert!(
-        invalid
-            .register("v1", "async function main(){return 0}")
+        futures_executor::block_on(invalid.register("v1", "async function main(){return 0}"))
             .is_err()
     );
     assert!(invalid.into_storage().is_err());
     let mut e = Engine::new(registered, runtime());
     let a = futures_executor::block_on(e.start("a", "v1", json!(2), 1000))?;
     let b = futures_executor::block_on(e.start("b", "v1", json!(7), 1000))?;
-    e.register("v2", "async function main(){return 99}")?;
+    futures_executor::block_on(e.register("v2", "async function main(){return 99}"))?;
     assert_eq!(
         value(
             &futures_executor::block_on(e.complete(
@@ -259,7 +261,10 @@ fn zero_growth_overwrites_and_no_history_dependency() -> Result<()> {
     kv.values
         .retain(|key, _| !key.starts_with("checkpoint/") || key.ends_with(&state.checkpoint_id));
     let mut e = Engine::new(kv, runtime());
-    assert_eq!(e.recover("r")?.checkpoint_id, state.checkpoint_id);
+    assert_eq!(
+        futures_executor::block_on(e.recover("r"))?.checkpoint_id,
+        state.checkpoint_id
+    );
     let done = futures_executor::block_on(e.complete(
         "r",
         state.state.pending[0].id(),
@@ -290,7 +295,7 @@ fn missing_golden_and_incompatible_build_are_rejected() -> Result<()> {
             }
         }
         assert!(
-            Engine::new(kv, runtime()).recover("r").is_err(),
+            futures_executor::block_on(Engine::new(kv, runtime()).recover("r")).is_err(),
             "mode={mode}"
         );
     }
@@ -304,7 +309,7 @@ fn initialization_and_guest_failure_contract() -> Result<()> {
         "async function main( {",
     ] {
         let mut e = Engine::new(MemoryTransaction::default(), runtime());
-        assert!(e.register("bad", source).is_err());
+        assert!(futures_executor::block_on(e.register("bad", source)).is_err());
         assert!(
             !e.storage()
                 .values
@@ -359,12 +364,10 @@ fn fuel_exhaustion_preserves_committed_head() -> Result<()> {
         .unwrap()
         .1;
     assert_eq!(head, before.checkpoint_id.as_bytes());
-    assert!(e.recover("r").is_err());
+    assert!(futures_executor::block_on(e.recover("r")).is_err());
     assert!(e.into_storage().is_err());
     assert_eq!(
-        Engine::new(committed, runtime())
-            .recover("r")?
-            .checkpoint_id,
+        futures_executor::block_on(Engine::new(committed, runtime()).recover("r"))?.checkpoint_id,
         before.checkpoint_id
     ); // no event replay
     Ok(())

@@ -22,7 +22,7 @@ fn runtime() -> Arc<Runtime> {
 }
 fn register(host: &mut Host, source: &str) -> Result<()> {
     let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
-    engine.register("v1", source)?;
+    futures_executor::block_on(engine.register("v1", source))?;
     engine.into_storage()?.commit()?;
     Ok(())
 }
@@ -37,11 +37,11 @@ struct GatedRead<'a> {
     gate: Option<oneshot::Receiver<()>>,
 }
 impl Kv for GatedRead<'_> {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        self.inner.get(key)
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get(key).await
     }
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
-        self.inner.put(key, value)
+    async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        self.inner.put(key, value).await
     }
 }
 impl Transaction for GatedRead<'_> {
@@ -56,8 +56,8 @@ impl Transaction for GatedRead<'_> {
         }
         self.inner.execute(op).await
     }
-    fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
-        self.inner.acknowledge(id, outcome, now)
+    async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
+        self.inner.acknowledge(id, outcome, now).await
     }
 }
 
@@ -141,7 +141,7 @@ fn cancelling_a_pending_read_rolls_back_state_effects_and_input() -> Result<()> 
     assert_eq!(engine.storage().inner.io().kv_writes, 1);
     // Even if the caller mistakenly tries to commit after cancellation, the
     // engine must refuse extraction and drop the SQLite transaction.
-    assert!(engine.recover("r").is_err());
+    assert!(futures_executor::block_on(engine.recover("r")).is_err());
     assert!(engine.into_storage().is_err());
     drop(host);
     let mut host = Host::open(&path)?;
@@ -156,7 +156,7 @@ fn cancelling_a_pending_read_rolls_back_state_effects_and_input() -> Result<()> 
         0
     );
     let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
-    assert!(engine.recover("r").is_err());
+    assert!(futures_executor::block_on(engine.recover("r")).is_err());
     let retry = block_on(engine.start("r", "v1", Value::Null, 1001))?;
     assert_eq!(retry.state.status, Status::Waiting);
     engine.into_storage()?.commit()?;
@@ -191,7 +191,10 @@ fn completion_consumption_rolls_back_with_vm_and_state_then_commits_once() -> Re
     assert_eq!(effects[0].outcome, Some(Outcome::success(42)));
     let mut engine = Engine::new(host.begin("r", "scope")?, runtime())
         .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
-    assert_eq!(engine.recover("r")?.checkpoint_id, first.checkpoint_id);
+    assert_eq!(
+        futures_executor::block_on(engine.recover("r"))?.checkpoint_id,
+        first.checkpoint_id
+    );
     assert_eq!(engine.storage().io().checkpoint_writes, 0);
     let next = block_on(engine.complete("r", id, Outcome::success(42), 1001))?;
     let stats = engine.into_storage()?.commit()?;
@@ -240,8 +243,7 @@ fn vm_error_discards_real_sqlite_mutations() -> Result<()> {
     assert!(host.state("scope", "n")?.is_none());
     assert!(host.effects("r")?.is_empty());
     assert!(
-        Engine::new(host.begin("r", "scope")?, runtime())
-            .recover("r")
+        futures_executor::block_on(Engine::new(host.begin("r", "scope")?, runtime()).recover("r"))
             .is_err()
     );
     Ok(())
@@ -308,8 +310,7 @@ fn committed_run_scope_cannot_change_on_recovery() -> Result<()> {
     let mut host = Host::open(&path)?;
     assert!(host.begin("r", "different-scope").is_err());
     assert!(
-        Engine::new(host.begin("r", "scope")?, runtime())
-            .recover("r")
+        futures_executor::block_on(Engine::new(host.begin("r", "scope")?, runtime()).recover("r"))
             .is_ok()
     );
     Ok(())
@@ -324,7 +325,7 @@ fn transaction_checks_run_even_without_guest_requests() -> Result<()> {
     block_on(engine.start("r", "v1", Value::Null, 1000))?;
     engine.into_storage()?.commit()?;
     let mut engine = Engine::new(host.begin("other", "scope")?, runtime());
-    assert!(engine.recover("r").is_err());
+    assert!(futures_executor::block_on(engine.recover("r")).is_err());
     assert!(block_on(engine.start("r", "v1", Value::Null, 1000)).is_err());
     assert!(engine.into_storage().is_err());
     let mut engine = Engine::new(host.begin("r", "scope")?, runtime());

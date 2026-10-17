@@ -1,6 +1,6 @@
 #![cfg(unix)]
 use anyhow::{Result, ensure};
-use quickjs_durable::{Engine, FileKv, Kv, MemoryTransaction, Outcome, Runtime, Status};
+use quickjs_durable::{Engine, FileKv, MemoryTransaction, Outcome, Runtime, Status};
 use serde_json::Value;
 use std::{process::Command, sync::Arc};
 
@@ -21,7 +21,11 @@ fn child_crash() -> Result<()> {
     let tx: MemoryTransaction = serde_json::from_slice(&store.get("domain")?.unwrap())?;
     let mut engine = Engine::new(tx, Arc::new(Runtime::new()?))
         .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
-    let pending = engine.recover("run")?.state.pending[0].id().to_owned();
+    let pending = futures_executor::block_on(engine.recover("run"))?
+        .state
+        .pending[0]
+        .id()
+        .to_owned();
     futures_executor::block_on(engine.complete("run", &pending, Outcome::success(42), 1001))?;
     let bytes = serde_json::to_vec(&engine.into_storage()?)?;
     if !after {
@@ -38,7 +42,7 @@ fn sigkill_before_and_after_host_commit_preserves_atomic_domain() -> Result<()> 
         let dir = tempfile::tempdir()?;
         let mut store = FileKv::open(dir.path())?;
         let mut engine = Engine::new(MemoryTransaction::default(), runtime.clone());
-        engine.register("v1", SOURCE)?;
+        futures_executor::block_on(engine.register("v1", SOURCE))?;
         let start = futures_executor::block_on(engine.start("run", "v1", Value::Null, 1000))?;
         store.put("domain", &serde_json::to_vec(&engine.into_storage()?)?)?;
         let status = Command::new(std::env::current_exe()?)
@@ -55,7 +59,7 @@ fn sigkill_before_and_after_host_commit_preserves_atomic_domain() -> Result<()> 
         assert_eq!(tx.effects.len(), 1);
         let mut engine = Engine::new(tx, runtime.clone())
             .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
-        let recovered = engine.recover("run")?;
+        let recovered = futures_executor::block_on(engine.recover("run"))?;
         assert_eq!(recovered.checkpoint_sequence, if after { 1 } else { 0 });
         assert!(
             engine

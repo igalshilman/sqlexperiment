@@ -188,26 +188,25 @@ The following signatures describe the implemented API; `Json` denotes a JSON val
 
 ```rust,ignore
 trait Kv {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<()>;
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    async fn put(&mut self, key: &str, value: &[u8]) -> Result<()>;
 }
 
 enum Resolution { Ready(Outcome), Pending }
 
 trait Transaction: Kv {
     fn check_run(&self, run: &str) -> Result<()>; // default allows unscoped hosts
-    fn execute(&mut self, op: &Operation)
-        -> impl Future<Output = Result<Resolution>>;
-    fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64)
+    async fn execute(&mut self, op: &Operation) -> Result<Resolution>;
+    async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64)
         -> Result<()>;
 }
 
 Engine::new(transaction, shared_runtime)
 Engine::with_checkpoint_interval(NonZeroUsize) // optional host request budget
-Engine::register(application_id, source) -> Result<()>
+Engine::register(application_id, source).await -> Result<()>
 Engine::start(run, application_id, input, now).await -> Result<View>
 Engine::complete(run, operation_id, outcome, now).await -> Result<View>
-Engine::recover(run) -> Result<View>
+Engine::recover(run).await -> Result<View>
 Engine::into_storage() -> Result<Transaction>
 ```
 
@@ -242,10 +241,10 @@ host.commit(transaction)?; // resolve an ambiguous outcome through storage recov
 publish(provisional);     // only after confirmed commit/application
 ```
 
-The current checkpoint `get/put` and acknowledgement APIs are synchronous; guest
-operation execution is awaitable. A remote checkpoint store needs an awaitable
-storage facade or a host-managed local staging/cache layer. No worker thread or
-serialized Rust future is part of this protocol.
+Every host call is awaitable: checkpoint `get/put`, guest operation execution and
+acknowledgement. The engine awaits them outside any Wasm call, so a remote store
+may suspend in each. No worker thread or serialized Rust future is part of this
+protocol.
 
 ## 3. QuickJS/Wasm snapshot ABI
 

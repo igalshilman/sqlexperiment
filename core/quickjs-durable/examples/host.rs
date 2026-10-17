@@ -1,6 +1,6 @@
 //! Host-owned atomic commit and explicit recovery. No replay log.
 use anyhow::{Context, Result, bail};
-use quickjs_durable::{Engine, FileKv, Kv, MemoryTransaction, Operation, Outcome, Runtime, Status};
+use quickjs_durable::{Engine, FileKv, MemoryTransaction, Operation, Outcome, Runtime, Status};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 
@@ -30,7 +30,7 @@ fn main() -> Result<()> {
         .transpose()?
         .unwrap_or_default();
     let mut engine = Engine::new(initial, runtime.clone());
-    engine.register("transaction-demo-v1", SOURCE)?;
+    futures_executor::block_on(engine.register("transaction-demo-v1", SOURCE))?;
     let mut view =
         futures_executor::block_on(engine.start("r", "transaction-demo-v1", json!(21), 1000))?;
     store.put("domain", &serde_json::to_vec(&engine.into_storage()?)?)?; // COMMIT
@@ -39,7 +39,9 @@ fn main() -> Result<()> {
         // and deliver its completion through the host's own path.
         let committed: MemoryTransaction =
             serde_json::from_slice(&store.get("domain")?.context("Missing domain")?)?;
-        let recovered = Engine::new(committed.clone(), runtime.clone()).recover("r")?;
+        let recovered = futures_executor::block_on(
+            Engine::new(committed.clone(), runtime.clone()).recover("r"),
+        )?;
         let id = recovered.state.pending[0].id().to_owned();
         let effect = committed.effects.get(&id).context("Missing host effect")?;
         let outcome = match effect {

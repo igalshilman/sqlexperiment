@@ -13,9 +13,11 @@ use std::{
 
 /// Reliable byte KV access. In an engine transaction, put only stages a value
 /// and reads observe staged writes. The outer host controls atomic durability.
+/// Both may await I/O, such as a remote store's: the engine holds no Wasm call
+/// while it waits.
 pub trait Kv {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<()>;
+    fn get(&self, key: &str) -> impl Future<Output = Result<Option<Vec<u8>>>>;
+    fn put(&mut self, key: &str, value: &[u8]) -> impl Future<Output = Result<()>>;
 }
 
 /// Isolated transaction workspace for examples, tests and benchmarks.
@@ -29,10 +31,10 @@ pub struct MemoryTransaction {
     pub effects: BTreeMap<String, Operation>,
 }
 impl Kv for MemoryTransaction {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.values.get(key).cloned())
     }
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
         self.values.insert(key.into(), value.into());
         Ok(())
     }
@@ -58,7 +60,12 @@ impl Transaction for MemoryTransaction {
         };
         Ok(Resolution::Ready(Outcome::success(value)))
     }
-    fn acknowledge(&mut self, operation_id: &str, _outcome: &Outcome, _now: u64) -> Result<()> {
+    async fn acknowledge(
+        &mut self,
+        operation_id: &str,
+        _outcome: &Outcome,
+        _now: u64,
+    ) -> Result<()> {
         // This test workspace's embedding supplies the recoverable result.
         anyhow::ensure!(
             self.effects.remove(operation_id).is_some(),
@@ -68,7 +75,9 @@ impl Transaction for MemoryTransaction {
     }
 }
 
-/// POSIX file implementation for process-crash tests and the runnable example.
+/// A durable file store for process-crash tests and the runnable examples: the
+/// host publishes its whole transaction domain as one value. Not an engine `Kv`.
+/// POSIX file implementation.
 /// File fsync -> rename -> directory fsync. Hashed filenames avoid path traversal
 /// and filesystem name-length limits. The host must retain the directory itself.
 pub struct FileKv {
@@ -85,15 +94,15 @@ impl FileKv {
         self.root.join(hash(key.as_bytes()))
     }
 }
-impl Kv for FileKv {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+impl FileKv {
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         match fs::read(self.path(key)) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).context("KV read"),
         }
     }
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    pub fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let (temp, mut file) = loop {
             let path = self.root.join(format!(

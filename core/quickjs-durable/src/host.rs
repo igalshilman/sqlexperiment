@@ -50,5 +50,10 @@ pub trait Transaction: Kv {
     fn execute(&mut self, operation: &Operation) -> impl Future<Output = Result<Resolution>>;
     /// Verify that the selected outcome is the recoverable completion and that
     /// delivery is not before its availability time, then stage consumption.
-    fn acknowledge(&mut self, operation_id: &str, outcome: &Outcome, now: u64) -> Result<()>;
+    fn acknowledge(
+        &mut self,
+        operation_id: &str,
+        outcome: &Outcome,
+        now: u64,
+    ) -> impl Future<Output = Result<()>>;
 }

@@ -14,7 +14,7 @@ fn runtime() -> Arc<Runtime> {
 }
 fn registered(source: &str) -> Result<MemoryTransaction> {
     let mut engine = Engine::new(MemoryTransaction::default(), runtime());
-    engine.register("v1", source)?;
+    futures_executor::block_on(engine.register("v1", source))?;
     engine.into_storage()
 }
 fn value(view: &View) -> Value {
@@ -56,7 +56,7 @@ fn local_kv_awaits_share_one_checkpoint_and_observe_staged_writes() -> Result<()
     assert!(committed.state.is_empty()); // staging did not publish anything
     assert!(committed.values.keys().all(|k| !k.ends_with("/head")));
     let committed = engine.into_storage()?; // host's atomic publish
-    let recovered = Engine::new(committed, runtime()).recover("r")?;
+    let recovered = futures_executor::block_on(Engine::new(committed, runtime()).recover("r"))?;
     assert_eq!(recovered.checkpoint_id, view.checkpoint_id);
     Ok(())
 }
@@ -101,12 +101,12 @@ impl FaultTransaction {
     }
 }
 impl Kv for FaultTransaction {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        self.inner.get(key)
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get(key).await
     }
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
         self.before()?;
-        self.inner.put(key, value)?;
+        self.inner.put(key, value).await?;
         self.after()
     }
 }
@@ -118,9 +118,9 @@ impl Transaction for FaultTransaction {
         self.after()?;
         Ok(result)
     }
-    fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
+    async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
         self.before()?;
-        self.inner.acknowledge(id, outcome, now)?;
+        self.inner.acknowledge(id, outcome, now).await?;
         self.after()
     }
 }
@@ -180,7 +180,10 @@ fn atomic_commit_couples_snapshot_state_and_effects_without_replay() -> Result<(
                     FaultTransaction::new(published, Some((1, false))),
                     runtime(),
                 );
-                assert_eq!(read_only.recover("r")?.checkpoint_id, view.checkpoint_id);
+                assert_eq!(
+                    futures_executor::block_on(read_only.recover("r"))?.checkpoint_id,
+                    view.checkpoint_id
+                );
                 assert_eq!(read_only.storage().actions, 0);
             }
         }
@@ -207,7 +210,10 @@ fn committed_result_consumption_is_not_repeated_after_lost_commit_ack() -> Resul
         FaultTransaction::new(committed, Some((1, false))),
         runtime(),
     );
-    assert_eq!(e.recover("r")?.state, next.state);
+    assert_eq!(
+        futures_executor::block_on(e.recover("r"))?.state,
+        next.state
+    );
     let duplicate = futures_executor::block_on(e.complete(
         "r",
         start.state.pending[0].id(),
@@ -327,7 +333,10 @@ fn guest_api_has_no_checkpoint_and_host_pause_preserves_queued_results() -> Resu
     // already captured inside the pending QuickJS job queue.
     committed.state.insert("n".into(), json!(99));
     let mut e = Engine::new(FaultTransaction::new(committed, None), runtime());
-    assert_eq!(e.recover("r")?.state, first.state);
+    assert_eq!(
+        futures_executor::block_on(e.recover("r"))?.state,
+        first.state
+    );
     let waiting =
         futures_executor::block_on(e.complete("r", &wakeup, Outcome::success(Value::Null), 1001))?;
     assert!(
@@ -366,7 +375,7 @@ fn vm_trap_aborts_staged_state_and_effects_together() -> Result<()> {
     assert_eq!(e.storage().effects.len(), 1);
     drop(e);
     assert_eq!(image(&committed), before);
-    assert!(Engine::new(committed, runtime()).recover("r").is_err());
+    assert!(futures_executor::block_on(Engine::new(committed, runtime()).recover("r")).is_err());
     Ok(())
 }
 
@@ -374,11 +383,11 @@ fn vm_trap_aborts_staged_state_and_effects_together() -> Result<()> {
 fn custom_rust_function_and_guest_errors_resolve_inside_the_transaction() -> Result<()> {
     struct Local(MemoryTransaction);
     impl Kv for Local {
-        fn get(&self, k: &str) -> Result<Option<Vec<u8>>> {
-            self.0.get(k)
+        async fn get(&self, k: &str) -> Result<Option<Vec<u8>>> {
+            self.0.get(k).await
         }
-        fn put(&mut self, k: &str, v: &[u8]) -> Result<()> {
-            self.0.put(k, v)
+        async fn put(&mut self, k: &str, v: &[u8]) -> Result<()> {
+            self.0.put(k, v).await
         }
     }
     impl Transaction for Local {
@@ -394,8 +403,8 @@ fn custom_rust_function_and_guest_errors_resolve_inside_the_transaction() -> Res
                 _ => self.0.execute(op).await,
             }
         }
-        fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
-            self.0.acknowledge(id, outcome, now)
+        async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
+            self.0.acknowledge(id, outcome, now).await
         }
     }
     let tx = registered(
@@ -521,5 +530,68 @@ fn rpc_delivery_before_resume_preserves_jobs_and_multiple_wakeups() -> Result<()
     assert_eq!(done.state.outcome, waiting.state.outcome);
     assert_eq!(e.storage().state["n"], 8); // queued continuation ran exactly once
     assert!(e.storage().effects.is_empty());
+    Ok(())
+}
+
+/// Storage that suspends before every read and write, as a remote store would:
+/// the engine must hold no Wasm call while it waits.
+#[test]
+fn checkpoint_storage_may_suspend() -> Result<()> {
+    struct Remote {
+        inner: MemoryTransaction,
+        suspended: usize,
+    }
+    /// Pending once, then ready: one trip back to the executor.
+    struct Yield(bool);
+    impl std::future::Future for Yield {
+        type Output = ();
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            if std::mem::replace(&mut self.0, true) {
+                return std::task::Poll::Ready(());
+            }
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+    impl Kv for Remote {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            Yield(false).await;
+            self.inner.get(key).await
+        }
+        async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
+            Yield(false).await;
+            self.suspended += 1;
+            self.inner.put(key, value).await
+        }
+    }
+    impl Transaction for Remote {
+        async fn execute(&mut self, op: &Operation) -> Result<Resolution> {
+            self.inner.execute(op).await
+        }
+        async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
+            self.inner.acknowledge(id, outcome, now).await
+        }
+    }
+    let remote = |inner| Remote {
+        inner,
+        suspended: 0,
+    };
+    let mut e = Engine::new(remote(registered(FLOW)?), runtime());
+    let start = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
+    let rpc = start.state.pending[0].id().to_owned();
+    let mut e = Engine::new(remote(e.into_storage()?.inner), runtime());
+    let next = futures_executor::block_on(e.complete("r", &rpc, Outcome::success(7), 1001))?;
+    let audit = next.state.pending[0].id().to_owned();
+    let done =
+        futures_executor::block_on(e.complete("r", &audit, Outcome::success(Value::Null), 1002))?;
+    assert_eq!(value(&done), json!(7));
+    assert!(e.storage().suspended > 0);
+    assert_eq!(
+        futures_executor::block_on(e.recover("r"))?.checkpoint_id,
+        done.checkpoint_id
+    );
     Ok(())
 }

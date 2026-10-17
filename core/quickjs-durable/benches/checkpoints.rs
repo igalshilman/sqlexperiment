@@ -12,21 +12,21 @@ struct MeasuredKv {
     writes: usize,
 }
 impl Kv for MeasuredKv {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        self.inner.get(key)
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get(key).await
     }
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
         self.bytes += key.len() + value.len();
         self.writes += 1;
-        self.inner.put(key, value)
+        self.inner.put(key, value).await
     }
 }
 impl Transaction for MeasuredKv {
     async fn execute(&mut self, operation: &Operation) -> Result<Resolution> {
         self.inner.execute(operation).await
     }
-    fn acknowledge(&mut self, operation_id: &str, outcome: &Outcome, now: u64) -> Result<()> {
-        self.inner.acknowledge(operation_id, outcome, now)
+    async fn acknowledge(&mut self, operation_id: &str, outcome: &Outcome, now: u64) -> Result<()> {
+        self.inner.acknowledge(operation_id, outcome, now).await
     }
 }
 fn main() -> Result<()> {
@@ -85,7 +85,7 @@ fn main() -> Result<()> {
         for repeat in 0..4 {
             let mut engine = Engine::new(MeasuredKv::default(), runtime.clone());
             let before = Instant::now();
-            engine.register(name, source)?;
+            futures_executor::block_on(engine.register(name, source))?;
             let register_ms = before.elapsed().as_secs_f64() * 1000.0;
             let golden_bytes = engine.storage().bytes;
             let mut previous_bytes = golden_bytes;
@@ -100,7 +100,7 @@ fn main() -> Result<()> {
                 previous_bytes = engine.storage().bytes;
                 previous_writes = engine.storage().writes;
                 let restore_start = Instant::now();
-                let restored = engine.recover("bench")?;
+                let restored = futures_executor::block_on(engine.recover("bench"))?;
                 let restore_ms = restore_start.elapsed().as_secs_f64() * 1000.0;
                 ensure!(
                     view.checkpoint_id == restored.checkpoint_id && view.state == restored.state,

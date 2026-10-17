@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use quickjs_durable::{Engine, FileKv, Kv, MemoryTransaction, Outcome, Runtime};
+use quickjs_durable::{Engine, FileKv, MemoryTransaction, Outcome, Runtime};
 use serde_json::Value;
 use std::{path::PathBuf, process::Command, sync::Arc};
 
@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let mut engine = Engine::new(tx, Arc::new(Runtime::new()?));
     let view = match args[1].as_str() {
         "start" => {
-            engine.register("demo-v1", SOURCE)?;
+            futures_executor::block_on(engine.register("demo-v1", SOURCE))?;
             futures_executor::block_on(engine.start("demo", "demo-v1", Value::Null, 1000))?
         }
         "first" => futures_executor::block_on(engine.complete(
@@ -47,7 +47,7 @@ fn main() -> Result<()> {
             Outcome::success(22),
             1002,
         ))?,
-        "recover" => engine.recover("demo")?,
+        "recover" => futures_executor::block_on(engine.recover("demo"))?,
         _ => anyhow::bail!("Unknown action"),
     };
     if args[1] != "recover" {

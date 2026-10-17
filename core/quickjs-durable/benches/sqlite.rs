@@ -47,7 +47,7 @@ async fn run() -> Result<()> {
             let path = directory.path().join(format!("{name}-{repeat}.sqlite"));
             let mut host = Host::open(&path)?;
             let mut engine = Engine::new(host.begin("bench", "scope")?, runtime.clone());
-            engine.register("v1", &source)?;
+            futures_executor::block_on(engine.register("v1", &source))?;
             engine.into_storage()?.commit()?;
             let wal_path = path.with_extension("sqlite-wal");
             let mut peak_wal_bytes = 0;
@@ -121,8 +121,9 @@ async fn run() -> Result<()> {
             // Reopen the database, reconstruct a fresh image and verify the result.
             let mut host = Host::open(&path)?;
             let before = Instant::now();
-            let recovered =
-                Engine::new(host.begin("bench", "scope")?, runtime.clone()).recover("bench")?;
+            let recovered = futures_executor::block_on(
+                Engine::new(host.begin("bench", "scope")?, runtime.clone()).recover("bench"),
+            )?;
             let recover_ms = before.elapsed().as_secs_f64() * 1000.0;
             ensure!(
                 recovered.state.outcome == Some(Outcome::success(100)),

@@ -30,7 +30,7 @@ async fn run() -> Result<()> {
     let mut host = Host::open(&path)?;
     let runtime = Arc::new(Runtime::new()?);
     let mut engine = Engine::new(host.begin("example", "counter")?, runtime.clone());
-    engine.register("sqlite-demo-v1", SOURCE)?;
+    futures_executor::block_on(engine.register("sqlite-demo-v1", SOURCE))?;
     engine.into_storage()?.commit()?; // shared golden, outside measured VM turns
     println!("SQLite {}: WAL, synchronous=FULL", rusqlite::version());
     println!("sequence | changed pages | blob bytes | VM/stage ms | COMMIT ms");

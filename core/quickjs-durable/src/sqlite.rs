@@ -213,7 +213,7 @@ impl SqliteTransaction<'_> {
 }
 
 impl Kv for SqliteTransaction<'_> {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let value: Option<Vec<u8>> = self
             .sql
             .prepare_cached("SELECT value FROM checkpoints WHERE key=?")?
@@ -226,7 +226,7 @@ impl Kv for SqliteTransaction<'_> {
         Ok(value)
     }
 
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
         self.sql.prepare_cached(
             "INSERT INTO checkpoints(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         )?.execute(params![key, value])?;
@@ -284,7 +284,7 @@ impl Transaction for SqliteTransaction<'_> {
         Ok(Resolution::Ready(Outcome::success(value)))
     }
 
-    fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
+    async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
         let recorded: Option<(Vec<u8>, i64)> = self.sql.query_row(
             "SELECT outcome,completed_at FROM effects WHERE id=? AND run=? AND outcome IS NOT NULL",
             params![id, self.run], |r| Ok((r.get(0)?, r.get(1)?))

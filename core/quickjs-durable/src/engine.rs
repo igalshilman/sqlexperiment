@@ -26,7 +26,7 @@ struct Loaded {
 }
 struct Golden {
     application: Application,
-    /// Shared by every turn of the application's runs: see `Runtime::golden_memory`.
+    /// Shared by every turn of the application's runs: see `Runtime::cached_golden`.
     memory: Arc<Vec<u8>>,
 }
 impl Golden {
@@ -113,17 +113,17 @@ impl<K: Transaction> Engine<K> {
 
     /// Stage a golden image once, before invocation-specific state is bound.
     /// Reusing an ID with different source or a different build is rejected.
-    pub fn register(&mut self, id: &str, source: &str) -> Result<()> {
+    pub async fn register(&mut self, id: &str, source: &str) -> Result<()> {
         self.begin_mutation()?;
-        let result = self.register_inner(id, source);
+        let result = self.register_inner(id, source).await;
         self.usable = result.is_ok();
         result
     }
 
-    fn register_inner(&mut self, id: &str, source: &str) -> Result<()> {
+    async fn register_inner(&mut self, id: &str, source: &str) -> Result<()> {
         identifier(id)?;
-        if self.kv.get(&app_key(id))?.is_some() {
-            let golden = self.golden(id)?;
+        if self.kv.get(&app_key(id)).await?.is_some() {
+            let golden = self.golden(id).await?;
             ensure!(
                 golden.application.source_hash == hash(source.as_bytes()),
                 "Application version is immutable"
@@ -133,7 +133,7 @@ impl<K: Transaction> Engine<K> {
         let image = self.runtime.golden(id, source)?;
         let bytes = codec::compress(&image.memory)?;
         let blob = app_key(id);
-        self.put_blob(&blob, &bytes)?;
+        self.put_blob(&blob, &bytes).await?;
         let application = Application {
             format: FORMAT,
             id: id.into(),
@@ -143,7 +143,7 @@ impl<K: Transaction> Engine<K> {
             memory_len: image.memory.len(),
             meta: image.meta,
         };
-        self.kv.put(&app_key(id), &json_bytes(&application)?)
+        self.kv.put(&app_key(id), &json_bytes(&application)?).await
     }
 
     /// Stage the initial checkpoint, local KV mutations and outgoing effects.
@@ -176,15 +176,21 @@ impl<K: Transaction> Engine<K> {
         validate_time(now)?;
         input_size(&input)?;
         let key = format!("{}input", run_prefix(run));
-        if let Some(current) = self.load(run)? {
-            let original: Value = decode(&self.kv.get(&key)?.context("Missing invocation input")?)?;
+        if let Some(current) = self.load(run).await? {
+            let original: Value = decode(
+                &self
+                    .kv
+                    .get(&key)
+                    .await?
+                    .context("Missing invocation input")?,
+            )?;
             ensure!(
                 current.manifest.application == application && original == input,
                 "Run already belongs to another application/input"
             );
             return Ok(Self::view(current));
         }
-        self.kv.put(&key, &json_bytes(&input)?)?;
+        self.kv.put(&key, &json_bytes(&input)?).await?;
         let event = Event::Start {
             application_id: application.into(),
             input,
@@ -221,7 +227,7 @@ impl<K: Transaction> Engine<K> {
         validate_time(now)?;
         outcome.validate()?;
         input_size(&outcome)?;
-        let current = self.load(run)?.context("Run does not exist")?;
+        let current = self.load(run).await?.context("Run does not exist")?;
         let pending = current
             .manifest
             .state
@@ -243,7 +249,7 @@ impl<K: Transaction> Engine<K> {
         if let Operation::Sleep { deadline, .. } = pending {
             ensure!(now >= *deadline, "Timer completed before deadline");
         }
-        self.kv.acknowledge(operation, &outcome, now)?;
+        self.kv.acknowledge(operation, &outcome, now).await?;
         let event = Event::Complete {
             operation_id: operation.into(),
             outcome,
@@ -257,14 +263,16 @@ impl<K: Transaction> Engine<K> {
     /// Read only: restore the current snapshot and pending-effect identities.
     /// No guest execution, host callback, effect re-emission or event replay.
     /// The host reconnects the pending IDs to its own durable effect state.
-    pub fn recover(&self, run: &str) -> Result<View> {
+    pub async fn recover(&self, run: &str) -> Result<View> {
         ensure!(
             self.usable,
             "Unfinished or failed engine transaction; discard it"
         );
         identifier(run)?;
         self.kv.check_run(run)?;
-        Ok(Self::view(self.load(run)?.context("Run does not exist")?))
+        Ok(Self::view(
+            self.load(run).await?.context("Run does not exist")?,
+        ))
     }
 
     fn view(loaded: Loaded) -> View {
@@ -282,20 +290,25 @@ impl<K: Transaction> Engine<K> {
             manifest_bytes: loaded.manifest_bytes,
         }
     }
-    fn get_blob(&self, id: &str) -> Result<Vec<u8>> {
-        let bytes = self.kv.get(&blob_key(id))?.context("Missing blob")?;
+    async fn get_blob(&self, id: &str) -> Result<Vec<u8>> {
+        let bytes = self.kv.get(&blob_key(id)).await?.context("Missing blob")?;
         ensure!(
             bytes.len() <= MAX_MEMORY + 1024 * 1024,
             "Blob exceeds size limit"
         );
         Ok(bytes)
     }
-    fn put_blob(&mut self, id: &str, bytes: &[u8]) -> Result<()> {
-        self.kv.put(&blob_key(id), bytes)
+    async fn put_blob(&mut self, id: &str, bytes: &[u8]) -> Result<()> {
+        self.kv.put(&blob_key(id), bytes).await
     }
-    fn golden(&self, id: &str) -> Result<Golden> {
-        let application: Application =
-            decode(&self.kv.get(&app_key(id))?.context("Missing application")?)?;
+    async fn golden(&self, id: &str) -> Result<Golden> {
+        let application: Application = decode(
+            &self
+                .kv
+                .get(&app_key(id))
+                .await?
+                .context("Missing application")?,
+        )?;
         ensure!(
             application.format == FORMAT
                 && application.id == id
@@ -306,35 +319,39 @@ impl<K: Transaction> Engine<K> {
             application.memory_len <= MAX_MEMORY && application.memory_len.is_multiple_of(65536),
             "Invalid golden memory size"
         );
-        let memory = self.runtime.golden_memory(&application, || {
-            let memory =
-                codec::decompress(&self.get_blob(&application.blob)?, application.memory_len)?;
-            ensure!(
-                memory.len() == application.memory_len,
-                "Golden image size mismatch"
-            );
-            Ok(memory)
-        })?;
+        let memory = match self.runtime.cached_golden(&application) {
+            Some(memory) => memory,
+            None => {
+                let blob = self.get_blob(&application.blob).await?;
+                let memory = codec::decompress(&blob, application.memory_len)?;
+                ensure!(
+                    memory.len() == application.memory_len,
+                    "Golden image size mismatch"
+                );
+                self.runtime.cache_golden(&application, memory)
+            }
+        };
         Ok(Golden {
             application,
             memory,
         })
     }
-    fn load(&self, run: &str) -> Result<Option<Loaded>> {
-        let Some(head) = self.kv.get(&format!("{}head", run_prefix(run)))? else {
+    async fn load(&self, run: &str) -> Result<Option<Loaded>> {
+        let Some(head) = self.kv.get(&format!("{}head", run_prefix(run))).await? else {
             return Ok(None);
         };
         let id = String::from_utf8(head)?;
         let bytes = self
             .kv
-            .get(&checkpoint_key(&id))?
+            .get(&checkpoint_key(&id))
+            .await?
             .context("Missing checkpoint")?;
         let manifest: Manifest = decode(&bytes)?;
         ensure!(
             manifest.format == FORMAT && manifest.build == self.runtime.build,
             "Incompatible checkpoint build/format"
         );
-        let golden = self.golden(&manifest.application)?;
+        let golden = self.golden(&manifest.application).await?;
         ensure!(
             manifest.memory_len >= golden.memory.len()
                 && manifest.memory_len <= MAX_MEMORY
@@ -357,7 +374,7 @@ impl<K: Transaction> Engine<K> {
                 .push((*index, reference.slot));
         }
         for (blob, references) in blobs {
-            let decoded = codec::decode_pages(&self.get_blob(blob)?)?;
+            let decoded = codec::decode_pages(&self.get_blob(blob).await?)?;
             for (index, slot) in references {
                 let (stored_index, xor) = decoded.get(slot).context("Invalid page slot")?;
                 ensure!(*stored_index == index, "Page reference mismatch");
@@ -392,7 +409,7 @@ impl<K: Transaction> Engine<K> {
             (Some(c), Event::Complete { .. }) => c.manifest.application.clone(),
             _ => anyhow::bail!("Invalid delivery"),
         };
-        let golden = self.golden(&application)?;
+        let golden = self.golden(&application).await?;
         let first = current.is_none().then(|| golden.image());
         let base = current
             .as_ref()
@@ -444,7 +461,7 @@ impl<K: Transaction> Engine<K> {
             let bytes = codec::encode_pages(&deltas)?;
             new_blob_bytes = bytes.len();
             let blob = id.clone();
-            self.put_blob(&blob, &bytes)?;
+            self.put_blob(&blob, &bytes).await?;
             for (slot, (index, _)) in deltas.iter().enumerate() {
                 pages.insert(
                     *index,
@@ -471,11 +488,12 @@ impl<K: Transaction> Engine<K> {
         };
         let bytes = json_bytes(&manifest)?;
         ensure!(bytes.len() <= MAX_JSON, "Checkpoint metadata exceeds limit");
-        self.kv.put(&checkpoint_key(&id), &bytes)?;
+        self.kv.put(&checkpoint_key(&id), &bytes).await?;
         // Head is staged with every other mutation. Only the outer host commit
         // makes it visible together with application state and effects.
         self.kv
-            .put(&format!("{}head", run_prefix(run)), id.as_bytes())?;
+            .put(&format!("{}head", run_prefix(run)), id.as_bytes())
+            .await?;
         Ok(Loaded {
             id,
             manifest,

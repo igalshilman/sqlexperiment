@@ -23,7 +23,11 @@ fn sqlite_crash_child() -> Result<()> {
     let mut engine = Engine::new(host.begin("r", "scope")?, runtime);
     if completion {
         engine = engine.with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
-        let id = engine.recover("r")?.state.pending[0].id().to_owned();
+        let id = futures_executor::block_on(engine.recover("r"))?
+            .state
+            .pending[0]
+            .id()
+            .to_owned();
         block_on(engine.complete("r", &id, Outcome::success(42), 1001))?;
     } else {
         block_on(engine.start("r", "v1", Value::Null, 1000))?;
@@ -43,7 +47,7 @@ fn sigkill_around_start_and_completion_commits_recovers_whole_sqlite_domain() ->
             let path = dir.path().join("host.sqlite");
             let mut host = Host::open(&path)?;
             let mut engine = Engine::new(host.begin("r", "scope")?, runtime.clone());
-            engine.register("v1", SOURCE)?;
+            futures_executor::block_on(engine.register("v1", SOURCE))?;
             engine.into_storage()?.commit()?;
             if completion {
                 let mut engine = Engine::new(host.begin("r", "scope")?, runtime.clone());
@@ -78,10 +82,10 @@ fn sigkill_around_start_and_completion_commits_recovers_whole_sqlite_domain() ->
             }
             let mut engine = Engine::new(host.begin("r", "scope")?, runtime.clone());
             if !completion && !after {
-                assert!(engine.recover("r").is_err());
+                assert!(futures_executor::block_on(engine.recover("r")).is_err());
             } else {
                 assert_eq!(
-                    engine.recover("r")?.checkpoint_sequence,
+                    futures_executor::block_on(engine.recover("r"))?.checkpoint_sequence,
                     u64::from(completion && after)
                 );
             }
