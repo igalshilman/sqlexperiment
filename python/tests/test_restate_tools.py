@@ -133,3 +133,18 @@ def test_steer_with_no_turn_is_a_message_of_its_own(agent):
     assert status == 200 and not steered["steered"], steered
     attached = request("GET", f"{INGRESS}/restate/invocation/{steered['invocationId']}/attach")
     assert attached == (200, "You said: hello")
+
+
+def test_restate_steps_of_a_graph():
+    k = key()
+    with ThreadPoolExecutor() as pool:
+        answer = pool.submit(call, f"refunds/{k}/chat", "103", None, 60)
+        wait_until(lambda: len(pending("refunds", k)) == 1, timeout=20, what="the wait")
+        [waiting] = pending("refunds", k)
+        assert (waiting["name"], waiting["input"]) == ("approval", {"order": "103"})
+        assert call(f"refunds/{k}/signal", {"name": "approval", "value": "approved by Kim"})[0] == 200
+        assert answer.result() == (200, "order 103: delivered / approved by Kim / refunded 103")
+    wait_until(lambda: call("notes/refunds-103/list") == (200, ["refunded 103"]), timeout=10, what="the note")
+    # A handler's terminal error fails the turn.
+    status, body = call(f"refunds/{key()}/chat", "999")
+    assert status == 500 and "no order 999" in str(body), body
