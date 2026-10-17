@@ -13,13 +13,13 @@ const assistant = pi.agent({ name: 'assistant', tools: [weather] });
 await serve(assistant);
 ```
 
-| Import                                                | Framework                       | Its state in the database | `chat(options)`               |
-| ----------------------------------------------------- | ------------------------------- | ------------------------- | ----------------------------- |
+| Import                                                | Framework                       | Its state in the database | `chat(options)`                         |
+| ----------------------------------------------------- | ------------------------------- | ------------------------- | --------------------------------------- |
 | [`restate-agents/pi`](src/pi/README.md)               | pi-durable                      | its storage               | `model`, `system`, `tools`, `workspace` |
 | [`restate-agents/opencode`](src/opencode/README.md)   | OpenCode 2.0, embedded          | its database              | `model`, `system`, `tools`, `directory` |
-| [`restate-agents/langgraph`](src/langgraph/README.md) | LangGraph                       | its checkpoints           | `model`, `system`, `tools` |
-| [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | the conversation          | `model`, `system`, `tools`    |
-| [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | its session's event log   | `model`, `system`, `tools`    |
+| [`restate-agents/langgraph`](src/langgraph/README.md) | LangGraph                       | its checkpoints           | `model`, `system`, `tools`              |
+| [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | the conversation          | `model`, `system`, `tools`              |
+| [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | its session's event log   | `model`, `system`, `tools`              |
 
 Each framework has `agent({ name, ...options })`, a virtual object with one
 handler, `chat`, which takes a message and returns the answer; and

@@ -53,6 +53,10 @@ export function reply(prompt: LanguageModelV3Message[], tools: string[]): Reply 
   if (tools.length === 0) return { text: 'Teller' };
   const last = prompt.at(-1)!;
   if (last.role === 'tool') return { text: `Done: ${textOf(last)}` };
+  // Asked who it is, it repeats its system prompt.
+  if (textOf(last) === 'Who are you?') {
+    return { text: prompt.flatMap((m) => (m.role === 'system' ? [m.content] : [])).join('\n') };
+  }
   // A fresh tool call id, unique like a model's: a step run again calls its
   // tools with new ids.
   const id = `call_${randomUUID()}`;

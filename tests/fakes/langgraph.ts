@@ -23,6 +23,10 @@ export class Teller extends BaseChatModel {
     const last = messages.at(-1)!;
     const { text } = last;
     if (last.getType() === 'tool') return new AIMessage(`Done: ${text}`);
+    // Asked who it is, it repeats its system prompt.
+    if (text === 'Who are you?') {
+      return new AIMessage(messages.flatMap((m) => (m.getType() === 'system' ? [m.text] : [])).join('\n'));
+    }
     // A tool call id, unique in the conversation, and the same when a step is
     // run again.
     const id = `call_${messages.length}`;
