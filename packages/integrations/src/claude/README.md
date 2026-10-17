@@ -67,8 +67,9 @@ The tests run on a scripted model, [`tests/fakes/claude.ts`](../../../../tests/f
 (`make test-ts T=claude`, from the repository root):
 
 - [`tests/agents/claude.test.ts`](../../../../tests/agents/claude.test.ts):
-  each point above, with crashes that stop an attempt in a tool call and
-  abandon it, keeping what it committed; and `messages`.
+  each point above, with crashes that stop an attempt in a tool call, or at
+  any of its state requests, and abandon it, keeping what it committed; and
+  `messages`.
 - [`tests/agents/claude.ts`](../../../../tests/agents/claude.ts): the bank
   agent, whose tools move money in the [ledger](../../../../tests/sql/ledger.ts),
   through crashes in [the crash test](../../../../tests/crash.ts)

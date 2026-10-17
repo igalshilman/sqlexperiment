@@ -251,3 +251,45 @@ export const SAID = [
     parts: [{ type: 'text', text: 'Done: {"accounts":8,"total":8000,"transfers":1,"inconsistent":0}' }],
   },
 ].map((m, id) => ({ id, role: m.role, parts: m.parts }));
+
+/**
+ * What goes wrong when `prompt` crashes at a state request of a message and
+ * is retried, at every `stride`th request (CRASH_STRIDE, default 3), some at
+ * once, until it answers without crashing: each should answer it, with one transfer, and one
+ * stored prompt in `messages`. From a conversation with a message before.
+ */
+export async function crashedAnywhere(
+  prompt: PromptHandler,
+  messages: (ctx: restate.SqlObjectContext, request: object) => Promise<{ messages: { role: string }[] }>,
+  {
+    stride = Number(process.env.CRASH_STRIDE ?? 3),
+    concurrency = 8,
+  }: {
+    /** Crash at every `stride`th state request. */
+    stride?: number;
+    /** How many crash points at once; 1 for a model fake that is not safe to share. */
+    concurrency?: number;
+  } = {},
+) {
+  const before = conversation(prompt, 'anywhere');
+  await before.attempt('inv0', 'Please move 1 from 3 to 4');
+  const crashAt = async (n: number) => {
+    const c = conversation(prompt, 'anywhere', before);
+    if ((await c.attempt('inv1', 'Please move 5 from 1 to 2', n)) !== 'crashed') return 'finished';
+    const answer = await Promise.race([
+      c.attempt('inv1', 'Please move 5 from 1 to 2'),
+      new Promise((resolve) => setTimeout(() => resolve('no answer'), 10_000)),
+    ]).catch((error: unknown) => String(error));
+    const prompts = (await c.read(messages, {})).messages.filter((m) => m.role === 'user').length;
+    const ok = answer === 'Done: moved 5 from account 1 to account 2' && c.ledger.transfers.size === 2 && prompts === 2;
+    return ok ? 'ok' : `${n}: ${String(answer)}, ${c.ledger.transfers.size} transfers, ${prompts} prompts`;
+  };
+  // A batch at a time, until one answers without crashing.
+  const wrong: string[] = [];
+  for (let from = 1, done = false; !done; from += concurrency * stride) {
+    const batch = await Promise.all(Array.from({ length: concurrency }, (_, i) => crashAt(from + i * stride)));
+    wrong.push(...batch.filter((r) => r !== 'ok' && r !== 'finished'));
+    done = batch.includes('finished');
+  }
+  return wrong;
+}

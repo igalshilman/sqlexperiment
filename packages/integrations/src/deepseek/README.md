@@ -74,7 +74,8 @@ which makes a fresh tool call id for every call, as a model does
 (`make test-ts T=deepseek`, from the repository root):
 
 - [`tests/agents/deepseek.test.ts`](../../../../tests/agents/deepseek.test.ts):
-  each point above, with crashes that stop an attempt in a tool call; and
+  each point above, with crashes that stop an attempt in a tool call, or
+  at any of its state requests; and
   `messages`. Without the checkpoint policy four of its tests fail, and with
   a transfer tool that ignores `retryOf` three do.
 - [`tests/agents/deepseek.ts`](../../../../tests/agents/deepseek.ts): the

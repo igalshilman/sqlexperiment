@@ -98,7 +98,8 @@ from the repository root):
 - [`tests/storage/opencode.test.ts`](../../../../tests/storage/opencode.test.ts):
   the Effect `SqlClient` of `db.ts`.
 - [`tests/agents/opencode.test.ts`](../../../../tests/agents/opencode.test.ts):
-  each point above, with crashes that stop an attempt in a tool call; the
+  each point above, with crashes that stop an attempt in a tool call, or
+  at any of its state requests; the
   system prompt; and `messages`. With a transfer tool that ignores `retryOf`,
   four of its tests fail.
 - [`tests/agents/opencode.ts`](../../../../tests/agents/opencode.ts): the

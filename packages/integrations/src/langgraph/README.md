@@ -46,7 +46,8 @@ step it stored.
   its answer to the model.
 - **A message is answered once per invocation**: the graph records each
   answer in its state, by invocation id, and a retried attempt returns it. A
-  run that a crash interrupted is finished before the next message starts.
+  run that a crash interrupted (its prompt without an answer) is finished
+  before the next message starts.
 
 ## Run
 
@@ -70,7 +71,8 @@ The tests run on a scripted model, [`tests/fakes/langgraph.ts`](../../../../test
   [`langgraph-upgrade.test.ts`](../../../../tests/storage/langgraph-upgrade.test.ts),
   a thread of an earlier version of the checkpointer.
 - [`tests/agents/langgraph.test.ts`](../../../../tests/agents/langgraph.test.ts):
-  each point above, with crashes that stop an attempt in a tool call; the
+  each point above, with crashes that stop an attempt in a tool call, or
+  at any of its state requests; the
   system prompt; and `messages`. With `durability: 'async'`, or `ToolNode`'s
   default error handling, it fails.
 - [`tests/agents/langgraph.ts`](../../../../tests/agents/langgraph.ts): the
