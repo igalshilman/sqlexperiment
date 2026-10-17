@@ -40,6 +40,10 @@ const WAREHOUSE = `
   CREATE TABLE IF NOT EXISTS reservations(orderId TEXT PRIMARY KEY, qty INTEGER NOT NULL, state TEXT NOT NULL);`;
 
 /** The stock of one SKU (the object key). */
+// Retried soon, as the ledger is: the crash test aborts attempts often, and
+// the server's default backoff would grow past its deadline.
+const OPTIONS = { ...restate.sqlOptions, retryPolicy: { initialInterval: 50, maxInterval: 500 } };
+
 export const warehouse = restate.object({
   name: 'Warehouse',
   handlers: {
@@ -94,7 +98,7 @@ export const warehouse = restate.object({
         return { available, restocked, reservations: reservations as Reservation[] };
       }),
   },
-  options: restate.sqlOptions,
+  options: OPTIONS,
 });
 
 const ORDER = `CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY CHECK (id = 0), sku TEXT, qty INTEGER, status TEXT)`;
@@ -158,7 +162,7 @@ export const orders = restate.object({
 
     status: (ctx: Ctx) => readOrder(ctx.db),
   },
-  options: restate.sqlOptions,
+  options: OPTIONS,
 });
 
 serveIfMain(import.meta, [warehouse, orders]);
