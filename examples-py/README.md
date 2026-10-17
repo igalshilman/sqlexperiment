@@ -9,17 +9,11 @@ after `make py` at the repository's root. See [Run an example](#run-an-example).
 | [`chat.py`](chat.py)     | A durable chat agent on LangGraph, with a tool                                                                 |
 | [`memory.py`](memory.py) | An assistant that remembers facts about you in its own SQL table, through its tools, with handlers of your own |
 
-They are built from three things of [`restate_agents`](../python/agents/README.md):
+They are built from [`restate_agents`](../python/agents/README.md): an agent
+is a virtual object per conversation, and its tools are plain functions.
 
 ```python
-from restate_agents import Object, langgraph, serve, tool
-
-notes = Object("notes", schema="CREATE TABLE IF NOT EXISTS notes (text TEXT)")  # a database per key
-
-
-@notes.handler
-async def add(ctx, note: str):
-    await ctx.db.execute("INSERT INTO notes VALUES (?)", [note])
+from restate_agents import langgraph, serve, tool
 
 
 @tool
@@ -29,13 +23,13 @@ async def remember(ctx, fact: str) -> str:
 
 
 assistant = langgraph.agent("assistant", tools=[remember])  # chat and messages handlers
-serve(notes, assistant)
+serve(assistant)
 ```
 
-A handler takes `ctx`, then its input: one parameter, or several, which a
-JSON object gives by name (`--json '{"title": "Milk", "done": false}'`). A tool's
-`ctx` and `call_id` parameters are not the model's: the handler's context,
-and the tool call's id, the same when a crash runs the call again.
+A tool's `ctx` and `call_id` parameters are not the model's: the handler's
+context (`ctx.db`, calls, sends), and the tool call's id, the same when a
+crash runs the call again. `notes.py` uses the patched SDK alone, with
+`restate.sql_options`.
 
 ## Run an example
 

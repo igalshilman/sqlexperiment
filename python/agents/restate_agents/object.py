@@ -1,4 +1,7 @@
-"""Virtual objects set up for SQL and agents: ``Object``, and ``serve``."""
+"""
+The virtual object under an agent, ``Object``, and ``serve``. ``Object`` is
+internal for now: the agents are built on it, and the tests use it.
+"""
 
 from __future__ import annotations
 
@@ -34,27 +37,18 @@ RETRY_POLICY = InvocationRetryPolicy(
 class Object(restate.VirtualObject):
     """
     A Restate virtual object with a SQL database of its own, ``ctx.db``: one
-    per key, stored with the object's state::
-
-        notes = Object("notes", schema="CREATE TABLE IF NOT EXISTS notes (text TEXT)")
-
-        @notes.handler
-        async def add(ctx, note: str):
-            await ctx.db.execute("INSERT INTO notes VALUES (?)", [note])
-
-    ``schema``: SQL that each handler runs first, such as ``CREATE TABLE IF
-    NOT EXISTS``. ``options`` are those of ``restate.VirtualObject``, which
-    add to (or replace) the ones set here: ``restate.sql_options``, and
-    retries without end, since each attempt resumes from the database.
+    per key, stored with the object's state. ``options`` are those of
+    ``restate.VirtualObject``, which add to (or replace) the ones set here:
+    ``restate.sql_options``, and retries without end, since each attempt
+    resumes from the database.
     """
 
-    def __init__(self, name: str, *, schema: str | None = None, metadata: dict[str, str] | None = None, **options):
+    def __init__(self, name: str, *, metadata: dict[str, str] | None = None, **options):
         super().__init__(
             name,
             metadata={**METADATA, **(metadata or {})},
             **{**restate.sql_options, "invocation_retry_policy": RETRY_POLICY, **options},
         )
-        self.schema = schema
 
     def handler(self, name: str | Callable | None = None, /, **options: Any) -> Any:  # type: ignore[override]
         """
@@ -82,19 +76,13 @@ class Object(restate.VirtualObject):
         return register
 
     def _handler(self, fn: Callable) -> Callable:
-        """``fn`` as the SDK takes a handler: one input at most, after the schema."""
+        """``fn`` as the SDK takes a handler: one input at most."""
         signature = inspect.signature(fn, eval_str=True)
         ctx, *params = signature.parameters.values()
-        schema = self.schema
-
-        async def prepare(context: Any) -> None:
-            if schema:
-                await context.db.execute(schema)
 
         if len(params) <= 1:
 
             async def handler(context: Any, *input: Any) -> Any:
-                await prepare(context)
                 return await fn(context, *input)
 
             handler.__signature__ = signature  # type: ignore[attr-defined]
@@ -109,7 +97,6 @@ class Object(restate.VirtualObject):
             model = create_model(f"{fn.__name__}_input", **fields)
 
             async def handler(context: Any, input: Any) -> Any:  # type: ignore[misc]
-                await prepare(context)
                 return await fn(context, **{name: getattr(input, name) for name in fields})
 
             handler.__signature__ = signature.replace(  # type: ignore[attr-defined]

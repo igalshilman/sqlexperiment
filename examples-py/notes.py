@@ -8,18 +8,21 @@ stored in Restate with the object's state. No database to run.
     curl localhost:8080/notes/alice/list
 """
 
-from restate_agents import Object, serve
+import restate
+from restate_agents import serve
 
-notes = Object("notes", schema="CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)")
+notes = restate.VirtualObject("notes", **restate.sql_options)
 
 
-@notes.handler
-async def add(ctx, note: str):
+@notes.handler()
+async def add(ctx: restate.ObjectContext, note: str):
+    await ctx.db.execute("CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)")
     await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [note])
 
 
 @notes.handler("list")
-async def list_notes(ctx) -> list[str]:
+async def list_notes(ctx: restate.ObjectContext) -> list[str]:
+    await ctx.db.execute("CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)")
     return [text for (text,) in await ctx.db.query("SELECT text FROM notes ORDER BY rowid")]
 
 

@@ -8,9 +8,15 @@ and with the other test services in services.py.
 """
 
 from restate import TerminalError
-from restate_agents import Object, serve
+from restate_agents import serve
+from restate_agents.object import Object
 
-account = Object("account", schema="CREATE TABLE IF NOT EXISTS moves (id TEXT PRIMARY KEY, amount INTEGER NOT NULL)")
+account = Object("account")
+
+
+async def moves(db):
+    await db.execute("CREATE TABLE IF NOT EXISTS moves (id TEXT PRIMARY KEY, amount INTEGER NOT NULL)")
+    return db
 
 
 async def balance_of(db) -> int:
@@ -21,14 +27,16 @@ async def balance_of(db) -> int:
 @account.handler
 async def deposit(ctx, id: str, amount: int) -> int:
     """Add money, once per id; returns the balance."""
-    await ctx.db.execute("INSERT OR IGNORE INTO moves VALUES (?, ?)", [id, amount])
-    return await balance_of(ctx.db)
+    db = await moves(ctx.db)
+    await db.execute("INSERT OR IGNORE INTO moves VALUES (?, ?)", [id, amount])
+    return await balance_of(db)
 
 
 @account.handler
 async def transfer(ctx, id: str, to: str, amount: int) -> int:
     """Send money to another account, once per id; returns the balance."""
     async with ctx.transaction() as t:
+        await moves(t.db)
         if not await t.db.query("SELECT 1 FROM moves WHERE id = ?", [id]):
             if amount > await balance_of(t.db):
                 raise TerminalError(f"transfer {id}: insufficient funds")
@@ -39,12 +47,13 @@ async def transfer(ctx, id: str, to: str, amount: int) -> int:
 
 @account.handler
 async def balance(ctx) -> int:
-    return await balance_of(ctx.db)
+    return await balance_of(await moves(ctx.db))
 
 
 @account.handler
 async def history(ctx) -> list[dict]:
-    return [{"id": id, "amount": amount} for id, amount in await ctx.db.query("SELECT id, amount FROM moves")]
+    db = await moves(ctx.db)
+    return [{"id": id, "amount": amount} for id, amount in await db.query("SELECT id, amount FROM moves")]
 
 
 if __name__ == "__main__":
