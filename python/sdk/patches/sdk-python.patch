@@ -1,0 +1,2282 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index ce23f1c..df22f3d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -15,3 +15,7 @@ doc = false
+ pyo3 = { version = "0.25.1", features = ["extension-module"] }
+ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+ restate-sdk-shared-core = { version = "7.0.3", features = ["request_identity", "sha2_random_seed", "rust_crypto"] }
++
++# The patched shared core, which setup.sh clones next to this one.
++[patch.crates-io]
++restate-sdk-shared-core = { path = "../sdk-shared-core" }
+diff --git a/pyproject.toml b/pyproject.toml
+index 13b86df..3e2f13e 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -31,6 +31,8 @@ openai = ["openai-agents>=0.6.1"]
+ pydantic_ai = ["pydantic-ai-slim>=2.0,<3"]
+ langchain = ["langchain>=1.0.0", "langgraph>=1.0.0", "langchain-core>=1.0.0"]
+ tracing = ["opentelemetry-api>=1.36.0"]
++# ctx.db: the sqlite-kv extension, loaded on first use.
++sql = ["sqlite-kv"]
+ zstd = [
+     "backports.zstd ; python_version < '3.14'",
+ ]
+@@ -44,6 +46,20 @@ features = ["pyo3/extension-module"]
+ module-name = "restate._internal"
+ python-source = "python"
+ 
++# Rebuilt by uv when the Rust changes, its own or the patched core's (cloned next to it).
++[tool.uv]
++cache-keys = [
++    { file = "pyproject.toml" },
++    { file = "Cargo.toml" },
++    { file = "src/**/*.rs" },
++    { file = "../sdk-shared-core/src/**/*.rs" },
++]
++
++# The sql extra's sqlite-kv, from the repository this clone is built in
++# (python/sdk/.build/sdk-python, next to python/sqlite-kv).
++[tool.uv.sources]
++sqlite-kv = { path = "../../../sqlite-kv" }
++
+ [tool.ruff]
+ line-length = 120
+ target-version = "py310"
+diff --git a/python/restate/__init__.py b/python/restate/__init__.py
+index 3b27a44..09f7f69 100644
+--- a/python/restate/__init__.py
++++ b/python/restate/__init__.py
+@@ -41,6 +41,7 @@ from .context import (
+ from .entry_codec import JournalValueCodec, JournalValueCodecProvider
+ from .exceptions import TerminalError, SdkInternalBaseException, is_internal_exception
+ from .asyncio import as_completed, gather, wait_completed, select
++from .sql import sql_options, SqlOptions, SqlDatabase, SqlSession, SqlTransaction, SqlTransactionSends
+ 
+ from .endpoint import app
+ 
+@@ -129,4 +130,10 @@ __all__ = [
+     "RestateClientSendHandle",
+     "HttpError",
+     "create_client",
++    "sql_options",
++    "SqlOptions",
++    "SqlDatabase",
++    "SqlSession",
++    "SqlTransaction",
++    "SqlTransactionSends",
+ ]
+diff --git a/python/restate/context.py b/python/restate/context.py
+index feb0086..94e0475 100644
+--- a/python/restate/context.py
++++ b/python/restate/context.py
+@@ -23,6 +23,9 @@ from datetime import timedelta
+ 
+ from restate.serde import DefaultSerde, Serde
+ 
++if typing.TYPE_CHECKING:
++    from restate.sql import SqlSession, SqlTransaction
++
+ T = TypeVar("T")
+ I = TypeVar("I")
+ O = TypeVar("O")
+@@ -785,6 +788,36 @@ class ObjectContext(Context, KeyValueStore):
+         Returns the key of the current object.
+         """
+ 
++    @property
++    @abc.abstractmethod
++    def db(self) -> "SqlSession":
++        """
++        The object's SQL database, kept in its state: each statement is its own
++        transaction, and ``db.transaction()`` groups several::
++
++            await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [note])
++            rows = await ctx.db.query("SELECT text FROM notes ORDER BY rowid")
++
++        For exclusive handlers of an object without journal replay
++        (``restate.VirtualObject(name, **restate.sql_options)``). Each commit is
++        durable once it returns. An SQL error raises a ``TerminalError``, since a
++        retry would repeat it; a storage error is retried.
++        """
++
++    @abc.abstractmethod
++    def transaction(self) -> typing.AsyncContextManager["SqlTransaction"]:
++        """
++        One transaction of ``ctx.db``, with the sends it commits with::
++
++            async with ctx.transaction() as t:
++                await t.db.execute("UPDATE stock SET n = n - ? WHERE sku = ?", [qty, sku])
++                t.tx.object_send(shipping.ship, key=sku, arg=qty)
++
++        It commits when the body ends, and rolls back when the body raises. A
++        send made with ``t.tx`` is made once the transaction commits, and only
++        then: exactly once, even if the attempt crashes after the commit.
++        """
++
+ 
+ class ObjectSharedContext(Context):
+     """
+diff --git a/python/restate/handler.py b/python/restate/handler.py
+index 91a55a7..60b128e 100644
+--- a/python/restate/handler.py
++++ b/python/restate/handler.py
+@@ -239,6 +239,7 @@ class Handler(Generic[I, O]):
+         enable_lazy_state: If true, lazy state is enabled.
+         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
+         invocation_retry_policy: Optional retry policy configuration applied to this handler.
++        journal_replay: If false, a retried attempt runs the handler again instead of replaying its journal.
+     """
+ 
+     service_tag: ServiceTag
+@@ -258,6 +259,7 @@ class Handler(Generic[I, O]):
+     ingress_private: Optional[bool] = None
+     invocation_retry_policy: Optional[InvocationRetryPolicy] = None
+     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None
++    journal_replay: bool = True
+ 
+ 
+ # disable too many arguments warning
+@@ -281,6 +283,7 @@ def make_handler(
+     ingress_private: Optional[bool] = None,
+     invocation_retry_policy: Optional[InvocationRetryPolicy] = None,
+     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None,
++    journal_replay: Optional[bool] = None,
+ ) -> Handler[I, O]:
+     """
+     Factory function to create a handler.
+@@ -303,6 +306,7 @@ def make_handler(
+         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
+         invocation_retry_policy: Retry policy used by Restate when invoking this handler.
+             NOTE: only supported with restate-server >= 1.5.
++        journal_replay: If false, a retried attempt runs the handler again instead of replaying its journal.
+     """
+     # try to deduce the handler name
+     handler_name = name
+@@ -335,6 +339,7 @@ def make_handler(
+         ingress_private=ingress_private,
+         invocation_retry_policy=invocation_retry_policy,
+         context_managers=context_managers,
++        journal_replay=journal_replay is not False,
+     )
+ 
+     vars(wrapped)[RESTATE_UNIQUE_HANDLER_SYMBOL] = handler
+diff --git a/python/restate/object.py b/python/restate/object.py
+index 14d5ef5..3ba219a 100644
+--- a/python/restate/object.py
++++ b/python/restate/object.py
+@@ -71,6 +71,9 @@ class VirtualObject:
+             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+             otherwise the service discovery will fail.
+         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this virtual object.
++        journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++            against the state as stored, instead of replaying the journal of earlier attempts. Handlers may override it.
++            Without it, ctx.run and awakeables are not available. Default True.
+     """
+ 
+     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
+@@ -90,6 +93,7 @@ class VirtualObject:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ):
+         self.service_tag = ServiceTag("object", name, description, metadata)
+         self.handlers = {}
+@@ -101,6 +105,7 @@ class VirtualObject:
+         self.ingress_private = ingress_private
+         self.invocation_retry_policy = invocation_retry_policy
+         self.context_managers = invocation_context_managers
++        self.journal_replay = journal_replay
+ 
+     @property
+     def name(self):
+@@ -129,6 +134,7 @@ class VirtualObject:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Decorator for defining a handler function.
+@@ -170,6 +176,9 @@ class VirtualObject:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+ 
+         Returns:
+             Callable: The decorated function.
+@@ -214,6 +223,7 @@ class VirtualObject:
+                 ingress_private,
+                 invocation_retry_policy,
+                 combined_context_managers,
++                journal_replay=self.journal_replay if journal_replay is None else journal_replay,
+             )
+             self.handlers[handler.name] = handler
+             return wrapped
+diff --git a/python/restate/selector.py b/python/restate/selector.py
+new file mode 100644
+index 0000000..96e4a00
+--- /dev/null
++++ b/python/restate/selector.py
+@@ -0,0 +1,228 @@
++#
++#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
++#
++#  This file is part of the Restate SDK for Python,
++#  which is released under the MIT license.
++#
++#  You can find a copy of the license in file LICENSE in the root
++#  directory of this repository or package, or at
++#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++#
++"""
++One loop that drives every pending wait of an invocation without journal replay.
++
++Without journal replay, the handler's futures are plain awaitables that user
++code awaits and combines as it likes: ``asyncio.gather``, ``asyncio.wait``,
++its own tasks, or a library's. The protocol has one await point per
++invocation, though: a suspension, the awaiting-on hint and a cancellation each
++take one unresolved future. So every wait is registered with the selector,
++which asks the VM for progress on the first of all of them to complete, and is
++the only one reading the invocation's input.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import logging
++from typing import Any, Callable, Dict, Optional, Protocol
++
++from restate.exceptions import SdkInternalException, SuspendedException, TerminalError
++from restate.vm import (
++    AllCompletedUnresolvedFuture,
++    DoProgressAnyCompleted,
++    DoProgressCancelSignalReceived,
++    DoProgressExecuteRun,
++    DoProgressWaitExternalProgress,
++    FirstCompletedUnresolvedFuture,
++    SingleUnresolvedFuture,
++    Suspended,
++    UnresolvedFuture,
++)
++
++logger = logging.getLogger(__name__)
++
++
++class SelectorDriver(Protocol):
++    """What the selector needs of the invocation."""
++
++    def do_progress(self, future: UnresolvedFuture) -> Any:
++        """The VM's progress on ``future``: a DoProgress* response, Suspended, or an exception."""
++        ...
++
++    def is_completed(self, handle: int) -> bool:
++        """Whether the VM has the result of ``handle``."""
++        ...
++
++    async def flush_output(self) -> None:
++        """Writes out what the VM has buffered."""
++        ...
++
++    async def receive(self) -> Dict[str, Any]:
++        """The next input event: a chunk of the request body, a disconnect, or a restate.* event."""
++        ...
++
++    def wake(self) -> None:
++        """Makes ``receive`` return a restate.* event."""
++        ...
++
++    def execute_run(self, handle: int) -> None:
++        """Starts the run of ``handle``, which signals its completion through ``receive``."""
++        ...
++
++    def notify_input(self, chunk: Dict[str, Any]) -> None:
++        """Passes a chunk of the request body to the VM."""
++        ...
++
++    def track(self, task: asyncio.Future) -> None:
++        """Cancels ``task`` at the end of the attempt."""
++        ...
++
++    def on_end(self) -> None:
++        """The attempt cannot go on: the selector has failed every wait."""
++        ...
++
++
++def is_ready(future: UnresolvedFuture, completed: Callable[[int], bool]) -> bool:
++    """Whether ``future`` needs no more progress."""
++    if isinstance(future, SingleUnresolvedFuture):
++        return completed(future.handle)
++    if isinstance(future, FirstCompletedUnresolvedFuture):
++        return any(is_ready(child, completed) for child in future.children)
++    if isinstance(future, AllCompletedUnresolvedFuture):
++        return all(is_ready(child, completed) for child in future.children)
++    raise TypeError(f"Unknown UnresolvedFuture variant: {type(future).__name__}")
++
++
++class FutureSelector:
++    """
++    The one loop of an invocation without journal replay.
++
++    A wait stays registered until it is ready. The loop settles whatever is
++    ready, then asks the VM for progress on the first of all the pending waits
++    to complete: so a suspension waits for any of them, a pending run starts
++    whichever wait reaches it first, and a cancellation reaches all of them. A
++    wait registered while the loop reads the input wakes it, so it is part of
++    the next check. The loop runs while something is pending.
++    """
++
++    def __init__(self, driver: SelectorDriver, disconnected: Callable[[], BaseException]) -> None:
++        self._driver = driver
++        self._disconnected = disconnected
++        self._waits: Dict[asyncio.Future, UnresolvedFuture] = {}
++        self._task: Optional[asyncio.Task] = None
++        # Between the VM's WaitExternalProgress and the next input.
++        self._waiting = False
++        # Why the attempt ended, once it has: each wait then raises a new one.
++        self._end: Optional[Callable[[], BaseException]] = None
++
++    @property
++    def ended(self) -> Optional[BaseException]:
++        """Why the attempt ended (a suspension, an error, a disconnect), or None while it goes on."""
++        return None if self._end is None else self._end()
++
++    @property
++    def size(self) -> int:
++        """The waits still pending, for tests."""
++        return len(self._waits)
++
++    async def wait(self, future: UnresolvedFuture) -> None:
++        """Returns once ``future`` is ready; raises if the attempt ends first, or is cancelled."""
++        if self._end is not None:
++            raise self._end()
++        if is_ready(future, self._driver.is_completed):
++            return
++        waiter = asyncio.get_running_loop().create_future()
++        self._waits[waiter] = future
++        if self._task is None:
++            self._task = asyncio.create_task(self._loop())
++            self._driver.track(self._task)
++        elif self._waiting:
++            # Only a loop waiting for input needs waking, once: any other picks
++            # up the new wait on its next pass.
++            self._waiting = False
++            self._driver.wake()
++        try:
++            await waiter
++        finally:
++            self._waits.pop(waiter, None)
++
++    def _settle(self) -> None:
++        for waiter, future in self._waits.items():
++            if not waiter.done() and is_ready(future, self._driver.is_completed):
++                waiter.set_result(None)
++
++    def _fail_all(self, error: Callable[[], BaseException]) -> None:
++        for waiter in self._waits:
++            if not waiter.done():
++                waiter.set_exception(error())
++
++    def _finish(self, end: Callable[[], BaseException]) -> None:
++        """The attempt cannot go on: every wait, now and later, raises ``end()``."""
++        self._end = end
++        self._fail_all(end)
++        self._driver.on_end()
++
++    async def _loop(self) -> None:
++        driver = self._driver
++        try:
++            while True:
++                self._settle()
++                # Let what that settled run, and register what it waits for
++                # next, so that one check covers them. An optimization: what
++                # registers later wakes the loop anyway.
++                await asyncio.sleep(0)
++                pending = [future for waiter, future in self._waits.items() if not waiter.done()]
++                if not pending:
++                    return
++                await driver.flush_output()
++                response = driver.do_progress(
++                    pending[0] if len(pending) == 1 else FirstCompletedUnresolvedFuture(pending)
++                )
++                if isinstance(response, BaseException):
++                    logger.exception("Exception in do_progress", exc_info=response)
++                    self._finish(_internal(response))
++                    return
++                if isinstance(response, Suspended):
++                    self._finish(SuspendedException)
++                    return
++                if isinstance(response, DoProgressAnyCompleted):
++                    continue
++                if isinstance(response, DoProgressCancelSignalReceived):
++                    # Reaches every pending wait; what waits after it is not cancelled.
++                    self._fail_all(lambda: TerminalError("cancelled", 409))
++                    continue
++                if isinstance(response, DoProgressExecuteRun):
++                    driver.execute_run(response.handle)
++                    continue
++                if isinstance(response, DoProgressWaitExternalProgress):
++                    self._waiting = True
++                    await driver.flush_output()
++                    chunk = await driver.receive()
++                    self._waiting = False
++                    kind = chunk.get("type")
++                    if kind == "http.disconnect":
++                        self._finish(self._disconnected)
++                        return
++                    if kind == "http.request":
++                        driver.notify_input(chunk)
++        except asyncio.CancelledError:
++            # The attempt is over.
++            self._end = self._end or SuspendedException
++            self._fail_all(self._end)
++            raise
++        except BaseException as error:  # pylint: disable=broad-exception-caught
++            logger.exception("Exception in the invocation's selector")
++            self._finish(_internal(error))
++        finally:
++            self._task = None
++
++
++def _internal(cause: BaseException) -> Callable[[], BaseException]:
++    """New SdkInternalExceptions, caused by ``cause``."""
++
++    def internal() -> BaseException:
++        error = SdkInternalException()
++        error.__cause__ = cause
++        return error
++
++    return internal
+diff --git a/python/restate/server.py b/python/restate/server.py
+index c5e233f..66d5478 100644
+--- a/python/restate/server.py
++++ b/python/restate/server.py
+@@ -320,7 +320,11 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
+             try:
+                 journal_codec = await get_codec()
+                 await process_invocation_to_completion(
+-                    VMWrapper(request_headers, disable_payload_checks=disable_payload_checks),
++                    VMWrapper(
++                        request_headers,
++                        disable_payload_checks=disable_payload_checks,
++                        journal_replay=handler.journal_replay,
++                    ),
+                     handler,
+                     dict(request_headers),
+                     receive_channel,
+diff --git a/python/restate/server_context.py b/python/restate/server_context.py
+index 80fbec3..b195422 100644
+--- a/python/restate/server_context.py
++++ b/python/restate/server_context.py
+@@ -56,7 +56,9 @@ from restate.exceptions import (
+ )
+ from restate.entry_codec import JournalValueCodec
+ from restate.handler import Handler, handler_from_callable, invoke_handler
++from restate.selector import FutureSelector
+ from restate.serde import BytesSerde, DefaultSerde, Serde
++from restate.sql import SqlAttempt, SqlSession, SqlTransaction
+ from restate.server_types import ReceiveChannel, Send
+ from restate.types import extract_core_type
+ from restate.vm import Failure, Invocation, NotReady, VMWrapper, RunRetryConfig, Suspended  # pylint: disable=line-too-long
+@@ -132,6 +134,13 @@ class LazyFuture(typing.Generic[T]):
+     def __await__(self):
+         return self.get().__await__()
+ 
++    def start(self, tasks: "Tasks") -> None:
++        """Starts the coroutine now, whether or not anything awaits it."""
++        if self.task is None:
++            self.task = asyncio.create_task(self.async_def())
++            # Cancelled at the end of the attempt; its error, if nothing awaits it, is dropped.
++            tasks.add(self.task)
++
+ 
+ class ServerDurableFuture(RestateDurableFuture[T]):
+     """This class implements a durable future API"""
+@@ -141,6 +150,10 @@ class ServerDurableFuture(RestateDurableFuture[T]):
+         self.context = context
+         self.handle = handle
+         self.future = LazyFuture(async_def)
++        if context.selector is not None:
++            # Without journal replay, an operation is driven to completion
++            # whether or not it is awaited: see restate/selector.py.
++            self.future.start(context.tasks)
+ 
+     def is_completed(self):
+         """
+@@ -437,6 +450,9 @@ class Tasks:
+                 pass
+             except asyncio.CancelledError:
+                 pass
++            except SdkInternalBaseException:
++                # A future driven without journal replay, when the attempt ends.
++                pass
+ 
+         task.add_done_callback(safe_remove)
+ 
+@@ -511,6 +527,9 @@ async def auto_close_extension_data(data: Dict[str, Any]):
+ class ServerInvocationContext(ObjectContext):
+     """This class implements the context for the restate framework based on the server."""
+ 
++    # Without journal replay, the one loop that drives every wait (see restate/selector.py).
++    selector: Optional[FutureSelector] = None
++
+     def __init__(
+         self,
+         vm: VMWrapper,
+@@ -534,6 +553,11 @@ class ServerInvocationContext(ObjectContext):
+         self.request_finished_event = asyncio.Event()
+         self.tasks = Tasks()
+         self.extension_data: Dict[str, Any] = {}
++        if not handler.journal_replay:
++            self.selector = FutureSelector(_SelectorDriver(self), DisconnectedException)
++        # The attempt's SQL session, from the first use of ctx.db or ctx.transaction.
++        self.sql_attempt: Optional[SqlAttempt] = None
++        self._attempt_end_listeners: List[Callable[[], None]] = []
+ 
+     def _encode(self, buffer: bytes) -> bytes:
+         """Apply the journal value codec encode step, if a codec is configured."""
+@@ -552,9 +576,7 @@ class ServerInvocationContext(ObjectContext):
+                     await stack.enter_async_context(manager())
+                 await stack.enter_async_context(auto_close_extension_data(self.extension_data))
+ 
+-                out_buffer = await invoke_handler(
+-                    handler=self.handler, ctx=self, in_buffer=in_buffer, journal_codec=self.journal_codec
+-                )
++                out_buffer = await self._invoke_with_sql(in_buffer)
+             restate_context_is_replaying.set(False)
+             self.vm.sys_write_output_success(bytes(out_buffer))
+             self.vm.sys_end()
+@@ -601,6 +623,20 @@ class ServerInvocationContext(ObjectContext):
+         finally:
+             _restate_context_var.reset(token)
+ 
++    async def _invoke_with_sql(self, in_buffer: bytes) -> bytes:
++        """Invoke the handler; its SQL session, if it opened one, ends with it."""
++        try:
++            out_buffer = await invoke_handler(
++                handler=self.handler, ctx=self, in_buffer=in_buffer, journal_codec=self.journal_codec
++            )
++        except BaseException:
++            if self.sql_attempt is not None:
++                await self.sql_attempt.end(failed=True)
++            raise
++        if self.sql_attempt is not None:
++            await self.sql_attempt.end(failed=False)
++        return out_buffer
++
+     async def leave(self):
+         """Leave the context."""
+         while True:
+@@ -642,6 +678,7 @@ class ServerInvocationContext(ObjectContext):
+         """Notify the attempt finished event."""
+         restate_context_is_replaying.set(False)
+         self.request_finished_event.set()
++        self._notify_attempt_end()
+         try:
+             self.tasks.cancel()
+         except asyncio.CancelledError:
+@@ -682,6 +719,9 @@ class ServerInvocationContext(ObjectContext):
+ 
+     async def create_poll_or_cancel_coroutine(self, unresolved_future: UnresolvedFuture) -> None:
+         """Create a coroutine to poll the unresolved future."""
++        if self.selector is not None:
++            await self.selector.wait(unresolved_future)
++            return
+         while True:
+             await self.take_and_send_output()
+             do_progress_response = self.vm.do_progress(unresolved_future)
+@@ -839,6 +879,9 @@ class ServerInvocationContext(ObjectContext):
+         return UUID(int=self.random_instance.getrandbits(128), version=4)
+ 
+     def time(self) -> RestateDurableFuture[float]:
++        if self.selector is not None:
++            # Nothing is recorded without journal replay: the time now.
++            return _ConstFuture(self, time.time())
+         # pylint: disable=W0108
+         return self.run_typed("timestamp", lambda: time.time())
+ 
+@@ -923,6 +966,7 @@ class ServerInvocationContext(ObjectContext):
+         type_hint: Optional[typing.Type[T]] = None,
+         args: Optional[typing.Tuple[Any, ...]] = None,
+     ) -> RestateDurableFuture[T]:
++        self._refuse_run()
+         if isinstance(serde, DefaultSerde):
+             if type_hint is None:
+                 signature = inspect.signature(action, eval_str=True)
+@@ -944,6 +988,11 @@ class ServerInvocationContext(ObjectContext):
+             )
+         return self.create_future(handle, serde)  # type: ignore
+ 
++    def _refuse_run(self) -> None:
++        if self.selector is not None:
++            # A terminal error, since a retry would fail the same way.
++            raise TerminalError("ctx.run is not available without journal replay: call the function directly")
++
+     def run_typed(
+         self,
+         name: str,
+@@ -952,6 +1001,18 @@ class ServerInvocationContext(ObjectContext):
+         /,
+         *args: P.args,
+         **kwargs: P.kwargs,
++    ) -> RestateDurableFuture[T]:
++        self._refuse_run()
++        return self._run_typed(name, action, options, *args, **kwargs)
++
++    def _run_typed(
++        self,
++        name: str,
++        action: Union[Callable[P, T], Callable[P, Coroutine[Any, Any, T]]],
++        options: RunOptions[T] = RunOptions(),
++        /,
++        *args: P.args,
++        **kwargs: P.kwargs,
+     ) -> RestateDurableFuture[T]:
+         if isinstance(options.serde, DefaultSerde):
+             # Copy options, as we're going to mutate type_hint and serde
+@@ -1230,6 +1291,9 @@ class ServerInvocationContext(ObjectContext):
+     def awakeable(
+         self, serde: Serde[I] = DefaultSerde(), type_hint: Optional[typing.Type[I]] = None
+     ) -> typing.Tuple[str, RestateDurableFuture[Any]]:
++        if self.selector is not None:
++            # Signal ids of skipped attempts are unknown, so a new one could collide.
++            raise TerminalError("awakeables are not available without journal replay: use ctx.signal")
+         if isinstance(serde, DefaultSerde):
+             serde = serde.with_maybe_type(type_hint)
+         name, handle = self.vm.sys_awakeable()
+@@ -1258,6 +1322,89 @@ class ServerInvocationContext(ObjectContext):
+     def key(self) -> str:
+         return self.invocation.key
+ 
++    # --- SQL (restate/sql.py)
++
++    @property
++    def db(self) -> SqlSession:
++        if self.sql_attempt is None:
++            self.sql_attempt = SqlAttempt(self)
++        return self.sql_attempt.db
++
++    def transaction(self) -> typing.AsyncContextManager[SqlTransaction]:
++        if self.sql_attempt is None:
++            self.sql_attempt = SqlAttempt(self)
++        return self.sql_attempt.transaction()
++
++    @property
++    def sql_handler_kind(self) -> Optional[str]:
++        """The handler's kind, if it is an object's: "exclusive" or "shared"."""
++        return self.handler.kind if self.handler.service_tag.kind == "object" else None
++
++    @property
++    def sql_journal_replay(self) -> bool:
++        """Whether the handler replays its journal."""
++        return self.handler.journal_replay
++
++    @property
++    def sql_namespace(self) -> str:
++        """The object's database's name."""
++        return f"{self.handler.service_tag.name}/{self.invocation.key}"
++
++    def sql_get(self, key: str) -> Awaitable[Optional[bytes]]:
++        """A state read, issued now."""
++        return self.get(key, serde=BytesSerde())
++
++    def sql_set(self, key: str, value: bytes) -> None:
++        """A state write."""
++        self.set(key, value, serde=BytesSerde())
++
++    def sql_clear(self, key: str) -> None:
++        """A state clear."""
++        self.clear(key)
++
++    def sql_sync(self) -> Awaitable[Any]:
++        """An empty run, done once the commands before it are stored: the SQL session's barrier."""
++        return self._run_typed("sync", _nothing)
++
++    def sql_send(
++        self,
++        service: str,
++        handler: str,
++        parameter: bytes,
++        key: Optional[str],
++        send_delay: Optional[timedelta],
++        idempotency_key: Optional[str],
++        headers: Optional[Dict[str, str]],
++    ) -> None:
++        """A send of a committed transaction."""
++        self.generic_send(service, handler, parameter, key, send_delay, idempotency_key, headers)
++
++    def sql_attempt_end(self) -> Optional[BaseException]:
++        """Why the attempt ended, or None while it goes on."""
++        if self.selector is not None and self.selector.ended is not None:
++            return self.selector.ended
++        if self.request_finished_event.is_set():
++            return SuspendedException()
++        return None
++
++    def sql_on_attempt_end(self, listener: Callable[[], None]) -> Callable[[], None]:
++        """Call ``listener`` when the attempt ends; the returned function cancels it."""
++        if self.sql_attempt_end() is not None:
++            listener()
++            return lambda: None
++        self._attempt_end_listeners.append(listener)
++
++        def cancel() -> None:
++            if listener in self._attempt_end_listeners:
++                self._attempt_end_listeners.remove(listener)
++
++        return cancel
++
++    def _notify_attempt_end(self) -> None:
++        listeners, self._attempt_end_listeners = self._attempt_end_listeners, []
++        for listener in listeners:
++            listener()
++
+     def cancel_invocation(self, invocation_id: str):
+         """cancel an existing invocation by id."""
+         if invocation_id is None:
+@@ -1283,3 +1430,70 @@ class ServerInvocationContext(ObjectContext):
+     def set_extension_data(self, key: str, value: Any) -> None:
+         """Set extension data by key."""
+         self.extension_data[key] = value
++
++
++async def _nothing() -> None:
++    """The action of an empty run."""
++
++
++class _ConstFuture(RestateDurableFuture[T]):
++    """A future of a value known now."""
++
++    def __init__(self, context: "ServerInvocationContext", value: T) -> None:
++        super().__init__()
++        self.context = context
++        self.value = value
++
++    def __await__(self) -> typing.Generator[Any, Any, T]:
++        async def value() -> T:
++            return self.value
++
++        return value().__await__()
++
++
++class _SelectorDriver:
++    """What the selector needs of the invocation (see restate/selector.py)."""
++
++    def __init__(self, context: ServerInvocationContext) -> None:
++        self.context = context
++
++    def do_progress(self, future: UnresolvedFuture) -> Any:
++        return self.context.vm.do_progress(future)
++
++    def is_completed(self, handle: int) -> bool:
++        return self.context.vm.is_completed(handle)
++
++    async def flush_output(self) -> None:
++        await self.context.take_and_send_output()
++
++    async def receive(self) -> Dict[str, Any]:
++        return typing.cast(Dict[str, Any], await self.context.receive())
++
++    def wake(self) -> None:
++        self.context.receive.wake()
++
++    def execute_run(self, handle: int) -> None:
++        context = self.context
++        fn = context.run_coros_to_execute.pop(handle)
++
++        async def run() -> None:
++            try:
++                await fn()
++            finally:
++                await context.receive.enqueue_restate_event({"type": "restate.run_completed", "data": None})
++
++        context.tasks.add(asyncio.create_task(run()))
++
++    def notify_input(self, chunk: Dict[str, Any]) -> None:
++        # Skip empty body frames to avoid hot loop (see #175)
++        body = chunk.get("body", None)
++        if body is not None and len(body) > 0:
++            self.context.vm.notify_input(body)
++        if not chunk.get("more_body", False):
++            self.context.vm.notify_input_closed()
++
++    def track(self, task: asyncio.Future) -> None:
++        self.context.tasks.add(task)
++
++    def on_end(self) -> None:
++        self.context._notify_attempt_end()  # pylint: disable=protected-access
+diff --git a/python/restate/server_types.py b/python/restate/server_types.py
+index 8c9d332..9ea92ef 100644
+--- a/python/restate/server_types.py
++++ b/python/restate/server_types.py
+@@ -44,9 +44,9 @@ class Scope(TypedDict):
+ 
+ 
+ class RestateEvent(TypedDict):
+-    """An event that represents a run completion"""
++    """An event of the SDK's own: a run completed, or a wake-up of the invocation's selector"""
+ 
+-    type: Literal["restate.run_completed"]
++    type: Literal["restate.run_completed", "restate.wake"]
+     data: Optional[Dict[str, Any]]
+ 
+ 
+@@ -182,6 +182,10 @@ class ReceiveChannel:
+         """Add a message."""
+         await self._queue.put(what)
+ 
++    def wake(self) -> None:
++        """Make the reader of the next message return, with a restate.wake event."""
++        self._queue.put_nowait({"type": "restate.wake", "data": None})
++
+     async def close(self):
+         """Close the channel."""
+         self._http_input_closed.set()
+diff --git a/python/restate/service.py b/python/restate/service.py
+index cecd90f..26736b9 100644
+--- a/python/restate/service.py
++++ b/python/restate/service.py
+@@ -68,6 +68,9 @@ class Service:
+             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+             otherwise the service discovery will fail.
+         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this service.
++        journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++            against the state as stored, instead of replaying the journal of earlier attempts. Handlers may override it.
++            Without it, ctx.run and awakeables are not available. Default True.
+         invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this service.
+     """
+ 
+@@ -85,6 +88,7 @@ class Service:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> None:
+         self.service_tag = ServiceTag("service", name, description, metadata)
+         self.handlers: typing.Dict[str, Handler] = {}
+@@ -95,6 +99,7 @@ class Service:
+         self.ingress_private = ingress_private
+         self.invocation_retry_policy = invocation_retry_policy
+         self.context_managers = invocation_context_managers
++        self.journal_replay = journal_replay
+ 
+     @property
+     def name(self):
+@@ -120,6 +125,7 @@ class Service:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Decorator for defining a handler function.
+@@ -157,6 +163,9 @@ class Service:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+             invocation_context_managers: List of context manager factories that will be applied to each invocation of this handler.
+ 
+         Returns:
+@@ -205,6 +214,7 @@ class Service:
+                 ingress_private,
+                 invocation_retry_policy,
+                 combined_context_managers,
++                journal_replay=self.journal_replay if journal_replay is None else journal_replay,
+             )
+             self.handlers[handler.name] = handler
+             return wrapped
+diff --git a/python/restate/sql.py b/python/restate/sql.py
+new file mode 100644
+index 0000000..0e8c5a3
+--- /dev/null
++++ b/python/restate/sql.py
+@@ -0,0 +1,601 @@
++#
++#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
++#
++#  This file is part of the Restate SDK for Python,
++#  which is released under the MIT license.
++#
++#  You can find a copy of the license in file LICENSE in the root
++#  directory of this repository or package, or at
++#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++#
++"""
++SQL in a virtual object: ``ctx.db``, a database kept in the object's state,
++through the sqlite-kv extension, with no journal replay; and
++``ctx.transaction()``, one transaction of it with the sends it commits with.
++An attempt has one session, opened on first use and saved when the handler
++ends.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import base64
++import json
++import typing
++import uuid
++from contextlib import asynccontextmanager
++from datetime import timedelta
++from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
++
++from restate.context import HandlerType, SendHandle
++from restate.exceptions import TerminalError
++from restate.handler import Handler, handler_from_callable
++
++I = typing.TypeVar("I")
++O = typing.TypeVar("O")
++
++SqlValue = typing.Union[None, int, float, str, bytes, bool]
++"""An SQL value. A ``bool`` parameter is stored as 0 or 1; BLOBs come back as ``bytes``."""
++
++Rows = List[List[Any]]
++"""Result rows: lists of ``SqlValue``s, typed ``Any`` (as ``sqlite3``'s), so that a row unpacks to what its query selects."""
++
++
++class SqlOptions(typing.TypedDict):
++    """The options of an object whose handlers use ``ctx.db``: see ``sql_options``."""
++
++    journal_replay: bool
++    enable_lazy_state: bool
++    journal_retention: timedelta
++
++
++sql_options: SqlOptions = {
++    "journal_replay": False,
++    "enable_lazy_state": True,
++    "journal_retention": timedelta(0),
++}
++"""
++Options for an object whose handlers use ``ctx.db``::
++
++    notes = restate.VirtualObject("notes", **restate.sql_options)
++
++No journal replay, since a later attempt makes different reads; lazy state, so
++an invocation does not start by loading every page; and no journal kept after
++an invocation completes, since it holds every page it read.
++"""
++
++
++class SqlDatabase(Protocol):
++    """SQL: the object's database, or one transaction of it."""
++
++    async def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> Rows:
++        """Run SQL and return its rows; parameters bind to a single statement."""
++        ...
++
++    async def query_columns(self, sql: str, params: Optional[Sequence[Any]] = None) -> Tuple[List[str], Rows]:
++        """``query``, returning ``(columns, rows)``: also the column names of the statement whose rows these are."""
++        ...
++
++    async def execute(self, sql: str, params: Optional[Sequence[Any]] = None) -> None:
++        """Run SQL (one or more statements), discarding rows."""
++        ...
++
++
++class SqlSession(SqlDatabase, Protocol):
++    """
++    The object's database, ``ctx.db``, for the whole handler: each statement
++    outside ``transaction()`` is its own transaction. Calls run one at a time,
++    in the order they start.
++    """
++
++    def transaction(self) -> typing.AsyncContextManager[SqlDatabase]:
++        """
++        One SQL transaction, as the body of an ``async with``::
++
++            async with ctx.db.transaction() as db:
++                await db.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", [amount, src])
++                await db.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", [amount, dst])
++
++        It commits when the body ends, and rolls back when the body raises. The
++        transaction holds the session: other calls to it wait until it ends,
++        and a call from inside the body is refused, as it would wait for the
++        body. So the body uses the ``db`` it gets, which is invalid once the
++        body has ended.
++        """
++        ...
++
++
++class SqlTransactionSends(Protocol):
++    """
++    The sends of a transaction: they are made once it commits, and only then.
++    They have no invocation id.
++    """
++
++    def service_send(
++        self,
++        tpe: HandlerType[I, O],
++        arg: I,
++        send_delay: Optional[timedelta] = None,
++        idempotency_key: Optional[str] = None,
++        headers: Optional[Dict[str, str]] = None,
++    ) -> SendHandle:
++        """Send a message to a service, once the transaction commits."""
++        ...
++
++    def object_send(
++        self,
++        tpe: HandlerType[I, O],
++        key: str,
++        arg: I,
++        send_delay: Optional[timedelta] = None,
++        idempotency_key: Optional[str] = None,
++        headers: Optional[Dict[str, str]] = None,
++    ) -> SendHandle:
++        """Send a message to an object, once the transaction commits."""
++        ...
++
++    def workflow_send(
++        self,
++        tpe: HandlerType[I, O],
++        key: str,
++        arg: I,
++        send_delay: Optional[timedelta] = None,
++        idempotency_key: Optional[str] = None,
++        headers: Optional[Dict[str, str]] = None,
++    ) -> SendHandle:
++        """Send a message to a workflow, once the transaction commits."""
++        ...
++
++    def generic_send(
++        self,
++        service: str,
++        handler: str,
++        arg: bytes,
++        key: Optional[str] = None,
++        send_delay: Optional[timedelta] = None,
++        idempotency_key: Optional[str] = None,
++        headers: Optional[Dict[str, str]] = None,
++    ) -> SendHandle:
++        """Send a message to a service, object or workflow by name, once the transaction commits."""
++        ...
++
++
++class SqlTransaction(typing.NamedTuple):
++    """What the body of ``async with ctx.transaction() as t`` gets."""
++
++    db: SqlDatabase
++    """The transaction's SQL."""
++    tx: SqlTransactionSends
++    """The transaction's sends."""
++
++
++class SqlHost(Protocol):
++    """What the SQL session needs of the handler's context (the SDK's context has it)."""
++
++    @property
++    def sql_handler_kind(self) -> Optional[str]:
++        """The handler's kind, if it is an object's: "exclusive" or "shared"."""
++        ...
++
++    @property
++    def sql_journal_replay(self) -> bool:
++        """Whether the handler replays its journal."""
++        ...
++
++    @property
++    def sql_namespace(self) -> str:
++        """The object's database's name: ``service/key``."""
++        ...
++
++    def sql_get(self, key: str) -> Awaitable[Optional[bytes]]:
++        """A state read, issued now."""
++        ...
++
++    def sql_set(self, key: str, value: bytes) -> None:
++        """A state write."""
++        ...
++
++    def sql_clear(self, key: str) -> None:
++        """A state clear."""
++        ...
++
++    def sql_sync(self) -> Awaitable[Any]:
++        """An empty run: done once every command before it is stored."""
++        ...
++
++    def sql_send(
++        self,
++        service: str,
++        handler: str,
++        parameter: bytes,
++        key: Optional[str],
++        send_delay: Optional[timedelta],
++        idempotency_key: Optional[str],
++        headers: Optional[Dict[str, str]],
++    ) -> None:
++        """A send, its parameter serialized."""
++        ...
++
++    def sql_attempt_end(self) -> Optional[BaseException]:
++        """Why the attempt ended (a suspension, say), or None while it goes on."""
++        ...
++
++    def sql_on_attempt_end(self, listener: Callable[[], None]) -> Callable[[], None]:
++        """Call ``listener`` when the attempt ends; the returned function cancels it."""
++        ...
++
++
++class SqlStore(Protocol):
++    """An ordered store, as the sqlite-kv extension takes it."""
++
++    def get(self, key: str) -> Awaitable[Optional[bytes]]: ...
++    def set(self, key: str, value: bytes) -> None: ...
++    def clear(self, key: str) -> None: ...
++    def sync(self) -> Awaitable[Any]: ...
++
++
++_wrap_store: Optional[Callable[[SqlStore], SqlStore]] = None
++
++
++def set_store_wrapper(wrap: Optional[Callable[[SqlStore], SqlStore]]) -> None:
++    """Wrap each object's store, such as for fault injection in tests."""
++    global _wrap_store  # pylint: disable=global-statement
++    _wrap_store = wrap
++
++
++class ObjectStore:
++    """
++    The object's state as an ordered store: ``set`` and ``clear`` are state
++    writes, which return at once and which the runtime stores in order;
++    ``sync`` is an empty run, done after the commands before it. A ``get`` or
++    ``sync`` that the attempt's end leaves waiting raises, so the session that
++    made it ends instead of holding its lock.
++    """
++
++    def __init__(self, host: SqlHost) -> None:
++        self._host = host
++
++    def get(self, key: str) -> Awaitable[Optional[bytes]]:
++        return self._host.sql_get(key)
++
++    def set(self, key: str, value: bytes) -> None:
++        self._host.sql_set(key, value)
++
++    def clear(self, key: str) -> None:
++        self._host.sql_clear(key)
++
++    def sync(self) -> Awaitable[Any]:
++        return self._host.sql_sync()
++
++
++# A transaction's sends wait in the object's state, under PENDING, while it
++# commits: written before its COMMIT, with the database's version then, and
++# cleared once they are made. The state writes are stored in order, so a later
++# open finds them if the commit may have landed, and the version tells whether
++# it did (it grew: the commit is recorded even if the transaction changed
++# nothing). Each send's idempotency key is `transaction/<id>/<index>`, with a
++# random id of the transaction, so making them again is dropped.
++PENDING = "_restate_sql_sends"
++
++
++class _NoInvocationId(SendHandle):
++    """What a send of a transaction returns: there is no invocation yet."""
++
++    async def invocation_id(self) -> str:
++        raise TerminalError("a send of ctx.transaction has no invocation id: it is made once the transaction commits")
++
++    async def cancel_invocation(self) -> None:
++        await self.invocation_id()
++
++
++class _Sends:
++    """The sends of a transaction, recorded until it commits."""
++
++    def __init__(self) -> None:
++        self.recorded: List[Dict[str, Any]] = []
++        self.open = True
++
++    def _record(
++        self,
++        service: str,
++        handler: str,
++        parameter: bytes,
++        key: Optional[str],
++        send_delay: Optional[timedelta],
++        idempotency_key: Optional[str],
++        headers: Optional[Dict[str, str]],
++    ) -> SendHandle:
++        if not self.open:
++            raise TerminalError("the transaction has ended: send from inside its body")
++        self.recorded.append(
++            {
++                "service": service,
++                "handler": handler,
++                "key": key,
++                "delay": None if send_delay is None else int(send_delay.total_seconds() * 1000),
++                "idempotency_key": idempotency_key,
++                "headers": headers,
++                "parameter": base64.b64encode(bytes(parameter)).decode("ascii"),
++            }
++        )
++        return _NoInvocationId()
++
++    def _typed(self, tpe, key, arg, send_delay, idempotency_key, headers) -> SendHandle:
++        target: Handler[Any, Any] = handler_from_callable(tpe)
++        parameter = target.handler_io.input_serde.serialize(arg)
++        return self._record(target.service_tag.name, target.name, parameter, key, send_delay, idempotency_key, headers)
++
++    def service_send(self, tpe, arg, send_delay=None, idempotency_key=None, headers=None) -> SendHandle:
++        return self._typed(tpe, None, arg, send_delay, idempotency_key, headers)
++
++    def object_send(self, tpe, key, arg, send_delay=None, idempotency_key=None, headers=None) -> SendHandle:
++        return self._typed(tpe, key, arg, send_delay, idempotency_key, headers)
++
++    def workflow_send(self, tpe, key, arg, send_delay=None, idempotency_key=None, headers=None) -> SendHandle:
++        return self._typed(tpe, key, arg, send_delay, idempotency_key, headers)
++
++    def generic_send(
++        self, service, handler, arg, key=None, send_delay=None, idempotency_key=None, headers=None
++    ) -> SendHandle:
++        return self._record(service, handler, arg, key, send_delay, idempotency_key, headers)
++
++
++def _reraise(error: BaseException, classify: Callable[[BaseException], BaseException]) -> typing.NoReturn:
++    """Raise what ``error`` fails with, as ``classify`` says."""
++    classified = classify(error)
++    if classified is error:
++        raise error
++    raise classified from error
++
++
++class _View:
++    """``db``'s calls, their errors classified by ``classify``."""
++
++    def __init__(self, db: Any, classify: Callable[[BaseException], BaseException]) -> None:
++        self._db = db
++        self._classify = classify
++
++    async def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> Rows:
++        try:
++            return await self._db.query(sql, params)
++        except Exception as error:  # pylint: disable=broad-exception-caught
++            _reraise(error, self._classify)
++
++    async def query_columns(self, sql: str, params: Optional[Sequence[Any]] = None) -> Tuple[List[str], Rows]:
++        try:
++            return await self._db.query_columns(sql, params)
++        except Exception as error:  # pylint: disable=broad-exception-caught
++            _reraise(error, self._classify)
++
++    async def execute(self, sql: str, params: Optional[Sequence[Any]] = None) -> None:
++        await self.query(sql, params)
++
++
++class _Session:
++    """``ctx.db``: the attempt's session, opened on first use."""
++
++    def __init__(self, attempt: SqlAttempt) -> None:
++        self._attempt = attempt
++
++    async def _view(self) -> _View:
++        return _View(await self._attempt.open(), self._attempt.classify)
++
++    async def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> Rows:
++        return await (await self._view()).query(sql, params)
++
++    async def query_columns(self, sql: str, params: Optional[Sequence[Any]] = None) -> Tuple[List[str], Rows]:
++        return await (await self._view()).query_columns(sql, params)
++
++    async def execute(self, sql: str, params: Optional[Sequence[Any]] = None) -> None:
++        await self.query(sql, params)
++
++    def transaction(self) -> typing.AsyncContextManager[SqlDatabase]:
++        return self._transaction()
++
++    @asynccontextmanager
++    async def _transaction(self) -> AsyncIterator[SqlDatabase]:
++        db = await self._attempt.open()
++        async with self._attempt.transaction_of(db) as (tx, _):
++            yield tx
++
++
++class SqlAttempt:
++    """
++    An attempt's SQL session: opened on its first use (``ctx.db`` or
++    ``ctx.transaction``), shared by everything the handler does, and saved
++    when the handler ends.
++    """
++
++    def __init__(self, host: SqlHost) -> None:
++        self._host = host
++        self._session: Optional[asyncio.Future] = None
++        # The session, once open.
++        self._db: Any = None
++        self._ended = False
++        self._cancel: Callable[[], None] = lambda: None
++        self.db: SqlSession = _Session(self)
++        """``ctx.db``."""
++
++    def classify(self, error: BaseException) -> BaseException:
++        """
++        What a database call's ``error`` fails with: an SQL error, which a
++        retry would repeat, becomes terminal, unless the session has ended (a
++        storage error, which is retried). If the attempt has ended, why it did
++        (a suspension, say).
++        """
++        ended = self._host.sql_attempt_end()
++        if ended is not None:
++            return ended
++        if isinstance(error, TerminalError) or not isinstance(error, Exception):
++            return error
++        if self._db is not None and self._db.is_usable():
++            terminal = TerminalError(str(error))
++            terminal.__cause__ = error
++            return terminal
++        return error
++
++    @asynccontextmanager
++    async def transaction_of(self, db: Any) -> AsyncIterator[Tuple[SqlDatabase, Any]]:
++        """
++        One transaction of ``db``, yielding its SQL and the extension's handle:
++        the body's own error passes as it is, the transaction's (a failed
++        COMMIT) is classified.
++        """
++        own: List[BaseException] = []
++        try:
++            async with db.transaction() as tx:
++                try:
++                    yield _View(tx, self.classify), tx
++                except BaseException as error:
++                    own.append(error)
++                    raise
++        except BaseException as error:
++            if own and own[0] is error:
++                raise
++            _reraise(error, self.classify)
++
++    @asynccontextmanager
++    async def transaction(self) -> AsyncIterator[SqlTransaction]:
++        """
++        ``ctx.transaction()``: one transaction of the session, whose sends are
++        made once it commits, and kept in the object's state until they are.
++        """
++        db = await self.open()
++        sends = _Sends()
++        pending: Optional[Dict[str, Any]] = None
++        try:
++            async with self.transaction_of(db) as (sql, tx):
++                yield SqlTransaction(db=sql, tx=sends)
++                sends.open = False
++                if sends.recorded:
++                    # Before the COMMIT's writes, so stored if they are.
++                    pending = {"version": await db.version(), "id": uuid.uuid4().hex, "sends": sends.recorded}
++                    self._host.sql_set(PENDING, json.dumps(pending).encode())
++                    # So that the version grows even if the transaction changed
++                    # nothing: otherwise a later open could not tell that it
++                    # committed.
++                    tx.record_commit()
++        except BaseException:
++            # A COMMIT refused with the session usable did not land; one that
++            # ended the session may have, which the next open tells.
++            if pending is not None and db.is_usable():
++                self._host.sql_clear(PENDING)
++            raise
++        finally:
++            sends.open = False
++        # Made right after the commit, before anything else runs: the next
++        # transaction writes PENDING only after this one has cleared it.
++        if pending is not None:
++            self._emit(pending)
++
++    def _emit(self, pending: Dict[str, Any]) -> None:
++        """
++        Make the sends of ``pending``, committed: each with an idempotency key
++        of the transaction (or its own), so that making them again is dropped.
++        """
++        for index, send in enumerate(pending["sends"]):
++            delay = send.get("delay")
++            self._host.sql_send(
++                send["service"],
++                send["handler"],
++                base64.b64decode(send["parameter"]),
++                send.get("key"),
++                None if delay is None else timedelta(milliseconds=delay),
++                send.get("idempotency_key") or f"transaction/{pending['id']}/{index}",
++                send.get("headers"),
++            )
++        # After the sends: once this is stored, so are they.
++        self._host.sql_clear(PENDING)
++
++    async def _recover(self, db: Any, store: SqlStore) -> None:
++        """The sends a crashed attempt left pending: made again if their transaction committed, else dropped."""
++        stored = await store.get(PENDING)
++        if stored is None:
++            return
++        pending = json.loads(bytes(stored).decode())
++        if await db.version() > pending["version"]:
++            self._emit(pending)
++        else:
++            self._host.sql_clear(PENDING)
++
++    async def open(self) -> Any:
++        """The session, opened on the first call."""
++        if self._ended:
++            raise RuntimeError("the handler has ended: its SQL session is closed")
++        if self._session is None:
++            self._session = asyncio.ensure_future(self._start())
++            # Its error goes to the calls that wait for it.
++            self._session.add_done_callback(lambda f: f.cancelled() or f.exception())
++        return await asyncio.shield(self._session)
++
++    async def _start(self) -> Any:
++        host = self._host
++        if host.sql_handler_kind != "exclusive":
++            raise TerminalError("ctx.db is for exclusive object handlers")
++        if host.sql_journal_replay:
++            raise TerminalError(
++                "ctx.db needs the object's options to include restate.sql_options "
++                "(journal_replay=False): a replayed journal would not match the reads of a later attempt"
++            )
++        try:
++            import sqlite_kv  # pylint: disable=import-outside-toplevel
++        except ImportError as error:
++            raise TerminalError(f"ctx.db needs the sqlite-kv package installed: {error}") from error
++        store: SqlStore = ObjectStore(host)
++        if _wrap_store is not None:
++            store = _wrap_store(store)
++        try:
++            db = await sqlite_kv.open(host.sql_namespace, store)
++        except Exception as error:  # pylint: disable=broad-exception-caught
++            _reraise(error, self.classify)
++        self._db = db
++        # A handler still waiting for something else when the attempt ends
++        # (a model request, say) keeps the session no longer: it closes once
++        # no statement runs, and the handler's later calls fail.
++        self._cancel = host.sql_on_attempt_end(lambda: _close_soon(db))
++        try:
++            await self._recover(db, store)
++        except BaseException:
++            await db.close()
++            raise
++        return db
++
++    async def end(self, failed: bool) -> None:
++        """
++        The handler ended (``failed``, or not): the session is saved. Saving
++        confirms its writes (an empty run, if it wrote), so that the page
++        cache may trust them; a session that is not saved makes the next one
++        in this process start cold. One that a storage error ended closes now.
++        """
++        self._ended = True
++        if self._session is None:
++            return
++        try:
++            db = await asyncio.shield(self._session)
++        except BaseException:  # pylint: disable=broad-exception-caught
++            # The open failed, and its error went to the call that made it.
++            return
++        self._cancel()
++        if failed:
++            # The handler's error stands: its writes are stored in order before
++            # the result, whether or not the save confirms them for the cache.
++            try:
++                await (db.save() if db.is_usable() else db.close())
++            except BaseException:  # pylint: disable=broad-exception-caught
++                try:
++                    await db.close()
++                except BaseException:  # pylint: disable=broad-exception-caught
++                    pass
++            return
++        try:
++            if db.is_usable():
++                await db.save()
++            else:
++                await db.close()
++        except Exception as error:  # pylint: disable=broad-exception-caught
++            _reraise(error, self.classify)
++
++
++def _close_soon(db: Any) -> None:
++    task = asyncio.ensure_future(db.close())
++    task.add_done_callback(lambda f: f.cancelled() or f.exception())
+diff --git a/python/restate/vm.py b/python/restate/vm.py
+index 7b7b91f..e652181 100644
+--- a/python/restate/vm.py
++++ b/python/restate/vm.py
+@@ -205,8 +205,13 @@ class VMWrapper:
+     It provides a type-friendly interface to our shared vm.
+     """
+ 
+-    def __init__(self, headers: typing.List[typing.Tuple[str, str]], disable_payload_checks: bool = False):
+-        self.vm = PyVM(headers, disable_payload_checks)
++    def __init__(
++        self,
++        headers: typing.List[typing.Tuple[str, str]],
++        disable_payload_checks: bool = False,
++        journal_replay: bool = True,
++    ):
++        self.vm = PyVM(headers, disable_payload_checks, journal_replay)
+ 
+     def get_response_head(self) -> typing.Tuple[int, typing.Iterable[typing.Tuple[str, str]]]:
+         """
+diff --git a/python/restate/workflow.py b/python/restate/workflow.py
+index b87a996..331153d 100644
+--- a/python/restate/workflow.py
++++ b/python/restate/workflow.py
+@@ -76,6 +76,9 @@ class Workflow:
+             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+             otherwise the service discovery will fail.
+         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
++        journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++            against the state as stored, instead of replaying the journal of earlier attempts. Handlers may override it.
++            Without it, ctx.run and awakeables are not available. Default True.
+         invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this workflow.
+     """
+ 
+@@ -96,6 +99,7 @@ class Workflow:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ):
+         self.service_tag = ServiceTag("workflow", name, description, metadata)
+         self.handlers = {}
+@@ -107,6 +111,7 @@ class Workflow:
+         self.ingress_private = ingress_private
+         self.invocation_retry_policy = invocation_retry_policy
+         self.context_managers = invocation_context_managers
++        self.journal_replay = journal_replay
+ 
+     @property
+     def name(self):
+@@ -133,6 +138,7 @@ class Workflow:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Mark this handler as a workflow entry point.
+@@ -173,6 +179,9 @@ class Workflow:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+         """
+         return self._add_handler(
+             name,
+@@ -191,6 +200,7 @@ class Workflow:
+             ingress_private=ingress_private,
+             invocation_retry_policy=invocation_retry_policy,
+             invocation_context_managers=invocation_context_managers,
++            journal_replay=journal_replay,
+         )
+ 
+     def handler(
+@@ -211,6 +221,7 @@ class Workflow:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Decorator for defining a handler function.
+@@ -251,6 +262,9 @@ class Workflow:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+             invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this handler.
+         """
+         return self._add_handler(
+@@ -270,6 +284,7 @@ class Workflow:
+             ingress_private,
+             invocation_retry_policy,
+             invocation_context_managers,
++            journal_replay=journal_replay,
+         )
+ 
+     # pylint: disable=R0914
+@@ -293,6 +308,7 @@ class Workflow:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Decorator for defining a handler function.
+@@ -337,6 +353,9 @@ class Workflow:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+ 
+         Returns:
+             Callable: The decorated function.
+@@ -382,6 +401,7 @@ class Workflow:
+                 ingress_private=ingress_private,
+                 invocation_retry_policy=invocation_retry_policy,
+                 context_managers=combined_context_managers,
++                journal_replay=self.journal_replay if journal_replay is None else journal_replay,
+             )
+             self.handlers[handler.name] = handler
+             return wrapped
+diff --git a/src/lib.rs b/src/lib.rs
+index 319281a..2058711 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -4,9 +4,9 @@ use pyo3::types::{PyBytes, PyNone, PyString};
+ use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
+ use restate_sdk_shared_core::{
+     AwaitResponse, AwakeableHandle, CallHandle, CoreVM, Error, Header, IdentityVerifier, Input,
+-    NonDeterministicChecksOption, NonEmptyValue, NotificationHandle, OnMaxAttempts, ResponseHead,
+-    RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture, VMOptions,
+-    Value, CANCEL_NOTIFICATION_HANDLE, VM,
++    JournalReplay, NonDeterministicChecksOption, NonEmptyValue, NotificationHandle, OnMaxAttempts,
++    ResponseHead, RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture,
++    VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
+ };
+ use std::fmt;
+ use std::time::{Duration, SystemTime};
+@@ -72,7 +72,6 @@ impl From<ResponseHead> for PyResponseHead {
+     }
+ }
+ 
+-
+ type PyNotificationHandle = u32;
+ 
+ #[pyclass]
+@@ -371,10 +370,11 @@ struct PyVM {
+ #[pymethods]
+ impl PyVM {
+     #[new]
+-    #[pyo3(signature = (headers, disable_payload_checks=false))]
++    #[pyo3(signature = (headers, disable_payload_checks=false, journal_replay=true))]
+     fn new(
+         headers: Vec<(String, String)>,
+         disable_payload_checks: bool,
++        journal_replay: bool,
+     ) -> Result<Self, PyVMError> {
+         // When a journal value codec is configured, the serialized payloads written to the journal
+         // may legitimately differ between attempts (e.g. encryption with a random nonce), so we
+@@ -385,6 +385,13 @@ impl PyVM {
+             } else {
+                 NonDeterministicChecksOption::Enabled
+             },
++            // Without it, a retried attempt runs the handler again from the start, against
++            // the state as stored, instead of replaying the journal of earlier attempts.
++            journal_replay: if journal_replay {
++                JournalReplay::Enabled
++            } else {
++                JournalReplay::Disabled
++            },
+             ..Default::default()
+         };
+         Ok(Self {
+@@ -468,6 +475,11 @@ impl PyVM {
+             Ok(AwaitResponse::CancelSignalReceived) => {
+                 Ok(Bound::new(py, PyDoProgressCancelSignalReceived)?.into_any())
+             }
++            // Of protocol V8's ephemeral commands, which this SDK does not make.
++            Ok(AwaitResponse::EphemeralNotificationReady(_)) => Err(PyVMError::from(Error::new(
++                restate_sdk_shared_core::error::codes::INTERNAL,
++                "unexpected ephemeral notification: this SDK makes no ephemeral commands",
++            )))?,
+         }
+     }
+ 
+diff --git a/tests/journal_replay.py b/tests/journal_replay.py
+new file mode 100644
+index 0000000..dc02582
+--- /dev/null
++++ b/tests/journal_replay.py
+@@ -0,0 +1,58 @@
++#
++#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
++#
++#  This file is part of the Restate SDK for Python,
++#  which is released under the MIT license.
++#
++#  You can find a copy of the license in file LICENSE in the root
++#  directory of this repository or package, or at
++#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++#
++"""The journal_replay option: a service's default, and a handler's own."""
++
++from restate import Context, ObjectContext, Service, VirtualObject, Workflow, WorkflowContext
++from restate.vm import VMWrapper
++
++
++def test_handlers_replay_their_journal_by_default():
++    greeter = Service("greeter")
++
++    @greeter.handler()
++    async def greet(ctx: Context, name: str) -> str:
++        return name
++
++    assert greeter.handlers["greet"].journal_replay
++
++
++def test_a_service_sets_it_for_its_handlers_and_a_handler_overrides_it():
++    counter = VirtualObject("counter", journal_replay=False)
++
++    @counter.handler()
++    async def add(ctx: ObjectContext, n: int) -> None:
++        pass
++
++    @counter.handler(journal_replay=True)
++    async def replayed(ctx: ObjectContext) -> None:
++        pass
++
++    assert not counter.handlers["add"].journal_replay
++    assert counter.handlers["replayed"].journal_replay
++
++    flow = Workflow("flow")
++
++    @flow.main(journal_replay=False)
++    async def run(ctx: WorkflowContext) -> None:
++        pass
++
++    @flow.handler()
++    async def query(ctx: WorkflowContext) -> None:
++        pass
++
++    assert not flow.handlers["run"].journal_replay
++    assert flow.handlers["query"].journal_replay
++
++
++def test_the_vm_takes_it():
++    headers = [("content-type", "application/vnd.restate.invocation.v6")]
++    VMWrapper(headers, journal_replay=False)
++    VMWrapper(headers)
+diff --git a/tests/selector.py b/tests/selector.py
+new file mode 100644
+index 0000000..3a26ae3
+--- /dev/null
++++ b/tests/selector.py
+@@ -0,0 +1,227 @@
++#
++#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
++#
++#  This file is part of the Restate SDK for Python,
++#  which is released under the MIT license.
++#
++#  You can find a copy of the license in file LICENSE in the root
++#  directory of this repository or package, or at
++#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++#
++"""The selector of an invocation without journal replay, against a fake VM."""
++
++import asyncio
++from typing import Any, Dict, List, Set
++
++import pytest
++
++from restate.exceptions import SdkInternalException, SuspendedException, TerminalError
++from restate.selector import FutureSelector, is_ready
++from restate.vm import (
++    AllCompletedUnresolvedFuture,
++    DoProgressAnyCompleted,
++    DoProgressCancelSignalReceived,
++    DoProgressExecuteRun,
++    DoProgressWaitExternalProgress,
++    FirstCompletedUnresolvedFuture,
++    SingleUnresolvedFuture,
++    Suspended,
++    UnresolvedFuture,
++)
++
++
++@pytest.fixture(scope="session")
++def anyio_backend():
++    return "asyncio"
++
++
++pytestmark = [pytest.mark.anyio]
++
++
++class Disconnected(Exception):
++    pass
++
++
++class FakeVm:
++    """A VM whose handles complete as input names them: a body chunk b"3" completes handle 3."""
++
++    def __init__(self) -> None:
++        self.completed: Set[int] = set()
++        self.input: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
++        self.checks: List[UnresolvedFuture] = []
++        # Responses that do_progress gives before looking at the handles.
++        self.script: List[Any] = []
++        self.runs: List[int] = []
++        self.wakes = 0
++        self.ended = 0
++        self.tasks: List[asyncio.Future] = []
++
++    def do_progress(self, future: UnresolvedFuture) -> Any:
++        self.checks.append(future)
++        if self.script:
++            return self.script.pop(0)
++        if is_ready(future, self.is_completed):
++            return DoProgressAnyCompleted()
++        return DoProgressWaitExternalProgress()
++
++    def is_completed(self, handle: int) -> bool:
++        return handle in self.completed
++
++    async def flush_output(self) -> None:
++        pass
++
++    async def receive(self) -> Dict[str, Any]:
++        return await self.input.get()
++
++    def wake(self) -> None:
++        self.wakes += 1
++        self.input.put_nowait({"type": "restate.wake"})
++
++    def execute_run(self, handle: int) -> None:
++        self.runs.append(handle)
++        self.completed.add(handle)
++        self.input.put_nowait({"type": "restate.run_completed"})
++
++    def notify_input(self, chunk: Dict[str, Any]) -> None:
++        self.completed.add(int(chunk["body"]))
++
++    def track(self, task: asyncio.Future) -> None:
++        self.tasks.append(task)
++
++    def on_end(self) -> None:
++        self.ended += 1
++
++    def complete(self, handle: int) -> None:
++        self.input.put_nowait({"type": "http.request", "body": str(handle).encode(), "more_body": True})
++
++
++def single(handle: int) -> SingleUnresolvedFuture:
++    return SingleUnresolvedFuture(handle)
++
++
++async def settle() -> None:
++    for _ in range(5):
++        await asyncio.sleep(0)
++
++
++async def test_a_ready_future_needs_no_loop():
++    vm = FakeVm()
++    vm.completed.add(1)
++    selector = FutureSelector(vm, Disconnected)
++    await selector.wait(single(1))
++    assert vm.checks == []
++
++
++async def test_concurrent_waits_share_one_await_point():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    both = asyncio.ensure_future(asyncio.gather(selector.wait(single(1)), selector.wait(single(2))))
++    await settle()
++    # One check, of the first of both to complete.
++    assert vm.checks == [FirstCompletedUnresolvedFuture([single(1), single(2)])]
++    vm.complete(2)
++    await settle()
++    assert not both.done()
++    vm.complete(1)
++    await both
++    assert selector.size == 0
++
++
++async def test_a_wait_made_while_the_loop_waits_for_input_joins_the_next_check():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    first = asyncio.ensure_future(selector.wait(single(1)))
++    await settle()
++    assert vm.checks == [single(1)]
++    second = asyncio.ensure_future(selector.wait(single(2)))
++    await settle()
++    assert vm.wakes == 1
++    assert vm.checks[-1] == FirstCompletedUnresolvedFuture([single(1), single(2)])
++    # A third wait while the loop waits again wakes it once more, not once per wait.
++    third = asyncio.ensure_future(selector.wait(single(3)))
++    await settle()
++    assert vm.wakes == 2
++    for handle in (3, 2, 1):
++        vm.complete(handle)
++    await asyncio.gather(first, second, third)
++
++
++async def test_combinators_wait_for_their_children():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    every = asyncio.ensure_future(selector.wait(AllCompletedUnresolvedFuture([single(1), single(2)])))
++    vm.complete(1)
++    await settle()
++    assert not every.done()
++    vm.complete(2)
++    await every
++
++
++async def test_a_cancellation_reaches_every_pending_wait_and_only_those():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    waits = [asyncio.ensure_future(selector.wait(single(h))) for h in (1, 2)]
++    await settle()
++    vm.script.append(DoProgressCancelSignalReceived())
++    vm.complete(9)
++    for wait in waits:
++        with pytest.raises(TerminalError) as error:
++            await wait
++        assert error.value.status_code == 409
++    # What waits after it is not cancelled.
++    later = asyncio.ensure_future(selector.wait(single(3)))
++    vm.complete(3)
++    await later
++
++
++async def test_a_suspension_ends_every_wait_now_and_later():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    vm.script.append(Suspended())
++    with pytest.raises(SuspendedException):
++        await selector.wait(single(1))
++    assert isinstance(selector.ended, SuspendedException)
++    assert vm.ended == 1
++    with pytest.raises(SuspendedException):
++        await selector.wait(single(2))
++
++
++async def test_an_error_of_the_vm_ends_the_attempt():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    vm.script.append(ValueError("journal mismatch"))
++    with pytest.raises(SdkInternalException) as error:
++        await selector.wait(single(1))
++    assert isinstance(error.value.__cause__, ValueError)
++
++
++async def test_a_disconnect_ends_the_attempt():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    wait = asyncio.ensure_future(selector.wait(single(1)))
++    await settle()
++    vm.input.put_nowait({"type": "http.disconnect"})
++    with pytest.raises(Disconnected):
++        await wait
++
++
++async def test_a_run_is_started_and_its_completion_wakes_the_loop():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    vm.script.append(DoProgressExecuteRun(7))
++    await selector.wait(single(7))
++    assert vm.runs == [7]
++
++
++async def test_the_loop_stops_when_nothing_is_pending_and_starts_again():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    first = asyncio.ensure_future(selector.wait(single(1)))
++    vm.complete(1)
++    await first
++    await settle()
++    assert all(task.done() for task in vm.tasks)
++    second = asyncio.ensure_future(selector.wait(single(2)))
++    vm.complete(2)
++    await second
++    assert len(vm.tasks) == 2
+diff --git a/tests/sql_attempt.py b/tests/sql_attempt.py
+new file mode 100644
+index 0000000..3a402a9
+--- /dev/null
++++ b/tests/sql_attempt.py
+@@ -0,0 +1,285 @@
++#
++#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
++#
++#  This file is part of the Restate SDK for Python,
++#  which is released under the MIT license.
++#
++#  You can find a copy of the license in file LICENSE in the root
++#  directory of this repository or package, or at
++#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++#
++"""ctx.db and ctx.transaction, over the sqlite-kv extension and a fake object state."""
++
++import asyncio
++import itertools
++import json
++from datetime import timedelta
++from typing import Any, Callable, Dict, List, Optional, Tuple
++
++import pytest
++
++from restate import VirtualObject, ObjectContext
++from restate.exceptions import TerminalError
++from restate.sql import PENDING, SqlAttempt
++
++pytest.importorskip("sqlite_kv")
++
++
++@pytest.fixture(scope="session")
++def anyio_backend():
++    return "asyncio"
++
++
++pytestmark = [pytest.mark.anyio]
++
++_objects = itertools.count()
++
++shop = VirtualObject("shop")
++
++
++@shop.handler()
++async def ship(ctx: ObjectContext, item: str) -> None:
++    pass
++
++
++class FakeHost:
++    """
++    An attempt over an object's state: reads see the stored state and this
++    attempt's writes; writes and sends are recorded in order, as the runtime
++    stores them, and stored by ``store(n)`` up to the n-th.
++    """
++
++    def __init__(self, state: Dict[str, bytes], name: str, kind: Optional[str] = "exclusive", replay=False) -> None:
++        self.state = state
++        self.name = name
++        self.kind = kind
++        self.replay = replay
++        # ("set", key, value), ("clear", key, None) or ("send", idempotency key, (target, parameter, delay)).
++        self.log: List[Tuple[str, str, Any]] = []
++        self.fail_reads = False
++
++    @property
++    def sql_handler_kind(self) -> Optional[str]:
++        return self.kind
++
++    @property
++    def sql_journal_replay(self) -> bool:
++        return self.replay
++
++    @property
++    def sql_namespace(self) -> str:
++        return self.name
++
++    def sql_get(self, key: str):
++        future = asyncio.get_running_loop().create_future()
++        if self.fail_reads:
++            future.set_exception(ConnectionError("the runtime is gone"))
++            return future
++        value = self.state.get(key)
++        for op, k, v in self.log:
++            if op in ("set", "clear") and k == key:
++                value = v
++        future.set_result(value)
++        return future
++
++    def sql_set(self, key: str, value: bytes) -> None:
++        self.log.append(("set", key, bytes(value)))
++
++    def sql_clear(self, key: str) -> None:
++        self.log.append(("clear", key, None))
++
++    async def sql_sync(self) -> None:
++        pass
++
++    def sql_send(self, service, handler, parameter, key, send_delay, idempotency_key, headers) -> None:
++        self.log.append(("send", idempotency_key, (f"{service}/{key}/{handler}", parameter, send_delay)))
++
++    def sql_attempt_end(self):
++        return None
++
++    def sql_on_attempt_end(self, listener: Callable[[], None]) -> Callable[[], None]:
++        return lambda: None
++
++    def store(self, n: Optional[int] = None) -> Dict[str, bytes]:
++        """The state once the first n commands are stored."""
++        state = dict(self.state)
++        for op, key, value in self.log[:n]:
++            if op == "set":
++                state[key] = value
++            elif op == "clear":
++                state.pop(key, None)
++        return state
++
++    def sends(self, n: Optional[int] = None) -> List[Tuple[str, Any]]:
++        return [(key, value) for op, key, value in self.log[:n] if op == "send"]
++
++
++def fresh() -> str:
++    """A namespace no session of this process has used: as another process sees the state."""
++    return f"object-{next(_objects)}"
++
++
++async def run(host: FakeHost, body) -> Any:
++    """One attempt of a handler: ``body(attempt)``, then the session ends with it."""
++    attempt = SqlAttempt(host)
++    try:
++        result = await body(attempt)
++    except BaseException:
++        await attempt.end(failed=True)
++        raise
++    await attempt.end(failed=False)
++    return result
++
++
++async def test_statements_persist_and_a_later_attempt_reads_them():
++    host = FakeHost({}, fresh())
++
++    async def write(attempt: SqlAttempt):
++        await attempt.db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)")
++        await attempt.db.execute("INSERT INTO t VALUES(?, ?)", [1, "one"])
++        return await attempt.db.query_columns("SELECT * FROM t")
++
++    assert await run(host, write) == (["id", "v"], [[1, "one"]])
++    later = FakeHost(host.store(), fresh())
++    assert await run(later, lambda a: a.db.query("SELECT v FROM t")) == [["one"]]
++
++
++async def test_an_sql_error_is_terminal_and_leaves_the_session_usable():
++    host = FakeHost({}, fresh())
++
++    async def body(attempt: SqlAttempt):
++        with pytest.raises(TerminalError, match="no such table") as error:
++            await attempt.db.query("SELECT * FROM missing")
++        assert isinstance(error.value.__cause__, RuntimeError)
++        return await attempt.db.query("SELECT 1")
++
++    assert await run(host, body) == [[1]]
++
++
++async def test_a_storage_error_is_retried_not_terminal():
++    host = FakeHost({}, fresh())
++    host.fail_reads = True
++
++    async def body(attempt: SqlAttempt):
++        await attempt.db.query("SELECT 1")
++
++    with pytest.raises(Exception) as error:
++        await run(host, body)
++    assert not isinstance(error.value, TerminalError)
++
++
++async def test_a_transaction_rolls_back_when_its_body_raises_its_own_error():
++    host = FakeHost({}, fresh())
++
++    async def body(attempt: SqlAttempt):
++        await attempt.db.execute("CREATE TABLE t(id INTEGER)")
++        with pytest.raises(ValueError, match="changed my mind"):
++            async with attempt.db.transaction() as db:
++                await db.execute("INSERT INTO t VALUES(1)")
++                raise ValueError("changed my mind")
++        with pytest.raises(ValueError, match="again"):
++            async with attempt.transaction() as t:
++                await t.db.execute("INSERT INTO t VALUES(2)")
++                t.tx.object_send(ship, "a", "apple")
++                raise ValueError("again")
++        return await attempt.db.query("SELECT count(*) FROM t")
++
++    assert await run(host, body) == [[0]]
++    assert host.sends() == []
++    assert PENDING not in host.store()
++
++
++async def test_a_transactions_sends_are_made_once_it_commits():
++    host = FakeHost({}, fresh())
++
++    async def body(attempt: SqlAttempt):
++        await attempt.db.execute("CREATE TABLE t(id INTEGER)")
++        async with attempt.transaction() as t:
++            await t.db.execute("INSERT INTO t VALUES(1)")
++            handle = t.tx.object_send(ship, "a", "apple", send_delay=timedelta(seconds=1))
++            t.tx.generic_send("shop", "ship", b'"pear"', key="b", idempotency_key="mine")
++            assert host.sends() == []
++        with pytest.raises(TerminalError, match="no invocation id"):
++            await handle.invocation_id()
++
++    await run(host, body)
++    [(first, (target, parameter, delay)), second] = host.sends()
++    assert first.startswith("transaction/") and first.endswith("/0")
++    assert (target, parameter, delay) == ("shop/a/ship", b'"apple"', timedelta(seconds=1))
++    assert second == ("mine", ("shop/b/ship", b'"pear"', None))
++    assert PENDING not in host.store()
++
++
++async def test_a_send_after_the_transaction_has_ended_is_refused():
++    host = FakeHost({}, fresh())
++
++    async def body(attempt: SqlAttempt):
++        async with attempt.transaction() as t:
++            await t.db.execute("CREATE TABLE t(id INTEGER)")
++        t.tx.object_send(ship, "a", "apple")
++
++    with pytest.raises(TerminalError, match="the transaction has ended"):
++        await run(host, body)
++
++
++async def test_the_sends_of_a_commit_are_made_once_wherever_the_attempt_crashed():
++    """
++    For every prefix of an attempt's commands that a crash may leave stored,
++    the next attempt makes the transaction's sends if, and only if, its commit
++    landed: with the same keys, so that each is made once.
++    """
++    base = FakeHost({}, fresh())
++    await run(base, lambda a: a.db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)"))
++    stored = base.store()
++
++    crashed = FakeHost(stored, fresh())
++    attempt = SqlAttempt(crashed)
++    async with attempt.transaction() as t:
++        await t.db.execute("INSERT INTO t VALUES(7)")
++        t.tx.object_send(ship, "a", "apple")
++    await attempt.end(failed=False)
++    assert len(crashed.sends()) == 1
++
++    for n in range(len(crashed.log) + 1):
++        after = FakeHost(crashed.store(n), fresh())
++
++        async def recover(attempt: SqlAttempt):
++            return await attempt.db.query("SELECT count(*) FROM t")
++
++        [[rows]] = await run(after, recover)
++        made = {key for key, _ in crashed.sends(n) + after.sends()}
++        assert len(made) == rows, f"{n} commands stored: {rows} rows, sends made with keys {made}"
++        assert PENDING not in after.store(), f"{n} commands stored"
++
++
++async def test_a_pending_record_is_the_transactions_own():
++    host = FakeHost({}, fresh())
++
++    async def body(attempt: SqlAttempt):
++        async with attempt.transaction() as t:
++            await t.db.execute("CREATE TABLE t(id INTEGER)")
++            t.tx.object_send(ship, "a", "apple")
++
++    await run(host, body)
++    [pending] = [json.loads(value) for op, key, value in host.log if op == "set" and key == PENDING]
++    assert pending["sends"][0]["service"] == "shop"
++    assert pending["sends"][0]["key"] == "a"
++
++
++async def test_ctx_db_is_for_exclusive_handlers_without_journal_replay():
++    for host, message in [
++        (FakeHost({}, fresh(), kind="shared"), "exclusive object handlers"),
++        (FakeHost({}, fresh(), kind=None), "exclusive object handlers"),
++        (FakeHost({}, fresh(), replay=True), "restate.sql_options"),
++    ]:
++        with pytest.raises(TerminalError, match=message):
++            await run(host, lambda a: a.db.query("SELECT 1"))
++
++
++async def test_the_session_is_closed_once_the_handler_ends():
++    host = FakeHost({}, fresh())
++    attempt = SqlAttempt(host)
++    await attempt.db.query("SELECT 1")
++    await attempt.end(failed=False)
++    with pytest.raises(RuntimeError, match="the handler has ended"):
++        await attempt.db.query("SELECT 1")

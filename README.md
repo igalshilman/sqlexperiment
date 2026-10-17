@@ -41,12 +41,11 @@ Each on the one before, then the examples and the tests:
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [`sqlite-kv/`](sqlite-kv/README.md)                             | **The storage.** SQL over an asynchronous key/value store, for namespaces with one owner at a time: a Rust crate with its tests, benchmarks, [design](sqlite-kv/docs/DESIGN.md) and [TLA+ specification](sqlite-kv/spec/README.md). It knows nothing about Restate.                                                                                                                                                                                                                              |
 | [`packages/sql-node/`](packages/sql-node/README.md)             | **The Node.js addon**, the `sqlite-kv` npm package: the crate over a key/value store implemented in JavaScript.                                                                                                                                                                                                                                                                                                                                                                                  |
-| [`packages/sql-python/`](packages/sql-python/README.md)         | **The Python extension**, the `sqlite-kv` Python package: the same over a key/value store implemented in Python.                                                                                                                                                                                                                                                                                                                                                                                 |
 | [`packages/sdk-typescript/`](packages/sdk-typescript/README.md) | **The SDK changes.** Patches to the Restate TypeScript SDK, over [the patched shared core](packages/sdk-shared-core/README.md) (`JournalReplay::Disabled`): handlers without journal replay (`journalReplay: false`), their own context type with plain promises, and `ctx.db` and `ctx.transaction` on the addon. [How SQL in virtual objects works](packages/sdk-typescript/SQL.md).                                                                                                           |
-| [`packages/sdk-python/`](packages/sdk-python/README.md)         | **The Python SDK changes.** Patches to the Restate Python SDK, over the same shared core: handlers without journal replay (`journal_replay=False`).                                                                                                                                                                                                                                                                                                                                              |
 | [`packages/integrations/`](packages/integrations)               | **The integrations**, the `restate-agents` package: agent frameworks in virtual objects, their state in the object's database, each a `chat()` handler: [pi](packages/integrations/src/pi/README.md) (`restate-agents/pi`), [OpenCode](packages/integrations/src/opencode/README.md), [LangGraph](packages/integrations/src/langgraph/README.md), [Claude](packages/integrations/src/claude/README.md) (the Anthropic SDK) and [DeepSeek Harness](packages/integrations/src/deepseek/README.md). |
 | [`examples/`](examples/README.md)                               | **The examples**, each a small file you run with node: a chat on each framework, a coding team, notes in SQL, and [a tool gateway](examples/gateway/README.md).                                                                                                                                                                                                                                                                                                                                  |
 | [`tests/`](tests)                                               | **The tests**: the agents with bank tools on scripted models, the storage conformance suites, SQL in objects (a ledger and a shop), and the crash and concurrency tests against a real Restate server.                                                                                                                                                                                                                                                                                           |
+| [`python/`](python/README.md)                                   | **The Python side**, its own uv workspace: [the Python extension](python/sqlite-kv/README.md) (the `sqlite-kv` Python package), [the Python SDK changes](python/sdk/README.md) (patches to the Restate Python SDK, over the same shared core: handlers without journal replay, `ctx.db` and `ctx.transaction()`), and its examples and tests.                                                                                                                                                    |
 
 ## Requirements
 
@@ -54,7 +53,7 @@ Each on the one before, then the examples and the tests:
 | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | Restate server | 1.7.13, the latest release (or later)                                                                                  |
 | TypeScript SDK | 1.17.3 with [the patches](packages/sdk-typescript/README.md), over the shared core's unreleased main; `make` builds it |
-| Python SDK     | 1.0.5 with [the patches](packages/sdk-python/README.md), over the same shared core; `make` builds it                   |
+| Python SDK     | 1.0.5 with [the patches](python/sdk/README.md), over the same shared core; `make` builds it                            |
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13
@@ -77,6 +76,7 @@ make test-sdk-py  # the patched Python SDK's own tests
 make test-sql-py  # the Python extension's tests
 make crash-test         # the integrations and SQL objects through crashes, against a Restate server
 make concurrency-test   # the context without journal replay, against a Restate server
+make crash-test-py concurrency-test-py   # the same, in Python
 make help
 ```
 
@@ -85,8 +85,8 @@ examples and tests are TypeScript that node runs as it is, and OpenCode needs 24
 SDK also needs the `wasm32-unknown-unknown` target and
 `wasm-bindgen` 0.2.121 (`cargo install wasm-bindgen-cli --version 0.2.121`).
 The Python parts need Python 3.13 and [uv](https://docs.astral.sh/uv/), which
-installs the workspace ([`pyproject.toml`](pyproject.toml)) into `.venv`
-(`make py`), building the patched SDK and the extension with maturin.
+installs [their workspace](python/README.md) into `python/.venv` (`make py`),
+building the patched SDK and the extension with maturin.
 
 The tests against a Restate server download its release binary on first use
 (see the [`Makefile`](Makefile): `RESTATE_VERSION`, `RESTATE_FROM`, `RESTATE_SERVER`).

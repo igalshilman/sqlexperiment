@@ -1,12 +1,12 @@
 # The Python workspace (uv), as pnpm-workspace.yaml is the TypeScript one:
-# the sqlite-kv extension (packages/sql-python), and the patched SDK, which
-# packages/sdk-python prepares (`make sdk-py`). `make py` installs them into
-# .venv; `make lint-py` checks them.
+# the sqlite-kv extension (sqlite-kv/), and the patched SDK, which sdk/
+# prepares (`make sdk-py`), for the examples (examples/) and the tests
+# (tests/). `make py` installs them into .venv; `make lint-py` checks them.
 [project]
 name = "restate-sql"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["restate-sdk", "sqlite-kv"]
+dependencies = ["restate-sdk", "sqlite-kv", "hypercorn>=0.17"]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.14", "mypy>=1.18"]
@@ -15,17 +15,17 @@ dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.14", "mypy>=1.18"]
 package = false
 
 [tool.uv.workspace]
-members = ["packages/sql-python"]
+members = ["sqlite-kv"]
 
 [tool.uv.sources]
 sqlite-kv = { workspace = true }
 # The patched SDK, wherever it is used.
-restate-sdk = { path = "packages/sdk-python/.build/sdk-python", editable = true }
+restate-sdk = { path = "sdk/.build/sdk-python", editable = true }
 
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-extend-exclude = ["**/.build", "**/target", "sqlite-kv"]
+extend-exclude = ["**/.build", "**/target"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

@@ -128,8 +128,8 @@ the owner cache.
 - [Benchmarks](benches/README.md)
 - [Node.js addon](../packages/sql-node/README.md): the same over a key/value store
   implemented in JavaScript, in `packages/sql-node/`
-- [Python extension](../packages/sql-python/README.md): the same over a
-  key/value store implemented in Python, in `packages/sql-python/`
+- [Python extension](../python/sqlite-kv/README.md): the same over a
+  key/value store implemented in Python, in `python/sqlite-kv/`
 
 It is used by a patched Restate TypeScript SDK, for SQL in virtual objects:
 see [the repository's README](../README.md).

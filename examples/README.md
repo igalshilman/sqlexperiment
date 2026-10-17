@@ -54,3 +54,7 @@ take Anthropic's models, and DeepSeek its own (see
 [the models](../packages/integrations/README.md#models)). To call an agent
 from code, or to send a message again safely, see
 [Calling an agent](../packages/integrations/README.md#calling-an-agent).
+
+## Python
+
+The Python examples are in [`python/examples`](../python/README.md#examples).
