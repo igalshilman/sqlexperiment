@@ -9,7 +9,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples-py"))
 
 import restate  # noqa: E402
 from bank import account  # noqa: E402
