@@ -63,8 +63,7 @@ function object(key: string) {
       const ctx = {
         key,
         request: () => ({ id }),
-        db: sql.db,
-        transaction: sql.transaction,
+        ...sql,
         genericCall: async (call: Call) => {
           calls.push(call);
           return `${call.key}: done`;

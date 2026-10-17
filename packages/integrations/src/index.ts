@@ -14,7 +14,7 @@ export {
   type PerCall,
 } from './common.ts';
 export { object } from './object.ts';
-export { signals } from './signals.ts';
+export { signals, type Resolved, type Signal, type Waiting } from './signals.ts';
 export { call, send, signal, subagent, tool, workflow, type Tool, type ToolContext } from './tools.ts';
 
 /**

@@ -15,17 +15,19 @@ const refund = restate.workflow({
   handlers: { run: async (_ctx: restate.WorkflowContext, _order: string) => 'refunded' },
 });
 
-/** A context, keyed `alice`, of invocation `inv1`, recording what is called and sent. */
-function context() {
+/** A context, keyed `alice`, of invocation `inv1`, recording what is called and sent, with the object's `state`. */
+function context(state = new Map<string, unknown>()) {
   const made: Record<string, unknown>[] = [];
   const ctx = {
     key: 'alice',
+    get: async (name: string) => structuredClone(state.get(name) ?? null),
+    set: (name: string, value: unknown) => void state.set(name, structuredClone(value)),
     request: () => ({ id: 'inv1', target: { service: 'assistant', handler: 'chat', key: 'alice' } }),
     genericCall: async (c: Record<string, unknown>) => (made.push({ kind: 'call', ...c }), `${String(c.method)} done`),
     genericSend: (c: Record<string, unknown>) => void made.push({ kind: 'send', ...c }),
     objectClient: (definition: { name: string }, key: string) => ({
-      wait: async (name: string, opts: restate.Opts<string, unknown>) => {
-        made.push({ kind: 'call', service: definition.name, key, method: 'wait', parameter: name, ...opts.getOpts() });
+      wait: async (parameter: unknown, opts: restate.Opts<unknown, unknown>) => {
+        made.push({ kind: 'call', service: definition.name, key, method: 'wait', parameter, ...opts.getOpts() });
         return 'approved';
       },
     }),
@@ -106,20 +108,51 @@ describe('workflow', () => {
 });
 
 describe('signal', () => {
-  it("waits on the agent's signals object for the signal, once per tool call", async () => {
-    const t = signal('approval', { description: 'Wait for a manager' });
+  it("waits on the agent's signals object, once per tool call, for what the model says", async () => {
+    const t = signal('approval', { description: 'Wait for a manager', input: z.object({ order: z.string() }) });
     expect(t.name).toBe('wait_for_approval');
-    const { result, made } = await run(t, {});
+    expect(fields(t)).toEqual(['order']);
+    const { result, made } = await run(t, { order: '103' });
     expect(result).toBe('approved');
     expect(made).toMatchObject([
       {
         service: 'signals',
         key: 'assistant:alice',
         method: 'wait',
-        parameter: 'approval',
+        parameter: { id: 'inv1:call_1', name: 'approval', input: { order: '103' } },
         idempotencyKey: 'inv1:call_1',
       },
     ]);
+  });
+});
+
+describe("Restate's tools", () => {
+  it('make a call again with the call id of the attempt that first made it', async () => {
+    const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
+    const state = new Map<string, unknown>();
+    // An attempt makes the call, and ends (a crash, a suspension) before it answers.
+    const first = context(state);
+    first.ctx.genericCall = (() => new Promise(() => {})) as never;
+    void t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
+    await new Promise((r) => setTimeout(r, 0));
+    // The next attempt's model makes it again, as a new tool call: it is the same call.
+    const next = context(state);
+    await t.run({ order: '103' }, { ctx: next.ctx, callId: 'call_2' });
+    // With another input, it is another call.
+    await t.run({ order: '104' }, { ctx: next.ctx, callId: 'call_3' });
+    // Once answered, the same input is a call of its own.
+    await t.run({ order: '103' }, { ctx: next.ctx, callId: 'call_4' });
+    expect(next.made.map((m) => m.idempotencyKey)).toEqual(['inv1:call_1', 'inv1:call_3', 'inv1:call_4']);
+  });
+
+  it('make two calls of the same input in one attempt', async () => {
+    const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
+    const { ctx, made } = context();
+    await Promise.all([
+      t.run({ order: '103' }, { ctx, callId: 'call_1' }),
+      t.run({ order: '103' }, { ctx, callId: 'call_2' }),
+    ]);
+    expect(made.map((m) => m.idempotencyKey)).toEqual(['inv1:call_1', 'inv1:call_2']);
   });
 });
 

@@ -8,11 +8,13 @@
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/support/alice/chat -d 'Order 103 arrived broken, can I get my $30 back?'
  *
- * The agent waits for approval; in another terminal, see what it waits for,
- * and approve:
+ * The agent waits for approval; in another terminal, see what it waits for
+ * (the refund, with the wait's id), and approve it:
  *
  *   curl localhost:8080/support/alice/pending
- *   curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'
+ *   curl localhost:8080/support/alice/signal --json '{"id": "<the id>", "value": "approved"}'
+ *
+ * or the oldest wait for an approval: `{"name": "approval", "value": "approved"}`.
  */
 import * as restate from '@restatedev/restate-sdk';
 import { call, serve, signal, workflow } from 'restate-agents';
@@ -47,6 +49,7 @@ const support = pi.agent({
     }),
     signal('approval', {
       description: "Wait for a manager to decide on a refund. Answers with the manager's decision.",
+      input: z.object({ order: z.string(), amount: z.number() }),
     }),
     workflow(refund, {
       description: 'Refund an order. Only once a manager approved it.',

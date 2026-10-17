@@ -1,6 +1,6 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from '@restatedev/restate-sdk';
-import { signals, signalsOf } from './signals.ts';
+import { type Resolved, type Signal, signals, signalsOf, type Waiting } from './signals.ts';
 
 /**
  * The options of every object here: SQL (`ctx.db`: no journal replay, lazy
@@ -27,20 +27,19 @@ const METADATA = {
 
 /**
  * The handlers every object here has, beside its own: `signal`, which
- * resolves a signal the object's tools wait for (see `signal` in tools.ts),
- * and `pending`, the signals they wait for. Both are shared, so they run
- * while the object's handler waits, and journaled: they use no `ctx.db`.
+ * resolves a wait of the object's tools (see `signal` in tools.ts), and
+ * `pending`, the waits. Both are shared, so they run while the object's
+ * handler waits, and journaled: they use no `ctx.db`.
  */
 const SIGNALS = {
   signal: restate.handlers.object.shared(
     { journalReplay: true },
-    async (ctx: restate.ObjectSharedContext, signal: { name: string; value?: unknown }) => {
-      await ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).resolve(signal);
-    },
+    async (ctx: restate.ObjectSharedContext, signal: Signal): Promise<Resolved> =>
+      ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).resolve(signal),
   ),
   pending: restate.handlers.object.shared(
     { journalReplay: true },
-    async (ctx: restate.ObjectSharedContext): Promise<string[]> =>
+    async (ctx: restate.ObjectSharedContext): Promise<Waiting[]> =>
       ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).pending(),
   ),
 };
@@ -62,9 +61,8 @@ type Reserved = { [name in keyof typeof SIGNALS]?: 'a handler every object has: 
  *     },
  *   });
  *
- * Besides its own handlers, it has `signal({ name, value })`, which
- * resolves a signal its tools wait for, and `pending`, the ones they wait
- * for.
+ * Besides its own handlers, it has `pending`, the waits of its tools
+ * (`signal()`), and `signal({ id, value })`, which resolves one.
  *
  * `options` and `metadata` add to (or replace) the ones set here, such as
  * `options: { journalRetention: { hours: 1 } }` to look at journals in the
