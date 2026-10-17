@@ -3,8 +3,8 @@
 # of packages/sdk-shared-core), the Node.js addon (packages/sql-node), the
 # integrations (packages/integrations), the tests (tests/) and the examples;
 # and, in python/, the uv workspace: the patched Python SDK (python/sdk, over
-# the same shared core), the Python extension (python/sqlite-kv), and the
-# Python examples and tests.
+# the same shared core), the Python extension (python/sqlite-kv), the Python
+# agent integrations (python/agents), and the Python examples and tests.
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -39,7 +39,7 @@ RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
 .PHONY: all help core addon sdk-ts sdk-py js py examples-rust test test-core test-addon test-sdk-ts test-ts \
-	test-sdk-py test-sql-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test \
+	test-sdk-py test-sql-py test-agents-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test \
 	crash-test-py concurrency-test-py restate-server clean
 
 # --- Build
@@ -78,7 +78,7 @@ examples-rust: ## The Rust example: the core crate's lookup
 
 # --- Test
 
-test: test-core test-addon test-sdk-ts test-ts test-sdk-py test-sql-py ## Every test that needs no Restate server
+test: test-core test-addon test-sdk-ts test-ts test-sdk-py test-sql-py test-agents-py ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
@@ -103,6 +103,9 @@ test-sdk-py: $(SDK_PY) ## The patched Python SDK's own tests
 test-sql-py: py ## The Python extension
 	cd python && uv run --locked pytest sqlite-kv/tests
 
+test-agents-py: py ## The Python agent integrations (python/agents): the checkpointer conformance suite, and the agents on a scripted model
+	cd python && uv run --locked pytest agents/tests
+
 lint: lint-core lint-ts lint-py ## Every lint
 
 lint-core: ## The Rust crates (the core, the addon and the Python extension): rustfmt --check and clippy
@@ -115,7 +118,7 @@ lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware)
 
 lint-py: py ## The Python: ruff format --check, ruff check and mypy; and the patched SDK's ruff, as it configures it, and rustfmt
 	cd python && uv run --locked ruff format --check && uv run --locked ruff check \
-		&& uv run --locked mypy sqlite-kv/python sqlite-kv/tests examples tests
+		&& uv run --locked mypy sqlite-kv/python sqlite-kv/tests agents examples tests
 	cd python/sdk/.build/sdk-python && uv run --extra lint ruff format --check && uv run --extra lint ruff check \
 		&& $(CARGO) fmt --check
 

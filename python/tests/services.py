@@ -1,6 +1,7 @@
 """
-The services of test_context.py: the examples' notes and bank, and a probe
-of the context without journal replay. Served on PORT, as the examples are.
+The services of the tests against a Restate server: the examples' notes and
+bank, a probe of the context without journal replay, and the agent on the
+scripted teller (scripted_agent.py). Served on PORT, as the examples are.
 """
 
 import asyncio
@@ -14,7 +15,8 @@ import restate  # noqa: E402
 from bank import account  # noqa: E402
 from notes import notes  # noqa: E402
 from restate import Context, ObjectContext  # noqa: E402
-from serve import serve  # noqa: E402
+from restate_agents import serve  # noqa: E402
+from scripted_agent import teller  # noqa: E402
 
 echo = restate.Service("echo")
 
@@ -120,4 +122,4 @@ async def cancellations(ctx: ObjectContext) -> int:
 
 
 if __name__ == "__main__":
-    serve(echo, probe, notes, account)
+    serve(echo, probe, notes, account, teller)

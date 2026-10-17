@@ -10,7 +10,7 @@ stored in Restate with the object's state. No database to run.
 
 import restate
 from restate import ObjectContext
-from serve import serve
+from restate_agents import serve
 
 notes = restate.VirtualObject("notes", **restate.sql_options)
 
