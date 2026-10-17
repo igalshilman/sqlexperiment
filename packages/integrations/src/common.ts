@@ -1,12 +1,32 @@
 // What the integrations share.
 import * as restate from '@restatedev/restate-sdk';
 
-/** A value, or what it is for an invocation. */
-export type PerCall<T> = T | ((ctx: restate.SqlObjectContext) => T);
+/**
+ * A value, or a function of the invocation's context that gives it: the
+ * same for every message, or each user's (from the object's database, say).
+ *
+ *   pi.chat({ model: 'anthropic/claude-sonnet-5-5' })
+ *   pi.chat(async (ctx) => ({ model: await modelOf(ctx) }))
+ */
+export type Configure<T> = T | ((ctx: restate.SqlObjectContext) => T | Promise<T>);
 
 /** `value` for the invocation of `ctx`. */
-export const forCall = <T>(value: PerCall<T>, ctx: restate.SqlObjectContext): T =>
-  typeof value === 'function' ? (value as (ctx: restate.SqlObjectContext) => T)(ctx) : value;
+export const configured = async <T>(value: Configure<T>, ctx: restate.SqlObjectContext): Promise<T> =>
+  typeof value === 'function' ? (value as (ctx: restate.SqlObjectContext) => T | Promise<T>)(ctx) : value;
+
+/** The prompts each invocation made so far, by its context. */
+const prompts = new WeakMap<object, number>();
+
+/**
+ * The id of the next prompt of the invocation of `ctx`: the invocation's id,
+ * then `<id>:2`, `<id>:3`... A retried attempt makes its prompts in the same
+ * order, so each gets the same id again, and its answer.
+ */
+export const nextPromptId = (ctx: restate.SqlObjectContext) => {
+  const n = (prompts.get(ctx) ?? 0) + 1;
+  prompts.set(ctx, n);
+  return n === 1 ? ctx.request().id : `${ctx.request().id}:${n}`;
+};
 
 /**
  * The model, as `provider/model-id` (such as `anthropic/claude-sonnet-5-5`):
@@ -72,6 +92,16 @@ export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: str
     },
   );
 
+/** A tool's error, which fails the attempt (Restate retries it): the error `cause` of tool `tool`. */
+export class ToolError extends Error {
+  readonly tool: string;
+  constructor(tool: string, cause: unknown) {
+    super(`the tool ${tool} failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = 'ToolError';
+    this.tool = tool;
+  }
+}
+
 /** The Anthropic SDK's errors of a request that fails again however often it is made. */
 const FOR_GOOD = new Set(['AuthenticationError', 'PermissionDeniedError', 'NotFoundError', 'BadRequestError']);
 
@@ -81,6 +111,7 @@ const FOR_GOOD = new Set(['AuthenticationError', 'PermissionDeniedError', 'NotFo
  * (a tool's, an overloaded provider's) fail the attempt, and Restate retries.
  */
 function refused(error: unknown) {
+  if (error instanceof ToolError) return false;
   if (error instanceof Error && FOR_GOOD.has(error.constructor.name)) return true;
   return /API key not found|no API key|Could not resolve authentication method|"code":"AUTH"/i.test(String(error));
 }

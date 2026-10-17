@@ -4,7 +4,9 @@
 //
 //   const assistant = claude.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
 //
-// or a handler of an object of your own: `handlers: { chat: claude.chat() }`
+// or a handler of an object of your own: `handlers: { chat: claude.chat() }`,
+// with options for each invocation: `claude.chat(async (ctx) => ({ system }))`,
+// or a prompt of your own handler: `claude.prompt(ctx, text, options)`
 //
 // The model is `model`, or else MODEL, or else anthropic/claude-sonnet-5-5,
 // with ANTHROPIC_API_KEY.
@@ -22,13 +24,19 @@
 import type * as restate from '@restatedev/restate-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
-import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, type PerCall } from '../common.ts';
+import {
+  chatHandler,
+  type Configure,
+  configured,
+  messagesHandler,
+  modelIdOf,
+  modelOf,
+  nextPromptId,
+} from '../common.ts';
 import { object } from '../object.ts';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { Conversation } from './conversation.ts';
-
-export { Conversation };
 
 /** The default model. */
 export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
@@ -73,16 +81,17 @@ const textOf = (content: Anthropic.Beta.Messages.BetaContentBlock[]) =>
 interface Agent {
   client: Anthropic;
   model: string;
+  maxTokens: number;
   system?: string;
   tools: BetaRunnableTool[];
 }
 
 /** Run prompt `id` of `conversation` until it is answered, from its stored messages. */
-async function run({ client, model, system, tools: all }: Agent, conversation: Conversation, id: string) {
+async function run({ client, model, maxTokens, system, tools: all }: Agent, conversation: Conversation, id: string) {
   const { tools, check } = failing(all);
   const runner = client.beta.messages.toolRunner({
     model,
-    max_tokens: 4096,
+    max_tokens: maxTokens,
     ...(system === undefined ? {} : { system }),
     tools,
     messages: await conversation.messages(),
@@ -119,44 +128,65 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): BetaRunnableTool =>
     run: (input, context) => t.run(input, { ctx, callId: callId(context) }),
   });
 
-export interface ChatOptions {
+/** An agent's options: `chat` and `prompt` take them. */
+export interface Options {
   /** The model, as `anthropic/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** The system prompt. */
   system?: string;
-  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the SDK's (such as `betaZodTool`s), or for an invocation. */
-  tools?: (PerCall<BetaRunnableTool> | AnyTool)[];
+  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the SDK's (such as `betaZodTool`s). */
+  tools?: (AnyTool | BetaRunnableTool)[];
+  /** The client of the Anthropic API: by default one with ANTHROPIC_API_KEY. */
+  client?: Anthropic;
+  /** The most tokens of each of the model's replies (default 4096). */
+  maxTokens?: number;
 }
 
-/** The answer to a message, each message an invocation, the conversation in the object's database. */
-const respond = ({ model: named, system, tools = [] }: ChatOptions = {}) => {
-  const client = new Anthropic();
-  const model = modelIdOf(modelOf(named, DEFAULT_MODEL), 'anthropic');
-  return async (ctx: restate.SqlObjectContext, message: string): Promise<string> => {
-    const agent = { client, model, system, tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))) };
-    const id = ctx.request().id;
-    const conversation = await Conversation.open(ctx.db);
-    for (;;) {
-      const answer = await conversation.answer(id);
-      if (answer !== undefined) return answer;
-      // Finish an interrupted message first (this one's, after a crash),
-      // then start this one.
-      let pending = await conversation.pending();
-      if (pending === undefined) {
-        await conversation.append(id, [{ role: 'user', content: message }]);
-        pending = id;
-      }
-      await run(agent, conversation, pending);
-    }
+/** The client of the agents without one of their own, made when first used. */
+let shared: Anthropic | undefined;
+
+/**
+ * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
+ * of an invocation is a prompt of its own.
+ */
+export const prompt = async (
+  ctx: restate.SqlObjectContext,
+  text: string,
+  { model: named, system, tools = [], client, maxTokens = 4096 }: Options = {},
+): Promise<string> => {
+  const agent = {
+    client: client ?? (shared ??= new Anthropic()),
+    model: modelIdOf(modelOf(named, DEFAULT_MODEL), 'anthropic'),
+    maxTokens,
+    system,
+    tools: tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
   };
+  const id = nextPromptId(ctx);
+  const conversation = await Conversation.open(ctx.db);
+  for (;;) {
+    const answer = await conversation.answer(id);
+    if (answer !== undefined) return answer;
+    // Finish an interrupted prompt first (this one's, after a crash), then
+    // start this one.
+    let pending = await conversation.pending();
+    if (pending === undefined) {
+      await conversation.append(id, [{ role: 'user', content: text }]);
+      pending = id;
+    }
+    await run(agent, conversation, pending);
+  }
 };
 
 /**
- * A chat handler: each message an invocation, the conversation in the object's database.
- * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
- * (`curl --json '"Hi"'`).
+ * A chat handler: each message an invocation, the conversation in the
+ * object's database, with `options`, or the options a function of the
+ * invocation's context gives. It takes the message as plain text
+ * (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
-export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
+export const chat = (options: Configure<Options> = {}) => {
+  if (typeof options === 'object') modelIdOf(modelOf(options.model, DEFAULT_MODEL), 'anthropic');
+  return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
+};
 
 /** The text of stored content, without its tool calls and results. */
 const storedText = (content: string | readonly { type: string; text?: string }[] | undefined) =>
@@ -182,5 +212,5 @@ export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) =>
+}: Options & { name: P; description?: string }) =>
   object({ name, description, handlers: { chat: chat(options), messages: messages() } });

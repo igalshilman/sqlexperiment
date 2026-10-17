@@ -57,7 +57,7 @@ const audit = (ctx: restate.SqlObjectContext) =>
   });
 
 /** Answer a message, once per invocation. */
-export const prompt = pi.chat({ tools: [transfer, audit] });
+export const prompt = pi.chat((ctx) => ({ tools: [transfer(ctx), audit(ctx)] }));
 
 export const agent = object({ name: 'Agent', handlers: { chat: prompt, messages: pi.messages() } });
 

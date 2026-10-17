@@ -3,11 +3,12 @@
 //
 //   const coder = opencode.agent({ name: 'coder', workspace: (ctx) => `/work/${ctx.key}` });
 //
-// or a handler of an object of your own: `handlers: { chat: opencode.chat() }`
+// or a handler of an object of your own: `handlers: { chat: opencode.chat() }`,
+// with options for each invocation: `opencode.chat(async (ctx) => ({ workspace }))`
 //
 // or, for more than a prompt:
 //
-//   code: (ctx, task) => withOpenCode(ctx, { tools }, (session) => session.prompt(task)),
+//   review: (ctx, task) => withOpenCode(ctx, { tools }, async ({ prompt }) => [await prompt(task), await prompt('Review it')]),
 //
 // The model is `model`, MODEL, or else anthropic/claude-sonnet-5-5,
 // which OpenCode's own providers serve, with the provider's API key (such as
@@ -39,10 +40,11 @@ import {
   CHECK_MODEL,
   chatHandler,
   checkModelName,
-  forCall,
+  type Configure,
+  configured,
   messagesHandler,
   modelOf,
-  type PerCall,
+  nextPromptId,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -64,42 +66,48 @@ const modelRef = (name: string): ModelRef => {
   return { providerID, id: id.join('/') };
 };
 
-/** A tool: `execute` gets the input and the tool call's id. */
-export interface Tool<Input = unknown> {
+/** An OpenCode tool of your own: `execute` gets the input and the tool call's id. */
+export interface OpenCodeTool<Input = unknown> {
   name: string;
   description: string;
   input: StandardSchemaV1<unknown, Input>;
   execute(input: Input, callId: string): Promise<string>;
 }
 
-/** `t` as a tool of any input, for a list of tools of different inputs. */
-const anyTool = <Input>(t: Tool<Input>) => t as Tool;
+/** `t` as an OpenCode tool. */
+const native = (t: AnyTool, ctx: restate.SqlObjectContext): OpenCodeTool => ({
+  name: t.name,
+  description: t.description,
+  input: t.input,
+  execute: (input, callId) => t.run(input as Record<string, unknown>, { ctx, callId }),
+});
 
 /** The session every prompt goes to. */
-export const SESSION = 'ses_root';
+const SESSION = 'ses_root';
 
 /** What `work` gets: `prompt(text)`, and the OpenCode `host` for anything else. */
 export interface OpenCodeSession {
   host: Host;
-  /** Answer `text`, once per prompt `id` (by default the invocation's), with the answer's text. */
+  /** Answer `text`, once per prompt `id`, with the answer's text. By default, each prompt of an invocation has an id of its own, the same on every attempt. */
   prompt(text: string, id?: string): Promise<string>;
 }
 
-export interface OpenCodeOptions {
-  /** OpenCode plugins, such as the one of the model. */
-  plugins?: Plugin.Plugin[];
-  /** The system prompt: who the agent is, and how it answers. */
-  system?: string;
+/** An agent's options: `chat`, `prompt` and `withOpenCode` take them. */
+export interface Options {
   /** The model of the session, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string | ModelRef;
-  /** The agent's tools, which replace OpenCode's own. */
-  tools?: Tool[];
+  /** The system prompt: who the agent is, and how it answers. */
+  system?: string;
+  /** The agent's tools, which replace OpenCode's own: `tool()`s, Restate's (`call`, `signal`...), or OpenCode tools of your own. */
+  tools?: (AnyTool | OpenCodeTool)[];
   /**
    * A directory of the local machine, made if missing: OpenCode keeps its own tools (read,
    * write, edit, bash, glob, grep...) there, besides `tools`, and the
    * session works in it.
    */
   workspace?: string;
+  /** OpenCode plugins, such as the one of the model. */
+  plugins?: Plugin.Plugin[];
 }
 
 /** An OpenCode plugin that adds `system` to the session's system prompt. */
@@ -114,7 +122,7 @@ const systemPlugin = (system: string): Plugin.Plugin => ({
 });
 
 /** An OpenCode plugin whose tools are `tools`, and only those. */
-function toolsPlugin(tools: Tool[], fail: (error: unknown) => Promise<never>, builtins = false): Plugin.Plugin {
+function toolsPlugin(tools: OpenCodeTool[], fail: (error: unknown) => Promise<never>, builtins = false): Plugin.Plugin {
   return {
     id: 'examples.tools',
     async setup(ctx) {
@@ -260,7 +268,7 @@ async function startInbox(host: Host) {
  */
 export const withOpenCode = async <T>(
   ctx: restate.SqlObjectContext,
-  { plugins = [], model: named, system, tools = [], workspace }: OpenCodeOptions,
+  { plugins = [], model: named, system, tools = [], workspace }: Options,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
   const model = typeof named === 'object' ? named : modelRef(modelOf(named, DEFAULT_MODEL));
@@ -278,7 +286,15 @@ export const withOpenCode = async <T>(
     return new Promise<never>(() => {});
   };
   const host = await openOpenCode(db, fence, {
-    plugins: [...plugins, toolsPlugin(tools, fail, workspace !== undefined), ...(system ? [systemPlugin(system)] : [])],
+    plugins: [
+      ...plugins,
+      toolsPlugin(
+        tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
+        fail,
+        workspace !== undefined,
+      ),
+      ...(system ? [systemPlugin(system)] : []),
+    ],
     config: { default_agent: 'build' },
     local: workspace !== undefined,
   });
@@ -287,7 +303,7 @@ export const withOpenCode = async <T>(
       failure,
       work({
         host,
-        async prompt(text, id = ctx.request().id) {
+        async prompt(text, id = nextPromptId(ctx)) {
           // OpenCode's ids are letters, digits, `_` and `-`.
           const messageId = `msg_${id.replace(/[^\w-]/g, '_')}`;
           const { session } = host.client;
@@ -341,49 +357,22 @@ export const withOpenCode = async <T>(
   }
 };
 
-/** Answer `text`, once per invocation: a retried attempt resumes the same prompt. */
-export const prompt = (ctx: restate.SqlObjectContext, text: string, options: OpenCodeOptions = {}) =>
+/**
+ * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
+ * of an invocation is a prompt of its own.
+ */
+export const prompt = (ctx: restate.SqlObjectContext, text: string, options: Options = {}) =>
   withOpenCode(ctx, options, (session) => session.prompt(text));
 
-export interface ChatOptions {
-  /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
-  model?: string;
-  /** The system prompt: who the agent is, and how it answers. */
-  system?: string;
-  /** The agent's tools, which replace OpenCode's own: `tool()`s, Restate's (`call`, `signal`...), or OpenCode tools of your own (`Tool`), or for an invocation. */
-  tools?: (PerCall<Tool> | AnyTool)[];
-  /** The directory to work in, with OpenCode's own tools (see {@link OpenCodeOptions.workspace}). */
-  workspace?: PerCall<string | undefined>;
-}
-
-/** The answer to a message, each message an invocation, the session in the object's database. */
-const respond =
-  ({ model, system, tools = [], workspace }: ChatOptions = {}) =>
-  (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
-    prompt(ctx, message, {
-      model,
-      system,
-      tools: tools.map((t) =>
-        isTool(t)
-          ? anyTool({
-              name: t.name,
-              description: t.description,
-              input: t.input,
-              execute: (input, callId) => t.run(input, { ctx, callId }),
-            })
-          : forCall(t, ctx),
-      ),
-      workspace: workspace === undefined ? undefined : forCall(workspace, ctx),
-    });
-
 /**
- * A chat handler: each message an invocation, the session in the object's database.
- * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
- * (`curl --json '"Hi"'`).
+ * A chat handler: each message an invocation, the session in the object's
+ * database, with `options`, or the options a function of the invocation's
+ * context gives (each user's workspace, say). It takes the message as plain
+ * text (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
-export const chat = (options: ChatOptions = {}) => {
-  checkModelName('opencode', options.model);
-  return chatHandler(respond(options));
+export const chat = (options: Configure<Options> = {}) => {
+  if (typeof options === 'object' && typeof options.model !== 'object') checkModelName('opencode', options.model);
+  return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
 
 /** The session's messages, oldest first. */
@@ -425,5 +414,5 @@ export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) =>
+}: Options & { name: P; description?: string }) =>
   object({ name, description, handlers: { chat: chat(options), messages: messages() } });

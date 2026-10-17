@@ -11,6 +11,7 @@ Here its storage is the agent's SQL database, in the Restate virtual object
 ```ts
 import { serve } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
+import { weather } from './weather.ts';
 
 const assistant = pi.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
 await serve(assistant);
@@ -25,16 +26,24 @@ await serve(assistant);
 | `workspace` | A directory for pi-durable's coding tools (`read`, `write`, `edit`, `bash`), on the local file system; use a sandbox           |
 
 For an object of your own, `pi.chat(options)` and `pi.messages()` are the
-handlers. For more than a prompt, `withPi(ctx, options, work)` runs `work`
-with the Harness, on the same options as `chat` (each for this invocation):
-`prompt(text)` answers a prompt once per invocation, and `conversation()` is
-the object's conversation, on the model, for pi-durable's own API (`reset`,
-`compact`, `entries`...):
+handlers; `options` may be a function of the invocation's context, such as
+each user's model from the object's database. `pi.prompt(ctx, text,
+options)` answers a prompt in a handler of your own. For more than a prompt,
+`withPi(ctx, options, work)` runs `work` with the Harness: `prompt(text)`
+answers a prompt once, and `conversation()` is the object's conversation, on
+the model, for pi-durable's own API (`reset`, `compact`, `entries`...):
 
 ```ts
-chat: chatHandler(async (ctx, message) => pi.prompt(ctx, message, await optionsOf(ctx))),
-reset: (ctx, handoff: string) =>
-  pi.withPi(ctx, {}, async ({ conversation, context }) => (await conversation()).reset(handoff, context)),
+const options = async (ctx: restate.SqlObjectContext): Promise<pi.Options> => ({
+  model: (await settingsOf(ctx)).model,
+  tools: [clock],
+});
+
+handlers: {
+  chat: pi.chat(options),
+  reset: async (ctx, handoff: string) =>
+    pi.withPi(ctx, await options(ctx), async ({ conversation, context }) => (await conversation()).reset(handoff, context)),
+},
 ```
 
 A conversation goes on with the model of each invocation: a `model` (or
@@ -52,7 +61,10 @@ handler does. A retried attempt opens the Harness again and carries on:
   invocation's id);
 - an answered prompt returns its answer;
 - unfinished work resumes: a model call is made again, and a tool call runs
-  again with the same call id, which a tool passes on to stay idempotent.
+  again with the same call id, which a tool passes on to stay idempotent;
+- a tool's error fails the attempt, and Restate retries it (pi-durable would
+  hand it to the model); a `restate.TerminalError` of a `restate-agents`
+  tool is its answer to the model.
 
 The files of a `workspace` are not in the database: they last as long as the
 disk does, and a coding tool a crash cut off is not run again (the model is

@@ -1,7 +1,8 @@
 // pi's chat without a Restate server or an API key: Anthropic's provider is a
 // fake model (../fakes/pi.ts).
 import type * as restate from '@restatedev/restate-sdk';
-import { subagent } from 'restate-agents';
+import { subagent, tool } from 'restate-agents';
+import { z } from 'zod';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { callTools, fakeProvider, say, textOf } from '../fakes/pi.ts';
@@ -26,6 +27,7 @@ vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
         const system = messages.find((m) => m.role === 'system') as { sections?: Record<string, string> } | undefined;
         return say(Object.values(system?.sections ?? {}).join('\n'));
       }
+      if (textOf(last.content) === 'Break it') return callTools([['boom', {}]]);
       if (textOf(last.content).startsWith('delegate')) {
         return callTools([
           ['coder', { name: 'fizzbuzz', task: 'write fizzbuzz.py' }],
@@ -61,8 +63,7 @@ function object(key: string) {
       const ctx = {
         key,
         request: () => ({ id }),
-        db: sql.db,
-        transaction: sql.transaction,
+        ...sql,
         genericCall: async (call: Call) => {
           calls.push(call);
           return `${call.key}: done`;
@@ -77,6 +78,17 @@ function object(key: string) {
 const said = (id: number, role: string, text: string) => ({ id, role, parts: [{ type: 'text', text }] });
 
 describe('pi.messages', () => {
+  it("reads without MODEL's provider", async () => {
+    const alice = object('alice');
+    await alice.invoke(pi.chat(), 'inv1', 'Hi, I am Alice');
+    vi.stubEnv('MODEL', 'nowhere/nothing');
+    try {
+      expect((await alice.invoke(pi.messages(), 'read', {})).messages).toHaveLength(2);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('gives the conversation: what was said, in order, a page at a time', async () => {
     const alice = object('alice');
     await alice.invoke(pi.chat(), 'inv1', 'Hi, I am Alice');
@@ -97,10 +109,48 @@ describe('pi.messages', () => {
   });
 });
 
+/** A handler that prompts twice. */
+const twice = async (ctx: restate.SqlObjectContext) => [
+  await pi.prompt(ctx, 'One'),
+  await pi.withPi(ctx, {}, (session) => session.prompt('Two')),
+];
+
 describe('pi.chat', () => {
+  it('takes options for each invocation', async () => {
+    const ada = object('ada');
+    const chat = pi.chat(async (ctx) => ({ system: `You are ${ctx.key}.` }));
+    expect(await ada.invoke(chat, 'inv1', 'Who are you?')).toContain('You are ada.');
+  });
+
   it('gives the model its system prompt', async () => {
     const ada = object('ada');
     expect(await ada.invoke(pi.chat({ system: 'You are Ada.' }), 'inv1', 'Who are you?')).toContain('You are Ada.');
+  });
+
+  it("fails the attempt on a tool's error, and the retry runs the tool call again", async () => {
+    const alice = object('alice');
+    const calls: string[] = [];
+    const boom = tool({
+      name: 'boom',
+      description: 'Fails the first time.',
+      input: z.object({}),
+      run: async (_input, { callId }) => {
+        calls.push(callId);
+        if (calls.length === 1) throw new Error('the disk is on fire');
+        return 'fixed';
+      },
+    });
+    const chat = pi.chat({ tools: [boom] });
+    await expect(alice.invoke(chat, 'inv1', 'Break it')).rejects.toThrow('the disk is on fire');
+    expect(await alice.invoke(chat, 'inv1', 'Break it')).toBe('fixed');
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toBe(calls[0]);
+  });
+
+  it('answers each prompt of an invocation, and each once', async () => {
+    const alice = object('alice');
+    expect(await alice.invoke(twice, 'inv1', undefined)).toEqual(['One', 'One / Two']);
+    expect(await alice.invoke(twice, 'inv1', undefined)).toEqual(['One', 'One / Two']);
   });
 
   it('remembers the conversation across messages, and answers a retried message once', async () => {

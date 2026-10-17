@@ -1,11 +1,13 @@
 # Examples
 
 Each one is a file you run with Node (24 or later), from here, after `make
-js` at the repository's root. See [Run an example](#run-an-example).
+js` at the repository's root. See [Run an example](#run-an-example). Start
+with [`chat.ts`](chat.ts), and [`restate-agents`](../packages/integrations/README.md),
+the integrations they use.
 
 | File                            | What                                                                                                                                          |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`chat.ts`](chat.ts)            | A durable chat agent on pi, with a tool: `pi.agent({ name: 'assistant', tools: [weather] })`                                                  |
+| [`chat.ts`](chat.ts)            | **Start here.** A durable chat agent on pi, with a tool: `pi.agent({ name: 'assistant', tools: [weather] })`                                  |
 | [`opencode.ts`](opencode.ts)    | The same agent on OpenCode 2.0                                                                                                                |
 | [`langgraph.ts`](langgraph.ts)  | The same agent on LangGraph                                                                                                                   |
 | [`claude.ts`](claude.ts)        | The same agent on Claude (the Anthropic SDK's tool runner)                                                                                    |
@@ -13,7 +15,7 @@ js` at the repository's root. See [Run an example](#run-an-example).
 | [`coding.ts`](coding.ts)        | A coordinator (pi) that hands coding tasks to coders of its own (OpenCode)                                                                    |
 | [`support.ts`](support.ts)      | A support agent whose tools are Restate itself: a service call, a signal (a manager's approval) and a workflow                                |
 | [`memory.ts`](memory.ts)        | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a handler of your own beside the agent's |
-| [`harness.ts`](harness.ts)      | pi's Harness configured as it runs (`withPi`): each user's model and persona from its database, and `compact` and `reset` handlers            |
+| [`harness.ts`](harness.ts)      | An agent each user configures: its model and persona from the object's database (`pi.chat(options)`), and `compact` and `reset` handlers      |
 | [`team.ts`](team.ts)            | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                       |
 | [`followup.ts`](followup.ts)    | An agent that schedules a check-in for a day later: `send` with a delay                                                                       |
 | [`triage.ts`](triage.ts)        | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review                                               |
@@ -58,3 +60,9 @@ from code, or to send a message again safely, see
 ## Python
 
 The Python examples are in [`python/examples`](../python/README.md#examples).
+
+## Write your own
+
+A new file here, beside the others, runs the same way: its package has
+`restate-agents`, the patched SDK and zod. For a package of your own, see
+[Build your own](../packages/integrations/README.md#build-your-own).

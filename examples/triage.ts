@@ -5,6 +5,7 @@
  * review without holding a process.
  *
  *   ANTHROPIC_API_KEY=… node triage.ts
+ *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/triage/t1/run/send --json '"I was charged twice for order 103."'
  *   curl localhost:8080/triage/t1/draft                               # the drafted reply

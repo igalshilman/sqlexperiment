@@ -1,11 +1,13 @@
 /**
- * An assistant each user sets up as it runs, on pi's Harness directly
- * (`withPi`) rather than `pi.chat()`: each user (the object's key) picks its
- * model and persona, kept in the object's database; `compact` has the model
- * summarize the conversation so far, to keep its context short; and `reset`
- * starts the conversation over, with a note to carry on.
+ * An assistant each user sets up as it runs: each user (the object's key)
+ * picks its model and persona, kept in the object's database, which `chat`
+ * reads for each message (`pi.chat(options)`, with options of the
+ * invocation); `compact` has the model summarize the conversation so far, to
+ * keep its context short; and `reset` starts the conversation over, with a
+ * note to carry on (both on pi's Harness directly, `withPi`).
  *
  *   ANTHROPIC_API_KEY=… node harness.ts
+ *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/configure --json '{"persona": "You answer as a pirate."}'
  *   curl localhost:8080/assistant/alice/chat -d 'What time is it?'
@@ -16,7 +18,7 @@
  * A model of another provider takes its API key, such as
  * `{"model": "openai/gpt-6-luna"}` with OPENAI_API_KEY.
  */
-import { chatHandler, object, serve, tool } from 'restate-agents';
+import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import type * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
@@ -43,7 +45,7 @@ const clock = tool({
 });
 
 /** pi's options for the user of `ctx`: its model and persona, and the tools. */
-const options = async (ctx: restate.SqlObjectContext): Promise<pi.PiOptions> => {
+const options = async (ctx: restate.SqlObjectContext): Promise<pi.Options> => {
   const { model, persona } = await settingsOf(ctx);
   return { model, system: persona ?? 'You are a helpful assistant.', tools: [clock] };
 };
@@ -51,7 +53,7 @@ const options = async (ctx: restate.SqlObjectContext): Promise<pi.PiOptions> => 
 const assistant = object({
   name: 'assistant',
   handlers: {
-    chat: chatHandler(async (ctx, message) => pi.prompt(ctx, message, await options(ctx))),
+    chat: pi.chat(options),
     messages: pi.messages(),
 
     /** Set the model or the persona (or both) for the next messages. */
