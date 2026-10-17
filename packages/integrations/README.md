@@ -25,8 +25,9 @@ Each framework has `agent({ name, ...options })`, a virtual object with one
 handler, `chat`, which takes a message and returns the answer; and
 `chat(options)`, that handler, for an object of your own. `object()`, of
 `restate-agents`, is `restate.object` with SQL set up: `ctx.db` in every
-handler, and retries without end, since each attempt resumes from the
-database.
+handler, retries without end (each attempt resumes from the database), and
+the SQL storage hidden from the journal in Restate's UI; its `options` and
+`metadata` add to these.
 A tool may be given as itself, or as a function of the invocation's context,
 `(ctx) => tool`, to reach other services through it. A tool that must not run
 twice passes its tool call id on (as an idempotency key, say): a crash runs
