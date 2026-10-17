@@ -6,7 +6,8 @@
 // what the model waits for; `status` and `messages` answer meanwhile) until
 // it is resolved by its id, then answers
 // with every tool's result; a signal no one waits for is dropped, unless it
-// is kept; a cancelled wait leaves `pending`; a message may be plain text;
+// is kept; a cancelled wait leaves `pending`; `stop` stops a message being
+// answered; a message may be plain text;
 // and a handler's terminal error is the tool's answer.
 //
 //   RESTATE_SERVER=/path/to/restate-server node restate-tools.ts   (or make tools-test)
@@ -238,6 +239,20 @@ try {
   assert.equal(await ingress.result(henrys), 'order 103: delivered / approved / refunded 103');
   assert.deepEqual(await henry.status(), { answering: null, waiting: [] });
   assert.equal((await henry.messages({ limit: 1 })).messages[0]?.parts[0]?.type, 'text');
+
+  // `stop` stops the message being answered, through the ingress: the next
+  // message is answered afresh.
+  const jack = ingress.objectClient(agent('support'), 'jack');
+  const jacks = await ingress
+    .objectSendClient(agent('support'), 'jack')
+    .chat('Refund order 103', clients.rpc.sendOpts({ idempotencyKey: 'msg-jack' }));
+  await waits('support/jack');
+  assert.deepEqual(await jack.stop(), { stopped: jacks.invocationId });
+  await assert.rejects(ingress.result(jacks), /409/);
+  await jack.signal({ name: 'approval', value: 'approved', keep: true });
+  assert.match(await jack.chat('Refund order 103'), /refunded 103$/);
+  assert.deepEqual(await jack.status(), { answering: null, waiting: [] });
+  assert.deepEqual(await jack.stop(), { stopped: null });
   await post('support/ivy/signal', { name: 'approval', value: 'approved', keep: true });
   const keyed = await fetch(`${INGRESS}/support/ivy/chat/send`, {
     method: 'POST',

@@ -34,12 +34,17 @@ export interface Status {
   waiting: Waiting[];
 }
 
+/** What `stop` did: the invocation of the message it stopped, or null if none was answered. */
+export interface Stopped {
+  stopped: string | null;
+}
+
 /**
  * The handlers every object here has, beside its own: `signal`, which
  * resolves a wait of the object's tools (see `signal` in tools.ts),
- * `pending`, the waits, and `status`, what the object is doing. They are
- * shared, so they run while the object's handler waits, and journaled: they
- * use no `ctx.db`.
+ * `pending`, the waits, `status`, what the object is doing, and `stop`,
+ * which stops the message it answers. They are shared, so they run while the
+ * object's handler works, and journaled: they use no `ctx.db`.
  */
 const BUILT_IN = {
   signal: restate.handlers.object.shared(
@@ -59,6 +64,12 @@ const BUILT_IN = {
       waiting: await ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).pending(),
     }),
   ),
+  /** Cancel the invocation of the message being answered (`status`'s), as Restate's admin API cancels one. */
+  stop: restate.handlers.object.shared({ journalReplay: true }, async (ctx: restate.ObjectSharedContext) => {
+    const turn = await ctx.get<Turn>(TURN);
+    if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
+    return { stopped: turn?.invocationId ?? null } satisfies Stopped;
+  }),
 };
 
 /** A handler: `ctx` is the object's context, with `ctx.db`; the input, if any, is annotated. */
@@ -79,8 +90,9 @@ type Reserved = { [name in keyof typeof BUILT_IN]?: 'a handler every object has:
  *   });
  *
  * Besides its own handlers, it has `status`, what it is doing (the message
- * it answers, and what its tools wait for), `pending`, the waits of its
- * tools (`signal()`), and `signal({ id, value })`, which resolves one.
+ * it answers, and what its tools wait for), `stop`, which stops that
+ * message, `pending`, the waits of its tools (`signal()`), and
+ * `signal({ id, value })`, which resolves one.
  *
  * `options` and `metadata` add to (or replace) the ones set here, such as
  * `options: { journalRetention: { hours: 1 } }` to look at journals in the
