@@ -15,6 +15,6 @@ export const prompt = deepseek.chat({
   tools: bank('DeepSeekAgent'),
 });
 
-export const agent = object({ name: 'DeepSeekAgent', handlers: { chat: prompt } });
+export const agent = object({ name: 'DeepSeekAgent', handlers: { chat: prompt, messages: deepseek.messages() } });
 
 serveIfMain(import.meta, [agent, ledger]);

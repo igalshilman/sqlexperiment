@@ -15,6 +15,6 @@ export const prompt = claude.chat({
   tools: bank('ClaudeAgent'),
 });
 
-export const agent = object({ name: 'ClaudeAgent', handlers: { chat: prompt } });
+export const agent = object({ name: 'ClaudeAgent', handlers: { chat: prompt, messages: claude.messages() } });
 
 serveIfMain(import.meta, [agent, ledger]);

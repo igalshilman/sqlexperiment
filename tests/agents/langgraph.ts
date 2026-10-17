@@ -12,6 +12,6 @@ import { bank } from './bank.ts';
 /** Answer a message, once per invocation. */
 export const prompt = langgraph.chat({ tools: bank('GraphAgent') });
 
-export const agent = object({ name: 'GraphAgent', handlers: { chat: prompt } });
+export const agent = object({ name: 'GraphAgent', handlers: { chat: prompt, messages: langgraph.messages() } });
 
 serveIfMain(import.meta, [agent, ledger]);
