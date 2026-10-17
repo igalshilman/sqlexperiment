@@ -8,6 +8,7 @@
  * back to a task, and a crash anywhere resumes where it stopped.
  *
  *   ANTHROPIC_API_KEY=… node team.ts
+ *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/editor/alice/chat -d 'Write a short guide to Lisbon for a first visit.'
  *   curl localhost:8080/writer/alice.guide/messages   # what the editor asked the writer (the task's name may differ)

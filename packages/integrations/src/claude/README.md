@@ -18,6 +18,7 @@ you give it.
 ```ts
 import { serve } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
+import { weather } from './weather.ts';
 
 const assistant = claude.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
 await serve(assistant);

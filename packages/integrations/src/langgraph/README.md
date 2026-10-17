@@ -11,6 +11,7 @@ the object's key.
 ```ts
 import { serve } from 'restate-agents';
 import * as langgraph from 'restate-agents/langgraph';
+import { weather } from './weather.ts';
 
 const assistant = langgraph.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
 await serve(assistant);

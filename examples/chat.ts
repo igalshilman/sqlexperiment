@@ -6,6 +6,7 @@
  * retries the call and the agent picks up where it left off.
  *
  *   ANTHROPIC_API_KEY=… node chat.ts
+ *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  *   curl localhost:8080/assistant/alice/chat -d 'What is my name?'
@@ -21,7 +22,7 @@ const weather = tool({
   description: 'The current weather in a city.',
   input: z.object({ city: z.string() }),
   // A stand-in for a real weather API.
-  run: async ({ city }) => `Sunny and 21°C in ${city}`,
+  run: ({ city }) => `Sunny and 21°C in ${city}`,
 });
 
 const assistant = pi.agent({ name: 'assistant', tools: [weather] });
