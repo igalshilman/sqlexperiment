@@ -4,7 +4,7 @@
 import { expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
-import { tool, type Tool } from 'restate-agents';
+import { type Steer, tool, type Tool } from 'restate-agents';
 import type { Store } from 'sqlite-kv';
 import { z } from 'zod';
 import type { Audit, Transfer } from './sql/ledger.ts';
@@ -31,6 +31,39 @@ export function memoryStore(map = new Map<string, Uint8Array>(), fence = { close
     sync: async () => {},
   };
 }
+
+/**
+ * The `signals` object of an agent's tests, as far as steering goes: the
+ * messages steered to each turn, and the turns closed.
+ */
+export class Steering {
+  /** The messages steered to each turn, by its invocation id. */
+  readonly turns = new Map<string, Steer[]>();
+  /** Each turn closed, with the ids of the messages it took. */
+  readonly closed: { turn: string; taken: string[]; cancelled: boolean }[] = [];
+
+  /** Steer turn `turn` (an invocation id) with `text`, as the object's `steer` does. */
+  steer(turn: string, text: string) {
+    const messages = this.turns.get(turn) ?? [];
+    this.turns.set(turn, [...messages, { id: `${turn}:steer:${messages.length + 1}`, text }]);
+  }
+
+  /** The messages of turn `turn` that it did not take: they are answered as messages of their own. */
+  left(turn: string) {
+    const close = this.closed.findLast((c) => c.turn === turn);
+    return (this.turns.get(turn) ?? []).filter((m) => !close?.taken.includes(m.id)).map((m) => m.text);
+  }
+}
+
+/** The steering of each object's state. */
+const steerings = new WeakMap<Map<string, Uint8Array>, Steering>();
+
+/** The steering of the object of state `map`. */
+export const steeringOf = (map: ReadonlyMap<string, Uint8Array>) => {
+  const object = map as Map<string, Uint8Array>;
+  if (!steerings.has(object)) steerings.set(object, new Steering());
+  return steerings.get(object)!;
+};
 
 /** An attempt of a handler, for {@link sqlAttempt}. */
 export interface AttemptOptions {
@@ -99,8 +132,19 @@ export function sqlAttempt({
   };
   const attempt = new restate.internal.SqlAttempt(ctx);
   const cancelled = Promise.withResolvers<void>();
+  const steering = steeringOf(map);
   return {
     db: attempt.db,
+    request: ctx.request,
+    /** The `signals` object, as steering calls it. */
+    objectClient: (definition: { name: string }) => {
+      if (definition.name !== 'signals') throw new Error(`no ${definition.name} in this test`);
+      return { steering: async (turn: string) => steering.turns.get(turn) ?? [] };
+    },
+    objectSendClient: (definition: { name: string }) => {
+      if (definition.name !== 'signals') throw new Error(`no ${definition.name} in this test`);
+      return { close: (close: Steering['closed'][number]) => void steering.closed.push(close) };
+    },
     /** Restate's explicit cancellation (`restate.internal.asInternal(ctx).cancellation()`), which `cancel` signals. */
     cancellation: () => cancelled.promise,
     cancelPreviousCalls: async () => [],
@@ -209,9 +253,9 @@ export function conversation(
       abort = sql.abort;
       const ctx = {
         key,
-        request: () => ({ id: requestId }),
-        objectClient: () => booksOf(current),
         ...sql,
+        objectClient: (definition: { name: string }) =>
+          definition.name === 'signals' ? sql.objectClient(definition) : booksOf(current),
       };
       const answer = sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, prompt));
       if (crashAt === undefined) return answer;
@@ -224,7 +268,7 @@ export function conversation(
      */
     async read<T, I>(other: (ctx: restate.SqlObjectContext, input: I) => Promise<T>, input?: I, requestId = 'read') {
       const sql = sqlAttempt({ map, key, id: requestId, shared: true });
-      const ctx = { key, request: () => ({ id: requestId }), ...sql };
+      const ctx = { key, ...sql };
       return sql.end(() => other(ctx as unknown as restate.SqlObjectContext, input as I));
     },
     /** An attempt that crashes in its next transfer. */
@@ -273,32 +317,50 @@ export const SAID = [
  * is retried, at every `stride`th request (CRASH_STRIDE, default 3), some at
  * once, until it answers without crashing: each should answer it, with one transfer, and one
  * stored prompt in `messages`. From a conversation with a message before.
+ *
+ * `steered`: the message is steered ({@link STEERED}) before it starts, and
+ * the steering is taken (in `messages`) or left (answered as a message of
+ * its own), exactly once, whatever the answer.
  */
 export async function crashedAnywhere(
   prompt: PromptHandler,
-  messages: (ctx: restate.SqlObjectContext, request: object) => Promise<{ messages: { role: string }[] }>,
+  messages: (
+    ctx: restate.SqlObjectContext,
+    request: object,
+  ) => Promise<{ messages: { role: string; parts: { type: string; text?: string }[] }[] }>,
   {
     stride = Number(process.env.CRASH_STRIDE ?? 3),
     concurrency = 8,
+    steered = false,
   }: {
     /** Crash at every `stride`th state request. */
     stride?: number;
     /** How many crash points at once; 1 for a model fake that is not safe to share. */
     concurrency?: number;
+    /** Steer the message before it starts. */
+    steered?: boolean;
   } = {},
 ) {
   const before = conversation(prompt, 'anywhere');
   await before.attempt('inv0', 'Please move 1 from 3 to 4');
   const crashAt = async (n: number) => {
     const c = conversation(prompt, 'anywhere', before);
+    if (steered) steeringOf(c.state).steer('inv1', STEERED);
     if ((await c.attempt('inv1', 'Please move 5 from 1 to 2', n)) !== 'crashed') return 'finished';
     const answer = await Promise.race([
       c.attempt('inv1', 'Please move 5 from 1 to 2'),
       new Promise((resolve) => setTimeout(() => resolve('no answer'), 10_000)),
     ]).catch((error: unknown) => String(error));
-    const prompts = (await c.read(messages, {})).messages.filter((m) => m.role === 'user').length;
-    const ok = answer === 'Done: moved 5 from account 1 to account 2' && c.ledger.transfers.size === 2 && prompts === 2;
-    return ok ? 'ok' : `${n}: ${String(answer)}, ${c.ledger.transfers.size} transfers, ${prompts} prompts`;
+    const users = (await c.read(messages, {})).messages.filter((m) => m.role === 'user');
+    if (steered) {
+      const taken = users.filter((m) => m.parts.some((p) => p.text === STEERED)).length;
+      const left = steeringOf(c.state).left('inv1').length;
+      const ok = typeof answer === 'string' && c.ledger.transfers.size === 2 && taken + left === 1;
+      return ok ? 'ok' : `${n}: ${String(answer)}, ${c.ledger.transfers.size} transfers, ${taken} taken, ${left} left`;
+    }
+    const ok =
+      answer === 'Done: moved 5 from account 1 to account 2' && c.ledger.transfers.size === 2 && users.length === 2;
+    return ok ? 'ok' : `${n}: ${String(answer)}, ${c.ledger.transfers.size} transfers, ${users.length} prompts`;
   };
   // A batch at a time, until one answers without crashing.
   const wrong: string[] = [];
@@ -338,7 +400,7 @@ export async function afterCancel(
     shared = false,
   ) => {
     const sql = sqlAttempt({ map, key: 'cancel', id, shared });
-    const ctx = { key: 'cancel', request: () => ({ id }), ...sql };
+    const ctx = { key: 'cancel', ...sql };
     return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, input));
   };
   const failed = await invoke(chat, 'inv1', 'Please move 5 from 1 to 2').then(
@@ -373,7 +435,7 @@ export async function cancelledWhileWorking(
   const handler = chat([transfer]);
   const attempt = (id: string, shared = false) => {
     const sql = sqlAttempt({ map, key: 'cancel', id, shared });
-    return { sql, ctx: { key: 'cancel', request: () => ({ id }), ...sql } as unknown as restate.SqlObjectContext };
+    return { sql, ctx: { key: 'cancel', ...sql } as unknown as restate.SqlObjectContext };
   };
   const first = attempt('inv1');
   const answering = first.sql.end(() => handler(first.ctx, 'Please move 5 from 1 to 2'));
@@ -388,6 +450,41 @@ export async function cancelledWhileWorking(
   const read = attempt('read', true);
   const page = await read.sql.end(() => messages(read.ctx, {}));
   return { failed, answer, parts: page.messages.map((m) => m.parts) };
+}
+
+/** What {@link steeredWhileWorking} steers a turn with. */
+export const STEERED = 'Only from account 1, please';
+
+/**
+ * `chat` (with `tools`) on an object of its own, its message (a transfer)
+ * steered ({@link STEERED}) while its tool `transfer` runs: its answer, the
+ * conversation then (each message's parts), and the steering that the turn
+ * did not take, which is answered as messages of their own.
+ */
+export async function steeredWhileWorking(
+  chat: (tools: Tool[]) => PromptHandler,
+  messages: (ctx: restate.SqlObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+) {
+  const map = new Map<string, Uint8Array>();
+  const steering = steeringOf(map);
+  const transfer = tool({
+    name: 'transfer',
+    description: 'Move money.',
+    input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+    run: (_transfer, { ctx }) => {
+      steering.steer(ctx.request().id, STEERED);
+      return 'moved 5 from account 1 to account 2';
+    },
+  });
+  const attempt = (id: string, shared = false) => {
+    const sql = sqlAttempt({ map, key: 'steer', id, shared });
+    return { sql, ctx: { key: 'steer', ...sql } as unknown as restate.SqlObjectContext };
+  };
+  const turn = attempt('inv1');
+  const answer = await turn.sql.end(() => chat([transfer])(turn.ctx, 'Please move 5 from 1 to 2'));
+  const read = attempt('read', true);
+  const page = await read.sql.end(() => messages(read.ctx, {}));
+  return { answer, parts: withoutIds(page.messages.map((m) => m.parts)), left: steering.left('inv1') };
 }
 
 /** `parts` without their tool calls' ids, which differ from run to run. */

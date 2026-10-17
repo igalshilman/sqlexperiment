@@ -55,6 +55,9 @@ import {
   modelIdOf,
   modelOf,
   nextPromptId,
+  settleSteering,
+  type Steerable,
+  takeSteering,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -111,6 +114,7 @@ async function boot(db: restate.SqlSession, system?: string): Promise<Context> {
 const CONTINUE = 'Continue: your last turn was interrupted. Finish the request.';
 
 const promptId = (id: string) => MessageId(`prompt:${id}`);
+const steerId = (id: string) => MessageId(`steer:${id}`);
 const textOf = (message: Message) => message.content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
 
 /**
@@ -244,6 +248,9 @@ export const prompt = async (
   const turn = cancellationOf(ctx);
   const onCancel = () => fail(turn!.reason);
   turn?.addEventListener('abort', onCancel, { once: true });
+  // Messages steered to the turn: the agent's steering, which its next step
+  // takes (after the tool calls), and the log keeps, by id.
+  let steerable!: Steerable;
   try {
     const sessionId = SessionId(ctx.key);
     const options = {
@@ -253,7 +260,12 @@ export const prompt = async (
           const definition = isTool(t) ? native(t, ctx) : t;
           agentCtx.tools.register({
             ...definition,
-            execute: (args, exec) => guard(fail, () => definition.execute(args, exec)),
+            execute: (args, exec) =>
+              guard(fail, async () => {
+                const result = await definition.execute(args, exec);
+                await takeSteering(ctx, steerable);
+                return result;
+              }),
           });
         }),
     };
@@ -261,6 +273,11 @@ export const prompt = async (
     const { agent } = (await harness.sessionPersistence.stat(sessionId))
       ? await harness.agents.resume({ resumeSessionId: sessionId, ...options })
       : await harness.agents.create({ sessionId, ...options });
+    steerable = {
+      steer: async (steered) => agent.steer(message(steerId(steered.id), steered.text)),
+      has: async (steered) =>
+        agent.session.snapshotEvents().some((e) => e.type === 'user/message' && e.data.id === steerId(steered)),
+    };
     // The log as this attempt found it: a turn that failed before is
     // continued like an interrupted one.
     const found = agent.session.snapshotEvents().length;
@@ -272,7 +289,10 @@ export const prompt = async (
     for (;;) {
       const events = agent.session.snapshotEvents();
       const answer = answerOf(events, promptId(id));
-      if (answer !== undefined) return answer;
+      if (answer !== undefined) {
+        await settleSteering(ctx, steerable);
+        return answer;
+      }
       // A turn of this attempt that failed (the model's request, or a
       // checkpoint) fails the attempt. Its end may be stored already, so
       // only this attempt's turns count: the retry asks the model again.
@@ -327,8 +347,9 @@ const parsed = (json: string): unknown => {
 export const messages = () =>
   messagesHandler(async (ctx, transcript) => {
     for (const e of await storedEvents(ctx.db, SessionId(ctx.key))) {
-      // The prompts, not the requests to continue an interrupted turn.
-      if (e.type === 'user/message' && e.data.id.startsWith('prompt:')) transcript.say('user', textOf(e.data));
+      // The prompts and the messages steered to them, not the requests to
+      // continue an interrupted turn.
+      if (e.type === 'user/message' && /^(prompt|steer):/.test(e.data.id)) transcript.say('user', textOf(e.data));
       if (e.type === 'assistant/message') transcript.say('assistant', textOf(e.data.message));
       if (e.type === 'tool/call') transcript.call(e.data.callId, e.data.name, parsed(e.data.arguments));
       if (e.type === 'tool/result')

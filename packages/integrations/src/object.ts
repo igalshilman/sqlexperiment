@@ -1,7 +1,7 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from '@restatedev/restate-sdk';
-import { TURN, type Turn } from './common.ts';
-import { type Resolved, type Signal, signals, signalsOf, type Waiting } from './signals.ts';
+import { messageSerde, TURN, type Turn } from './common.ts';
+import { type Resolved, type Signal, type Steered, signals, signalsOf, type Waiting } from './signals.ts';
 
 /**
  * The options of every object here: SQL (`ctx.db`: no journal replay, lazy
@@ -42,9 +42,10 @@ export interface Stopped {
 /**
  * The handlers every object here has, beside its own: `signal`, which
  * resolves a wait of the object's tools (see `signal` in tools.ts),
- * `pending`, the waits, `status`, what the object is doing, and `stop`,
- * which stops the message it answers. They are shared, so they run while the
- * object's handler works, and journaled: they use no `ctx.db`.
+ * `pending`, the waits, `status`, what the object is doing, `stop`, which
+ * stops the message it answers, and `steer`, which adds to it. They are
+ * shared, so they run while the object's handler works, and journaled: they
+ * use no `ctx.db`.
  */
 const BUILT_IN = {
   signal: restate.handlers.object.shared(
@@ -70,6 +71,22 @@ const BUILT_IN = {
     if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
     return { stopped: turn?.invocationId ?? null } satisfies Stopped;
   }),
+  /**
+   * Add `text` to the message being answered (`status`'s), such as "Only
+   * Monday, please": the agent takes it at its next tool call, as its
+   * framework steers a turn. A turn that ends first answers it as a message
+   * of its own, as `chat` does when no message is answered.
+   */
+  steer: restate.handlers.object.shared(
+    { journalReplay: true, input: messageSerde, accept: '*/*' },
+    async (ctx: restate.ObjectSharedContext, text: string): Promise<Steered> => {
+      const agent = { service: ctx.request().target.service, key: ctx.key };
+      const turn = await ctx.get<Turn>(TURN);
+      return ctx
+        .objectClient(signals, signalsOf(agent.service, agent.key))
+        .steer({ agent, turn: turn?.invocationId ?? null, text });
+    },
+  ),
 };
 
 /** A handler: `ctx` is the object's context, with `ctx.db`; the input, if any, is annotated. */
@@ -91,8 +108,8 @@ type Reserved = { [name in keyof typeof BUILT_IN]?: 'a handler every object has:
  *
  * Besides its own handlers, it has `status`, what it is doing (the message
  * it answers, and what its tools wait for), `stop`, which stops that
- * message, `pending`, the waits of its tools (`signal()`), and
- * `signal({ id, value })`, which resolves one.
+ * message, `steer`, which adds to it, `pending`, the waits of its tools
+ * (`signal()`), and `signal({ id, value })`, which resolves one.
  *
  * `options` and `metadata` add to (or replace) the ones set here, such as
  * `options: { journalRetention: { hours: 1 } }` to look at journals in the

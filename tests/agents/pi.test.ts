@@ -6,7 +6,15 @@ import { z } from 'zod';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { callTools, fakeProvider, say, textOf } from '../fakes/pi.ts';
-import { afterCancel, cancelledTransfer, cancelledWhileWorking, withoutIds, sqlAttempt } from '../testing.ts';
+import {
+  afterCancel,
+  cancelledTransfer,
+  cancelledWhileWorking,
+  STEERED,
+  steeredWhileWorking,
+  withoutIds,
+  sqlAttempt,
+} from '../testing.ts';
 
 // It repeats what it was told so far; asked to delegate, it hands out two
 // tasks, and then reports their results.
@@ -66,7 +74,6 @@ function object(key: string) {
       const sql = sqlAttempt({ map, key, id });
       const ctx = {
         key,
-        request: () => ({ id }),
         ...sql,
         genericCall: async (call: Call) => {
           calls.push(call);
@@ -166,6 +173,26 @@ describe('pi.chat', () => {
       [{ type: 'text', text: 'Hello' }],
       [{ type: 'text', text: 'Please move 5 from 1 to 2 / Hello' }],
     ]);
+  });
+
+  it('takes a message steered to the turn at its next tool call', async () => {
+    const { answer, parts, left } = await steeredWhileWorking((tools) => pi.chat({ tools }), pi.messages());
+    expect(answer).toBe(`Please move 5 from 1 to 2 / ${STEERED}`);
+    expect(parts).toEqual([
+      [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
+      [
+        { type: 'text', text: 'On it.' },
+        {
+          type: 'tool',
+          name: 'transfer',
+          input: { from: 1, to: 2, amount: 5 },
+          output: 'moved 5 from account 1 to account 2',
+        },
+      ],
+      [{ type: 'text', text: STEERED }],
+      [{ type: 'text', text: answer }],
+    ]);
+    expect(left).toEqual([]);
   });
 
   it('takes options for each invocation', async () => {

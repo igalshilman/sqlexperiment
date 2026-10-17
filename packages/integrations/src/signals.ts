@@ -1,6 +1,6 @@
 // Signals to agents: a virtual object per agent, keyed `<agent>:<key>` (such
 // as `assistant:alice`), whose `wait` returns once `resolve` gives the wait
-// its value.
+// its value; and the messages steered to the message an agent answers.
 //
 // An agent's own handler cannot wait on an awakeable (it has no journal to
 // replay one from), so it calls `wait`, which can: a journaled handler of
@@ -39,11 +39,46 @@ export interface Resolved {
   resolved: string | null;
 }
 
-/** The waits, in the order they started, each with its awakeable; and the signals kept for the next wait. */
+/** A message steered to the message being answered (its turn): its id, `<turn>:steer:<n>`, and its text. */
+export interface Steer {
+  id: string;
+  text: string;
+}
+
+/**
+ * What `steer` did: the invocation that answers it, and whether it steers
+ * the message being answered (or, with none answered, was sent as a message
+ * of its own).
+ */
+export interface Steered {
+  invocationId: string;
+  steered: boolean;
+}
+
+/** An agent: its object's name, and key. */
+interface Agent {
+  service: string;
+  key: string;
+}
+
+/** The turns closed last, newest last: a message steered to one of them is a message of its own. */
+const CLOSED = 16;
+
+/**
+ * The waits, in the order they started, each with its awakeable; the signals
+ * kept for the next wait; and the messages steered to the turn being
+ * answered, and the turns closed last.
+ */
 interface State {
   waiting: (Waiting & { awakeable: string })[];
   kept: Record<string, unknown[]>;
+  steering: { turn: string; messages: Steer[] };
+  closed: string[];
 }
+
+/** Send `text` to `agent`'s `chat`, as a message of its own: its invocation's id. */
+const send = (ctx: restate.ObjectContext<State>, { service, key }: Agent, text: string) =>
+  ctx.genericSend({ service, method: 'chat', key, parameter: text, inputSerde: restate.serde.json }).invocationId;
 
 export const signals = restate.object({
   name: 'signals',
@@ -97,6 +132,49 @@ export const signals = restate.object({
         return;
       }
       ctx.set('waiting', [...((await ctx.get('waiting')) ?? []), wait]);
+    },
+
+    /**
+     * @internal Steer `turn` (the message `agent` answers, if any) with
+     * `text`: queued for it to take at its next step, or, if it is over, sent
+     * as a message of its own.
+     */
+    steer: async (
+      ctx: restate.ObjectContext<State>,
+      { agent, turn, text }: { agent: Agent; turn: string | null; text: string },
+    ) => {
+      if (turn === null || ((await ctx.get('closed')) ?? []).includes(turn)) {
+        return { invocationId: await send(ctx, agent, text), steered: false } satisfies Steered;
+      }
+      const steering = await ctx.get('steering');
+      const messages = steering?.turn === turn ? steering.messages : [];
+      ctx.set('steering', { turn, messages: [...messages, { id: `${turn}:steer:${messages.length + 1}`, text }] });
+      return { invocationId: turn, steered: true } satisfies Steered;
+    },
+
+    /** @internal The messages steered to `turn`, in order. */
+    steering: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext<State>, turn: string) => {
+      const steering = await ctx.get('steering');
+      return steering?.turn === turn ? steering.messages : [];
+    }),
+
+    /**
+     * @internal `turn` is over: each message steered to it that it did not
+     * take (not in `taken`) is sent as a message of its own, unless the turn
+     * was cancelled; later ones are, too.
+     */
+    close: async (
+      ctx: restate.ObjectContext<State>,
+      { agent, turn, taken, cancelled }: { agent: Agent; turn: string; taken: string[]; cancelled: boolean },
+    ) => {
+      const closed = (await ctx.get('closed')) ?? [];
+      if (closed.includes(turn)) return;
+      ctx.set('closed', [...closed, turn].slice(-CLOSED));
+      const steering = await ctx.get('steering');
+      if (steering?.turn !== turn) return;
+      ctx.clear('steering');
+      if (cancelled) return;
+      for (const { id, text } of steering.messages) if (!taken.includes(id)) await send(ctx, agent, text);
     },
 
     /** @internal Forget wait `id`, whose agent no longer waits. */

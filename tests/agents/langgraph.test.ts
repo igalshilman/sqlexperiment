@@ -8,6 +8,8 @@ import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  STEERED,
+  steeredWhileWorking,
   withoutIds,
   conversation,
   crashedAnywhere,
@@ -26,6 +28,12 @@ describe('the LangGraph agent', () => {
     expect(now.failed).toBeInstanceOf(restate.CancelledError);
     expect(now.answer).toBe(waiting.answer);
     expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
+  });
+
+  it('answers a message steered to the turn as a message of its own, once the turn ends', async () => {
+    const { answer, left } = await steeredWhileWorking((tools) => langgraph.chat({ tools }), langgraph.messages());
+    expect(answer).toBe('Done: moved 5 from account 1 to account 2');
+    expect(left).toEqual([STEERED]);
   });
 
   it('ends a cancelled turn, and answers the next message afresh', async () => {
@@ -56,6 +64,10 @@ describe('the LangGraph agent', () => {
 
   it('answers a message once after a crash at any of its state requests', async () => {
     expect(await crashedAnywhere(prompt, langgraph.messages())).toEqual([]);
+  }, 600_000);
+
+  it('answers a message once after a crash at any of its state requests, steered once', async () => {
+    expect(await crashedAnywhere(prompt, langgraph.messages(), { steered: true })).toEqual([]);
   }, 600_000);
 
   it('gives the conversation: what was said, in order, with the tool calls', async () => {
