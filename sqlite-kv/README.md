@@ -126,8 +126,8 @@ the owner cache.
 - [Protocol specification](spec/README.md): the protocol in TLA+, model-checked
   with TLC, and the monitor that checks the code against it
 - [Benchmarks](benches/README.md)
-- [Node.js addon](../packages/sql/README.md): the same over a key/value store
-  implemented in JavaScript, in `packages/sql/`
+- [Node.js addon](../packages/sql-node/README.md): the same over a key/value store
+  implemented in JavaScript, in `packages/sql-node/`
 
 It is used by a patched Restate TypeScript SDK, for SQL in virtual objects:
 see [the repository's README](../README.md).
@@ -150,7 +150,7 @@ cargo test --locked
 cargo test --locked --features simulation   # storage, cache and failure campaigns
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo run --locked --features simulation --example lookup
-(cd ../packages/sql && npm run build && npm test)   # the addon
+(cd ../packages/sql-node && npm run build && npm test)   # the addon
 ```
 
 The `simulation` feature adds an in-memory KV store, fault injection and a

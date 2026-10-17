@@ -9,14 +9,14 @@
 # or a part: `node gateway/main.ts agents` (the Assistant and Case), or
 # `node gateway/main.ts tools` (the tools and the Gateway).
 #
-# Needs the patched SDK's tarball, packages/sdk/.build (`make sdk-ts`).
+# Needs the patched SDK's tarball, packages/sdk-typescript/.build (`make sdk-ts`).
 
 # The sqlite-kv addon, for Linux.
 FROM rust:1-bookworm AS addon
 WORKDIR /src
 COPY sqlite-kv sqlite-kv
-COPY packages/sql packages/sql
-RUN cd packages/sql && cargo build --locked --release \
+COPY packages/sql-node packages/sql-node
+RUN cd packages/sql-node && cargo build --locked --release \
   && cp target/release/libsqlite_kv_node.so sqlite_kv.node
 
 # The workspace's packages that the examples use.
@@ -24,9 +24,9 @@ FROM node:24-bookworm AS deps
 RUN corepack enable
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz packages/sdk/.build/
-COPY packages/sql/package.json packages/sql/index.js packages/sql/index.d.ts packages/sql/
-COPY --from=addon /src/packages/sql/sqlite_kv.node packages/sql/
+COPY packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz packages/sdk-typescript/.build/
+COPY packages/sql-node/package.json packages/sql-node/index.js packages/sql-node/index.d.ts packages/sql-node/
+COPY --from=addon /src/packages/sql-node/sqlite_kv.node packages/sql-node/
 COPY packages/integrations packages/integrations
 COPY examples/package.json examples/
 RUN pnpm install --frozen-lockfile --prod --filter examples...

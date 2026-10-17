@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@restatedev/restate-sdk': file:packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz
+  '@restatedev/restate-sdk': file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 
 importers:
 
@@ -45,14 +45,14 @@ importers:
         specifier: 1.2.12
         version: 1.2.12(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.4)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
       '@restatedev/restate-sdk':
-        specifier: file:../packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz
-        version: file:packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql)
+        specifier: file:../packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
+        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)
       restate-agents:
         specifier: workspace:*
         version: link:../packages/integrations
       sqlite-kv:
         specifier: workspace:*
-        version: link:../packages/sql
+        version: link:../packages/sql-node
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -174,8 +174,8 @@ importers:
         specifier: 2.0.27
         version: 2.0.27(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.5.17(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.4)(graphql@16.14.2)(redis@6.3.0(@opentelemetry/api@1.9.0))(typebox@1.3.27)(typescript@7.0.2)(web-tree-sitter@0.25.10)(ws@8.22.0)
       '@restatedev/restate-sdk':
-        specifier: file:../sdk/.build/restatedev-restate-sdk-1.17.3.tgz
-        version: file:packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql)
+        specifier: file:../sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
+        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)
       '@standard-schema/spec':
         specifier: 1.1.0
         version: 1.1.0
@@ -184,14 +184,14 @@ importers:
         version: 4.0.1
       sqlite-kv:
         specifier: workspace:*
-        version: link:../sql
+        version: link:../sql-node
       zod:
         specifier: 4.6.5
         version: 4.6.5
 
-  packages/sdk: {}
+  packages/sdk-typescript: {}
 
-  packages/sql: {}
+  packages/sql-node: {}
 
   tests:
     dependencies:
@@ -313,8 +313,8 @@ importers:
         specifier: 2.0.27
         version: 2.0.27(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.5.17(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.4)(graphql@16.14.2)(redis@6.3.0(@opentelemetry/api@1.9.0))(typebox@1.3.27)(typescript@7.0.2)(web-tree-sitter@0.25.10)(ws@8.22.0)
       '@restatedev/restate-sdk':
-        specifier: file:../packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz
-        version: file:packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql)
+        specifier: file:../packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
+        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)
       '@standard-schema/spec':
         specifier: 1.1.0
         version: 1.1.0
@@ -326,7 +326,7 @@ importers:
         version: link:../packages/integrations
       sqlite-kv:
         specifier: workspace:*
-        version: link:../packages/sql
+        version: link:../packages/sql-node
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -1887,8 +1887,8 @@ packages:
   '@restatedev/restate-sdk-core@1.17.3':
     resolution: {integrity: sha512-KZxRF7eitdb/QgTiPLbFifwLtk0AeqQPzWV8be7rOjaQ8jdXjiaCQIszDh4BuyJb+4KMaDd8/muSWbAY+A3XhA==}
 
-  '@restatedev/restate-sdk@file:packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz':
-    resolution: {integrity: sha512-tFLGCoPABOcg/M9i7rjPbRhtSvNv/gLquIVjDFX9UAUR1iZAlqxFuH32wUPHGtADvbUf/3g3yJnZdetGGfjomA==, tarball: file:packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz}
+  '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz':
+    resolution: {integrity: sha512-tFLGCoPABOcg/M9i7rjPbRhtSvNv/gLquIVjDFX9UAUR1iZAlqxFuH32wUPHGtADvbUf/3g3yJnZdetGGfjomA==, tarball: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz}
     version: 1.17.3
     peerDependencies:
       sqlite-kv: '*'
@@ -5999,7 +5999,7 @@ snapshots:
 
   '@restatedev/restate-sdk-core@1.17.3': {}
 
-  '@restatedev/restate-sdk@file:packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql)':
+  '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)':
     dependencies:
       '@restatedev/restate-sdk-core': 1.17.3
     optionalDependencies:

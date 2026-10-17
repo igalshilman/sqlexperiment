@@ -2,9 +2,9 @@ packages:
   - packages/*
   - tests
   - examples
-# The patched SDK, built by packages/sdk (`make sdk-ts`), wherever it is used.
+# The patched SDK, built by packages/sdk-typescript (`make sdk-ts`), wherever it is used.
 overrides:
-  '@restatedev/restate-sdk': file:packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz
+  '@restatedev/restate-sdk': file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 # Dependencies whose install scripts run (npm ran them all).
 onlyBuiltDependencies:
   - '@google/genai'
