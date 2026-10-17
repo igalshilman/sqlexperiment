@@ -4,7 +4,8 @@
 //
 // Checks: the agent waits for the signal (`pending` lists it) until it is
 // resolved, then answers with every tool's result; a signal resolved before
-// the agent waits for it is kept for it; and a message may be plain text.
+// the agent waits for it is kept for it; a message may be plain text; and a
+// handler's terminal error is the tool's answer.
 //
 //   RESTATE_SERVER=/path/to/restate-server node restate-tools.ts   (or make tools-test)
 import assert from 'node:assert/strict';
@@ -31,7 +32,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const orders = restate.service({
   name: 'orders',
-  handlers: { status: async (_ctx: restate.Context, { order }: { order: string }) => `order ${order}: delivered` },
+  handlers: {
+    status: async (_ctx: restate.Context, { order }: { order: string }) => {
+      if (order !== '103') throw new restate.TerminalError(`no order ${order}`);
+      return `order ${order}: delivered`;
+    },
+  },
 });
 const refund = restate.workflow({
   name: 'refund',
@@ -48,7 +54,10 @@ const models = createModels();
 models.setProvider(
   fakeProvider('script', 'script', ({ messages }) => {
     const results = messages.filter((m) => m.role === 'toolResult').map((m) => textOf(m.content));
-    if (results.length === 0) return callTools([['orders_status', { order: '103' }]]);
+    const asked = messages.find((m) => m.role === 'user');
+    const order = /\d+/.exec(asked ? textOf(asked.content) : '')?.[0] ?? '';
+    if (results.length === 0) return callTools([['orders_status', { order }]]);
+    if (results[0]!.startsWith('Error')) return say(results[0]!);
     if (results.length === 1) return callTools([['wait_for_approval', {}]]);
     if (results.length === 2) return callTools([['refund', { order: '103' }]]);
     return say(results.join(' / '));
@@ -127,6 +136,9 @@ try {
     body: 'Refund order 103',
   });
   assert.equal(await plain.json(), 'order 103: delivered / approved / refunded 103');
+
+  // A handler's terminal error is the tool's answer, for the model.
+  assert.equal(await post('support/dave/chat', 'Refund order 999'), 'Error: no order 999');
   console.log('ok');
 } finally {
   server.kill('SIGKILL');
