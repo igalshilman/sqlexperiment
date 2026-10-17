@@ -1,7 +1,8 @@
 # Build and test everything: the core crate, and the pnpm workspace: the
 # patched TypeScript SDK (packages/sdk-typescript, over the patched shared core
 # of packages/sdk-shared-core), the Node.js addon (packages/sql-node), the
-# integrations (packages/integrations), the tests (tests/) and the examples.
+# integrations (packages/integrations), the tests (tests/) and the examples;
+# and the uv workspace: the Python extension (packages/sql-python).
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -9,7 +10,8 @@
 #   make concurrency-test   the context without journal replay, against RESTATE_SERVER
 #   make help         every target
 #
-# The Rust workspaces (the crate, the addon) share one target directory.
+# The Rust workspaces (the crate, the addon, the Python extension) share one
+# target directory.
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
@@ -33,12 +35,12 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core addon sdk-ts js examples-rust test test-core test-addon test-sdk-ts test-ts \
-	lint lint-core lint-ts format crash-test concurrency-test tools-test restate-server clean
+.PHONY: all help core addon sdk-ts js py examples-rust test test-core test-addon test-sdk-ts test-ts \
+	test-sql-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test restate-server clean
 
 # --- Build
 
-all: core addon js ## Build everything
+all: core addon js py ## Build everything
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -59,12 +61,15 @@ $(SDK_TARBALL): $(wildcard packages/sdk-typescript/patches/*.patch) $(CORE_PATCH
 js: $(ADDON) $(SDK_TARBALL) ## The pnpm workspace, installed with the patched SDK and the addon
 	pnpm install --force
 
+py: ## The uv workspace (.venv), with the Python extension (packages/sql-python), rebuilt when its Rust changes
+	uv sync --locked
+
 examples-rust: ## The Rust example: the core crate's lookup
 	cd $(CORE) && $(CARGO) build --locked --release --features simulation --example lookup
 
 # --- Test
 
-test: test-core test-addon test-sdk-ts test-ts ## Every test that needs no Restate server
+test: test-core test-addon test-sdk-ts test-ts test-sql-py ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
@@ -79,19 +84,30 @@ test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests, and its t
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
 	cd tests && pnpm exec vitest run $(T)
 
-lint: lint-core lint-ts ## Every lint
+test-sql-py: py ## The Python extension
+	uv run --locked pytest packages/sql-python/tests
 
-lint-core: ## The Rust crates (the core and the addon): rustfmt --check and clippy
+lint: lint-core lint-ts lint-py ## Every lint
+
+lint-core: ## The Rust crates (the core, the addon and the Python extension): rustfmt --check and clippy
 	cd $(CORE) && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 	cd packages/sql-node && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
+	cd packages/sql-python && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	pnpm check
 
-format: js ## Format everything: rustfmt, and oxfmt (TypeScript, JavaScript, Markdown)
+lint-py: py ## The Python: ruff format --check, ruff check and mypy
+	uv run --locked ruff format --check
+	uv run --locked ruff check
+	uv run --locked mypy packages/sql-python/python packages/sql-python/tests
+
+format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Markdown) and ruff (Python)
 	cd $(CORE) && $(CARGO) fmt
 	cd packages/sql-node && $(CARGO) fmt
+	cd packages/sql-python && $(CARGO) fmt
 	pnpm format
+	uv run --locked ruff format
 
 crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through crashes, against a Restate server
 	cd tests && node crash.ts
@@ -122,4 +138,5 @@ endif
 	mv $@.tmp $@
 
 clean: ## Remove build outputs
-	rm -rf $(CARGO_TARGET_DIR) $(ADDON) packages/sdk-typescript/.build node_modules */node_modules packages/*/node_modules
+	rm -rf $(CARGO_TARGET_DIR) $(ADDON) packages/sdk-typescript/.build node_modules */node_modules packages/*/node_modules \
+		.venv packages/sql-python/python/sqlite_kv/*.so
