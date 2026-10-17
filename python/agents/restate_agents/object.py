@@ -22,9 +22,11 @@ from restate import InvocationRetryPolicy
 from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL
 from restate.serde import Serde
 
-from restate_agents.signals import Resolved, Signal, signals, signals_of
+from restate_agents.common import MessageSerde
+from restate_agents.signals import Agent, Resolved, Signal, Steered, SteerRequest, signals, signals_of
 from restate_agents.signals import pending as pending_signals
 from restate_agents.signals import resolve as resolve_signal
+from restate_agents.signals import steer as steer_signal
 
 # Restate's UI hides the SQL storage from the journal view: the database's
 # pages, log and header in the object's state (v13/...), the sends pending
@@ -43,6 +45,31 @@ RETRY_POLICY = InvocationRetryPolicy(
 # The name of the object whose handler runs.
 _service: ContextVar[str] = ContextVar("restate_agents.service")
 
+# The state key of the ``Turn`` being answered.
+TURN = "restate-agents.turn"
+
+
+class Turn(BaseModel):
+    """The message a ``chat`` handler is answering: its invocation, and when it started."""
+
+    invocationId: str  # noqa: N815 (as Restate names it)
+    """The invocation's id: ``/restate/invocation/<id>/attach`` waits for its answer."""
+    since: str
+    """When it started, as an ISO date."""
+
+
+class Status(BaseModel):
+    """What an object is doing: the message it answers, if any, and what its tools wait for."""
+
+    answering: Turn | None
+    waiting: list[dict[str, Any]]
+
+
+class Stopped(BaseModel):
+    """What ``stop`` did: the invocation of the message it stopped, or None if none was answered."""
+
+    stopped: str | None
+
 
 class Object(restate.VirtualObject):
     """
@@ -52,10 +79,12 @@ class Object(restate.VirtualObject):
     ``restate.sql_options``, and retries without end, since each attempt
     resumes from the database.
 
-    Each has the handlers ``signal``, which resolves a wait of its tools (see
-    ``signal`` in tools.py), and ``pending``, the waits. Both are shared, so
-    they run while the object's handler waits, and journaled: they use no
-    ``ctx.db``.
+    Besides its own handlers, each has ``status``, what it is doing (the
+    message it answers, and what its tools wait for), ``stop``, which stops
+    that message, ``steer``, which adds to it, ``pending``, the waits of its
+    tools (``signal`` in tools.py), and ``signal``, which resolves one. They
+    are shared, so they run while the object's handler works, and journaled:
+    they use no ``ctx.db``.
     """
 
     def __init__(self, name: str, *, metadata: dict[str, str] | None = None, **options):
@@ -73,8 +102,38 @@ class Object(restate.VirtualObject):
             """The waits of this object's tools, oldest first, as ``Waiting``."""
             return await ctx.object_call(pending_signals, key=signals_of(name, ctx.key()), arg=None)
 
-        for handler in (signal, pending):
+        async def status(ctx: restate.ObjectSharedContext) -> Status:
+            """What this object is doing: the message it answers, if any, and what its tools wait for."""
+            turn = await ctx.get(TURN)
+            return Status(
+                answering=Turn(**turn) if turn else None,
+                waiting=await ctx.object_call(pending_signals, key=signals_of(name, ctx.key()), arg=None),
+            )
+
+        async def stop(ctx: restate.ObjectSharedContext) -> Stopped:
+            """Cancel the invocation of the message being answered (``status``'s), as Restate's admin API does."""
+            turn = await ctx.get(TURN)
+            if turn:
+                ctx.cancel_invocation(turn["invocationId"])
+            return Stopped(stopped=turn["invocationId"] if turn else None)
+
+        async def steer(ctx: restate.ObjectSharedContext, text: str) -> Steered:
+            """
+            Add ``text`` to the message being answered (``status``'s), such as
+            "Only Monday, please": the agent takes it at its next tool call. A
+            turn that ends first answers it as a message of its own, as ``chat``
+            does when no message is answered.
+            """
+            turn = await ctx.get(TURN)
+            agent = Agent(service=name, key=ctx.key())
+            request = SteerRequest(agent=agent, turn=turn["invocationId"] if turn else None, text=text)
+            return await ctx.object_call(steer_signal, key=signals_of(name, ctx.key()), arg=request)
+
+        for handler in (signal, pending, status, stop):
             restate.VirtualObject.handler(self, kind="shared", journal_replay=True)(handler)
+        restate.VirtualObject.handler(
+            self, kind="shared", journal_replay=True, accept="*/*", input_serde=MessageSerde()
+        )(steer)
 
     def handler(self, name: str | Callable | None = None, /, **options: Any) -> Any:  # type: ignore[override]
         """

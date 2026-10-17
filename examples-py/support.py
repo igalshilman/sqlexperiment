@@ -15,6 +15,12 @@ The agent waits for approval; in another terminal, see what it waits for
     curl localhost:8080/support/alice/signal --json '{"id": "<the id>", "value": "approved"}'
 
 or the oldest wait for an approval: ``{"name": "approval", "value": "approved"}``.
+While it works, add to the message it answers (it reads it after its next
+tool call), see what it does, or stop it:
+
+    curl localhost:8080/support/alice/steer -d 'Actually, make it $20'
+    curl localhost:8080/support/alice/status
+    curl localhost:8080/support/alice/stop
 """
 
 from datetime import timedelta

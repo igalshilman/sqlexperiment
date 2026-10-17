@@ -33,8 +33,9 @@ class Teller(BaseChatModel):
     Moves money as it is told to: "move 5 from 1 to 2" calls the tool "transfer";
     "refuse <reason>" calls "refuse", "remember <fact>" calls "remember";
     "use <tool> <json> then <tool> <json>" calls those tools in turn, with
-    those inputs, and answers with their results, joined by " / "; it echoes
-    the rest.
+    those inputs, and answers with their results, joined by " / "; a message
+    steered to the turn (its id ``<turn>:steer:<n>``) it answers "Steered:
+    <text>"; it echoes the rest.
     """
 
     calls: int = 0
@@ -51,7 +52,14 @@ class Teller(BaseChatModel):
         self.calls += 1
         self.systems.extend(str(m.content) for m in messages if isinstance(m, SystemMessage))
         last = messages[-1]
-        asked = next(i for i in reversed(range(len(messages))) if isinstance(messages[i], HumanMessage))
+        if isinstance(last, HumanMessage) and ":steer:" in (last.id or ""):
+            return AIMessage(content=f"Steered: {last.content}")
+        steered = lambda m: ":steer:" in (m.id or "")  # noqa: E731
+        asked = next(
+            i
+            for i in reversed(range(len(messages)))
+            if isinstance(messages[i], HumanMessage) and not steered(messages[i])
+        )
         if match := re.fullmatch(r"use (.+)", str(messages[asked].content)):
             steps = [step.split(" ", 1) for step in match.group(1).split(" then ")]
             results = [str(m.content) for m in messages[asked:] if isinstance(m, ToolMessage)]
@@ -148,6 +156,14 @@ class Object:
         self.crashed = False
         # One namespace per attempt: its process starts cold, as after a crash.
         self.name = f"agent-{next(self._names)}"
+        # The object's other state (such as the turn it answers), the sends it made, and the messages steered to it.
+        self.values: dict[str, Any] = {}
+        self.sends: list[tuple[str, Any]] = []
+        self.steered: list[dict[str, str]] = []
+
+    def steer(self, text: str) -> None:
+        """Steer the turn being answered with ``text``, as the agent's ``steer`` handler does."""
+        self.steered.append({"id": f"turn:steer:{len(self.steered) + 1}", "text": text})
 
     def crash(self) -> None:
         """The process dies now."""
@@ -210,6 +226,24 @@ class Context:
             self.obj.crash_at = None
             self.obj.crash()
         return not self.obj.crashed
+
+    # --- the object's state, calls and sends, as a turn uses them (besides ctx.db)
+
+    async def get(self, key: str) -> Any:
+        return self.obj.values.get(key)
+
+    def set(self, key: str, value: Any) -> None:
+        self.obj.values[key] = value
+
+    def clear(self, key: str) -> None:
+        self.obj.values.pop(key, None)
+
+    def object_send(self, handler: Callable[..., Any], key: str, arg: Any, **options: Any) -> None:
+        self.obj.sends.append((handler.__name__, arg))
+
+    async def object_call(self, handler: Callable[..., Any], key: str, arg: Any, **options: Any) -> Any:
+        assert handler.__name__ == "steering", f"the agents call {handler.__name__} here"
+        return list(self.obj.steered)
 
     # --- the SqlHost of restate.sql
 
