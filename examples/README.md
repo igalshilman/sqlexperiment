@@ -3,17 +3,21 @@
 Each one is a file you run with Node (24 or later), from here, after `make
 js` at the repository's root. See [Run an example](#run-an-example).
 
-| File                            | What                                                                                                           |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| [`chat.ts`](chat.ts)            | A durable chat agent on pi, with a tool: `pi.agent({ name: 'assistant', tools: [weather] })`                   |
-| [`opencode.ts`](opencode.ts)    | The same agent on OpenCode 2.0                                                                                 |
-| [`langgraph.ts`](langgraph.ts)  | The same agent on LangGraph                                                                                    |
-| [`claude.ts`](claude.ts)        | The same agent on Claude (the Anthropic SDK's tool runner)                                                     |
-| [`deepseek.ts`](deepseek.ts)    | The same agent on the DeepSeek Harness (`DEEPSEEK_API_KEY`)                                                    |
-| [`coding.ts`](coding.ts)        | A coordinator (pi) that hands coding tasks to coders of its own (OpenCode)                                     |
-| [`support.ts`](support.ts)      | A support agent whose tools are Restate itself: a service call, a signal (a manager's approval) and a workflow |
-| [`notes.ts`](notes.ts)          | SQL in a virtual object, with `ctx.db`                                                                         |
-| [`gateway/`](gateway/README.md) | A tool gateway for agents: approvals, and limits per tenant and user                                           |
+| File                            | What                                                                                                                                          |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`chat.ts`](chat.ts)            | A durable chat agent on pi, with a tool: `pi.agent({ name: 'assistant', tools: [weather] })`                                                  |
+| [`opencode.ts`](opencode.ts)    | The same agent on OpenCode 2.0                                                                                                                |
+| [`langgraph.ts`](langgraph.ts)  | The same agent on LangGraph                                                                                                                   |
+| [`claude.ts`](claude.ts)        | The same agent on Claude (the Anthropic SDK's tool runner)                                                                                    |
+| [`deepseek.ts`](deepseek.ts)    | The same agent on the DeepSeek Harness (`DEEPSEEK_API_KEY`)                                                                                   |
+| [`coding.ts`](coding.ts)        | A coordinator (pi) that hands coding tasks to coders of its own (OpenCode)                                                                    |
+| [`support.ts`](support.ts)      | A support agent whose tools are Restate itself: a service call, a signal (a manager's approval) and a workflow                                |
+| [`memory.ts`](memory.ts)        | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a handler of your own beside the agent's |
+| [`team.ts`](team.ts)            | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                       |
+| [`followup.ts`](followup.ts)    | An agent that schedules a check-in for a day later: `send` with a delay                                                                       |
+| [`triage.ts`](triage.ts)        | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review                                               |
+| [`notes.ts`](notes.ts)          | SQL in a virtual object, with `ctx.db`                                                                                                        |
+| [`gateway/`](gateway/README.md) | A tool gateway for agents: approvals, and limits per tenant and user                                                                          |
 
 Each agent is a virtual object, one per key, whose conversation is in the
 object's SQL database: a message is answered once per invocation, and a

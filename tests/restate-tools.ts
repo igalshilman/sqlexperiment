@@ -75,13 +75,21 @@ const support = pi.agent({
   ],
 });
 
+// A workflow that calls the agent like any handler, as examples/triage.ts does.
+const triage = restate.workflow({
+  name: 'triage',
+  handlers: {
+    run: async (ctx: restate.WorkflowContext, ticket: string) => ctx.objectClient(support, ctx.key).chat(ticket),
+  },
+});
+
 const dir = mkdtempSync(join(tmpdir(), 'restate-tools-'));
 const server = spawn(SERVER, ['--base-dir', dir], {
   env: { ...process.env, RESTATE_BIND_IP: '127.0.0.1', RESTATE_LISTEN_MODE: 'tcp' },
   stdio: 'ignore',
 });
 try {
-  await restate.serve({ services: [orders, refund, support, signals], port: PORT });
+  await restate.serve({ services: [orders, refund, support, triage, signals], port: PORT });
   for (
     let i = 0;
     !(await fetch(`${ADMIN}/health`).then(
@@ -141,6 +149,10 @@ try {
     body: 'Refund order 103',
   });
   assert.equal(await plain.json(), 'order 103: delivered / approved / refunded 103');
+
+  // From a workflow: the agent's answer is the workflow's result.
+  await post('support/erin/signal', { name: 'approval', value: 'approved' });
+  assert.equal(await post('triage/erin/run', 'Refund order 103'), 'order 103: delivered / approved / refunded 103');
 
   // A handler's terminal error is the tool's answer, for the model.
   assert.equal(await post('support/dave/chat', 'Refund order 999'), 'Error: no order 999');
