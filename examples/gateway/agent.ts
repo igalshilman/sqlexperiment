@@ -26,6 +26,7 @@ import * as restate from '@restatedev/restate-sdk';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { z } from 'zod';
+import { object } from 'restate-agents';
 import { withPi } from 'restate-agents/pi';
 import { join } from 'node:path';
 import { gateway, identity } from './gateway.ts';
@@ -95,22 +96,10 @@ async function gatewayTools(ctx: restate.SqlObjectContext, tenant: string, user:
   );
 }
 
-// Hide the SQL storage from the UI's journal view: the database's pages,
-// log and header in the object's state (`v13/...`), the sends pending with
-// a transaction, and the `sync` run before an attempt ends.
-const metadata = {
-  'dev.restate.tooling.journal.hidden.names': 'sync,_restate_sql_sends',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v13/',
-};
-const options = {
-  ...restate.sqlOptions,
-  // A prompt is long work, and each attempt resumes from storage.
-  retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
-  // Kept an hour, to look at in the UI (sqlOptions keeps none).
-  journalRetention: { hours: 1 },
-};
+// Journals kept an hour, to look at in the UI (by default none are kept).
+const options = { journalRetention: { hours: 1 } };
 
-export const caseAgent = restate.object({
+export const caseAgent = object({
   name: 'Case',
   handlers: {
     report: restate.createObjectHandler(
@@ -133,7 +122,6 @@ export const caseAgent = restate.object({
       },
     ),
   },
-  metadata,
   options,
 });
 
@@ -176,7 +164,7 @@ export const prompt = async (ctx: restate.SqlObjectContext, text: z.infer<typeof
   }));
 };
 
-export const assistant = restate.object({
+export const assistant = object({
   name: 'Assistant',
   handlers: {
     prompt: restate.createObjectHandler(
@@ -196,6 +184,5 @@ export const assistant = restate.object({
       prompt,
     ),
   },
-  metadata,
   options,
 });
