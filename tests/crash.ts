@@ -121,7 +121,9 @@ const listening = (port: number) =>
  */
 function supervise({ name, groups, port }: Process, perMille: number): Supervised {
   let failures = 0;
-  const run = () =>
+  // The first start aborts early, at a random request: every process aborts
+  // at least once, however few requests its random aborts come to.
+  const run = (first = false) =>
     spawn(process.execPath, ['--import', FAKES, fileURLToPath(new URL('serve.ts', import.meta.url)), ...groups], {
       env: {
         ...process.env,
@@ -129,6 +131,7 @@ function supervise({ name, groups, port }: Process, perMille: number): Supervise
         ...(['agent', 'opencode'].includes(name) ? { MODEL: 'teller/teller' } : {}),
         PORT: String(port),
         ABORT_PER_MILLE: String(perMille),
+        ...(first && perMille > 0 ? { ABORT_AT: String(20 + Math.floor(Math.random() * 180)) } : {}),
         SHOP_EXPIRY_MS: String(EXPIRY_MS),
         SQLITE_KV_CACHE_FILE: join(dir, `${name}.cache`),
       },
@@ -155,7 +158,7 @@ function supervise({ name, groups, port }: Process, perMille: number): Supervise
   const state: Supervised = {
     starts: 1,
     stopped: false,
-    child: run(),
+    child: run(true),
     stop: () =>
       new Promise((resolve) => {
         state.stopped = true;
