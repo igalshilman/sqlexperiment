@@ -24,7 +24,7 @@
     "**/node_modules",
     "**/.venv",
     "packages/sdk-typescript/.build",
-    "packages/sdk-python/.build",
+    "python/sdk/.build",
     "**/target"
   ]
 }

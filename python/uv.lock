@@ -367,7 +367,7 @@ wheels = [
 
 [[package]]
 name = "restate-sdk"
-source = { editable = "packages/sdk-python/.build/sdk-python" }
+source = { editable = "sdk/.build/sdk-python" }
 
 [package.metadata]
 requires-dist = [
@@ -391,7 +391,7 @@ requires-dist = [
     { name = "pyright", marker = "extra == 'lint'", specifier = ">=1.1.390" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6.9" },
-    { name = "sqlite-kv", marker = "extra == 'sql'", directory = "packages/sql-python" },
+    { name = "sqlite-kv", marker = "extra == 'sql'", directory = "sqlite-kv" },
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
 provides-extras = ["adk", "client", "harness", "langchain", "lint", "openai", "pydantic-ai", "serde", "sql", "test", "tracing", "zstd"]
@@ -417,8 +417,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "hypercorn", specifier = ">=0.17" },
-    { name = "restate-sdk", editable = "packages/sdk-python/.build/sdk-python" },
-    { name = "sqlite-kv", editable = "packages/sql-python" },
+    { name = "restate-sdk", editable = "sdk/.build/sdk-python" },
+    { name = "sqlite-kv", editable = "sqlite-kv" },
 ]
 
 [package.metadata.requires-dev]
@@ -457,7 +457,7 @@ wheels = [
 [[package]]
 name = "sqlite-kv"
 version = "0.1.0"
-source = { editable = "packages/sql-python" }
+source = { editable = "sqlite-kv" }
 
 [[package]]
 name = "typing-extensions"

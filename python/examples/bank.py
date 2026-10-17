@@ -7,7 +7,7 @@ in one transaction (``ctx.transaction()``): the credit is made once the debit
 commits, and only then, even if the process crashes in between. Each move is
 recorded with its id, so a deposit or a transfer made twice moves money once.
 
-    uv run examples/python/bank.py
+    uv run examples/bank.py   # in python/, after make py
     restate deployments register http://localhost:9080
     curl localhost:8080/account/alice/deposit --json '{"id": "d1", "amount": 100}'
     curl localhost:8080/account/alice/transfer --json '{"id": "t1", "to": "bob", "amount": 30}'
