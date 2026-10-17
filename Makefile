@@ -32,7 +32,7 @@ RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
 .PHONY: all help core addon sdk-ts js examples-rust test test-core test-addon test-sdk-ts test-ts \
-	lint lint-core lint-ts format crash-test concurrency-test restate-server clean
+	lint lint-core lint-ts format crash-test concurrency-test tools-test restate-server clean
 
 # --- Build
 
@@ -96,6 +96,9 @@ crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through cra
 
 concurrency-test: js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
 	cd tests && node concurrency.ts
+
+tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, workflow), against a Restate server
+	cd tests && node restate-tools.ts
 
 restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)

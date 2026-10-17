@@ -10,9 +10,9 @@
  *   curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice. Is it warm in Lisbon?"'
  *   curl localhost:8080/assistant/alice/chat --json '"What is my name?"'
  */
-import * as restate from '@restatedev/restate-sdk';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
+import { serve } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 
 const weather = defineTool({
@@ -25,4 +25,4 @@ const weather = defineTool({
 
 const assistant = pi.agent({ name: 'assistant', tools: [weather] });
 
-await restate.serve({ services: [assistant] });
+await serve(assistant);

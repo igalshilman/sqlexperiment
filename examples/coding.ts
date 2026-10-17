@@ -10,7 +10,7 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/coordinator/alice/chat --json '"Write fizzbuzz.py and primes.py, and run them"'
  */
-import * as restate from '@restatedev/restate-sdk';
+import { serve } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 import * as pi from 'restate-agents/pi';
 
@@ -26,4 +26,4 @@ const coordinator = pi.agent({
   tools: [pi.subagent(coder, { description: 'a coding agent with files of its own' })],
 });
 
-await restate.serve({ services: [coordinator, coder] });
+await serve(coordinator, coder);

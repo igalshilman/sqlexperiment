@@ -9,7 +9,7 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice. Is it warm in Lisbon?"'
  */
-import * as restate from '@restatedev/restate-sdk';
+import { serve } from 'restate-agents';
 import * as deepseek from 'restate-agents/deepseek';
 
 const weather = deepseek.tool({
@@ -26,4 +26,4 @@ const assistant = deepseek.agent({
   tools: [weather],
 });
 
-await restate.serve({ services: [assistant] });
+await serve(assistant);

@@ -16,5 +16,8 @@ tests, and `node --import ./fakes/fakes.ts` for processes.
   crashes: the services abort at random, and the server is killed twice
   (`make crash-test`). [`serve.ts`](serve.ts) serves them,
   [`faults.ts`](faults.ts) injects the faults.
+- [`tools.test.ts`](tools.test.ts) and [`restate-tools.ts`](restate-tools.ts):
+  Restate's own agent tools, with a fake context, and against a real Restate
+  server (`make tools-test`).
 - [`concurrency.ts`](concurrency.ts): the context without journal replay,
   against a real Restate server (`make concurrency-test`).

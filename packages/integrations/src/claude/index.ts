@@ -24,6 +24,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import { forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
+import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
+import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { Conversation } from './conversation.ts';
 
 export { Conversation };
@@ -108,20 +110,29 @@ async function run({ client, model, system, tools: all }: Agent, conversation: C
   }
 }
 
+/** `t` as a tool of the Anthropic SDK's tool runner. */
+const native = (t: AnyTool, ctx: restate.SqlObjectContext): BetaRunnableTool =>
+  betaZodTool({
+    name: t.name,
+    description: t.description,
+    inputSchema: t.input,
+    run: (input, context) => t.run(input, { ctx, callId: callId(context) }),
+  });
+
 export interface ChatOptions {
   /** The model: CLAUDE_MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** The system prompt. */
   system?: string;
-  /** The agent's tools (such as `betaZodTool`s), or for an invocation. */
-  tools?: PerCall<BetaRunnableTool>[];
+  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the SDK's (such as `betaZodTool`s), or for an invocation. */
+  tools?: (PerCall<BetaRunnableTool> | AnyTool)[];
 }
 
 /** A chat handler: each message an invocation, the conversation in the object's database. */
 export const chat = ({ model = process.env.CLAUDE_MODEL ?? DEFAULT_MODEL, system, tools = [] }: ChatOptions = {}) => {
   const client = new Anthropic();
   return async (ctx: restate.SqlObjectContext, message: string): Promise<string> => {
-    const agent = { client, model, system, tools: tools.map((t) => forCall(t, ctx)) };
+    const agent = { client, model, system, tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))) };
     const id = ctx.request().id;
     const conversation = await Conversation.open(ctx.db);
     for (;;) {

@@ -9,7 +9,7 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice. Is it warm in Lisbon?"'
  */
-import * as restate from '@restatedev/restate-sdk';
+import { serve } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 import { z } from 'zod';
 
@@ -23,4 +23,4 @@ const weather = opencode.tool({
 
 const assistant = opencode.agent({ name: 'assistant', tools: [weather] });
 
-await restate.serve({ services: [assistant] });
+await serve(assistant);

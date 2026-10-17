@@ -26,11 +26,13 @@ import type * as restate from '@restatedev/restate-sdk';
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage } from '@langchain/core/messages';
-import type { StructuredToolInterface } from '@langchain/core/tools';
+import { type StructuredToolInterface, tool } from '@langchain/core/tools';
 import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import { forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
+import { isTool, type Tool as AnyTool } from '../tools.ts';
+
 import { SqlCheckpointSaver } from './checkpointer.ts';
 
 export { SqlCheckpointSaver };
@@ -60,11 +62,21 @@ function graph(model: BaseChatModel, tools: StructuredToolInterface[]) {
     .addEdge('answer', END);
 }
 
+/** `t` as a LangChain tool. */
+const native = (t: AnyTool, ctx: restate.SqlObjectContext): StructuredToolInterface =>
+  tool(
+    async (input, { toolCall }) => {
+      if (!toolCall?.id) throw new Error('a tool call without an id');
+      return t.run(input, { ctx, callId: toolCall.id });
+    },
+    { name: t.name, description: t.description, schema: t.input },
+  );
+
 export interface ChatOptions {
   /** A chat model that calls tools, or for an invocation; by default ChatAnthropic. */
   model?: PerCall<BaseChatModel>;
-  /** The agent's tools, or for an invocation. */
-  tools?: PerCall<StructuredToolInterface>[];
+  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or LangChain's, or for an invocation. */
+  tools?: (PerCall<StructuredToolInterface> | AnyTool)[];
 }
 
 /** A chat handler: each message an invocation, the thread (the object's key) in the object's database. */
@@ -76,7 +88,7 @@ export const chat =
       : new ChatAnthropic({ model: process.env.LANGGRAPH_MODEL ?? DEFAULT_MODEL });
     const app = graph(
       llm,
-      tools.map((t) => forCall(t, ctx)),
+      tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),
     ).compile({ checkpointer: new SqlCheckpointSaver(ctx.db) });
     const config = { configurable: { thread_id: ctx.key }, durability: 'sync' as const };
     const id = ctx.request().id;
