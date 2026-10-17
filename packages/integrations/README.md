@@ -66,6 +66,12 @@ Anthropic's models (and LangGraph any LangChain chat model, as `model`). The
 tests ([`../../tests`](../../tests/README.md)) run the agents on scripted
 models.
 
+A wrong model fails at once: a model that is not `provider/model-id`, or
+another provider's for an agent of one provider's models, when the agent is
+defined; a missing or wrong API key, or a model the provider does not know,
+with a terminal error that says what to check, rather than retries while
+the caller waits.
+
 ## Calling an agent
 
 Through Restate's ingress, the request's body is the message (text, or a

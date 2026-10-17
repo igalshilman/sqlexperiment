@@ -35,7 +35,16 @@ import * as restate from '@restatedev/restate-sdk';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
-import { chatHandler, forCall, messagesHandler, modelOf, said, type PerCall } from '../common.ts';
+import {
+  CHECK_MODEL,
+  chatHandler,
+  checkModelName,
+  forCall,
+  messagesHandler,
+  modelOf,
+  said,
+  type PerCall,
+} from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 
@@ -286,7 +295,11 @@ export const withOpenCode = async <T>(
           }
           const now = await settled(messageId);
           if (now.state === 'answered') return now.text;
-          if (now.state === 'failed') throw new restate.TerminalError(`prompt ${id} unanswered: ${now.reason}`);
+          if (now.state === 'failed') {
+            throw new restate.TerminalError(
+              `prompt ${id} unanswered: ${now.reason} (the model ${model.providerID}/${model.id}: ${CHECK_MODEL})`,
+            );
+          }
           throw new Error(`prompt ${id} is not in the session`);
         },
       }),
@@ -336,7 +349,10 @@ const respond =
  * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
  * (`curl --json '"Hi"'`).
  */
-export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
+export const chat = (options: ChatOptions = {}) => {
+  checkModelName('opencode', options.model);
+  return chatHandler(respond(options));
+};
 
 /** The session's messages, oldest first. */
 async function transcript(host: Host): Promise<Message[]> {

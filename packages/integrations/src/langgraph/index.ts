@@ -117,7 +117,10 @@ const respond =
  * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
  * (`curl --json '"Hi"'`).
  */
-export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
+export const chat = (options: ChatOptions = {}) => {
+  if (typeof options.model === 'string') modelIdOf(options.model, 'anthropic');
+  return chatHandler(respond(options));
+};
 
 /** A handler of the thread: what was said, in order, from its last checkpoint. */
 export const messages = () =>

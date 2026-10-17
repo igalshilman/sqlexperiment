@@ -261,7 +261,10 @@ const respond =
  * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
  * (`curl --json '"Hi"'`).
  */
-export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
+export const chat = (options: ChatOptions = {}) => {
+  if (options.model !== undefined) modelIdOf(options.model, 'deepseek');
+  return chatHandler(respond(options));
+};
 
 /** A handler of the session: what was said, in order, from its log. */
 export const messages = () =>
