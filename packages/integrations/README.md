@@ -100,12 +100,18 @@ curl localhost:8080/assistant/alice/chat/send -d 'Plan my week'      # {"invocat
 curl localhost:8080/restate/invocation/inv_1f…/attach               # the answer, once there is one
 ```
 
-**Stop a turn.** Cancel its invocation, as any Restate invocation, by its
-id (from `/send`, or `status`):
+**Stop a turn.** `stop` stops the message being answered, such as for a
+UI's Stop button: it cancels its invocation (the one `status` says), and
+answers its id, or null if no message was answered. To interrupt with a new
+message, send it after `stop`: it is answered once the stopped turn ended.
 
 ```sh
-curl -X PATCH localhost:9070/invocations/inv_1f…/cancel
+curl localhost:8080/assistant/alice/stop                             # {"stopped": "inv_1f…"}
+curl localhost:8080/assistant/alice/chat -d 'Actually, plan only Monday'
 ```
+
+`stop` is Restate's cancellation, as Restate's admin API (port 9070) cancels
+any invocation by its id: `curl -X PATCH localhost:9070/invocations/inv_1f…/cancel`.
 
 The turn ends cancelled whenever the cancellation comes (during a model
 request too), and the agent does not go on: each framework stops its turn
@@ -209,6 +215,7 @@ const sent = await restate
   .objectSendClient(agent('assistant'), 'alice')
   .chat('Plan my week', clients.rpc.sendOpts({ idempotencyKey: 'msg-1' }));
 const { answering, waiting } = await alice.status(); // while it works
+await alice.stop(); // the Stop button
 const { messages } = await alice.messages({ limit: 20 }); // the tool calls so far
 const answer = await restate.result(sent); // once it answered
 ```
@@ -393,7 +400,7 @@ API, such as compacting the conversation (see their READMEs).
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and
 `metadata` add to these. Its own handlers cannot be named `signal`,
-`pending` or `status`, which every object has. A shared handler of yours
+`pending`, `status` or `stop`, which every object has. A shared handler of yours
 reads the database too: `ctx.db` is the database as stored, beside a
 message being answered.
 

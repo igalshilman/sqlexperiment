@@ -11,10 +11,10 @@
 //   const { messages } = await alice.messages({ limit: 20 });
 import type { VirtualObjectDefinition } from '@restatedev/restate-sdk-core';
 import type { ChatMessage, Messages, MessagesRequest, Part, Turn } from './common.ts';
-import type { Status } from './object.ts';
+import type { Status, Stopped } from './object.ts';
 import type { Resolved, Signal, Waiting } from './signals.ts';
 
-export type { ChatMessage, Messages, MessagesRequest, Part, Resolved, Signal, Status, Turn, Waiting };
+export type { ChatMessage, Messages, MessagesRequest, Part, Resolved, Signal, Status, Stopped, Turn, Waiting };
 
 /** The handlers of an agent (`agent()` of any framework), as Restate's client calls them. */
 export interface Agent {
@@ -24,6 +24,8 @@ export interface Agent {
   messages(ctx: unknown, request?: MessagesRequest): Promise<Messages>;
   /** What the agent is doing: the message it answers, and what its tools wait for. */
   status(ctx: unknown): Promise<Status>;
+  /** Stop the message it answers: cancel its invocation. */
+  stop(ctx: unknown): Promise<Stopped>;
   /** What its tools wait for. */
   pending(ctx: unknown): Promise<Waiting[]>;
   /** Resolve a wait: by its id, or the oldest for a name. */
