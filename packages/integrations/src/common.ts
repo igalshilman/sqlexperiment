@@ -86,6 +86,16 @@ export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: str
     },
   );
 
+/** A tool's error, which fails the attempt (Restate retries it): the error `cause` of tool `tool`. */
+export class ToolError extends Error {
+  readonly tool: string;
+  constructor(tool: string, cause: unknown) {
+    super(`the tool ${tool} failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = 'ToolError';
+    this.tool = tool;
+  }
+}
+
 /** The Anthropic SDK's errors of a request that fails again however often it is made. */
 const FOR_GOOD = new Set(['AuthenticationError', 'PermissionDeniedError', 'NotFoundError', 'BadRequestError']);
 
@@ -95,6 +105,7 @@ const FOR_GOOD = new Set(['AuthenticationError', 'PermissionDeniedError', 'NotFo
  * (a tool's, an overloaded provider's) fail the attempt, and Restate retries.
  */
 function refused(error: unknown) {
+  if (error instanceof ToolError) return false;
   if (error instanceof Error && FOR_GOOD.has(error.constructor.name)) return true;
   return /API key not found|no API key|Could not resolve authentication method|"code":"AUTH"/i.test(String(error));
 }
