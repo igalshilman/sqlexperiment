@@ -10,7 +10,7 @@ let requests = 0;
 
 const maybeAbort = () => {
   if (++requests === at || Math.random() * 1000 < perMille) {
-    console.error('aborting at a state request');
+    console.error(`aborting at state request ${requests}`);
     // As abruptly as process.abort(), without a core dump or a crash report.
     process.kill(process.pid, 'SIGKILL');
   }
