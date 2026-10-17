@@ -7,7 +7,7 @@
  * it left off after a crash. Coders run real commands: use a sandbox.
  *
  *   ANTHROPIC_API_KEY=… WORKSPACE=/tmp/coding node coding.ts
- *   restate deployments register http://localhost:9080
+ *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/coordinator/alice/chat -d 'Write fizzbuzz.py and primes.py, and run them'
  */
 import { serve, subagent } from 'restate-agents';
@@ -18,7 +18,7 @@ const workspace = process.env.WORKSPACE ?? '/tmp/coding';
 
 const coder = opencode.agent({
   name: 'coder',
-  directory: (ctx) => `${workspace}/${ctx.key}`,
+  workspace: (ctx) => `${workspace}/${ctx.key}`,
 });
 
 const coordinator = pi.agent({

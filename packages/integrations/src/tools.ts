@@ -203,6 +203,11 @@ export const workflow = <S extends z.ZodObject | undefined = undefined>(
       }),
   });
 
+/** An object with a `chat` handler; another object needs subagent's `handler`. */
+type WithChat<M> = M extends { chat: unknown }
+  ? unknown
+  : { 'an agent with a chat handler, or a handler option': never };
+
 /**
  * A tool, named after `agent` (an agent, or any virtual object), that hands
  * a task to it: to the object keyed `<this key>.<task name>`, through its
@@ -211,11 +216,20 @@ export const workflow = <S extends z.ZodObject | undefined = undefined>(
  *
  *   const lead = pi.agent({ name: 'lead', tools: [subagent(coder, { description: 'a coding agent' })] });
  */
-export const subagent = <M>(
+export function subagent<M>(
+  agent: restate.VirtualObjectDefinition<string, M> & WithChat<M>,
+  options?: { description?: string },
+): Tool;
+/** A sub-agent through another of its handlers. */
+export function subagent<M>(
+  agent: restate.VirtualObjectDefinition<string, M>,
+  options: { description?: string; handler: keyof M & string },
+): Tool;
+export function subagent<M>(
   agent: restate.VirtualObjectDefinition<string, M>,
   { description = `the ${agent.name} agent`, handler }: { description?: string; handler?: keyof M & string } = {},
-): Tool =>
-  tool({
+): Tool {
+  return tool({
     name: agent.name,
     description:
       `Hand a task to ${description}, and get its answer. ` +
@@ -235,6 +249,7 @@ export const subagent = <M>(
         parameter: task,
       }),
   });
+}
 
 /**
  * A tool that waits for the signal `name` to the agent, and answers with its

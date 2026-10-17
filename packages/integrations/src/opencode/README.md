@@ -23,13 +23,13 @@ built on (4.0.1). OpenCode needs Node 24.
   transaction. (The Promise API's `OpenCode.create` drops its replacements,
   so the host is booted with the Effect API's.)
 - [`index.ts`](index.ts): `restate-agents/opencode`. `withOpenCode(ctx, {
-  plugins, model, tools, directory }, work)` runs `work` with OpenCode for one
+  plugins, model, system, tools, workspace }, work)` runs `work` with OpenCode for one
   invocation, over `ctx.db`, and its `prompt(text, id?)` answers a prompt
   in the object's session, once per id (by default the invocation's); `prompt(ctx, text, options)` answers a message once
   per invocation (`ctx.request().id`). `chat({
-  model?, tools?, directory? })` makes a handler, `handlers: { chat:
+  model?, system?, tools?, workspace? })` makes a handler, `handlers: { chat:
   opencode.chat() }`, and `agent({ name, ...options })` a virtual object whose `chat` it is, that takes a message (a string) and returns the answer.
-  The agent's tools replace OpenCode's own, unless it has a `directory` of
+  The agent's tools replace OpenCode's own, unless it has a `workspace` directory of
   the local machine to work in, where it keeps OpenCode's own tools too.
 - [`tests/agents/opencode.ts`](../../../../tests/agents/opencode.ts): the OpenCodeAgent
   object, whose bank tools move money in the [ledger](../../../../tests/sql/ledger.ts), and

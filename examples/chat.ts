@@ -6,7 +6,7 @@
  * retries the call and the agent picks up where it left off.
  *
  *   ANTHROPIC_API_KEY=… node chat.ts
- *   restate deployments register http://localhost:9080
+ *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  *   curl localhost:8080/assistant/alice/chat -d 'What is my name?'
  *   curl localhost:8080/assistant/alice/messages   # the conversation so far

@@ -41,7 +41,7 @@ root), register it, and play the demo against it:
 
 ```sh
 MODEL=openai/gpt-6-luna node gateway/main.ts
-restate deployments register http://localhost:9080
+npx @restatedev/restate deployments register http://localhost:9080
 gateway/demo.sh
 ```
 

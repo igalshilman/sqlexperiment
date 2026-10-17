@@ -5,7 +5,7 @@
  * page say.
  *
  *   ANTHROPIC_API_KEY=… node memory.ts
- *   restate deployments register http://localhost:9080
+ *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'I am vegetarian, and I live in Lisbon.'
  *   curl localhost:8080/assistant/alice/chat -d 'Suggest a restaurant for tonight.'
  *   curl localhost:8080/assistant/alice/facts

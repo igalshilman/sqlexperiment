@@ -28,21 +28,28 @@ crash resumes the reply. The integrations are in
 
 ```sh
 ANTHROPIC_API_KEY=… node chat.ts                      # the agent, on port 9080
-restate-server                                         # Restate, in another terminal
-restate deployments register http://localhost:9080     # tell Restate where the agent is
+npx @restatedev/restate-server                         # Restate, in another terminal
+npx @restatedev/restate deployments register http://localhost:9080   # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
 curl localhost:8080/assistant/alice/messages           # the conversation so far
 ```
+
+Without the CLI, register through the admin API:
+`curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'`.
+`make restate-server`, at the repository's root, downloads the server's
+binary to `target/restate/restate-server`.
 
 With Restate in Docker, the agent is at the host's address, as the
 container sees it:
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13
-restate deployments register http://host.docker.internal:9080
+npx @restatedev/restate deployments register http://host.docker.internal:9080
 ```
 
 `MODEL` picks another model, such as `MODEL=openai/gpt-6-luna` with
-`OPENAI_API_KEY` (see [the models](../packages/integrations/README.md#models)).
-To call an agent from code, or to send a message again safely, see
+`OPENAI_API_KEY`, for the agents on pi and OpenCode; Claude and LangGraph
+take Anthropic's models, and DeepSeek its own (see
+[the models](../packages/integrations/README.md#models)). To call an agent
+from code, or to send a message again safely, see
 [Calling an agent](../packages/integrations/README.md#calling-an-agent).

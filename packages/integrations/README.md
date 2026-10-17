@@ -16,23 +16,39 @@ await serve(assistant);
 | Import                                                | Framework                       | Its state in the database | `chat(options)`                         |
 | ----------------------------------------------------- | ------------------------------- | ------------------------- | --------------------------------------- |
 | [`restate-agents/pi`](src/pi/README.md)               | pi-durable                      | its storage               | `model`, `system`, `tools`, `workspace` |
-| [`restate-agents/opencode`](src/opencode/README.md)   | OpenCode 2.0, embedded          | its database              | `model`, `system`, `tools`, `directory` |
+| [`restate-agents/opencode`](src/opencode/README.md)   | OpenCode 2.0, embedded          | its database              | `model`, `system`, `tools`, `workspace` |
 | [`restate-agents/langgraph`](src/langgraph/README.md) | LangGraph                       | its checkpoints           | `model`, `system`, `tools`              |
 | [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | the conversation          | `model`, `system`, `tools`              |
 | [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | its session's event log   | `model`, `system`, `tools`              |
 
-Each framework has `agent({ name, ...options })`, a virtual object with the
-handlers `chat`, which takes a message and returns the answer, and
-`messages`, the conversation so far; and `chat(options)` and `messages()`,
-those handlers, for an object of your own. `object()`, of
-`restate-agents`, is `restate.object` with SQL set up: `ctx.db` in every
-handler, retries without end (each attempt resumes from the database), and
-the SQL storage hidden from the journal in Restate's UI; its `options` and
-`metadata` add to these.
-A tool may be given as itself, or as a function of the invocation's context,
-`(ctx) => tool`, to reach other services through it. A tool that must not run
-twice passes its tool call id on (as an idempotency key, say): a crash runs
-an unfinished tool call again, with the same id.
+Each framework has `agent({ name, ...options })`: a virtual object, one per
+key, with the handlers `chat` (a message in, the answer out), `messages`
+(the conversation so far), and `signal` and `pending` (see
+[Tools](#tools)).
+
+## Your own object
+
+`chat(options)` and `messages()` are those handlers, for an object of your
+own, beside handlers of yours. `object()` is `restate.object` set up for
+them: `ctx.db` in every handler; retries up to 100,000 times, 50 to 500 ms
+apart, since each attempt resumes from the database; and the SQL storage
+hidden from the journal in Restate's UI. Its `options` and `metadata` add to
+these.
+
+```ts
+import { object } from 'restate-agents';
+
+const assistant = object({
+  name: 'assistant',
+  handlers: {
+    chat: pi.chat({ tools: [remember, recall] }),
+    messages: pi.messages(),
+    facts: async (ctx) => ctx.db.query('SELECT fact FROM facts'),
+  },
+});
+```
+
+See [`examples/memory.ts`](../../examples/memory.ts).
 
 ## Models
 
@@ -95,7 +111,10 @@ const answer = await restate.objectClient(assistant, 'alice').chat('Hi, I am Ali
 ## Tools
 
 Any agent's `tools` take a framework's own tools, and the tools of
-`restate-agents`, which work the same in every framework:
+`restate-agents`, which work the same in every framework. A tool may also be a function of
+the invocation's context, `(ctx) => tool`. A crash runs an unfinished tool
+call again with the same call id, which a tool that must not run twice
+passes on (as an idempotency key, say):
 
 ```ts
 import { call, send, signal, subagent, tool, workflow } from 'restate-agents';
