@@ -1,7 +1,8 @@
 """
 The services of the tests against a Restate server: the notes example, a
-bank, a probe of the context without journal replay, and the agent on the
-scripted teller (scripted_agent.py). Served on PORT, as the examples are.
+bank, a probe of the context without journal replay, the agent on the
+scripted teller (scripted_agent.py), and a support agent with Restate's
+tools. Served on PORT, as the examples are.
 """
 
 import asyncio
@@ -10,12 +11,15 @@ from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples-py"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests"))
 
 import restate  # noqa: E402
 from bank import account  # noqa: E402
-from notes import notes  # noqa: E402
-from restate import Context, ObjectContext  # noqa: E402
-from restate_agents import serve  # noqa: E402
+from fakes import Teller  # noqa: E402
+from notes import add, notes  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+from restate import Context, ObjectContext, WorkflowContext  # noqa: E402
+from restate_agents import call, langgraph, send, serve, signal, subagent, workflow  # noqa: E402
 from scripted_agent import teller  # noqa: E402
 
 echo = restate.Service("echo")
@@ -121,5 +125,47 @@ async def cancellations(ctx: ObjectContext) -> int:
     return n
 
 
+orders = restate.Service("orders")
+
+
+@orders.handler()
+async def status(ctx: Context, order: str) -> str:
+    """The status of an order."""
+    if order != "103":
+        raise restate.TerminalError(f"no order {order}")
+    return f"order {order}: delivered"
+
+
+class Refund(BaseModel):
+    order: str
+    amount: float
+
+
+refund = restate.Workflow("refund")
+
+
+@refund.main()
+async def run(ctx: WorkflowContext, request: Refund) -> str:
+    """Refund an order."""
+    await ctx.sleep(timedelta(milliseconds=200))
+    return f"refunded {request.order}"
+
+
+helper = langgraph.agent("helper", model=Teller())
+
+# The scripted model's "use <tool> <json> then ..." calls these in turn.
+support = langgraph.agent(
+    "support",
+    model=Teller(),
+    tools=[
+        call(status),
+        signal("approval", description="Wait for a manager to approve a refund.", input=Refund),
+        workflow(refund, description="Refund an order, once a manager approved it."),
+        subagent(helper, description="a helper"),
+        send(add, description="Add a note to someone's notes."),
+    ],
+)
+
+
 if __name__ == "__main__":
-    serve(echo, probe, notes, account, teller)
+    serve(echo, probe, notes, account, teller, orders, refund, helper, support)

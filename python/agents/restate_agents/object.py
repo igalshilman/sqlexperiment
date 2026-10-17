@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import os
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import timedelta
 from typing import Any
 
@@ -19,6 +20,10 @@ from pydantic import BaseModel, create_model
 from restate import InvocationRetryPolicy
 from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL
 from restate.serde import Serde
+
+from restate_agents.signals import Resolved, Signal, signals, signals_of
+from restate_agents.signals import pending as pending_signals
+from restate_agents.signals import resolve as resolve_signal
 
 # Restate's UI hides the SQL storage from the journal view: the database's
 # pages, log and header in the object's state (v13/...), the sends pending
@@ -34,6 +39,10 @@ RETRY_POLICY = InvocationRetryPolicy(
 )
 
 
+# The name of the object whose handler runs.
+_service: ContextVar[str] = ContextVar("restate_agents.service")
+
+
 class Object(restate.VirtualObject):
     """
     A Restate virtual object with a SQL database of its own, ``ctx.db``: one
@@ -41,6 +50,11 @@ class Object(restate.VirtualObject):
     ``restate.VirtualObject``, which add to (or replace) the ones set here:
     ``restate.sql_options``, and retries without end, since each attempt
     resumes from the database.
+
+    Each has the handlers ``signal``, which resolves a wait of its tools (see
+    ``signal`` in tools.py), and ``pending``, the waits. Both are shared, so
+    they run while the object's handler waits, and journaled: they use no
+    ``ctx.db``.
     """
 
     def __init__(self, name: str, *, metadata: dict[str, str] | None = None, **options):
@@ -49,6 +63,17 @@ class Object(restate.VirtualObject):
             metadata={**METADATA, **(metadata or {})},
             **{**restate.sql_options, "invocation_retry_policy": RETRY_POLICY, **options},
         )
+
+        async def signal(ctx: restate.ObjectSharedContext, signal: Signal) -> Resolved:
+            """Resolve a wait of this object's tools: by its id, or else the oldest for its name."""
+            return await ctx.object_call(resolve_signal, key=signals_of(name, ctx.key()), arg=signal)
+
+        async def pending(ctx: restate.ObjectSharedContext) -> list[dict[str, Any]]:
+            """The waits of this object's tools, oldest first, as ``Waiting``."""
+            return await ctx.object_call(pending_signals, key=signals_of(name, ctx.key()), arg=None)
+
+        for handler in (signal, pending):
+            restate.VirtualObject.handler(self, kind="shared", journal_replay=True)(handler)
 
     def handler(self, name: str | Callable | None = None, /, **options: Any) -> Any:  # type: ignore[override]
         """
@@ -65,6 +90,8 @@ class Object(restate.VirtualObject):
             return self.handler()(name)
 
         def register(fn: Callable) -> Callable:
+            if (name or fn.__name__) in self.handlers:
+                raise ValueError(f"{self.name} has a handler {name or fn.__name__} already: name yours otherwise")
             handler = self._handler(fn)
             if (model := getattr(handler, "input_model", None)) is not None:
                 options.setdefault("input_serde", _ArgumentsSerde(model))
@@ -83,6 +110,7 @@ class Object(restate.VirtualObject):
         if len(params) <= 1:
 
             async def handler(context: Any, *input: Any) -> Any:
+                _service.set(self.name)
                 return await fn(context, *input)
 
             handler.__signature__ = signature  # type: ignore[attr-defined]
@@ -97,6 +125,7 @@ class Object(restate.VirtualObject):
             model = create_model(f"{fn.__name__}_input", **fields)
 
             async def handler(context: Any, input: Any) -> Any:  # type: ignore[misc]
+                _service.set(self.name)
                 return await fn(context, **{name: getattr(input, name) for name in fields})
 
             handler.__signature__ = signature.replace(  # type: ignore[attr-defined]
@@ -131,8 +160,21 @@ def context() -> Any:
     return ctx
 
 
+def service() -> str:
+    """The name of the object whose handler runs, such as a tool's."""
+    try:
+        return _service.get()
+    except LookupError:
+        raise RuntimeError("not in a handler of an agent's object") from None
+
+
 def serve(*services: restate.Service | restate.VirtualObject | restate.Workflow) -> None:
-    """Serve ``services`` over HTTP/2, on PORT or 9080, until interrupted."""
+    """Serve ``services``, and the agents' ``signals``, over HTTP/2, on PORT or 9080, until interrupted."""
     config = hypercorn.config.Config()
     config.bind = [f"0.0.0.0:{os.environ.get('PORT', '9080')}"]
-    asyncio.run(hypercorn.asyncio.serve(restate.app(list(services)), config))  # type: ignore[arg-type]
+    asyncio.run(hypercorn.asyncio.serve(app(*services), config))  # type: ignore[arg-type]
+
+
+def app(*services: restate.Service | restate.VirtualObject | restate.Workflow, **options: Any) -> Any:
+    """The ASGI app of ``services``, and of the agents' ``signals``; ``options`` are ``restate.app``'s."""
+    return restate.app([*services, *([] if signals in services else [signals])], **options)

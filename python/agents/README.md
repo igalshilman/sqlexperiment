@@ -50,21 +50,58 @@ three tables, a step storing only the channels it changed.
 ### Tools
 
 `@tool` makes a tool of a function: the model gives its parameters, which
-their types and the docstring describe. Two parameters are not the model's:
-`ctx`, the handler's context (`ctx.db`, calls, sends), and `call_id`, the
-tool call's id. A crash runs an unfinished tool call again with the same id,
-so a tool that must not run twice passes it on, as an idempotency key or a
-row's key:
+their types and the docstring describe. Three parameters are not the model's:
+`ctx`, the handler's context (`ctx.db`, calls, sends), `call_id`, the tool
+call's id, and `idempotency_key`, the call's in this invocation
+(`<invocation id>:<call id>`). A crash runs an unfinished tool call again
+with the same id, so a tool that must not run twice passes it on, as an
+idempotency key or a row's key:
 
 ```python
 @tool
-async def send_money(ctx, call_id, to: str, amount: int) -> str:
+async def send_money(ctx, idempotency_key, to: str, amount: int) -> str:
     """Send money from the customer's account to another account."""
-    left = await ctx.object_call(transfer, key=ctx.key(), arg={"id": call_id, "to": to, "amount": amount})
-    return f"Sent {amount} to {to}, {left} left"
+    await ctx.object_call(transfer, key=ctx.key(), arg={"to": to, "amount": amount}, idempotency_key=idempotency_key)
+    return f"Sent {amount} to {to}"
 ```
 
 LangChain's own tools work too.
+
+### Restate's tools
+
+Tools that call, send to, start and wait for what Restate runs, each once
+per tool call, however often an attempt crashes (its idempotency key is the
+tool call's), as in [`examples-py/support.py`](../../examples-py/support.py):
+
+```python
+from restate_agents import call, langgraph, send, signal, subagent, workflow
+
+support = langgraph.agent(
+    "support",
+    tools=[
+        call(status),  # a handler of a service, an object or a workflow
+        signal("approval", description="Wait for a manager to approve a refund.", input=Refund),
+        workflow(refund),  # a restate.Workflow, run to its end
+        subagent(researcher, description="a researcher, who answers with facts"),
+        send(checkin, delay=timedelta(days=1)),
+    ],
+)
+```
+
+| Tool                                                   | What                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `call(handler, description=, name=, key=)`             | Calls `handler` and answers with what it returns. The model gives its input (its parameter, or its pydantic model's fields) and, for an object or a workflow, the key, unless `key` (a string, or a function of the context) does. `name`: `<service>_<handler>`; `description`: the handler's docstring. |
+| `send(handler, description=, name=, key=, delay=)`     | Sends to `handler`, after `delay` if given, and does not wait.                                                                                                                                                                                                                                            |
+| `workflow(wf, description=, name=, key=)`              | Runs the workflow `wf`, keyed `<this key>-<call id>` unless `key` keys it, and answers with its result.                                                                                                                                                                                                   |
+| `subagent(agent, description=, name=, handler="chat")` | Hands a named task to `agent`, keyed `<this key>.<task name>`: tasks of different names run at once, the same name continues the same task.                                                                                                                                                               |
+| `signal(signal, description=, input=, name=)`          | Waits for the signal `signal` to the agent, without holding a process, and answers with its value. With `input` (a pydantic model), the model says what it waits for.                                                                                                                                     |
+
+A handler's `restate.TerminalError` is the tool's answer to the model. Each
+agent has two more handlers, for its signals: `pending`, the waits, and
+`signal`, which resolves one by its id, or the oldest for a name
+(`{"name": "approval", "value": "approved"}`; with `"keep": true`, kept for
+the next wait if none waits). The waits are in a journaled virtual object,
+`signals`, which `serve` (and `app`) serve with your services.
 
 ### Through crashes
 
@@ -107,8 +144,13 @@ serves them on `PORT`, or 9080.
   a crash at each state request of a message (with `durability="async"`, it
   moves money twice), an interrupted run, the system prompt, and tools'
   errors.
+- [`tests/test_tools.py`](tests/test_tools.py): Restate's tools on a fake
+  context: their names, the model's input, and the calls they make.
 
 Against a real Restate server ([`../tests`](../tests)): `make
 concurrency-test-py` has the agent moving money through Restate calls, and
+Restate's tools ([`test_restate_tools.py`](../tests/test_restate_tools.py):
+a call, a signal and a workflow in one turn, signals kept and dropped, a
+cancelled wait, a subagent, a send), and
 `make crash-test-py` prompts it while the process crashes, checking that each
 prompt moved money exactly once.
