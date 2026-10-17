@@ -502,10 +502,13 @@ never follows it. A page reference can point into an older batch without needing
 that batch's old manifest.
 
 For the reference implementation the build ID is SHA-256 of concatenated compiled-
-input Wasm bytes (transformed in tracked mode), UTF-8 bridge source, vm.rs, model.rs,
-instrument.rs, then literal `wasmtime=49.0.3;format=rust-v1`. A new implementation
-may use its own immutable compatibility identity, but must pin all state-layout
-and restore semantics. Different source/runtime builds require new application
+input Wasm bytes (transformed in tracked mode), UTF-8 bridge source, then the restore
+contract as a literal: `abi=<version>;wasmtime=49.0.3;stack=<bytes>;heap=<bytes>;
+intrinsics=<flags>`. It covers what a restored image depends on, not the host's source
+code: editing the host keeps stored runs restorable. Bump the ABI version when the
+restore contract changes in a way these inputs don't show (import behavior, the bridge
+protocol, VM metadata). A new implementation may use its own immutable compatibility
+identity, but must pin all state-layout and restore semantics. Different source/runtime builds require new application
 versions; retain old artifacts for old runs. There is no heap migration.
 
 The returned View contains checkpoint ID, application ID, sequence, State, image
@@ -587,7 +590,9 @@ reconstruct(run):
     return Image(memory, manifest.meta), manifest.State
 ```
 
-Each live page is applied once, against golden/zero bytes. Do not apply a golden-
+The golden image is immutable per application version, so a runtime may keep it
+decompressed across turns; the reference caches it by application ID and source
+hash. Each live page is applied once, against golden/zero bytes. Do not apply a golden-
 relative delta to the previous invocation page. Do not retain every decoded old
 batch simultaneously: mostly superseded batches can amplify retained memory.
 Each referenced batch is still read/decompressed in full; compaction is future

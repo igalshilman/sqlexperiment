@@ -1,10 +1,14 @@
 use crate::model::{
-    Capture, Event, Image, MAX_INPUT, MAX_MEMORY, MAX_TIME, PAGE, State, VmMeta, hash,
+    Application, Capture, Event, Image, MAX_INPUT, MAX_MEMORY, MAX_TIME, PAGE, State, VmMeta, hash,
 };
 use crate::{Operation, Resolution, Transaction};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+};
 use wasmtime::error::Context;
 use wasmtime::{
     Caller, Config, Engine, Global, Instance, Linker, Memory, Module, Store, StoreLimits,
@@ -18,6 +22,15 @@ const FUEL: u64 = 200_000_000;
 // Below upstream's 512 KiB ceiling: Wasmtime native frames need their own
 // headroom, especially in the instrumented interpreter. Reapply after restore.
 const MAX_STACK: i32 = 32 * 1024;
+const MAX_HEAP: i32 = 32 * 1024 * 1024;
+// qjs_init2 flags: every intrinsic but weak references/finalization (bit 9)
+// and performance (bit 10).
+const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
+/// What a restored image depends on besides the Wasm and the bridge source.
+/// Bump the version when the restore contract changes in a way these inputs
+/// don't show: the imports' behavior, the bridge protocol, the VM metadata.
+/// Editing the host's code otherwise keeps every stored run restorable.
+const ABI: &str = "abi=1;wasmtime=49.0.3";
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.
@@ -90,6 +103,10 @@ pub struct Runtime {
     engine: Engine,
     module: Module,
     pub(crate) build: String,
+    /// Decompressed golden memory per application version (ID and source).
+    /// Golden creation is deterministic for a build, so an entry is valid for
+    /// any store whose catalog names that version.
+    goldens: Mutex<HashMap<String, Arc<Vec<u8>>>>,
 }
 struct Host {
     now: u64,
@@ -121,22 +138,32 @@ impl Runtime {
                 );
             }
         }
-        let build = hash(
-            &[
-                wasm,
-                BOOTSTRAP.as_bytes(),
-                include_str!("vm.rs").as_bytes(),
-                include_str!("model.rs").as_bytes(),
-                include_str!("instrument.rs").as_bytes(),
-                b"wasmtime=49.0.3;format=rust-v1",
-            ]
-            .concat(),
-        );
+        // The instrumented Wasm already covers the tracking transform.
+        let limits = format!("{ABI};stack={MAX_STACK};heap={MAX_HEAP};intrinsics={INTRINSICS}");
+        let build = hash(&[wasm, BOOTSTRAP.as_bytes(), limits.as_bytes()].concat());
         Ok(Self {
             engine,
             module,
             build,
+            goldens: Mutex::default(),
         })
+    }
+
+    /// The application's golden memory, decompressed by `load` only the first
+    /// time this runtime meets the application version.
+    pub(crate) fn golden_memory(
+        &self,
+        application: &Application,
+        load: impl FnOnce() -> anyhow::Result<Vec<u8>>,
+    ) -> anyhow::Result<Arc<Vec<u8>>> {
+        // The source hash is hexadecimal: no `/` in it, so the key is unambiguous.
+        let key = format!("{}/{}", application.source_hash, application.id);
+        if let Some(memory) = self.goldens.lock().unwrap().get(&key) {
+            return Ok(memory.clone());
+        }
+        let memory = Arc::new(load()?);
+        self.goldens.lock().unwrap().insert(key, memory.clone());
+        Ok(memory)
     }
     pub fn build_id(&self) -> &str {
         &self.build
@@ -151,11 +178,10 @@ impl Runtime {
         vm.instance
             .get_typed_func::<(), ()>(&mut vm.store, "_initialize")?
             .call(&mut vm.store, ())?;
-        let intrinsics = !(1_i32 << 9 | 1_i32 << 10);
         ensure!(
             vm.instance
                 .get_typed_func::<i32, i32>(&mut vm.store, "qjs_init2")?
-                .call(&mut vm.store, intrinsics)?
+                .call(&mut vm.store, INTRINSICS)?
                 == 0,
             "QuickJS initialization failed"
         );
@@ -477,7 +503,7 @@ impl Vm {
     fn limits(&mut self) -> Result<()> {
         self.instance
             .get_typed_func::<i32, ()>(&mut self.store, "qjs_set_memory_limit")?
-            .call(&mut self.store, 32 * 1024 * 1024)?;
+            .call(&mut self.store, MAX_HEAP)?;
         self.instance
             .get_typed_func::<i32, ()>(&mut self.store, "qjs_set_max_stack_size")?
             .call(&mut self.store, MAX_STACK)?;

@@ -26,7 +26,16 @@ struct Loaded {
 }
 struct Golden {
     application: Application,
-    image: Image,
+    /// Shared by every turn of the application's runs: see `Runtime::golden_memory`.
+    memory: Arc<Vec<u8>>,
+}
+impl Golden {
+    fn image(&self) -> Image {
+        Image {
+            meta: self.application.meta.clone(),
+            memory: self.memory.to_vec(),
+        }
+    }
 }
 
 fn run_prefix(run: &str) -> String {
@@ -297,16 +306,19 @@ impl<K: Transaction> Engine<K> {
             application.memory_len <= MAX_MEMORY && application.memory_len.is_multiple_of(65536),
             "Invalid golden memory size"
         );
-        let memory = codec::decompress(&self.get_blob(&application.blob)?, application.memory_len)?;
-        ensure!(
-            memory.len() == application.memory_len,
-            "Golden image size mismatch"
-        );
-        let image = Image {
-            meta: application.meta.clone(),
+        let memory = self.runtime.golden_memory(&application, || {
+            let memory =
+                codec::decompress(&self.get_blob(&application.blob)?, application.memory_len)?;
+            ensure!(
+                memory.len() == application.memory_len,
+                "Golden image size mismatch"
+            );
+            Ok(memory)
+        })?;
+        Ok(Golden {
+            application,
             memory,
-        };
-        Ok(Golden { application, image })
+        })
     }
     fn load(&self, run: &str) -> Result<Option<Loaded>> {
         let Some(head) = self.kv.get(&format!("{}head", run_prefix(run)))? else {
@@ -324,12 +336,12 @@ impl<K: Transaction> Engine<K> {
         );
         let golden = self.golden(&manifest.application)?;
         ensure!(
-            manifest.memory_len >= golden.image.memory.len()
+            manifest.memory_len >= golden.memory.len()
                 && manifest.memory_len <= MAX_MEMORY
                 && manifest.memory_len.is_multiple_of(65536),
             "Invalid checkpoint memory size"
         );
-        let mut memory = golden.image.memory;
+        let mut memory = golden.memory.to_vec();
         memory.resize(manifest.memory_len, 0);
         // Group references, then release each decoded blob before loading the
         // next. Keeping all historical batches can vastly exceed VM memory.
@@ -381,7 +393,10 @@ impl<K: Transaction> Engine<K> {
             _ => anyhow::bail!("Invalid delivery"),
         };
         let golden = self.golden(&application)?;
-        let base = current.as_ref().map_or(&golden.image, |c| &c.image);
+        let first = current.is_none().then(|| golden.image());
+        let base = current
+            .as_ref()
+            .map_or_else(|| first.as_ref().unwrap(), |c| &c.image);
         let pending = current
             .as_ref()
             .map_or(&[][..], |c| c.manifest.state.pending.as_slice());
@@ -401,15 +416,15 @@ impl<K: Transaction> Engine<K> {
             .map_or_else(BTreeMap::new, |c| c.manifest.pages.clone());
         // Reuse the reconstructed parent buffer. Capture copies only changed
         // pages out of Wasm; no second full snapshot copy is needed.
-        let mut memory = current.as_mut().map_or_else(
-            || golden.image.memory.clone(),
-            |c| std::mem::take(&mut c.image.memory),
-        );
+        let mut memory = match (current.as_mut(), first) {
+            (Some(c), _) => std::mem::take(&mut c.image.memory),
+            (None, first) => first.context("Missing golden image")?.memory,
+        };
         memory.resize(capture.memory_len, 0);
         let changed = capture.pages.len();
         let mut deltas = Vec::new();
         for (index, new) in capture.pages {
-            let original = page(&golden.image.memory, index as usize);
+            let original = page(&golden.memory, index as usize);
             memory[index as usize * PAGE..(index as usize + 1) * PAGE].copy_from_slice(&new);
             if original == new {
                 pages.remove(&index);
