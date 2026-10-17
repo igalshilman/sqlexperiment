@@ -2,7 +2,8 @@
 # the sqlite-kv extension (sqlite-kv/), the patched SDK, which sdk/
 # prepares (`make sdk-py`), and the agent integrations (agents/), and their
 # tests (tests/). `make py` installs them into .venv; `make lint-py` checks
-# them. The examples (examples/) are a project of their own, as yours would be.
+# them. The examples (../examples-python) are a project of their own, as
+# yours would be.
 [project]
 name = "restate-sql"
 version = "0.1.0"
@@ -17,7 +18,6 @@ package = false
 
 [tool.uv.workspace]
 members = ["sqlite-kv", "agents"]
-exclude = ["examples"]
 
 [tool.uv.sources]
 sqlite-kv = { workspace = true }

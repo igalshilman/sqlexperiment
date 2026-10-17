@@ -3,9 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p . && tsc -p examples/ui",
-    "lint": "oxlint --type-aware",
-    "check": "tsc -p . && tsc -p examples/ui && oxlint --type-aware",
+    "typecheck": "tsc -p . && tsc -p ../examples-typescript && tsc -p ../examples-typescript/ui",
     "test": "pnpm --filter tests test"
   },
   "devDependencies": {

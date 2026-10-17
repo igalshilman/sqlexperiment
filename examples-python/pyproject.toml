@@ -1,6 +1,6 @@
 # The Python examples, each a file you run with `uv run`, after `make py` at
 # the repository's root: the patched SDK and restate-agents, from the
-# workspace around it (python/).
+# workspace of python/.
 [project]
 name = "examples"
 version = "0.1.0"
@@ -11,6 +11,6 @@ dependencies = ["restate-agents", "restate-sdk", "sqlite-kv"]
 package = false
 
 [tool.uv.sources]
-restate-agents = { path = "../agents", editable = true }
-restate-sdk = { path = "../sdk/.build/sdk-python", editable = true }
-sqlite-kv = { path = "../sqlite-kv", editable = true }
+restate-agents = { path = "../python/agents", editable = true }
+restate-sdk = { path = "../python/sdk/.build/sdk-python", editable = true }
+sqlite-kv = { path = "../python/sqlite-kv", editable = true }

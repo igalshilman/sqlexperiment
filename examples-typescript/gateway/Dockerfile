@@ -1,6 +1,6 @@
 # The tool gateway's endpoint. Build it from the repository's root:
 #
-#   docker build -f typescript/examples/gateway/Dockerfile -t tool-gateway .
+#   docker build -f examples-typescript/gateway/Dockerfile -t tool-gateway .
 #
 # It serves the endpoint (Orders, Payments, Gateway, Assistant, Case) on 9080:
 #
@@ -19,17 +19,18 @@ COPY typescript/packages/sql-node typescript/packages/sql-node
 RUN cd typescript/packages/sql-node && cargo build --locked --release \
   && cp target/release/libsqlite_kv_node.so sqlite_kv.node
 
-# The workspace's packages that the examples use, in the pnpm workspace (typescript/).
+# The workspace's packages that the examples use, laid out as in the
+# repository: the pnpm workspace in typescript/, the examples beside it.
 FROM node:24-bookworm AS deps
 RUN corepack enable
-WORKDIR /app
+WORKDIR /app/typescript
 COPY typescript/package.json typescript/pnpm-workspace.yaml typescript/pnpm-lock.yaml ./
 COPY typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz packages/sdk-typescript/.build/
 COPY typescript/packages/sql-node/package.json typescript/packages/sql-node/index.js typescript/packages/sql-node/index.d.ts \
   packages/sql-node/
 COPY --from=addon /src/typescript/packages/sql-node/sqlite_kv.node packages/sql-node/
 COPY typescript/packages/integrations packages/integrations
-COPY typescript/examples/package.json examples/
+COPY examples-typescript/package.json ../examples-typescript/
 RUN pnpm install --frozen-lockfile --prod --filter examples...
 
 FROM node:24-bookworm-slim
@@ -37,8 +38,8 @@ FROM node:24-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends python3 git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app /app
-WORKDIR /app/examples
-COPY typescript/examples/gateway/*.ts gateway/
+WORKDIR /app/examples-typescript
+COPY examples-typescript/gateway/*.ts gateway/
 ENV PORT=9080
 # The agents' model, for the Assistant and Case: give OPENAI_API_KEY.
 ENV MODEL=openai/gpt-6-luna

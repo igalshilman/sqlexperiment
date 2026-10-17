@@ -16,7 +16,7 @@ it: see [Tokens](#tokens).
 ## Where we are
 
 A UI polls `status` and `messages` (see
-[`examples/ui`](../../../examples/ui/app.ts)), once a second, whether or
+[`examples-typescript/ui`](../../../../examples-typescript/ui/app.ts)), once a second, whether or
 not anything changed.
 
 And a reader sees a running turn's progress late. Measured against
@@ -73,7 +73,7 @@ The same, on what we have:
    iterator of `{ status, messages }` (each new message, and the status),
    from a cursor (`messages`' `after`), until its signal aborts. A network
    failure retries, a window's retry keeps its idempotency key.
-   [`examples/ui`](../../../examples/ui/app.ts) uses it instead of polling.
+   [`examples-typescript/ui`](../../../../examples-typescript/ui/app.ts) uses it instead of polling.
 
 What a client then does:
 

@@ -1,7 +1,7 @@
 packages:
   - packages/*
   - tests
-  - examples
+  - ../examples-typescript
 # The patched SDK, built by packages/sdk-typescript (`make sdk-ts`), wherever it is used.
 overrides:
   '@restatedev/restate-sdk': file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz

@@ -14,7 +14,7 @@ after `make py` at the repository's root. See [Run an example](#run-an-example).
 | [`triage.py`](triage.py)     | A LangGraph graph of your own: a router hands each message to the billing or the tech team, each with its tools      |
 | [`writer.py`](writer.py)     | A LangGraph graph of your own: a writer drafts and a model edits, a person approves (a signal), a workflow publishes |
 
-They are built from [`restate_agents`](../agents/README.md): an agent
+They are built from [`restate_agents`](../python/agents/README.md): an agent
 is a virtual object per conversation, and its tools are plain functions.
 
 ```python

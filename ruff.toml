@@ -1,4 +1,4 @@
-# Ruff, for all the Python here (with the examples): `make format`, `make lint-py`.
+# Ruff, for all the Python here (python/ and examples-python/): `make format`, `make lint-py`.
 line-length = 120
 target-version = "py313"
 extend-exclude = ["**/.build", "**/target"]

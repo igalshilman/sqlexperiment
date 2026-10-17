@@ -2,7 +2,7 @@
 
 Each one is a file you run with Node (24 or later), from here, after `make
 js` at the repository's root. See [Run an example](#run-an-example). Start
-with [`chat.ts`](chat.ts), and [`restate-agents`](../packages/integrations/README.md),
+with [`chat.ts`](chat.ts), and [`restate-agents`](../typescript/packages/integrations/README.md),
 the integrations they use.
 
 | File                            | What                                                                                                                                          |
@@ -29,7 +29,7 @@ the integrations they use.
 Each agent is a virtual object, one per key, whose conversation is in the
 object's SQL database: a message is answered once per invocation, and a
 crash resumes the reply. The integrations are in
-[`restate-agents`](../packages/integrations/README.md).
+[`restate-agents`](../typescript/packages/integrations/README.md).
 
 ## Run an example
 
@@ -57,16 +57,16 @@ npx @restatedev/restate deployments register http://host.docker.internal:9080
 `MODEL` picks another model, such as `MODEL=openai/gpt-6-luna` with
 `OPENAI_API_KEY`, for the agents on pi and OpenCode; Claude and LangGraph
 take Anthropic's models, and DeepSeek its own (see
-[the models](../packages/integrations/README.md#models)). To call an agent
+[the models](../typescript/packages/integrations/README.md#models)). To call an agent
 from code, or to send a message again safely, see
-[Calling an agent](../packages/integrations/README.md#calling-an-agent).
+[Calling an agent](../typescript/packages/integrations/README.md#calling-an-agent).
 
 ## Python
 
-The Python examples are in [`python/examples`](../../python/README.md#examples).
+The Python examples are in [`examples-python`](../examples-python/README.md).
 
 ## Write your own
 
 A new file here, beside the others, runs the same way: its package has
 `restate-agents`, the patched SDK and zod. For a package of your own, see
-[Build your own](../packages/integrations/README.md#build-your-own).
+[Build your own](../typescript/packages/integrations/README.md#build-your-own).

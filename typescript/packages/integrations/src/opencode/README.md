@@ -18,13 +18,13 @@ const coder = opencode.agent({ name: 'coder', workspace: '/work/coder' });
 await serve(coder);
 ```
 
-| Option      | What                                                                                                                                                                    |
-| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)                                      |
-| `system`    | The system prompt                                                                                                                                                       |
-| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`OpenCodeTool`)                                                                       |
-| `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...); use a sandbox. Without one, the agent has only `tools` |
-| `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples/review.ts`](../../../../examples/review.ts))                |
+| Option      | What                                                                                                                                                                              |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)                                                |
+| `system`    | The system prompt                                                                                                                                                                 |
+| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`OpenCodeTool`)                                                                                 |
+| `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...); use a sandbox. Without one, the agent has only `tools`           |
+| `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples-typescript/review.ts`](../../../../../examples-typescript/review.ts)) |
 
 For an object of your own, `opencode.chat(options)` and
 `opencode.messages()` are the handlers; `options` may be a function of the
@@ -93,12 +93,12 @@ turn starts, and resumes every claimed turn when it boots.
 ## Run
 
 ```sh
-cd typescript/examples && ANTHROPIC_API_KEY=… node opencode.ts
+cd examples-typescript && ANTHROPIC_API_KEY=… node opencode.ts
 ```
 
 With a Restate server, and the agent registered with it: see
-[Run an example](../../../../examples/README.md#run-an-example).
-[`examples/coding.ts`](../../../../examples/coding.ts) has OpenCode coders,
+[Run an example](../../../../../examples-typescript/README.md#run-an-example).
+[`examples-typescript/coding.ts`](../../../../../examples-typescript/coding.ts) has OpenCode coders,
 each with a workspace, under a pi coordinator.
 
 ## Tests

@@ -48,7 +48,7 @@ handlers: {
 
 A conversation goes on with the model of each invocation: a `model` (or
 MODEL) changed since it started is the model of its next turn.
-[`examples/harness.ts`](../../../../examples/harness.ts) keeps each user's
+[`examples-typescript/harness.ts`](../../../../../examples-typescript/harness.ts) keeps each user's
 model and persona in the object's database.
 
 ## Through crashes
@@ -73,13 +73,13 @@ told it was interrupted).
 ## Run
 
 ```sh
-cd typescript/examples && ANTHROPIC_API_KEY=… node chat.ts
+cd examples-typescript && ANTHROPIC_API_KEY=… node chat.ts
 ```
 
 With a Restate server, and the agent registered with it: see
-[Run an example](../../../../examples/README.md#run-an-example).
-[`examples/chat.ts`](../../../../examples/chat.ts) is a chat agent with a
-tool, and [`examples/coding.ts`](../../../../examples/coding.ts) a pi
+[Run an example](../../../../../examples-typescript/README.md#run-an-example).
+[`examples-typescript/chat.ts`](../../../../../examples-typescript/chat.ts) is a chat agent with a
+tool, and [`examples-typescript/coding.ts`](../../../../../examples-typescript/coding.ts) a pi
 coordinator that hands coding tasks to OpenCode coders.
 
 ## Tests

@@ -197,9 +197,9 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "restate-agents", editable = "../agents" },
-    { name = "restate-sdk", editable = "../sdk/.build/sdk-python" },
-    { name = "sqlite-kv", editable = "../sqlite-kv" },
+    { name = "restate-agents", editable = "../python/agents" },
+    { name = "restate-sdk", editable = "../python/sdk/.build/sdk-python" },
+    { name = "sqlite-kv", editable = "../python/sqlite-kv" },
 ]
 
 [[package]]
@@ -907,7 +907,7 @@ wheels = [
 [[package]]
 name = "restate-agents"
 version = "0.1.0"
-source = { editable = "../agents" }
+source = { editable = "../python/agents" }
 dependencies = [
     { name = "hypercorn" },
     { name = "langchain-anthropic" },
@@ -925,13 +925,13 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=1.6" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "pydantic-ai-slim", extras = ["anthropic"], specifier = ">=2.57" },
-    { name = "restate-sdk", editable = "../sdk/.build/sdk-python" },
-    { name = "sqlite-kv", editable = "../sqlite-kv" },
+    { name = "restate-sdk", editable = "../python/sdk/.build/sdk-python" },
+    { name = "sqlite-kv", editable = "../python/sqlite-kv" },
 ]
 
 [[package]]
 name = "restate-sdk"
-source = { editable = "../sdk/.build/sdk-python" }
+source = { editable = "../python/sdk/.build/sdk-python" }
 
 [package.metadata]
 requires-dist = [
@@ -955,7 +955,7 @@ requires-dist = [
     { name = "pyright", marker = "extra == 'lint'", specifier = ">=1.1.390" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6.9" },
-    { name = "sqlite-kv", marker = "extra == 'sql'", directory = "../sqlite-kv" },
+    { name = "sqlite-kv", marker = "extra == 'sql'", directory = "../python/sqlite-kv" },
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
 provides-extras = ["adk", "client", "harness", "langchain", "lint", "openai", "pydantic-ai", "serde", "sql", "test", "tracing", "zstd"]
@@ -972,7 +972,7 @@ wheels = [
 [[package]]
 name = "sqlite-kv"
 version = "0.1.0"
-source = { editable = "../sqlite-kv" }
+source = { editable = "../python/sqlite-kv" }
 
 [[package]]
 name = "tenacity"

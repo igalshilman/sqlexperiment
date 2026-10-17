@@ -245,7 +245,7 @@ this against a real server.
 
 ## The examples
 
-The smallest is [`examples/notes.ts`](../../examples/notes.ts): plain SQL
+The smallest is [`examples-typescript/notes.ts`](../../../examples-typescript/notes.ts): plain SQL
 with `ctx.db`. The ledger and the shop are in [`tests/sql/`](../../tests/sql),
 where the tests use them. Each runs alone (`node sql/shop.ts` from
 [`tests/`](../../tests)), or together with the others (`pnpm serve` there, or

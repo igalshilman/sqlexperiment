@@ -3,10 +3,11 @@
 #   core/        the sqlite-kv crate, and the patch to the SDKs' shared core
 #                (core/sdk-shared-core) that both SDKs build on
 #   typescript/  the pnpm workspace: the patched TypeScript SDK, the Node.js
-#                addon, the integrations, their tests and the examples
+#                addon, the integrations and their tests; with the examples
+#                (examples-typescript/, a member of the workspace)
 #   python/      the uv workspace: the patched Python SDK, the Python
-#                extension, the agent integrations, their tests; and the
-#                examples (python/examples, a project of their own)
+#                extension, the agent integrations and their tests; and the
+#                examples (examples-python/, a project of their own)
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -26,6 +27,9 @@ CORE_PATCH := core/sdk-shared-core/sdk-shared-core.patch
 SDK_PY := python/sdk/.build/sdk-python/.patched
 # Formats the TypeScript, JavaScript and Markdown of every part, as .oxfmtrc.json says.
 OXFMT := typescript/node_modules/.bin/oxfmt
+# Lints the TypeScript of every part, as .oxlintrc.json says; its type-aware
+# rules run tsgolint, from the pnpm workspace too.
+OXLINT := OXLINT_TSGOLINT_PATH=$(CURDIR)/typescript/node_modules/.bin/tsgolint typescript/node_modules/.bin/oxlint
 # The tests against a Restate server run a released restate-server: by default
 # RESTATE_VERSION's, downloaded from its GitHub release for this platform. Or
 # RESTATE_FROM=image takes it out of RESTATE_IMAGE with docker (Linux only), or
@@ -129,12 +133,13 @@ lint-core: ## The Rust crates (the core, the addon and the Python extension): ru
 	cd python/sqlite-kv && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
-	cd typescript && pnpm check
+	cd typescript && pnpm typecheck
+	$(OXLINT) --type-aware typescript examples-typescript
 	$(OXFMT) --check
 
-lint-py: py ## The Python (python/): ruff format --check and ruff check; and the patched SDK's ruff, as it configures it, and rustfmt
-	uv run --project python --locked ruff format --check python
-	uv run --project python --locked ruff check python
+lint-py: py ## The Python (python/, examples-python/): ruff format --check and ruff check; and the patched SDK's ruff, as it configures it, and rustfmt
+	uv run --project python --locked ruff format --check python examples-python
+	uv run --project python --locked ruff check python examples-python
 	cd python/sdk/.build/sdk-python && uv run --extra lint ruff format --check && uv run --extra lint ruff check \
 		&& $(CARGO) fmt --check
 
@@ -143,7 +148,7 @@ format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Mark
 	cd typescript/packages/sql-node && $(CARGO) fmt
 	cd python/sqlite-kv && $(CARGO) fmt
 	$(OXFMT)
-	uv run --project python --locked ruff format python
+	uv run --project python --locked ruff format python examples-python
 
 crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through crashes, against a Restate server
 	cd typescript/tests && node crash.ts
@@ -151,7 +156,7 @@ crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through cra
 concurrency-test: js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
 	cd typescript/tests && node concurrency.ts
 
-concurrency-test-py: py $(RESTATE_SERVER) ## Python: the context without journal replay, agents, Restate's tools and the examples (python/examples), against a Restate server
+concurrency-test-py: py $(RESTATE_SERVER) ## Python: the context without journal replay, agents, Restate's tools and the examples (examples-python/), against a Restate server
 	cd python && uv run --locked pytest tests
 
 crash-test-py: py $(RESTATE_SERVER) ## Python: a bank and an agent through crashes, against a Restate server
@@ -181,5 +186,5 @@ endif
 
 clean: ## Remove build outputs
 	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) typescript/packages/sdk-typescript/.build python/sdk/.build \
-		typescript/node_modules typescript/*/node_modules typescript/packages/*/node_modules \
+		typescript/node_modules typescript/*/node_modules typescript/packages/*/node_modules examples-typescript/node_modules \
 		python/.venv python/sqlite-kv/python/sqlite_kv/*.so

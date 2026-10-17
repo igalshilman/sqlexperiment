@@ -55,7 +55,7 @@ with the same storage, page cache and pending sends:
 - The attempt's session opens on first use and is saved when the handler
   ends: one empty run, if it wrote, so that the page cache may trust it.
 
-[`examples`](../examples/README.md) has notes in SQL,
+[`examples-python`](../../examples-python/README.md) has notes in SQL,
 and [`python/tests`](../tests) runs them, a bank, and the context below
 against a real Restate server (`make concurrency-test-py`), and the bank
 through crashes (`make crash-test-py`).

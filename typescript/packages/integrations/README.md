@@ -19,7 +19,7 @@ once, and each tool call is made once.
 ## Start here
 
 A chat agent with a tool, the whole of
-[`examples/chat.ts`](../../examples/chat.ts):
+[`examples-typescript/chat.ts`](../../../examples-typescript/chat.ts):
 
 ```ts
 import { serve, tool } from 'restate-agents';
@@ -38,7 +38,7 @@ const assistant = pi.agent({ name: 'assistant', tools: [weather] });
 await serve(assistant);
 ```
 
-Run it, from [`examples/`](../../examples/README.md), after `make js` at the
+Run it, from [`examples-typescript/`](../../../examples-typescript/README.md), after `make js` at the
 repository's root ([Build your own](#build-your-own)):
 
 ```sh
@@ -284,7 +284,7 @@ for await (const change of follow(restate, agent('assistant'), 'alice', { signal
 `restate-agents/client` also has the types of what the handlers answer
 (`Messages`, `Status`, `Waiting`...); `agent<H>(name)` types an object of
 your own with its handlers `H`.
-[`examples/ui`](../../examples/ui/app.ts) is a chat page on it: the
+[`examples-typescript/ui`](../../../examples-typescript/ui/app.ts) is a chat page on it: the
 conversation as the agent works, its approvals, steering and Stop.
 
 ## Tools
@@ -374,7 +374,7 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 A wait ends with its agent's invocation: a cancelled one leaves `pending`.
 The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 `serve` serves beside the agents. See
-[`examples/support.ts`](../../examples/support.ts).
+[`examples-typescript/support.ts`](../../../examples-typescript/support.ts).
 
 ## Models
 
@@ -401,7 +401,7 @@ the caller waits.
 `agent()` is an object with `chat` and `messages`. For more, make the
 object yourself, with `object()`, and the framework's handlers beside your
 own: here, an assistant whose tools keep facts in its own table
-([`examples/memory.ts`](../../examples/memory.ts)):
+([`examples-typescript/memory.ts`](../../../examples-typescript/memory.ts)):
 
 ```ts
 import type * as restate from '@restatedev/restate-sdk';
@@ -438,7 +438,7 @@ await serve(assistant);
 
 **Options for each invocation.** `chat` takes options, or a function of the
 invocation's context that gives them: each user's model and persona from
-the object's database, say ([`examples/harness.ts`](../../examples/harness.ts)):
+the object's database, say ([`examples-typescript/harness.ts`](../../../examples-typescript/harness.ts)):
 
 ```ts
 chat: pi.chat(async (ctx) => ({ model: (await settingsOf(ctx)).model, tools: [clock] })),
@@ -475,7 +475,7 @@ it needs Rust (with the `wasm32-unknown-unknown` target and `wasm-bindgen`
 0.2.121), Node 24 or later, and pnpm; `nix develop` has them all (see
 [Build and test](../../../README.md#build-and-test)).
 
-Then the quickest start is a file in [`examples/`](../../examples/README.md),
+Then the quickest start is a file in [`examples-typescript/`](../../../examples-typescript/README.md),
 whose package has `restate-agents`, the SDK and zod. Or a package of your own
 in the pnpm workspace: a directory listed in
 [`pnpm-workspace.yaml`](../../pnpm-workspace.yaml), with

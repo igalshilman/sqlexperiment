@@ -61,11 +61,11 @@ again from the start, with the stored messages.
 ## Run
 
 ```sh
-cd typescript/examples && ANTHROPIC_API_KEY=… node claude.ts
+cd examples-typescript && ANTHROPIC_API_KEY=… node claude.ts
 ```
 
 With a Restate server, and the agent registered with it: see
-[Run an example](../../../../examples/README.md#run-an-example).
+[Run an example](../../../../../examples-typescript/README.md#run-an-example).
 
 ## Tests
 

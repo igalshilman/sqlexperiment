@@ -1,0 +1,7 @@
+{
+  // The examples, as the workspace's TypeScript (../typescript/tsconfig.json)
+  // checks them: `make lint-ts`. The chat page (ui/) has its own.
+  "extends": "../typescript/tsconfig.json",
+  "include": ["**/*.ts"],
+  "exclude": ["**/node_modules", "ui"]
+}

@@ -10,7 +10,7 @@ and the agent integrations, in a pnpm workspace of its own
 | [`packages/sql-node/`](packages/sql-node/README.md)             | **The Node.js addon**, the `sqlite-kv` npm package: the crate over a key/value store implemented in JavaScript.                                                                                     |
 | [`packages/sdk-typescript/`](packages/sdk-typescript/README.md) | **The SDK changes.** Patches to the Restate TypeScript SDK, over [the patched shared core](../core/sdk-shared-core/README.md): handlers without journal replay, and `ctx.db` and `ctx.transaction`. |
 | [`packages/integrations/`](packages/integrations/README.md)     | **The integrations**, the `restate-agents` package: pi, OpenCode, LangGraph, Claude (the Anthropic SDK) and the DeepSeek Harness, in virtual objects.                                               |
-| [`examples/`](examples/README.md)                               | **The examples**, each a small file you run with node.                                                                                                                                              |
+| [`examples-typescript/`](../examples-typescript/README.md)      | **The examples**, each a small file you run with node: beside this directory, and a member of this workspace.                                                                                       |
 | [`tests/`](tests)                                               | **The tests**: the agents on scripted models, the storage conformance suites, SQL in objects, and the crash and concurrency tests against a real Restate server.                                    |
 
 ## Build and test

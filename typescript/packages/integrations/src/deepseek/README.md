@@ -69,11 +69,11 @@ it, and leaves the model to decide what to do about it. So:
 ## Run
 
 ```sh
-cd typescript/examples && DEEPSEEK_API_KEY=… node deepseek.ts
+cd examples-typescript && DEEPSEEK_API_KEY=… node deepseek.ts
 ```
 
 With a Restate server, and the agent registered with it: see
-[Run an example](../../../../examples/README.md#run-an-example).
+[Run an example](../../../../../examples-typescript/README.md#run-an-example).
 
 ## Tests
 
