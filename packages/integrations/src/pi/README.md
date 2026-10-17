@@ -57,10 +57,11 @@ scripted one, [`tests/fakes/pi.ts`](../../../../tests/fakes/pi.ts), which needs 
 ```sh
 make js   # from the repository root: the addon, the patched SDK, pnpm install
 cd examples && ANTHROPIC_API_KEY=… node chat.ts   # a chat session, on port 9080
-docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13   # Restate (see the repository's README, Requirements), in another terminal
-restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
 ```
+
+A Restate server runs beside it, with the agent registered: see
+[Run an example](../../../../examples/README.md#run-an-example).
 
 The agents run through crashes in [the crash test](../../../../tests/crash.ts) (`make crash-test`).
 The test Agent object keeps retrying rather than pausing after Restate's default
