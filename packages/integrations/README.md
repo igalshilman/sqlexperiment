@@ -21,9 +21,10 @@ await serve(assistant);
 | [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | the conversation          | `model`, `system`, `tools`              |
 | [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | its session's event log   | `model`, `system`, `tools`              |
 
-Each framework has `agent({ name, ...options })`, a virtual object with one
-handler, `chat`, which takes a message and returns the answer; and
-`chat(options)`, that handler, for an object of your own. `object()`, of
+Each framework has `agent({ name, ...options })`, a virtual object with the
+handlers `chat`, which takes a message and returns the answer, and
+`messages`, the conversation so far; and `chat(options)` and `messages()`,
+those handlers, for an object of your own. `object()`, of
 `restate-agents`, is `restate.object` with SQL set up: `ctx.db` in every
 handler, retries without end (each attempt resumes from the database), and
 the SQL storage hidden from the journal in Restate's UI; its `options` and
@@ -65,6 +66,14 @@ often it is sent. To send without waiting, add `/send`:
 ```sh
 curl localhost:8080/assistant/alice/chat -H 'idempotency-key: msg-1' -d 'Hi, I am Alice'
 curl localhost:8080/assistant/alice/chat/send -d 'Summarize our chat later'
+```
+
+The conversation so far is `messages`: what was said, in order, as
+`{ role: 'user' | 'assistant', text }`, without tool calls and results. It
+waits for a message being answered:
+
+```sh
+curl localhost:8080/assistant/alice/messages
 ```
 
 From a Restate handler, through the agent's definition:
