@@ -40,7 +40,7 @@ Run the endpoint, from [`examples/`](..) (after `make js` at the repository
 root), register it, and play the demo against it:
 
 ```sh
-PI_MODEL=openai/gpt-6-luna node gateway/main.ts
+MODEL=openai/gpt-6-luna node gateway/main.ts
 restate deployments register http://localhost:9080
 gateway/demo.sh
 ```
@@ -56,7 +56,7 @@ gateway/demo.sh
    the same order reaches the same object, which remembers the first; and
    another tenant's order of the same number is another object, empty.
 
-`PI_MODEL` is the agents' model, such as `openai/gpt-6-luna` with
+`MODEL` is the agents' model, such as `openai/gpt-6-luna` with
 `OPENAI_API_KEY` (by default `anthropic/claude-sonnet-5-5`, with
 `ANTHROPIC_API_KEY`).
 On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and

@@ -10,7 +10,7 @@
 // crash; and otherwise answers the prompt again.
 //
 // It is the model `teller/teller` of OpenCode booted with `tellerPlugin`, as
-// `withTeller(openOpenCode)` does: with OPENCODE_MODEL=teller/teller, an
+// `withTeller(openOpenCode)` does: with MODEL=teller/teller, an
 // agent's model.
 import { randomUUID } from 'node:crypto';
 import type {

@@ -12,7 +12,7 @@ vi.mock('restate-agents/opencode/db', async (original) => {
   const db = await original<typeof OpenCodeDb>();
   return { ...db, openOpenCode: withTeller(db.openOpenCode) };
 });
-vi.stubEnv('OPENCODE_MODEL', 'teller/teller');
+vi.stubEnv('MODEL', 'teller/teller');
 
 describe('the OpenCode agent', () => {
   it('answers a message once per invocation', async () => {

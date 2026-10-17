@@ -2,7 +2,7 @@
 // the Gateway: stateless, so anywhere) or `agents` (the Assistant, keyed per
 // user, and the Case, keyed per order: in a sandbox).
 //
-//   PI_MODEL=openai/gpt-6-luna OPENAI_API_KEY=… node gateway/main.ts [tools|agents]
+//   MODEL=openai/gpt-6-luna OPENAI_API_KEY=… node gateway/main.ts [tools|agents]
 import { serve } from 'restate-agents';
 import { assistant, caseAgent } from './agent.ts';
 import { gateway } from './gateway.ts';

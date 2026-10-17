@@ -1,7 +1,7 @@
 // The bank agent on Claude (restate-agents/claude): a ClaudeAgent object per conversation, whose tools
 // (./bank.ts) move money in the ledger.
 //
-// Environment: PORT (default 9080), ANTHROPIC_API_KEY, CLAUDE_MODEL, and ABORT_PER_MILLE (see
+// Environment: PORT (default 9080), ANTHROPIC_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
 import { object } from 'restate-agents';
 import * as claude from 'restate-agents/claude';

@@ -40,7 +40,7 @@ WORKDIR /app/examples
 COPY examples/gateway/*.ts gateway/
 ENV PORT=9080
 # The agents' model, for the Assistant and Case: give OPENAI_API_KEY.
-ENV PI_MODEL=openai/gpt-6-luna
+ENV MODEL=openai/gpt-6-luna
 # Each agent object's files, in a directory of its own below this: a
 # sandbox's disk. `-e WORKSPACE=` leaves the agents without files.
 ENV WORKSPACE=/data/workspace

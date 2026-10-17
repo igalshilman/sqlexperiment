@@ -50,7 +50,7 @@ again. Here its storage is a Restate virtual object's SQL database
 - [`examples/chat.ts`](../../../../examples/chat.ts): a durable chat agent with a tool, `pi.agent({ name: 'assistant', tools: [weather] })`; [`examples/coding.ts`](../../../../examples/coding.ts): a pi
   coordinator that hands coding tasks to OpenCode coders with `subagent` (of `restate-agents`).
 
-The model is `model`, or else `PI_MODEL`, by default
+The model is `model`, or else `MODEL`, by default
 `anthropic/claude-sonnet-5-5` (with `ANTHROPIC_API_KEY`). The tests use a
 scripted one, [`tests/fakes/pi.ts`](../../../../tests/fakes/pi.ts), which needs no key.
 

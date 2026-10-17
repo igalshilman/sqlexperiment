@@ -33,9 +33,9 @@ conversation, which is the LangGraph thread.
   thread being the object's key, and answers the message once per invocation
   (`ctx.request().id`).
 
-  Its model is `model`, or else `ChatAnthropic` (`LANGGRAPH_MODEL`, by default
-  `claude-sonnet-5-5`, with `ANTHROPIC_API_KEY`): any LangChain chat model
-  that calls tools takes its place. The tests use a scripted one,
+  Its model is `model`, or else `MODEL`, by default
+  `anthropic/claude-sonnet-5-5` (`ChatAnthropic`, with `ANTHROPIC_API_KEY`);
+  or any LangChain chat model that calls tools, as `model`. The tests use a scripted one,
   [`tests/fakes/langgraph.ts`](../../../../tests/fakes/langgraph.ts).
 
 - [`tests/storage/langgraph.test.ts`](../../../../tests/storage/langgraph.test.ts):

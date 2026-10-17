@@ -8,6 +8,22 @@ export type PerCall<T> = T | ((ctx: restate.SqlObjectContext) => T);
 export const forCall = <T>(value: PerCall<T>, ctx: restate.SqlObjectContext): T =>
   typeof value === 'function' ? (value as (ctx: restate.SqlObjectContext) => T)(ctx) : value;
 
+/**
+ * The model, as `provider/model-id` (such as `anthropic/claude-sonnet-5-5`):
+ * `model`, or else MODEL, or else the framework's default.
+ */
+export const modelOf = (model: string | undefined, fallback: string) => model || process.env.MODEL || fallback;
+
+/**
+ * The model id of `model`, for a framework with only `provider`'s models:
+ * `provider/model-id`, or the id alone.
+ */
+export const modelIdOf = (model: string, provider: string) => {
+  const [named, id] = model.includes('/') ? model.split('/', 2) : [provider, model];
+  if (named !== provider || !id) throw new Error(`${model}: not a model of ${provider} (${provider}/<model-id>)`);
+  return id;
+};
+
 /** A chat message: the request's body as text, or the string it is as JSON (`"Hi"`). */
 const message: restate.Serde<string> = {
   contentType: 'text/plain',

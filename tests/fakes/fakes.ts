@@ -1,7 +1,7 @@
 // Test only: the scripted tellers in place of the real models, for the
 // examples run as processes, such as the crash test's (../test.ts):
 //
-//   PI_MODEL=teller/teller OPENCODE_MODEL=teller/teller node --import ./fakes/fakes.ts serve.ts
+//   MODEL=teller/teller node --import ./fakes/fakes.ts serve.ts
 //
 // An example's import of a model's module gets the teller's module instead
 // (the unit tests do the same with vi.mock):

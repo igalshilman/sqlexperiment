@@ -6,7 +6,7 @@
 // or a handler of an object of your own: `handlers: { chat: deepseek.chat() }`
 //
 // The model is DeepSeek's (@deepseek-ai/dsh-llm-deepseek-api-key): `model`,
-// or else DEEPSEEK_MODEL (default deepseek-flash), with DEEPSEEK_API_KEY.
+// or else MODEL, or else deepseek/deepseek-flash, with DEEPSEEK_API_KEY.
 //
 // The handler is not replayed: a retried attempt (a crash, a lost connection)
 // boots the harness again and resumes the session from the stored log.
@@ -42,7 +42,7 @@ import {
   type ToolRunContext,
   ToolRuntime,
 } from '@deepseek-ai/dsh-tools';
-import { chatHandler, forCall, type PerCall } from '../common.ts';
+import { chatHandler, forCall, modelIdOf, modelOf, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
@@ -66,7 +66,7 @@ export const tool = <const S extends ParameterSchemaSpec>(options: {
   });
 
 /** The default model. */
-export const DEFAULT_MODEL = 'deepseek-flash';
+export const DEFAULT_MODEL = 'deepseek/deepseek-flash';
 
 /** Run a tool's `body`, whose error also goes to `fail`. */
 async function guard<T>(fail: (error: unknown) => void, body: () => Promise<T>): Promise<T> {
@@ -189,7 +189,7 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolDefinition =>
   });
 
 export interface ChatOptions {
-  /** The model: DEEPSEEK_MODEL, or else {@link DEFAULT_MODEL}. */
+  /** The model, as `deepseek/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** The system prompt's persona. */
   system?: string;
@@ -199,7 +199,7 @@ export interface ChatOptions {
 
 /** The answer to a message, each message an invocation, the session in the object's database. */
 const respond =
-  ({ model = process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL, system = 'Answer briefly.', tools = [] }: ChatOptions = {}) =>
+  ({ model: named, system = 'Answer briefly.', tools = [] }: ChatOptions = {}) =>
   async (ctx: restate.SqlObjectContext, text: string): Promise<string> => {
     const id = ctx.request().id;
     const harness = await boot(ctx.db, system);
@@ -210,7 +210,7 @@ const respond =
     try {
       const sessionId = SessionId(ctx.key);
       const options = {
-        agentOptions: { provider: 'deepseek-official', model },
+        agentOptions: { provider: 'deepseek-official', model: modelIdOf(modelOf(named, DEFAULT_MODEL), 'deepseek') },
         setup: (agentCtx: Context) =>
           tools.forEach((t) => {
             const definition = isTool(t) ? native(t, ctx) : forCall(t, ctx);

@@ -61,5 +61,5 @@ export const teller: Respond = (context) => {
   return say('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
 };
 
-/** The teller as the pi-ai provider `teller`, for PI_MODEL=teller/teller (see fakes.ts). */
+/** The teller as the pi-ai provider `teller`, for MODEL=teller/teller (see fakes.ts). */
 export const tellerProvider = () => fakeProvider('teller', 'teller', teller);

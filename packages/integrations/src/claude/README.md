@@ -48,8 +48,8 @@ the agent takes whatever tools you give it.
   through crashes, and a scripted model ([`tests/fakes/claude.ts`](../../../../tests/fakes/claude.ts)).
 - [`examples/claude.ts`](../../../../examples/claude.ts): a durable chat agent with a tool, `claude.agent({ name: 'assistant', tools: [weather] })`.
 
-The model is `model`, or else `CLAUDE_MODEL`, by default `claude-sonnet-5-5`, with
-`ANTHROPIC_API_KEY`.
+The model is `model`, or else `MODEL`, by default `anthropic/claude-sonnet-5-5`,
+with `ANTHROPIC_API_KEY`.
 
 ## Through crashes
 

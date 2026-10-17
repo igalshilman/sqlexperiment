@@ -33,9 +33,13 @@ A tool may be given as itself, or as a function of the invocation's context,
 twice passes its tool call id on (as an idempotency key, say): a crash runs
 an unfinished tool call again, with the same id.
 
-The models are real ones: by default Anthropic's `claude-sonnet-5-5`, with
-`ANTHROPIC_API_KEY` (DeepSeek's `deepseek-flash`, with `DEEPSEEK_API_KEY`, for
-the DeepSeek Harness). The tests ([`../../tests`](../../tests/README.md)) run
+The models are real ones. Every agent's `model` is `provider/model-id`, or
+else the `MODEL` environment variable, or else Anthropic's
+`anthropic/claude-sonnet-5-5`, with `ANTHROPIC_API_KEY` (DeepSeek's
+`deepseek/deepseek-flash`, with `DEEPSEEK_API_KEY`, for the DeepSeek
+Harness). pi and OpenCode take any provider they know (such as
+`openai/gpt-6-luna`, with `OPENAI_API_KEY`); Claude and LangGraph take
+Anthropic's models (or LangGraph, any LangChain chat model). The tests ([`../../tests`](../../tests/README.md)) run
 them on scripted models instead.
 
 ## Tools

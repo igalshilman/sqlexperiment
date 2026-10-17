@@ -1,7 +1,7 @@
 // The bank agent on OpenCode 2.0 (restate-agents/opencode): an OpenCodeAgent object per session, whose tools
 // (./bank.ts) move money in the ledger.
 //
-// Environment: PORT (default 9080), ANTHROPIC_API_KEY, OPENCODE_MODEL, and ABORT_PER_MILLE (see
+// Environment: PORT (default 9080), ANTHROPIC_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
 import { object } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';

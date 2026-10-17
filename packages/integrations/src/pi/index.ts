@@ -10,8 +10,8 @@
 //
 //   chat: (ctx, message) => withPi(ctx, { tools }, (pi) => pi.prompt(ctx.request().id, message)),
 //
-// The model is `model`, PI_MODEL, or else anthropic/claude-sonnet-5-5, with
-// the provider's API key (such as ANTHROPIC_API_KEY).
+// The model is `model`, MODEL, or else anthropic/claude-sonnet-5-5, with the
+// provider's API key (such as ANTHROPIC_API_KEY).
 //
 // It runs `work` over `ctx.db`: pi-durable's storage is the object's
 // database (storage.ts), and each pi-durable commit is an SQL transaction
@@ -45,7 +45,7 @@ import {
 } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
-import { chatHandler, forCall, type PerCall } from '../common.ts';
+import { chatHandler, forCall, modelOf, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
@@ -67,7 +67,7 @@ const textOf = (content: Message['content']): string =>
 export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
 
 export interface PiOptions {
-  /** The model, as `provider/model-id`: PI_MODEL, or else {@link DEFAULT_MODEL}. */
+  /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** A pi-ai model registry; by default, one of the model's provider. */
   models?: MutableModels;
@@ -93,10 +93,11 @@ async function modelsOf(provider: string): Promise<MutableModels> {
  */
 export const withPi = async <T>(
   ctx: restate.SqlObjectContext,
-  { model = process.env.PI_MODEL || DEFAULT_MODEL, models, tools = [], workspace }: PiOptions,
+  { model: named, models, tools = [], workspace }: PiOptions,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const db = ctx.db;
+  const model = modelOf(named, DEFAULT_MODEL);
   const [provider = '', modelId = ''] = model.split('/');
   models ??= await modelsOf(provider);
   const context = BACKGROUND_CONTEXT;
@@ -139,7 +140,7 @@ export const prompt = (ctx: restate.SqlObjectContext, text: string, options: PiO
   withPi(ctx, options, (pi) => pi.prompt(ctx.request().id, text));
 
 export interface ChatOptions {
-  /** The model, as `provider/model-id`: PI_MODEL, or else {@link DEFAULT_MODEL}. */
+  /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** A pi-ai model registry, for a provider of your own; by default, one of the model's provider. */
   models?: MutableModels;

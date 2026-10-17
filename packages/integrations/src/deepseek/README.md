@@ -25,7 +25,7 @@ versions.
   harness's session checkpoint policy, and the model adapter. It creates the
   session, or resumes it, gives the agent its tools, and answers the message.
   Its model is DeepSeek's (`@deepseek-ai/dsh-llm-deepseek-api-key`): `model`,
-  or else `DEEPSEEK_MODEL`, by default `deepseek-flash`, with
+  or else `MODEL`, by default `deepseek/deepseek-flash`, with
   `DEEPSEEK_API_KEY`.
 - [`tests/agents/deepseek.ts`](../../../../tests/agents/deepseek.ts): a DeepSeekAgent
   object per conversation, whose bank tools move money in the
