@@ -5,8 +5,10 @@
   "description": "Restate virtual objects with SQL, and agents on it: each a file you run with node",
   "type": "module",
   "dependencies": {
+    "@anthropic-ai/sdk": "0.133.0",
     "@earendil-works/pi-ai": "1.1.0",
     "@earendil-works/pi-durable": "1.1.0",
+    "@langchain/core": "1.2.12",
     "@restatedev/restate-sdk": "1.17.3",
     "restate-agents": "workspace:*",
     "sqlite-kv": "workspace:*",

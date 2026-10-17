@@ -3,8 +3,9 @@
 - No backwards compatibility: this is an experiment. Rename, move, delete and
   change APIs, storage formats and layouts freely; no shims, deprecations or
   migration paths.
-- Optimize for simplicity, above all in the examples: as few lines as
-  possible.
+- Optimize for readability and developer experience, above all in what users
+  see (examples, APIs, docs): clear names, a doc comment on how to run it,
+  idiomatic code; short, but never cramped.
 - Decide yourself; ask the owner only critical questions.
 - Examples use real models (an API key); scripted models are for tests only
   (tests/fakes).

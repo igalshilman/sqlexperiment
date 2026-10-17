@@ -31,11 +31,33 @@ import { SessionId, SessionStore, type SessionEvent } from '@deepseek-ai/dsh-ses
 import * as checkpoints from '@deepseek-ai/dsh-session-checkpoint-policy';
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection';
 import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
-import { ToolRuntime, type ToolDefinition } from '@deepseek-ai/dsh-tools';
+import {
+  defineTool,
+  type InferArgs,
+  type ParameterSchemaSpec,
+  type ToolDefinition,
+  type ToolRunContext,
+  ToolRuntime,
+} from '@deepseek-ai/dsh-tools';
 import { forCall, type PerCall } from '../common.ts';
 import { SqlSessionPersistence } from './persistence.ts';
 
 export { SqlSessionPersistence };
+
+/**
+ * A tool whose result is text: `defineTool` of @deepseek-ai/dsh-tools, with
+ * the output that takes.
+ */
+export const tool = <const S extends ParameterSchemaSpec>(options: {
+  name: string;
+  description: string;
+  parameters: S;
+  execute: (args: InferArgs<S>, exec: ToolRunContext) => Promise<string>;
+}): ToolDefinition =>
+  defineTool<S, { type: 'string' }>({
+    ...options,
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+  });
 
 /** The default model. */
 export const DEFAULT_MODEL = 'deepseek-flash';
@@ -123,8 +145,11 @@ export const chat =
         agentOptions: { provider: 'deepseek-official', model },
         setup: (agentCtx: Context) =>
           tools.forEach((t) => {
-            const tool = forCall(t, ctx);
-            agentCtx.tools.register({ ...tool, execute: (args, exec) => guard(fail, () => tool.execute(args, exec)) });
+            const definition = forCall(t, ctx);
+            agentCtx.tools.register({
+              ...definition,
+              execute: (args, exec) => guard(fail, () => definition.execute(args, exec)),
+            });
           }),
       };
       // Resuming closes a turn a crash left open.
