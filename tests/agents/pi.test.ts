@@ -176,7 +176,7 @@ describe('pi.chat', () => {
   });
 
   it('takes a message steered to the turn at its next tool call', async () => {
-    const { answer, parts, left } = await steeredWhileWorking((tools) => pi.chat({ tools }), pi.messages());
+    const { answer, parts, left, published } = await steeredWhileWorking((tools) => pi.chat({ tools }), pi.messages());
     expect(answer).toBe(`Please move 5 from 1 to 2 / ${STEERED}`);
     expect(parts).toEqual([
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
@@ -193,6 +193,8 @@ describe('pi.chat', () => {
       [{ type: 'text', text: answer }],
     ]);
     expect(left).toEqual([]);
+    // Published at its start, as its tool call starts and ends, and at its end.
+    expect(published).toBe(4);
   });
 
   it('takes options for each invocation', async () => {

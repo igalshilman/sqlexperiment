@@ -61,7 +61,8 @@ import {
   nextPromptId,
   settleSteering,
   type Steerable,
-  takeSteering,
+  toolCallEnded,
+  toolCallStarted,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -174,10 +175,10 @@ export const withPi = async <T>(
   const failing = (t: ToolRegistration): ToolRegistration => ({
     ...t,
     execute: (args, api, task) =>
-      t
-        .execute(args, api, task)
+      toolCallStarted(ctx)
+        .then(() => t.execute(args, api, task))
         .then(async (result) => {
-          await takeSteering(ctx, steerable);
+          await toolCallEnded(ctx, steerable);
           return result;
         })
         .catch((error: unknown) => {

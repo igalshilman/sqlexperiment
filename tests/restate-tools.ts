@@ -7,7 +7,8 @@
 // it is resolved by its id, then answers
 // with every tool's result; a signal no one waits for is dropped, unless it
 // is kept; a cancelled wait leaves `pending`; `stop` stops a message being
-// answered, and `steer` adds to it; a message may be plain text;
+// answered, and `steer` adds to it; `follow` gives the conversation as it
+// changes; a message may be plain text;
 // and a handler's terminal error is the tool's answer.
 //
 //   RESTATE_SERVER=/path/to/restate-server node restate-tools.ts   (or make tools-test)
@@ -20,7 +21,7 @@ import * as restate from '@restatedev/restate-sdk';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { call, signal, signals, workflow, type Messages, type Status, type Waiting } from 'restate-agents';
 import * as clients from '@restatedev/restate-sdk-clients';
-import { agent } from 'restate-agents/client';
+import { agent, follow, type Followed } from 'restate-agents/client';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
@@ -272,6 +273,39 @@ try {
     ['assistant', 'refund({"order":"103"}): refunded 103'],
     ['assistant', 'order 103: delivered / approved / refunded 103'],
   ]);
+  // `follow` gives the conversation as it changes, without polling: the wait
+  // for approval, then the answer, as the turn stores them.
+  const stopFollowing = new AbortController();
+  const seen: Followed[] = [];
+  const following = (async () => {
+    for await (const change of follow(ingress, agent('support'), 'mia', { signal: stopFollowing.signal })) {
+      seen.push(change);
+      if (change.status.waiting.length > 0)
+        await ingress.objectClient(agent('support'), 'mia').signal({ name: 'approval', value: 'approved' });
+      if (change.status.answering === null && change.messages.at(-1)?.parts[0]?.type === 'text' && seen.length > 1)
+        return;
+    }
+  })();
+  await ingress.objectSendClient(agent('support'), 'mia').chat('Refund order 103');
+  await following;
+  stopFollowing.abort();
+  assert.ok(
+    seen.some((c) => c.status.answering !== null && c.status.waiting.length === 1),
+    JSON.stringify(seen),
+  );
+  assert.equal(
+    seen.at(-1)?.messages.at(-1)?.parts[0]?.type === 'text' &&
+      (seen.at(-1)!.messages.at(-1)!.parts[0] as { text: string }).text,
+    'order 103: delivered / approved / refunded 103',
+  );
+  assert.ok(seen.length < 20, `${seen.length} changes`);
+  // A watch with nothing new answers at its timeout, with the same revision.
+  const mia = ingress.objectClient(agent('support'), 'mia');
+  const now = await mia.notifications();
+  const started = Date.now();
+  assert.deepEqual(await mia.watch({ afterRevision: now.revision, timeoutSeconds: 1 }), now);
+  assert.ok(Date.now() - started >= 900, `${Date.now() - started} ms`);
+
   // With no message answered, it is a message of its own.
   const own = await liam.steer('Thanks!');
   assert.equal(own.steered, false);

@@ -1,6 +1,6 @@
 # Following a conversation: a design
 
-Status: proposal, for the owner to decide (see [Decisions](#decisions)).
+Status: built. Decided: no token streaming; `follow()` on Restate's client.
 
 ## Goal
 

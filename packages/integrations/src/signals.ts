@@ -1,6 +1,7 @@
 // Signals to agents: a virtual object per agent, keyed `<agent>:<key>` (such
 // as `assistant:alice`), whose `wait` returns once `resolve` gives the wait
-// its value; and the messages steered to the message an agent answers.
+// its value; the messages steered to the message an agent answers; and the
+// revision of the agent's conversation, which its `watch` waits on.
 //
 // An agent's own handler cannot wait on an awakeable (it has no journal to
 // replay one from), so it calls `wait`, which can: a journaled handler of
@@ -55,6 +56,17 @@ export interface Steered {
   steered: boolean;
 }
 
+/** The revision of an agent's conversation: each change of what a client reads increases it. */
+export interface Notifications {
+  revision: number;
+}
+
+/** What `watch` waits for: a revision past `afterRevision`, for at most `timeoutSeconds` (default 50, at most 60). */
+export interface Watch {
+  afterRevision: number;
+  timeoutSeconds?: number;
+}
+
 /** An agent: its object's name, and key. */
 interface Agent {
   service: string;
@@ -66,14 +78,26 @@ const CLOSED = 16;
 
 /**
  * The waits, in the order they started, each with its awakeable; the signals
- * kept for the next wait; and the messages steered to the turn being
- * answered, and the turns closed last.
+ * kept for the next wait; the messages steered to the turn being answered,
+ * and the turns closed last; and the conversation's revision, with the
+ * `watch`es waiting for a newer one.
  */
 interface State {
   waiting: (Waiting & { awakeable: string })[];
   kept: Record<string, unknown[]>;
   steering: { turn: string; messages: Steer[] };
   closed: string[];
+  revision: number;
+  watching: { afterRevision: number; awakeable: string }[];
+}
+
+/** Increase the revision, and answer each `watch` waiting for it: the new revision. */
+async function publish(ctx: restate.ObjectContext<State>): Promise<Notifications> {
+  const revision = ((await ctx.get('revision')) ?? 0) + 1;
+  ctx.set('revision', revision);
+  for (const { awakeable } of (await ctx.get('watching')) ?? []) ctx.resolveAwakeable(awakeable, { revision });
+  ctx.clear('watching');
+  return { revision };
 }
 
 /** Send `text` to `agent`'s `chat`, as a message of its own: its invocation's id. */
@@ -114,6 +138,7 @@ export const signals = restate.object({
       const [wait] = waiting.splice(at, 1);
       ctx.resolveAwakeable(wait!.awakeable, value);
       ctx.set('waiting', waiting);
+      await publish(ctx);
       return { resolved: wait!.id } satisfies Resolved;
     },
 
@@ -132,6 +157,7 @@ export const signals = restate.object({
         return;
       }
       ctx.set('waiting', [...((await ctx.get('waiting')) ?? []), wait]);
+      await publish(ctx);
     },
 
     /**
@@ -149,6 +175,7 @@ export const signals = restate.object({
       const steering = await ctx.get('steering');
       const messages = steering?.turn === turn ? steering.messages : [];
       ctx.set('steering', { turn, messages: [...messages, { id: `${turn}:steer:${messages.length + 1}`, text }] });
+      await publish(ctx);
       return { invocationId: turn, steered: true } satisfies Steered;
     },
 
@@ -183,6 +210,46 @@ export const signals = restate.object({
       ctx.set(
         'waiting',
         waiting.filter((w) => w.id !== id),
+      );
+      await publish(ctx);
+    },
+
+    /** @internal The conversation changed: increase its revision, and answer the `watch`es. */
+    publish,
+
+    /**
+     * @internal The turn `turn` made progress (a tool call ended): publish
+     * it, and answer the messages steered to the turn.
+     */
+    progress: async (ctx: restate.ObjectContext<State>, turn: string) => {
+      await publish(ctx);
+      const steering = await ctx.get('steering');
+      return steering?.turn === turn ? steering.messages : [];
+    },
+
+    /** The conversation's revision. */
+    notifications: restate.handlers.object.shared(
+      async (ctx: restate.ObjectSharedContext<State>): Promise<Notifications> => ({
+        revision: (await ctx.get('revision')) ?? 0,
+      }),
+    ),
+
+    /** @internal Answer `awakeable` once the revision is past `afterRevision`: at once, if it is. */
+    subscribe: async (ctx: restate.ObjectContext<State>, watch: { afterRevision: number; awakeable: string }) => {
+      const revision = (await ctx.get('revision')) ?? 0;
+      if (revision > watch.afterRevision) {
+        ctx.resolveAwakeable(watch.awakeable, { revision });
+        return;
+      }
+      ctx.set('watching', [...((await ctx.get('watching')) ?? []), watch]);
+    },
+
+    /** @internal Forget the `watch` of `awakeable`, which no longer waits. */
+    unsubscribe: async (ctx: restate.ObjectContext<State>, awakeable: string) => {
+      const watching = (await ctx.get('watching')) ?? [];
+      ctx.set(
+        'watching',
+        watching.filter((w) => w.awakeable !== awakeable),
       );
     },
   },
