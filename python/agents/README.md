@@ -32,8 +32,9 @@ curl localhost:8080/assistant/alice/messages   # the conversation so far
 key (its thread), with the handlers `chat` (a message in, the answer out; as
 plain text, `-d 'Hi'`, or a JSON string, `--json '"Hi"'`) and `messages` (the
 conversation so far, with the tool calls, a page at a time:
-`{"limit": 50, "before": id, "after": id}`). Add handlers of your own with
-`@assistant.handler()`.
+`{"limit": 50, "before": id, "after": id}`); `status`, `stop` and `steer`
+([Turns](#turns)); and `pending` and `signal` ([Restate's tools](#restates-tools)).
+Add handlers of your own with `@assistant.handler`.
 
 | Option   | What                                                                                                                                                                                                                        |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -46,6 +47,39 @@ back to the model until it answers. Its checkpoints are in the object's
 database ([`checkpointer.py`](restate_agents/langgraph/checkpointer.py),
 `SqlCheckpointSaver`): checkpoints, channel values and pending writes in
 three tables, a step storing only the channels it changed.
+
+### A graph of your own
+
+`langgraph.agent(name, graph=...)` runs a `StateGraph` of yours instead
+(uncompiled: the agent compiles it with the object's database as its
+checkpointer), or a function of the invocation's context giving one. Its
+state has `messages` (`MessagesState`, or a subclass with fields of your
+own, stored with the thread); each message goes in as a `HumanMessage`, and
+the answer is the text of the last `AIMessage`. Its nodes get the handler's
+context from `restate_agents.context()`, and run their tools with
+`langgraph.tool_node(tools)`: LangGraph's `ToolNode`, for `@tool`s, Restate's
+tools and LangChain's, which then takes the messages steered to the turn
+(and a node's model binds them with
+`model.bind_tools(langgraph.langchain_tools(tools))`)
+([`examples-py/triage.py`](../../examples-py/triage.py),
+[`examples-py/writer.py`](../../examples-py/writer.py)):
+
+```python
+graph = StateGraph(MessagesState)
+graph.add_node("model", call_model)
+graph.add_node("tools", langgraph.tool_node([get_weather]))
+graph.add_edge(START, "model")
+graph.add_conditional_edges("model", tools_condition)
+graph.add_edge("tools", "model")
+
+assistant = langgraph.agent("assistant", graph=graph)
+```
+
+`langgraph.prompt(ctx, graph, text)` answers a prompt in a handler of your
+own, as `chat` does: once, however often an attempt crashes (an
+invocation's first prompt has its id, the next `<id>:2`, and so on).
+LangGraph's `interrupt()` does not work here: wait for a person with a
+`signal` tool.
 
 ### Tools
 
@@ -115,10 +149,36 @@ and LangGraph carries on from the last step it stored.
 - **A tool's error fails the attempt**, and Restate retries it; but a
   `restate.TerminalError`, which a retry would repeat, is the tool's answer to
   the model.
-- **A message is answered once per invocation**: the graph records each
-  answer in its state, by invocation id, and a retried attempt returns it. A
-  run that a crash interrupted (its prompt without an answer) is finished
-  before the next message starts.
+- **A message is answered once per invocation**: it goes into the thread
+  with its invocation's id as its own, and a retried attempt that finds it
+  there returns its answer. A run that a crash cut off (with steps left) is
+  finished before the next message starts.
+
+## Turns
+
+The message `chat` answers is a turn. While it answers, `status` says so
+(`{"answering": {"invocationId": "inv_1f…", "since": …}, "waiting": [...]}`,
+with what its tools wait for); `stop` stops it, and `steer` adds to it:
+
+```sh
+curl localhost:8080/assistant/alice/status
+curl localhost:8080/assistant/alice/stop                              # {"stopped": "inv_1f…"}
+curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invocationId": "inv_1f…", "steered": true}
+```
+
+- **`stop`** cancels the turn's invocation (Restate's cancellation, as its
+  admin API cancels one): its tools' calls and waits are cancelled with it,
+  each cut-off tool call and the turn are answered "Cancelled", and the next
+  message starts afresh. It reaches the turn at its next Restate operation
+  (a tool's call or wait, a storage request); during a model request, once
+  the request is answered.
+- **`steer`** adds a message to the turn: the agent takes it after its next
+  tool call (`tool_node`), and the model reads it with the tools' results.
+  A turn that ends before (no tool call came) answers it as a message of its
+  own; with no turn, `steer` is a message of its own (`"steered": false`, and
+  its invocation, to attach to). A stopped turn answers none of them. The
+  steered messages wait in the agent's `signals` object, and go into the
+  thread by their ids: a retried attempt neither loses nor repeats one.
 
 ## Handlers of your own
 

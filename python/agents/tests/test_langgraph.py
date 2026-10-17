@@ -3,6 +3,8 @@
 import pytest
 import restate
 from fakes import Bank, Object, Teller
+from langchain_core.messages import AIMessage
+from langgraph.graph import START, MessagesState, StateGraph
 from restate_agents import langgraph, tool
 
 
@@ -158,3 +160,96 @@ async def test_a_tool_gets_the_context_and_its_call_id():
     assert await Object("bob").invoke(obj.handlers["chat"].fn, "move 5 from 1 to 2") == "Done: moved"
     [(key, call_id, src, dst, amount)] = seen
     assert (key, src, dst, amount) == ("bob", 1, 2, 5) and call_id
+
+
+async def test_a_steered_message_joins_the_turn_at_its_next_tool_call():
+    bank, teller, alice = world()
+    chat, messages = agent(bank, teller)
+    alice.steer("only to account 2, please")
+    assert await alice.invoke(chat, "move 5 from 1 to 2") == "Steered: only to account 2, please"
+    page = await alice.invoke(messages, None)
+    assert [m["parts"][0]["text"] for m in page["messages"] if m["role"] == "user"] == [
+        "move 5 from 1 to 2",
+        "only to account 2, please",
+    ]
+    [(handler, closing)] = alice.sends
+    assert (handler, closing.taken, closing.cancelled) == ("close", ["turn:steer:1"], False)
+    assert "restate-agents.turn" not in alice.values
+
+
+async def test_a_turn_without_a_tool_call_leaves_its_steered_messages_to_be_sent():
+    bank, teller, alice = world()
+    chat, _ = agent(bank, teller)
+    alice.steer("and then?")
+    assert await alice.invoke(chat, "hello") == "You said: hello"
+    [(_, closing)] = alice.sends
+    assert closing.taken == []
+
+
+async def test_a_cancelled_turn_ends_and_the_next_message_starts_afresh():
+    @tool
+    async def wait_for_approval() -> str:
+        """Wait for an approval."""
+        raise restate.TerminalError("cancelled", 409)  # as Restate's cancellation reaches a wait
+
+    obj = langgraph.agent("support", model=Teller(), tools=[wait_for_approval])
+    chat, messages = obj.handlers["chat"].fn, obj.handlers["messages"].fn
+    alice = Object()
+    with pytest.raises(restate.TerminalError, match="cancelled"):
+        await alice.invoke(chat, "use wait_for_approval {}")
+    [(_, closing)] = alice.sends
+    assert closing.cancelled
+    assert await alice.invoke(chat, "hello") == "You said: hello"
+    page = await alice.invoke(messages, None)
+    [cancelled] = [m for m in page["messages"] if m["role"] == "assistant" and m["parts"][0]["type"] == "tool"]
+    assert cancelled["parts"][0]["output"] == langgraph.CANCELLED
+    assert [m["parts"][-1].get("text") for m in page["messages"]][-3:] == [
+        langgraph.CANCELLED,
+        "hello",
+        "You said: hello",
+    ]
+
+
+def shouting(runs: list[str]) -> StateGraph:
+    """A graph of one node, which answers the last message in capitals."""
+
+    async def shout(state: MessagesState) -> dict:
+        runs.append(state["messages"][-1].content)
+        return {"messages": [AIMessage(state["messages"][-1].content.upper())]}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("shout", shout)
+    graph.add_edge(START, "shout")
+    return graph
+
+
+async def test_an_agent_on_a_graph_of_your_own():
+    runs: list[str] = []
+    obj = langgraph.agent("shouter", graph=shouting(runs))
+    chat = obj.handlers["chat"].fn
+    alice = Object()
+    assert await alice.invoke(chat, "hi", invocation="i1") == "HI"
+    # The same invocation, again: answered from the thread, without running the graph.
+    assert await alice.invoke(chat, "hi", invocation="i1") == "HI"
+    assert runs == ["hi"]
+
+
+async def test_prompts_of_a_handler_of_your_own_are_answered_once_each():
+    runs: list[str] = []
+    graph = shouting(runs)
+    obj = langgraph.agent("shouter", graph=graph)
+
+    @obj.handler
+    async def twice(ctx, text: str) -> list[str]:
+        return [await langgraph.prompt(ctx, graph, text), await langgraph.prompt(ctx, graph, f"{text}!")]
+
+    alice = Object()
+    handler = obj.handlers["twice"].fn
+    assert await alice.invoke(handler, "hi", invocation="i1") == ["HI", "HI!"]
+    assert await alice.invoke(handler, "hi", invocation="i1") == ["HI", "HI!"]
+    assert runs == ["hi", "hi!"]
+
+
+def test_an_agent_takes_a_graph_or_the_usual_options():
+    with pytest.raises(TypeError, match="not both"):
+        langgraph.agent("shouter", graph=shouting([]), system="Shout.")

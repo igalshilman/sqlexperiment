@@ -89,3 +89,40 @@ def test_send_does_not_wait():
     sent = use(("notes_add", {"key": other, "note": "call back"}))
     assert call(f"support/{k}/chat", sent) == (200, f"sent to notes/{other}/add")
     wait_until(lambda: call(f"notes/{other}/list") == (200, ["call back"]), timeout=10, what="the note")
+
+
+def test_status_and_stop_a_turn():
+    k = key()
+    assert call(f"support/{k}/status") == (200, {"answering": None, "waiting": []})
+    assert call(f"support/{k}/stop") == (200, {"stopped": None})
+    with ThreadPoolExecutor() as pool:
+        answer = pool.submit(call, f"support/{k}/chat", use(("wait_for_approval", REFUND)), None, 60)
+        wait_until(lambda: len(pending(k)) == 1, timeout=20, what="the wait")
+        status, now = call(f"support/{k}/status")
+        assert status == 200 and now["answering"]["invocationId"].startswith("inv_") and len(now["waiting"]) == 1
+        assert call(f"support/{k}/stop") == (200, {"stopped": now["answering"]["invocationId"]})
+        status, body = answer.result()
+        assert status == 409, body
+    wait_until(lambda: call(f"support/{k}/status") == (200, {"answering": None, "waiting": []}), timeout=20)
+    # The next message starts afresh.
+    assert call(f"support/{k}/chat", "hello") == (200, "You said: hello")
+
+
+def test_steer_a_turn_at_its_next_tool_call():
+    k = key()
+    with ThreadPoolExecutor() as pool:
+        answer = pool.submit(call, f"support/{k}/chat", use(("wait_for_approval", REFUND)), None, 60)
+        wait_until(lambda: len(pending(k)) == 1, timeout=20, what="the wait")
+        status, steered = call(f"support/{k}/steer", "Only Monday, please")
+        assert status == 200 and steered["steered"], steered
+        assert call(f"support/{k}/signal", {"name": "approval", "value": "approved"})[0] == 200
+        assert answer.result() == (200, "Steered: Only Monday, please")
+        assert call(f"support/{k}/status")[1]["answering"] is None
+
+
+def test_steer_with_no_turn_is_a_message_of_its_own():
+    k = key()
+    status, steered = call(f"support/{k}/steer", "hello")
+    assert status == 200 and not steered["steered"], steered
+    attached = request("GET", f"{INGRESS}/restate/invocation/{steered['invocationId']}/attach")
+    assert attached == (200, "You said: hello")
