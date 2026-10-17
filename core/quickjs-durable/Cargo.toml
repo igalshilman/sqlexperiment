@@ -10,6 +10,8 @@ full-scan = []
 # Compare tracking coverage against every memory page after each turn.
 verify-dirty = []
 sqlite-host = ["dep:rusqlite"]
+# The same tables in one namespace of a key/value store, through sqlite-kv.
+sqlite-kv-host = ["dep:sqlite-kv"]
 
 [dependencies]
 anyhow = "1"
@@ -22,8 +24,11 @@ zstd = "0.13"
 wasmparser = "=0.258.3"
 wasm-encoder = { version = "=0.258.3", features = ["wasmparser"] }
 rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
+sqlite-kv = { path = "../sqlite-kv", optional = true }
 
 [dev-dependencies]
+bytes = "1"
+futures = "0.3"
 futures-channel = "0.3.34"
 futures-executor = "0.3.34"
 tempfile = "3"

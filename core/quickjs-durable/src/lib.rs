@@ -11,6 +11,8 @@ mod host;
 mod instrument;
 mod kv;
 mod model;
+#[cfg(feature = "sqlite-kv-host")]
+pub mod namespace;
 #[cfg(feature = "sqlite-host")]
 pub mod sqlite;
 pub mod tracking;

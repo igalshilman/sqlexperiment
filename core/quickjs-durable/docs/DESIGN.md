@@ -762,6 +762,27 @@ outcome is uncertain, let database recovery establish committed state before ret
 Actual power-loss durability depends on filesystem/device sync semantics; the
 implemented crash tests exercise process termination.
 
+### 7.1. The same tables on sqlite-kv
+
+`namespace::NamespaceTransaction` (feature `sqlite-kv-host`) keeps these tables in
+one namespace of a key/value store through sqlite-kv: a Restate virtual object's
+state, one namespace per object key. sqlite-kv already turns single-key puts into
+an atomic multi-key commit (a log transaction, usually one put), so the atomic-KV
+WAL of section 8 is not needed for this host.
+
+- A turn is one sqlite-kv session; `commit` is one `save()`. Dropping the
+  transaction discards every staged change. The namespace's owner (the object's
+  exclusive handler) runs one turn at a time.
+- The namespace is one application KV scope: `state` has no scope column, and
+  there is no `runs` table. Every run in the namespace shares `state`.
+- `effects` is an outbox, `(id, run, operation)`, with no outcome columns. The
+  embedding's inbox holds each result until a turn consumes it: a Restate
+  invocation of the object, retried until its turn commits. `acknowledge` checks
+  that the run's request is still outstanding and deletes it with the turn.
+- After a commit, and again on recovery, the host dispatches every row of
+  `effects` under its stable ID, which the receiver deduplicates. Resume is a
+  row like the others: the host sends it back to the object.
+
 ## 8. Atomic-KV host: proposed redo WAL
 
 This section completely specifies a minimal replacement for SQLite's multi-key

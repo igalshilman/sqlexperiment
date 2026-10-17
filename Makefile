@@ -63,8 +63,8 @@ help: ## List the targets
 core: ## The sqlite-kv crate
 	cd $(CORE) && $(CARGO) build --locked --release
 
-qjs: ## The durable QuickJS runtime (core/quickjs-durable), with its SQLite host
-	cd $(QJS) && $(CARGO) build --locked --release --features sqlite-host
+qjs: ## The durable QuickJS runtime (core/quickjs-durable), with its hosts (SQLite, and sqlite-kv)
+	cd $(QJS) && $(CARGO) build --locked --release --features sqlite-host,sqlite-kv-host
 
 addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)
 
@@ -113,8 +113,8 @@ test-core: ## The core crate, with the simulation campaigns
 # checks after every turn that the write barriers marked each changed page;
 # full-scan is the uninstrumented build, which compares every page.
 test-qjs: ## The durable QuickJS runtime: with dirty-page tracking (verified), then with full scans
-	cd $(QJS) && $(CARGO) test --locked --release --features sqlite-host,verify-dirty --lib --tests
-	cd $(QJS) && $(CARGO) test --locked --release --features sqlite-host,full-scan --lib --test recovery --test host --test sqlite
+	cd $(QJS) && $(CARGO) test --locked --release --features sqlite-host,sqlite-kv-host,verify-dirty --lib --tests
+	cd $(QJS) && $(CARGO) test --locked --release --features sqlite-host,sqlite-kv-host,full-scan --lib --test recovery --test host --test sqlite --test namespace
 
 test-addon: $(ADDON) ## The Node.js addon
 	cd typescript/packages/sql-node && npm test
@@ -147,8 +147,8 @@ lint-core: ## The Rust crates (the core, the addon and the Python extension): ru
 
 lint-qjs: ## The durable QuickJS runtime: rustfmt --check and clippy, in both capture modes
 	cd $(QJS) && $(CARGO) fmt --check
-	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,verify-dirty --all-targets -- -D warnings
-	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,full-scan --all-targets -- -D warnings
+	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,sqlite-kv-host,verify-dirty --all-targets -- -D warnings
+	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,sqlite-kv-host,full-scan --all-targets -- -D warnings
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	cd typescript && pnpm typecheck

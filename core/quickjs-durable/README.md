@@ -19,8 +19,10 @@ async function main(input, ctx) {
 
 The host owns each turn's transaction: the VM checkpoint, the application's
 KV writes, the new effects and the consumed result commit together, or not at
-all. A SQLite host implements it (`--features sqlite-host`). There is no
-binding to Restate yet.
+all. Two hosts implement it: one on a SQLite file (`--features sqlite-host`),
+and the same tables on [sqlite-kv](../sqlite-kv/README.md), in one namespace of
+a key/value store such as a Restate object's state (`--features
+sqlite-kv-host`). There is no binding to Restate's SDKs yet.
 
 An experiment, imported from its own repository: see
 [the design](docs/DESIGN.md), the complete specification.
