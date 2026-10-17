@@ -3,7 +3,7 @@
 // the way out of a crashed attempt. `make test-ts T=claude`. Its client is the teller's (../fakes/claude.ts).
 import * as restate from '@restatedev/restate-sdk';
 import { describe, expect, it, vi } from 'vitest';
-import { conversation, SAID } from '../testing.ts';
+import { conversation, crashedAnywhere, SAID } from '../testing.ts';
 import { HttpError, teller } from '../fakes/claude.ts';
 import * as claude from 'restate-agents/claude';
 import { prompt } from './claude.ts';
@@ -11,6 +11,10 @@ import { prompt } from './claude.ts';
 vi.mock('@anthropic-ai/sdk', () => import('../fakes/claude.ts'));
 
 describe('the Claude agent', () => {
+  it('answers a message once after a crash at any of its state requests', async () => {
+    expect(await crashedAnywhere(prompt, claude.messages())).toEqual([]);
+  }, 600_000);
+
   it('gives the conversation: what was said, in order, with the tool calls', async () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');

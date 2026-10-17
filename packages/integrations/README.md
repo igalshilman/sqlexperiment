@@ -48,7 +48,13 @@ const assistant = object({
 });
 ```
 
-See [`examples/memory.ts`](../../examples/memory.ts).
+A `chat` of your own, `chatHandler(answer)`, takes its message as the
+agents' do (text, or a JSON string), and answers with
+`answer(ctx, message)`.
+
+See [`examples/memory.ts`](../../examples/memory.ts), and
+[`examples/harness.ts`](../../examples/harness.ts) for pi's Harness
+configured per user.
 
 ## Models
 

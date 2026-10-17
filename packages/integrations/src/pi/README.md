@@ -26,12 +26,21 @@ await serve(assistant);
 
 For an object of your own, `pi.chat(options)` and `pi.messages()` are the
 handlers. For more than a prompt, `withPi(ctx, options, work)` runs `work`
-with the Harness, and `session.prompt(text)` answers a prompt once per
-invocation:
+with the Harness, on the same options as `chat` (each for this invocation):
+`prompt(text)` answers a prompt once per invocation, and `conversation()` is
+the object's conversation, on the model, for pi-durable's own API (`reset`,
+`compact`, `entries`...):
 
 ```ts
-chat: (ctx, message) => withPi(ctx, { tools }, (session) => session.prompt(message)),
+chat: chatHandler(async (ctx, message) => pi.prompt(ctx, message, await optionsOf(ctx))),
+reset: (ctx, handoff: string) =>
+  pi.withPi(ctx, {}, async ({ conversation, context }) => (await conversation()).reset(handoff, context)),
 ```
+
+A conversation goes on with the model of each invocation: a `model` (or
+MODEL) changed since it started is the model of its next turn.
+[`examples/harness.ts`](../../../../examples/harness.ts) keeps each user's
+model and persona in the object's database.
 
 ## Through crashes
 
@@ -70,6 +79,8 @@ which needs no key (`make test-ts T=pi`, from the repository root):
   pi-durable's storage conformance suite on the object's database;
   [`pi-workspace.test.ts`](../../../../tests/storage/pi-workspace.test.ts),
   `withPi` with a workspace.
+- [`tests/agents/pi-bank.test.ts`](../../../../tests/agents/pi-bank.test.ts):
+  the bank agent, with crashes at any of a message's state requests.
 - [`tests/agents/pi.test.ts`](../../../../tests/agents/pi.test.ts): the chat,
   its system prompt, `messages`, and sub-agents.
 - [`tests/agents/pi.ts`](../../../../tests/agents/pi.ts): the bank agent,

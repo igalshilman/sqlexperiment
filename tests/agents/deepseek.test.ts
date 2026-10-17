@@ -4,7 +4,7 @@
 // does. Its model is the teller (../fakes/deepseek.ts). `make test-ts T=deepseek`.
 import { describe, expect, it, vi } from 'vitest';
 import type { RequestMessage } from '@deepseek-ai/dsh-llm';
-import { conversation, SAID } from '../testing.ts';
+import { conversation, crashedAnywhere, SAID } from '../testing.ts';
 import { teller } from '../fakes/deepseek.ts';
 import * as deepseek from 'restate-agents/deepseek';
 import { prompt } from './deepseek.ts';
@@ -27,6 +27,10 @@ async function counting(body: (calls: { model: number }) => Promise<void>) {
 }
 
 describe('the DeepSeek Harness agent', () => {
+  it('answers a message once after a crash at any of its state requests', async () => {
+    expect(await crashedAnywhere(prompt, deepseek.messages())).toEqual([]);
+  }, 600_000);
+
   it('gives the conversation: what was said, in order, with the tool calls', async () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
