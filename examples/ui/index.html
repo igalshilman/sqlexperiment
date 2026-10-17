@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Support chat</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --line: #8884;
+        --muted: #888;
+        --accent: #3b6fd8;
+        font:
+          15px/1.45 system-ui,
+          sans-serif;
+      }
+      body {
+        margin: 0 auto;
+        max-width: 720px;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        padding: 0 16px;
+        box-sizing: border-box;
+      }
+      header {
+        padding: 12px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      header small {
+        color: var(--muted);
+      }
+      #messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px 0;
+      }
+      .message {
+        margin: 8px 0;
+        max-width: 85%;
+      }
+      .message.user {
+        margin-left: auto;
+        padding: 6px 12px;
+        border-radius: 12px;
+        background: var(--accent);
+        color: white;
+      }
+      .text {
+        margin: 4px 0;
+        white-space: pre-wrap;
+      }
+      .tool {
+        margin: 4px 0;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font:
+          13px ui-monospace,
+          monospace;
+      }
+      .tool .output {
+        color: var(--muted);
+      }
+      .tool.error .output {
+        color: #d33;
+      }
+      #status {
+        border-top: 1px solid var(--line);
+        padding: 8px 0;
+      }
+      .wait {
+        margin: 4px 0;
+      }
+      .wait button {
+        margin-left: 8px;
+      }
+      #composer {
+        display: flex;
+        gap: 8px;
+        padding: 0 0 16px;
+      }
+      #text {
+        flex: 1;
+        padding: 8px;
+        font: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Support</strong> <small>as <span id="user"></span> (<code>?user=</code>)</small>
+    </header>
+    <div id="messages"></div>
+    <div id="status">
+      <div id="working" hidden>Working… <button id="stop">Stop</button></div>
+      <div id="waiting"></div>
+    </div>
+    <form id="composer">
+      <input id="text" placeholder="Order 103 arrived broken, can I get my $30 back?" autocomplete="off" />
+      <button id="send">Send</button>
+    </form>
+    <script type="module" src="./app.ts"></script>
+  </body>
+</html>

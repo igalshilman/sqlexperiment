@@ -47,6 +47,9 @@ importers:
       '@restatedev/restate-sdk':
         specifier: file:../packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
         version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)
+      '@restatedev/restate-sdk-clients':
+        specifier: 1.17.3
+        version: 1.17.3
       restate-agents:
         specifier: workspace:*
         version: link:../packages/integrations
@@ -56,6 +59,10 @@ importers:
       zod:
         specifier: 4.6.5
         version: 4.6.5
+    devDependencies:
+      vite:
+        specifier: 8.3.4
+        version: 8.3.4(@types/node@24.19.2)(esbuild@0.28.2)
 
   packages/integrations:
     dependencies:
