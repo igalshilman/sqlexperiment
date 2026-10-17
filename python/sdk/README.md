@@ -1,9 +1,9 @@
 # The patched Python SDK
 
-The Python counterpart of [the patched TypeScript SDK](../../packages/sdk-typescript/README.md):
+The Python counterpart of [the patched TypeScript SDK](../../typescript/packages/sdk-typescript/README.md):
 the Restate Python SDK with an invocation that does not replay its journal,
 and SQL in a virtual object on it, over
-[the patched shared core](../../packages/sdk-shared-core/README.md), which it links
+[the patched shared core](../../core/sdk-shared-core/README.md), which it links
 natively (PyO3) where the TypeScript SDK compiles it to WebAssembly.
 
 |                    | What                                                     | Version                                                                                                                                                                                                                                | Form                                           |
@@ -35,7 +35,7 @@ async def transfer(ctx: ObjectContext, order: dict) -> None:
         t.tx.object_send(shipping.ship, key=order["sku"], arg=order)
 ```
 
-It works as in TypeScript ([how SQL in virtual objects works](../../packages/sdk-typescript/SQL.md)),
+It works as in TypeScript ([how SQL in virtual objects works](../../typescript/packages/sdk-typescript/SQL.md)),
 with the same storage, page cache and pending sends:
 
 - `restate.sql_options` is `journal_replay=False`, `enable_lazy_state=True`
@@ -55,7 +55,7 @@ with the same storage, page cache and pending sends:
 - The attempt's session opens on first use and is saved when the handler
   ends: one empty run, if it wrote, so that the page cache may trust it.
 
-[`examples-py`](../../examples-py/README.md) has notes in SQL,
+[`examples-python`](../../examples-python/README.md) has notes in SQL,
 and [`python/tests`](../tests) runs them, a bank, and the context below
 against a real Restate server (`make concurrency-test-py`), and the bank
 through crashes (`make crash-test-py`).
@@ -91,7 +91,7 @@ On a retried attempt, each operation the handler reaches happens again:
 
 [`setup.sh`](setup.sh) (`make sdk-py`) clones both repositories at the
 pinned revisions into `.build/` (ignored), and applies
-[`patches/`](patches) and [the shared core's patch](../../packages/sdk-shared-core/sdk-shared-core.patch).
+[`patches/`](patches) and [the shared core's patch](../../core/sdk-shared-core/sdk-shared-core.patch).
 The SDK's `Cargo.toml` takes the core from the clone next to it. The uv
 workspace ([`python/pyproject.toml`](../pyproject.toml)) installs the SDK from
 `.build/sdk-python` wherever `restate-sdk` is used, building it with maturin
@@ -108,7 +108,7 @@ against a Restate server in docker (its test harness).
 
 | Change                                                                                                                                                                                                                       | Why                                                                                                                                                                                                                                                                                                       | Where                                                                                  |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `JournalReplay::Disabled`, and state commands named after their key                                                                                                                                                          | See [the shared core](../../packages/sdk-shared-core/README.md)                                                                                                                                                                                                                                           | `sdk-shared-core.patch`                                                                |
+| `JournalReplay::Disabled`, and state commands named after their key                                                                                                                                                          | See [the shared core](../../core/sdk-shared-core/README.md)                                                                                                                                                                                                                                               | `sdk-shared-core.patch`                                                                |
 | A `journal_replay` option of services, objects and workflows, and of their handlers, passed to the VM's constructor                                                                                                          | Turns it off per service, or per handler: a retried attempt then runs the handler again from the start, against the state as stored                                                                                                                                                                       | `service.py`, `object.py`, `workflow.py`, `handler.py`, `server.py`, `vm.py`, `lib.rs` |
 | Without journal replay, one loop drives every wait of the invocation, and the context's futures start when they are made                                                                                                     | Concurrency is safe once nothing is replayed, but the protocol has one await point per invocation: a suspension, the awaiting-on hint and a cancellation each take one future. So each wait registers with the selector, which asks the VM about all of them at once, and is the only reader of the input | `selector.py`, `server_context.py`, `server_types.py`                                  |
 | Without journal replay, `ctx.run` and awakeables are refused, and `ctx.time()` is the time now                                                                                                                               | With nothing replayed a run's result would not be kept, and signal ids of skipped attempts are unknown                                                                                                                                                                                                    | `server_context.py`                                                                    |

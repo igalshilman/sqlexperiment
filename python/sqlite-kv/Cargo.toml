@@ -13,7 +13,7 @@ name = "sqlite_kv_python"
 crate-type = ["cdylib"]
 
 [dependencies]
-sqlite-kv = { path = "../../sqlite-kv" }
+sqlite-kv = { path = "../../core/sqlite-kv" }
 # Its value type, as pinned by sqlite-kv.
 turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
 pyo3 = { version = "0.30", features = ["extension-module"] }

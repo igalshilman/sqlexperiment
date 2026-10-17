@@ -4,7 +4,7 @@ Agent frameworks in Restate virtual objects, in Python: each object (one per
 key) keeps the agent's state in its SQL database (`ctx.db`, of
 [the patched SDK](../sdk/README.md)), and each message is answered once per
 invocation, however often an attempt crashes. The Python counterpart of
-[`restate-agents`](../../packages/integrations/README.md), with
+[`restate-agents`](../../typescript/packages/integrations/README.md), with
 [LangGraph](#langgraph) and [Pydantic AI](#pydantic-ai).
 
 ```python
@@ -61,8 +61,8 @@ context from `restate_agents.context()`, and run their tools with
 tools and LangChain's, which then takes the messages steered to the turn
 (and a node's model binds them with
 `model.bind_tools(langgraph.langchain_tools(tools))`)
-([`examples-py/triage.py`](../../examples-py/triage.py),
-[`examples-py/writer.py`](../../examples-py/writer.py)):
+([`examples-python/triage.py`](../../examples-python/triage.py),
+[`examples-python/writer.py`](../../examples-python/writer.py)):
 
 ```python
 graph = StateGraph(MessagesState)
@@ -89,7 +89,7 @@ graph can take Restate's steps itself, as nodes
 `workflow(target)` and `signal(name)`, each made once per run of its node,
 however often an attempt crashes (its idempotency key is the invocation's
 id and LangGraph's task id, which a step that a crash cut off keeps)
-([`examples-py/writer.py`](../../examples-py/writer.py): a person approves
+([`examples-python/writer.py`](../../examples-python/writer.py): a person approves
 each post, and a workflow publishes it):
 
 ```python
@@ -137,7 +137,7 @@ LangChain's own tools work too.
 
 Tools that call, send to, start and wait for what Restate runs, each once
 per tool call, however often an attempt crashes (its idempotency key is the
-tool call's), as in [`examples-py/support.py`](../../examples-py/support.py):
+tool call's), as in [`examples-python/support.py`](../../examples-python/support.py):
 
 ```python
 from restate_agents import call, langgraph, send, signal, subagent, workflow
@@ -210,7 +210,7 @@ Or bring an `Agent` of your own, whose tools include Restate's through
 `toolset(tools)`; and ask it from handlers of your own with `prompt(ctx,
 agent, text, **run)` (`run`: `Agent.run`'s options, such as `output_type` or
 `deps`), each prompt answered once
-([`examples-py/trips.py`](../../examples-py/trips.py)):
+([`examples-python/trips.py`](../../examples-python/trips.py)):
 
 ```python
 from pydantic_ai import Agent
@@ -269,10 +269,10 @@ per key: `restate.VirtualObject` with `restate.sql_options`, retries up to
 and the SQL storage hidden from the journal in Restate's UI.
 `@assistant.handler` adds a handler, which takes `ctx`, then its input: one
 parameter, or several, which a JSON object gives by name
-([`examples-py/memory.py`](../../examples-py/memory.py)). `serve(*services)`
+([`examples-python/memory.py`](../../examples-python/memory.py)). `serve(*services)`
 serves them on `PORT`, or 9080; with `background=True`, on a thread of its
 own, returning at once, as in a Modal Server
-([`examples-py/on_modal.py`](../../examples-py/on_modal.py)).
+([`examples-python/on_modal.py`](../../examples-python/on_modal.py)).
 
 ## Tests
 

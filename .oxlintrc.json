@@ -1,5 +1,5 @@
 {
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "$schema": "./typescript/node_modules/oxlint/configuration_schema.json",
   "plugins": ["typescript", "unicorn", "import", "node", "promise", "vitest", "oxc"],
   "categories": {
     "correctness": "error",
@@ -20,5 +20,11 @@
     // SQL rows and JSON from the wire are typed by assertion where they arrive.
     "typescript/no-unsafe-type-assertion": "off"
   },
-  "ignorePatterns": ["**/node_modules", "**/.venv", "packages/sdk-typescript/.build", "python/sdk/.build", "**/target"]
+  "ignorePatterns": [
+    "**/node_modules",
+    "**/.venv",
+    "typescript/packages/sdk-typescript/.build",
+    "python/sdk/.build",
+    "**/target"
+  ]
 }
