@@ -4,7 +4,38 @@ An experiment: each Restate virtual object gets its own SQLite-compatible
 database, stored in the object's state, and its handlers run without journal
 replay, so a retried attempt runs again against the state as stored.
 
-Layers, each on the one before, then the examples and the tests:
+## What it looks like
+
+An agent whose tools are Restate itself: it looks an order up with a
+service, waits for a manager's approval, and refunds with a workflow. Its
+conversation is in its own SQL database, and a crash, or a manager who takes
+a day, changes nothing ([`examples/support.ts`](examples/support.ts)):
+
+```ts
+const support = pi.agent({
+  name: 'support',
+  tools: [
+    call(orders, 'status', { description: 'The status of an order.', input: z.object({ order: z.string() }) }),
+    signal('approval', { description: "Wait for a manager's decision on a refund." }),
+    workflow(refund, { description: 'Refund an order.', input: z.object({ order: z.string(), amount: z.number() }) }),
+  ],
+});
+
+await serve(orders, refund, support);
+```
+
+```sh
+curl localhost:8080/support/alice/chat -d 'Order 103 arrived broken, can I get my $30 back?'
+curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'
+```
+
+The same agent runs on pi, OpenCode, LangGraph, Claude (the Anthropic SDK)
+or the DeepSeek Harness: see [`restate-agents`](packages/integrations/README.md)
+and [the examples](examples/README.md).
+
+## Layers
+
+Each on the one before, then the examples and the tests:
 
 | Path                                              | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
