@@ -200,6 +200,22 @@ try {
   await post('support/erin/signal', { name: 'approval', value: 'approved', keep: true });
   assert.equal(await post('triage/erin/run', 'Refund order 103'), 'order 103: delivered / approved / refunded 103');
 
+  // Sent without waiting, and its answer fetched later: by the invocation's
+  // id, or by the idempotency key it was sent with.
+  await post('support/henry/signal', { name: 'approval', value: 'approved', keep: true });
+  const henry = (await post('support/henry/chat/send', 'Refund order 103')) as { invocationId: string };
+  const attached = await fetch(`${INGRESS}/restate/invocation/${henry.invocationId}/attach`);
+  assert.equal(await attached.json(), 'order 103: delivered / approved / refunded 103');
+  await post('support/ivy/signal', { name: 'approval', value: 'approved', keep: true });
+  const keyed = await fetch(`${INGRESS}/support/ivy/chat/send`, {
+    method: 'POST',
+    headers: { 'content-type': 'text/plain', 'idempotency-key': 'msg-1' },
+    body: 'Refund order 103',
+  });
+  assert.ok(keyed.ok, await keyed.text());
+  const byKey = await fetch(`${INGRESS}/restate/invocation/support/ivy/chat/msg-1/attach`);
+  assert.equal(await byKey.json(), 'order 103: delivered / approved / refunded 103');
+
   // A handler's terminal error is the tool's answer, for the model.
   assert.equal(await post('support/dave/chat', 'Refund order 999'), 'Error: no order 999');
   console.log('ok');

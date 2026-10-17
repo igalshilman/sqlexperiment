@@ -11,6 +11,7 @@ Here its storage is the agent's SQL database, in the Restate virtual object
 ```ts
 import { serve } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
+import { weather } from './weather.ts';
 
 const assistant = pi.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
 await serve(assistant);

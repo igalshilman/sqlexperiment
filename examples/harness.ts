@@ -1,11 +1,13 @@
 /**
- * An assistant each user sets up as it runs, on pi's Harness directly
- * (`withPi`) rather than `pi.chat()`: each user (the object's key) picks its
- * model and persona, kept in the object's database; `compact` has the model
- * summarize the conversation so far, to keep its context short; and `reset`
- * starts the conversation over, with a note to carry on.
+ * An assistant each user sets up as it runs: each user (the object's key)
+ * picks its model and persona, kept in the object's database, which `chat`
+ * reads for each message (`pi.chat(options)`, with options of the
+ * invocation); `compact` has the model summarize the conversation so far, to
+ * keep its context short; and `reset` starts the conversation over, with a
+ * note to carry on (both on pi's Harness directly, `withPi`).
  *
  *   ANTHROPIC_API_KEY=… node harness.ts
+ *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/configure --json '{"persona": "You answer as a pirate."}'
  *   curl localhost:8080/assistant/alice/chat -d 'What time is it?'

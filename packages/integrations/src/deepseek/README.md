@@ -15,6 +15,7 @@ each other's exact versions.
 ```ts
 import { serve } from 'restate-agents';
 import * as deepseek from 'restate-agents/deepseek';
+import { weather } from './weather.ts';
 
 const assistant = deepseek.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
 await serve(assistant);
