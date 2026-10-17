@@ -1,16 +1,21 @@
-"""Virtual objects set up for SQL and agents."""
+"""Virtual objects set up for SQL and agents: ``Object``, and ``serve``."""
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
 import hypercorn.asyncio
 import hypercorn.config
 import restate
-from restate import InvocationRetryPolicy, ObjectContext
+from pydantic import BaseModel, create_model
+from restate import InvocationRetryPolicy
+from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL
+from restate.serde import Serde
 
 # Restate's UI hides the SQL storage from the journal view: the database's
 # pages, log and header in the object's state (v13/...), the sends pending
@@ -26,36 +31,116 @@ RETRY_POLICY = InvocationRetryPolicy(
 )
 
 
-def object(name: str, *, description: str | None = None, metadata: dict[str, str] | None = None, **options: Any):
+class Object(restate.VirtualObject):
     """
     A Restate virtual object with a SQL database of its own, ``ctx.db``: one
     per key, stored with the object's state::
 
-        notes = restate_agents.object("notes")
+        notes = Object("notes", schema="CREATE TABLE IF NOT EXISTS notes (text TEXT)")
 
-        @notes.handler()
-        async def add(ctx: ObjectContext, note: str) -> None:
+        @notes.handler
+        async def add(ctx, note: str):
             await ctx.db.execute("INSERT INTO notes VALUES (?)", [note])
 
-    ``options`` add to (or replace) the ones set here: ``restate.sql_options``
-    and a retry policy without end. ``metadata`` adds to the metadata that
-    hides the SQL storage in Restate's UI.
+    ``schema``: SQL that each handler runs first, such as ``CREATE TABLE IF
+    NOT EXISTS``. ``options`` are those of ``restate.VirtualObject``, which
+    add to (or replace) the ones set here: ``restate.sql_options``, and
+    retries without end, since each attempt resumes from the database.
     """
-    return restate.VirtualObject(
-        name,
-        description=description,
-        metadata={**METADATA, **(metadata or {})},
-        **{**restate.sql_options, "invocation_retry_policy": RETRY_POLICY, **options},
-    )
+
+    def __init__(self, name: str, *, schema: str | None = None, metadata: dict[str, str] | None = None, **options):
+        super().__init__(
+            name,
+            metadata={**METADATA, **(metadata or {})},
+            **{**restate.sql_options, "invocation_retry_policy": RETRY_POLICY, **options},
+        )
+        self.schema = schema
+
+    def handler(self, name: str | Callable | None = None, /, **options: Any) -> Any:  # type: ignore[override]
+        """
+        A handler, as ``@obj.handler``, ``@obj.handler("name")`` or
+        ``@obj.handler(kind="shared")``. It takes ``ctx``, then its input: one
+        parameter, or several, which a JSON object gives by name::
+
+            @account.handler
+            async def deposit(ctx, id: str, amount: int) -> int: ...
+
+            curl localhost:8080/account/alice/deposit --json '{"id": "d1", "amount": 100}'
+        """
+        if callable(name):
+            return self.handler()(name)
+
+        def register(fn: Callable) -> Callable:
+            handler = self._handler(fn)
+            if (model := getattr(handler, "input_model", None)) is not None:
+                options.setdefault("input_serde", _ArgumentsSerde(model))
+            registered = restate.VirtualObject.handler(self, name, **options)(handler)
+            # The function itself names the handler, for calls and sends (ctx.object_call(add, ...)).
+            vars(fn)[RESTATE_UNIQUE_HANDLER_SYMBOL] = vars(registered)[RESTATE_UNIQUE_HANDLER_SYMBOL]
+            return fn
+
+        return register
+
+    def _handler(self, fn: Callable) -> Callable:
+        """``fn`` as the SDK takes a handler: one input at most, after the schema."""
+        signature = inspect.signature(fn, eval_str=True)
+        ctx, *params = signature.parameters.values()
+        schema = self.schema
+
+        async def prepare(context: Any) -> None:
+            if schema:
+                await context.db.execute(schema)
+
+        if len(params) <= 1:
+
+            async def handler(context: Any, *input: Any) -> Any:
+                await prepare(context)
+                return await fn(context, *input)
+
+            handler.__signature__ = signature  # type: ignore[attr-defined]
+        else:
+            fields: dict[str, Any] = {
+                p.name: (
+                    p.annotation if p.annotation is not p.empty else Any,
+                    ... if p.default is p.empty else p.default,
+                )
+                for p in params
+            }
+            model = create_model(f"{fn.__name__}_input", **fields)
+
+            async def handler(context: Any, input: Any) -> Any:  # type: ignore[misc]
+                await prepare(context)
+                return await fn(context, **{name: getattr(input, name) for name in fields})
+
+            handler.__signature__ = signature.replace(  # type: ignore[attr-defined]
+                parameters=[ctx, inspect.Parameter("input", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=model)]
+            )
+            handler.input_model = model  # type: ignore[attr-defined]
+        handler.__name__ = fn.__name__
+        handler.__doc__ = fn.__doc__
+        return handler
 
 
-def context() -> ObjectContext:
-    """The context of the handler running, such as for a tool to call a service or use ``ctx.db``."""
+class _ArgumentsSerde(Serde[Any]):
+    """A handler's parameters, as a JSON object: from a dict, such as a call's, or the model of the parameters."""
+
+    def __init__(self, model: type[BaseModel]) -> None:
+        self.model = model
+
+    def deserialize(self, buf: bytes) -> Any:
+        return self.model.model_validate_json(buf or b"{}")
+
+    def serialize(self, obj: Any) -> bytes:
+        return self.model.model_validate(obj).model_dump_json().encode()
+
+
+def context() -> Any:
+    """The context of the handler running, such as a tool's: ``ctx.db``, calls and sends."""
     from restate.extensions import current_context
 
     ctx = current_context()
-    if not isinstance(ctx, ObjectContext):
-        raise RuntimeError("not in a Restate object's handler")
+    if ctx is None:
+        raise RuntimeError("not in a Restate handler")
     return ctx
 
 

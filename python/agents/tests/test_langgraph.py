@@ -3,7 +3,7 @@
 import pytest
 import restate
 from fakes import Bank, Object, Teller
-from restate_agents import langgraph
+from restate_agents import langgraph, tool
 
 
 def world() -> tuple[Bank, Teller, Object]:
@@ -142,3 +142,19 @@ async def test_a_missing_api_key_is_a_terminal_error(monkeypatch):
     obj = langgraph.agent("assistant")
     with pytest.raises(restate.TerminalError, match="check the agent's model"):
         await Object().run(obj.handlers["chat"].fn, "hello")
+
+
+async def test_a_tool_gets_the_context_and_its_call_id():
+    seen = []
+
+    @tool
+    async def transfer(ctx, call_id, src: int, dst: int, amount: int) -> str:
+        """Move money."""
+        seen.append((ctx.key(), call_id, src, dst, amount))
+        return "moved"
+
+    assert transfer.input.model_json_schema()["required"] == ["src", "dst", "amount"]
+    obj = langgraph.agent("teller", model=Teller(), tools=[transfer])
+    assert await Object("bob").invoke(obj.handlers["chat"].fn, "move 5 from 1 to 2") == "Done: moved"
+    [(key, call_id, src, dst, amount)] = seen
+    assert (key, src, dst, amount) == ("bob", 1, 2, 5) and call_id

@@ -8,8 +8,7 @@ invocation, however often an attempt crashes. The Python counterpart of
 LangGraph.
 
 ```python
-from langchain_core.tools import tool
-from restate_agents import langgraph, serve
+from restate_agents import langgraph, serve, tool
 
 
 @tool
@@ -50,20 +49,22 @@ three tables, a step storing only the channels it changed.
 
 ### Tools
 
-A tool is a LangChain tool. One that uses Restate gets the handler's context
-from `restate_agents.context()`, and one that must not run twice takes its
-tool call id (`InjectedToolCallId`) and passes it on, such as in an
-idempotency key ([`examples/teller.py`](../examples/teller.py)):
+`@tool` makes a tool of a function: the model gives its parameters, which
+their types and the docstring describe. Two parameters are not the model's:
+`ctx`, the handler's context (`ctx.db`, calls, sends), and `call_id`, the
+tool call's id. A crash runs an unfinished tool call again with the same id,
+so a tool that must not run twice passes it on, as an idempotency key or a
+row's key ([`examples-py/teller.py`](../../examples-py/teller.py)):
 
 ```python
 @tool
-async def send_money(to: str, amount: int, tool_call_id: Annotated[str, InjectedToolCallId]) -> str:
+async def send_money(ctx, call_id, to: str, amount: int) -> str:
     """Send money from the customer's account to another account."""
-    ctx = restate_agents.context()
-    move = Transfer(id=tool_call_id, to=to, amount=amount)
-    left = await ctx.object_call(transfer, key=ctx.key(), arg=move, idempotency_key=tool_call_id)
-    return f"Sent {amount} to {to}; {left} left"
+    left = await ctx.object_call(transfer, key=ctx.key(), arg={"id": call_id, "to": to, "amount": amount})
+    return f"Sent {amount} to {to}, {left} left"
 ```
+
+LangChain's own tools work too.
 
 ### Through crashes
 
@@ -82,13 +83,31 @@ and LangGraph carries on from the last step it stored.
   run that a crash interrupted (its prompt without an answer) is finished
   before the next message starts.
 
-## Your own object
+## Objects
 
-`restate_agents.object(name)` is `restate.VirtualObject` set up for SQL and
-agents: `restate.sql_options`, retries up to 100,000 times, 50 to 500 ms
-apart (each attempt resumes from the database), and the SQL storage hidden
-from the journal in Restate's UI. `restate_agents.serve(*services)` serves
-them on `PORT`, or 9080.
+`Object(name, schema=...)` is a virtual object with a SQL database of its
+own, `ctx.db`, one per key: `restate.VirtualObject` with
+`restate.sql_options`, retries up to 100,000 times, 50 to 500 ms apart (each
+attempt resumes from the database), and the SQL storage hidden from the
+journal in Restate's UI. Each handler first runs `schema`, such as `CREATE
+TABLE IF NOT EXISTS`. A handler takes `ctx`, then its input: one parameter,
+or several, which a JSON object gives by name:
+
+```python
+account = Object("account", schema="CREATE TABLE IF NOT EXISTS moves (id TEXT PRIMARY KEY, amount INTEGER)")
+
+
+@account.handler
+async def deposit(ctx, id: str, amount: int) -> int:
+    await ctx.db.execute("INSERT OR IGNORE INTO moves VALUES (?, ?)", [id, amount])
+    [[balance]] = await ctx.db.query("SELECT sum(amount) FROM moves")
+    return balance
+```
+
+An agent is an `Object` too: `langgraph.agent(name, schema=..., ...)` takes
+its options, and `@agent.handler` adds handlers of your own
+([`examples-py/memory.py`](../../examples-py/memory.py)).
+`serve(*services)` serves them on `PORT`, or 9080.
 
 ## Tests
 

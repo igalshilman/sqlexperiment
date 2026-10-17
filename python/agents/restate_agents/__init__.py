@@ -1,14 +1,21 @@
 """
-Agent frameworks in Restate virtual objects: each object (one per key)
-keeps the agent's state in its SQL database (``ctx.db``), and each message is
-answered once per invocation, however often an attempt crashes.
+Durable agents and SQL in Restate virtual objects: each object (one per key)
+has a SQL database of its own, ``ctx.db``, where an agent keeps its
+conversation, and each message is answered once per invocation, however
+often an attempt crashes.
 
-    from restate_agents import langgraph, serve
+    from restate_agents import langgraph, serve, tool
 
-    assistant = langgraph.agent("assistant", tools=[weather])
+    @tool
+    def get_weather(city: str) -> str:
+        '''The current weather in a city.'''
+        return f"Sunny and 21°C in {city}"
+
+    assistant = langgraph.agent("assistant", tools=[get_weather])
     serve(assistant)
 """
 
-from restate_agents.object import context, object, serve
+from restate_agents.object import Object, context, serve
+from restate_agents.tool import Tool, tool
 
-__all__ = ["context", "object", "serve"]
+__all__ = ["Object", "Tool", "context", "serve", "tool"]

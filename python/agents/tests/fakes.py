@@ -23,6 +23,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import InjectedToolCallId, tool
+from restate.server_context import _restate_context_var
 from restate.sql import SqlAttempt
 
 
@@ -144,6 +145,7 @@ class Object:
     async def run(self, handler: Callable[..., Any], *args: Any, invocation: str | None = None) -> Any:
         """One attempt of ``handler``; raises Crash if it crashed, its state then stored up to the crash."""
         ctx = Context(self, invocation or uuid.uuid4().hex)
+        token = _restate_context_var.set(ctx)  # type: ignore[arg-type]
         try:
             result = await handler(ctx, *args)
             await ctx.attempt.end(failed=False)
@@ -153,6 +155,8 @@ class Object:
                 raise Crash() from error
             await ctx.attempt.end(failed=True)
             raise
+        finally:
+            _restate_context_var.reset(token)
         if self.crashed:
             self.crashed = False
             raise Crash()
