@@ -36,10 +36,11 @@ Restate holds the rest:
 - the limits: calls over a rule wait in Restate's queues, per tenant and per
   user.
 
-Run the endpoint, register it, and play the demo against it:
+Run the endpoint, from [`examples/`](..) (after `make js` at the repository
+root), register it, and play the demo against it:
 
 ```sh
-PI_MODEL=openai/gpt-6-luna node serve.ts gateway
+PI_MODEL=openai/gpt-6-luna node gateway/main.ts
 restate deployments register http://localhost:9080
 gateway/demo.sh
 ```
@@ -61,9 +62,9 @@ gateway/demo.sh
 On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`.
 
-Or as two deployments: `node serve.ts gateway-tools` (the tools and the
+Or as two deployments: `node gateway/main.ts tools` (the tools and the
 Gateway: stateless, so anywhere, such as your laptop) and
-`node serve.ts gateway-assistant` (the Assistant, keyed per user, the Case,
+`node gateway/main.ts agents` (the Assistant, keyed per user, the Case,
 keyed per order: in a sandbox). Register both with the same Restate server.
 
 With `WORKSPACE` set, each agent object gets a directory of its own,
@@ -76,3 +77,6 @@ The image's model is `openai/gpt-6-luna`: give it `OPENAI_API_KEY`.
 
 In Docker: [`Dockerfile`](Dockerfile), published as
 `ghcr.io/igalshilman/tool-gateway`, serves the endpoint on 9080.
+
+[`tests/gateway.test.ts`](../../tests/gateway.test.ts) tests its parts
+without a Restate server (`make test-ts T=gateway`).

@@ -4,22 +4,22 @@ An experiment: each Restate virtual object gets its own SQLite-compatible
 database, stored in the object's state, and its handlers run without journal
 replay, so a retried attempt runs again against the state as stored.
 
-Three layers, each on the one before, and the agents on top:
+Layers, each on the one before, then the examples and the tests:
 
-| Path | What |
-| --- | --- |
-| [`sqlite-kv/`](sqlite-kv/README.md) | **The storage.** SQL over an asynchronous key/value store, for namespaces with one owner at a time: a Rust crate with its tests, benchmarks, [design](sqlite-kv/docs/DESIGN.md) and [TLA+ specification](sqlite-kv/spec/README.md). It knows nothing about Restate. |
-| [`packages/sql/`](packages/sql/README.md) | **The Node.js addon**, the `sqlite-kv` npm package: the crate over a key/value store implemented in JavaScript. |
-| [`packages/sdk/`](packages/sdk/README.md) | **The SDK changes.** Patches to the Restate TypeScript SDK and its shared core: handlers without journal replay (`journalReplay: false`), their own context type with plain promises, and `ctx.db` and `ctx.transaction` on the addon. [How SQL in virtual objects works](packages/sdk/SQL.md). |
+| Path                                              | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`sqlite-kv/`](sqlite-kv/README.md)               | **The storage.** SQL over an asynchronous key/value store, for namespaces with one owner at a time: a Rust crate with its tests, benchmarks, [design](sqlite-kv/docs/DESIGN.md) and [TLA+ specification](sqlite-kv/spec/README.md). It knows nothing about Restate.                                                                                                                                                                                                                              |
+| [`packages/sql/`](packages/sql/README.md)         | **The Node.js addon**, the `sqlite-kv` npm package: the crate over a key/value store implemented in JavaScript.                                                                                                                                                                                                                                                                                                                                                                                  |
+| [`packages/sdk/`](packages/sdk/README.md)         | **The SDK changes.** Patches to the Restate TypeScript SDK and its shared core: handlers without journal replay (`journalReplay: false`), their own context type with plain promises, and `ctx.db` and `ctx.transaction` on the addon. [How SQL in virtual objects works](packages/sdk/SQL.md).                                                                                                                                                                                                  |
 | [`packages/integrations/`](packages/integrations) | **The integrations**, the `restate-agents` package: agent frameworks in virtual objects, their state in the object's database, each a `chat()` handler: [pi](packages/integrations/src/pi/README.md) (`restate-agents/pi`), [OpenCode](packages/integrations/src/opencode/README.md), [LangGraph](packages/integrations/src/langgraph/README.md), [Claude](packages/integrations/src/claude/README.md) (the Anthropic SDK) and [DeepSeek Harness](packages/integrations/src/deepseek/README.md). |
-| [`examples/`](examples/README.md) | **The examples**, each a small file you run with node: a chat on each framework, a coding team, notes in SQL, and [a tool gateway](examples/gateway/README.md). |
-| [`tests/`](tests) | **The tests**: the agents with bank tools on scripted models, the storage conformance suites, SQL in objects (a ledger and a shop), and the crash and concurrency tests against a real Restate server. |
+| [`examples/`](examples/README.md)                 | **The examples**, each a small file you run with node: a chat on each framework, a coding team, notes in SQL, and [a tool gateway](examples/gateway/README.md).                                                                                                                                                                                                                                                                                                                                  |
+| [`tests/`](tests)                                 | **The tests**: the agents with bank tools on scripted models, the storage conformance suites, SQL in objects (a ledger and a shop), and the crash and concurrency tests against a real Restate server.                                                                                                                                                                                                                                                                                           |
 
 ## Requirements
 
-|                | Version                                                                                               |
-| -------------- | ----------------------------------------------------------------------------------------------------- |
-| Restate server | 1.7.13, the latest release (or later)                                                                 |
+|                | Version                                                                                                     |
+| -------------- | ----------------------------------------------------------------------------------------------------------- |
+| Restate server | 1.7.13, the latest release (or later)                                                                       |
 | TypeScript SDK | 1.17.3 with [the patches](packages/sdk/README.md), over the shared core's unreleased main; `make` builds it |
 
 ```sh
@@ -45,8 +45,7 @@ make help
 ```
 
 Without Nix: besides Rust, the Node.js parts need node 24 or later (the
-examples and tests are TypeScript that node runs as it is, and OpenCode needs
-24) and pnpm, which installs the workspace (`make js`); the patched TypeScript
+examples and tests are TypeScript that node runs as it is, and OpenCode needs 24) and pnpm, which installs the workspace (`make js`); the patched TypeScript
 SDK also needs the `wasm32-unknown-unknown` target and
 `wasm-bindgen` 0.2.121 (`cargo install wasm-bindgen-cli --version 0.2.121`).
 

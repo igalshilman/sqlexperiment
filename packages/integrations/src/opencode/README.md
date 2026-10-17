@@ -3,15 +3,15 @@
 [OpenCode](https://opencode.ai) 2.0 can run embedded: `@opencode/sdk` hosts
 the whole OpenCode server in your process, with no HTTP listener, and its
 workerd profile runs it in a Cloudflare Durable Object, on the object's
-SQLite. Here it runs in a Restate virtual object instead: one OpenCodeAgent
-object per session, whose OpenCode database (sessions, messages, the inbox,
+SQLite. Here it runs in a Restate virtual object instead: one object per
+session, whose OpenCode database (sessions, messages, the inbox,
 durable events) is the object's SQL database
-([SQL in Restate virtual objects](../node/README.md)).
+([SQL in Restate virtual objects](../../../sdk/SQL.md)).
 
-The example pins OpenCode 2.0.27 exactly, with the Effect release it is
+The integration pins OpenCode 2.0.27 exactly, with the Effect release it is
 built on (4.0.1). OpenCode needs Node 24.
 
-- [`opencode-db.ts`](opencode-db.ts): `openOpenCode(db, fence, options)`
+- [`db.ts`](db.ts) (`restate-agents/opencode/db`): `openOpenCode(db, fence, options)`
   boots OpenCode's embedded host with its database in `db`, the object's database,
   `ctx.db`. The host is OpenCode's workerd profile (no local
   filesystem, shell, terminal or version control; config inline; plugins in
@@ -22,19 +22,29 @@ built on (4.0.1). OpenCode needs Node 24.
   statements run one at a time, and each OpenCode transaction is a sqlite-kv
   transaction. (The Promise API's `OpenCode.create` drops its replacements,
   so the host is booted with the Effect API's.)
-- [`with-opencode.ts`](with-opencode.ts): `withOpenCode(ctx, { plugins,
-  model, tools }, work)` runs `work` with OpenCode for one invocation, over
-  `ctx.db`, and `prompt(id, text)` answers a prompt in the object's
-  session. The agent's tools replace OpenCode's own.
-- [`agent.ts`](agent.ts): the OpenCodeAgent object. Its handler,
-  `prompt(ctx, { id, text })`, gives the agent its bank tools, which move
-  money in the [ledger](../node/ledger.ts), and answers the prompt.
-- [`agent.test.ts`](agent.test.ts): the handler with a fake `ctx`, through
-  crashes, and a scripted model
-  ([`../testing/opencode.ts`](../testing/opencode.ts)), an AI SDK language
+- [`index.ts`](index.ts): `restate-agents/opencode`. `withOpenCode(ctx, {
+  plugins, model, tools, directory }, work)` runs `work` with OpenCode for one
+  invocation, over `ctx.db`, and its `prompt(id, text)` answers a prompt in
+  the object's session; `prompt(ctx, text, options)` answers a message once
+  per invocation (`ctx.request().id`); `tool(...)` defines a tool. `chat({
+  model?, tools?, directory? })` makes a handler, `handlers: { chat:
+  opencode.chat() }`, that takes a message (a string) and returns the answer.
+  The agent's tools replace OpenCode's own, unless it has a `directory` of
+  the local machine to work in, where it keeps OpenCode's own tools too.
+- [`tests/agents/opencode.ts`](../../../../tests/agents/opencode.ts): the OpenCodeAgent
+  object, whose bank tools move money in the [ledger](../../../../tests/sql/ledger.ts), and
+  [its tests](../../../../tests/agents/opencode.test.ts): the handler with a fake `ctx`,
+  through crashes, and a scripted model
+  ([`tests/fakes/opencode.ts`](../../../../tests/fakes/opencode.ts)), an AI SDK language
   model that OpenCode calls through a plugin's `language` hook.
+- [`tests/storage/opencode.test.ts`](../../../../tests/storage/opencode.test.ts): the
+  Effect `SqlClient` of `db.ts` over a sqlite-kv database in memory.
+- [`examples/opencode.ts`](../../../../examples/opencode.ts): a durable chat,
+  one `session` object with `chat: opencode.chat()`; and
+  [`examples/coding.ts`](../../../../examples/coding.ts), OpenCode coders,
+  each with a directory, under a pi coordinator.
 
-The model is `OPENCODE_MODEL=provider/model-id`, by default
+The model is `model`, or else `OPENCODE_MODEL=provider/model-id`, by default
 `anthropic/claude-sonnet-5-5` (with `ANTHROPIC_API_KEY`), which OpenCode's
 own providers serve.
 
@@ -55,7 +65,7 @@ It is OpenCode's agent core, not its terminal UI, and in the workerd
 profile it spawns nothing either: its shell, terminal, file and version
 control services are disabled or stubbed. An agent that should run commands
 needs a tool that runs them elsewhere (a sandbox, a service), idempotently,
-like the ledger tools.
+like the bank agent's ledger tools in the tests.
 
 ## What we found
 
@@ -107,7 +117,7 @@ at a time, so a claim found at boot is always one a dead attempt left.
   it an "interrupted" result, and asks the model to continue without
   repeating completed work.
 - **A transfer is idempotent by its tool call id, and a retry names the call
-  it retries.** The transfer tool takes `retryOf`, the id of the call to
+  it retries.** The bank agent's transfer tool takes `retryOf`, the id of the call to
   retry, and uses it (or its own call id) as the transfer id, which the
   ledger dedupes on; so a retried transfer moves the money once. Its call to
   the ledger has an idempotency key made from the request id
@@ -119,20 +129,21 @@ at a time, so a claim found at boot is always one a dead attempt left.
   hand the error to the model as the tool's result. Instead the failed
   attempt stores nothing more (its fence closes, and the tool call never
   returns), so its retry finds the call interrupted, and retries it as above.
-- **A prompt is answered once per id**: the prompt's id is its OpenCode
-  message id, and a prompt asked again returns the answer of the turn that
-  answered it. A prompt that a crash interrupted is finished before the next
-  prompt starts: OpenCode resumes it at boot, and a new prompt waits for it,
+- **A message is answered once per invocation**: the invocation id
+  (`ctx.request().id`) is its OpenCode message id, and a retried attempt
+  returns the answer of the turn that answered it; a caller that resends a
+  message uses an idempotency key. A prompt that a crash interrupted is
+  finished before the next prompt starts: OpenCode resumes it at boot, and a new prompt waits for it,
   since one queued while it runs would join its turn.
 
-[`agent.test.ts`](agent.test.ts) checks each of these, with a crash that
+[`opencode.test.ts`](../../../../tests/agents/opencode.test.ts) checks each of these, with a crash that
 stops an attempt in a tool call and abandons it, keeping what it stored (the
 next attempt fences it, as Restate does). Its scripted model makes a fresh tool call
 id for every call, as a model does, so a retry that started the prompt over
 would move the money twice: with a transfer tool that ignores `retryOf`,
-four of its five tests fail. The [crash test](../README.md#validation) runs
+four of its five tests fail. The [crash test](../../../../tests/crash.ts) runs
 four sessions of eight transfers and an audit each, beside the other
-agents', against a real server: every prompt moves money exactly once.
+agents', against a real server: every message moves money exactly once.
 
 A prompt takes some hundreds of SQL statements (OpenCode's migrations check,
 its session, messages, inbox and durable events), and booting OpenCode takes
@@ -141,11 +152,10 @@ about 100 ms per attempt, after a one-time import of about 2 s per process.
 ## Run
 
 ```sh
-make examples-js   # from the repository root
-cd examples && node opencode/agent.ts   # the agent and the ledger, on port 9080
+make js   # from the repository root
+cd examples && ANTHROPIC_API_KEY=… node opencode.ts   # a chat session, on port 9080
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
-curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
-curl localhost:8080/OpenCodeAgent/alice/prompt --json '{"id": "p1", "text": "Please move 5 from 1 to 2"}'
-npm run test:opencode   # the handler's tests
+curl localhost:8080/session/alice/chat --json '"Hi, I am Alice"'
+make test-ts T=opencode   # the handler's tests, from the repository root
 ```

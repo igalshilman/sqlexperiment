@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The tool gateway's demo, in four acts, against a Restate server that has
-# the gateway's endpoint (`node serve.ts gateway`) registered. Everything
+# the gateway's endpoint (`node gateway/main.ts`) registered. Everything
 # goes through Restate: its ingress, and its admin API for the limits.
 #
 #   INGRESS=http://localhost:8080 ADMIN=http://localhost:9070 gateway/demo.sh

@@ -21,7 +21,7 @@
 // `bash` runs any command, within the directory or outside it.
 //
 // Environment: PORT, PI_MODEL (see restate-agents/pi) with its provider's
-// API key, WORKSPACE and ABORT_PER_MILLE (see ../faults.ts).
+// API key, and WORKSPACE.
 import * as restate from '@restatedev/restate-sdk';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
