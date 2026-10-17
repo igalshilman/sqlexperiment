@@ -79,6 +79,8 @@ which needs no key (`make test-ts T=pi`, from the repository root):
   pi-durable's storage conformance suite on the object's database;
   [`pi-workspace.test.ts`](../../../../tests/storage/pi-workspace.test.ts),
   `withPi` with a workspace.
+- [`tests/agents/pi-bank.test.ts`](../../../../tests/agents/pi-bank.test.ts):
+  the bank agent, with crashes at any of a message's state requests.
 - [`tests/agents/pi.test.ts`](../../../../tests/agents/pi.test.ts): the chat,
   its system prompt, `messages`, and sub-agents.
 - [`tests/agents/pi.ts`](../../../../tests/agents/pi.ts): the bank agent,

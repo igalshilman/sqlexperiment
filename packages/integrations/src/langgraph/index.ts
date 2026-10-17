@@ -107,8 +107,12 @@ const respond =
       const answer = state.values.answers?.[id];
       if (answer !== undefined) return answer;
       // Finish an interrupted run first (this message's, after a crash),
-      // then start this message's.
-      await app.invoke(state.next.length > 0 ? null : { messages: [new HumanMessage(message)], prompt: id }, config);
+      // then start this message's. A run is unfinished while its prompt has
+      // no answer: `next` does not say, as it leaves out the steps whose
+      // writes are stored.
+      const { prompt, answers = {} } = state.values;
+      const interrupted = prompt !== undefined && answers[prompt] === undefined;
+      await app.invoke(interrupted ? null : { messages: [new HumanMessage(message)], prompt: id }, config);
     }
   };
 
