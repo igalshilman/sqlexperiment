@@ -7,7 +7,7 @@
 //
 // or, for more than a prompt:
 //
-//   code: (ctx, task) => withOpenCode(ctx, { tools }, (opencode) => opencode.prompt(id, task)),
+//   code: (ctx, task) => withOpenCode(ctx, { tools }, (session) => session.prompt(task)),
 //
 // The model is `model`, MODEL, or else anthropic/claude-sonnet-5-5,
 // which OpenCode's own providers serve, with the provider's API key (such as
@@ -70,11 +70,11 @@ export const tool = <Input>(t: Tool<Input>) => t as Tool;
 /** The session every prompt goes to. */
 export const SESSION = 'ses_root';
 
-/** What `work` gets: `prompt(id, text)`, and the OpenCode `host` for anything else. */
+/** What `work` gets: `prompt(text)`, and the OpenCode `host` for anything else. */
 export interface OpenCodeSession {
   host: Host;
-  /** Answer `text`, once per prompt `id` (letters, digits, `_`, `-`), with the answer's text. */
-  prompt(id: string, text: string): Promise<string>;
+  /** Answer `text`, once per prompt `id` (by default the invocation's), with the answer's text. */
+  prompt(text: string, id?: string): Promise<string>;
 }
 
 export interface OpenCodeOptions {
@@ -213,7 +213,7 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
 /**
  * Run `work(opencode)` with OpenCode over the object's database: `model` is
  * the session's model, `plugins` OpenCode plugins (such as the model's), and
- * `tools` the agent's tools. `opencode` has `prompt(id, text)`, and the
+ * `tools` the agent's tools. `opencode` has `prompt(text)`, and the
  * OpenCode `host` for anything else.
  */
 export const withOpenCode = async <T>(
@@ -245,8 +245,9 @@ export const withOpenCode = async <T>(
       failure,
       work({
         host,
-        async prompt(id, text) {
-          const messageId = `msg_${id}`;
+        async prompt(text, id = ctx.request().id) {
+          // OpenCode's ids are letters, digits, `_` and `-`.
+          const messageId = `msg_${id.replace(/[^\w-]/g, '_')}`;
           const { session } = host.client;
           const sessionID = SESSION as never;
           try {
@@ -295,7 +296,7 @@ export const withOpenCode = async <T>(
 
 /** Answer `text`, once per invocation: a retried attempt resumes the same prompt. */
 export const prompt = (ctx: restate.SqlObjectContext, text: string, options: OpenCodeOptions = {}) =>
-  withOpenCode(ctx, options, (opencode) => opencode.prompt(ctx.request().id.replace(/[^\w-]/g, '_'), text));
+  withOpenCode(ctx, options, (session) => session.prompt(text));
 
 export interface ChatOptions {
   /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */

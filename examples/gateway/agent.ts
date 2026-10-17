@@ -116,8 +116,8 @@ export const caseAgent = object({
         const [tenant = '', order = ''] = ctx.key.split('.', 2);
         const tools = await gatewayTools(ctx, tenant, user);
         const workspace = workspaceOf('Case', ctx.key);
-        return withPi(ctx, { tools, workspace }, async (pi) => ({
-          answer: await pi.prompt(ctx.request().id, `Order ${order}, from ${user}: ${question}`),
+        return withPi(ctx, { tools, workspace }, async (session) => ({
+          answer: await session.prompt(`Order ${order}, from ${user}: ${question}`),
         }));
       },
     ),
@@ -159,8 +159,8 @@ export const prompt = async (ctx: restate.SqlObjectContext, text: z.infer<typeof
   );
   // Submitted once: a retried attempt resumes the prompt of the same invocation id.
   const workspace = workspaceOf('Assistant', ctx.key);
-  return withPi(ctx, { tools, workspace }, async (pi) => ({
-    answer: await pi.prompt(ctx.request().id, text),
+  return withPi(ctx, { tools, workspace }, async (session) => ({
+    answer: await session.prompt(text),
   }));
 };
 

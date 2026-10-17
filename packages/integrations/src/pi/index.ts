@@ -8,7 +8,7 @@
 //
 // or, for more than a prompt:
 //
-//   chat: (ctx, message) => withPi(ctx, { tools }, (pi) => pi.prompt(ctx.request().id, message)),
+//   chat: (ctx, message) => withPi(ctx, { tools }, (session) => session.prompt(message)),
 //
 // The model is `model`, MODEL, or else anthropic/claude-sonnet-5-5, with the
 // provider's API key (such as ANTHROPIC_API_KEY).
@@ -51,12 +51,12 @@ import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
 import { openSqlKvStorage } from './storage.ts';
 
-/** What `work` gets: `prompt(id, text)`, and the `harness` and chord `context` for anything else. */
+/** What `work` gets: `prompt(text)`, and the `harness` and chord `context` for anything else. */
 export interface Pi {
   harness: Harness;
   context: Context;
-  /** Answer `text`, once per prompt `id`, with the answer's text. */
-  prompt(id: string, text: string): Promise<string>;
+  /** Answer `text`, once per prompt `id` (by default the invocation's), with the answer's text. */
+  prompt(text: string, id?: string): Promise<string>;
 }
 
 /** The text of a message's content. */
@@ -90,7 +90,7 @@ async function modelsOf(provider: string): Promise<MutableModels> {
 /**
  * Run `work(pi)` with a Harness over the object's database: `model` is the
  * model to use as `provider/model-id`, and `tools` the agent's tools. `pi`
- * has `prompt(id, text)`, and the `harness` and chord `context` for anything
+ * has `prompt(text)`, and the `harness` and chord `context` for anything
  * else.
  */
 export const withPi = async <T>(
@@ -119,7 +119,7 @@ export const withPi = async <T>(
     return await work({
       harness,
       context,
-      async prompt(id, text) {
+      async prompt(text, id = ctx.request().id) {
         const root = await harness.root(context, { agent: { model: { provider, modelId } } });
         const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
         const settled = await submission.wait(context);
@@ -140,7 +140,7 @@ export const withPi = async <T>(
 
 /** Answer `text`, once per invocation: a retried attempt resumes the same prompt. */
 export const prompt = (ctx: restate.SqlObjectContext, text: string, options: PiOptions = {}) =>
-  withPi(ctx, options, (pi) => pi.prompt(ctx.request().id, text));
+  withPi(ctx, options, (session) => session.prompt(text));
 
 export interface ChatOptions {
   /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
