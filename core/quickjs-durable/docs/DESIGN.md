@@ -659,7 +659,8 @@ loop:
             // host has staged a durable effect; leave its promise pending
     if not saw_ready:
         break with state
-    if configured_budget exists and ready_count >= configured_budget:
+    if (configured_budget exists and ready_count >= configured_budget)
+            or remaining_fuel < half of the turn's fuel:
         invoke internal pause(), then inspect without draining jobs
         require last pending request is Resume
         require await transaction.execute(that Resume) returns Pending
@@ -675,7 +676,10 @@ and outcome before capture. Any execution, host, serialization or staging error
 poisons the engine and aborts the pre-decision transaction.
 
 Default policy has no request budget: continue through local operations until
-only durable effects remain or the invocation is terminal. A configured positive
+only durable effects remain, the invocation is terminal, or the turn has spent
+half its fuel. That last stop matters: one local KV await costs roughly 300,000
+fuel (more with write barriers), so a few hundred sequential awaits would
+otherwise exhaust a turn, trap, and trap again on every retry. A configured positive
 budget counts Ready requests, not JS statements or elapsed time. A batch can
 exceed it. A checkpoint may preserve queued continuations of already-resolved
 promises; the committed Resume makes them schedulable after a crash.

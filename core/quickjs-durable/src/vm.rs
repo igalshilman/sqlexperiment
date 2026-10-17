@@ -19,6 +19,10 @@ use wasmtime::{Result, bail, ensure};
 const WASM: &[u8] = include_bytes!("../assets/quickjs.wasm");
 const BOOTSTRAP: &str = include_str!("../assets/guest.js");
 const FUEL: u64 = 200_000_000;
+/// Fuel left when a turn stops at its next safe boundary to checkpoint, so a
+/// long run of local requests makes progress across turns instead of trapping
+/// in every one of them. The rest covers that boundary's batch and capture.
+const CHECKPOINT_FUEL: u64 = FUEL / 2;
 // Below upstream's 512 KiB ceiling: Wasmtime native frames need their own
 // headroom, especially in the instrumented interpreter. Reapply after restore.
 const MAX_STACK: i32 = 32 * 1024;
@@ -279,7 +283,9 @@ impl Runtime {
             if !ready {
                 break state;
             }
-            if checkpoint_interval.is_some_and(|limit| ready_operations >= limit.get()) {
+            let budget_spent =
+                checkpoint_interval.is_some_and(|limit| ready_operations >= limit.get());
+            if budget_spent || vm.store.get_fuel()? < CHECKPOINT_FUEL {
                 // Every operation in this batch has been handled, and ready
                 // outcomes are now in the heap/job queue. No Wasm call or Rust
                 // operation future is live. Persist a local wakeup so recovery

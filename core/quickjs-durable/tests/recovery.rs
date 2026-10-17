@@ -1,5 +1,5 @@
 use anyhow::Result;
-use quickjs_durable::{Engine, MemoryTransaction, Outcome, Runtime, Status};
+use quickjs_durable::{Engine, MemoryTransaction, Operation, Outcome, Runtime, Status};
 use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
 
@@ -432,5 +432,28 @@ fn zero_overrides_nonzero_golden_and_return_to_golden_removes_pages() -> Result<
         4,
     ))?;
     assert_eq!(value(&done.state.outcome), json!([true, 5]));
+    Ok(())
+}
+
+/// A long run of local requests: more than one turn's fuel. The engine
+/// checkpoints at a safe boundary once half the fuel is spent, and a Resume
+/// wakeup continues it, so the run finishes instead of trapping every turn.
+#[test]
+fn long_local_loops_checkpoint_before_fuel_runs_out() -> Result<()> {
+    let mut e = engine(
+        "async function main(_,ctx){for(let i=0;i<2000;i++){await ctx.kv.set('k',i);}return await ctx.kv.get('k');}",
+    );
+    let mut view = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
+    let mut turns = 1;
+    while view.state.status == Status::Waiting {
+        let [Operation::Resume { id }] = &view.state.pending[..] else {
+            panic!("Expected one Resume wakeup: {:?}", view.state.pending);
+        };
+        let id = id.clone();
+        view = futures_executor::block_on(e.complete("r", &id, Outcome::success(Value::Null), 2))?;
+        turns += 1;
+    }
+    assert_eq!(value(&view.state.outcome), json!(1999));
+    assert!(turns > 2, "{turns} turns");
     Ok(())
 }
