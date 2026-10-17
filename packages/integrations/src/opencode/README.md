@@ -49,7 +49,11 @@ turn starts, and resumes every claimed turn when it boots.
   it an "interrupted" result, and asks the model to continue without
   repeating completed work. A tool that must not run twice needs a way for a
   retry to name the call it retries (the bank agent's `transfer` takes
-  `retryOf`).
+  `retryOf`). Restate's own tools
+  (`call`, `send`, `workflow`, `subagent`, `signal`) need none: made again
+  with the same input, the call is the one the cut-off call made, which
+  matters for a long one, such as a wait for an approval, since a suspension
+  (after Restate's inactivity timeout) restarts the handler too.
 - **A tool's error fails the attempt**, and Restate retries it; a
   `restate.TerminalError` of a `restate-agents` tool is its answer to the
   model. The failed attempt stores nothing more, so its retry finds the call

@@ -71,7 +71,7 @@ function store(key: string) {
   const map = new Map<string, Uint8Array>();
   return <I, O>(handler: (ctx: restate.SqlObjectContext, input: I) => Promise<O>, id: string, input: I) => {
     const sql = sqlAttempt({ map, key, id });
-    const ctx = { key, request: () => ({ id }), db: sql.db, transaction: sql.transaction };
+    const ctx = { key, request: () => ({ id }), ...sql };
     return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, input));
   };
 }

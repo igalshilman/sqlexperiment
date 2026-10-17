@@ -163,14 +163,14 @@ passes on (as an idempotency key, say):
 import { call, send, signal, subagent, tool, workflow } from 'restate-agents';
 ```
 
-| Tool                                                           | What the model gets                                                                                                                                   |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool({ name, description, input, run })`                      | A tool of your own: `input` is a zod object, `run(input, { ctx, callId })` returns text or JSON                                                       |
-| `call(target, handler, { description, input?, key? })`         | Calls a handler of a service, virtual object or workflow, and answers with its result. Of an object, the model chooses the key, unless `key` gives it |
-| `send(target, handler, { description, input?, key?, delay? })` | Sends to a handler without waiting: a one-way call, after `delay` if given                                                                            |
-| `workflow(target, { description, input? })`                    | Runs a workflow to the end, a workflow of its own per tool call, and answers with its result                                                          |
-| `signal(name, { description })`                                | Waits for a signal (a person's approval, another system's result) without holding a process, and answers with its value                               |
-| `subagent(agent, { description?, handler? })`                  | Hands a named task to another agent (of any framework), keyed `<this key>.<task>`, and answers with its answer: the same name continues the task      |
+| Tool                                                           | What the model gets                                                                                                                                                  |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool({ name, description, input, run })`                      | A tool of your own: `input` is a zod object, `run(input, { ctx, callId })` returns text or JSON                                                                      |
+| `call(target, handler, { description, input?, key? })`         | Calls a handler of a service, virtual object or workflow, and answers with its result. Of an object, the model chooses the key, unless `key` gives it                |
+| `send(target, handler, { description, input?, key?, delay? })` | Sends to a handler without waiting: a one-way call, after `delay` if given                                                                                           |
+| `workflow(target, { description, input? })`                    | Runs a workflow to the end, a workflow of its own per tool call, and answers with its result                                                                         |
+| `signal(name, { description, input? })`                        | Waits for a signal (a person's approval, another system's result) without holding a process, and answers with its value; `input` is what the model says it waits for |
+| `subagent(agent, { description?, handler? })`                  | Hands a named task to another agent (of any framework), keyed `<this key>.<task>`, and answers with its answer: the same name continues the task                     |
 
 Handler names are checked against the target's handlers: a typo does not
 compile.
@@ -181,16 +181,44 @@ on; any other error fails the attempt, which Restate retries.
 
 Each Restate call has an idempotency key made of the invocation's id and the
 model's tool call id: a crash runs an unfinished tool call again, and it
-makes the same call, once.
+makes the same call, once. On the frameworks that tell the model a cut-off
+tool call was interrupted instead (OpenCode, the DeepSeek Harness), the
+model makes it again as a new tool call: with the same input, it is the
+same Restate call, which it waits for again. So a wait for an approval
+outlasts a suspension (after Restate's inactivity timeout), which restarts
+the handler.
 
-Every agent (every `object()`) has a `signal` handler, which resolves a
-signal, and `pending`, which lists what it waits for; both run while the
-agent waits. A signal resolved before the agent waits is kept for it:
+Every agent (every `object()`) has `pending`, which lists its waits, and a
+`signal` handler, which resolves one; both run while the agent waits. Each
+wait has an id, the signal's name, the model's `input` (such as the refund
+to approve) and when it started:
 
 ```sh
 curl localhost:8080/support/alice/pending
-curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'
 ```
+
+```json
+[
+  {
+    "id": "inv_1f…:toolu_01",
+    "name": "approval",
+    "input": { "order": "103", "amount": 30 },
+    "since": "2026-10-17T15:00:00.000Z"
+  }
+]
+```
+
+`signal` resolves the wait of an `id`, or else the oldest wait for a
+`name`, and answers with the id it resolved, or `null` if none waited. A
+signal no one waits for is dropped, so a stale approval approves nothing
+later; with `"keep": true` it is kept for the next wait for its name:
+
+```sh
+curl localhost:8080/support/alice/signal --json '{"id": "inv_1f…:toolu_01", "value": "approved"}'
+curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved", "keep": true}'
+```
+
+A wait ends with its agent's invocation: a cancelled one leaves `pending`.
 
 Underneath, signals are kept by the `signals` object, keyed
 `<agent>:<key>`; `serve(...services)` serves the agents with it, on PORT

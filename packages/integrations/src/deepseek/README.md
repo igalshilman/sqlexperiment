@@ -46,7 +46,11 @@ it, and leaves the model to decide what to do about it. So:
   gives each such call an error result that says so, and tells the model to
   retry only an idempotent operation; the handler then asks the agent to
   continue. A tool that must not run twice needs a way for a retry to name
-  the call it retries (the bank agent's `transfer` takes `retryOf`).
+  the call it retries (the bank agent's `transfer` takes `retryOf`). Restate's own tools
+  (`call`, `send`, `workflow`, `subagent`, `signal`) need none: made again
+  with the same input, the call is the one the cut-off call made, which
+  matters for a long one, such as a wait for an approval, since a suspension
+  (after Restate's inactivity timeout) restarts the handler too.
 - **A tool's error fails the attempt**, and Restate retries it; a
   `restate.TerminalError` of a `restate-agents` tool is its answer to the
   model. The failed attempt stores nothing more, so its retry finds the call

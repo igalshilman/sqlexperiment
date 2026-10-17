@@ -95,6 +95,12 @@ export function sqlAttempt({
   const attempt = new restate.internal.SqlAttempt(ctx);
   return {
     db: attempt.db,
+    /** `ctx.get` and `ctx.set` of the object's state, as JSON. */
+    get: async <T>(name: string): Promise<T | null> => {
+      const value = await ctx.get(name);
+      return value === null ? null : (JSON.parse(new TextDecoder().decode(value)) as T);
+    },
+    set: (name: string, value: unknown) => ctx.set(name, new TextEncoder().encode(JSON.stringify(value))),
     transaction: <T>(body: (t: restate.SqlTransaction) => Promise<T>) => attempt.transaction(body),
     /** `handler`'s result, once its session ended. */
     end: <T>(handler: () => Promise<T>) => restate.internal.withSql(handler, () => attempt),
@@ -193,8 +199,7 @@ export function conversation(
         key,
         request: () => ({ id: requestId }),
         objectClient: () => booksOf(current),
-        db: sql.db,
-        transaction: sql.transaction,
+        ...sql,
       };
       const answer = sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, prompt));
       if (crashAt === undefined) return answer;
@@ -208,7 +213,7 @@ export function conversation(
       abort?.();
       const sql = sqlAttempt({ map, fence, key, id: requestId });
       abort = sql.abort;
-      const ctx = { key, request: () => ({ id: requestId }), db: sql.db, transaction: sql.transaction };
+      const ctx = { key, request: () => ({ id: requestId }), ...sql };
       return sql.end(() => other(ctx as unknown as restate.SqlObjectContext, input as I));
     },
     /** An attempt that crashes in its next transfer. */
