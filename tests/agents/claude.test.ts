@@ -3,9 +3,9 @@
 // the way out of a crashed attempt. `make test-ts T=claude`. Its client is the teller's (../fakes/claude.ts).
 import * as restate from '@restatedev/restate-sdk';
 import { describe, expect, it, vi } from 'vitest';
-import { tool } from 'restate-agents';
+import { CANCELLED, tool } from 'restate-agents';
 import { z } from 'zod';
-import { conversation, crashedAnywhere, SAID, sqlAttempt } from '../testing.ts';
+import { afterCancel, cancelledTransfer, conversation, crashedAnywhere, SAID, sqlAttempt } from '../testing.ts';
 import { HttpError, teller } from '../fakes/claude.ts';
 import * as claude from 'restate-agents/claude';
 import { bank } from './bank.ts';
@@ -21,6 +21,29 @@ const twice = async (ctx: restate.SqlObjectContext) =>
   ]);
 
 describe('the Claude agent', () => {
+  it('ends a cancelled turn, and answers the next message afresh', async () => {
+    const { failed, answer, parts } = await afterCancel(claude.chat({ tools: [cancelledTransfer] }), claude.messages());
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(answer).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    expect(parts).toEqual([
+      [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
+      [
+        { type: 'text', text: 'On it.' },
+        {
+          type: 'tool',
+          id: 'toolu_1',
+          name: 'transfer',
+          input: { from: 1, to: 2, amount: 5 },
+          output: CANCELLED,
+          error: true,
+        },
+      ],
+      [{ type: 'text', text: CANCELLED }],
+      [{ type: 'text', text: 'Hello' }],
+      [{ type: 'text', text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' }],
+    ]);
+  });
+
   it('gives the conversation while it answers: the tool calls made so far', async () => {
     const map = new Map<string, Uint8Array>();
     const started = Promise.withResolvers<void>();

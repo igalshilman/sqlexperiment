@@ -25,7 +25,7 @@
 // - A message is answered once per invocation: its message carries the
 //   invocation id, and a retried attempt returns the answer of the turn that
 //   finished it.
-import type * as restate from '@restatedev/restate-sdk';
+import * as restate from '@restatedev/restate-sdk';
 import { Context } from '@deepseek-ai/cordis';
 import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import { AgentLoop } from '@deepseek-ai/dsh-agent-loop';
@@ -45,6 +45,7 @@ import {
   ToolRuntime,
 } from '@deepseek-ai/dsh-tools';
 import {
+  CANCELLED,
   chatHandler,
   type Configure,
   configured,
@@ -112,7 +113,9 @@ const textOf = (message: Message) => message.content.flatMap((c) => (c.type === 
 
 /**
  * The answer to prompt `id` in the session log: the last reply of the first
- * turn completed after it; undefined while it is absent or unfinished.
+ * turn completed after it, or {@link CANCELLED} if a cancellation aborted its
+ * turn; undefined while it is absent or unfinished (a crash's interrupted
+ * turn is continued).
  */
 function answerOf(events: readonly SessionEvent[], id: MessageId): string | undefined {
   const at = events.findIndex((e) => e.type === 'user/message' && e.data.id === id);
@@ -121,6 +124,9 @@ function answerOf(events: readonly SessionEvent[], id: MessageId): string | unde
   for (const e of events.slice(at)) {
     if (e.type === 'assistant/message') answer = textOf(e.data.message);
     if (e.type === 'turn/end' && e.data.reason.kind === 'completed') return answer ?? '';
+    if (e.type === 'turn/end' && e.data.reason.kind === 'aborted' && e.data.reason.reason.kind === 'user') {
+      return CANCELLED;
+    }
   }
   return undefined;
 }
@@ -223,6 +229,8 @@ export const prompt = async (
   // stores nothing more, so the retry finds the tool's call without a result.
   const { promise: failed, reject: fail } = Promise.withResolvers<never>();
   failed.catch(() => {});
+  // A cancelled invocation cancels the agent's turn, which the log keeps.
+  let cancelTurn: (() => Promise<void>) | undefined;
   try {
     const sessionId = SessionId(ctx.key);
     const options = {
@@ -243,6 +251,11 @@ export const prompt = async (
     // The log as this attempt found it: a turn that failed before is
     // continued like an interrupted one.
     const found = agent.session.snapshotEvents().length;
+    cancelTurn = async () => {
+      agent.cancel({ kind: 'user' });
+      await agent.whenIdle();
+      await harness.sessions.flush(agent.session);
+    };
     for (;;) {
       const events = agent.session.snapshotEvents();
       const answer = answerOf(events, promptId(id));
@@ -265,6 +278,10 @@ export const prompt = async (
       await harness.sessions.flush(agent.session);
     }
   } catch (e) {
+    if (e instanceof restate.CancelledError && cancelTurn) {
+      await cancelTurn();
+      throw e;
+    }
     (harness.sessionPersistence as SqlSessionPersistence).abandon();
     throw e;
   } finally {

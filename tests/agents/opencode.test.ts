@@ -3,7 +3,8 @@
 // anything on the way out. Its model is the teller (../fakes/opencode.ts).
 // `make test-ts T=opencode`.
 import { describe, expect, it, vi } from 'vitest';
-import { conversation, crashedAnywhere, SAID } from '../testing.ts';
+import * as restate from '@restatedev/restate-sdk';
+import { afterCancel, cancelledTransfer, conversation, crashedAnywhere, SAID } from '../testing.ts';
 import { teller, withTeller } from '../fakes/opencode.ts';
 import * as opencode from 'restate-agents/opencode';
 import { prompt } from './opencode.ts';
@@ -16,6 +17,32 @@ vi.mock('restate-agents/opencode/db', async (original) => {
 vi.stubEnv('MODEL', 'teller/teller');
 
 describe('the OpenCode agent', () => {
+  it('ends a cancelled turn, and answers the next message afresh', async () => {
+    const { failed, answer, parts } = await afterCancel(
+      opencode.chat({ tools: [cancelledTransfer] }),
+      opencode.messages(),
+    );
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(answer).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    // OpenCode's interrupt ends the tool call, as its own error.
+    expect(parts).toEqual([
+      [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
+      [
+        { type: 'text', text: 'On it.' },
+        {
+          type: 'tool',
+          id: expect.any(String),
+          name: 'transfer',
+          input: { from: 1, to: 2, amount: 5 },
+          output: 'Tool execution interrupted',
+          error: true,
+        },
+      ],
+      [{ type: 'text', text: 'Hello' }],
+      [{ type: 'text', text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' }],
+    ]);
+  });
+
   it('gives the conversation: what was said, in order, with the tool calls', async () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');

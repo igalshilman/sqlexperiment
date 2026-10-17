@@ -100,6 +100,19 @@ curl localhost:8080/assistant/alice/chat/send -d 'Plan my week'      # {"invocat
 curl localhost:8080/restate/invocation/inv_1f…/attach               # the answer, once there is one
 ```
 
+**Stop a turn.** Cancel its invocation, as any Restate invocation, by its
+id (from `/send`, or `status`):
+
+```sh
+curl -X PATCH localhost:9070/invocations/inv_1f…/cancel
+```
+
+The turn ends cancelled, and the agent does not go on: each framework records
+the cut-off tool calls as cancelled, in its own way, and the next message
+starts afresh. A cancellation reaches a turn while a Restate call of its
+tools is pending: a wait for an approval, a sub-agent, a workflow; one that
+comes during a model request is not seen yet.
+
 **Send again safely.** A caller that may send a message again (after a
 timeout, say) gives it an idempotency key: the same key is the same
 invocation, answered once, however often it is sent. Its answer is also at

@@ -158,7 +158,7 @@ interface Content {
   text?: string;
   id?: string;
   name?: string;
-  state?: { status?: string; input?: unknown; content?: Content[] };
+  state?: { status?: string; input?: unknown; content?: Content[]; error?: { message?: string } };
 }
 
 /** The text of `content`. */
@@ -279,9 +279,13 @@ export const withOpenCode = async <T>(
   const failure = new Promise<never>((_, reject) => (failed = reject));
   failure.catch(() => {});
   // A tool's error ends the attempt: nothing more is stored, and the tool
-  // call never returns, so OpenCode does not go on without it.
+  // call never returns, so OpenCode does not go on without it. A cancelled
+  // invocation interrupts the session's turn instead (below), which OpenCode
+  // records, so the next prompt does not resume it.
+  let cancelled: restate.CancelledError | undefined;
   const fail = (error: unknown) => {
-    fence.closed = true;
+    if (error instanceof restate.CancelledError) cancelled = error;
+    else fence.closed = true;
     failed(error);
     return new Promise<never>(() => {});
   };
@@ -300,7 +304,12 @@ export const withOpenCode = async <T>(
   });
   try {
     return await Promise.race([
-      failure,
+      failure.catch(async (error: unknown) => {
+        if (error instanceof restate.CancelledError) {
+          await host.call(host.client.session.interrupt({ sessionID: SESSION as never }));
+        }
+        throw error;
+      }),
       work({
         host,
         async prompt(text, id = nextPromptId(ctx)) {
@@ -344,6 +353,8 @@ export const withOpenCode = async <T>(
           const now = await settled(messageId);
           if (now.state === 'answered') return now.text;
           if (now.state === 'failed') {
+            // A prompt the cancellation's interrupt ended fails with the cancellation.
+            if (cancelled) throw cancelled;
             throw new restate.TerminalError(
               `prompt ${id} unanswered: ${now.reason} (the model ${model.providerID}/${model.id}: ${CHECK_MODEL})`,
             );
@@ -409,7 +420,9 @@ export const messages = () =>
         for (const c of m.content ?? []) {
           if (c.type !== 'tool' || !c.id || !c.state) continue;
           transcript.call(c.id, c.name ?? '', c.state.input);
-          if (c.state.content) transcript.result(c.id, textOf(c.state.content), c.state.status === 'error');
+          // A failed or interrupted call has its error, and perhaps no content.
+          const output = c.state.content ? textOf(c.state.content) : c.state.error?.message;
+          if (output !== undefined) transcript.result(c.id, output, c.state.status === 'error');
         }
       }
     } finally {

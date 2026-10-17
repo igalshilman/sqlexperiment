@@ -143,11 +143,18 @@ export const withPi = async <T>(
   const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
   const { promise: failure, reject: failed } = Promise.withResolvers<never>();
   failure.catch(() => {});
+  // A cancelled invocation aborts the conversation's work instead (below):
+  // pi-durable ends the turn, and the tool call with it.
+  let cancelled: restate.CancelledError | undefined;
   const failing = (t: ToolRegistration): ToolRegistration => ({
     ...t,
-    execute: (...args) =>
-      t.execute(...args).catch((error: unknown) => {
+    execute: (args, api, task) =>
+      t.execute(args, api, task).catch((error: unknown) => {
         failed(error);
+        if (error instanceof restate.CancelledError) {
+          cancelled = error;
+          return awaitWithContext(new Promise<never>(() => {}), task);
+        }
         cancel(error);
         return awaitWithContext(new Promise<never>(() => {}), context);
       }),
@@ -178,7 +185,10 @@ export const withPi = async <T>(
       return root;
     };
     return await Promise.race([
-      failure,
+      failure.catch(async (error: unknown) => {
+        if (error instanceof restate.CancelledError) await (await conversation()).abort(context);
+        throw error;
+      }),
       work({
         harness,
         context,
@@ -188,6 +198,8 @@ export const withPi = async <T>(
           const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
           const settled = await submission.wait(context);
           if (settled.status !== 'done' || settled.answer === undefined) {
+            // A prompt the cancellation's abort ended fails with the cancellation.
+            if (cancelled) throw cancelled;
             const reason = settled.reason ?? 'unknown';
             const check =
               reason === 'model_error' || reason === 'no_model' ? ` (the model ${model}: ${CHECK_MODEL})` : '';

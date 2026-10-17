@@ -2,7 +2,9 @@
 // handler (see ../testing.ts): LangGraph gets no chance to save anything on the
 // way out of a crashed attempt. `make test-ts T=langgraph`. Its model is the teller (../fakes/langgraph.ts).
 import { describe, expect, it, vi } from 'vitest';
-import { conversation, crashedAnywhere, SAID } from '../testing.ts';
+import * as restate from '@restatedev/restate-sdk';
+import { CANCELLED } from 'restate-agents';
+import { afterCancel, cancelledTransfer, conversation, crashedAnywhere, SAID } from '../testing.ts';
 import { Teller } from '../fakes/langgraph.ts';
 import * as langgraph from 'restate-agents/langgraph';
 import { prompt } from './langgraph.ts';
@@ -10,6 +12,32 @@ import { prompt } from './langgraph.ts';
 vi.mock('@langchain/anthropic', () => import('../fakes/langgraph.ts'));
 
 describe('the LangGraph agent', () => {
+  it('ends a cancelled turn, and answers the next message afresh', async () => {
+    const { failed, answer, parts } = await afterCancel(
+      langgraph.chat({ tools: [cancelledTransfer] }),
+      langgraph.messages(),
+    );
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(answer).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    expect(parts).toEqual([
+      [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
+      [
+        { type: 'text', text: 'On it.' },
+        {
+          type: 'tool',
+          id: 'call_1',
+          name: 'transfer',
+          input: { from: 1, to: 2, amount: 5 },
+          output: CANCELLED,
+          error: true,
+        },
+      ],
+      [{ type: 'text', text: CANCELLED }],
+      [{ type: 'text', text: 'Hello' }],
+      [{ type: 'text', text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' }],
+    ]);
+  });
+
   it('answers a message once after a crash at any of its state requests', async () => {
     expect(await crashedAnywhere(prompt, langgraph.messages())).toEqual([]);
   }, 600_000);

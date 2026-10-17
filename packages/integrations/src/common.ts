@@ -79,6 +79,12 @@ const message: restate.Serde<string> = {
   },
 };
 
+/**
+ * What a cancelled turn answers, and each tool call it cut off: the model
+ * sees it in the conversation that goes on.
+ */
+export const CANCELLED = 'Cancelled: the turn was stopped before it finished.';
+
 /** The state key of the {@link Turn} being answered. */
 export const TURN = 'restate-agents.turn';
 

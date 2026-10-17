@@ -6,7 +6,7 @@ import { z } from 'zod';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { callTools, fakeProvider, say, textOf } from '../fakes/pi.ts';
-import { sqlAttempt } from '../testing.ts';
+import { afterCancel, cancelledTransfer, sqlAttempt } from '../testing.ts';
 
 // It repeats what it was told so far; asked to delegate, it hands out two
 // tasks, and then reports their results.
@@ -29,6 +29,9 @@ vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
       }
       if (textOf(last.content) === 'Break it') return callTools([['boom', {}]]);
       if (textOf(last.content) === 'Look it up') return callTools([['lookup', {}]]);
+      if (textOf(last.content) === 'Please move 5 from 1 to 2') {
+        return callTools([['transfer', { from: 1, to: 2, amount: 5 }]], 'On it.');
+      }
       if (textOf(last.content).startsWith('delegate')) {
         return callTools([
           ['coder', { name: 'fizzbuzz', task: 'write fizzbuzz.py' }],
@@ -134,6 +137,29 @@ const twice = async (ctx: restate.SqlObjectContext) => [
 ];
 
 describe('pi.chat', () => {
+  it('ends a cancelled turn, and answers the next message afresh', async () => {
+    const { failed, answer, parts } = await afterCancel(pi.chat({ tools: [cancelledTransfer] }), pi.messages());
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(answer).toBe('Please move 5 from 1 to 2 / Hello');
+    // pi-durable's abort ends the tool call, as its own error.
+    expect(parts).toEqual([
+      [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
+      [
+        { type: 'text', text: 'On it.' },
+        {
+          type: 'tool',
+          id: expect.any(String),
+          name: 'transfer',
+          input: { from: 1, to: 2, amount: 5 },
+          output: expect.stringContaining('Tool transfer was aborted'),
+          error: true,
+        },
+      ],
+      [{ type: 'text', text: 'Hello' }],
+      [{ type: 'text', text: 'Please move 5 from 1 to 2 / Hello' }],
+    ]);
+  });
+
   it('takes options for each invocation', async () => {
     const ada = object('ada');
     const chat = pi.chat(async (ctx) => ({ system: `You are ${ctx.key}.` }));
