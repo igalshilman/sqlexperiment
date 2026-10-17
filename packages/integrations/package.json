@@ -55,6 +55,7 @@
     "@opencode/sdk": "2.0.27",
     "@opencode/server": "2.0.27",
     "@restatedev/restate-sdk": "1.17.3",
+    "@restatedev/restate-sdk-clients": "1.17.3",
     "@restatedev/restate-sdk-core": "1.17.3",
     "@standard-schema/spec": "1.1.0",
     "effect": "4.0.1",

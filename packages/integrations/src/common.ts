@@ -118,23 +118,33 @@ export interface Steerable {
   has(id: string): Promise<boolean>;
 }
 
-/** The messages steered to the turn of `ctx` (see `steer` in object.ts), and the ids of those taken. */
-async function steeringOf(ctx: restate.SqlObjectContext) {
-  const taken = steerings.get(ctx);
-  if (!taken) return { taken: new Set<string>(), messages: [] };
-  const { service } = ctx.request().target;
-  const messages = await ctx.objectClient(signals, signalsOf(service, ctx.key)).steering(ctx.request().id);
-  return { taken, messages: messages.filter((m) => !taken.has(m.id)) };
-}
+/** The `signals` object of the agent of `ctx`. */
+const signalsOfAgent = (ctx: restate.SqlObjectContext) =>
+  ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key));
 
 /**
- * Give `conversation` the messages steered to the turn of `ctx` (a `chat`
- * handler's) since, which it does not have yet. A framework calls it at the
- * end of each tool call, while the turn goes on: its next step takes them.
+ * The conversation of `ctx` changed (see `watch` in object.ts): its revision
+ * increases, and the clients that follow it read it again. It is a call to
+ * Restate, so it also sends what the handler wrote before, for them to read.
  */
-export async function takeSteering(ctx: restate.SqlObjectContext, conversation: Steerable) {
-  const { taken, messages } = await steeringOf(ctx);
-  for (const message of messages) {
+export const publish = async (ctx: restate.SqlObjectContext) => {
+  await signalsOfAgent(ctx).publish();
+};
+
+/** A tool call of the turn of `ctx` starts: {@link publish} it (its call is stored). */
+export const toolCallStarted = (ctx: restate.SqlObjectContext) => publish(ctx);
+
+/**
+ * A tool call of the turn of `ctx` (a `chat` handler's) ended: {@link publish}
+ * it, and give `conversation` the messages steered to the turn since, which it
+ * does not have yet: its next step takes them. Without a conversation (a
+ * framework that takes no steering), they wait for the turn's end.
+ */
+export async function toolCallEnded(ctx: restate.SqlObjectContext, conversation?: Steerable) {
+  const messages = await signalsOfAgent(ctx).progress(ctx.request().id);
+  const taken = steerings.get(ctx);
+  if (!taken || !conversation) return;
+  for (const message of messages.filter((m) => !taken.has(m.id))) {
     if (!(await conversation.has(message.id))) await conversation.steer(message);
     taken.add(message.id);
   }
@@ -147,8 +157,11 @@ export async function takeSteering(ctx: restate.SqlObjectContext, conversation: 
  * their own, when it ends.
  */
 export async function settleSteering(ctx: restate.SqlObjectContext, conversation: Pick<Steerable, 'has'>) {
-  const { taken, messages } = await steeringOf(ctx);
-  for (const message of messages) if (await conversation.has(message.id)) taken.add(message.id);
+  const taken = steerings.get(ctx);
+  if (!taken) return;
+  for (const message of await signalsOfAgent(ctx).steering(ctx.request().id)) {
+    if (!taken.has(message.id) && (await conversation.has(message.id))) taken.add(message.id);
+  }
 }
 
 /** A promise that rejects with `signal`'s reason once it aborts. */
@@ -172,8 +185,10 @@ export const aborted = (signal: AbortSignal) =>
  * ends the turn, and the handler fails with a `restate.CancelledError`.
  *
  * Messages steered to it (`steer`) go to the agent's conversation at its next
- * tool call ({@link takeSteering}); when it ends, those it did not take are
- * answered as messages of their own, unless it was cancelled.
+ * tool call ({@link toolCallEnded}); when it ends, those it did not take are
+ * answered as messages of their own, unless it was cancelled. It publishes
+ * when it starts and ends ({@link publish}), for the clients that follow the
+ * conversation.
  */
 export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: string) => Promise<string>) =>
   restate.handlers.object.exclusive(
@@ -185,12 +200,14 @@ export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: str
       }
       const taken = new Set<string>();
       steerings.set(ctx, taken);
+      await publish(ctx);
       const agent = { service: ctx.request().target.service, key: ctx.key };
-      const end = (cancelled = false) => {
+      const end = async (cancelled = false) => {
         ctx.clear(TURN);
         ctx
           .objectSendClient(signals, signalsOf(agent.service, agent.key))
           .close({ agent, turn: invocationId, taken: [...taken], cancelled });
+        await publish(ctx);
       };
       const turn = new AbortController();
       turns.set(ctx, turn.signal);
@@ -206,17 +223,17 @@ export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: str
         // Cancelled once answered: the answer stands.
       } catch (error) {
         if (error instanceof restate.TerminalError) {
-          end(error instanceof restate.CancelledError);
+          await end(error instanceof restate.CancelledError);
           throw error;
         }
         // Any other error fails the attempt, and Restate retries the turn.
         if (!refused(error)) throw error;
-        end();
+        await end();
         throw new restate.TerminalError(`the model's provider refused the request: ${CHECK_MODEL}. ${String(error)}`, {
           errorCode: REFUSED,
         });
       }
-      end();
+      await end();
       return answered;
     },
   );

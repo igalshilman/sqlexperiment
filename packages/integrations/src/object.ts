@@ -1,7 +1,16 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from '@restatedev/restate-sdk';
 import { messageSerde, TURN, type Turn } from './common.ts';
-import { type Resolved, type Signal, type Steered, signals, signalsOf, type Waiting } from './signals.ts';
+import {
+  type Notifications,
+  type Resolved,
+  type Signal,
+  type Steered,
+  signals,
+  signalsOf,
+  type Waiting,
+  type Watch,
+} from './signals.ts';
 
 /**
  * The options of every object here: SQL (`ctx.db`: no journal replay, lazy
@@ -43,9 +52,10 @@ export interface Stopped {
  * The handlers every object here has, beside its own: `signal`, which
  * resolves a wait of the object's tools (see `signal` in tools.ts),
  * `pending`, the waits, `status`, what the object is doing, `stop`, which
- * stops the message it answers, and `steer`, which adds to it. They are
- * shared, so they run while the object's handler works, and journaled: they
- * use no `ctx.db`.
+ * stops the message it answers, `steer`, which adds to it, and
+ * `notifications` and `watch`, the revision of its conversation, and a wait
+ * for a newer one. They are shared, so they run while the object's handler
+ * works, and journaled: they use no `ctx.db`.
  */
 const BUILT_IN = {
   signal: restate.handlers.object.shared(
@@ -87,6 +97,31 @@ const BUILT_IN = {
         .steer({ agent, turn: turn?.invocationId ?? null, text });
     },
   ),
+  /** The revision of the conversation: each change of what `messages` and `status` give increases it. */
+  notifications: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.ObjectSharedContext): Promise<Notifications> =>
+      ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).notifications(),
+  ),
+  /**
+   * The revision, once it is past `afterRevision`, or at the timeout (50 s by
+   * default, at most 60 s), whichever comes first: a client then reads what
+   * changed. It waits in Restate, holding no process; a client that retries
+   * it with the same idempotency key joins the same wait.
+   */
+  watch: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.ObjectSharedContext, { afterRevision, timeoutSeconds = 50 }: Watch): Promise<Notifications> => {
+      const key = signalsOf(ctx.request().target.service, ctx.key);
+      const { id, promise } = ctx.awakeable<Notifications>();
+      ctx.objectSendClient(signals, key).subscribe({ afterRevision, awakeable: id });
+      const timeout = ctx.sleep({ seconds: Math.min(Math.max(timeoutSeconds, 0), 60) }).map(() => null);
+      const changed = await restate.RestatePromise.race([promise, timeout]);
+      if (changed) return changed;
+      ctx.objectSendClient(signals, key).unsubscribe(id);
+      return ctx.objectClient(signals, key).notifications();
+    },
+  ),
 };
 
 /** A handler: `ctx` is the object's context, with `ctx.db`; the input, if any, is annotated. */
@@ -109,7 +144,9 @@ type Reserved = { [name in keyof typeof BUILT_IN]?: 'a handler every object has:
  * Besides its own handlers, it has `status`, what it is doing (the message
  * it answers, and what its tools wait for), `stop`, which stops that
  * message, `steer`, which adds to it, `pending`, the waits of its tools
- * (`signal()`), and `signal({ id, value })`, which resolves one.
+ * (`signal()`), `signal({ id, value })`, which resolves one, and
+ * `notifications` and `watch({ afterRevision })`, to follow its
+ * conversation (`follow()` of restate-agents/client).
  *
  * `options` and `metadata` add to (or replace) the ones set here, such as
  * `options: { journalRetention: { hours: 1 } }` to look at journals in the

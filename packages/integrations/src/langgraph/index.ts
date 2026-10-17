@@ -42,6 +42,8 @@ import {
   modelIdOf,
   modelOf,
   nextPromptId,
+  toolCallEnded,
+  toolCallStarted,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -65,12 +67,28 @@ const State = Annotation.Root({
  * The tools node: each tool call of the model's last message run by a
  * ToolNode, whose tool's error fails the attempt; and a call of a tool the
  * agent does not have answered with an error, for the model to see (the
- * ToolNode would fail the attempt, and every retry the same way).
+ * ToolNode would fail the attempt, and every retry the same way). The round
+ * is published as it starts and ends, for the clients that follow the
+ * conversation.
  */
-function toolsNode(tools: StructuredToolInterface[]) {
+function toolsNode(ctx: restate.SqlObjectContext, tools: StructuredToolInterface[]) {
+  const run = runTools(tools);
+  return async (state: typeof MessagesAnnotation.State, config: RunnableConfig) => {
+    await toolCallStarted(ctx);
+    const ran = await run(state, config);
+    await toolCallEnded(ctx);
+    return ran;
+  };
+}
+
+/** The tool calls of the model's last message: the tools the agent has, run by a ToolNode, and an error for the others. */
+function runTools(tools: StructuredToolInterface[]) {
   const node = new ToolNode(tools, { handleToolErrors: false });
   const names = new Set(tools.map((t) => t.name));
-  return async (state: typeof MessagesAnnotation.State, config: RunnableConfig) => {
+  return async (
+    state: typeof MessagesAnnotation.State,
+    config: RunnableConfig,
+  ): Promise<{ messages: BaseMessage[] }> => {
     const last = state.messages.at(-1) as AIMessage;
     const calls = last.tool_calls ?? [];
     const unknown = calls.filter((c) => !names.has(c.name));
@@ -102,14 +120,14 @@ function toolsNode(tools: StructuredToolInterface[]) {
 }
 
 /** The agent's graph: `model`, calling `tools`. */
-function graph(model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
+function graph(ctx: restate.SqlObjectContext, model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
   if (!model.bindTools) throw new Error(`${model.getName()} does not call tools`);
   const withTools = model.bindTools(tools);
   return new StateGraph(State)
     .addNode('model', async ({ messages }) => ({
       messages: [await withTools.invoke(system ? [new SystemMessage(system), ...messages] : messages)],
     }))
-    .addNode('tools', toolsNode(tools))
+    .addNode('tools', toolsNode(ctx, tools))
     .addNode('answer', ({ prompt, messages }) => ({ answers: { [prompt]: messages.at(-1)!.text } }))
     .addEdge(START, 'model')
     .addConditionalEdges('model', toolsCondition, { tools: 'tools', [END]: 'answer' })
@@ -151,6 +169,7 @@ export const prompt = async (
       ? model
       : new ChatAnthropic({ model: modelIdOf(modelOf(model, DEFAULT_MODEL), 'anthropic') });
   const app = graph(
+    ctx,
     llm,
     tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
     system,

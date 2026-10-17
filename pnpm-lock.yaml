@@ -189,6 +189,9 @@ importers:
       '@restatedev/restate-sdk':
         specifier: file:../sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
         version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)
+      '@restatedev/restate-sdk-clients':
+        specifier: 1.17.3
+        version: 1.17.3
       '@restatedev/restate-sdk-core':
         specifier: 1.17.3
         version: 1.17.3

@@ -61,7 +61,8 @@ your own (`restate.serve`, `restate.endpoint()`) binds `signals` too.
 The same agent runs on each of them: `agent({ name, ...options })`, with
 the handlers `chat` (a message in, the answer out) and `messages` (the
 conversation so far), `status` (what it is doing), `stop` and `steer` (the
-message it answers), and `signal` and `pending` ([Signals](#signals)).
+message it answers), `notifications` and `watch` (to follow it), and `signal`
+and `pending` ([Signals](#signals)).
 
 | Import                                                | Framework                       | Choose it when                                                                                |
 | ----------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -215,6 +216,23 @@ curl localhost:8080/support/alice/status
 In a tool part, `error: true` says the output is the tool's error (`Error:
 <message>`), for a UI to show it as one.
 
+**Follow it.** Instead of polling `messages` and `status`, a UI waits for
+the next change: `notifications` is the conversation's revision, which each
+change increases (a message or tool call stored, a wait, a turn's start and
+end), and `watch` answers once the revision is past the one given, or at its
+timeout (50 s by default, at most 60). It waits in Restate, holding no
+process; `follow()` of `restate-agents/client` (below) does the reading and
+the waiting:
+
+```sh
+curl localhost:8080/support/alice/notifications                          # {"revision": 7}
+curl localhost:8080/support/alice/watch --json '{"afterRevision": 7}'     # {"revision": 8}, once something changed
+```
+
+The revision says only that something changed; a client then reads
+`messages` and `status` again. The model's reply comes whole, with its
+message: there is no token streaming.
+
 **From code.** From a Restate handler, through the agent's definition:
 
 ```ts
@@ -225,8 +243,8 @@ From any other code, a web app included, with Restate's own client
 ([`@restatedev/restate-sdk-clients`](https://docs.restate.dev/develop/ts/clients)).
 `agent(name)` of `restate-agents/client` is the agent's definition as the
 client takes it: its name, typed with an agent's handlers. It imports
-nothing but types, so a web app bundles it without the agent's code or the
-SDK:
+Restate's client and nothing of the agent's code or the SDK, so a web app
+bundles it as it is:
 
 ```ts
 import * as clients from '@restatedev/restate-sdk-clients';
@@ -243,6 +261,24 @@ await alice.steer('Only Monday, please'); // typed while it works
 await alice.stop(); // the Stop button
 const { messages } = await alice.messages({ limit: 20 }); // the tool calls so far
 const answer = await restate.result(sent); // once it answered
+```
+
+`follow(restate, agent(name), key)` gives the conversation as it changes:
+what the agent is doing, and the messages new or changed since the last
+time (a message may come again, changed, such as a tool call with its
+output: keep them by `id`), until its `signal` aborts. A network failure
+does not end it, and a wait it retries joins the one already parked in
+Restate:
+
+```ts
+import { agent, follow } from 'restate-agents/client';
+
+const stop = new AbortController();
+const messages = new Map<number, ChatMessage>();
+for await (const change of follow(restate, agent('assistant'), 'alice', { signal: stop.signal })) {
+  for (const m of change.messages) messages.set(m.id, m);
+  render(change.status, [...messages.values()]);
+}
 ```
 
 `restate-agents/client` also has the types of what the handlers answer
@@ -426,7 +462,7 @@ API, such as compacting the conversation (see their READMEs).
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and
 `metadata` add to these. Its own handlers cannot be named `signal`,
-`pending`, `status`, `stop` or `steer`, which every object has. A shared handler of yours
+`pending`, `status`, `stop`, `steer`, `notifications` or `watch`, which every object has. A shared handler of yours
 reads the database too: `ctx.db` is the database as stored, beside a
 message being answered.
 

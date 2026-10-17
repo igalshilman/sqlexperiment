@@ -35,6 +35,8 @@ import {
   modelIdOf,
   modelOf,
   nextPromptId,
+  toolCallEnded,
+  toolCallStarted,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
@@ -89,8 +91,13 @@ interface Agent {
   tools: BetaRunnableTool[];
 }
 
-/** Run prompt `id` of `conversation` until it is answered, from its stored messages. */
+/**
+ * Run prompt `id` of `conversation` until it is answered, from its stored
+ * messages; each round of tool calls published as it starts and ends (for
+ * the clients that follow the conversation).
+ */
 async function run(
+  ctx: restate.SqlObjectContext,
   { client, model, maxTokens, system, tools: all }: Agent,
   conversation: Conversation,
   id: string,
@@ -124,9 +131,11 @@ async function run(
     }
     // The reply first, then its tools.
     await conversation.append(id, [reply]);
+    await toolCallStarted(ctx);
     const results = await runner.generateToolResponse();
     check();
     if (results) await conversation.append(id, [results]);
+    await toolCallEnded(ctx);
   }
 }
 
@@ -186,7 +195,7 @@ export const prompt = async (
     }
     const turn = cancellationOf(ctx);
     try {
-      const running = run(agent, conversation, pending, turn);
+      const running = run(ctx, agent, conversation, pending, turn);
       running.catch(() => {});
       await (turn ? Promise.race([running, aborted(turn)]) : running);
     } catch (error) {
