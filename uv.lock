@@ -302,10 +302,41 @@ wheels = [
 ]
 
 [[package]]
+name = "restate-sdk"
+source = { editable = "packages/sdk-python/.build/sdk-python" }
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", marker = "extra == 'test'" },
+    { name = "backports-zstd", marker = "python_full_version < '3.14' and extra == 'zstd'" },
+    { name = "dacite", marker = "extra == 'serde'" },
+    { name = "google-adk", marker = "extra == 'adk'", specifier = ">=1.20.0" },
+    { name = "httpx", marker = "extra == 'harness'" },
+    { name = "httpx", extras = ["http2"], marker = "extra == 'client'" },
+    { name = "hypercorn", marker = "extra == 'harness'" },
+    { name = "hypercorn", marker = "extra == 'test'" },
+    { name = "langchain", marker = "extra == 'langchain'", specifier = ">=1.0.0" },
+    { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=1.0.0" },
+    { name = "langgraph", marker = "extra == 'langchain'", specifier = ">=1.0.0" },
+    { name = "msgspec", marker = "extra == 'serde'" },
+    { name = "mypy", marker = "extra == 'lint'", specifier = ">=1.11.2" },
+    { name = "openai-agents", marker = "extra == 'openai'", specifier = ">=0.6.1" },
+    { name = "opentelemetry-api", marker = "extra == 'tracing'", specifier = ">=1.36.0" },
+    { name = "pydantic", marker = "extra == 'serde'" },
+    { name = "pydantic-ai-slim", marker = "extra == 'pydantic-ai'", specifier = ">=2.0,<3" },
+    { name = "pyright", marker = "extra == 'lint'", specifier = ">=1.1.390" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6.9" },
+    { name = "testcontainers", marker = "extra == 'harness'" },
+]
+provides-extras = ["adk", "client", "harness", "langchain", "lint", "openai", "pydantic-ai", "serde", "test", "tracing", "zstd"]
+
+[[package]]
 name = "restate-sql"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "restate-sdk" },
     { name = "sqlite-kv" },
 ]
 
@@ -318,7 +349,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "sqlite-kv", editable = "packages/sql-python" }]
+requires-dist = [
+    { name = "restate-sdk", editable = "packages/sdk-python/.build/sdk-python" },
+    { name = "sqlite-kv", editable = "packages/sql-python" },
+]
 
 [package.metadata.requires-dev]
 dev = [

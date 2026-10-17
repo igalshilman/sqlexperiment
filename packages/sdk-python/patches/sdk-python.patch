@@ -1,0 +1,461 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index ce23f1c..df22f3d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -15,3 +15,7 @@ doc = false
+ pyo3 = { version = "0.25.1", features = ["extension-module"] }
+ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+ restate-sdk-shared-core = { version = "7.0.3", features = ["request_identity", "sha2_random_seed", "rust_crypto"] }
++
++# The patched shared core, which setup.sh clones next to this one.
++[patch.crates-io]
++restate-sdk-shared-core = { path = "../sdk-shared-core" }
+diff --git a/pyproject.toml b/pyproject.toml
+index 13b86df..8d2f693 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -44,6 +44,15 @@ features = ["pyo3/extension-module"]
+ module-name = "restate._internal"
+ python-source = "python"
+ 
++# Rebuilt by uv when the Rust changes, its own or the patched core's (cloned next to it).
++[tool.uv]
++cache-keys = [
++    { file = "pyproject.toml" },
++    { file = "Cargo.toml" },
++    { file = "src/**/*.rs" },
++    { file = "../sdk-shared-core/src/**/*.rs" },
++]
++
+ [tool.ruff]
+ line-length = 120
+ target-version = "py310"
+diff --git a/python/restate/handler.py b/python/restate/handler.py
+index 91a55a7..60b128e 100644
+--- a/python/restate/handler.py
++++ b/python/restate/handler.py
+@@ -239,6 +239,7 @@ class Handler(Generic[I, O]):
+         enable_lazy_state: If true, lazy state is enabled.
+         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
+         invocation_retry_policy: Optional retry policy configuration applied to this handler.
++        journal_replay: If false, a retried attempt runs the handler again instead of replaying its journal.
+     """
+ 
+     service_tag: ServiceTag
+@@ -258,6 +259,7 @@ class Handler(Generic[I, O]):
+     ingress_private: Optional[bool] = None
+     invocation_retry_policy: Optional[InvocationRetryPolicy] = None
+     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None
++    journal_replay: bool = True
+ 
+ 
+ # disable too many arguments warning
+@@ -281,6 +283,7 @@ def make_handler(
+     ingress_private: Optional[bool] = None,
+     invocation_retry_policy: Optional[InvocationRetryPolicy] = None,
+     context_managers: Optional[List[Callable[[], AsyncContextManager[None]]]] = None,
++    journal_replay: Optional[bool] = None,
+ ) -> Handler[I, O]:
+     """
+     Factory function to create a handler.
+@@ -303,6 +306,7 @@ def make_handler(
+         ingress_private: If true, the handler cannot be invoked from the HTTP nor Kafka ingress.
+         invocation_retry_policy: Retry policy used by Restate when invoking this handler.
+             NOTE: only supported with restate-server >= 1.5.
++        journal_replay: If false, a retried attempt runs the handler again instead of replaying its journal.
+     """
+     # try to deduce the handler name
+     handler_name = name
+@@ -335,6 +339,7 @@ def make_handler(
+         ingress_private=ingress_private,
+         invocation_retry_policy=invocation_retry_policy,
+         context_managers=context_managers,
++        journal_replay=journal_replay is not False,
+     )
+ 
+     vars(wrapped)[RESTATE_UNIQUE_HANDLER_SYMBOL] = handler
+diff --git a/python/restate/object.py b/python/restate/object.py
+index 14d5ef5..3ba219a 100644
+--- a/python/restate/object.py
++++ b/python/restate/object.py
+@@ -71,6 +71,9 @@ class VirtualObject:
+             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+             otherwise the service discovery will fail.
+         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this virtual object.
++        journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++            against the state as stored, instead of replaying the journal of earlier attempts. Handlers may override it.
++            Without it, ctx.run and awakeables are not available. Default True.
+     """
+ 
+     handlers: typing.Dict[str, Handler[typing.Any, typing.Any]]
+@@ -90,6 +93,7 @@ class VirtualObject:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ):
+         self.service_tag = ServiceTag("object", name, description, metadata)
+         self.handlers = {}
+@@ -101,6 +105,7 @@ class VirtualObject:
+         self.ingress_private = ingress_private
+         self.invocation_retry_policy = invocation_retry_policy
+         self.context_managers = invocation_context_managers
++        self.journal_replay = journal_replay
+ 
+     @property
+     def name(self):
+@@ -129,6 +134,7 @@ class VirtualObject:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Decorator for defining a handler function.
+@@ -170,6 +176,9 @@ class VirtualObject:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+ 
+         Returns:
+             Callable: The decorated function.
+@@ -214,6 +223,7 @@ class VirtualObject:
+                 ingress_private,
+                 invocation_retry_policy,
+                 combined_context_managers,
++                journal_replay=self.journal_replay if journal_replay is None else journal_replay,
+             )
+             self.handlers[handler.name] = handler
+             return wrapped
+diff --git a/python/restate/server.py b/python/restate/server.py
+index c5e233f..66d5478 100644
+--- a/python/restate/server.py
++++ b/python/restate/server.py
+@@ -320,7 +320,11 @@ def asgi_app(endpoint: Endpoint) -> RestateAppT:
+             try:
+                 journal_codec = await get_codec()
+                 await process_invocation_to_completion(
+-                    VMWrapper(request_headers, disable_payload_checks=disable_payload_checks),
++                    VMWrapper(
++                        request_headers,
++                        disable_payload_checks=disable_payload_checks,
++                        journal_replay=handler.journal_replay,
++                    ),
+                     handler,
+                     dict(request_headers),
+                     receive_channel,
+diff --git a/python/restate/service.py b/python/restate/service.py
+index cecd90f..26736b9 100644
+--- a/python/restate/service.py
++++ b/python/restate/service.py
+@@ -68,6 +68,9 @@ class Service:
+             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+             otherwise the service discovery will fail.
+         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this service.
++        journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++            against the state as stored, instead of replaying the journal of earlier attempts. Handlers may override it.
++            Without it, ctx.run and awakeables are not available. Default True.
+         invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this service.
+     """
+ 
+@@ -85,6 +88,7 @@ class Service:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> None:
+         self.service_tag = ServiceTag("service", name, description, metadata)
+         self.handlers: typing.Dict[str, Handler] = {}
+@@ -95,6 +99,7 @@ class Service:
+         self.ingress_private = ingress_private
+         self.invocation_retry_policy = invocation_retry_policy
+         self.context_managers = invocation_context_managers
++        self.journal_replay = journal_replay
+ 
+     @property
+     def name(self):
+@@ -120,6 +125,7 @@ class Service:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Decorator for defining a handler function.
+@@ -157,6 +163,9 @@ class Service:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+             invocation_context_managers: List of context manager factories that will be applied to each invocation of this handler.
+ 
+         Returns:
+@@ -205,6 +214,7 @@ class Service:
+                 ingress_private,
+                 invocation_retry_policy,
+                 combined_context_managers,
++                journal_replay=self.journal_replay if journal_replay is None else journal_replay,
+             )
+             self.handlers[handler.name] = handler
+             return wrapped
+diff --git a/python/restate/vm.py b/python/restate/vm.py
+index 7b7b91f..e652181 100644
+--- a/python/restate/vm.py
++++ b/python/restate/vm.py
+@@ -205,8 +205,13 @@ class VMWrapper:
+     It provides a type-friendly interface to our shared vm.
+     """
+ 
+-    def __init__(self, headers: typing.List[typing.Tuple[str, str]], disable_payload_checks: bool = False):
+-        self.vm = PyVM(headers, disable_payload_checks)
++    def __init__(
++        self,
++        headers: typing.List[typing.Tuple[str, str]],
++        disable_payload_checks: bool = False,
++        journal_replay: bool = True,
++    ):
++        self.vm = PyVM(headers, disable_payload_checks, journal_replay)
+ 
+     def get_response_head(self) -> typing.Tuple[int, typing.Iterable[typing.Tuple[str, str]]]:
+         """
+diff --git a/python/restate/workflow.py b/python/restate/workflow.py
+index b87a996..331153d 100644
+--- a/python/restate/workflow.py
++++ b/python/restate/workflow.py
+@@ -76,6 +76,9 @@ class Workflow:
+             NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+             otherwise the service discovery will fail.
+         invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
++        journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++            against the state as stored, instead of replaying the journal of earlier attempts. Handlers may override it.
++            Without it, ctx.run and awakeables are not available. Default True.
+         invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this workflow.
+     """
+ 
+@@ -96,6 +99,7 @@ class Workflow:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ):
+         self.service_tag = ServiceTag("workflow", name, description, metadata)
+         self.handlers = {}
+@@ -107,6 +111,7 @@ class Workflow:
+         self.ingress_private = ingress_private
+         self.invocation_retry_policy = invocation_retry_policy
+         self.context_managers = invocation_context_managers
++        self.journal_replay = journal_replay
+ 
+     @property
+     def name(self):
+@@ -133,6 +138,7 @@ class Workflow:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Mark this handler as a workflow entry point.
+@@ -173,6 +179,9 @@ class Workflow:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this workflow.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+         """
+         return self._add_handler(
+             name,
+@@ -191,6 +200,7 @@ class Workflow:
+             ingress_private=ingress_private,
+             invocation_retry_policy=invocation_retry_policy,
+             invocation_context_managers=invocation_context_managers,
++            journal_replay=journal_replay,
+         )
+ 
+     def handler(
+@@ -211,6 +221,7 @@ class Workflow:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Decorator for defining a handler function.
+@@ -251,6 +262,9 @@ class Workflow:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+             invocation_context_managers (List[Callable[[], AsyncContextManager[None]]], optional): List of context manager factories that will be applied to each invocation of this handler.
+         """
+         return self._add_handler(
+@@ -270,6 +284,7 @@ class Workflow:
+             ingress_private,
+             invocation_retry_policy,
+             invocation_context_managers,
++            journal_replay=journal_replay,
+         )
+ 
+     # pylint: disable=R0914
+@@ -293,6 +308,7 @@ class Workflow:
+         invocation_context_managers: typing.Optional[
+             typing.List[typing.Callable[[], typing.AsyncContextManager[None]]]
+         ] = None,
++        journal_replay: typing.Optional[bool] = None,
+     ) -> typing.Callable[[T], T]:
+         """
+         Decorator for defining a handler function.
+@@ -337,6 +353,9 @@ class Workflow:
+                 NOTE: You can set this field only if you register this service against restate-server >= 1.4,
+                 otherwise the service discovery will fail.
+             invocation_retry_policy (InvocationRetryPolicy, optional): Retry policy applied for all invocations to this handler.
++            journal_replay (bool, optional): When set to False, a retried attempt runs the handler again from the start,
++                against the state as stored, instead of replaying the journal of earlier attempts.
++                This overrides the setting of the service. Default True.
+ 
+         Returns:
+             Callable: The decorated function.
+@@ -382,6 +401,7 @@ class Workflow:
+                 ingress_private=ingress_private,
+                 invocation_retry_policy=invocation_retry_policy,
+                 context_managers=combined_context_managers,
++                journal_replay=self.journal_replay if journal_replay is None else journal_replay,
+             )
+             self.handlers[handler.name] = handler
+             return wrapped
+diff --git a/src/lib.rs b/src/lib.rs
+index 319281a..2058711 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -4,9 +4,9 @@ use pyo3::types::{PyBytes, PyNone, PyString};
+ use restate_sdk_shared_core::fmt::{set_error_formatter, ErrorFormatter};
+ use restate_sdk_shared_core::{
+     AwaitResponse, AwakeableHandle, CallHandle, CoreVM, Error, Header, IdentityVerifier, Input,
+-    NonDeterministicChecksOption, NonEmptyValue, NotificationHandle, OnMaxAttempts, ResponseHead,
+-    RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture, VMOptions,
+-    Value, CANCEL_NOTIFICATION_HANDLE, VM,
++    JournalReplay, NonDeterministicChecksOption, NonEmptyValue, NotificationHandle, OnMaxAttempts,
++    ResponseHead, RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture,
++    VMOptions, Value, CANCEL_NOTIFICATION_HANDLE, VM,
+ };
+ use std::fmt;
+ use std::time::{Duration, SystemTime};
+@@ -72,7 +72,6 @@ impl From<ResponseHead> for PyResponseHead {
+     }
+ }
+ 
+-
+ type PyNotificationHandle = u32;
+ 
+ #[pyclass]
+@@ -371,10 +370,11 @@ struct PyVM {
+ #[pymethods]
+ impl PyVM {
+     #[new]
+-    #[pyo3(signature = (headers, disable_payload_checks=false))]
++    #[pyo3(signature = (headers, disable_payload_checks=false, journal_replay=true))]
+     fn new(
+         headers: Vec<(String, String)>,
+         disable_payload_checks: bool,
++        journal_replay: bool,
+     ) -> Result<Self, PyVMError> {
+         // When a journal value codec is configured, the serialized payloads written to the journal
+         // may legitimately differ between attempts (e.g. encryption with a random nonce), so we
+@@ -385,6 +385,13 @@ impl PyVM {
+             } else {
+                 NonDeterministicChecksOption::Enabled
+             },
++            // Without it, a retried attempt runs the handler again from the start, against
++            // the state as stored, instead of replaying the journal of earlier attempts.
++            journal_replay: if journal_replay {
++                JournalReplay::Enabled
++            } else {
++                JournalReplay::Disabled
++            },
+             ..Default::default()
+         };
+         Ok(Self {
+@@ -468,6 +475,11 @@ impl PyVM {
+             Ok(AwaitResponse::CancelSignalReceived) => {
+                 Ok(Bound::new(py, PyDoProgressCancelSignalReceived)?.into_any())
+             }
++            // Of protocol V8's ephemeral commands, which this SDK does not make.
++            Ok(AwaitResponse::EphemeralNotificationReady(_)) => Err(PyVMError::from(Error::new(
++                restate_sdk_shared_core::error::codes::INTERNAL,
++                "unexpected ephemeral notification: this SDK makes no ephemeral commands",
++            )))?,
+         }
+     }
+ 
+diff --git a/tests/journal_replay.py b/tests/journal_replay.py
+new file mode 100644
+index 0000000..dc02582
+--- /dev/null
++++ b/tests/journal_replay.py
+@@ -0,0 +1,58 @@
++#
++#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
++#
++#  This file is part of the Restate SDK for Python,
++#  which is released under the MIT license.
++#
++#  You can find a copy of the license in file LICENSE in the root
++#  directory of this repository or package, or at
++#  https://github.com/restatedev/sdk-typescript/blob/main/LICENSE
++#
++"""The journal_replay option: a service's default, and a handler's own."""
++
++from restate import Context, ObjectContext, Service, VirtualObject, Workflow, WorkflowContext
++from restate.vm import VMWrapper
++
++
++def test_handlers_replay_their_journal_by_default():
++    greeter = Service("greeter")
++
++    @greeter.handler()
++    async def greet(ctx: Context, name: str) -> str:
++        return name
++
++    assert greeter.handlers["greet"].journal_replay
++
++
++def test_a_service_sets_it_for_its_handlers_and_a_handler_overrides_it():
++    counter = VirtualObject("counter", journal_replay=False)
++
++    @counter.handler()
++    async def add(ctx: ObjectContext, n: int) -> None:
++        pass
++
++    @counter.handler(journal_replay=True)
++    async def replayed(ctx: ObjectContext) -> None:
++        pass
++
++    assert not counter.handlers["add"].journal_replay
++    assert counter.handlers["replayed"].journal_replay
++
++    flow = Workflow("flow")
++
++    @flow.main(journal_replay=False)
++    async def run(ctx: WorkflowContext) -> None:
++        pass
++
++    @flow.handler()
++    async def query(ctx: WorkflowContext) -> None:
++        pass
++
++    assert not flow.handlers["run"].journal_replay
++    assert flow.handlers["query"].journal_replay
++
++
++def test_the_vm_takes_it():
++    headers = [("content-type", "application/vnd.restate.invocation.v6")]
++    VMWrapper(headers, journal_replay=False)
++    VMWrapper(headers)
