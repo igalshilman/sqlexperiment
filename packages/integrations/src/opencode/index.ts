@@ -80,6 +80,8 @@ export interface OpenCodeSession {
 export interface OpenCodeOptions {
   /** OpenCode plugins, such as the one of the model. */
   plugins?: Plugin.Plugin[];
+  /** The system prompt: who the agent is, and how it answers. */
+  system?: string;
   /** The model of the session, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string | ModelRef;
   /** The agent's tools, which replace OpenCode's own. */
@@ -91,6 +93,17 @@ export interface OpenCodeOptions {
    */
   directory?: string;
 }
+
+/** An OpenCode plugin that adds `system` to the session's system prompt. */
+const systemPlugin = (system: string): Plugin.Plugin => ({
+  id: 'examples.system',
+  async setup(ctx) {
+    const hook = await ctx.session.hook('context', (request) => {
+      request.system.push({ type: 'text', text: system });
+    });
+    return () => hook.dispose();
+  },
+});
 
 /** An OpenCode plugin whose tools are `tools`, and only those. */
 function toolsPlugin(tools: Tool[], fail: (error: unknown) => Promise<never>, builtins = false): Plugin.Plugin {
@@ -205,7 +218,7 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
  */
 export const withOpenCode = async <T>(
   ctx: restate.SqlObjectContext,
-  { plugins = [], model: named, tools = [], directory }: OpenCodeOptions,
+  { plugins = [], model: named, system, tools = [], directory }: OpenCodeOptions,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
   const model = typeof named === 'object' ? named : modelRef(modelOf(named, DEFAULT_MODEL));
@@ -223,7 +236,7 @@ export const withOpenCode = async <T>(
     return new Promise<never>(() => {});
   };
   const host = await openOpenCode(db, fence, {
-    plugins: [...plugins, toolsPlugin(tools, fail, directory !== undefined)],
+    plugins: [...plugins, toolsPlugin(tools, fail, directory !== undefined), ...(system ? [systemPlugin(system)] : [])],
     config: { default_agent: 'build' },
     local: directory !== undefined,
   });
@@ -287,6 +300,8 @@ export const prompt = (ctx: restate.SqlObjectContext, text: string, options: Ope
 export interface ChatOptions {
   /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
+  /** The system prompt: who the agent is, and how it answers. */
+  system?: string;
   /** The agent's tools, which replace OpenCode's own: `tool()`s, Restate's (`call`, `signal`...), or this module's `tool`s, or for an invocation. */
   tools?: (PerCall<Tool> | AnyTool)[];
   /** The directory to work in, with OpenCode's own tools (see {@link OpenCodeOptions.directory}). */
@@ -295,10 +310,11 @@ export interface ChatOptions {
 
 /** The answer to a message, each message an invocation, the session in the object's database. */
 const respond =
-  ({ model, tools = [], directory }: ChatOptions = {}) =>
+  ({ model, system, tools = [], directory }: ChatOptions = {}) =>
   (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
     prompt(ctx, message, {
       model,
+      system,
       tools: tools.map((t) =>
         isTool(t)
           ? tool({

@@ -25,7 +25,7 @@
 import type * as restate from '@restatedev/restate-sdk';
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { HumanMessage } from '@langchain/core/messages';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { type StructuredToolInterface, tool } from '@langchain/core/tools';
 import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
@@ -49,11 +49,13 @@ const State = Annotation.Root({
 });
 
 /** The agent's graph: `model`, calling `tools`. */
-function graph(model: BaseChatModel, tools: StructuredToolInterface[]) {
+function graph(model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
   if (!model.bindTools) throw new Error(`${model.getName()} does not call tools`);
   const withTools = model.bindTools(tools);
   return new StateGraph(State)
-    .addNode('model', async ({ messages }) => ({ messages: [await withTools.invoke(messages)] }))
+    .addNode('model', async ({ messages }) => ({
+      messages: [await withTools.invoke(system ? [new SystemMessage(system), ...messages] : messages)],
+    }))
     .addNode('tools', new ToolNode(tools, { handleToolErrors: false }))
     .addNode('answer', ({ prompt, messages }) => ({ answers: { [prompt]: messages.at(-1)!.text } }))
     .addEdge(START, 'model')
@@ -78,13 +80,15 @@ export interface ChatOptions {
    * or a chat model that calls tools, or for an invocation.
    */
   model?: PerCall<string | BaseChatModel>;
+  /** The system prompt: who the agent is, and how it answers. */
+  system?: string;
   /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or LangChain's, or for an invocation. */
   tools?: (PerCall<StructuredToolInterface> | AnyTool)[];
 }
 
 /** The answer to a message, each message an invocation, the thread (the object's key) in the object's database. */
 const respond =
-  ({ model, tools = [] }: ChatOptions = {}) =>
+  ({ model, system, tools = [] }: ChatOptions = {}) =>
   async (ctx: restate.SqlObjectContext, message: string): Promise<string> => {
     const chosen = model === undefined ? undefined : forCall(model, ctx);
     const llm =
@@ -94,6 +98,7 @@ const respond =
     const app = graph(
       llm,
       tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),
+      system,
     ).compile({ checkpointer: new SqlCheckpointSaver(ctx.db) });
     const config = { configurable: { thread_id: ctx.key }, durability: 'sync' as const };
     const id = ctx.request().id;

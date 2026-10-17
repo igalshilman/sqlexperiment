@@ -71,6 +71,8 @@ export interface PiOptions {
   model?: string;
   /** A pi-ai model registry; by default, one of the model's provider. */
   models?: MutableModels;
+  /** The system prompt: who the agent is, and how it answers. */
+  system?: string;
   /** The agent's tools, made with pi-durable's `defineTool`. */
   tools?: ToolRegistration[];
   /** A directory for the coding tools, made if missing; without one, the agent has no file system. */
@@ -93,7 +95,7 @@ async function modelsOf(provider: string): Promise<MutableModels> {
  */
 export const withPi = async <T>(
   ctx: restate.SqlObjectContext,
-  { model: named, models, tools = [], workspace }: PiOptions,
+  { model: named, models, system, tools = [], workspace }: PiOptions,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const db = ctx.db;
@@ -103,6 +105,7 @@ export const withPi = async <T>(
   const context = BACKGROUND_CONTEXT;
   const registry = createRegistry();
   registry.install(defineExtension({ name: 'tools', tools }));
+  if (system) registry.install(defineExtension({ name: 'system', sections: [section('system', () => system)] }));
   let env: (() => NodeExecutionEnv) | undefined;
   if (workspace) {
     await mkdir(workspace, { recursive: true });
@@ -144,6 +147,8 @@ export interface ChatOptions {
   model?: string;
   /** A pi-ai model registry, for a provider of your own; by default, one of the model's provider. */
   models?: MutableModels;
+  /** The system prompt: who the agent is, and how it answers. */
+  system?: string;
   /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or pi-durable's `defineTool`s, or for an invocation. */
   tools?: (PerCall<ToolRegistration> | AnyTool)[];
   /** A directory for the coding tools (see {@link PiOptions.workspace}). */
@@ -164,11 +169,12 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolRegistration =>
 
 /** The answer to a message, each message an invocation, the conversation in the object's database. */
 const respond =
-  ({ model, models, tools = [], workspace }: ChatOptions = {}) =>
+  ({ model, models, system, tools = [], workspace }: ChatOptions = {}) =>
   (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
     prompt(ctx, message, {
       model,
       models,
+      system,
       tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),
       workspace: workspace === undefined ? undefined : forCall(workspace, ctx),
     });

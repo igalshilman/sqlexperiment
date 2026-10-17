@@ -79,11 +79,11 @@ async function guard<T>(fail: (error: unknown) => void, body: () => Promise<T>):
 }
 
 /** The harness, its session in `db`: the services an agent loop needs, the persistence and its checkpoints. */
-async function boot(db: restate.SqlSession, system: string): Promise<Context> {
+async function boot(db: restate.SqlSession, system?: string): Promise<Context> {
   const harness = new Context();
   await harness.plugin(LlmRuntime);
   await harness.plugin(SessionStore);
-  await harness.plugin(SystemPrompt, { personaPrefix: system });
+  await harness.plugin(SystemPrompt, system ? { personaPrefix: system } : {});
   await harness.plugin(ToolRuntime, {});
   await harness.plugin(AgentRegistry);
   await harness.plugin(SessionProjectionRegistry);
@@ -191,7 +191,7 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolDefinition =>
 export interface ChatOptions {
   /** The model, as `deepseek/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
-  /** The system prompt's persona. */
+  /** The system prompt: who the agent is, and how it answers. */
   system?: string;
   /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the harness's (`tool` here, or `defineTool`), or for an invocation. */
   tools?: (PerCall<ToolDefinition> | AnyTool)[];
@@ -199,7 +199,7 @@ export interface ChatOptions {
 
 /** The answer to a message, each message an invocation, the session in the object's database. */
 const respond =
-  ({ model: named, system = 'Answer briefly.', tools = [] }: ChatOptions = {}) =>
+  ({ model: named, system, tools = [] }: ChatOptions = {}) =>
   async (ctx: restate.SqlObjectContext, text: string): Promise<string> => {
     const id = ctx.request().id;
     const harness = await boot(ctx.db, system);
