@@ -15,11 +15,6 @@
 // another object: they run at once, and one holds no other up. The same
 // order is the same object for every user, and remembers each report on it.
 //
-// Coding: the `code` tool hands a coding task to a coding agent of its own,
-// OpenCode in a Coder object per task, keyed `<tenant>.<user>.<task>`
-// (coder.ts): two tasks are two objects, which run at once, each with its
-// own session and files, and in its own machine where each object gets one.
-//
 // Files: with WORKSPACE set, each object gets a directory of its own,
 // `$WORKSPACE/<service>/<key>`, and pi-durable's coding tools over it
 // (read, write, edit, bash; see ../pi/with-pi.ts). Run it in a sandbox:
@@ -37,10 +32,18 @@ import { z } from 'zod';
 import { serveIfMain } from '../faults.ts';
 import { callTools, fakeProvider, lastText, type Respond, say, textOf } from '../pi/utils.ts';
 import { withPi } from '../pi/with-pi.ts';
-import { coder, workspaceOf } from './coder.ts';
+import { join } from 'node:path';
 import { gateway, identity } from './gateway.ts';
 
-export { workspaceOf };
+/**
+ * The object's own directory in WORKSPACE, if set: `<service>/<key>`, the
+ * key's characters other than letters, digits, `.`, `_` and `-` as `_`.
+ */
+export function workspaceOf(service: string, key: string, root = process.env.WORKSPACE): string | undefined {
+  if (!root) return undefined;
+  const name = key.replace(/[^\w.-]/g, '_');
+  return join(root, service, /^\.*$/.test(name) ? `_${name}` : name);
+}
 
 /** A tool's result, in a sentence: an order, a refund or a ticket, or else the text as it is. */
 export function sentence(text: string): string {
@@ -63,8 +66,7 @@ function lastResults({ messages }: TranscriptContext) {
 }
 
 /**
- * The scripted model: "code: fizzbuzz: …; primes: …" hands each task to a
- * coding agent of its own, "write notes.md: …", "read notes.md" and
+ * The scripted model: "write notes.md: …", "read notes.md" and
  * "run: ls -l" use the workspace's files, "investigate orders 103 and 104: …" hands each order
  * to its case agent at once, "where are orders 101 to 108?" looks them all
  * up at once, "refund 30 of order 103" refunds, "open a ticket for order
@@ -80,19 +82,6 @@ export function concierge(context: TranscriptContext) {
   if (read) return callTools([['read', { path: read[1]! }]]);
   const run = /^run:?\s+([^]+)$/i.exec(text);
   if (run) return callTools([['bash', { command: run[1]! }]]);
-  const code = /^code:\s*([^]+)$/i.exec(text);
-  if (code) {
-    const tasks = code[1]!
-      .split(';')
-      .map((t) => t.trim())
-      .filter(Boolean);
-    return callTools(
-      tasks.map((t, i) => {
-        const [, name = `task-${i + 1}`, task = t] = /^([\w-]+):\s*([^]+)$/.exec(t) ?? [];
-        return ['code', { name, task }];
-      }),
-    );
-  }
   if (/^\s*investigate\b/i.test(text)) {
     const [orders = '', question = text] = text.split(/:\s*/, 2);
     return callTools((orders.match(/\d+/g) ?? []).map((order) => ['investigate', { order, question }]));
@@ -141,7 +130,6 @@ export const EXAMPLES = [
   'Open a ticket for order 104: the box was empty.',
   'Where are orders 101 to 112?',
   'Investigate orders 103 and 104: the boxes arrived crushed.',
-  'Code: fizzbuzz: write fizzbuzz.py that prints FizzBuzz from 1 to 15 and run it; primes: write primes.py that prints the primes below 50 and run it',
   // With a workspace only.
   ...(process.env.WORKSPACE
     ? ['Write notes.md: order 103 arrived crushed, refund pending.', 'Read notes.md', 'Run: ls -la && cat notes.md']
@@ -247,35 +235,10 @@ export const caseAgent = restate.object({
   options,
 });
 
-/** Answer prompt `text`, with the tenant's tools, case agents and coders. */
+/** Answer prompt `text`, with the tenant's tools and case agents. */
 export const prompt = async (ctx: restate.SqlObjectContext, text: z.infer<typeof PROMPT_SCHEMA>) => {
   const { tenant, user } = identity(ctx.key);
   const tools = await gatewayTools(ctx, tenant, user);
-  tools.push(
-    defineTool({
-      name: 'code',
-      description:
-        'Hand a coding task to a coding agent with a machine and files of its own, and answer with its report. ' +
-        'Name each task: tasks of different names run at once, each in its own machine; ' +
-        'the same name continues the same task, with its files.',
-      parameters: Type.Object({
-        name: Type.String({ description: 'A short name for the task, such as "fizzbuzz": letters, digits, -' }),
-        task: Type.String({ description: 'The task, in full: the coding agent sees nothing else' }),
-      }),
-      replay: 'safe',
-      execute: async ({ name, task }, api) => {
-        const slug =
-          name
-            .toLowerCase()
-            .replace(/[^a-z0-9-]+/g, '-')
-            .replace(/^-+|-+$/g, '') || 'task';
-        const { answer } = await ctx
-          .objectClient(coder, `${ctx.key}.${slug}`)
-          .code({ task }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` }));
-        return { content: [{ type: 'text', text: answer }], isError: false };
-      },
-    }),
-  );
   tools.push(
     defineTool({
       name: 'investigate',
@@ -322,7 +285,6 @@ export const assistant = restate.object({
           ...EXAMPLES.map((e) => `- ${e}`),
           'A refund waits for a manager: `Gateway/<tenant>/pending`, then `Gateway/<tenant>/decide`.',
           'Investigating an order hands it to its case agent, `Case/<tenant>.<order>`.',
-          'Coding tasks go to a coding agent each, `Coder/<tenant>.<user>.<task>`.',
         ].join('\n'),
         metadata: Object.fromEntries(EXAMPLES.map((e, i) => [`example.${i + 1}`, e])),
         input: restate.serde.schema(PROMPT_SCHEMA),
@@ -336,4 +298,4 @@ export const assistant = restate.object({
   options,
 });
 
-serveIfMain(import.meta, [assistant, caseAgent, coder]);
+serveIfMain(import.meta, [assistant, caseAgent]);

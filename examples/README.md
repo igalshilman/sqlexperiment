@@ -10,6 +10,9 @@ One npm package, here, on the patched Restate TypeScript SDK and the
 - [`chat/`](chat/chat.ts): the smallest one, a durable chat in a few
   lines: a `session` object whose `chat` is a pi agent, its conversation in
   the object's database.
+- [`coding/`](coding/coding.ts): a coding team: a coordinator you chat with
+  (pi), which hands each coding task to a coding agent of its own (OpenCode),
+  an object per task, with its own database and directory.
 - [`node/`](node/README.md): SQL in Restate virtual objects, how it works,
   and two examples:
   - [`ledger.ts`](node/ledger.ts): accounts and transfers, deduped by

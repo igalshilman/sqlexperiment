@@ -6,8 +6,7 @@
 #
 #   docker run -p 9080:9080 -e OPENAI_API_KEY tool-gateway
 #
-# or a part: `node serve.ts gateway-assistant` (the Assistant, Case and Coder),
-# `node serve.ts gateway-coder` (the coding agents, OpenCode), or
+# or a part: `node serve.ts gateway-assistant` (the Assistant and Case), or
 # `node serve.ts gateway-tools` (the tools and the Gateway).
 #
 # Needs the patched SDK's tarball, vendor/typescript/.build (`make sdk-ts`).
@@ -19,8 +18,7 @@ COPY sqlite-kv sqlite-kv
 RUN cd sqlite-kv/node && cargo build --locked --release \
   && cp target/release/libsqlite_kv_node.so sqlite_kv.node
 
-# The packages, built where a compiler is: OpenCode's tree-sitter parsers
-# are native modules.
+# The packages.
 FROM node:24-bookworm AS deps
 WORKDIR /app
 COPY sqlite-kv/node/package.json sqlite-kv/node/index.js sqlite-kv/node/index.d.ts sqlite-kv/node/
@@ -32,26 +30,24 @@ WORKDIR /app/examples
 RUN node -e ' \
   const fs = require("fs"); \
   const p = JSON.parse(fs.readFileSync("package.json")); \
-  const keep = ["@restatedev/restate-sdk", "sqlite-kv", "zod", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable", \
-    "@opencode/core", "@opencode/plugin", "@opencode/sdk", "@opencode/server", "effect"]; \
+  const keep = ["@restatedev/restate-sdk", "sqlite-kv", "zod", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"]; \
   p.dependencies = Object.fromEntries(keep.map((k) => [k, p.dependencies[k]])); \
   delete p.devDependencies; delete p.scripts; \
   fs.writeFileSync("package.json", JSON.stringify(p, null, 2));' \
   && npm install --omit=dev --no-audit --no-fund
 
 FROM node:24-bookworm-slim
-# For the coding agents' bash tool: Python and git, besides Node.
+# For the agents' bash tool: Python and git, besides Node.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app /app
 WORKDIR /app/examples
 COPY examples/serve.ts examples/faults.ts ./
 COPY examples/pi/utils.ts examples/pi/with-pi.ts examples/pi/pi-storage.ts pi/
-COPY examples/opencode/opencode-db.ts examples/opencode/with-opencode.ts examples/opencode/teller.ts opencode/
 COPY examples/gateway/*.ts gateway/
 ENV PORT=9080
-# The agents' model, for the Assistant, Case and Coder: give OPENAI_API_KEY.
-# `-e PI_MODEL=` falls back to the scripted models (the Coder has none).
+# The agents' model, for the Assistant and Case: give OPENAI_API_KEY.
+# `-e PI_MODEL=` falls back to the scripted models.
 ENV PI_MODEL=openai/gpt-6-luna
 # Each agent object's files, in a directory of its own below this: a
 # sandbox's disk. `-e WORKSPACE=` leaves the agents without files.

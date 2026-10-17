@@ -115,12 +115,3 @@ describe('the workspace', () => {
     expect(toolCalls(user('Run: ls -la && cat notes.md'))).toEqual([['bash', { command: 'ls -la && cat notes.md' }]]);
   });
 });
-
-describe('coding tasks', () => {
-  it('go to a coder each, by name, in the scripted model', () => {
-    expect(toolCalls(user('Code: fizzbuzz: write fizzbuzz.py; primes: write primes.py'))).toEqual([
-      ['code', { name: 'fizzbuzz', task: 'write fizzbuzz.py' }],
-      ['code', { name: 'primes', task: 'write primes.py' }],
-    ]);
-  });
-});

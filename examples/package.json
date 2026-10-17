@@ -10,6 +10,7 @@
     "test:concurrency": "node concurrency.ts",
     "test:node": "vitest run node",
     "test:chat": "vitest run chat",
+    "test:coding": "vitest run coding",
     "test:pi": "vitest run pi",
     "test:langgraph": "vitest run langgraph",
     "test:claude": "vitest run claude",

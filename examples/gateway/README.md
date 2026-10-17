@@ -63,25 +63,7 @@ On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 Or as two deployments: `node serve.ts gateway-tools` (the tools and the
 Gateway: stateless, so anywhere, such as your laptop) and
 `node serve.ts gateway-assistant` (the Assistant, keyed per user, the Case,
-keyed per order, and the Coder, keyed per coding task: in a sandbox). Register both with the same Restate server.
-
-**Coding agents.** The Assistant's `code` tool hands a coding task to a
-coding agent of its own: [OpenCode](../opencode/README.md) in a `Coder`
-object per task, keyed `<tenant>.<user>.<task>` ([`coder.ts`](coder.ts)), with
-the same model as the Assistant (`PI_MODEL`, such as `openai/gpt-6-luna` with
-`OPENAI_API_KEY`; a real model only). Ask for two tasks, and the model names
-them and calls `code` twice at once: two objects, each with its own OpenCode
-session in its own database and its own directory, and, deployed where each
-object gets a machine (`node serve.ts gateway-coder`), its own machine. It
-has OpenCode's own tools (read, write, edit, bash, glob, grep...) on the
-local machine, in `$WORKSPACE/Coder/<key>`; the image has Python and git. The same task name
-continues in the same object, with its files.
-
-```
-Please do two coding tasks in parallel: (1) write fizzbuzz.py printing
-FizzBuzz for 1..15 and run it; (2) write primes.py printing the primes below
-50 and run it. Report both outputs.
-```
+keyed per order: in a sandbox). Register both with the same Restate server.
 
 With `WORKSPACE` set, each agent object gets a directory of its own,
 `$WORKSPACE/<service>/<key>`, and pi's coding tools over it: `read`, `write`,

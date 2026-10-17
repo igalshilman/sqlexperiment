@@ -182,11 +182,7 @@ export const tellerPlugin: Plugin.Plugin = {
   },
 };
 
-/** An OpenCode model reference. */
-export interface ModelRef {
-  providerID: string;
-  id: string;
-}
+import type { ModelRef } from './with-opencode.ts';
 
 /**
  * `{ plugins, model }`: OPENCODE_MODEL=provider/model-id (with the provider's

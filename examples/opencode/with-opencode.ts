@@ -1,8 +1,15 @@
 // withOpenCode: OpenCode 2.0 for one Restate invocation, with its database in
 // the virtual object's database.
 //
-//   prompt: (ctx, { id, text }) =>
-//     withOpenCode(ctx, { plugins, model, tools }, (opencode) => opencode.prompt(id, text)),
+//   code: (ctx, task) => prompt(ctx, task, { directory }),
+//
+// or, for more than a prompt:
+//
+//   code: (ctx, task) => withOpenCode(ctx, { tools }, (opencode) => opencode.prompt(id, task)),
+//
+// The model is `model`, OPENCODE_MODEL, or else anthropic/claude-sonnet-5-5,
+// which OpenCode's own providers serve, with the provider's API key (such as
+// ANTHROPIC_API_KEY).
 //
 // It runs `work` over `ctx.db`: OpenCode's tables are the object's
 // database (opencode-db.ts), and each OpenCode transaction is an SQL
@@ -23,10 +30,25 @@
 // to the model: from then on the attempt stores nothing (its fence closes),
 // and the next attempt finds the call interrupted.
 import * as restate from '@restatedev/restate-sdk';
+import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { type Fence, type Host, openOpenCode } from './opencode-db.ts';
-import type { ModelRef } from './teller.ts';
+
+/** An OpenCode model reference. */
+export interface ModelRef {
+  providerID: string;
+  id: string;
+}
+
+/** The default model, as `provider/model-id`. */
+export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
+
+/** `provider/model-id` as OpenCode names it. */
+const modelRef = (name: string): ModelRef => {
+  const [providerID = '', ...id] = name.split('/');
+  return { providerID, id: id.join('/') };
+};
 
 /** A tool: `execute` gets the input and the tool call's id. */
 export interface Tool<Input = unknown> {
@@ -52,12 +74,12 @@ export interface OpenCodeSession {
 export interface OpenCodeOptions {
   /** OpenCode plugins, such as the one of the model. */
   plugins?: Plugin.Plugin[];
-  /** The model of the session. */
-  model: ModelRef;
+  /** The model of the session, as `provider/model-id`: OPENCODE_MODEL, or else {@link DEFAULT_MODEL}. */
+  model?: string | ModelRef;
   /** The agent's tools, which replace OpenCode's own. */
   tools?: Tool[];
   /**
-   * A directory of the local machine: OpenCode keeps its own tools (read,
+   * A directory of the local machine, made if missing: OpenCode keeps its own tools (read,
    * write, edit, bash, glob, grep...) there, besides `tools`, and the
    * session works in it.
    */
@@ -177,9 +199,11 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
  */
 export const withOpenCode = async <T>(
   ctx: restate.SqlObjectContext,
-  { plugins = [], model, tools = [], directory }: OpenCodeOptions,
+  { plugins = [], model: named = process.env.OPENCODE_MODEL || DEFAULT_MODEL, tools = [], directory }: OpenCodeOptions,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
+  const model = typeof named === 'string' ? modelRef(named) : named;
+  if (directory) await mkdir(directory, { recursive: true });
   const db = ctx.db;
   const fence: Fence = { closed: false };
   let failed!: (error: unknown) => void;
@@ -249,3 +273,7 @@ export const withOpenCode = async <T>(
     await host.close();
   }
 };
+
+/** Answer `text`, once per invocation: a retried attempt resumes the same prompt. */
+export const prompt = (ctx: restate.SqlObjectContext, text: string, options: OpenCodeOptions = {}) =>
+  withOpenCode(ctx, options, (opencode) => opencode.prompt(ctx.request().id.replace(/[^\w-]/g, '_'), text));
