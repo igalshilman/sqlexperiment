@@ -23,7 +23,7 @@ await serve(assistant);
 
 Each framework has `agent({ name, ...options })`: a virtual object, one per
 key, with the handlers `chat` (a message in, the answer out), `messages`
-(the conversation so far), and `signal` and `pending` (see
+(the conversation so far, a page at a time), and `signal` and `pending` (see
 [Tools](#tools)).
 
 ## Your own object
@@ -90,13 +90,43 @@ curl localhost:8080/assistant/alice/chat -H 'idempotency-key: msg-1' -d 'Hi, I a
 curl localhost:8080/assistant/alice/chat/send -d 'Summarize our chat later'
 ```
 
-The conversation so far is `messages`: what was said, in order, as
-`{ role: 'user' | 'assistant', text }`, without tool calls and results. It
-waits for a message being answered:
+The conversation so far is `messages`, a page at a time, for a chat UI:
+what was said, in order, with the tool calls the agent made and their
+outputs. Without a body, it is the latest 50 messages:
 
 ```sh
 curl localhost:8080/assistant/alice/messages
 ```
+
+```json
+{
+  "messages": [
+    { "id": 0, "role": "user", "parts": [{ "type": "text", "text": "Weather in Paris?" }] },
+    {
+      "id": 1,
+      "role": "assistant",
+      "parts": [
+        { "type": "tool", "id": "toolu_01", "name": "weather", "input": { "city": "Paris" }, "output": "18°C, sunny" }
+      ]
+    },
+    { "id": 2, "role": "assistant", "parts": [{ "type": "text", "text": "18°C and sunny." }] }
+  ],
+  "more": false
+}
+```
+
+A message's `id` is its position in the conversation. `limit` caps a page;
+`before` an id gives older messages (scrolling back, while `more` says there
+are older ones still), and `after` an id newer ones (polling for what came
+since):
+
+```sh
+curl localhost:8080/assistant/alice/messages --json '{"limit": 20, "before": 40}'
+curl localhost:8080/assistant/alice/messages --json '{"after": 59}'
+```
+
+It reads the framework's own storage, and is exclusive: it waits for a
+message being answered, and does not show a turn while it runs.
 
 From a Restate handler, through the agent's definition:
 

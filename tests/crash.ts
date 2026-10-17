@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import type { ChildProcess } from 'node:child_process';
+import type { Messages } from 'restate-agents';
 import type { Audit } from './sql/ledger.ts';
 import type { Order, Reservation } from './sql/shop.ts';
 
@@ -328,8 +329,13 @@ services = PROCESSES.map((p) => supervise(p, 0));
 // Each agent's conversation has each prompt once, in order, however often
 // its attempts crashed and its messages were sent again.
 for (const [name, s] of sessions) {
-  const said = await call<{ role: string; text: string }[]>(`${name}/s${s}/messages`);
-  const asked = said.filter((m) => m.role === 'user').map((m) => m.text);
+  // A page at a time, from the latest back.
+  const said: Messages['messages'] = [];
+  for (let page: Messages | undefined; !page || page.more;) {
+    page = await call<Messages>(`${name}/s${s}/messages`, { limit: 20, before: said[0]?.id });
+    said.unshift(...page.messages);
+  }
+  const asked = said.filter((m) => m.role === 'user').map((m) => (m.parts[0] as { text: string }).text);
   assert.deepEqual(
     asked,
     [...Array.from({ length: PROMPTS }, (_, p) => promptText(s, p)), 'audit the books'],

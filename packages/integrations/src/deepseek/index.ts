@@ -42,7 +42,7 @@ import {
   type ToolRunContext,
   ToolRuntime,
 } from '@deepseek-ai/dsh-tools';
-import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, said, type PerCall } from '../common.ts';
+import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
@@ -266,16 +266,26 @@ export const chat = (options: ChatOptions = {}) => {
   return chatHandler(respond(options));
 };
 
-/** A handler of the session: what was said, in order, from its log. */
+/** `json` parsed, or as it is if it is not JSON. */
+const parsed = (json: string): unknown => {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return json;
+  }
+};
+
+/** A handler of the session, a page at a time: what was said, in order, with the tool calls, from its log. */
 export const messages = () =>
-  messagesHandler(async (ctx) =>
-    (await storedEvents(ctx.db, SessionId(ctx.key))).flatMap((e) => {
+  messagesHandler(async (ctx, transcript) => {
+    for (const e of await storedEvents(ctx.db, SessionId(ctx.key))) {
       // The prompts, not the requests to continue an interrupted turn.
-      if (e.type === 'user/message' && e.data.id.startsWith('prompt:')) return said('user', textOf(e.data));
-      if (e.type === 'assistant/message') return said('assistant', textOf(e.data.message));
-      return [];
-    }),
-  );
+      if (e.type === 'user/message' && e.data.id.startsWith('prompt:')) transcript.say('user', textOf(e.data));
+      if (e.type === 'assistant/message') transcript.say('assistant', textOf(e.data.message));
+      if (e.type === 'tool/call') transcript.call(e.data.callId, e.data.name, parsed(e.data.arguments));
+      if (e.type === 'tool/result') transcript.result(e.data.message.toolCallId, textOf(e.data.message));
+    }
+  });
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({
