@@ -5,6 +5,7 @@
   "description": "Agent frameworks in Restate virtual objects, their state in the object's SQL database: pi, OpenCode, LangGraph, Claude (Anthropic SDK) and DeepSeek Harness",
   "type": "module",
   "exports": {
+    ".": "./src/index.ts",
     "./claude": "./src/claude/index.ts",
     "./deepseek": "./src/deepseek/index.ts",
     "./langgraph": "./src/langgraph/index.ts",

@@ -23,7 +23,8 @@ again. Here its storage is a Restate virtual object's SQL database
   of it, which takes a message (a string) and returns the answer:
 
   ```js
-  handlers: { chat: pi.chat() }
+  const assistant = pi.agent({ name: 'assistant', tools: [weather] }); // a virtual object
+  handlers: { chat: pi.chat() } // a handler of an object of your own
   // or, for more than a prompt:
   chat: (ctx, message) => withPi(ctx, { tools }, (pi) => pi.prompt(ctx.request().id, message)),
   ```
@@ -48,8 +49,7 @@ again. Here its storage is a Restate virtual object's SQL database
   to the ledger has an idempotency key made from the request id
   (`ctx.request().id`) and the tool call id. [Its tests](../../../../tests/agents/pi.test.ts)
   run the handler through crashes.
-- [`examples/chat.ts`](../../../../examples/chat.ts): a durable chat, one `session` object
-  with `chat: pi.chat()`; [`examples/coding.ts`](../../../../examples/coding.ts): a pi
+- [`examples/chat.ts`](../../../../examples/chat.ts): a durable chat agent with a tool, `pi.agent({ name: 'assistant', tools: [weather] })`; [`examples/coding.ts`](../../../../examples/coding.ts): a pi
   coordinator that hands coding tasks to OpenCode coders with `pi.subagent`.
 
 The model is `model`, or else `PI_MODEL`, by default

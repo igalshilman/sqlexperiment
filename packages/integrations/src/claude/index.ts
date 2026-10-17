@@ -2,7 +2,9 @@
 // Anthropic SDK (`client.beta.messages.toolRunner`): the conversation is in
 // the object's database (conversation.ts).
 //
-//   handlers: { chat: claude.chat({ system: 'Answer briefly.', tools: [weather] }) }
+//   const assistant = claude.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
+//
+// or a handler of an object of your own: `handlers: { chat: claude.chat() }`
 //
 // The model is `model`, or else CLAUDE_MODEL (default claude-sonnet-5-5),
 // with ANTHROPIC_API_KEY.
@@ -21,6 +23,7 @@ import type * as restate from '@restatedev/restate-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import { forCall, type PerCall } from '../common.ts';
+import { object } from '../object.ts';
 import { Conversation } from './conversation.ts';
 
 export { Conversation };
@@ -135,3 +138,10 @@ export const chat = ({ model = process.env.CLAUDE_MODEL ?? DEFAULT_MODEL, system
     }
   };
 };
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+export const agent = <P extends string>({
+  name,
+  description,
+  ...options
+}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });

@@ -21,12 +21,6 @@ const weather = opencode.tool({
   execute: async ({ city }) => `Sunny and 21°C in ${city}`,
 });
 
-const assistant = restate.object({
-  name: 'assistant',
-  handlers: {
-    chat: opencode.chat({ tools: [weather] }),
-  },
-  options: restate.sqlOptions,
-});
+const assistant = opencode.agent({ name: 'assistant', tools: [weather] });
 
 await restate.serve({ services: [assistant] });

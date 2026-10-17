@@ -8,24 +8,24 @@
  *   curl localhost:8080/notes/alice/list
  */
 import * as restate from '@restatedev/restate-sdk';
+import { object } from 'restate-agents';
 
 const SCHEMA = 'CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)';
 
-const notes = restate.object({
+const notes = object({
   name: 'notes',
   handlers: {
-    add: async (ctx: restate.SqlObjectContext, note: string) => {
+    add: async (ctx, note: string) => {
       await ctx.db.execute(SCHEMA);
       await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
     },
 
-    list: async (ctx: restate.SqlObjectContext) => {
+    list: async (ctx) => {
       await ctx.db.execute(SCHEMA);
       const rows = await ctx.db.query('SELECT text FROM notes ORDER BY rowid');
       return rows.map(([text]) => text);
     },
   },
-  options: restate.sqlOptions,
 });
 
 await restate.serve({ services: [notes] });

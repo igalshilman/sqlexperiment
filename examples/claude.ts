@@ -23,12 +23,10 @@ const weather = betaZodTool({
   run: async ({ city }) => `Sunny and 21°C in ${city}`,
 });
 
-const assistant = restate.object({
+const assistant = claude.agent({
   name: 'assistant',
-  handlers: {
-    chat: claude.chat({ system: 'You are a friendly assistant. Answer briefly.', tools: [weather] }),
-  },
-  options: restate.sqlOptions,
+  system: 'You are a friendly assistant. Answer briefly.',
+  tools: [weather],
 });
 
 await restate.serve({ services: [assistant] });

@@ -20,7 +20,7 @@ the agent takes whatever tools you give it.
   the id of the invocation (`ctx.request().id`) it belongs to, and the answer
   to each. Each `append` is one SQL transaction.
 - [`index.ts`](index.ts): `restate-agents/claude`. `chat({ model?, system?,
-  tools? })` makes a handler, `handlers: { chat: claude.chat() }`, that takes
+  tools? })` makes a handler, `handlers: { chat: claude.chat() }`, and `agent({ name, ...options })` a virtual object whose `chat` it is (with SQL set up, see [`object`](../object.ts)), that takes
   a message (a string) and returns the answer: it starts a runner with the
   stored messages in `ctx.db`, and stores each step:
 
@@ -46,8 +46,7 @@ the agent takes whatever tools you give it.
   conversation, whose tools move money in the [ledger](../../../../tests/sql/ledger.ts), and
   [its tests](../../../../tests/agents/claude.test.ts): the handler with a fake `ctx`,
   through crashes, and a scripted model ([`tests/fakes/claude.ts`](../../../../tests/fakes/claude.ts)).
-- [`examples/claude.ts`](../../../../examples/claude.ts): a durable chat, one
-  `session` object with `chat: claude.chat()`.
+- [`examples/claude.ts`](../../../../examples/claude.ts): a durable chat agent with a tool, `claude.agent({ name: 'assistant', tools: [weather] })`.
 
 The model is `model`, or else `CLAUDE_MODEL`, by default `claude-sonnet-5-5`, with
 `ANTHROPIC_API_KEY`.

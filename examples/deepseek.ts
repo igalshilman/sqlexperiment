@@ -20,12 +20,10 @@ const weather = deepseek.tool({
   execute: async ({ city }) => `Sunny and 21°C in ${city}`,
 });
 
-const assistant = restate.object({
+const assistant = deepseek.agent({
   name: 'assistant',
-  handlers: {
-    chat: deepseek.chat({ system: 'You are a friendly assistant. Answer briefly.', tools: [weather] }),
-  },
-  options: restate.sqlOptions,
+  system: 'You are a friendly assistant. Answer briefly.',
+  tools: [weather],
 });
 
 await restate.serve({ services: [assistant] });
