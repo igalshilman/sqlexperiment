@@ -7,8 +7,7 @@
  *   curl localhost:8080/notes/alice/add --json '"Buy milk"'
  *   curl localhost:8080/notes/alice/list
  */
-import * as restate from '@restatedev/restate-sdk';
-import { object } from 'restate-agents';
+import { object, serve } from 'restate-agents';
 
 const SCHEMA = 'CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)';
 
@@ -28,4 +27,4 @@ const notes = object({
   },
 });
 
-await restate.serve({ services: [notes] });
+await serve(notes);

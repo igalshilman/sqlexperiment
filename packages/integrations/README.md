@@ -37,3 +37,36 @@ The models are real ones: by default Anthropic's `claude-sonnet-5-5`, with
 `ANTHROPIC_API_KEY` (DeepSeek's `deepseek-flash`, with `DEEPSEEK_API_KEY`, for
 the DeepSeek Harness). The tests ([`../../tests`](../../tests/README.md)) run
 them on scripted models instead.
+
+## Tools
+
+Any agent's `tools` take a framework's own tools, and the tools of
+`restate-agents`, which work the same in every framework:
+
+```ts
+import { call, send, signal, tool, workflow } from 'restate-agents';
+```
+
+| Tool                                                           | What the model gets                                                                                                                                   |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool({ name, description, input, run })`                      | A tool of your own: `input` is a zod object, `run(input, { ctx, callId })` returns text or JSON                                                       |
+| `call(target, handler, { description, input?, key? })`         | Calls a handler of a service, virtual object or workflow, and answers with its result. Of an object, the model chooses the key, unless `key` gives it |
+| `send(target, handler, { description, input?, key?, delay? })` | Sends to a handler without waiting: a one-way call, after `delay` if given                                                                            |
+| `workflow(target, { description, input? })`                    | Runs a workflow to the end, a workflow of its own per tool call, and answers with its result                                                          |
+| `signal(name, { description })`                                | Waits for a signal (a person's approval, another system's result) without holding a process, and answers with its value                               |
+
+Each Restate call has an idempotency key made of the invocation's id and the
+model's tool call id: a crash runs an unfinished tool call again, and it
+makes the same call, once.
+
+A signal is resolved through the `signals` object, keyed `<agent>:<key>`;
+`pending` lists what an agent waits for, and a signal resolved before the
+agent waits is kept for it:
+
+```sh
+curl localhost:8080/signals/support:alice/pending
+curl localhost:8080/signals/support:alice/resolve --json '{"name": "approval", "value": "approved"}'
+```
+
+`serve(...services)` serves the agents with the `signals` object, on PORT
+(default 9080). See [`examples/support.ts`](../../examples/support.ts).

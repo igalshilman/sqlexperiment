@@ -10,8 +10,8 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice. Is it warm in Lisbon?"'
  */
-import * as restate from '@restatedev/restate-sdk';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
+import { serve } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
 import { z } from 'zod';
 
@@ -29,4 +29,4 @@ const assistant = claude.agent({
   tools: [weather],
 });
 
-await restate.serve({ services: [assistant] });
+await serve(assistant);

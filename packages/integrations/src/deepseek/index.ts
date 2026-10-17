@@ -37,12 +37,15 @@ import {
   defineTool,
   type InferArgs,
   type ParameterSchemaSpec,
+  type ValueSchemaSpec,
   type ToolDefinition,
   type ToolRunContext,
   ToolRuntime,
 } from '@deepseek-ai/dsh-tools';
 import { forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
+import { isTool, type Tool as AnyTool } from '../tools.ts';
+import { z } from 'zod';
 import { SqlSessionPersistence } from './persistence.ts';
 
 export { SqlSessionPersistence };
@@ -123,13 +126,75 @@ function lastPrompt(events: readonly SessionEvent[]): MessageId | undefined {
 const message = (id: string, text: string): UserMessage =>
   freezeMessage({ id: MessageId(id), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } });
 
+/** A JSON schema node as the harness's value schema: what it cannot say, it takes as any JSON. */
+function valueSpec(node: Record<string, unknown>): ValueSchemaSpec {
+  const annotations = typeof node.description === 'string' ? { description: node.description } : {};
+  const variants = (node.anyOf ?? node.oneOf) as Record<string, unknown>[] | undefined;
+  if (variants && variants.length >= 2) {
+    const [first, second, ...rest] = variants.map(valueSpec) as [
+      ValueSchemaSpec,
+      ValueSchemaSpec,
+      ...ValueSchemaSpec[],
+    ];
+    return { ...annotations, oneOf: [first, second, ...rest] };
+  }
+  switch (node.type) {
+    case 'string':
+    case 'number':
+    case 'integer':
+    case 'boolean':
+    case 'null':
+      return {
+        ...annotations,
+        type: node.type,
+        ...(Array.isArray(node.enum) ? { enum: node.enum } : {}),
+      };
+    case 'array':
+      return {
+        ...annotations,
+        type: 'array',
+        ...(node.items ? { items: valueSpec(node.items as Record<string, unknown>) } : {}),
+      };
+    case 'object':
+      return {
+        ...annotations,
+        type: 'object',
+        properties: parameterSpec(node),
+        additionalProperties: node.additionalProperties !== false,
+      };
+    default:
+      return { ...annotations, type: 'json' };
+  }
+}
+
+/** The properties of a JSON schema object as the harness's parameters. */
+function parameterSpec(node: Record<string, unknown>): ParameterSchemaSpec {
+  const required = new Set((node.required as string[] | undefined) ?? []);
+  const properties = (node.properties ?? {}) as Record<string, Record<string, unknown>>;
+  return Object.fromEntries(
+    Object.entries(properties).map(([name, property]) => [
+      name,
+      { ...valueSpec(property), ...(required.has(name) ? { required: true as const } : {}) },
+    ]),
+  );
+}
+
+/** `t` as a harness tool. */
+const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolDefinition =>
+  tool({
+    name: t.name,
+    description: t.description,
+    parameters: parameterSpec(z.toJSONSchema(t.input) as Record<string, unknown>),
+    execute: (args, exec) => t.run(t.input.parse(args), { ctx, callId: exec.callId }),
+  });
+
 export interface ChatOptions {
   /** The model: DEEPSEEK_MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** The system prompt's persona. */
   system?: string;
-  /** The agent's tools (`defineTool` of @deepseek-ai/dsh-tools), or for an invocation. */
-  tools?: PerCall<ToolDefinition>[];
+  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the harness's (`tool` here, or `defineTool`), or for an invocation. */
+  tools?: (PerCall<ToolDefinition> | AnyTool)[];
 }
 
 /** A chat handler: each message an invocation, the session in the object's database. */
@@ -148,7 +213,7 @@ export const chat =
         agentOptions: { provider: 'deepseek-official', model },
         setup: (agentCtx: Context) =>
           tools.forEach((t) => {
-            const definition = forCall(t, ctx);
+            const definition = isTool(t) ? native(t, ctx) : forCall(t, ctx);
             agentCtx.tools.register({
               ...definition,
               execute: (args, exec) => guard(fail, () => definition.execute(args, exec)),

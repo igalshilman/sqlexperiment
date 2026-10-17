@@ -9,8 +9,8 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice. Is it warm in Lisbon?"'
  */
-import * as restate from '@restatedev/restate-sdk';
 import { tool } from '@langchain/core/tools';
+import { serve } from 'restate-agents';
 import * as langgraph from 'restate-agents/langgraph';
 import { z } from 'zod';
 
@@ -26,4 +26,4 @@ const weather = tool(
 
 const assistant = langgraph.agent({ name: 'assistant', tools: [weather] });
 
-await restate.serve({ services: [assistant] });
+await serve(assistant);

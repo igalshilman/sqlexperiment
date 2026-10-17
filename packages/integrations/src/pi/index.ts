@@ -47,6 +47,8 @@ import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
 import { forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
+import { isTool, type Tool as AnyTool } from '../tools.ts';
+import { z } from 'zod';
 import { openSqlKvStorage } from './storage.ts';
 
 /** What `work` gets: `prompt(id, text)`, and the `harness` and chord `context` for anything else. */
@@ -139,19 +141,34 @@ export const prompt = (ctx: restate.SqlObjectContext, text: string, options: PiO
 export interface ChatOptions {
   /** The model, as `provider/model-id`: PI_MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
-  /** The agent's tools, each made with pi-durable's `defineTool`, or for an invocation. */
-  tools?: PerCall<ToolRegistration>[];
+  /** A pi-ai model registry, for a provider of your own; by default, one of the model's provider. */
+  models?: MutableModels;
+  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or pi-durable's `defineTool`s, or for an invocation. */
+  tools?: (PerCall<ToolRegistration> | AnyTool)[];
   /** A directory for the coding tools (see {@link PiOptions.workspace}). */
   workspace?: PerCall<string | undefined>;
 }
 
+/** `t` as a pi-durable tool. */
+const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolRegistration =>
+  defineTool({
+    name: t.name,
+    description: t.description,
+    parameters: Type.Unsafe<Record<string, unknown>>(z.toJSONSchema(t.input)),
+    replay: 'safe', // a crash runs it again, with the same call id
+    execute: async (args, { callId }) => ({
+      content: [{ type: 'text', text: await t.run(t.input.parse(args), { ctx, callId }) }],
+    }),
+  });
+
 /** A chat handler: each message an invocation, the conversation in the object's database. */
 export const chat =
-  ({ model, tools = [], workspace }: ChatOptions = {}) =>
+  ({ model, models, tools = [], workspace }: ChatOptions = {}) =>
   (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
     prompt(ctx, message, {
       model,
-      tools: tools.map((tool) => forCall(tool, ctx)),
+      models,
+      tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),
       workspace: workspace === undefined ? undefined : forCall(workspace, ctx),
     });
 

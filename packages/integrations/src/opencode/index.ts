@@ -37,6 +37,8 @@ import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
+import { isTool, type Tool as AnyTool } from '../tools.ts';
+
 import { type Fence, type Host, openOpenCode } from './db.ts';
 
 /** An OpenCode model reference. */
@@ -285,8 +287,8 @@ export const prompt = (ctx: restate.SqlObjectContext, text: string, options: Ope
 export interface ChatOptions {
   /** The model, as `provider/model-id`: OPENCODE_MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
-  /** The agent's tools, which replace OpenCode's own, or for an invocation. */
-  tools?: PerCall<Tool>[];
+  /** The agent's tools, which replace OpenCode's own: `tool()`s, Restate's (`call`, `signal`...), or this module's `tool`s, or for an invocation. */
+  tools?: (PerCall<Tool> | AnyTool)[];
   /** The directory to work in, with OpenCode's own tools (see {@link OpenCodeOptions.directory}). */
   directory?: PerCall<string | undefined>;
 }
@@ -297,7 +299,16 @@ export const chat =
   (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
     prompt(ctx, message, {
       model,
-      tools: tools.map((t) => forCall(t, ctx)),
+      tools: tools.map((t) =>
+        isTool(t)
+          ? tool({
+              name: t.name,
+              description: t.description,
+              input: t.input,
+              execute: (input, callId) => t.run(input, { ctx, callId }),
+            })
+          : forCall(t, ctx),
+      ),
       directory: directory === undefined ? undefined : forCall(directory, ctx),
     });
 
