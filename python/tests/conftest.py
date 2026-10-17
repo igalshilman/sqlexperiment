@@ -14,10 +14,10 @@ def restate_server(tmp_path_factory) -> Iterator[None]:
     logs = tmp_path_factory.mktemp("logs")
     server = Server(logs / "server.log")
     service = Service([HERE / "services.py"], 9181, logs / "services.log")
-    server.start()
-    service.start()
-    service.register()
     try:
+        server.start()
+        service.start()
+        service.register()
         yield
     finally:
         service.stop()
