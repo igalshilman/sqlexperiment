@@ -8,8 +8,7 @@
 // that id, so a tool call run again after a crash makes the same call, once.
 import * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
-import type { PerCall } from './common.ts';
-import { forCall } from './common.ts';
+import { forCall, type PerCall, ToolError } from './common.ts';
 import { signals, signalsOf } from './signals.ts';
 
 const TOOL = Symbol.for('restate-agents.tool');
@@ -71,7 +70,7 @@ export const tool = <S extends z.ZodObject>(options: {
       // A terminal error is the tool's answer, which the model can act on; any
       // other error fails the attempt, which Restate retries.
       if (error instanceof restate.TerminalError) return `Error: ${error.message}`;
-      throw error;
+      throw new ToolError(options.name, error);
     }
   },
 });

@@ -30,10 +30,11 @@ key, with the handlers `chat` (a message in, the answer out), `messages`
 
 `chat(options)` and `messages()` are those handlers, for an object of your
 own, beside handlers of yours. `object()` is `restate.object` set up for
-them: `ctx.db` in every handler; retries up to 100,000 times, 50 to 500 ms
-apart, since each attempt resumes from the database; and the SQL storage
-hidden from the journal in Restate's UI. Its `options` and `metadata` add to
-these.
+them: `ctx.db` in every handler; retries for weeks (50 ms after a crash,
+then twice as long each time, up to 10 s apart), since each attempt resumes
+from the database; and the SQL storage hidden from the journal in Restate's
+UI. Its `options` (such as `retryPolicy`) and `metadata` add to these. Its
+own handlers cannot be named `signal` or `pending`, which every object has.
 
 ```ts
 import { object } from 'restate-agents';

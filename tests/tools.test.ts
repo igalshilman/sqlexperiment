@@ -1,7 +1,7 @@
 // Restate's own tools (restate-agents' call, send, workflow and signal), run
 // with a fake context that records the calls they make.
 import * as restate from '@restatedev/restate-sdk';
-import { call, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
+import { call, object, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -149,5 +149,17 @@ describe('tool', () => {
     });
     expect((await run(lookup, { order: '7' })).result).toBe('Error: no order 7');
     await expect(run(lookup, { order: 'lost' })).rejects.toThrow('connection reset');
+  });
+});
+
+/** An object with `handlers`, as a function that defines it. */
+const named = (handlers: Record<string, () => Promise<void>>) => () => object({ name: 'assistant', handlers });
+
+describe('object', () => {
+  it('refuses handlers of its own named as the ones every object has', () => {
+    expect(named({ signal: async () => {} })).toThrow('every object has a `signal` handler already');
+    expect(named({ pending: async () => {} })).toThrow('every object has a `pending` handler already');
+    // @ts-expect-error: a handler every object has
+    expect(() => object({ name: 'assistant', handlers: { signal: async () => {} } })).toThrow('`signal`');
   });
 });
