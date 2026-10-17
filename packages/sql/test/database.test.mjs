@@ -57,13 +57,7 @@ test('runs SQL and round-trips values', async () => {
   const ns = fresh();
   const db = await open(ns, backend.request());
   await db.execute('CREATE TABLE t(i INTEGER, r REAL, s TEXT, b BLOB, n INTEGER)');
-  await db.execute('INSERT INTO t VALUES(?, ?, ?, ?, ?)', [
-    42,
-    1.5,
-    'héllo',
-    Uint8Array.from([1, 2, 3]),
-    null,
-  ]);
+  await db.execute('INSERT INTO t VALUES(?, ?, ?, ?, ?)', [42, 1.5, 'héllo', Uint8Array.from([1, 2, 3]), null]);
   await db.execute('INSERT INTO t VALUES(?, ?, ?, ?, ?)', [2n ** 62n, -0.25, '', new Uint8Array(0), true]);
   const rows = await db.query('SELECT * FROM t ORDER BY i');
   assert.deepEqual(rows[0], [42, 1.5, 'héllo', Buffer.from([1, 2, 3]), null]);
@@ -91,7 +85,10 @@ test('an SQL error leaves the session usable; a transaction rolls back', async (
     /abort/,
   );
   assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
-  assert.equal(await db.transaction(async (tx) => tx.query('INSERT INTO t VALUES(2) RETURNING id')).then((r) => r[0][0]), 2);
+  assert.equal(
+    await db.transaction(async (tx) => tx.query('INSERT INTO t VALUES(2) RETURNING id')).then((r) => r[0][0]),
+    2,
+  );
   await db.save();
 });
 
@@ -205,7 +202,9 @@ test('a call running meanwhile does not make the session look unusable', async (
   }
   assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
   // Nor while a statement runs.
-  const running = db.query('WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000) SELECT count(*) FROM n');
+  const running = db.query(
+    'WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000) SELECT count(*) FROM n',
+  );
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(db.isUsable());
   await running;
@@ -258,12 +257,15 @@ test('the version grows with each commit, and only then', async () => {
 test('a call to the session inside its transaction is refused, not left waiting', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER)');
-  let later;
+  let later = Promise.resolve();
   await db.transaction(async (tx) => {
     await tx.execute('INSERT INTO t VALUES(1)');
     // It would wait for this transaction, which waits for this body.
     await assert.rejects(db.execute('INSERT INTO t VALUES(2)'), /use the transaction handle/);
-    await assert.rejects(db.transaction(async () => {}), /use the transaction handle/);
+    await assert.rejects(
+      db.transaction(async () => {}),
+      /use the transaction handle/,
+    );
     // Once the body has settled, its asynchronous context may use the session.
     later = new Promise((resolve) => setTimeout(resolve, 5)).then(() => db.execute('INSERT INTO t VALUES(3)'));
   });

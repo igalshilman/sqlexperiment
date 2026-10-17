@@ -101,13 +101,14 @@ nothing it shows can disappear later.
 **What a crash leaves.** Interrupting any step leaves a state the next open
 reads correctly:
 
-| Interrupted | Result |
-|---|---|
-| A commit | Either all of the transaction or none of it |
-| A checkpoint | Pages hold old or new images; the log replays over them |
-| A `meta` write or a deletion | Repeated by a later save |
+| Interrupted                  | Result                                                  |
+| ---------------------------- | ------------------------------------------------------- |
+| A commit                     | Either all of the transaction or none of it             |
+| A checkpoint                 | Pages hold old or new images; the log replays over them |
+| A `meta` write or a deletion | Repeated by a later save                                |
 
 **What it relies on.**
+
 - **One owner at a time.** The host must guarantee it, and settle every
   outstanding request before another owner opens.
 - **Reliable storage.** The backend returns what was stored. Values are
@@ -133,12 +134,12 @@ see [the repository's README](../README.md).
 
 ## Layout
 
-| Path | What |
-|---|---|
+| Path                          | What                                |
+| ----------------------------- | ----------------------------------- |
 | `src/`, `tests/`, `examples/` | The crate, its tests and an example |
-| [`benches/`](benches) | Benchmarks and their results |
-| [`docs/`](docs) | Design, storage format, review |
-| [`spec/`](spec) | The protocol in TLA+ |
+| [`benches/`](benches)         | Benchmarks and their results        |
+| [`docs/`](docs)               | Design, storage format, review      |
+| [`spec/`](spec)               | The protocol in TLA+                |
 
 ## Build and test
 

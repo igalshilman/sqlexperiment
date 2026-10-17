@@ -60,14 +60,14 @@ policy, verify the changed payloads and row count, and run `integrity_check`.
 
 **One-row replacement, total mutation key + value bytes (open's confirmation plus the commit):**
 
-| Rows | Payload bytes | Payload family | Raw | Adaptive LZ4 | Reduction |
-|---:|---:|---|---:|---:|---:|
-| 100 | 64 | Repetitive | 12,477 | 1,218 | 90.2% |
-| 100 | 64 | JSON | 12,477 | 2,114 | 83.1% |
-| 100 | 64 | Random | 12,477 | 4,518 | 63.8% |
-| 10,000 | 256 | Repetitive | 12,477 | 748 | 94.0% |
-| 10,000 | 256 | JSON | 12,477 | 2,069 | 83.4% |
-| 10,000 | 256 | Random | 12,477 | 4,539 | 63.6% |
+|   Rows | Payload bytes | Payload family |    Raw | Adaptive LZ4 | Reduction |
+| -----: | ------------: | -------------- | -----: | -----------: | --------: |
+|    100 |            64 | Repetitive     | 12,477 |        1,218 |     90.2% |
+|    100 |            64 | JSON           | 12,477 |        2,114 |     83.1% |
+|    100 |            64 | Random         | 12,477 |        4,518 |     63.8% |
+| 10,000 |           256 | Repetitive     | 12,477 |          748 |     94.0% |
+| 10,000 |           256 | JSON           | 12,477 |        2,069 |     83.4% |
+| 10,000 |           256 | Random         | 12,477 |        4,539 |     63.6% |
 
 These bytes now include the log tail that open re-puts on this weak backend
 (here the baseline's last save, which touched the header and schema pages) in
@@ -106,11 +106,11 @@ There are **72 timed samples** (12 datasets × two policies × three repeats).
 
 Median time per page for the 10,000-row / 256-byte datasets:
 
-| Payload | Raw encode | LZ4 encode | Raw decode | Adaptive decode |
-|---|---:|---:|---:|---:|
-| Repetitive | 0.09 µs | 1.09 µs | 0.24 µs | 0.40 µs |
-| JSON | 0.09 µs | 5.98 µs | 0.22 µs | 2.01 µs |
-| Random | 0.13 µs | 1.53 µs | 0.26 µs | 0.37 µs |
+| Payload    | Raw encode | LZ4 encode | Raw decode | Adaptive decode |
+| ---------- | ---------: | ---------: | ---------: | --------------: |
+| Repetitive |    0.09 µs |    1.09 µs |    0.24 µs |         0.40 µs |
+| JSON       |    0.09 µs |    5.98 µs |    0.22 µs |         2.01 µs |
+| Random     |    0.13 µs |    1.53 µs |    0.26 µs |         0.37 µs |
 
 These are elapsed times in isolated codec loops on this shared host, not remote
 request timings or a production speedup. Min/median/max are retained. Raw SQL

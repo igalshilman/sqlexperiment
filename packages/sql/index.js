@@ -1,7 +1,7 @@
 'use strict';
 // SQL over a key/value store implemented in JavaScript. See index.d.ts.
 const { AsyncLocalStorage } = require('node:async_hooks');
-const native = require('./sqlite_kv.node');
+const addon = require('./sqlite_kv.node');
 
 const GET = 0;
 const SET = 1;
@@ -41,7 +41,7 @@ async function open(namespace, store) {
         return Promise.reject(new Error(`unknown store operation ${op}`));
     }
   };
-  return new Database(await native.open(namespace, dispatch));
+  return new Database(await addon.open(namespace, dispatch));
 }
 
 // The transaction whose body is running, in that body's asynchronous context:
