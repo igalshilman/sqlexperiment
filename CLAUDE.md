@@ -8,3 +8,5 @@
 - Decide yourself; ask the owner only critical questions.
 - Examples use real models (an API key); scripted models are for tests only
   (tests/fakes).
+- Commit in small steps, and open frequent PRs so the owner can follow the
+  changes; merge them yourself once the checks pass (no real users yet).
