@@ -1,5 +1,5 @@
 {
-  description = "SQL in Restate virtual objects: the sqlite-kv crate, its Node.js addon, the patched Restate TypeScript SDK, the agent integrations and the examples";
+  description = "SQL in Restate virtual objects: the sqlite-kv crate, its Node.js addon and Python extension, the patched Restate TypeScript SDK, the agent integrations and the examples";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -37,7 +37,8 @@
           packages =
             with pkgs;
             [
-              # The crate and the addon; the shared core, to WebAssembly.
+              # The crate, the addon and the Python extension; the shared core,
+              # to WebAssembly.
               (rust-bin.stable."1.98.1".default.override {
                 extensions = [
                   "rust-src"
@@ -52,19 +53,26 @@
               # OpenCode needs it.
               nodejs_24
               pnpm_11
+              # The uv workspace (pyproject.toml): the Python extension, built
+              # with maturin, which uv fetches.
+              python313
+              uv
               git
               curl
               gnumake
 
-              # The TLA+ check (sqlite-kv/spec/check.sh) and the benchmark scripts.
+              # The TLA+ check (sqlite-kv/spec/check.sh); the benchmark scripts
+              # run on the Python above.
               jdk_headless
-              python3
             ]
             ++ lib.optionals stdenv.hostPlatform.isDarwin [
               libiconv
               # ld64.lld, for a cargo config that links with -fuse-ld=lld.
               lld
             ];
+          # uv uses this Python, rather than one it downloads.
+          UV_PYTHON = "${pkgs.python313}/bin/python3";
+          UV_PYTHON_DOWNLOADS = "never";
         };
       });
 

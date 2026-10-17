@@ -20,5 +20,5 @@
     // SQL rows and JSON from the wire are typed by assertion where they arrive.
     "typescript/no-unsafe-type-assertion": "off"
   },
-  "ignorePatterns": ["**/node_modules", "packages/sdk-typescript/.build", "**/target"]
+  "ignorePatterns": ["**/node_modules", "**/.venv", "packages/sdk-typescript/.build", "**/target"]
 }
