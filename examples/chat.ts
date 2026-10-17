@@ -9,6 +9,7 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  *   curl localhost:8080/assistant/alice/chat -d 'What is my name?'
+ *   curl localhost:8080/assistant/alice/messages   # the conversation so far
  */
 import { serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';

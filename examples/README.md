@@ -27,6 +27,7 @@ ANTHROPIC_API_KEY=… node chat.ts                      # the agent, on port 908
 restate-server                                         # Restate, in another terminal
 restate deployments register http://localhost:9080     # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
+curl localhost:8080/assistant/alice/messages           # the conversation so far
 ```
 
 With Restate in Docker, the agent is at the host's address, as the
