@@ -9,7 +9,7 @@
 import * as restate from '@restatedev/restate-sdk';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { type Configure, configured, ToolError } from './common.ts';
+import { cancellationOf, type Configure, configured, ToolError } from './common.ts';
 import { signals, signalsOf } from './signals.ts';
 
 const TOOL = Symbol.for('restate-agents.tool');
@@ -80,7 +80,10 @@ export const tool = <S extends z.ZodObject>(options: {
       return text(await options.run(input, { ctx, callId, idempotencyKey: `${ctx.request().id}:${callId}` }));
     } catch (error) {
       // The invocation was cancelled: the turn ends, rather than the model
-      // going on with the tool's error as its answer.
+      // going on with the tool's error as its answer (such as the failure of
+      // a call that the cancellation cancelled).
+      const turn = cancellationOf(ctx);
+      if (turn?.aborted) throw turn.reason;
       if (error instanceof restate.CancelledError) throw error;
       // A terminal error is the tool's answer, which the model can act on; any
       // other error fails the attempt, which Restate retries.

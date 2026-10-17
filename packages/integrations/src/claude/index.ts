@@ -25,7 +25,9 @@ import * as restate from '@restatedev/restate-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import {
+  aborted,
   CANCELLED,
+  cancellationOf,
   chatHandler,
   type Configure,
   configured,
@@ -88,15 +90,23 @@ interface Agent {
 }
 
 /** Run prompt `id` of `conversation` until it is answered, from its stored messages. */
-async function run({ client, model, maxTokens, system, tools: all }: Agent, conversation: Conversation, id: string) {
+async function run(
+  { client, model, maxTokens, system, tools: all }: Agent,
+  conversation: Conversation,
+  id: string,
+  signal?: AbortSignal,
+) {
   const { tools, check } = failing(all);
-  const runner = client.beta.messages.toolRunner({
-    model,
-    max_tokens: maxTokens,
-    ...(system === undefined ? {} : { system }),
-    tools,
-    messages: await conversation.messages(),
-  });
+  const runner = client.beta.messages.toolRunner(
+    {
+      model,
+      max_tokens: maxTokens,
+      ...(system === undefined ? {} : { system }),
+      tools,
+      messages: await conversation.messages(),
+    },
+    { signal },
+  );
   // A reply whose tools did not finish (a crash): run them, with the same ids.
   if (runner.params.messages.at(-1)?.role === 'assistant') {
     const results = await runner.generateToolResponse();
@@ -174,11 +184,17 @@ export const prompt = async (
       await conversation.append(id, [{ role: 'user', content: text }]);
       pending = id;
     }
+    const turn = cancellationOf(ctx);
     try {
-      await run(agent, conversation, pending);
+      const running = run(agent, conversation, pending, turn);
+      running.catch(() => {});
+      await (turn ? Promise.race([running, aborted(turn)]) : running);
     } catch (error) {
       // Cancelled: the prompt ends, and the next one starts afresh.
-      if (error instanceof restate.CancelledError) await conversation.cancel(pending, CANCELLED);
+      if (turn?.aborted || error instanceof restate.CancelledError) {
+        await conversation.cancel(pending, CANCELLED);
+        throw turn?.aborted ? turn.reason : error;
+      }
       throw error;
     }
   }

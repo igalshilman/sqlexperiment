@@ -5,7 +5,16 @@ import * as restate from '@restatedev/restate-sdk';
 import { describe, expect, it, vi } from 'vitest';
 import { CANCELLED, tool } from 'restate-agents';
 import { z } from 'zod';
-import { afterCancel, cancelledTransfer, conversation, crashedAnywhere, SAID, sqlAttempt } from '../testing.ts';
+import {
+  afterCancel,
+  cancelledTransfer,
+  cancelledWhileWorking,
+  conversation,
+  crashedAnywhere,
+  SAID,
+  sqlAttempt,
+  withoutIds,
+} from '../testing.ts';
 import { HttpError, teller } from '../fakes/claude.ts';
 import * as claude from 'restate-agents/claude';
 import { bank } from './bank.ts';
@@ -21,6 +30,14 @@ const twice = async (ctx: restate.SqlObjectContext) =>
   ]);
 
 describe('the Claude agent', () => {
+  it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
+    const now = await cancelledWhileWorking((tools) => claude.chat({ tools }), claude.messages());
+    const waiting = await afterCancel(claude.chat({ tools: [cancelledTransfer] }), claude.messages());
+    expect(now.failed).toBeInstanceOf(restate.CancelledError);
+    expect(now.answer).toBe(waiting.answer);
+    expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
+  });
+
   it('ends a cancelled turn, and answers the next message afresh', async () => {
     const { failed, answer, parts } = await afterCancel(claude.chat({ tools: [cancelledTransfer] }), claude.messages());
     expect(failed).toBeInstanceOf(restate.CancelledError);
