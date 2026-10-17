@@ -6,7 +6,7 @@
  * Restate retries the call and the harness resumes the session.
  *
  *   DEEPSEEK_API_KEY=… node deepseek.ts
- *   restate deployments register http://localhost:9080
+ *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  */
 import { serve, tool } from 'restate-agents';

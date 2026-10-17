@@ -1,7 +1,7 @@
 // OpenCode 2.0 agents in Restate virtual objects: OpenCode for each
 // invocation, with its database in the object's database.
 //
-//   const coder = opencode.agent({ name: 'coder', directory: (ctx) => `/work/${ctx.key}` });
+//   const coder = opencode.agent({ name: 'coder', workspace: (ctx) => `/work/${ctx.key}` });
 //
 // or a handler of an object of your own: `handlers: { chat: opencode.chat() }`
 //
@@ -91,7 +91,7 @@ export interface OpenCodeOptions {
    * write, edit, bash, glob, grep...) there, besides `tools`, and the
    * session works in it.
    */
-  directory?: string;
+  workspace?: string;
 }
 
 /** An OpenCode plugin that adds `system` to the session's system prompt. */
@@ -111,7 +111,7 @@ function toolsPlugin(tools: Tool[], fail: (error: unknown) => Promise<never>, bu
     id: 'examples.tools',
     async setup(ctx) {
       const transform = await ctx.tool.transform((editor) => {
-        // Without a directory, no filesystem, shell or web: the agent acts
+        // Without a workspace, no filesystem, shell or web: the agent acts
         // through its tools.
         if (!builtins) for (const { id } of editor.list()) editor.remove(id);
         for (const t of tools) {
@@ -220,11 +220,11 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
  */
 export const withOpenCode = async <T>(
   ctx: restate.SqlObjectContext,
-  { plugins = [], model: named, system, tools = [], directory }: OpenCodeOptions,
+  { plugins = [], model: named, system, tools = [], workspace }: OpenCodeOptions,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
   const model = typeof named === 'object' ? named : modelRef(modelOf(named, DEFAULT_MODEL));
-  if (directory) await mkdir(directory, { recursive: true });
+  if (workspace) await mkdir(workspace, { recursive: true });
   const db = ctx.db;
   const fence: Fence = { closed: false };
   let failed!: (error: unknown) => void;
@@ -238,9 +238,9 @@ export const withOpenCode = async <T>(
     return new Promise<never>(() => {});
   };
   const host = await openOpenCode(db, fence, {
-    plugins: [...plugins, toolsPlugin(tools, fail, directory !== undefined), ...(system ? [systemPlugin(system)] : [])],
+    plugins: [...plugins, toolsPlugin(tools, fail, workspace !== undefined), ...(system ? [systemPlugin(system)] : [])],
     config: { default_agent: 'build' },
-    local: directory !== undefined,
+    local: workspace !== undefined,
   });
   try {
     return await Promise.race([
@@ -260,7 +260,7 @@ export const withOpenCode = async <T>(
                 id: sessionID,
                 model: model as never,
                 agent: 'build' as never,
-                ...(directory ? { location: { directory: directory as never } } : {}),
+                ...(workspace ? { location: { directory: workspace as never } } : {}),
               }),
             );
           }
@@ -307,13 +307,13 @@ export interface ChatOptions {
   system?: string;
   /** The agent's tools, which replace OpenCode's own: `tool()`s, Restate's (`call`, `signal`...), or OpenCode tools of your own (`Tool`), or for an invocation. */
   tools?: (PerCall<Tool> | AnyTool)[];
-  /** The directory to work in, with OpenCode's own tools (see {@link OpenCodeOptions.directory}). */
-  directory?: PerCall<string | undefined>;
+  /** The directory to work in, with OpenCode's own tools (see {@link OpenCodeOptions.workspace}). */
+  workspace?: PerCall<string | undefined>;
 }
 
 /** The answer to a message, each message an invocation, the session in the object's database. */
 const respond =
-  ({ model, system, tools = [], directory }: ChatOptions = {}) =>
+  ({ model, system, tools = [], workspace }: ChatOptions = {}) =>
   (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
     prompt(ctx, message, {
       model,
@@ -328,7 +328,7 @@ const respond =
             })
           : forCall(t, ctx),
       ),
-      directory: directory === undefined ? undefined : forCall(directory, ctx),
+      workspace: workspace === undefined ? undefined : forCall(workspace, ctx),
     });
 
 /**

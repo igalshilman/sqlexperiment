@@ -3,7 +3,7 @@
  * stored in Restate with the object's state. No database to run.
  *
  *   node notes.ts
- *   restate deployments register http://localhost:9080
+ *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/notes/alice/add --json '"Buy milk"'
  *   curl localhost:8080/notes/alice/list
  */

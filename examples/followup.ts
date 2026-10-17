@@ -4,7 +4,7 @@
  * meantime, and a restart changes nothing.
  *
  *   ANTHROPIC_API_KEY=… node followup.ts
- *   restate deployments register http://localhost:9080
+ *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/concierge/alice/chat -d 'My order 103 is late. Can you keep an eye on it?'
  *
  * The check-in shows in Restate's UI (localhost:9070) as a scheduled
