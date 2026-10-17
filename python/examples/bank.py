@@ -20,7 +20,7 @@ from typing import TypedDict
 
 import restate
 from restate import InvocationRetryPolicy, ObjectContext, SqlDatabase
-from serve import serve
+from restate_agents import serve
 
 account = restate.VirtualObject(
     "account",

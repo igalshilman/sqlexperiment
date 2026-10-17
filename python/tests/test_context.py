@@ -115,3 +115,36 @@ def test_a_cancellation_reaches_every_pending_wait():
         what="the cancellation",
     )
     wait_until(lambda: call(f"probe/{k}/cancellations") == (200, 1), timeout=10, what="the handler to see it")
+
+
+def test_an_agent_moves_money_through_restate():
+    src, dst = 900 + int(key()[:4], 16) % 50, 990
+    assert call(f"account/acct-{src}/deposit", {"id": "opening", "amount": 100}) == (200, 100)
+    status, answer = call(f"teller/{key()}/chat", f"move 30 from {src} to {dst}")
+    assert (status, answer) == (200, f"Done: moved 30 from {src} to {dst}, 70 left")
+    wait_until(lambda: call(f"account/acct-{dst}/balance") == (200, 30), timeout=10, what="the credit")
+    # Overdrawn: the bank's TerminalError is the tool's answer to the model.
+    status, answer = call(f"teller/{key()}/chat", f"move 500 from {src} to {dst}")
+    assert status == 200 and answer.startswith("Done: transfer ") and answer.endswith(": insufficient funds")
+
+
+def test_an_agent_keeps_its_conversation():
+    k = key()
+    assert call(f"teller/{k}/chat", "hello") == (200, "You said: hello")
+    assert call(f"teller/{k}/chat", "again") == (200, "You said: again")
+    status, page = call(f"teller/{k}/messages")
+    assert status == 200
+    assert [(m["role"], m["parts"][0]["text"]) for m in page["messages"]] == [
+        ("user", "hello"),
+        ("assistant", "You said: hello"),
+        ("user", "again"),
+        ("assistant", "You said: again"),
+    ]
+
+
+def test_an_agents_tool_uses_the_objects_database():
+    k = key()
+    assert call(f"teller/{k}/chat", "remember I like tea") == (200, "Done: Remembered: I like tea")
+    assert call(f"teller/{k}/chat", "remember I like tea") == (200, "Done: Remembered: I like tea")
+    assert call(f"teller/{k}/chat", "remember I live in Lisbon") == (200, "Done: Remembered: I live in Lisbon")
+    assert call(f"teller/{k}/facts") == (200, ["I like tea", "I live in Lisbon"])
