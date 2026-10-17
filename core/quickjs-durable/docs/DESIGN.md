@@ -575,7 +575,9 @@ capture(G, P, M, VM, next_sequence):
 Count compared pages as examined_pages. Count actual changes even when their
 existing override is removed as changed_pages. No new blob is needed for an empty
 batch. A zero page that differs from a nonzero golden page remains an explicit
-XOR override. Size-only zero growth still requires the new manifest length.
+XOR override. Size-only zero growth still requires the new manifest length. When
+the next manifest would reference more batches than the bound of section 5.4,
+replace the batch with every live override, XORed against golden.
 
 The reference reuses/updates the reconstructed parent buffer to form the next
 image, copying only actual changes out of Wasm. This avoids another full capture
@@ -605,8 +607,12 @@ decompressed across turns; the reference caches it by application ID and source
 hash. Each live page is applied once, against golden/zero bytes. Do not apply a golden-
 relative delta to the previous invocation page. Do not retain every decoded old
 batch simultaneously: mostly superseded batches can amplify retained memory.
-Each referenced batch is still read/decompressed in full; compaction is future
-work. Retain golden and every referenced blob. No record GC is implemented.
+Each referenced batch is still read/decompressed in full, so capture bounds how
+many a manifest references (16 in the reference): when the next manifest would
+reference more, the turn writes every live override into its own batch, and the
+manifest then references that one alone. A long run's restore reads at most that
+many batches instead of one per turn. Retain golden and every referenced blob. No
+record GC is implemented.
 
 ## 6. Engine algorithms and checkpoint boundaries
 
@@ -1154,7 +1160,7 @@ are recorded with the raw results. The Rust runtime has no Node/Python dependenc
 
 ## 12. Scope limits, provenance and references
 
-The baseline deliberately has no warm-VM cache, compaction, GC, heap migration,
+The baseline deliberately has no warm-VM cache, GC, heap migration,
 background WAL apply, concurrent writers, generic Wasm snapshots or dynamic native
 extensions. Full page indexes and checkpoint history accumulate. Future GC must
 retain every blob/golden/runtime artifact reachable from retained heads, not just

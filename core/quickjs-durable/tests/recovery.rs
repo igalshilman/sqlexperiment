@@ -485,3 +485,33 @@ fn long_local_loops_checkpoint_before_fuel_runs_out() -> Result<()> {
     assert!(turns > 2, "{turns} turns");
     Ok(())
 }
+
+/// Restore reads every batch the manifest references. A long run would read
+/// more of them every turn; past a limit, a turn rewrites every live page into
+/// its own batch, so the count stays bounded and restoring stays exact.
+#[test]
+fn long_runs_reference_a_bounded_number_of_batches() -> Result<()> {
+    let mut e = engine(
+        "const log=[];async function main(_,ctx){for(let i=0;i<60;i++){log.push('x'.repeat(5000)+i);await durable.call('tick');}return log.length+':'+log[59].slice(-2);}",
+    );
+    let mut view = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
+    let mut most = 0;
+    while view.state.status == Status::Waiting {
+        let id = view.state.pending[0].id().to_owned();
+        view = futures_executor::block_on(e.complete("r", &id, Outcome::success(Value::Null), 2))?;
+        let manifest: Value = serde_json::from_slice(
+            &e.storage().values[&format!("checkpoint/{}", view.checkpoint_id)],
+        )?;
+        let batches: std::collections::BTreeSet<&str> = manifest["pages"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|reference| reference["blob"].as_str().unwrap())
+            .collect();
+        most = most.max(batches.len());
+    }
+    assert_eq!(value(&view.state.outcome), json!("60:59"));
+    assert!(most <= 16, "{most} batches");
+    assert!(most > 1);
+    Ok(())
+}

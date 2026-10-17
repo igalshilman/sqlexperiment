@@ -5,10 +5,18 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroUsize,
+    sync::Arc,
+};
 
 const FORMAT: u32 = 1;
 const MAX_JSON: usize = 16 * 1024 * 1024;
+/// Most page batches a manifest may reference. Restore reads each referenced
+/// batch in full, superseded pages and all; past this many, a turn writes every
+/// live page into its own batch, so a long run's restore stays bounded.
+const MAX_BATCHES: usize = 16;
 
 /// Runs within a host-owned transaction. All writes and effect requests remain
 /// staged until the host commits; a returned View is not itself a commit.
@@ -554,6 +562,29 @@ impl<K: Transaction> Engine<K> {
             meta: capture.meta,
             memory,
         };
+        let changed_indices: BTreeSet<u32> = deltas.iter().map(|(index, _)| *index).collect();
+        let mut batches: BTreeSet<&str> = pages
+            .iter()
+            .filter(|(index, _)| !changed_indices.contains(index))
+            .map(|(_, reference)| reference.blob.as_str())
+            .collect();
+        if !deltas.is_empty() {
+            batches.insert(&id);
+        }
+        if batches.len() > MAX_BATCHES {
+            let live: BTreeSet<u32> = pages.keys().copied().chain(changed_indices).collect();
+            deltas = live
+                .into_iter()
+                .map(|index| {
+                    let current = page(&next.memory, index as usize);
+                    let original = page(&golden.memory, index as usize);
+                    (
+                        index,
+                        current.iter().zip(original).map(|(n, o)| n ^ o).collect(),
+                    )
+                })
+                .collect();
+        }
         let mut new_blob_bytes = 0;
         if !deltas.is_empty() {
             let bytes = codec::encode_pages(&deltas)?;
