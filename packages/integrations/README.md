@@ -59,6 +59,10 @@ import { call, send, signal, subagent, tool, workflow } from 'restate-agents';
 Handler names are checked against the target's handlers: a typo does not
 compile.
 
+A tool whose handler fails with a `restate.TerminalError` (an unknown
+order, say) answers the model with `Error: <message>`, and the agent goes
+on; any other error fails the attempt, which Restate retries.
+
 Each Restate call has an idempotency key made of the invocation's id and the
 model's tool call id: a crash runs an unfinished tool call again, and it
 makes the same call, once.

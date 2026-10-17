@@ -1,7 +1,7 @@
 // Restate's own tools (restate-agents' call, send, workflow and signal), run
 // with a fake context that records the calls they make.
 import * as restate from '@restatedev/restate-sdk';
-import { call, send, signal, subagent, workflow, type Tool } from 'restate-agents';
+import { call, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -133,5 +133,21 @@ describe('subagent', () => {
     expect(made).toMatchObject([
       { service: 'carts', key: 'alice.pears', method: 'add', parameter: 'add pears', idempotencyKey: 'inv1:call_1' },
     ]);
+  });
+});
+
+describe('tool', () => {
+  it("answers a terminal error as the model's result, and lets any other fail the attempt", async () => {
+    const lookup = tool({
+      name: 'lookup',
+      description: 'Look an order up',
+      input: z.object({ order: z.string() }),
+      run: async ({ order }) => {
+        if (order === 'lost') throw new Error('connection reset');
+        throw new restate.TerminalError(`no order ${order}`);
+      },
+    });
+    expect((await run(lookup, { order: '7' })).result).toBe('Error: no order 7');
+    await expect(run(lookup, { order: 'lost' })).rejects.toThrow('connection reset');
   });
 });

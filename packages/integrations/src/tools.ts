@@ -50,7 +50,9 @@ const text = (value: unknown) => (typeof value === 'string' ? value : (JSON.stri
  *   });
  *
  * `run` returns the result, text or anything JSON; it gets the agent's `ctx`
- * and the tool call's `callId` too.
+ * and the tool call's `callId` too. A `restate.TerminalError` it throws (or
+ * a Restate call it makes fails with) is its answer, `Error: <message>`, for
+ * the model to act on.
  */
 export const tool = <S extends z.ZodObject>(options: {
   name: string;
@@ -62,7 +64,16 @@ export const tool = <S extends z.ZodObject>(options: {
   name: options.name,
   description: options.description,
   input: options.input,
-  run: async (input, context) => text(await options.run(input, context)),
+  run: async (input, context) => {
+    try {
+      return text(await options.run(input, context));
+    } catch (error) {
+      // A terminal error is the tool's answer, which the model can act on; any
+      // other error fails the attempt, which Restate retries.
+      if (error instanceof restate.TerminalError) return `Error: ${error.message}`;
+      throw error;
+    }
+  },
 });
 
 /** A service, virtual object or workflow, as its definition (`restate.service(...)` and so on), of handlers `M`. */
