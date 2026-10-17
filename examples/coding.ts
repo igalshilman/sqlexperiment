@@ -2,7 +2,7 @@
  * A coding team: you chat with a coordinator (pi), which hands each coding
  * task to a coder of its own (OpenCode).
  *
- * Every coder is an object of its own, `coder/<you>.<task>`, with its own
+ * Every coder is an agent of its own, `coder/<you>.<task>`, with its own
  * database and its own directory. Tasks run at once, and each picks up where
  * it left off after a crash. Coders run real commands: use a sandbox.
  *
@@ -16,22 +16,14 @@ import * as pi from 'restate-agents/pi';
 
 const workspace = process.env.WORKSPACE ?? '/tmp/coding';
 
-const coder = restate.object({
+const coder = opencode.agent({
   name: 'coder',
-  handlers: {
-    code: opencode.chat({ directory: (ctx) => `${workspace}/${ctx.key}` }),
-  },
-  options: restate.sqlOptions,
+  directory: (ctx) => `${workspace}/${ctx.key}`,
 });
 
-const coordinator = restate.object({
+const coordinator = pi.agent({
   name: 'coordinator',
-  handlers: {
-    chat: pi.chat({
-      tools: [pi.subagent(coder, 'code', 'a coding agent with files of its own')],
-    }),
-  },
-  options: restate.sqlOptions,
+  tools: [pi.subagent(coder, { description: 'a coding agent with files of its own' })],
 });
 
 await restate.serve({ services: [coordinator, coder] });

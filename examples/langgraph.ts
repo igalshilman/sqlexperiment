@@ -24,12 +24,6 @@ const weather = tool(
   },
 );
 
-const assistant = restate.object({
-  name: 'assistant',
-  handlers: {
-    chat: langgraph.chat({ tools: [weather] }),
-  },
-  options: restate.sqlOptions,
-});
+const assistant = langgraph.agent({ name: 'assistant', tools: [weather] });
 
 await restate.serve({ services: [assistant] });

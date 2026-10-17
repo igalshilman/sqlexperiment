@@ -1,7 +1,9 @@
 // DeepSeek Harness agents in Restate virtual objects: the session (the
 // harness's event log) is in the object's database (persistence.ts).
 //
-//   handlers: { chat: deepseek.chat({ tools: [weather] }) }
+//   const assistant = deepseek.agent({ name: 'assistant', tools: [weather] });
+//
+// or a handler of an object of your own: `handlers: { chat: deepseek.chat() }`
 //
 // The model is DeepSeek's (@deepseek-ai/dsh-llm-deepseek-api-key): `model`,
 // or else DEEPSEEK_MODEL (default deepseek-flash), with DEEPSEEK_API_KEY.
@@ -40,6 +42,7 @@ import {
   ToolRuntime,
 } from '@deepseek-ai/dsh-tools';
 import { forCall, type PerCall } from '../common.ts';
+import { object } from '../object.ts';
 import { SqlSessionPersistence } from './persistence.ts';
 
 export { SqlSessionPersistence };
@@ -187,3 +190,10 @@ export const chat =
       await harness.fiber.dispose();
     }
   };
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+export const agent = <P extends string>({
+  name,
+  description,
+  ...options
+}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });

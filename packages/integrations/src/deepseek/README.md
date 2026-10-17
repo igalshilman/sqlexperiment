@@ -19,7 +19,7 @@ versions.
   event. An append is kept in memory; a flush, the harness's durability
   barrier, stores what was appended before it in one SQL transaction.
 - [`index.ts`](index.ts): `restate-agents/deepseek`. `chat({ model?, system?,
-  tools? })` makes a handler, `handlers: { chat: deepseek.chat() }`, that
+  tools? })` makes a handler, `handlers: { chat: deepseek.chat() }`, and `agent({ name, ...options })` a virtual object whose `chat` it is (with SQL set up, see [`object`](../object.ts)), that
   takes a message (a string) and returns the answer. It boots the harness over
   `ctx.db`: the services an agent loop needs, the persistence and the
   harness's session checkpoint policy, and the model adapter. It creates the
@@ -32,8 +32,7 @@ versions.
   [ledger](../../../../tests/sql/ledger.ts), and [its tests](../../../../tests/agents/deepseek.test.ts):
   the handler with a fake `ctx`, through crashes, and a scripted model,
   [`tests/fakes/deepseek.ts`](../../../../tests/fakes/deepseek.ts).
-- [`examples/deepseek.ts`](../../../../examples/deepseek.ts): a durable chat,
-  one `session` object with `chat: deepseek.chat()`.
+- [`examples/deepseek.ts`](../../../../examples/deepseek.ts): a durable chat agent with a tool, `deepseek.agent({ name: 'assistant', tools: [weather] })`.
 
 ## Through crashes
 

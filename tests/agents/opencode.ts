@@ -20,6 +20,7 @@
 // API key, and ABORT_PER_MILLE (see ../faults.ts).
 // OpenCode needs Node 24.
 import * as restate from '@restatedev/restate-sdk';
+import { object } from 'restate-agents';
 import { z } from 'zod';
 import { serveIfMain } from '../faults.ts';
 import { ledger } from '../sql/ledger.ts';
@@ -65,15 +66,6 @@ const audit = (ctx: restate.SqlObjectContext) =>
 /** Answer a message, once per invocation. */
 export const prompt = opencode.chat({ tools: [transfer, audit] });
 
-export const agent = restate.object({
-  name: 'OpenCodeAgent',
-  handlers: { chat: prompt },
-  options: {
-    ...restate.sqlOptions,
-    // A prompt is long work, and each attempt resumes from storage: keep
-    // retrying rather than pause after Restate's default number of attempts.
-    retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
-  },
-});
+export const agent = object({ name: 'OpenCodeAgent', handlers: { chat: prompt } });
 
 serveIfMain(import.meta, [agent, ledger]);

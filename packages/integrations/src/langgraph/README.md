@@ -13,7 +13,7 @@ conversation, which is the LangGraph thread.
   conversation does not store its whole message list again at every step.
   Each `put` and `putWrites` is one SQL transaction.
 - [`index.ts`](index.ts): `restate-agents/langgraph`. `chat({ model?,
-  tools? })` makes a handler, `handlers: { chat: langgraph.chat() }`, that
+  tools? })` makes a handler, `handlers: { chat: langgraph.chat() }`, and `agent({ name, ...options })` a virtual object whose `chat` it is (with SQL set up, see [`object`](../object.ts)), that
   takes a message (a string) and returns the answer. Its graph is the usual
   tool-calling loop (a model node, a tools node, back to the model until it
   answers):
@@ -53,7 +53,7 @@ conversation, which is the LangGraph thread.
   and [its tests](../../../../tests/agents/langgraph.test.ts): the handler with a fake
   `ctx`, through crashes.
 - [`examples/langgraph.ts`](../../../../examples/langgraph.ts): a durable
-  chat, one `session` object with `chat: langgraph.chat()`.
+  chat agent with a tool, `langgraph.agent({ name: 'assistant', tools: [weather] })`.
 
 ## Through crashes
 

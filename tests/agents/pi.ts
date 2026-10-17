@@ -10,6 +10,7 @@
 // Environment: PORT (default 9080), PI_MODEL with its provider's API key,
 // and ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
+import { object } from 'restate-agents';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
 import { serveIfMain } from '../faults.ts';
@@ -58,15 +59,6 @@ const audit = (ctx: restate.SqlObjectContext) =>
 /** Answer a message, once per invocation. */
 export const prompt = pi.chat({ tools: [transfer, audit] });
 
-export const agent = restate.object({
-  name: 'Agent',
-  handlers: { chat: prompt },
-  options: {
-    ...restate.sqlOptions,
-    // A prompt is long work, and each attempt resumes from storage: keep
-    // retrying rather than pause after Restate's default number of attempts.
-    retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
-  },
-});
+export const agent = object({ name: 'Agent', handlers: { chat: prompt } });
 
 serveIfMain(import.meta, [agent, ledger]);

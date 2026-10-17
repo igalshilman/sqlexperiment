@@ -8,6 +8,7 @@
 // Environment: PORT (default 9080), ANTHROPIC_API_KEY, CLAUDE_MODEL and
 // ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
+import { object } from 'restate-agents';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import * as claude from 'restate-agents/claude';
 import { z } from 'zod';
@@ -53,15 +54,6 @@ export const prompt = claude.chat({
   tools: [transfer, audit],
 });
 
-export const agent = restate.object({
-  name: 'ClaudeAgent',
-  handlers: { chat: prompt },
-  options: {
-    ...restate.sqlOptions,
-    // A prompt is long work, and each attempt resumes from storage: keep
-    // retrying rather than pause after Restate's default number of attempts.
-    retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
-  },
-});
+export const agent = object({ name: 'ClaudeAgent', handlers: { chat: prompt } });
 
 serveIfMain(import.meta, [agent, ledger]);

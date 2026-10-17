@@ -28,7 +28,7 @@ built on (4.0.1). OpenCode needs Node 24.
   the object's session; `prompt(ctx, text, options)` answers a message once
   per invocation (`ctx.request().id`); `tool(...)` defines a tool. `chat({
   model?, tools?, directory? })` makes a handler, `handlers: { chat:
-  opencode.chat() }`, that takes a message (a string) and returns the answer.
+  opencode.chat() }`, and `agent({ name, ...options })` a virtual object whose `chat` it is, that takes a message (a string) and returns the answer.
   The agent's tools replace OpenCode's own, unless it has a `directory` of
   the local machine to work in, where it keeps OpenCode's own tools too.
 - [`tests/agents/opencode.ts`](../../../../tests/agents/opencode.ts): the OpenCodeAgent
@@ -39,8 +39,7 @@ built on (4.0.1). OpenCode needs Node 24.
   model that OpenCode calls through a plugin's `language` hook.
 - [`tests/storage/opencode.test.ts`](../../../../tests/storage/opencode.test.ts): the
   Effect `SqlClient` of `db.ts` over a sqlite-kv database in memory.
-- [`examples/opencode.ts`](../../../../examples/opencode.ts): a durable chat,
-  one `session` object with `chat: opencode.chat()`; and
+- [`examples/opencode.ts`](../../../../examples/opencode.ts): a durable chat agent with a tool, `opencode.agent({ name: 'assistant', tools: [weather] })`; and
   [`examples/coding.ts`](../../../../examples/coding.ts), OpenCode coders,
   each with a directory, under a pi coordinator.
 

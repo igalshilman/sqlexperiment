@@ -10,6 +10,7 @@
 // Environment: PORT (default 9080), DEEPSEEK_API_KEY and ABORT_PER_MILLE (see
 // ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
+import { object } from 'restate-agents';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import * as deepseek from 'restate-agents/deepseek';
 import { serveIfMain } from '../faults.ts';
@@ -61,15 +62,6 @@ export const prompt = deepseek.chat({
   tools: [transfer, audit],
 });
 
-export const agent = restate.object({
-  name: 'DeepSeekAgent',
-  handlers: { chat: prompt },
-  options: {
-    ...restate.sqlOptions,
-    // A prompt is long work, and each attempt resumes from storage: keep
-    // retrying rather than pause after Restate's default number of attempts.
-    retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
-  },
-});
+export const agent = object({ name: 'DeepSeekAgent', handlers: { chat: prompt } });
 
 serveIfMain(import.meta, [agent, ledger]);

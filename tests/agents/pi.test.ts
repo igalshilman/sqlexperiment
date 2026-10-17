@@ -22,8 +22,8 @@ vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
       }
       if (textOf(last.content).startsWith('delegate')) {
         return callTools([
-          ['code', { name: 'fizzbuzz', task: 'write fizzbuzz.py' }],
-          ['code', { name: 'primes', task: 'write primes.py' }],
+          ['coder', { name: 'fizzbuzz', task: 'write fizzbuzz.py' }],
+          ['coder', { name: 'primes', task: 'write primes.py' }],
         ]);
       }
       return say(
@@ -82,7 +82,7 @@ describe('pi.chat', () => {
 describe('pi.subagent', () => {
   it('hands each task to the sub-agent of its name, once per tool call', async () => {
     const alice = object('alice');
-    const chat = pi.chat({ tools: [pi.subagent({ name: 'coder' }, 'code')] });
+    const chat = pi.chat({ tools: [pi.subagent({ name: 'coder' }, { handler: 'code' })] });
     expect(await alice.invoke(chat, 'inv1', 'delegate fizzbuzz and primes')).toBe(
       'alice.fizzbuzz: done\nalice.primes: done',
     );

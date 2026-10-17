@@ -1,7 +1,9 @@
 // LangGraph agents in Restate virtual objects: a tool-calling graph whose
 // checkpoints are in the object's database (checkpointer.ts).
 //
-//   handlers: { chat: langgraph.chat({ tools: [search] }) }
+//   const assistant = langgraph.agent({ name: 'assistant', tools: [search] });
+//
+// or a handler of an object of your own: `handlers: { chat: langgraph.chat() }`
 //
 // The graph is the usual tool-calling loop: a model node, a tools node, and
 // back to the model until it answers. The model is `model`, or else
@@ -28,6 +30,7 @@ import type { StructuredToolInterface } from '@langchain/core/tools';
 import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import { forCall, type PerCall } from '../common.ts';
+import { object } from '../object.ts';
 import { SqlCheckpointSaver } from './checkpointer.ts';
 
 export { SqlCheckpointSaver };
@@ -86,3 +89,10 @@ export const chat =
       await app.invoke(state.next.length > 0 ? null : { messages: [new HumanMessage(message)], prompt: id }, config);
     }
   };
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+export const agent = <P extends string>({
+  name,
+  description,
+  ...options
+}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });

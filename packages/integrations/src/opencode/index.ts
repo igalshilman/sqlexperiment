@@ -1,7 +1,9 @@
 // OpenCode 2.0 agents in Restate virtual objects: OpenCode for each
 // invocation, with its database in the object's database.
 //
-//   handlers: { code: opencode.chat({ directory: (ctx) => `/work/${ctx.key}` }) }
+//   const coder = opencode.agent({ name: 'coder', directory: (ctx) => `/work/${ctx.key}` });
+//
+// or a handler of an object of your own: `handlers: { chat: opencode.chat() }`
 //
 // or, for more than a prompt:
 //
@@ -34,6 +36,7 @@ import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { forCall, type PerCall } from '../common.ts';
+import { object } from '../object.ts';
 import { type Fence, type Host, openOpenCode } from './db.ts';
 
 /** An OpenCode model reference. */
@@ -297,3 +300,10 @@ export const chat =
       tools: tools.map((t) => forCall(t, ctx)),
       directory: directory === undefined ? undefined : forCall(directory, ctx),
     });
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+export const agent = <P extends string>({
+  name,
+  description,
+  ...options
+}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });

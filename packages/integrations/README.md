@@ -9,19 +9,24 @@ however often an attempt crashes.
 import * as restate from '@restatedev/restate-sdk';
 import * as pi from 'restate-agents/pi';
 
-const session = restate.object({ name: 'session', handlers: { chat: pi.chat() }, options: restate.sqlOptions });
-await restate.serve({ services: [session] });
+const assistant = pi.agent({ name: 'assistant', tools: [weather] });
+await restate.serve({ services: [assistant] });
 ```
 
-| Import                                                | Framework                       | Its state in the database | `chat(options)`                                                                                           |
-| ----------------------------------------------------- | ------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------- |
-| [`restate-agents/pi`](src/pi/README.md)               | pi-durable                      | its storage               | `model`, `tools`, `workspace`; and `subagent(object, handler)`, a tool that hands a task to another agent |
-| [`restate-agents/opencode`](src/opencode/README.md)   | OpenCode 2.0, embedded          | its database              | `model`, `tools`, `directory`                                                                             |
-| [`restate-agents/langgraph`](src/langgraph/README.md) | LangGraph                       | its checkpoints           | `model`, `tools`                                                                                          |
-| [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | the conversation          | `model`, `system`, `tools`                                                                                |
-| [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | its session's event log   | `model`, `system`, `tools`                                                                                |
+| Import                                                | Framework                       | Its state in the database | `chat(options)`                                                                                 |
+| ----------------------------------------------------- | ------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------- |
+| [`restate-agents/pi`](src/pi/README.md)               | pi-durable                      | its storage               | `model`, `tools`, `workspace`; and `subagent(agent)`, a tool that hands a task to another agent |
+| [`restate-agents/opencode`](src/opencode/README.md)   | OpenCode 2.0, embedded          | its database              | `model`, `tools`, `directory`                                                                   |
+| [`restate-agents/langgraph`](src/langgraph/README.md) | LangGraph                       | its checkpoints           | `model`, `tools`                                                                                |
+| [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | the conversation          | `model`, `system`, `tools`                                                                      |
+| [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | its session's event log   | `model`, `system`, `tools`                                                                      |
 
-`chat(options)` makes a handler, `(ctx, message: string) => Promise<string>`.
+Each framework has `agent({ name, ...options })`, a virtual object with one
+handler, `chat`, which takes a message and returns the answer; and
+`chat(options)`, that handler, for an object of your own. `object()`, of
+`restate-agents`, is `restate.object` with SQL set up: `ctx.db` in every
+handler, and retries without end, since each attempt resumes from the
+database.
 A tool may be given as itself, or as a function of the invocation's context,
 `(ctx) => tool`, to reach other services through it. A tool that must not run
 twice passes its tool call id on (as an idempotency key, say): a crash runs

@@ -23,12 +23,6 @@ const weather = defineTool({
   execute: async ({ city }) => ({ content: [{ type: 'text', text: `Sunny and 21°C in ${city}` }] }),
 });
 
-const assistant = restate.object({
-  name: 'assistant',
-  handlers: {
-    chat: pi.chat({ tools: [weather] }),
-  },
-  options: restate.sqlOptions,
-});
+const assistant = pi.agent({ name: 'assistant', tools: [weather] });
 
 await restate.serve({ services: [assistant] });

@@ -1,8 +1,10 @@
 // pi agents in Restate virtual objects: a pi-durable Harness for each
 // invocation, with its storage in the object's database.
 //
-//   handlers: { chat: pi.chat() }
-//   handlers: { chat: pi.chat({ tools: [subagent(coder, 'code')] }) }
+//   const assistant = pi.agent({ name: 'assistant', tools: [weather] });
+//   const lead = pi.agent({ name: 'lead', tools: [pi.subagent(coder)] });
+//
+// or a handler of an object of your own: `handlers: { chat: pi.chat() }`
 //
 // or, for more than a prompt:
 //
@@ -44,6 +46,7 @@ import {
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
 import { forCall, type PerCall } from '../common.ts';
+import { object } from '../object.ts';
 import { openSqlKvStorage } from './storage.ts';
 
 /** What `work` gets: `prompt(id, text)`, and the `harness` and chord `context` for anything else. */
@@ -153,16 +156,17 @@ export const chat =
     });
 
 /**
- * A tool that hands a task to a sub-agent: the object `agent`, keyed
- * `<this key>.<task name>`, through its `handler`. Tasks of different names
- * run at once; the same name continues the same task. A call is made once
- * per tool call, however many attempts run it.
+ * A tool, named after `agent` (an object, such as one of {@link agent}), that
+ * hands a task to it: to the object keyed `<this key>.<task name>`, through
+ * its `handler` (`chat`). Tasks of different names run at once; the same name
+ * continues the same task. A call is made once per tool call, however many
+ * attempts run it.
  */
 export const subagent =
-  (agent: { name: string }, handler = 'chat', description = `a ${agent.name} agent`) =>
+  (agent: { name: string }, { description = `the ${agent.name} agent`, handler = 'chat' } = {}) =>
   (ctx: restate.SqlObjectContext): ToolRegistration =>
     defineTool({
-      name: handler,
+      name: agent.name,
       description:
         `Hand a task to ${description}, and get its answer. ` +
         'Tasks of different names run at once; the same name continues the same task.',
@@ -184,3 +188,10 @@ export const subagent =
         return { content: [{ type: 'text', text: answer }] };
       },
     });
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+export const agent = <P extends string>({
+  name,
+  description,
+  ...options
+}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });
