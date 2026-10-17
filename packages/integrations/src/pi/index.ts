@@ -45,7 +45,17 @@ import {
 } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
-import { chatHandler, forCall, messagesHandler, modelOf, said, type ChatMessage, type PerCall } from '../common.ts';
+import {
+  CHECK_MODEL,
+  chatHandler,
+  checkModelName,
+  forCall,
+  messagesHandler,
+  modelOf,
+  said,
+  type ChatMessage,
+  type PerCall,
+} from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
@@ -82,8 +92,15 @@ export interface PiOptions {
 /** A registry of `provider`'s models, such as anthropicProvider() from @earendil-works/pi-ai/providers/anthropic. */
 async function modelsOf(provider: string): Promise<MutableModels> {
   const models = createModels();
-  const module = await import(`@earendil-works/pi-ai/providers/${provider}`);
-  models.setProvider(module[`${provider}Provider`]());
+  let module: Record<string, () => Parameters<MutableModels['setProvider']>[0]>;
+  try {
+    module = await import(`@earendil-works/pi-ai/providers/${provider}`);
+  } catch {
+    throw new restate.TerminalError(`pi knows no model provider "${provider}": ${CHECK_MODEL}`);
+  }
+  // amazon-bedrock: amazonBedrockProvider
+  const name = `${provider.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())}Provider`;
+  models.setProvider(module[name]!());
   return models;
 }
 
@@ -124,7 +141,10 @@ export const withPi = async <T>(
         const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
         const settled = await submission.wait(context);
         if (settled.status !== 'done' || settled.answer === undefined) {
-          throw new restate.TerminalError(`prompt ${id} unanswered: ${settled.reason ?? 'unknown'}`);
+          const reason = settled.reason ?? 'unknown';
+          const check =
+            reason === 'model_error' || reason === 'no_model' ? ` (the model ${model}: ${CHECK_MODEL})` : '';
+          throw new restate.TerminalError(`prompt ${id} unanswered: ${reason}${check}`);
         }
         const { answer } = settled;
         const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
@@ -184,7 +204,10 @@ const respond =
  * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
  * (`curl --json '"Hi"'`).
  */
-export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
+export const chat = (options: ChatOptions = {}) => {
+  checkModelName('pi', options.model);
+  return chatHandler(respond(options));
+};
 
 /** A handler of the conversation: what was said, in order, from pi-durable's entries. */
 export const messages = () =>
