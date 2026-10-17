@@ -64,8 +64,8 @@ export interface Tool<Input = unknown> {
   execute(input: Input, callId: string): Promise<string>;
 }
 
-/** A tool, for a list of tools of different inputs. */
-export const tool = <Input>(t: Tool<Input>) => t as Tool;
+/** `t` as a tool of any input, for a list of tools of different inputs. */
+const anyTool = <Input>(t: Tool<Input>) => t as Tool;
 
 /** The session every prompt goes to. */
 export const SESSION = 'ses_root';
@@ -303,7 +303,7 @@ export interface ChatOptions {
   model?: string;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
-  /** The agent's tools, which replace OpenCode's own: `tool()`s, Restate's (`call`, `signal`...), or this module's `tool`s, or for an invocation. */
+  /** The agent's tools, which replace OpenCode's own: `tool()`s, Restate's (`call`, `signal`...), or OpenCode tools of your own (`Tool`), or for an invocation. */
   tools?: (PerCall<Tool> | AnyTool)[];
   /** The directory to work in, with OpenCode's own tools (see {@link OpenCodeOptions.directory}). */
   directory?: PerCall<string | undefined>;
@@ -318,7 +318,7 @@ const respond =
       system,
       tools: tools.map((t) =>
         isTool(t)
-          ? tool({
+          ? anyTool({
               name: t.name,
               description: t.description,
               input: t.input,
