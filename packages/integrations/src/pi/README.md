@@ -10,7 +10,8 @@ again. Here its storage is a Restate virtual object's SQL database
 - [`index.ts`](index.ts): `restate-agents/pi`. `withPi(ctx, { models,
   model, tools, workspace }, work)` runs `work` with a pi-durable Harness
   over the object's database, `ctx.db`, and closes it at the end.
-  `pi.prompt(id, text)` answers a prompt once per id: it submits the prompt,
+  `session.prompt(text, id?)` answers a prompt once per id (by default the
+  invocation's): it submits the prompt,
   waits for the answer, records it, and returns its text. A retried attempt
   (a crash, a lost connection) opens the Harness again and carries on:
   - a prompt is submitted once, by its id (pi-durable's `requestId`);
@@ -26,7 +27,7 @@ again. Here its storage is a Restate virtual object's SQL database
   const assistant = pi.agent({ name: 'assistant', tools: [weather] }); // a virtual object
   handlers: { chat: pi.chat() } // a handler of an object of your own
   // or, for more than a prompt:
-  chat: (ctx, message) => withPi(ctx, { tools }, (pi) => pi.prompt(ctx.request().id, message)),
+  chat: (ctx, message) => withPi(ctx, { tools }, (session) => session.prompt(message)),
   ```
 
   A caller that resends a message uses an idempotency key. With a

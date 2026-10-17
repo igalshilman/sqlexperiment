@@ -8,7 +8,7 @@
 //
 // or, for more than a prompt:
 //
-//   chat: (ctx, message) => withPi(ctx, { tools }, (pi) => pi.prompt(ctx.request().id, message)),
+//   chat: (ctx, message) => withPi(ctx, { tools }, (session) => session.prompt(message)),
 //
 // The model is `model`, MODEL, or else anthropic/claude-sonnet-5-5, with the
 // provider's API key (such as ANTHROPIC_API_KEY).
@@ -51,12 +51,12 @@ import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
 import { openSqlKvStorage } from './storage.ts';
 
-/** What `work` gets: `prompt(id, text)`, and the `harness` and chord `context` for anything else. */
+/** What `work` gets: `prompt(text)`, and the `harness` and chord `context` for anything else. */
 export interface Pi {
   harness: Harness;
   context: Context;
-  /** Answer `text`, once per prompt `id`, with the answer's text. */
-  prompt(id: string, text: string): Promise<string>;
+  /** Answer `text`, once per prompt `id` (by default the invocation's), with the answer's text. */
+  prompt(text: string, id?: string): Promise<string>;
 }
 
 /** The text of a message's content. */
@@ -71,6 +71,8 @@ export interface PiOptions {
   model?: string;
   /** A pi-ai model registry; by default, one of the model's provider. */
   models?: MutableModels;
+  /** The system prompt: who the agent is, and how it answers. */
+  system?: string;
   /** The agent's tools, made with pi-durable's `defineTool`. */
   tools?: ToolRegistration[];
   /** A directory for the coding tools, made if missing; without one, the agent has no file system. */
@@ -88,12 +90,12 @@ async function modelsOf(provider: string): Promise<MutableModels> {
 /**
  * Run `work(pi)` with a Harness over the object's database: `model` is the
  * model to use as `provider/model-id`, and `tools` the agent's tools. `pi`
- * has `prompt(id, text)`, and the `harness` and chord `context` for anything
+ * has `prompt(text)`, and the `harness` and chord `context` for anything
  * else.
  */
 export const withPi = async <T>(
   ctx: restate.SqlObjectContext,
-  { model: named, models, tools = [], workspace }: PiOptions,
+  { model: named, models, system, tools = [], workspace }: PiOptions,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const db = ctx.db;
@@ -103,6 +105,7 @@ export const withPi = async <T>(
   const context = BACKGROUND_CONTEXT;
   const registry = createRegistry();
   registry.install(defineExtension({ name: 'tools', tools }));
+  if (system) registry.install(defineExtension({ name: 'system', sections: [section('system', () => system)] }));
   let env: (() => NodeExecutionEnv) | undefined;
   if (workspace) {
     await mkdir(workspace, { recursive: true });
@@ -116,7 +119,7 @@ export const withPi = async <T>(
     return await work({
       harness,
       context,
-      async prompt(id, text) {
+      async prompt(text, id = ctx.request().id) {
         const root = await harness.root(context, { agent: { model: { provider, modelId } } });
         const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
         const settled = await submission.wait(context);
@@ -137,13 +140,15 @@ export const withPi = async <T>(
 
 /** Answer `text`, once per invocation: a retried attempt resumes the same prompt. */
 export const prompt = (ctx: restate.SqlObjectContext, text: string, options: PiOptions = {}) =>
-  withPi(ctx, options, (pi) => pi.prompt(ctx.request().id, text));
+  withPi(ctx, options, (session) => session.prompt(text));
 
 export interface ChatOptions {
   /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** A pi-ai model registry, for a provider of your own; by default, one of the model's provider. */
   models?: MutableModels;
+  /** The system prompt: who the agent is, and how it answers. */
+  system?: string;
   /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or pi-durable's `defineTool`s, or for an invocation. */
   tools?: (PerCall<ToolRegistration> | AnyTool)[];
   /** A directory for the coding tools (see {@link PiOptions.workspace}). */
@@ -164,11 +169,12 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolRegistration =>
 
 /** The answer to a message, each message an invocation, the conversation in the object's database. */
 const respond =
-  ({ model, models, tools = [], workspace }: ChatOptions = {}) =>
+  ({ model, models, system, tools = [], workspace }: ChatOptions = {}) =>
   (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
     prompt(ctx, message, {
       model,
       models,
+      system,
       tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),
       workspace: workspace === undefined ? undefined : forCall(workspace, ctx),
     });

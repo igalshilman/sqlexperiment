@@ -27,7 +27,7 @@ describe('withPi', () => {
     try {
       const ctx = { db } as unknown as restate.SqlObjectContext;
       const { answer, agent } = await withPi(ctx, { models, model: 'scribe/scribe', workspace }, async (pi) => ({
-        answer: await pi.prompt('p1', 'take a note'),
+        answer: await pi.prompt('take a note', 'p1'),
         agent: await (await pi.harness.root(pi.context)).agent(pi.context),
       }));
       expect(answer).toBe('written');

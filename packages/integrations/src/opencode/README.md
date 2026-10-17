@@ -24,8 +24,8 @@ built on (4.0.1). OpenCode needs Node 24.
   so the host is booted with the Effect API's.)
 - [`index.ts`](index.ts): `restate-agents/opencode`. `withOpenCode(ctx, {
   plugins, model, tools, directory }, work)` runs `work` with OpenCode for one
-  invocation, over `ctx.db`, and its `prompt(id, text)` answers a prompt in
-  the object's session; `prompt(ctx, text, options)` answers a message once
+  invocation, over `ctx.db`, and its `prompt(text, id?)` answers a prompt
+  in the object's session, once per id (by default the invocation's); `prompt(ctx, text, options)` answers a message once
   per invocation (`ctx.request().id`); `tool(...)` defines a tool. `chat({
   model?, tools?, directory? })` makes a handler, `handlers: { chat:
   opencode.chat() }`, and `agent({ name, ...options })` a virtual object whose `chat` it is, that takes a message (a string) and returns the answer.

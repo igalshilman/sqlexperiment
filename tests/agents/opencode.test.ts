@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { conversation } from '../testing.ts';
 import { teller, withTeller } from '../fakes/opencode.ts';
+import * as opencode from 'restate-agents/opencode';
 import { prompt } from './opencode.ts';
 import type * as OpenCodeDb from 'restate-agents/opencode/db';
 
@@ -15,6 +16,11 @@ vi.mock('restate-agents/opencode/db', async (original) => {
 vi.stubEnv('MODEL', 'teller/teller');
 
 describe('the OpenCode agent', () => {
+  it('gives the model its system prompt', async () => {
+    const c = conversation(opencode.chat({ system: 'You are Ada.' }), 'ada');
+    expect(await c.attempt('inv1', 'Who are you?')).toContain('You are Ada.');
+  });
+
   it('answers a message once per invocation', async () => {
     const c = conversation(prompt, 'a');
     const first = await c.attempt('inv1', 'Please move 5 from 1 to 2');

@@ -21,6 +21,11 @@ vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
             .join('\n'),
         );
       }
+      // Asked who it is, it repeats its system prompt.
+      if (textOf(last.content) === 'Who are you?') {
+        const system = messages.find((m) => m.role === 'system') as { sections?: Record<string, string> } | undefined;
+        return say(Object.values(system?.sections ?? {}).join('\n'));
+      }
       if (textOf(last.content).startsWith('delegate')) {
         return callTools([
           ['coder', { name: 'fizzbuzz', task: 'write fizzbuzz.py' }],
@@ -70,6 +75,11 @@ function object(key: string) {
 }
 
 describe('pi.chat', () => {
+  it('gives the model its system prompt', async () => {
+    const ada = object('ada');
+    expect(await ada.invoke(pi.chat({ system: 'You are Ada.' }), 'inv1', 'Who are you?')).toContain('You are Ada.');
+  });
+
   it('remembers the conversation across messages, and answers a retried message once', async () => {
     const alice = object('alice');
     const chat = pi.chat();
