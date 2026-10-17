@@ -136,4 +136,5 @@ export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options), messages: messages() } });
+}: ChatOptions & { name: P; description?: string }) =>
+  object({ name, description, handlers: { chat: chat(options), messages: messages() } });

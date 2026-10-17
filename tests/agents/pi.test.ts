@@ -74,6 +74,20 @@ function object(key: string) {
   };
 }
 
+describe('pi.messages', () => {
+  it('gives the conversation: what was said, in order', async () => {
+    const alice = object('alice');
+    await alice.invoke(pi.chat(), 'inv1', 'Hi, I am Alice');
+    await alice.invoke(pi.chat(), 'inv2', 'What is my name?');
+    expect(await alice.invoke(pi.messages() as unknown as Handler, 'read', '')).toEqual([
+      { role: 'user', text: 'Hi, I am Alice' },
+      { role: 'assistant', text: 'Hi, I am Alice' },
+      { role: 'user', text: 'What is my name?' },
+      { role: 'assistant', text: 'Hi, I am Alice / What is my name?' },
+    ]);
+  });
+});
+
 describe('pi.chat', () => {
   it('gives the model its system prompt', async () => {
     const ada = object('ada');

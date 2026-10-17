@@ -35,7 +35,7 @@ import * as restate from '@restatedev/restate-sdk';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
-import { chatHandler, forCall, modelOf, type PerCall } from '../common.ts';
+import { chatHandler, forCall, messagesHandler, modelOf, said, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 
@@ -141,6 +141,8 @@ interface Message {
   id: string;
   type: string;
   outcome?: string;
+  /** A user message's text. */
+  text?: string;
   content?: { type: string; text?: string }[];
   error?: { message?: string };
 }
@@ -336,9 +338,44 @@ const respond =
  */
 export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
-/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
+/** The session's messages, oldest first. */
+async function transcript(host: Host): Promise<Message[]> {
+  const all: Message[] = [];
+  for (let cursor: string | undefined; ;) {
+    const page: { data: Message[]; cursor: { next?: string | null } } = await host.call(
+      host.client.message.list(
+        cursor === undefined
+          ? { sessionID: SESSION as never, order: 'asc', limit: 50 }
+          : { sessionID: SESSION as never, cursor },
+      ),
+    );
+    all.push(...page.data);
+    cursor = page.cursor.next ?? undefined;
+    if (cursor === undefined) return all;
+  }
+}
+
+/** A handler of the session: what was said, in order. */
+export const messages = () =>
+  messagesHandler((ctx) =>
+    withOpenCode(ctx, {}, async ({ host }) =>
+      (await transcript(host)).flatMap((m) => {
+        if (m.type === 'user') return said('user', m.text ?? '');
+        if (m.type === 'assistant') {
+          return said(
+            'assistant',
+            (m.content ?? []).flatMap((c) => (c.type === 'text' && c.text ? [c.text] : [])).join(''),
+          );
+        }
+        return [];
+      }),
+    ),
+  );
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) => object({ name, description, handlers: { chat: chat(options) } });
+}: ChatOptions & { name: P; description?: string }) =>
+  object({ name, description, handlers: { chat: chat(options), messages: messages() } });
