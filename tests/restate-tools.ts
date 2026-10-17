@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import * as restate from '@restatedev/restate-sdk';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { call, signal, signals, workflow, type Messages, type Status, type Waiting } from 'restate-agents';
+import { AgentError, agentClient } from 'restate-agents/client';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
@@ -214,10 +215,14 @@ try {
 
   // Sent without waiting, and its answer fetched later: by the invocation's
   // id, or by the idempotency key it was sent with.
-  await post('support/henry/signal', { name: 'approval', value: 'approved', keep: true });
-  const henry = (await post('support/henry/chat/send', 'Refund order 103')) as { invocationId: string };
-  const attached = await fetch(`${INGRESS}/restate/invocation/${henry.invocationId}/attach`);
-  assert.equal(await attached.json(), 'order 103: delivered / approved / refunded 103');
+  // Through the client of restate-agents/client.
+  const henry = agentClient(INGRESS, 'support', 'henry');
+  assert.deepEqual(await henry.signal({ name: 'approval', value: 'approved', keep: true }), { resolved: null });
+  const { invocationId } = await henry.send('Refund order 103');
+  assert.equal(await henry.attach(invocationId), 'order 103: delivered / approved / refunded 103');
+  assert.deepEqual(await henry.status(), { answering: null, waiting: [] });
+  assert.equal((await henry.messages({ limit: 1 })).messages[0]?.parts[0]?.type, 'text');
+  await assert.rejects(agentClient(INGRESS, 'nobody', 'x').status(), (e: unknown) => e instanceof AgentError);
   await post('support/ivy/signal', { name: 'approval', value: 'approved', keep: true });
   const keyed = await fetch(`${INGRESS}/support/ivy/chat/send`, {
     method: 'POST',

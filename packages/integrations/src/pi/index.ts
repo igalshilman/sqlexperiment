@@ -245,7 +245,7 @@ export const messages = () =>
             transcript.say('assistant', textOf(m.content));
             for (const c of m.content) if (c.type === 'toolCall') transcript.call(c.id, c.name, c.arguments);
           }
-          if (m.role === 'toolResult') transcript.result(m.toolCallId, textOf(m.content));
+          if (m.role === 'toolResult') transcript.result(m.toolCallId, textOf(m.content), m.isError);
         }
         cursor = page.next;
         if (cursor === undefined) return;

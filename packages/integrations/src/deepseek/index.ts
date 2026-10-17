@@ -300,7 +300,8 @@ export const messages = () =>
       if (e.type === 'user/message' && e.data.id.startsWith('prompt:')) transcript.say('user', textOf(e.data));
       if (e.type === 'assistant/message') transcript.say('assistant', textOf(e.data.message));
       if (e.type === 'tool/call') transcript.call(e.data.callId, e.data.name, parsed(e.data.arguments));
-      if (e.type === 'tool/result') transcript.result(e.data.message.toolCallId, textOf(e.data.message));
+      if (e.type === 'tool/result')
+        transcript.result(e.data.message.toolCallId, textOf(e.data.message), e.data.message.isError);
     }
   });
 

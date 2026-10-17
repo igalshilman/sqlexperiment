@@ -85,7 +85,9 @@ curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'       # "Hello Alic
 ```
 
 A key answers one message at a time: a message sent while another is
-answered waits for it.
+answered waits for it. A message that fails for good answers with an error:
+HTTP 424 if the model's provider refused it (a missing or wrong API key, an
+unknown model), 500 otherwise.
 
 **Send now, fetch the answer later.** A turn can take longer than an HTTP
 request should wait (a tool that waits for a person, say). Add `/send` to
@@ -162,6 +164,26 @@ curl localhost:8080/support/alice/status
   ]
 }
 ```
+
+In a tool part, `error: true` says the output is the tool's error (`Error:
+<message>`), for a UI to show it as one.
+
+**From a web app.** `restate-agents/client` is a client of an agent's
+handlers over `fetch`, with their types. It imports nothing but types, so a
+web app bundles it without the SDK:
+
+```ts
+import { agentClient } from 'restate-agents/client';
+
+const alice = agentClient('http://localhost:8080', 'assistant', 'alice');
+const { invocationId } = await alice.send('Plan my week');
+const { answering, waiting } = await alice.status(); // while it works
+const { messages } = await alice.messages({ limit: 20 }); // the tool calls so far
+const answer = await alice.attach(invocationId); // once it answered
+```
+
+It has `chat`, `send`, `attach`, `messages`, `status`, `pending` and
+`signal`; a failed request throws an `AgentError` with the HTTP status.
 
 **From code.** From a Restate handler, through the agent's definition:
 

@@ -158,7 +158,7 @@ interface Content {
   text?: string;
   id?: string;
   name?: string;
-  state?: { input?: unknown; content?: Content[] };
+  state?: { status?: string; input?: unknown; content?: Content[] };
 }
 
 /** The text of `content`. */
@@ -409,7 +409,7 @@ export const messages = () =>
         for (const c of m.content ?? []) {
           if (c.type !== 'tool' || !c.id || !c.state) continue;
           transcript.call(c.id, c.name ?? '', c.state.input);
-          if (c.state.content) transcript.result(c.id, textOf(c.state.content));
+          if (c.state.content) transcript.result(c.id, textOf(c.state.content), c.state.status === 'error');
         }
       }
     } finally {
