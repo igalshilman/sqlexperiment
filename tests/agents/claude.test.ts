@@ -111,6 +111,12 @@ describe('the Claude agent', () => {
     expect(await crashedAnywhere(prompt, claude.messages(), { steered: true })).toEqual([]);
   }, 600_000);
 
+  it('tells the model a tool it does not have is not there', async () => {
+    // The teller audits with a tool `audit`, which this agent lacks.
+    const c = conversation(claude.chat(), 'unknown');
+    expect(await c.attempt('inv1', 'audit the books')).toMatch(/^Done: .*audit/s);
+  });
+
   it('gives the conversation: what was said, in order, with the tool calls', async () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
