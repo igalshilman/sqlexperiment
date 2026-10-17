@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # The tool gateway's demo, in four acts, against a Restate server that has
-# the gateway's endpoint (`node serve.ts gateway`) registered. Everything
+# the gateway's endpoint (`node gateway/main.ts`) registered. Everything
 # goes through Restate: its ingress, and its admin API for the limits.
 #
 #   INGRESS=http://localhost:8080 ADMIN=http://localhost:9070 gateway/demo.sh
 #
-# The agent's model is the endpoint's PI_MODEL: the scripted one, or a real
-# one, such as openai/gpt-5.4-mini. Press enter between acts.
+# The agent's model is the endpoint's PI_MODEL, such as openai/gpt-5.4-mini.
+# Press enter between acts.
 set -euo pipefail
 INGRESS=${INGRESS:-http://localhost:8080}
 ADMIN=${ADMIN:-http://localhost:9070}

@@ -18,7 +18,6 @@
 //
 // Environment: PORT.
 import * as restate from '@restatedev/restate-sdk';
-import { serveIfMain } from '../faults.ts';
 import { PREBUILT } from './tools.ts';
 
 /** A tool, as a model sees it, and the handler that runs it. */
@@ -125,5 +124,3 @@ export const gateway = restate.object({
   // A waiting call suspends soon, and holds no process.
   options: { inactivityTimeout: { seconds: 1 }, journalRetention: { hours: 1 } },
 });
-
-serveIfMain(import.meta, [gateway]);

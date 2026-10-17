@@ -1,0 +1,44 @@
+// Test only: the scripted teller, a LangChain chat model that needs no API key
+// and answers deterministically, so the agent's tests and the crash test run
+// offline. It transfers and audits on request, and reports the tool's result.
+//
+// The module stands in for @langchain/anthropic (see fakes.ts): its
+// ChatAnthropic is the teller.
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import { AIMessage, type BaseMessage } from '@langchain/core/messages';
+import type { ChatResult } from '@langchain/core/outputs';
+
+export class Teller extends BaseChatModel {
+  override _llmType() {
+    return 'teller';
+  }
+
+  // It knows its tools.
+  override bindTools(_tools: unknown[]) {
+    return this;
+  }
+
+  /** The reply to `messages`. */
+  reply(messages: BaseMessage[]): AIMessage {
+    const last = messages.at(-1)!;
+    const { text } = last;
+    if (last.getType() === 'tool') return new AIMessage(`Done: ${text}`);
+    // A tool call id, unique in the conversation, and the same when a step is
+    // run again.
+    const id = `call_${messages.length}`;
+    const move = /move (\d+) from (\d+) to (\d+)/i.exec(text);
+    if (move) {
+      const [amount, from, to] = move.slice(1).map(Number);
+      return new AIMessage({ content: 'On it.', tool_calls: [{ id, name: 'transfer', args: { from, to, amount } }] });
+    }
+    if (/audit/i.test(text)) return new AIMessage({ content: '', tool_calls: [{ id, name: 'audit', args: {} }] });
+    return new AIMessage('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+  }
+
+  override async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+    const message = this.reply(messages);
+    return { generations: [{ text: message.text, message }] };
+  }
+}
+
+export { Teller as ChatAnthropic };
