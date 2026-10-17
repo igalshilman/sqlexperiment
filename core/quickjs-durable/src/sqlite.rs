@@ -213,7 +213,7 @@ impl SqliteTransaction<'_> {
 }
 
 impl Kv for SqliteTransaction<'_> {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
         let value: Option<Vec<u8>> = self
             .sql
             .prepare_cached("SELECT value FROM checkpoints WHERE key=?")?

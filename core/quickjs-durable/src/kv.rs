@@ -14,9 +14,10 @@ use std::{
 /// Reliable byte KV access. In an engine transaction, put only stages a value
 /// and reads observe staged writes. The outer host controls atomic durability.
 /// Both may await I/O, such as a remote store's: the engine holds no Wasm call
-/// while it waits.
+/// while it waits. Both take `&mut self`: a store's session may need exclusive
+/// access even to read.
 pub trait Kv {
-    fn get(&self, key: &str) -> impl Future<Output = Result<Option<Vec<u8>>>>;
+    fn get(&mut self, key: &str) -> impl Future<Output = Result<Option<Vec<u8>>>>;
     fn put(&mut self, key: &str, value: &[u8]) -> impl Future<Output = Result<()>>;
 }
 
@@ -31,7 +32,7 @@ pub struct MemoryTransaction {
     pub effects: BTreeMap<String, Operation>,
 }
 impl Kv for MemoryTransaction {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.values.get(key).cloned())
     }
     async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {

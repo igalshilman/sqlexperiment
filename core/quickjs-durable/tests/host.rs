@@ -101,7 +101,7 @@ impl FaultTransaction {
     }
 }
 impl Kv for FaultTransaction {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
         self.inner.get(key).await
     }
     async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
@@ -176,7 +176,7 @@ fn atomic_commit_couples_snapshot_state_and_effects_without_replay() -> Result<(
                 assert_eq!(published.effects.len(), 1);
                 assert!(published.effects.contains_key(view.state.pending[0].id()));
                 assert!(!published.values.keys().any(|k| k.contains("/event/")));
-                let read_only = Engine::new(
+                let mut read_only = Engine::new(
                     FaultTransaction::new(published, Some((1, false))),
                     runtime(),
                 );
@@ -383,7 +383,7 @@ fn vm_trap_aborts_staged_state_and_effects_together() -> Result<()> {
 fn custom_rust_function_and_guest_errors_resolve_inside_the_transaction() -> Result<()> {
     struct Local(MemoryTransaction);
     impl Kv for Local {
-        async fn get(&self, k: &str) -> Result<Option<Vec<u8>>> {
+        async fn get(&mut self, k: &str) -> Result<Option<Vec<u8>>> {
             self.0.get(k).await
         }
         async fn put(&mut self, k: &str, v: &[u8]) -> Result<()> {
@@ -557,7 +557,7 @@ fn checkpoint_storage_may_suspend() -> Result<()> {
         }
     }
     impl Kv for Remote {
-        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        async fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
             Yield(false).await;
             self.inner.get(key).await
         }

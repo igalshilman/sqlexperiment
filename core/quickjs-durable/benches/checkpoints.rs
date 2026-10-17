@@ -12,7 +12,7 @@ struct MeasuredKv {
     writes: usize,
 }
 impl Kv for MeasuredKv {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
         self.inner.get(key).await
     }
     async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {

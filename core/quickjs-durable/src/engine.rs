@@ -263,7 +263,7 @@ impl<K: Transaction> Engine<K> {
     /// Read only: restore the current snapshot and pending-effect identities.
     /// No guest execution, host callback, effect re-emission or event replay.
     /// The host reconnects the pending IDs to its own durable effect state.
-    pub async fn recover(&self, run: &str) -> Result<View> {
+    pub async fn recover(&mut self, run: &str) -> Result<View> {
         ensure!(
             self.usable,
             "Unfinished or failed engine transaction; discard it"
@@ -290,7 +290,7 @@ impl<K: Transaction> Engine<K> {
             manifest_bytes: loaded.manifest_bytes,
         }
     }
-    async fn get_blob(&self, id: &str) -> Result<Vec<u8>> {
+    async fn get_blob(&mut self, id: &str) -> Result<Vec<u8>> {
         let bytes = self.kv.get(&blob_key(id)).await?.context("Missing blob")?;
         ensure!(
             bytes.len() <= MAX_MEMORY + 1024 * 1024,
@@ -301,7 +301,7 @@ impl<K: Transaction> Engine<K> {
     async fn put_blob(&mut self, id: &str, bytes: &[u8]) -> Result<()> {
         self.kv.put(&blob_key(id), bytes).await
     }
-    async fn golden(&self, id: &str) -> Result<Golden> {
+    async fn golden(&mut self, id: &str) -> Result<Golden> {
         let application: Application = decode(
             &self
                 .kv
@@ -336,7 +336,7 @@ impl<K: Transaction> Engine<K> {
             memory,
         })
     }
-    async fn load(&self, run: &str) -> Result<Option<Loaded>> {
+    async fn load(&mut self, run: &str) -> Result<Option<Loaded>> {
         let Some(head) = self.kv.get(&format!("{}head", run_prefix(run))).await? else {
             return Ok(None);
         };
