@@ -5,7 +5,7 @@
 import * as restate from '@restatedev/restate-sdk';
 import { signals } from './signals.ts';
 
-export type { PerCall } from './common.ts';
+export type { ChatMessage, Messages, MessagesRequest, Part, PerCall } from './common.ts';
 export { object } from './object.ts';
 export { signals } from './signals.ts';
 export { call, send, signal, subagent, tool, workflow, type Tool, type ToolContext } from './tools.ts';

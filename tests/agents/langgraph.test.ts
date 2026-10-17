@@ -10,12 +10,11 @@ import { prompt } from './langgraph.ts';
 vi.mock('@langchain/anthropic', () => import('../fakes/langgraph.ts'));
 
 describe('the LangGraph agent', () => {
-  it('gives the conversation: what was said, in order, without tool calls', async () => {
+  it('gives the conversation: what was said, in order, with the tool calls', async () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
-    const said = await c.read(langgraph.messages());
-    expect(said).toEqual(SAID);
+    expect(await c.read(langgraph.messages())).toEqual({ messages: SAID, more: false });
   });
 
   it('gives the model its system prompt', async () => {

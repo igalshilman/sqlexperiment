@@ -41,7 +41,6 @@ vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
     }),
 }));
 
-type Handler = (ctx: restate.SqlObjectContext, message: string) => Promise<string>;
 interface Call {
   service: string;
   key?: string;
@@ -57,7 +56,7 @@ function object(key: string) {
   return {
     calls,
     /** Invocation `id` of `handler`. */
-    invoke(handler: Handler, id: string, message: string) {
+    invoke<I, O>(handler: (ctx: restate.SqlObjectContext, input: I) => Promise<O>, id: string, input: I) {
       const sql = sqlAttempt({ map, key, id });
       const ctx = {
         key,
@@ -69,22 +68,32 @@ function object(key: string) {
           return `${call.key}: done`;
         },
       };
-      return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, message));
+      return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, input));
     },
   };
 }
 
+/** Message `id` of `messages`: `text` of `role`. */
+const said = (id: number, role: string, text: string) => ({ id, role, parts: [{ type: 'text', text }] });
+
 describe('pi.messages', () => {
-  it('gives the conversation: what was said, in order', async () => {
+  it('gives the conversation: what was said, in order, a page at a time', async () => {
     const alice = object('alice');
     await alice.invoke(pi.chat(), 'inv1', 'Hi, I am Alice');
     await alice.invoke(pi.chat(), 'inv2', 'What is my name?');
-    expect(await alice.invoke(pi.messages() as unknown as Handler, 'read', '')).toEqual([
-      { role: 'user', text: 'Hi, I am Alice' },
-      { role: 'assistant', text: 'Hi, I am Alice' },
-      { role: 'user', text: 'What is my name?' },
-      { role: 'assistant', text: 'Hi, I am Alice / What is my name?' },
-    ]);
+    expect(await alice.invoke(pi.messages(), 'read', {})).toEqual({
+      messages: [
+        said(0, 'user', 'Hi, I am Alice'),
+        said(1, 'assistant', 'Hi, I am Alice'),
+        said(2, 'user', 'What is my name?'),
+        said(3, 'assistant', 'Hi, I am Alice / What is my name?'),
+      ],
+      more: false,
+    });
+    expect(await alice.invoke(pi.messages(), 'read2', { limit: 1, before: 3 })).toEqual({
+      messages: [said(2, 'user', 'What is my name?')],
+      more: true,
+    });
   });
 });
 
@@ -105,7 +114,10 @@ describe('pi.chat', () => {
 });
 
 /** A sub-agent with a `code` handler. */
-const coder = { name: 'coder' } as restate.VirtualObjectDefinition<'coder', { code: Handler }>;
+const coder = { name: 'coder' } as restate.VirtualObjectDefinition<
+  'coder',
+  { code: (ctx: restate.SqlObjectContext, task: string) => Promise<string> }
+>;
 
 describe('subagent', () => {
   it('hands each task to the sub-agent of its name, once per tool call', async () => {

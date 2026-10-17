@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as restate from '@restatedev/restate-sdk';
 import { createModels } from '@earendil-works/pi-ai/models';
-import { call, signal, signals, workflow } from 'restate-agents';
+import { call, signal, signals, workflow, type Messages } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
@@ -83,6 +83,13 @@ const triage = restate.workflow({
   },
 });
 
+/** `messages` as lines: each message's role, then its parts. */
+const lines = (messages: Messages['messages']) =>
+  messages.map((m) => [
+    m.role,
+    ...m.parts.map((p) => (p.type === 'text' ? p.text : `${p.name}(${JSON.stringify(p.input)}): ${p.output}`)),
+  ]);
+
 const dir = mkdtempSync(join(tmpdir(), 'restate-tools-'));
 const server = spawn(SERVER, ['--base-dir', dir], {
   env: { ...process.env, RESTATE_BIND_IP: '127.0.0.1', RESTATE_LISTEN_MODE: 'tcp' },
@@ -128,11 +135,21 @@ try {
   await post('support/alice/signal', { name: 'approval', value: 'approved by Kim' });
   assert.equal(await answer, 'order 103: delivered / approved by Kim / refunded 103');
   assert.deepEqual(await post('support/alice/pending'), []);
-  // The conversation: what was said, without the tool calls.
-  assert.deepEqual(await post('support/alice/messages'), [
-    { role: 'user', text: 'Refund order 103, please' },
-    { role: 'assistant', text: 'order 103: delivered / approved by Kim / refunded 103' },
+  // The conversation: what was said, with the tool calls, as plain `curl` gets it.
+  const said = (await (await fetch(`${INGRESS}/support/alice/messages`, { method: 'POST' })).json()) as Messages;
+  assert.deepEqual(lines(said.messages), [
+    ['user', 'Refund order 103, please'],
+    ['assistant', 'orders_status({"order":"103"}): order 103: delivered'],
+    ['assistant', 'wait_for_approval({}): approved by Kim'],
+    ['assistant', 'refund({"order":"103"}): refunded 103'],
+    ['assistant', 'order 103: delivered / approved by Kim / refunded 103'],
   ]);
+  assert.equal(said.more, false);
+  // A page at a time: the latest two, then the one before them.
+  const latest = (await post('support/alice/messages', { limit: 2 })) as Messages;
+  assert.deepEqual([latest.messages.map((m) => m.id), latest.more], [[3, 4], true]);
+  const older = (await post('support/alice/messages', { limit: 1, before: 3 })) as Messages;
+  assert.deepEqual(older.messages, [said.messages[2]]);
 
   // A signal resolved before the agent waits for it is kept for it.
   await post('support/bob/signal', { name: 'approval', value: 'approved early' });

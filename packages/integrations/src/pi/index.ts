@@ -52,8 +52,6 @@ import {
   forCall,
   messagesHandler,
   modelOf,
-  said,
-  type ChatMessage,
   type PerCall,
 } from '../common.ts';
 import { object } from '../object.ts';
@@ -209,21 +207,23 @@ export const chat = (options: ChatOptions = {}) => {
   return chatHandler(respond(options));
 };
 
-/** A handler of the conversation: what was said, in order, from pi-durable's entries. */
+/** A handler of the conversation, a page at a time: what was said, in order, with the tool calls, from pi-durable's entries. */
 export const messages = () =>
-  messagesHandler((ctx) =>
+  messagesHandler((ctx, transcript) =>
     withPi(ctx, {}, async ({ harness, context }) => {
       const root = await harness.root(context);
-      const conversation: ChatMessage[] = [];
       for (let cursor: Parameters<typeof root.entries>[2]; ;) {
         const page = await root.entries({ order: 'ascending' }, 100, cursor, context);
-        for (const entry of page.items) {
-          for (const m of entry.model ?? []) {
-            if (m.role === 'user' || m.role === 'assistant') conversation.push(...said(m.role, textOf(m.content)));
+        for (const m of page.items.flatMap((entry) => entry.model ?? [])) {
+          if (m.role === 'user') transcript.say('user', textOf(m.content));
+          if (m.role === 'assistant') {
+            transcript.say('assistant', textOf(m.content));
+            for (const c of m.content) if (c.type === 'toolCall') transcript.call(c.id, c.name, c.arguments);
           }
+          if (m.role === 'toolResult') transcript.result(m.toolCallId, textOf(m.content));
         }
         cursor = page.next;
-        if (cursor === undefined) return conversation;
+        if (cursor === undefined) return;
       }
     }),
   );

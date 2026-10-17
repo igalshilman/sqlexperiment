@@ -42,7 +42,6 @@ import {
   forCall,
   messagesHandler,
   modelOf,
-  said,
   type PerCall,
 } from '../common.ts';
 import { object } from '../object.ts';
@@ -145,14 +144,27 @@ function toolsPlugin(tools: Tool[], fail: (error: unknown) => Promise<never>, bu
   };
 }
 
-/** A message of the session's transcript, as far as a prompt's outcome goes. */
+/** A part of an assistant message: text, or a tool call (`id`, `name`, and its `state`). */
+interface Content {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+  state?: { input?: unknown; content?: Content[] };
+}
+
+/** The text of `content`. */
+const textOf = (content: Content[] = []) =>
+  content.flatMap((c) => (c.type === 'text' && c.text ? [c.text] : [])).join('');
+
+/** A message of the session's transcript, as far as a prompt's outcome and `messages` go. */
 interface Message {
   id: string;
   type: string;
   outcome?: string;
   /** A user message's text. */
   text?: string;
-  content?: { type: string; text?: string }[];
+  content?: Content[];
   error?: { message?: string };
 }
 
@@ -189,7 +201,7 @@ async function outcome(host: Host, messageId: string) {
   let last: Message | undefined;
   for (const m of after) {
     if (m.type === 'idle' || (m.type === 'user' && last !== undefined)) {
-      const text = (last?.content ?? []).flatMap((c) => (c.type === 'text' && c.text ? [c.text] : [])).join('');
+      const text = textOf(last?.content);
       const error = last?.error?.message;
       const ended = m.type === 'idle' ? m.outcome : 'succeeded';
       return ended === 'succeeded' && error === undefined
@@ -355,7 +367,7 @@ export const chat = (options: ChatOptions = {}) => {
 };
 
 /** The session's messages, oldest first. */
-async function transcript(host: Host): Promise<Message[]> {
+async function sessionMessages(host: Host): Promise<Message[]> {
   const all: Message[] = [];
   for (let cursor: string | undefined; ;) {
     const page: { data: Message[]; cursor: { next?: string | null } } = await host.call(
@@ -371,21 +383,21 @@ async function transcript(host: Host): Promise<Message[]> {
   }
 }
 
-/** A handler of the session: what was said, in order. */
+/** A handler of the session, a page at a time: what was said, in order, with the tool calls. */
 export const messages = () =>
-  messagesHandler((ctx) =>
-    withOpenCode(ctx, {}, async ({ host }) =>
-      (await transcript(host)).flatMap((m) => {
-        if (m.type === 'user') return said('user', m.text ?? '');
-        if (m.type === 'assistant') {
-          return said(
-            'assistant',
-            (m.content ?? []).flatMap((c) => (c.type === 'text' && c.text ? [c.text] : [])).join(''),
-          );
+  messagesHandler((ctx, transcript) =>
+    withOpenCode(ctx, {}, async ({ host }) => {
+      for (const m of await sessionMessages(host)) {
+        if (m.type === 'user') transcript.say('user', m.text);
+        if (m.type !== 'assistant') continue;
+        transcript.say('assistant', textOf(m.content));
+        for (const c of m.content ?? []) {
+          if (c.type !== 'tool' || !c.id || !c.state) continue;
+          transcript.call(c.id, c.name ?? '', c.state.input);
+          if (c.state.content) transcript.result(c.id, textOf(c.state.content));
         }
-        return [];
-      }),
-    ),
+      }
+    }),
   );
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */

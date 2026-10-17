@@ -16,18 +16,11 @@ vi.mock('restate-agents/opencode/db', async (original) => {
 vi.stubEnv('MODEL', 'teller/teller');
 
 describe('the OpenCode agent', () => {
-  it('gives the conversation: what was said, in order, without tool calls', async () => {
+  it('gives the conversation: what was said, in order, with the tool calls', async () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
-    expect(await c.read(opencode.messages())).toEqual(SAID);
-  });
-
-  it('gives the conversation: what was said, in order, without tool calls', async () => {
-    const c = conversation(prompt, 'm');
-    await c.attempt('inv1', 'Please move 5 from 1 to 2');
-    await c.attempt('inv2', 'audit the books');
-    expect(await c.read(opencode.messages())).toEqual(SAID);
+    expect(await c.read(opencode.messages())).toEqual({ messages: SAID, more: false });
   });
 
   it('gives the model its system prompt', async () => {
