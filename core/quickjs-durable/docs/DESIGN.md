@@ -121,8 +121,13 @@ Validate the discriminator: a success must have `ok:true`, a failure `ok:false`.
 Root return `undefined` becomes successful null. A root value outside the JSON
 contract becomes a failed outcome. A failed operation rejects its promise with
 an Error carrying the supplied name/message and may be caught by the application.
-A terminal guest failure may commit prior KV mutations. Infrastructure errors,
-VM traps and cancelled turns instead abort the transaction.
+A terminal guest failure may commit prior KV mutations. So does a VM trap: the
+guest running out of fuel inside one job, or an error QuickJS cannot hand to a
+script. The same image and delivery would trap again on every retry, so the
+engine ends the run instead: it stages a failed outcome named `Trap` over the
+last good image (the trapped one is mid-mutation) and abandons the run's
+outstanding requests. Infrastructure errors and cancelled turns abort the
+transaction.
 
 ### 2.2. Snapshot-resident promise bridge
 
@@ -199,6 +204,7 @@ trait Transaction: Kv {
     async fn execute(&mut self, op: &Operation) -> Result<Resolution>;
     async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64)
         -> Result<()>;
+    async fn abandon(&mut self, run: &str) -> Result<()>; // the run trapped
 }
 
 Engine::new(transaction, shared_runtime)
@@ -395,8 +401,8 @@ Reference limits, not a general resource-management API:
 
 The 32 KiB stack limit is deliberately lower than upstream's 512 KiB ceiling:
 the latter exhausted the instrumented Wasmtime native stack in the recursion
-probe. Reapply the smaller limit after restore. Remaining native traps still
-abort the turn. Wasm memory limits do not bound total host-process memory.
+probe. Reapply the smaller limit after restore. Remaining native traps end the
+run, as section 2.1 describes. Wasm memory limits do not bound total host-process memory.
 
 ## 4. Discovering writes and choosing a diff
 
@@ -689,14 +695,14 @@ budget counts Ready requests, not JS statements or elapsed time. A batch can
 exceed it. A checkpoint may preserve queued continuations of already-resolved
 promises; the committed Resume makes them schedulable after a crash.
 
-| Situation                                   | Action                                                           |
-| ------------------------------------------- | ---------------------------------------------------------------- |
-| Local KV/custom result                      | Deliver and continue in the same turn unless budget reached      |
-| Rust operation future awaiting I/O          | Retain VM, transaction and tracker; do not capture               |
-| Durable RPC/timer wait, no runnable jobs    | Capture and commit pending effect identities                     |
-| Host budget reached                         | Finish batch, stage ready Resume, capture before queued jobs run |
-| Root settled, no pending requests           | Capture terminal state; publish only after commit                |
-| Infinite synchronous job or microtask chain | Fuel may trap; abort. No native-stack preemption snapshot        |
+| Situation                                   | Action                                                               |
+| ------------------------------------------- | -------------------------------------------------------------------- |
+| Local KV/custom result                      | Deliver and continue in the same turn unless budget reached          |
+| Rust operation future awaiting I/O          | Retain VM, transaction and tracker; do not capture                   |
+| Durable RPC/timer wait, no runnable jobs    | Capture and commit pending effect identities                         |
+| Host budget reached                         | Finish batch, stage ready Resume, capture before queued jobs run     |
+| Root settled, no pending requests           | Capture terminal state; publish only after commit                    |
+| Infinite synchronous job or microtask chain | Fuel traps; the run ends failed. No native-stack preemption snapshot |
 
 Any available effect can be delivered next, not just Resume. If an RPC arrives
 before Resume, its turn also drains already queued jobs. More than one Resume

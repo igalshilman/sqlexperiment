@@ -1,4 +1,8 @@
-use crate::{Transaction, codec, model::*, vm::Runtime};
+use crate::{
+    Transaction, codec,
+    model::*,
+    vm::{Runtime, Turn},
+};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
@@ -396,6 +400,67 @@ impl<K: Transaction> Engine<K> {
         }))
     }
 
+    /// The guest trapped mid-turn: its image is unusable, and the same delivery
+    /// would trap again. End the run instead of failing the turn forever. Its
+    /// last good image stays; the KV writes made before the trap stand, as for a
+    /// thrown error; its outstanding requests are abandoned.
+    #[allow(clippy::too_many_arguments)]
+    async fn end_trapped(
+        &mut self,
+        run: &str,
+        id: String,
+        sequence: u64,
+        application: String,
+        previous: Option<String>,
+        pages: BTreeMap<u32, PageRef>,
+        image: Image,
+        event: &Event,
+        next_operation: u64,
+        message: String,
+    ) -> Result<Loaded> {
+        self.kv.abandon(run).await?;
+        let state = State {
+            pending: Vec::new(),
+            next_operation,
+            now: event.now(),
+            status: Status::Failed,
+            outcome: Some(Outcome::failure("Trap", message)),
+        };
+        let manifest = Manifest {
+            format: FORMAT,
+            application,
+            build: self.runtime.build.clone(),
+            previous,
+            sequence,
+            meta: image.meta.clone(),
+            memory_len: image.memory.len(),
+            pages,
+            state,
+            changed_pages: 0,
+            examined_pages: 0,
+            new_blob_bytes: 0,
+        };
+        self.stage(run, &id, &manifest).await?;
+        Ok(Loaded {
+            id,
+            manifest_bytes: json_bytes(&manifest)?.len(),
+            manifest,
+            image,
+        })
+    }
+
+    /// Stage a manifest and point the run's head at it. Only the outer host
+    /// commit makes it visible, with application state and effects.
+    async fn stage(&mut self, run: &str, id: &str, manifest: &Manifest) -> Result<usize> {
+        let bytes = json_bytes(manifest)?;
+        ensure!(bytes.len() <= MAX_JSON, "Checkpoint metadata exceeds limit");
+        self.kv.put(&checkpoint_key(id), &bytes).await?;
+        self.kv
+            .put(&format!("{}head", run_prefix(run)), id.as_bytes())
+            .await?;
+        Ok(bytes.len())
+    }
+
     async fn checkpoint(
         &mut self,
         run: &str,
@@ -417,7 +482,13 @@ impl<K: Transaction> Engine<K> {
         let pending = current
             .as_ref()
             .map_or(&[][..], |c| c.manifest.state.pending.as_slice());
-        let (capture, state) = self
+        let next_operation = current
+            .as_ref()
+            .map_or(0, |c| c.manifest.state.next_operation);
+        let current_id_pages = current
+            .as_ref()
+            .map(|c| (c.id.clone(), c.manifest.pages.clone()));
+        let turn = self
             .runtime
             .turn(
                 run,
@@ -428,6 +499,33 @@ impl<K: Transaction> Engine<K> {
                 self.checkpoint_interval,
             )
             .await?;
+        let (capture, state) = match turn {
+            Turn::Captured(capture, state) => (capture, state),
+            Turn::Trapped(message) => {
+                let image = match (current, first) {
+                    (Some(c), _) => c.image,
+                    (None, first) => first.context("Missing golden image")?,
+                };
+                let (previous, pages) = match &current_id_pages {
+                    Some((id, pages)) => (Some(id.clone()), pages.clone()),
+                    None => (None, BTreeMap::new()),
+                };
+                return self
+                    .end_trapped(
+                        run,
+                        id,
+                        sequence,
+                        application,
+                        previous,
+                        pages,
+                        image,
+                        event,
+                        next_operation,
+                        message,
+                    )
+                    .await;
+            }
+        };
         let mut pages = current
             .as_ref()
             .map_or_else(BTreeMap::new, |c| c.manifest.pages.clone());
@@ -486,19 +584,12 @@ impl<K: Transaction> Engine<K> {
             examined_pages: capture.examined_pages,
             new_blob_bytes,
         };
-        let bytes = json_bytes(&manifest)?;
-        ensure!(bytes.len() <= MAX_JSON, "Checkpoint metadata exceeds limit");
-        self.kv.put(&checkpoint_key(&id), &bytes).await?;
-        // Head is staged with every other mutation. Only the outer host commit
-        // makes it visible together with application state and effects.
-        self.kv
-            .put(&format!("{}head", run_prefix(run)), id.as_bytes())
-            .await?;
+        let manifest_bytes = self.stage(run, &id, &manifest).await?;
         Ok(Loaded {
             id,
             manifest,
             image: next,
-            manifest_bytes: bytes.len(),
+            manifest_bytes,
         })
     }
 }

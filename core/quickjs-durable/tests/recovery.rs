@@ -342,34 +342,62 @@ fn initialization_and_guest_failure_contract() -> Result<()> {
     Ok(())
 }
 
+/// A synchronous job longer than a turn's fuel traps, and would trap again on
+/// every retry: the engine ends the run instead, over its last good image,
+/// abandoning its outstanding requests.
 #[test]
-fn fuel_exhaustion_preserves_committed_head() -> Result<()> {
-    let mut e = engine("async function main(){await durable.call('observe');while(true){} }");
+fn a_trap_ends_the_run() -> Result<()> {
+    let mut e = engine(
+        "async function main(_,ctx){await ctx.kv.set('before',1);const a=ctx.rpc.call({service:'S',handler:'h'});await durable.call('observe');await ctx.kv.set('after',1);while(true){}}",
+    );
     let before = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
+    assert_eq!(before.state.pending.len(), 2);
     let committed = e.into_storage()?;
-    let mut e = Engine::new(committed.clone(), runtime());
-    let error = futures_executor::block_on(e.complete(
+    let mut e = Engine::new(committed, runtime());
+    let failed = futures_executor::block_on(e.complete(
         "r",
-        before.state.pending[0].id(),
+        before.state.pending[1].id(),
         Outcome::success(Value::Null),
         2,
-    ))
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("fuel"), "{error:#}");
-    let head = e
-        .storage()
-        .values
-        .iter()
-        .find(|(k, _)| k.ends_with("/head"))
-        .unwrap()
-        .1;
-    assert_eq!(head, before.checkpoint_id.as_bytes());
-    assert!(futures_executor::block_on(e.recover("r")).is_err());
-    assert!(e.into_storage().is_err());
+    ))?;
+    assert_eq!(failed.state.status, Status::Failed);
+    assert!(failed.state.pending.is_empty());
+    let Some(Outcome::Failure { error, .. }) = &failed.state.outcome else {
+        panic!("Expected a failure: {:?}", failed.state.outcome);
+    };
+    assert_eq!(error.name, "Trap");
+    assert!(error.message.contains("fuel"), "{}", error.message);
+    // The writes before the trap stand, as for a thrown error; the requests
+    // still outstanding are abandoned.
+    assert_eq!(e.storage().state["after"], json!(1));
+    assert!(e.storage().effects.is_empty());
+    let committed = e.into_storage()?;
+    // A late result for an abandoned request changes nothing.
+    let mut e = Engine::new(committed, runtime());
+    let late = futures_executor::block_on(e.complete(
+        "r",
+        before.state.pending[0].id(),
+        Outcome::success(1),
+        3,
+    ))?;
+    assert_eq!(late.checkpoint_id, failed.checkpoint_id);
     assert_eq!(
-        futures_executor::block_on(Engine::new(committed, runtime()).recover("r"))?.checkpoint_id,
-        before.checkpoint_id
-    ); // no event replay
+        futures_executor::block_on(e.recover("r"))?.state.status,
+        Status::Failed
+    );
+    Ok(())
+}
+
+/// A trap in the first turn ends the run over the golden image.
+#[test]
+fn a_trap_in_the_first_turn_ends_the_run() -> Result<()> {
+    let mut e = engine("async function main(){while(true){}}");
+    let failed = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
+    assert_eq!(failed.state.status, Status::Failed);
+    assert_eq!(failed.checkpoint_sequence, 0);
+    let mut e = Engine::new(e.into_storage()?, runtime());
+    let again = futures_executor::block_on(e.start("r", "v1", Value::Null, 2))?;
+    assert_eq!(again.checkpoint_id, failed.checkpoint_id);
     Ok(())
 }
 

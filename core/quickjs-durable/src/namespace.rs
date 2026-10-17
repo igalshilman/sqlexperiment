@@ -188,4 +188,12 @@ impl Transaction for NamespaceTransaction {
             .await
             .map_err(sql)
     }
+
+    async fn abandon(&mut self, run: &str) -> Result<()> {
+        self.check_run(run)?;
+        self.db
+            .execute_with("DELETE FROM effects WHERE run = ?", [text(run)])
+            .await
+            .map_err(sql)
+    }
 }

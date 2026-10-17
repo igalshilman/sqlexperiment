@@ -166,3 +166,19 @@ fn a_turn_belongs_to_one_run() -> Result<()> {
     assert!(block_on(begin(&store, "other")?.recover("run")).is_err());
     Ok(())
 }
+
+#[test]
+fn a_trap_abandons_the_runs_outbox() -> Result<()> {
+    let store = Arc::new(Store::default());
+    let mut e = begin(&store, "run")?;
+    block_on(e.register(
+        "v1",
+        "async function main(_,ctx){ctx.rpc.call({service:'S',handler:'h'});await ctx.kv.set('n',1);while(true){}}",
+    ))?;
+    let failed = block_on(e.start("run", "v1", Value::Null, 1000))?;
+    assert_eq!(failed.state.status, Status::Failed);
+    commit(e)?;
+    assert!(effects(&store, "run")?.is_empty());
+    assert_eq!(state(&store, "n")?, json!(1));
+    Ok(())
+}

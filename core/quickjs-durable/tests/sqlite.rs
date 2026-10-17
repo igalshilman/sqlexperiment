@@ -1,5 +1,5 @@
 #![cfg(feature = "sqlite-host")]
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use futures_channel::oneshot;
 use futures_executor::block_on;
 use quickjs_durable::{
@@ -58,6 +58,9 @@ impl Transaction for GatedRead<'_> {
     }
     async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
         self.inner.acknowledge(id, outcome, now).await
+    }
+    async fn abandon(&mut self, run: &str) -> Result<()> {
+        self.inner.abandon(run).await
     }
 }
 
@@ -224,7 +227,7 @@ fn completion_consumption_rolls_back_with_vm_and_state_then_commits_once() -> Re
 }
 
 #[test]
-fn vm_error_discards_real_sqlite_mutations() -> Result<()> {
+fn a_trap_ends_the_run_in_one_commit() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("host.sqlite");
     let mut host = Host::open(&path)?;
@@ -233,19 +236,14 @@ fn vm_error_discards_real_sqlite_mutations() -> Result<()> {
         "async function main(_,ctx){await ctx.kv.set('n',1);ctx.rpc.call({service:'Echo',handler:'echo'},1);await ctx.kv.get('n');while(true){} }",
     )?;
     let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
-    let error = block_on(engine.start("r", "v1", Value::Null, 1000)).unwrap_err();
-    ensure!(
-        format!("{error:#}").contains("fuel"),
-        "Unexpected error: {error:#}"
-    );
+    let failed = block_on(engine.start("r", "v1", Value::Null, 1000))?;
+    assert_eq!(failed.state.status, quickjs_durable::Status::Failed);
     assert_eq!(engine.storage().io().effect_inserts, 1);
-    assert!(engine.into_storage().is_err());
-    assert!(host.state("scope", "n")?.is_none());
+    engine.into_storage()?.commit()?;
+    assert_eq!(host.state("scope", "n")?, Some(Value::from(1)));
     assert!(host.effects("r")?.is_empty());
-    assert!(
-        futures_executor::block_on(Engine::new(host.begin("r", "scope")?, runtime()).recover("r"))
-            .is_err()
-    );
+    let recovered = block_on(Engine::new(host.begin("r", "scope")?, runtime()).recover("r"))?;
+    assert_eq!(recovered.state.status, quickjs_durable::Status::Failed);
     Ok(())
 }
 

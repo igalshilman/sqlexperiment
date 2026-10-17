@@ -203,6 +203,7 @@ impl Runtime {
         vm.snapshot()
     }
 
+    /// Restore `image`, deliver `event` and run until the next checkpoint.
     pub(crate) async fn turn(
         &self,
         run: &str,
@@ -211,9 +212,40 @@ impl Runtime {
         pending: &[Operation],
         transaction: &mut impl Transaction,
         checkpoint_interval: Option<NonZeroUsize>,
-    ) -> Result<(Capture, State)> {
+    ) -> Result<Turn> {
         let mut vm = Vm::new(self, run, event.now())?;
         vm.restore(image)?;
+        let result = self
+            .pump(
+                &mut vm,
+                run,
+                image,
+                event,
+                pending,
+                transaction,
+                checkpoint_interval,
+            )
+            .await;
+        match result {
+            Ok((capture, state)) => Ok(Turn::Captured(capture, state)),
+            Err(error) => match trap(&error) {
+                Some(message) => Ok(Turn::Trapped(message)),
+                None => Err(error),
+            },
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn pump(
+        &self,
+        vm: &mut Vm,
+        run: &str,
+        image: &Image,
+        event: &Event,
+        pending: &[Operation],
+        transaction: &mut impl Transaction,
+        checkpoint_interval: Option<NonZeroUsize>,
+    ) -> Result<(Capture, State)> {
         match event {
             Event::Start { input, .. } => {
                 let seed = u32::from_be_bytes(Sha256::digest(run.as_bytes())[..4].try_into()?);
@@ -313,6 +345,39 @@ impl Runtime {
         let next = vm.capture(image)?;
         Ok((next, state))
     }
+}
+
+/// How a turn ended: at a checkpoint, or in a trap.
+pub(crate) enum Turn {
+    Captured(Capture, State),
+    /// The guest trapped: it ran out of fuel, or QuickJS hit an error that no
+    /// script can catch. The image is mid-mutation, and the same image and
+    /// delivery would trap again.
+    Trapped(String),
+}
+
+/// QuickJS failed a job with an error no script can catch, such as running
+/// out of memory while throwing.
+#[derive(Debug)]
+struct Uncatchable(String);
+impl std::fmt::Display for Uncatchable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Uncatchable guest error: {}", self.0)
+    }
+}
+impl std::error::Error for Uncatchable {}
+
+/// The guest's own failure, if `error` is one: a host's error is not.
+fn trap(error: &wasmtime::Error) -> Option<String> {
+    if let Some(trap) = error.downcast_ref::<wasmtime::Trap>() {
+        return Some(match trap {
+            wasmtime::Trap::OutOfFuel => {
+                "Out of fuel: one synchronous job ran longer than a turn allows".into()
+            }
+            trap => trap.to_string(),
+        });
+    }
+    error.downcast_ref::<Uncatchable>().map(ToString::to_string)
 }
 
 struct Vm {
@@ -664,7 +729,7 @@ impl Vm {
     fn drain(&mut self) -> Result<()> {
         while self.pending.call(&mut self.store, ())? != 0 {
             if self.execute.call(&mut self.store, ())? < 0 {
-                bail!("Guest job failed: {}", self.exception()?)
+                return Err(wasmtime::Error::new(Uncatchable(self.exception()?)));
             }
         }
         Ok(())

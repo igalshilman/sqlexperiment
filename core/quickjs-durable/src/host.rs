@@ -56,4 +56,7 @@ pub trait Transaction: Kv {
         outcome: &Outcome,
         now: u64,
     ) -> impl Future<Output = Result<()>>;
+    /// The run ended with requests outstanding (it trapped): stage dropping
+    /// them all, so none is dispatched again and no result is expected.
+    fn abandon(&mut self, run: &str) -> impl Future<Output = Result<()>>;
 }

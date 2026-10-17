@@ -310,4 +310,12 @@ impl Transaction for SqliteTransaction<'_> {
         self.count(|s| s.effect_consumptions += 1);
         Ok(())
     }
+
+    async fn abandon(&mut self, run: &str) -> Result<()> {
+        self.check_run(run)?;
+        self.sql
+            .prepare_cached("DELETE FROM effects WHERE run=?")?
+            .execute([run])?;
+        Ok(())
+    }
 }

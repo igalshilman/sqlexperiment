@@ -41,6 +41,11 @@ impl Kv for MemoryTransaction {
     }
 }
 
+/// Whether `id` is one of `run`'s operation IDs: `<run>/<n>`.
+fn owned_by(id: &str, run: &str) -> bool {
+    id.rsplit_once('/').is_some_and(|(owner, _)| owner == run)
+}
+
 impl Transaction for MemoryTransaction {
     async fn execute(&mut self, operation: &Operation) -> Result<Resolution> {
         let value = match operation {
@@ -72,6 +77,10 @@ impl Transaction for MemoryTransaction {
             self.effects.remove(operation_id).is_some(),
             "Missing effect"
         );
+        Ok(())
+    }
+    async fn abandon(&mut self, run: &str) -> Result<()> {
+        self.effects.retain(|id, _| !owned_by(id, run));
         Ok(())
     }
 }

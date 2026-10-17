@@ -28,6 +28,9 @@ impl Transaction for MeasuredKv {
     async fn acknowledge(&mut self, operation_id: &str, outcome: &Outcome, now: u64) -> Result<()> {
         self.inner.acknowledge(operation_id, outcome, now).await
     }
+    async fn abandon(&mut self, run: &str) -> Result<()> {
+        self.inner.abandon(run).await
+    }
 }
 fn main() -> Result<()> {
     if cfg!(debug_assertions) {

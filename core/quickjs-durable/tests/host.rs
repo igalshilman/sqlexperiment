@@ -123,6 +123,11 @@ impl Transaction for FaultTransaction {
         self.inner.acknowledge(id, outcome, now).await?;
         self.after()
     }
+    async fn abandon(&mut self, run: &str) -> Result<()> {
+        self.before()?;
+        self.inner.abandon(run).await?;
+        self.after()
+    }
 }
 
 #[test]
@@ -358,22 +363,17 @@ fn guest_api_has_no_checkpoint_and_host_pause_preserves_queued_results() -> Resu
 }
 
 #[test]
-fn vm_trap_aborts_staged_state_and_effects_together() -> Result<()> {
+fn a_trap_ends_the_run_in_the_same_staged_transaction() -> Result<()> {
     let committed = registered(
         "async function main(_,ctx){await ctx.kv.set('n',1);ctx.rpc.call({service:'Echo',handler:'echo'});await ctx.kv.set('n',2);while(true){} }",
     )?;
     let before = image(&committed);
     let mut e = Engine::new(committed.clone(), runtime());
-    assert!(
-        format!(
-            "{:#}",
-            futures_executor::block_on(e.start("r", "v1", Value::Null, 1000)).unwrap_err()
-        )
-        .contains("fuel")
-    );
-    assert_eq!(e.storage().state["n"], 2); // staged, still invisible
-    assert_eq!(e.storage().effects.len(), 1);
-    drop(e);
+    let failed = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
+    assert_eq!(failed.state.status, Status::Failed);
+    assert_eq!(e.storage().state["n"], 2); // staged, as for a thrown error
+    assert!(e.storage().effects.is_empty()); // abandoned
+    drop(e); // nothing is visible until the host publishes
     assert_eq!(image(&committed), before);
     assert!(futures_executor::block_on(Engine::new(committed, runtime()).recover("r")).is_err());
     Ok(())
@@ -405,6 +405,9 @@ fn custom_rust_function_and_guest_errors_resolve_inside_the_transaction() -> Res
         }
         async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
             self.0.acknowledge(id, outcome, now).await
+        }
+        async fn abandon(&mut self, run: &str) -> Result<()> {
+            self.0.abandon(run).await
         }
     }
     let tx = registered(
@@ -573,6 +576,9 @@ fn checkpoint_storage_may_suspend() -> Result<()> {
         }
         async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64) -> Result<()> {
             self.inner.acknowledge(id, outcome, now).await
+        }
+        async fn abandon(&mut self, run: &str) -> Result<()> {
+            self.inner.abandon(run).await
         }
     }
     let remote = |inner| Remote {
