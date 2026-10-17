@@ -60,7 +60,7 @@ from restate_agents.common import (
 )
 from restate_agents.langgraph.checkpointer import SqlCheckpointSaver
 from restate_agents.object import Object
-from restate_agents.tool import Tool
+from restate_agents.tools import Tool
 
 __all__ = ["DEFAULT_MODEL", "SqlCheckpointSaver", "agent"]
 

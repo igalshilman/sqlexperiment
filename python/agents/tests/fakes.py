@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import re
 import uuid
 from collections.abc import Callable, Sequence
@@ -20,7 +21,7 @@ from typing import Annotated, Any
 
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import InjectedToolCallId, tool
 from restate.server_context import _restate_context_var
@@ -31,7 +32,9 @@ class Teller(BaseChatModel):
     """
     Moves money as it is told to: "move 5 from 1 to 2" calls the tool "transfer";
     "refuse <reason>" calls "refuse", "remember <fact>" calls "remember";
-    it echoes the rest.
+    "use <tool> <json> then <tool> <json>" calls those tools in turn, with
+    those inputs, and answers with their results, joined by " / "; it echoes
+    the rest.
     """
 
     calls: int = 0
@@ -48,6 +51,14 @@ class Teller(BaseChatModel):
         self.calls += 1
         self.systems.extend(str(m.content) for m in messages if isinstance(m, SystemMessage))
         last = messages[-1]
+        asked = next(i for i in reversed(range(len(messages))) if isinstance(messages[i], HumanMessage))
+        if match := re.fullmatch(r"use (.+)", str(messages[asked].content)):
+            steps = [step.split(" ", 1) for step in match.group(1).split(" then ")]
+            results = [str(m.content) for m in messages[asked:] if isinstance(m, ToolMessage)]
+            if len(results) == len(steps):
+                return AIMessage(content=" / ".join(results))
+            tool, args = steps[len(results)]
+            return AIMessage(content="", tool_calls=[{"name": tool, "args": json.loads(args), "id": uuid.uuid4().hex}])
         if isinstance(last, ToolMessage):
             return AIMessage(content=f"Done: {last.content}")
         text = str(last.content)

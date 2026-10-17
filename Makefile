@@ -136,7 +136,7 @@ crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through cra
 concurrency-test: js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
 	cd tests && node concurrency.ts
 
-concurrency-test-py: py $(RESTATE_SERVER) ## Python: the context without journal replay, an agent and the examples (examples-py), against a Restate server
+concurrency-test-py: py $(RESTATE_SERVER) ## Python: the context without journal replay, agents, Restate's tools and the examples (examples-py), against a Restate server
 	cd python && uv run --locked pytest tests
 
 crash-test-py: py $(RESTATE_SERVER) ## Python: a bank and an agent through crashes, against a Restate server

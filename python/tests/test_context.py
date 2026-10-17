@@ -7,28 +7,8 @@ Restate server: the examples, retries, suspensions, concurrency, cancellation.
 
 import time
 import uuid
-from collections.abc import Iterator
-from pathlib import Path
 
-import pytest
-from harness import ADMIN, INGRESS, Server, Service, call, request, wait_until
-
-HERE = Path(__file__).resolve().parent
-
-
-@pytest.fixture(scope="module", autouse=True)
-def restate_server(tmp_path_factory) -> Iterator[None]:
-    logs = tmp_path_factory.mktemp("logs")
-    server = Server(logs / "server.log")
-    service = Service([HERE / "services.py"], 9181, logs / "services.log")
-    server.start()
-    service.start()
-    service.register()
-    try:
-        yield
-    finally:
-        service.stop()
-        server.kill()
+from harness import ADMIN, INGRESS, call, request, wait_until
 
 
 def key() -> str:
