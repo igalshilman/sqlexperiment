@@ -4,3 +4,4 @@
 .git
 .direnv
 packages/sdk-typescript/.build/sdk-*
+packages/sdk-python/.build

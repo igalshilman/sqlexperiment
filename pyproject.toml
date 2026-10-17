@@ -1,11 +1,12 @@
 # The Python workspace (uv), as pnpm-workspace.yaml is the TypeScript one:
-# the sqlite-kv extension (packages/sql-python). `make py` installs it into
-# .venv, `make test-py` and `make lint-py` check it.
+# the sqlite-kv extension (packages/sql-python), and the patched SDK, which
+# packages/sdk-python prepares (`make sdk-py`). `make py` installs them into
+# .venv; `make lint-py` checks them.
 [project]
 name = "restate-sql"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["sqlite-kv"]
+dependencies = ["restate-sdk", "sqlite-kv"]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.14", "mypy>=1.18"]
@@ -18,6 +19,8 @@ members = ["packages/sql-python"]
 
 [tool.uv.sources]
 sqlite-kv = { workspace = true }
+# The patched SDK, wherever it is used.
+restate-sdk = { path = "packages/sdk-python/.build/sdk-python", editable = true }
 
 [tool.ruff]
 line-length = 120

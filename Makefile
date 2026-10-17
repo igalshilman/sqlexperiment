@@ -2,7 +2,8 @@
 # patched TypeScript SDK (packages/sdk-typescript, over the patched shared core
 # of packages/sdk-shared-core), the Node.js addon (packages/sql-node), the
 # integrations (packages/integrations), the tests (tests/) and the examples;
-# and the uv workspace: the Python extension (packages/sql-python).
+# and the uv workspace: the patched Python SDK (packages/sdk-python, over the
+# same shared core) and the Python extension (packages/sql-python).
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -19,6 +20,7 @@ SDK_TARBALL := packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 CORE := sqlite-kv
 ADDON := packages/sql-node/sqlite_kv.node
 CORE_PATCH := packages/sdk-shared-core/sdk-shared-core.patch
+SDK_PY := packages/sdk-python/.build/sdk-python/.patched
 # The tests against a Restate server run a released restate-server: by default
 # RESTATE_VERSION's, downloaded from its GitHub release for this platform. Or
 # RESTATE_FROM=image takes it out of RESTATE_IMAGE with docker (Linux only), or
@@ -35,8 +37,8 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core addon sdk-ts js py examples-rust test test-core test-addon test-sdk-ts test-ts \
-	test-sql-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test restate-server clean
+.PHONY: all help core addon sdk-ts sdk-py js py examples-rust test test-core test-addon test-sdk-ts test-ts \
+	test-sdk-py test-sql-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test restate-server clean
 
 # --- Build
 
@@ -61,7 +63,12 @@ $(SDK_TARBALL): $(wildcard packages/sdk-typescript/patches/*.patch) $(CORE_PATCH
 js: $(ADDON) $(SDK_TARBALL) ## The pnpm workspace, installed with the patched SDK and the addon
 	pnpm install --force
 
-py: ## The uv workspace (.venv), with the Python extension (packages/sql-python), rebuilt when its Rust changes
+sdk-py: $(SDK_PY) ## The patched Python SDK's sources (packages/sdk-python), for the uv workspace to build
+
+$(SDK_PY): $(wildcard packages/sdk-python/patches/*.patch) $(CORE_PATCH) packages/sdk-python/setup.sh
+	packages/sdk-python/setup.sh
+
+py: $(SDK_PY) ## The uv workspace (.venv): the patched Python SDK and the Python extension, rebuilt when their Rust changes
 	uv sync --locked
 
 examples-rust: ## The Rust example: the core crate's lookup
@@ -69,7 +76,7 @@ examples-rust: ## The Rust example: the core crate's lookup
 
 # --- Test
 
-test: test-core test-addon test-sdk-ts test-ts test-sql-py ## Every test that needs no Restate server
+test: test-core test-addon test-sdk-ts test-ts test-sdk-py test-sql-py ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
@@ -84,6 +91,13 @@ test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests, and its t
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
 	cd tests && pnpm exec vitest run $(T)
 
+# Its own environment, with the extras its tests use; its tests against a
+# Restate server in docker (the test harness) are left out.
+test-sdk-py: $(SDK_PY) ## The patched Python SDK's own tests
+	cd packages/sdk-python/.build/sdk-python && uv run --extra test --extra serde --extra client \
+		pytest -o python_files='*.py' tests --ignore=tests/harness.py --ignore=tests/servercontext.py \
+		--ignore=tests/ext.py -k 'not end_to_end'
+
 test-sql-py: py ## The Python extension
 	uv run --locked pytest packages/sql-python/tests
 
@@ -97,10 +111,12 @@ lint-core: ## The Rust crates (the core, the addon and the Python extension): ru
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	pnpm check
 
-lint-py: py ## The Python: ruff format --check, ruff check and mypy
+lint-py: py ## The Python: ruff format --check, ruff check and mypy; and the patched SDK's ruff, as it configures it, and rustfmt
 	uv run --locked ruff format --check
 	uv run --locked ruff check
 	uv run --locked mypy packages/sql-python/python packages/sql-python/tests
+	cd packages/sdk-python/.build/sdk-python && uv run --extra lint ruff format --check && uv run --extra lint ruff check \
+		&& $(CARGO) fmt --check
 
 format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Markdown) and ruff (Python)
 	cd $(CORE) && $(CARGO) fmt
@@ -138,5 +154,5 @@ endif
 	mv $@.tmp $@
 
 clean: ## Remove build outputs
-	rm -rf $(CARGO_TARGET_DIR) $(ADDON) packages/sdk-typescript/.build node_modules */node_modules packages/*/node_modules \
+	rm -rf $(CARGO_TARGET_DIR) $(ADDON) packages/sdk-typescript/.build packages/sdk-python/.build node_modules */node_modules packages/*/node_modules \
 		.venv packages/sql-python/python/sqlite_kv/*.so

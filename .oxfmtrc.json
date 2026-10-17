@@ -2,5 +2,5 @@
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
   "printWidth": 120,
   "singleQuote": true,
-  "ignorePatterns": ["**/node_modules", "**/.venv", "packages/sdk-typescript/.build", "**/target", "pnpm-lock.yaml"]
+  "ignorePatterns": ["**/node_modules", "**/.venv", "packages/sdk-typescript/.build", "packages/sdk-python/.build", "**/target", "pnpm-lock.yaml"]
 }
