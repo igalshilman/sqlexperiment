@@ -55,6 +55,11 @@ with the same storage, page cache and pending sends:
 - The attempt's session opens on first use and is saved when the handler
   ends: one empty run, if it wrote, so that the page cache may trust it.
 
+[`examples/python`](../../examples/README.md#python) has notes and a bank,
+and [`tests/python`](../../tests/python) runs them and the context below
+against a real Restate server (`make concurrency-test-py`), and the bank
+through crashes (`make crash-test-py`).
+
 ## The context without journal replay
 
 With `journal_replay=False`, a retried attempt runs the handler again from the

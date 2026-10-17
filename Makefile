@@ -38,7 +38,8 @@ RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
 .PHONY: all help core addon sdk-ts sdk-py js py examples-rust test test-core test-addon test-sdk-ts test-ts \
-	test-sdk-py test-sql-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test restate-server clean
+	test-sdk-py test-sql-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test \
+	crash-test-py concurrency-test-py restate-server clean
 
 # --- Build
 
@@ -114,7 +115,7 @@ lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware)
 lint-py: py ## The Python: ruff format --check, ruff check and mypy; and the patched SDK's ruff, as it configures it, and rustfmt
 	uv run --locked ruff format --check
 	uv run --locked ruff check
-	uv run --locked mypy packages/sql-python/python packages/sql-python/tests
+	uv run --locked mypy packages/sql-python/python packages/sql-python/tests examples/python tests/python
 	cd packages/sdk-python/.build/sdk-python && uv run --extra lint ruff format --check && uv run --extra lint ruff check \
 		&& $(CARGO) fmt --check
 
@@ -130,6 +131,12 @@ crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through cra
 
 concurrency-test: js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
 	cd tests && node concurrency.ts
+
+concurrency-test-py: py $(RESTATE_SERVER) ## Python: the context without journal replay and the examples, against a Restate server
+	uv run --locked pytest tests/python
+
+crash-test-py: py $(RESTATE_SERVER) ## Python: the bank example through crashes, against a Restate server
+	uv run --locked python tests/python/crash.py
 
 tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, workflow), against a Restate server
 	cd tests && node restate-tools.ts

@@ -895,10 +895,10 @@ index cecd90f..26736b9 100644
              return wrapped
 diff --git a/python/restate/sql.py b/python/restate/sql.py
 new file mode 100644
-index 0000000..1ca9792
+index 0000000..0e8c5a3
 --- /dev/null
 +++ b/python/restate/sql.py
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,601 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -938,7 +938,8 @@ index 0000000..1ca9792
 +SqlValue = typing.Union[None, int, float, str, bytes, bool]
 +"""An SQL value. A ``bool`` parameter is stored as 0 or 1; BLOBs come back as ``bytes``."""
 +
-+Rows = List[List[SqlValue]]
++Rows = List[List[Any]]
++"""Result rows: lists of ``SqlValue``s, typed ``Any`` (as ``sqlite3``'s), so that a row unpacks to what its query selects."""
 +
 +
 +class SqlOptions(typing.TypedDict):
