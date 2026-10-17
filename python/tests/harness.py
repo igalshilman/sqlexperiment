@@ -24,6 +24,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 INGRESS = "http://127.0.0.1:8080"
 ADMIN = "http://127.0.0.1:9070"
+HTTP1 = os.environ.get("RESTATE_HTTP1") == "1"
 # Requests go straight to localhost, whatever proxy the environment names.
 _http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -117,7 +118,10 @@ class Service:
             self.process.wait()
 
     def register(self) -> None:
-        status, body = request("POST", f"{ADMIN}/deployments", {"uri": f"http://127.0.0.1:{self.port}", "force": True})
+        # With RESTATE_HTTP1=1, Restate calls the services over HTTP/1.1, in request-response mode, as it calls
+        # a deployment behind a proxy that has no HTTP/2 end to end (Modal's, or AWS Lambda's).
+        deployment = {"uri": f"http://127.0.0.1:{self.port}", "force": True, "use_http_11": HTTP1}
+        status, body = request("POST", f"{ADMIN}/deployments", deployment)
         assert status in (200, 201), f"registering {self.name}: {status} {body}"
 
 
