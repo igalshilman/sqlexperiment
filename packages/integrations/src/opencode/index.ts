@@ -234,6 +234,25 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
 }
 
 /**
+ * Start the session's queued prompts, if no turn runs them. OpenCode resumes
+ * the turns it claimed when it boots, but a crash between a prompt's queueing
+ * and its turn's claim leaves it in the inbox with nothing to run it: sent
+ * again, by its id, it starts.
+ */
+async function startInbox(host: Host) {
+  const { session } = host.client;
+  const sessionID = SESSION as never;
+  const active: Record<string, unknown> = await host.call(session.active());
+  if (active[SESSION] !== undefined) return;
+  const inbox: { id: string; payload: { text: string } }[] = await host.call(session.inbox.list({ sessionID }));
+  const first = inbox[0];
+  if (first === undefined) return;
+  await host.call(
+    session.prompt({ sessionID, id: first.id as never, text: first.payload.text, delivery: 'queue', resume: true }),
+  );
+}
+
+/**
  * Run `work(opencode)` with OpenCode over the object's database: `model` is
  * the session's model, `plugins` OpenCode plugins (such as the model's), and
  * `tools` the agent's tools. `opencode` has `prompt(text)`, and the
@@ -290,6 +309,7 @@ export const withOpenCode = async <T>(
             for (;;) {
               const now = await outcome(host, of);
               if (now.state !== 'running') return now;
+              await startInbox(host);
               await host.call(session.wait({ sessionID }));
               // A turn resumed at boot may not have started yet.
               const active: Record<string, unknown> = await host.call(session.active());
