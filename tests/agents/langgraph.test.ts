@@ -4,7 +4,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as restate from '@restatedev/restate-sdk';
 import { CANCELLED } from 'restate-agents';
-import { afterCancel, cancelledTransfer, conversation, crashedAnywhere, SAID } from '../testing.ts';
+import {
+  afterCancel,
+  cancelledTransfer,
+  cancelledWhileWorking,
+  withoutIds,
+  conversation,
+  crashedAnywhere,
+  SAID,
+} from '../testing.ts';
 import { Teller } from '../fakes/langgraph.ts';
 import * as langgraph from 'restate-agents/langgraph';
 import { prompt } from './langgraph.ts';
@@ -12,6 +20,14 @@ import { prompt } from './langgraph.ts';
 vi.mock('@langchain/anthropic', () => import('../fakes/langgraph.ts'));
 
 describe('the LangGraph agent', () => {
+  it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
+    const now = await cancelledWhileWorking((tools) => langgraph.chat({ tools }), langgraph.messages());
+    const waiting = await afterCancel(langgraph.chat({ tools: [cancelledTransfer] }), langgraph.messages());
+    expect(now.failed).toBeInstanceOf(restate.CancelledError);
+    expect(now.answer).toBe(waiting.answer);
+    expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
+  });
+
   it('ends a cancelled turn, and answers the next message afresh', async () => {
     const { failed, answer, parts } = await afterCancel(
       langgraph.chat({ tools: [cancelledTransfer] }),

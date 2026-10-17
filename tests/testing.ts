@@ -4,7 +4,7 @@
 import { expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
-import { tool } from 'restate-agents';
+import { tool, type Tool } from 'restate-agents';
 import type { Store } from 'sqlite-kv';
 import { z } from 'zod';
 import type { Audit, Transfer } from './sql/ledger.ts';
@@ -98,8 +98,14 @@ export function sqlAttempt({
     },
   };
   const attempt = new restate.internal.SqlAttempt(ctx);
+  const cancelled = Promise.withResolvers<void>();
   return {
     db: attempt.db,
+    /** Restate's explicit cancellation (`restate.internal.asInternal(ctx).cancellation()`), which `cancel` signals. */
+    cancellation: () => cancelled.promise,
+    cancelPreviousCalls: async () => [],
+    /** Cancel the invocation, as Restate does. */
+    cancel: () => cancelled.resolve(),
     /** `ctx.get` and `ctx.set` of the object's state, as JSON. */
     get: async <T>(name: string): Promise<T | null> => {
       const value = await ctx.get(name);
@@ -343,3 +349,52 @@ export async function afterCancel(
   const page = await invoke(messages, 'read', {}, true);
   return { failed, answer, parts: page.messages.map((m) => m.parts) };
 }
+
+/**
+ * `chat` (with `tools`) on an object of its own, its first message (a
+ * transfer) cancelled while `transfer` runs (when it calls `started`), not
+ * while a Restate call is pending: as during a model request.
+ */
+export async function cancelledWhileWorking(
+  chat: (tools: Tool[]) => PromptHandler,
+  messages: (ctx: restate.SqlObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+) {
+  const map = new Map<string, Uint8Array>();
+  const started = Promise.withResolvers<void>();
+  const transfer = tool({
+    name: 'transfer',
+    description: 'Move money.',
+    input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+    run: async () => {
+      started.resolve();
+      return new Promise<never>(() => {}); // as long as it takes
+    },
+  });
+  const handler = chat([transfer]);
+  const attempt = (id: string, shared = false) => {
+    const sql = sqlAttempt({ map, key: 'cancel', id, shared });
+    return { sql, ctx: { key: 'cancel', request: () => ({ id }), ...sql } as unknown as restate.SqlObjectContext };
+  };
+  const first = attempt('inv1');
+  const answering = first.sql.end(() => handler(first.ctx, 'Please move 5 from 1 to 2'));
+  await started.promise;
+  first.sql.cancel();
+  const failed = await answering.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  const second = attempt('inv2');
+  const answer = await second.sql.end(() => handler(second.ctx, 'Hello'));
+  const read = attempt('read', true);
+  const page = await read.sql.end(() => messages(read.ctx, {}));
+  return { failed, answer, parts: page.messages.map((m) => m.parts) };
+}
+
+/** `parts` without their tool calls' ids, which differ from run to run. */
+export const withoutIds = (parts: unknown[][]) =>
+  parts.map((message) =>
+    message.map((part) => {
+      if (typeof part !== 'object' || part === null) return part;
+      return Object.fromEntries(Object.entries(part).filter(([key]) => key !== 'id'));
+    }),
+  );

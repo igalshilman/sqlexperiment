@@ -5,7 +5,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RequestMessage } from '@deepseek-ai/dsh-llm';
 import * as restate from '@restatedev/restate-sdk';
-import { afterCancel, cancelledTransfer, conversation, crashedAnywhere, SAID } from '../testing.ts';
+import {
+  afterCancel,
+  cancelledTransfer,
+  cancelledWhileWorking,
+  withoutIds,
+  conversation,
+  crashedAnywhere,
+  SAID,
+} from '../testing.ts';
 import { teller } from '../fakes/deepseek.ts';
 import * as deepseek from 'restate-agents/deepseek';
 import { prompt } from './deepseek.ts';
@@ -28,6 +36,14 @@ async function counting(body: (calls: { model: number }) => Promise<void>) {
 }
 
 describe('the DeepSeek Harness agent', () => {
+  it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
+    const now = await cancelledWhileWorking((tools) => deepseek.chat({ tools }), deepseek.messages());
+    const waiting = await afterCancel(deepseek.chat({ tools: [cancelledTransfer] }), deepseek.messages());
+    expect(now.failed).toBeInstanceOf(restate.CancelledError);
+    expect(now.answer).toBe(waiting.answer);
+    expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
+  });
+
   it('ends a cancelled turn, and answers the next message afresh', async () => {
     const { failed, answer, parts } = await afterCancel(
       deepseek.chat({ tools: [cancelledTransfer] }),

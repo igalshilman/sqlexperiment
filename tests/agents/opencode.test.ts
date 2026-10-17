@@ -4,7 +4,15 @@
 // `make test-ts T=opencode`.
 import { describe, expect, it, vi } from 'vitest';
 import * as restate from '@restatedev/restate-sdk';
-import { afterCancel, cancelledTransfer, conversation, crashedAnywhere, SAID } from '../testing.ts';
+import {
+  afterCancel,
+  cancelledTransfer,
+  cancelledWhileWorking,
+  withoutIds,
+  conversation,
+  crashedAnywhere,
+  SAID,
+} from '../testing.ts';
 import { teller, withTeller } from '../fakes/opencode.ts';
 import * as opencode from 'restate-agents/opencode';
 import { prompt } from './opencode.ts';
@@ -17,6 +25,14 @@ vi.mock('restate-agents/opencode/db', async (original) => {
 vi.stubEnv('MODEL', 'teller/teller');
 
 describe('the OpenCode agent', () => {
+  it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
+    const now = await cancelledWhileWorking((tools) => opencode.chat({ tools }), opencode.messages());
+    const waiting = await afterCancel(opencode.chat({ tools: [cancelledTransfer] }), opencode.messages());
+    expect(now.failed).toBeInstanceOf(restate.CancelledError);
+    expect(now.answer).toBe(waiting.answer);
+    expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
+  });
+
   it('ends a cancelled turn, and answers the next message afresh', async () => {
     const { failed, answer, parts } = await afterCancel(
       opencode.chat({ tools: [cancelledTransfer] }),

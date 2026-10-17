@@ -34,6 +34,7 @@ import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langcha
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import {
   CANCELLED,
+  cancellationOf,
   chatHandler,
   type Configure,
   configured,
@@ -126,11 +127,18 @@ export const prompt = async (
     // are stored.
     const { prompt: last, answers = {} } = state.values;
     const interrupted = last !== undefined && answers[last] === undefined;
+    const turn = cancellationOf(ctx);
     try {
-      await app.invoke(interrupted ? null : { messages: [new HumanMessage(text)], prompt: id }, config);
+      await app.invoke(interrupted ? null : { messages: [new HumanMessage(text)], prompt: id }, {
+        ...config,
+        signal: turn,
+      });
     } catch (error) {
       // Cancelled: the run ends, and the next prompt starts afresh.
-      if (error instanceof restate.CancelledError) await cancel(app, config);
+      if (turn?.aborted || error instanceof restate.CancelledError) {
+        await cancel(app, config);
+        throw turn?.aborted ? turn.reason : error;
+      }
       throw error;
     }
   }

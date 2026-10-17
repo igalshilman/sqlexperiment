@@ -37,6 +37,7 @@ import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import {
+  cancellationOf,
   CHECK_MODEL,
   chatHandler,
   checkModelName,
@@ -283,12 +284,16 @@ export const withOpenCode = async <T>(
   // invocation interrupts the session's turn instead (below), which OpenCode
   // records, so the next prompt does not resume it.
   let cancelled: restate.CancelledError | undefined;
+  // A cancellation, whenever it comes, interrupts the session's turn (below).
+  const turn = cancellationOf(ctx);
+  const onCancel = () => void fail(turn!.reason);
   const fail = (error: unknown) => {
     if (error instanceof restate.CancelledError) cancelled = error;
     else fence.closed = true;
     failed(error);
     return new Promise<never>(() => {});
   };
+  turn?.addEventListener('abort', onCancel, { once: true });
   const host = await openOpenCode(db, fence, {
     plugins: [
       ...plugins,
@@ -364,6 +369,7 @@ export const withOpenCode = async <T>(
       }),
     ]);
   } finally {
+    turn?.removeEventListener('abort', onCancel);
     await host.close();
   }
 };

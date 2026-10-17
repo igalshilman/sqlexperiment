@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS answers (prompt TEXT PRIMARY KEY, answer TEXT NOT NUL
 
 export class Conversation {
   #db: SqlSession;
+  /** Cancelled: a run cut off then stores nothing more. */
+  #closed = false;
 
   constructor(db: SqlSession) {
     this.#db = db;
@@ -54,6 +56,7 @@ export class Conversation {
    * the last reply that has none, then `text` as the reply and the answer.
    */
   async cancel(id: string, text: string): Promise<void> {
+    this.#closed = true;
     const last = (await this.messages()).at(-1);
     const calls =
       last?.role === 'assistant' && Array.isArray(last.content)
@@ -73,11 +76,16 @@ export class Conversation {
               })),
             },
           ];
-    await this.append(id, [...results, { role: 'assistant', content: text }], text);
+    await this.#store(id, [...results, { role: 'assistant', content: text }], text);
   }
 
   /** Store `messages` of prompt `id`, and its `answer` if given, in one transaction. */
   append(id: string, messages: MessageParam[], answer?: string): Promise<void> {
+    if (this.#closed) return Promise.reject(new Error('the conversation was cancelled'));
+    return this.#store(id, messages, answer);
+  }
+
+  #store(id: string, messages: MessageParam[], answer?: string): Promise<void> {
     return this.#db.transaction(async (tx) => {
       for (const message of messages) {
         await tx.execute('INSERT INTO messages (prompt, message) VALUES (?, ?)', [id, JSON.stringify(message)]);

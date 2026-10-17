@@ -45,7 +45,9 @@ import {
   ToolRuntime,
 } from '@deepseek-ai/dsh-tools';
 import {
+  aborted,
   CANCELLED,
+  cancellationOf,
   chatHandler,
   type Configure,
   configured,
@@ -201,7 +203,15 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolDefinition =>
     name: t.name,
     description: t.description,
     parameters: parameterSpec(z.toJSONSchema(t.input) as Record<string, unknown>),
-    execute: (args, exec) => t.run(t.input.parse(args), { ctx, callId: exec.callId }),
+    // Aborted (the agent's turn, on a cancellation), it waits no more.
+    execute: (args, exec) => {
+      const run = t.run(t.input.parse(args), { ctx, callId: exec.callId });
+      if (!exec.signal) return run;
+      const stopped = aborted(exec.signal).catch(() => {
+        throw new restate.CancelledError();
+      });
+      return Promise.race([run, stopped]);
+    },
   });
 
 /** An agent's options: `chat` and `prompt` take them. */
@@ -231,6 +241,9 @@ export const prompt = async (
   failed.catch(() => {});
   // A cancelled invocation cancels the agent's turn, which the log keeps.
   let cancelTurn: (() => Promise<void>) | undefined;
+  const turn = cancellationOf(ctx);
+  const onCancel = () => fail(turn!.reason);
+  turn?.addEventListener('abort', onCancel, { once: true });
   try {
     const sessionId = SessionId(ctx.key);
     const options = {
@@ -285,6 +298,7 @@ export const prompt = async (
     (harness.sessionPersistence as SqlSessionPersistence).abandon();
     throw e;
   } finally {
+    turn?.removeEventListener('abort', onCancel);
     await harness.fiber.dispose();
   }
 };

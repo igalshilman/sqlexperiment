@@ -107,11 +107,13 @@ id (from `/send`, or `status`):
 curl -X PATCH localhost:9070/invocations/inv_1f…/cancel
 ```
 
-The turn ends cancelled, and the agent does not go on: each framework records
-the cut-off tool calls as cancelled, in its own way, and the next message
-starts afresh. A cancellation reaches a turn while a Restate call of its
-tools is pending: a wait for an approval, a sub-agent, a workflow; one that
-comes during a model request is not seen yet.
+The turn ends cancelled whenever the cancellation comes (during a model
+request too), and the agent does not go on: each framework stops its turn
+and records the cut-off tool calls as cancelled, in its own way, and the
+next message starts afresh. The calls its tools made (a wait for an
+approval, a sub-agent's task, a workflow) are cancelled with it. `chat`
+uses Restate's explicit cancellation for this (`explicitCancellation`,
+`ctx.cancellation()` and `cancelPreviousCalls()`).
 
 **Send again safely.** A caller that may send a message again (after a
 timeout, say) gives it an idempotency key: the same key is the same

@@ -96,6 +96,23 @@ export interface Turn {
   since: string;
 }
 
+/** The cancellation of each turn, by its context: aborted when Restate cancels its invocation. */
+const turns = new WeakMap<object, AbortSignal>();
+
+/**
+ * The signal of the turn of `ctx` (of a `chat` handler, `chatHandler`):
+ * aborted, with a `restate.CancelledError`, once Restate cancels the
+ * invocation. An agent's `prompt` stops its framework's turn then.
+ */
+export const cancellationOf = (ctx: object): AbortSignal | undefined => turns.get(ctx);
+
+/** A promise that rejects with `signal`'s reason once it aborts. */
+export const aborted = (signal: AbortSignal) =>
+  new Promise<never>((_, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+
 /**
  * `answer` as a chat handler, which takes its message as plain text or as a
  * JSON string, so that both of these work:
@@ -103,19 +120,32 @@ export interface Turn {
  *   curl localhost:8080/assistant/alice/chat -d 'Hi'
  *   curl localhost:8080/assistant/alice/chat --json '"Hi"'
  *
- * While it answers, the object's `status` says so (its {@link Turn}).
+ * While it answers, the object's `status` says so (its {@link Turn}). Its
+ * invocation's cancellation (Restate's, explicit: `ctx.cancellation()`)
+ * aborts {@link cancellationOf} its context, whenever it comes, and cancels
+ * the calls its tools made (`cancelPreviousCalls()`): the agent's `prompt`
+ * ends the turn, and the handler fails with a `restate.CancelledError`.
  */
 export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: string) => Promise<string>) =>
   restate.handlers.object.exclusive(
-    { input: message, accept: '*/*', journalReplay: false },
+    { input: message, accept: '*/*', journalReplay: false, explicitCancellation: true },
     async (ctx: restate.SqlObjectContext, text: string) => {
       const invocationId = ctx.request().id;
       if ((await ctx.get<Turn>(TURN))?.invocationId !== invocationId) {
         ctx.set(TURN, { invocationId, since: new Date().toISOString() } satisfies Turn);
       }
+      const turn = new AbortController();
+      turns.set(ctx, turn.signal);
+      const internal = restate.internal.asInternal(ctx as unknown as restate.Context);
+      void (async () => {
+        await (internal.cancellation() as unknown as Promise<void>);
+        turn.abort(new restate.CancelledError());
+        await (internal.cancelPreviousCalls() as unknown as Promise<unknown>);
+      })().catch(() => {});
       let answered: string;
       try {
         answered = await answer(ctx, text);
+        // Cancelled once answered: the answer stands.
       } catch (error) {
         if (error instanceof restate.TerminalError) {
           ctx.clear(TURN);

@@ -50,6 +50,7 @@ import {
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
 import {
+  cancellationOf,
   CHECK_MODEL,
   chatHandler,
   checkModelName,
@@ -117,8 +118,9 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolRegistration =>
     description: t.description,
     parameters: Type.Unsafe<Record<string, unknown>>(z.toJSONSchema(t.input)),
     replay: 'safe', // a crash runs it again, with the same call id
-    execute: async (args, { callId }) => ({
-      content: [{ type: 'text', text: await t.run(t.input.parse(args), { ctx, callId }) }],
+    // Aborted (the conversation's work, on a cancellation), it waits no more.
+    execute: async (args, { callId }, task) => ({
+      content: [{ type: 'text', text: await awaitWithContext(t.run(t.input.parse(args), { ctx, callId }), task) }],
     }),
   });
 
@@ -146,10 +148,19 @@ export const withPi = async <T>(
   // A cancelled invocation aborts the conversation's work instead (below):
   // pi-durable ends the turn, and the tool call with it.
   let cancelled: restate.CancelledError | undefined;
+  // A cancellation, whenever it comes, aborts the conversation's work (below).
+  const turn = cancellationOf(ctx);
+  const onCancel = () => {
+    cancelled = turn!.reason as restate.CancelledError;
+    failed(cancelled);
+  };
+  turn?.addEventListener('abort', onCancel, { once: true });
   const failing = (t: ToolRegistration): ToolRegistration => ({
     ...t,
     execute: (args, api, task) =>
       t.execute(args, api, task).catch((error: unknown) => {
+        // The turn was cancelled, and the abort ended the call: pi-durable records it.
+        if (cancelled) throw error;
         failed(error);
         if (error instanceof restate.CancelledError) {
           cancelled = error;
@@ -214,6 +225,7 @@ export const withPi = async <T>(
       }),
     ]);
   } finally {
+    turn?.removeEventListener('abort', onCancel);
     await harness.close(withoutAbortSignal(context));
   }
 };

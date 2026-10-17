@@ -6,7 +6,7 @@ import { z } from 'zod';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { callTools, fakeProvider, say, textOf } from '../fakes/pi.ts';
-import { afterCancel, cancelledTransfer, sqlAttempt } from '../testing.ts';
+import { afterCancel, cancelledTransfer, cancelledWhileWorking, withoutIds, sqlAttempt } from '../testing.ts';
 
 // It repeats what it was told so far; asked to delegate, it hands out two
 // tasks, and then reports their results.
@@ -137,6 +137,14 @@ const twice = async (ctx: restate.SqlObjectContext) => [
 ];
 
 describe('pi.chat', () => {
+  it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
+    const now = await cancelledWhileWorking((tools) => pi.chat({ tools }), pi.messages());
+    const waiting = await afterCancel(pi.chat({ tools: [cancelledTransfer] }), pi.messages());
+    expect(now.failed).toBeInstanceOf(restate.CancelledError);
+    expect(now.answer).toBe(waiting.answer);
+    expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
+  });
+
   it('ends a cancelled turn, and answers the next message afresh', async () => {
     const { failed, answer, parts } = await afterCancel(pi.chat({ tools: [cancelledTransfer] }), pi.messages());
     expect(failed).toBeInstanceOf(restate.CancelledError);
