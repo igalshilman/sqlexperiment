@@ -21,7 +21,9 @@
 // carries on: a prompt is submitted once, by its id (pi-durable's requestId),
 // an answered prompt returns its answer, and unfinished work resumes: a model
 // call is made again, and a tool call declared `replay: 'safe'` runs again
-// with the same call id, which a tool passes on to stay idempotent.
+// with the same call id, which a tool passes on to stay idempotent. A tool's
+// error fails the attempt, which Restate retries (pi-durable would hand it to
+// the model as the tool's result).
 //
 // With a `workspace` directory, the agent also gets pi-durable's coding
 // tools (`read`, `write`, `edit`, `bash`) over it, on the local file system.
@@ -30,7 +32,7 @@
 // it was interrupted).
 import * as restate from '@restatedev/restate-sdk';
 import type { Context } from '@earendil-works/chord';
-import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { awaitWithContext, BACKGROUND_CONTEXT, withCancel, withoutAbortSignal } from '@earendil-works/chord/context';
 import { mkdir } from 'node:fs/promises';
 import { type Message, type MutableModels, Type } from '@earendil-works/pi-ai';
 import { createModels } from '@earendil-works/pi-ai/models';
@@ -53,6 +55,7 @@ import {
   forCall,
   messagesHandler,
   modelOf,
+  nextPromptId,
   type PerCall,
 } from '../common.ts';
 import { object } from '../object.ts';
@@ -64,7 +67,7 @@ import { openSqlKvStorage } from './storage.ts';
 export interface Pi {
   harness: Harness;
   context: Context;
-  /** Answer `text`, once per prompt `id` (by default the invocation's), with the answer's text. */
+  /** Answer `text`, once per prompt `id`, with the answer's text. By default, each prompt of an invocation has an id of its own, the same on every attempt. */
   prompt(text: string, id?: string): Promise<string>;
   /** The object's conversation, on the model: for `reset`, `compact`, `entries` and the like. */
   conversation: () => Promise<Conversation>;
@@ -132,9 +135,25 @@ export const withPi = async <T>(
   const model = modelOf(named, DEFAULT_MODEL);
   const [provider = '', modelId = ''] = model.split('/');
   models ??= await modelsOf(provider);
-  const context = BACKGROUND_CONTEXT;
+  // A tool's error fails the attempt, which Restate retries (pi-durable would
+  // hand it to the model): the work is cancelled, so the tool call stores no
+  // result, and the retry runs it again with the same call id.
+  const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
+  const { promise: failure, reject: failed } = Promise.withResolvers<never>();
+  failure.catch(() => {});
+  const failing = (t: ToolRegistration): ToolRegistration => ({
+    ...t,
+    execute: (...args) =>
+      t.execute(...args).catch((error: unknown) => {
+        failed(error);
+        cancel(error);
+        return awaitWithContext(new Promise<never>(() => {}), context);
+      }),
+  });
   const registry = createRegistry();
-  registry.install(defineExtension({ name: 'tools', tools: tools.map((t) => (isTool(t) ? native(t, ctx) : t)) }));
+  registry.install(
+    defineExtension({ name: 'tools', tools: tools.map((t) => failing(isTool(t) ? native(t, ctx) : t)) }),
+  );
   if (system) registry.install(defineExtension({ name: 'system', sections: [section('system', () => system)] }));
   let env: (() => NodeExecutionEnv) | undefined;
   if (workspace) {
@@ -156,29 +175,32 @@ export const withPi = async <T>(
       }
       return root;
     };
-    return await work({
-      harness,
-      context,
-      conversation,
-      async prompt(text, id = ctx.request().id) {
-        const root = await conversation();
-        const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
-        const settled = await submission.wait(context);
-        if (settled.status !== 'done' || settled.answer === undefined) {
-          const reason = settled.reason ?? 'unknown';
-          const check =
-            reason === 'model_error' || reason === 'no_model' ? ` (the model ${model}: ${CHECK_MODEL})` : '';
-          throw new restate.TerminalError(`prompt ${id} unanswered: ${reason}${check}`);
-        }
-        const { answer } = settled;
-        const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
-        const reply = entry?.model?.at(-1);
-        if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
-        return textOf(reply.content);
-      },
-    });
+    return await Promise.race([
+      failure,
+      work({
+        harness,
+        context,
+        conversation,
+        async prompt(text, id = nextPromptId(ctx)) {
+          const root = await conversation();
+          const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
+          const settled = await submission.wait(context);
+          if (settled.status !== 'done' || settled.answer === undefined) {
+            const reason = settled.reason ?? 'unknown';
+            const check =
+              reason === 'model_error' || reason === 'no_model' ? ` (the model ${model}: ${CHECK_MODEL})` : '';
+            throw new restate.TerminalError(`prompt ${id} unanswered: ${reason}${check}`);
+          }
+          const { answer } = settled;
+          const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
+          const reply = entry?.model?.at(-1);
+          if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
+          return textOf(reply.content);
+        },
+      }),
+    ]);
   } finally {
-    await harness.close(context);
+    await harness.close(withoutAbortSignal(context));
   }
 };
 

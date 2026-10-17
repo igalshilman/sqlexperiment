@@ -8,6 +8,20 @@ export type PerCall<T> = T | ((ctx: restate.SqlObjectContext) => T);
 export const forCall = <T>(value: PerCall<T>, ctx: restate.SqlObjectContext): T =>
   typeof value === 'function' ? (value as (ctx: restate.SqlObjectContext) => T)(ctx) : value;
 
+/** The prompts each invocation made so far, by its context. */
+const prompts = new WeakMap<object, number>();
+
+/**
+ * The id of the next prompt of the invocation of `ctx`: the invocation's id,
+ * then `<id>:2`, `<id>:3`... A retried attempt makes its prompts in the same
+ * order, so each gets the same id again, and its answer.
+ */
+export const nextPromptId = (ctx: restate.SqlObjectContext) => {
+  const n = (prompts.get(ctx) ?? 0) + 1;
+  prompts.set(ctx, n);
+  return n === 1 ? ctx.request().id : `${ctx.request().id}:${n}`;
+};
+
 /**
  * The model, as `provider/model-id` (such as `anthropic/claude-sonnet-5-5`):
  * `model`, or else MODEL, or else the framework's default.

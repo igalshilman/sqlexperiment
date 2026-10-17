@@ -52,7 +52,10 @@ handler does. A retried attempt opens the Harness again and carries on:
   invocation's id);
 - an answered prompt returns its answer;
 - unfinished work resumes: a model call is made again, and a tool call runs
-  again with the same call id, which a tool passes on to stay idempotent.
+  again with the same call id, which a tool passes on to stay idempotent;
+- a tool's error fails the attempt, and Restate retries it (pi-durable would
+  hand it to the model); a `restate.TerminalError` of a `restate-agents`
+  tool is its answer to the model.
 
 The files of a `workspace` are not in the database: they last as long as the
 disk does, and a coding tool a crash cut off is not run again (the model is

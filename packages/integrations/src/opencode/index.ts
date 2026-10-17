@@ -42,6 +42,7 @@ import {
   forCall,
   messagesHandler,
   modelOf,
+  nextPromptId,
   type PerCall,
 } from '../common.ts';
 import { object } from '../object.ts';
@@ -81,7 +82,7 @@ export const SESSION = 'ses_root';
 /** What `work` gets: `prompt(text)`, and the OpenCode `host` for anything else. */
 export interface OpenCodeSession {
   host: Host;
-  /** Answer `text`, once per prompt `id` (by default the invocation's), with the answer's text. */
+  /** Answer `text`, once per prompt `id`, with the answer's text. By default, each prompt of an invocation has an id of its own, the same on every attempt. */
   prompt(text: string, id?: string): Promise<string>;
 }
 
@@ -287,7 +288,7 @@ export const withOpenCode = async <T>(
       failure,
       work({
         host,
-        async prompt(text, id = ctx.request().id) {
+        async prompt(text, id = nextPromptId(ctx)) {
           // OpenCode's ids are letters, digits, `_` and `-`.
           const messageId = `msg_${id.replace(/[^\w-]/g, '_')}`;
           const { session } = host.client;
