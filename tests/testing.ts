@@ -42,6 +42,8 @@ export interface AttemptOptions {
   id?: string;
   /** Each send the attempt makes. */
   send?: (send: restate.GenericSend<Uint8Array>) => void;
+  /** Before each of the attempt's state requests. */
+  onRequest?: () => void;
 }
 
 /**
@@ -50,8 +52,16 @@ export interface AttemptOptions {
  * does. Each attempt is a database of its own in this process (a namespace
  * of its own), so that one a crash abandoned does not share the page cache.
  */
-export function sqlAttempt({ map, fence = { closed: false }, key = 'k', id = 'inv', send = () => {} }: AttemptOptions) {
+export function sqlAttempt({
+  map,
+  fence = { closed: false },
+  key = 'k',
+  id = 'inv',
+  send = () => {},
+  onRequest = () => {},
+}: AttemptOptions) {
   const check = () => {
+    onRequest();
     if (fence.closed) throw new Error('fenced');
   };
   const end = Promise.withResolvers<void>();
@@ -64,7 +74,10 @@ export function sqlAttempt({ map, fence = { closed: false }, key = 'k', id = 'in
     request: () => ({ id, target }),
     invocationEndPromise: end,
     defaultSerde: restate.serde.json,
-    get: async (k: string) => map.get(k) ?? null,
+    get: async (k: string) => {
+      onRequest();
+      return map.get(k) ?? null;
+    },
     set: (k: string, value: Uint8Array) => {
       check();
       map.set(k, Uint8Array.from(value));
@@ -117,14 +130,22 @@ export interface FakeLedger {
  * store anything on the way out. Like Restate, the next attempt fences it, so
  * it stores nothing afterwards.
  */
-export function conversation(handler: PromptHandler, key: string) {
-  const map = new Map<string, Uint8Array>();
-  let fence = { closed: false };
+export function conversation(
+  handler: PromptHandler,
+  key: string,
+  from?: { state: ReadonlyMap<string, Uint8Array>; ledger: FakeLedger },
+) {
+  // From another conversation: a copy of its state.
+  const map = new Map<string, Uint8Array>(from?.state);
+  let fence: { closed: boolean } = { closed: false };
   // Ends the attempt before: Restate fences it once the next one starts.
   let abort: (() => void) | undefined;
   const ledger: FakeLedger = { transfers: new Map(), calls: [], crashNext: 0, failNext: 0, crashed: () => {} };
-  const books = {
+  // The books as an attempt calls them: a fenced (crashed) attempt's calls
+  // never reach them, as a dead process's do not.
+  const booksOf = (attempt: { closed: boolean }) => ({
     async transfer(transfer: Transfer, opts: restate.Opts<Transfer, Transfer>) {
+      if (attempt.closed) return new Promise<Transfer>(() => {});
       ledger.calls.push({ name: 'transfer', id: transfer.id, key: opts.getOpts().idempotencyKey });
       if (!ledger.transfers.has(transfer.id)) ledger.transfers.set(transfer.id, transfer);
       const applied = ledger.transfers.get(transfer.id)!;
@@ -142,24 +163,43 @@ export function conversation(handler: PromptHandler, key: string) {
     async audit(): Promise<Audit> {
       return { accounts: 8, total: 8000, transfers: ledger.transfers.size, inconsistent: 0 };
     },
-  };
+  });
+  if (from) for (const [id, transfer] of from.ledger.transfers) ledger.transfers.set(id, transfer);
   return {
     ledger,
-    /** One attempt of the handler, as Restate makes it, with request id `requestId`. */
-    async attempt(requestId: string, prompt: string) {
+    /** The object's state. */
+    state: map as ReadonlyMap<string, Uint8Array>,
+    /**
+     * One attempt of the handler, as Restate makes it, with request id
+     * `requestId`; with `crashAt`, it crashes at that state request (from 1),
+     * and is abandoned there.
+     */
+    async attempt(requestId: string, prompt: string, crashAt?: number) {
       fence.closed = true;
       fence = { closed: false };
+      const current = fence;
       abort?.();
-      const sql = sqlAttempt({ map, fence, key, id: requestId });
+      let requests = 0;
+      const crashed = Promise.withResolvers<'crashed'>();
+      const onRequest = () => {
+        if (++requests !== crashAt) return;
+        current.closed = true;
+        crashed.resolve('crashed');
+        throw new Error('crash at a state request');
+      };
+      const sql = sqlAttempt({ map, fence, key, id: requestId, onRequest });
       abort = sql.abort;
       const ctx = {
         key,
         request: () => ({ id: requestId }),
-        objectClient: () => books,
+        objectClient: () => booksOf(current),
         db: sql.db,
         transaction: sql.transaction,
       };
-      return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, prompt));
+      const answer = sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, prompt));
+      if (crashAt === undefined) return answer;
+      answer.catch(() => {});
+      return Promise.race([crashed.promise, answer]);
     },
     /** Another handler of the object (such as `messages`), with `input`, in an attempt of its own. */
     async read<T, I>(other: (ctx: restate.SqlObjectContext, input: I) => Promise<T>, input?: I, requestId = 'read') {

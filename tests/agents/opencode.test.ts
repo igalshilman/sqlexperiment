@@ -23,6 +23,35 @@ describe('the OpenCode agent', () => {
     expect(await c.read(opencode.messages())).toEqual({ messages: SAID, more: false });
   });
 
+  it('answers a message once after a crash at any of its state requests', async () => {
+    const before = conversation(prompt, 'every');
+    await before.attempt('inv0', 'Please move 1 from 3 to 4');
+    /** What goes wrong with a crash at state request `n` of the next message, if it crashed there. */
+    const crashAt = async (n: number) => {
+      const c = conversation(prompt, 'every', before);
+      if ((await c.attempt('inv1', 'Please move 5 from 1 to 2', n)) !== 'crashed') return 'finished';
+      const answer = await Promise.race([
+        c.attempt('inv1', 'Please move 5 from 1 to 2'),
+        new Promise((resolve) => setTimeout(() => resolve('no answer'), 10_000)),
+      ]);
+      const { messages } = await c.read(opencode.messages());
+      const prompts = messages.filter((m) => m.role === 'user').length;
+      const ok =
+        answer === 'Done: moved 5 from account 1 to account 2' && c.ledger.transfers.size === 2 && prompts === 2;
+      return ok ? 'ok' : `${n}: ${String(answer)}, ${c.ledger.transfers.size} transfers, ${prompts} prompts`;
+    };
+    // Every third state request (CRASH_STRIDE=1: every one), a batch at a
+    // time, until one finishes uncrashed.
+    const stride = Number(process.env.CRASH_STRIDE ?? 3);
+    const wrong: string[] = [];
+    for (let from = 1, done = false; !done; from += 8 * stride) {
+      const batch = await Promise.all(Array.from({ length: 8 }, (_, i) => crashAt(from + i * stride)));
+      wrong.push(...batch.filter((r) => r !== 'ok' && r !== 'finished'));
+      done = batch.includes('finished');
+    }
+    expect(wrong).toEqual([]);
+  }, 600_000);
+
   it('gives the model its system prompt', async () => {
     const c = conversation(opencode.chat({ system: 'You are Ada.' }), 'ada');
     expect(await c.attempt('inv1', 'Who are you?')).toContain('You are Ada.');
