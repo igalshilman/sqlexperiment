@@ -41,6 +41,7 @@ import {
   defineTool,
   Harness,
   section,
+  type Conversation,
   type ToolRegistration,
 } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
@@ -59,12 +60,14 @@ import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
 import { openSqlKvStorage } from './storage.ts';
 
-/** What `work` gets: `prompt(text)`, and the `harness` and chord `context` for anything else. */
+/** What `work` gets: `prompt(text)`, the `conversation()`, and the `harness` and chord `context` for anything else. */
 export interface Pi {
   harness: Harness;
   context: Context;
   /** Answer `text`, once per prompt `id` (by default the invocation's), with the answer's text. */
   prompt(text: string, id?: string): Promise<string>;
+  /** The object's conversation, on the model: for `reset`, `compact`, `entries` and the like. */
+  conversation: () => Promise<Conversation>;
 }
 
 /** The text of a message's content. */
@@ -81,8 +84,8 @@ export interface PiOptions {
   models?: MutableModels;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
-  /** The agent's tools, made with pi-durable's `defineTool`. */
-  tools?: ToolRegistration[];
+  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or pi-durable's `defineTool`s. */
+  tools?: (ToolRegistration | AnyTool)[];
   /** A directory for the coding tools, made if missing; without one, the agent has no file system. */
   workspace?: string;
 }
@@ -102,6 +105,18 @@ async function modelsOf(provider: string): Promise<MutableModels> {
   return models;
 }
 
+/** `t` as a pi-durable tool. */
+const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolRegistration =>
+  defineTool({
+    name: t.name,
+    description: t.description,
+    parameters: Type.Unsafe<Record<string, unknown>>(z.toJSONSchema(t.input)),
+    replay: 'safe', // a crash runs it again, with the same call id
+    execute: async (args, { callId }) => ({
+      content: [{ type: 'text', text: await t.run(t.input.parse(args), { ctx, callId }) }],
+    }),
+  });
+
 /**
  * Run `work(pi)` with a Harness over the object's database: `model` is the
  * model to use as `provider/model-id`, and `tools` the agent's tools. `pi`
@@ -119,7 +134,7 @@ export const withPi = async <T>(
   models ??= await modelsOf(provider);
   const context = BACKGROUND_CONTEXT;
   const registry = createRegistry();
-  registry.install(defineExtension({ name: 'tools', tools }));
+  registry.install(defineExtension({ name: 'tools', tools: tools.map((t) => (isTool(t) ? native(t, ctx) : t)) }));
   if (system) registry.install(defineExtension({ name: 'system', sections: [section('system', () => system)] }));
   let env: (() => NodeExecutionEnv) | undefined;
   if (workspace) {
@@ -131,11 +146,22 @@ export const withPi = async <T>(
   }
   const harness = await Harness.open(await openSqlKvStorage(db), { models, registry, env }, context);
   try {
+    // The root conversation keeps the model it was created with: on another
+    // one now (`model` or MODEL changed), it moves to this one.
+    const conversation = async () => {
+      const root = await harness.root(context, { agent: { model: { provider, modelId } } });
+      const { model: current } = await root.agent(context);
+      if (current?.provider !== provider || current.modelId !== modelId) {
+        await root.configure({ model: { provider, modelId } }, context);
+      }
+      return root;
+    };
     return await work({
       harness,
       context,
+      conversation,
       async prompt(text, id = ctx.request().id) {
-        const root = await harness.root(context, { agent: { model: { provider, modelId } } });
+        const root = await conversation();
         const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
         const settled = await submission.wait(context);
         if (settled.status !== 'done' || settled.answer === undefined) {
@@ -173,18 +199,6 @@ export interface ChatOptions {
   workspace?: PerCall<string | undefined>;
 }
 
-/** `t` as a pi-durable tool. */
-const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolRegistration =>
-  defineTool({
-    name: t.name,
-    description: t.description,
-    parameters: Type.Unsafe<Record<string, unknown>>(z.toJSONSchema(t.input)),
-    replay: 'safe', // a crash runs it again, with the same call id
-    execute: async (args, { callId }) => ({
-      content: [{ type: 'text', text: await t.run(t.input.parse(args), { ctx, callId }) }],
-    }),
-  });
-
 /** The answer to a message, each message an invocation, the conversation in the object's database. */
 const respond =
   ({ model, models, system, tools = [], workspace }: ChatOptions = {}) =>
@@ -193,7 +207,7 @@ const respond =
       model,
       models,
       system,
-      tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),
+      tools: tools.map((t) => (isTool(t) ? t : forCall(t, ctx))),
       workspace: workspace === undefined ? undefined : forCall(workspace, ctx),
     });
 
