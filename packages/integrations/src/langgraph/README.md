@@ -93,6 +93,6 @@ make js   # from the repository root
 cd examples && ANTHROPIC_API_KEY=… node langgraph.ts   # a chat session, on port 9080
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
-curl localhost:8080/session/alice/chat --json '"Hi, I am Alice"'
+curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice"'
 make test-ts T=langgraph   # the conformance suite and the handler's tests, from the repository root
 ```

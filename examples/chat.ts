@@ -1,12 +1,34 @@
-// A durable chat: an agent (pi) per key, its conversation in the object's
-// SQL database. A crash resumes the reply.
-//
-//   ANTHROPIC_API_KEY=… node chat.ts
-//   curl localhost:8080/session/alice/chat --json '"Hi, I am Alice"'
-//   curl localhost:8080/session/alice/chat --json '"What is my name?"'
+/**
+ * A durable chat agent on pi.
+ *
+ * Each key is a conversation of its own (`assistant/alice`, `assistant/bob`),
+ * kept in the object's SQL database. If the process dies mid-reply, Restate
+ * retries the call and the agent picks up where it left off.
+ *
+ *   ANTHROPIC_API_KEY=… node chat.ts
+ *   restate deployments register http://localhost:9080
+ *   curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice. Is it warm in Lisbon?"'
+ *   curl localhost:8080/assistant/alice/chat --json '"What is my name?"'
+ */
 import * as restate from '@restatedev/restate-sdk';
+import { Type } from '@earendil-works/pi-ai';
+import { defineTool } from '@earendil-works/pi-durable';
 import * as pi from 'restate-agents/pi';
 
-const session = restate.object({ name: 'session', handlers: { chat: pi.chat() }, options: restate.sqlOptions });
+const weather = defineTool({
+  name: 'get_weather',
+  description: 'The current weather in a city.',
+  parameters: Type.Object({ city: Type.String() }),
+  // A stand-in for a real weather API.
+  execute: async ({ city }) => ({ content: [{ type: 'text', text: `Sunny and 21°C in ${city}` }] }),
+});
 
-await restate.serve({ services: [session] });
+const assistant = restate.object({
+  name: 'assistant',
+  handlers: {
+    chat: pi.chat({ tools: [weather] }),
+  },
+  options: restate.sqlOptions,
+});
+
+await restate.serve({ services: [assistant] });

@@ -1,11 +1,34 @@
-// A durable chat on Claude (the Anthropic SDK's tool runner): the
-// conversation in the object's SQL database. A crash resumes the reply.
-//
-//   ANTHROPIC_API_KEY=… node claude.ts
-//   curl localhost:8080/session/alice/chat --json '"Hi, I am Alice"'
+/**
+ * A durable chat agent on Claude, with the Anthropic SDK's tool runner: the
+ * conversation lives in the object's SQL database.
+ *
+ * Each key is a conversation of its own. If the process dies mid-reply,
+ * Restate retries the call and the runner carries on from the stored
+ * messages.
+ *
+ *   ANTHROPIC_API_KEY=… node claude.ts
+ *   restate deployments register http://localhost:9080
+ *   curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice. Is it warm in Lisbon?"'
+ */
 import * as restate from '@restatedev/restate-sdk';
+import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import * as claude from 'restate-agents/claude';
+import { z } from 'zod';
 
-const session = restate.object({ name: 'session', handlers: { chat: claude.chat() }, options: restate.sqlOptions });
+const weather = betaZodTool({
+  name: 'get_weather',
+  description: 'The current weather in a city.',
+  inputSchema: z.object({ city: z.string() }),
+  // A stand-in for a real weather API.
+  run: async ({ city }) => `Sunny and 21°C in ${city}`,
+});
 
-await restate.serve({ services: [session] });
+const assistant = restate.object({
+  name: 'assistant',
+  handlers: {
+    chat: claude.chat({ system: 'You are a friendly assistant. Answer briefly.', tools: [weather] }),
+  },
+  options: restate.sqlOptions,
+});
+
+await restate.serve({ services: [assistant] });
