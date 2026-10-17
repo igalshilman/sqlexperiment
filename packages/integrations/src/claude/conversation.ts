@@ -49,6 +49,33 @@ export class Conversation {
     return row?.[0] as string | undefined;
   }
 
+  /**
+   * Close prompt `id`, which was cancelled: a result for each tool call of
+   * the last reply that has none, then `text` as the reply and the answer.
+   */
+  async cancel(id: string, text: string): Promise<void> {
+    const last = (await this.messages()).at(-1);
+    const calls =
+      last?.role === 'assistant' && Array.isArray(last.content)
+        ? last.content.filter((b) => b.type === 'tool_use')
+        : [];
+    const results: MessageParam[] =
+      calls.length === 0
+        ? []
+        : [
+            {
+              role: 'user',
+              content: calls.map((call) => ({
+                type: 'tool_result' as const,
+                tool_use_id: call.id,
+                content: text,
+                is_error: true,
+              })),
+            },
+          ];
+    await this.append(id, [...results, { role: 'assistant', content: text }], text);
+  }
+
   /** Store `messages` of prompt `id`, and its `answer` if given, in one transaction. */
   append(id: string, messages: MessageParam[], answer?: string): Promise<void> {
     return this.#db.transaction(async (tx) => {

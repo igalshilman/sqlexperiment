@@ -24,7 +24,8 @@
 //   would hand it to the model as the tool's result).
 // - A message is answered once per invocation: the graph records each answer
 //   in its state, and a retried attempt returns it.
-import type * as restate from '@restatedev/restate-sdk';
+import * as restate from '@restatedev/restate-sdk';
+import type { RunnableConfig } from '@langchain/core/runnables';
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { AIMessage, type BaseMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
@@ -32,6 +33,7 @@ import { type StructuredToolInterface, tool } from '@langchain/core/tools';
 import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import {
+  CANCELLED,
   chatHandler,
   type Configure,
   configured,
@@ -124,9 +126,41 @@ export const prompt = async (
     // are stored.
     const { prompt: last, answers = {} } = state.values;
     const interrupted = last !== undefined && answers[last] === undefined;
-    await app.invoke(interrupted ? null : { messages: [new HumanMessage(text)], prompt: id }, config);
+    try {
+      await app.invoke(interrupted ? null : { messages: [new HumanMessage(text)], prompt: id }, config);
+    } catch (error) {
+      // Cancelled: the run ends, and the next prompt starts afresh.
+      if (error instanceof restate.CancelledError) await cancel(app, config);
+      throw error;
+    }
   }
 };
+
+/**
+ * End the run of `app` that was cancelled, as its `answer` node: a result for
+ * each tool call of the last reply that has none, then {@link CANCELLED} as
+ * the reply and the prompt's answer.
+ */
+async function cancel(app: ReturnType<ReturnType<typeof graph>['compile']>, config: RunnableConfig) {
+  const { values } = await app.getState(config);
+  const messages = (values.messages ?? []) as BaseMessage[];
+  const answered = new Set(messages.filter((m) => ToolMessage.isInstance(m)).map((m) => m.tool_call_id));
+  const last = messages.findLast((m) => AIMessage.isInstance(m));
+  const calls = (last && AIMessage.isInstance(last) ? (last.tool_calls ?? []) : []).filter(
+    (call) => call.id !== undefined && !answered.has(call.id),
+  );
+  await app.updateState(
+    config,
+    {
+      messages: [
+        ...calls.map((call) => new ToolMessage({ tool_call_id: call.id!, content: CANCELLED, status: 'error' })),
+        new AIMessage(CANCELLED),
+      ],
+      answers: { [values.prompt]: CANCELLED },
+    },
+    'answer',
+  );
+}
 
 /**
  * A chat handler: each message an invocation, the thread (the object's key)

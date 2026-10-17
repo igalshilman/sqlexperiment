@@ -200,6 +200,18 @@ try {
     if (i > 300) throw new Error('a cancelled wait is still pending');
     await sleep(100);
   }
+  // The cancelled turn is over: it ends cancelled, the agent does not go on
+  // (no refund), and the wait's tool call ends with an error.
+  const attached = await fetch(`${INGRESS}/restate/invocation/${sent.invocationId}/attach`);
+  assert.equal(attached.status, 409, await attached.text());
+  assert.deepEqual(await post('support/grace/status'), { answering: null, waiting: [] });
+  const graces = lines(((await post('support/grace/messages')) as Messages).messages);
+  assert.deepEqual(graces.slice(0, 2), [
+    ['user', 'Refund order 103'],
+    ['assistant', 'orders_status({"order":"103"}): order 103: delivered'],
+  ]);
+  assert.match(String(graces[2]?.[1]), /^wait_for_approval\(\{"order":"103"\}\): .*aborted/s);
+  assert.equal(graces.length, 3, JSON.stringify(graces));
 
   // A message as plain text, as `curl -d` sends it.
   await post('support/carol/signal', { name: 'approval', value: 'approved', keep: true });

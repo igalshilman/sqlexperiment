@@ -6,6 +6,7 @@ import * as restate from '@restatedev/restate-sdk';
 import { signals } from './signals.ts';
 
 export {
+  CANCELLED,
   chatHandler,
   type ChatMessage,
   type Messages,

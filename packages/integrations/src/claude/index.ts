@@ -21,10 +21,11 @@
 //   runner hands it to the model as the tool's result).
 // - A message is answered once per invocation: its answer is stored with the
 //   model's last reply, and a retried attempt returns it.
-import type * as restate from '@restatedev/restate-sdk';
+import * as restate from '@restatedev/restate-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import {
+  CANCELLED,
   chatHandler,
   type Configure,
   configured,
@@ -173,7 +174,13 @@ export const prompt = async (
       await conversation.append(id, [{ role: 'user', content: text }]);
       pending = id;
     }
-    await run(agent, conversation, pending);
+    try {
+      await run(agent, conversation, pending);
+    } catch (error) {
+      // Cancelled: the prompt ends, and the next one starts afresh.
+      if (error instanceof restate.CancelledError) await conversation.cancel(pending, CANCELLED);
+      throw error;
+    }
   }
 };
 

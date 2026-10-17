@@ -4,7 +4,8 @@
 // does. Its model is the teller (../fakes/deepseek.ts). `make test-ts T=deepseek`.
 import { describe, expect, it, vi } from 'vitest';
 import type { RequestMessage } from '@deepseek-ai/dsh-llm';
-import { conversation, crashedAnywhere, SAID } from '../testing.ts';
+import * as restate from '@restatedev/restate-sdk';
+import { afterCancel, cancelledTransfer, conversation, crashedAnywhere, SAID } from '../testing.ts';
 import { teller } from '../fakes/deepseek.ts';
 import * as deepseek from 'restate-agents/deepseek';
 import { prompt } from './deepseek.ts';
@@ -27,6 +28,31 @@ async function counting(body: (calls: { model: number }) => Promise<void>) {
 }
 
 describe('the DeepSeek Harness agent', () => {
+  it('ends a cancelled turn, and answers the next message afresh', async () => {
+    const { failed, answer, parts } = await afterCancel(
+      deepseek.chat({ tools: [cancelledTransfer] }),
+      deepseek.messages(),
+    );
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(answer).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    // The harness ends the tool call with the cancellation, as its error.
+    expect(parts).toEqual([
+      [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
+      [
+        {
+          type: 'tool',
+          id: expect.any(String),
+          name: 'transfer',
+          input: { from: 1, to: 2, amount: 5 },
+          output: 'Error: Cancelled',
+          error: true,
+        },
+      ],
+      [{ type: 'text', text: 'Hello' }],
+      [{ type: 'text', text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' }],
+    ]);
+  });
+
   it('answers a message once after a crash at any of its state requests', async () => {
     expect(await crashedAnywhere(prompt, deepseek.messages())).toEqual([]);
   }, 600_000);

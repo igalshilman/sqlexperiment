@@ -4,7 +4,9 @@
 import { expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
+import { tool } from 'restate-agents';
 import type { Store } from 'sqlite-kv';
+import { z } from 'zod';
 import type { Audit, Transfer } from './sql/ledger.ts';
 
 /**
@@ -300,4 +302,44 @@ export async function crashedAnywhere(
     done = batch.includes('finished');
   }
   return wrong;
+}
+
+/** A transfer whose invocation is cancelled while it runs (while it waits for an approval, say). */
+export const cancelledTransfer = tool({
+  name: 'transfer',
+  description: 'Move money.',
+  input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+  run: () => {
+    throw new restate.CancelledError();
+  },
+});
+
+/**
+ * `chat` (with {@link cancelledTransfer}) on an object of its own: its first
+ * message (a transfer) cancelled, then a second one, `Hello`. What the first
+ * failed with, the second's answer, and the conversation then: each
+ * message's parts.
+ */
+export async function afterCancel(
+  chat: PromptHandler,
+  messages: (ctx: restate.SqlObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+) {
+  const map = new Map<string, Uint8Array>();
+  const invoke = <I, O>(
+    handler: (ctx: restate.SqlObjectContext, input: I) => Promise<O>,
+    id: string,
+    input: I,
+    shared = false,
+  ) => {
+    const sql = sqlAttempt({ map, key: 'cancel', id, shared });
+    const ctx = { key: 'cancel', request: () => ({ id }), ...sql };
+    return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, input));
+  };
+  const failed = await invoke(chat, 'inv1', 'Please move 5 from 1 to 2').then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  const answer = await invoke(chat, 'inv2', 'Hello');
+  const page = await invoke(messages, 'read', {}, true);
+  return { failed, answer, parts: page.messages.map((m) => m.parts) };
 }
