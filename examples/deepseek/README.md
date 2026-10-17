@@ -24,11 +24,10 @@ versions.
   harness's session checkpoint policy, and the model adapter. It creates the
   session, or resumes it, gives the agent its bank tools, which move money in
   the [ledger](../node/ledger.ts), and answers the prompt.
-- [`teller.ts`](teller.ts): a scripted model adapter for the harness's model
-  service, so the agent and its tests run without an API key. The example has
-  no other model: DeepSeek's own adapter (`@deepseek-ai/dsh-llm-deepseek`,
-  with `dsh-llm-deepseek-api-key`) also needs the harness's credential,
-  filesystem, attachment and plugin-loader services.
+  Its model is DeepSeek's (`@deepseek-ai/dsh-llm-deepseek-api-key`):
+  `DEEPSEEK_MODEL`, by default `deepseek-flash`, with `DEEPSEEK_API_KEY`.
+  The tests use a scripted one,
+  [`../testing/deepseek.ts`](../testing/deepseek.ts).
 - [`agent.test.ts`](agent.test.ts): the handler with a fake `ctx`, through
   crashes.
 
@@ -76,7 +75,7 @@ do about what it was doing. So:
 
 [`agent.test.ts`](agent.test.ts) checks each of these, with a crash that
 stops an attempt in a tool call and abandons it, keeping what it stored (the
-next attempt fences it, as Restate does). The teller makes a fresh tool call
+next attempt fences it, as Restate does). Its scripted model makes a fresh tool call
 id for every call, as a model does, so a retry that started the prompt over
 would move the money twice: without the checkpoint policy four of its five
 tests fail, and with a transfer tool that ignores `retryOf` three do. The

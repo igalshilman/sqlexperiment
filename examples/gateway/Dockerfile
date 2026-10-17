@@ -43,11 +43,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 git ca-
 COPY --from=deps /app /app
 WORKDIR /app/examples
 COPY examples/serve.ts examples/faults.ts ./
-COPY examples/pi/utils.ts examples/pi/with-pi.ts examples/pi/pi-storage.ts pi/
+COPY examples/pi/with-pi.ts examples/pi/pi-storage.ts pi/
 COPY examples/gateway/*.ts gateway/
 ENV PORT=9080
 # The agents' model, for the Assistant and Case: give OPENAI_API_KEY.
-# `-e PI_MODEL=` falls back to the scripted models.
 ENV PI_MODEL=openai/gpt-6-luna
 # Each agent object's files, in a directory of its own below this: a
 # sandbox's disk. `-e WORKSPACE=` leaves the agents without files.

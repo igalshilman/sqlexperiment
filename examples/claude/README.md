@@ -40,12 +40,11 @@ this example has only its bank tools.
 
   Its tools move money in the [ledger](../node/ledger.ts).
 
-- [`teller.ts`](teller.ts): a scripted model that needs no API key: an
-  Anthropic client whose `fetch` answers the Messages API itself, so the agent
-  and its tests run offline. `CLAUDE_MODEL=claude-sonnet-5-5` (and
-  `ANTHROPIC_API_KEY`) uses Claude instead.
 - [`agent.test.ts`](agent.test.ts): the handler with a fake `ctx`, through
-  crashes.
+  crashes, and a scripted model ([`../testing/claude.ts`](../testing/claude.ts)).
+
+The model is `CLAUDE_MODEL`, by default `claude-sonnet-5-5`, with
+`ANTHROPIC_API_KEY`.
 
 ## Through crashes
 

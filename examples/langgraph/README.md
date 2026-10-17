@@ -31,9 +31,11 @@ conversation, which is the LangGraph thread.
   Its handler, `prompt(ctx, { id, text })`, compiles the graph with the
   checkpointer over `ctx.db`, and answers the prompt once per id.
 
-- [`teller.ts`](teller.ts): a scripted chat model that needs no API key, so
-  the agent and its tests run offline. Any LangChain chat model that calls
-  tools takes its place.
+  Its model is `ChatAnthropic` (`LANGGRAPH_MODEL`, by default
+  `claude-sonnet-5-5`, with `ANTHROPIC_API_KEY`): any LangChain chat model
+  that calls tools takes its place. The tests use a scripted one,
+  [`../testing/langgraph.ts`](../testing/langgraph.ts).
+
 - [`checkpointer.test.ts`](checkpointer.test.ts): LangGraph's checkpointer
   conformance suite (`@langchain/langgraph-checkpoint-validation`, 718 tests)
   on the checkpointer, over a sqlite-kv database in memory.

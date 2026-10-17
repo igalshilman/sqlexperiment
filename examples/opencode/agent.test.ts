@@ -1,10 +1,18 @@
 // The agent's handler without a Restate server, through crashes of the
 // handler (see ../testing.ts): a crashed attempt gets no chance to store
-// anything on the way out. `npm run test:opencode` (or make test-opencode).
-import { describe, expect, it } from 'vitest';
+// anything on the way out. Its model is the teller (../testing/opencode.ts).
+// `npm run test:opencode` (or make test-opencode).
+import { describe, expect, it, vi } from 'vitest';
 import { conversation } from '../testing.ts';
+import { teller, withTeller } from '../testing/opencode.ts';
 import { prompt } from './agent.ts';
-import { teller } from './teller.ts';
+import type * as OpenCodeDb from './opencode-db.ts';
+
+vi.mock('./opencode-db.ts', async (original) => {
+  const db = await original<typeof OpenCodeDb>();
+  return { ...db, openOpenCode: withTeller(db.openOpenCode) };
+});
+vi.stubEnv('OPENCODE_MODEL', 'teller/teller');
 
 describe('the OpenCode agent', () => {
   it('answers a prompt once, by its id', async () => {

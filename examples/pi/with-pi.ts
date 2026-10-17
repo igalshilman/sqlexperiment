@@ -29,7 +29,7 @@ import * as restate from '@restatedev/restate-sdk';
 import type { Context } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { mkdir } from 'node:fs/promises';
-import type { MutableModels } from '@earendil-works/pi-ai';
+import type { Message, MutableModels } from '@earendil-works/pi-ai';
 import { createModels } from '@earendil-works/pi-ai/models';
 import {
   AssistantEntry,
@@ -41,7 +41,6 @@ import {
 } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
-import { textOf } from './utils.ts';
 import { openSqlKvStorage } from './pi-storage.ts';
 
 /** What `work` gets: `prompt(id, text)`, and the `harness` and chord `context` for anything else. */
@@ -51,6 +50,10 @@ export interface Pi {
   /** Answer `text`, once per prompt `id`, with the answer's text. */
   prompt(id: string, text: string): Promise<string>;
 }
+
+/** The text of a message's content. */
+const textOf = (content: Message['content']): string =>
+  typeof content === 'string' ? content : content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
 
 /** The default model, as `provider/model-id`. */
 export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';

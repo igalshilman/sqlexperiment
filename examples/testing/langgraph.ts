@@ -1,9 +1,9 @@
-// The scripted teller: a LangChain chat model that needs no API key and
-// answers deterministically, so the agent example and the crash tests run
+// Test only: the scripted teller, a LangChain chat model that needs no API key
+// and answers deterministically, so the agent's tests and the crash test run
 // offline. It transfers and audits on request, and reports the tool's result.
 //
-// Any LangChain chat model that calls tools takes its place, such as
-// `new ChatAnthropic({ model: 'claude-sonnet-4-5' })` from @langchain/anthropic.
+// The module stands in for @langchain/anthropic (see fakes.ts): its
+// ChatAnthropic is the teller.
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import type { ChatResult } from '@langchain/core/outputs';
@@ -40,3 +40,5 @@ export class Teller extends BaseChatModel {
     return { generations: [{ text: message.text, message }] };
   }
 }
+
+export { Teller as ChatAnthropic };

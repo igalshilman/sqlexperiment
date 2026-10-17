@@ -1,6 +1,10 @@
-// The scripted teller: a DeepSeek Harness model adapter that needs no API key
-// and answers deterministically, so the agent example and the crash tests run
-// offline. It transfers and audits on request, and reports the tool's result.
+// Test only: the scripted teller, a DeepSeek Harness model adapter that needs
+// no API key and answers deterministically, so the agent's tests and the crash
+// test run offline. It transfers and audits on request, and reports the tool's
+// result.
+//
+// The module stands in for @deepseek-ai/dsh-llm-deepseek-api-key (see
+// fakes.ts): a plugin whose provider, deepseek-official, is the teller.
 //
 // After a crash the harness closes the interrupted turn: a tool call it
 // recorded without a result gets an error result saying its outcome is
@@ -16,6 +20,7 @@ import {
   type StreamChunk,
   type ToolCallBlock,
 } from '@deepseek-ai/dsh-llm';
+import type { Context } from '@deepseek-ai/cordis';
 
 const textOf = (message: RequestMessage) =>
   message.content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
@@ -25,8 +30,8 @@ export type Reply =
   | { text: string; call?: undefined }
   | { text?: undefined; call: { id: ToolCallId; name: string; args: Record<string, unknown> } };
 
-/** The text that asks the agent to finish an interrupted prompt. */
-export const CONTINUE = 'Continue: your last turn was interrupted. Finish the request.';
+/** How the agent asks to finish an interrupted prompt (agent.ts's CONTINUE). */
+const CONTINUE = /^Continue: your last turn was interrupted/;
 
 /** The teller's reply to `messages`: `{ text }`, or `{ call: { id, name, args } }`. */
 export function reply(messages: RequestMessage[]): Reply {
@@ -36,9 +41,9 @@ export function reply(messages: RequestMessage[]): Reply {
   // tools with new ids.
   const id = ToolCallId(`call_${randomUUID()}`);
   let text = textOf(last);
-  if (text === CONTINUE) {
+  if (CONTINUE.test(text)) {
     // The interrupted prompt, and the last tool result since.
-    const at = messages.findLastIndex((m) => m.role === 'user' && textOf(m) !== CONTINUE);
+    const at = messages.findLastIndex((m) => m.role === 'user' && !CONTINUE.test(textOf(m)));
     const result = messages.slice(at).findLast((m) => m.role === 'tool');
     if (result && /outcome is unknown/.test(textOf(result))) {
       const call = messages
@@ -87,3 +92,11 @@ export class Teller extends LlmAdapter {
 }
 
 export const teller = new Teller();
+
+/** The plugin of the teller, as the provider deepseek-official. */
+export const name = 'llm-deepseek-teller';
+export const inject = ['llm'];
+export const Config = undefined; // no options
+export function apply(ctx: Context) {
+  ctx.llm.registerAdapter(['deepseek-official'], teller);
+}

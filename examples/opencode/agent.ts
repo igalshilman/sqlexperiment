@@ -18,16 +18,14 @@
 //   hand it to the model as the tool's result).
 // - A prompt is answered once per prompt id, its OpenCode message id.
 //
-// Environment: PORT (default 9080), OPENCODE_MODEL (see teller.ts) and
-// ABORT_PER_MILLE (see ../faults.ts). OpenCode needs Node 24.
+// Environment: PORT (default 9080), OPENCODE_MODEL (see with-opencode.ts)
+// with its provider's API key, and ABORT_PER_MILLE (see ../faults.ts).
+// OpenCode needs Node 24.
 import * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
 import { serveIfMain } from '../faults.ts';
 import { ledger } from '../node/ledger.ts';
-import { modelFromEnv } from './teller.ts';
 import { tool, withOpenCode } from './with-opencode.ts';
-
-const { plugins, model } = modelFromEnv();
 
 /** The bank tools of one invocation: they reach the ledger through `ctx`. */
 const bank = (ctx: restate.SqlObjectContext) => {
@@ -69,7 +67,7 @@ const bank = (ctx: restate.SqlObjectContext) => {
 
 /** Answer prompt `text`, once per prompt `id`. */
 export const prompt = (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) =>
-  withOpenCode(ctx, { plugins, model, tools: bank(ctx) }, async (opencode) => ({
+  withOpenCode(ctx, { tools: bank(ctx) }, async (opencode) => ({
     answer: await opencode.prompt(id, text),
   }));
 

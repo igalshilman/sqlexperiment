@@ -17,17 +17,16 @@
 // - A prompt is answered once per prompt id: its answer is stored with the
 //   model's last reply, and a prompt asked again returns it.
 //
-// Environment: PORT (default 9080), ABORT_PER_MILLE (see ../faults.ts), and
-// CLAUDE_MODEL (see teller.ts).
+// Environment: ANTHROPIC_API_KEY, CLAUDE_MODEL (default claude-sonnet-5-5),
+// PORT (default 9080) and ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
-import type Anthropic from '@anthropic-ai/sdk';
+import Anthropic from '@anthropic-ai/sdk';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import { z } from 'zod';
 import { serveIfMain } from '../faults.ts';
 import { ledger } from '../node/ledger.ts';
 import { Conversation } from './conversation.ts';
-import { clientFromEnv } from './teller.ts';
 
 /** The id of the tool call a tool runs for: the runner always passes it. */
 const callId = (context?: BetaToolRunContext) => {
@@ -99,7 +98,8 @@ const textOf = (content: Anthropic.Beta.Messages.BetaContentBlock[]) =>
     .map((c) => c.text)
     .join('');
 
-const { client, model } = clientFromEnv();
+const client = new Anthropic();
+const model = process.env.CLAUDE_MODEL ?? 'claude-sonnet-5-5';
 
 /** Run prompt `id` of `conversation` until it is answered, from its stored messages. */
 async function run(ctx: restate.SqlObjectContext, conversation: Conversation, id: string) {

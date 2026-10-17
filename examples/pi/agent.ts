@@ -8,17 +8,14 @@
 // request id (`ctx.request().id`, the same on every attempt) and the tool
 // call id, so a retried attempt reaches the call the first one made.
 //
-// Environment: PORT (default 9080), PI_MODEL (see utils.ts) and
-// ABORT_PER_MILLE (see ../faults.ts).
+// Environment: PORT (default 9080), PI_MODEL (see with-pi.ts) with its
+// provider's API key, and ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
 import { serveIfMain } from '../faults.ts';
 import { ledger } from '../node/ledger.ts';
-import { modelFromEnv } from './utils.ts';
 import { withPi } from './with-pi.ts';
-
-const { models, model } = await modelFromEnv();
 
 /** The bank tools of one invocation: they reach the ledger through `ctx`. */
 const bank = (ctx: restate.SqlObjectContext) => {
@@ -66,7 +63,7 @@ export const agent = restate.object({
   handlers: {
     /** Answer prompt `text`, once per prompt `id`. */
     prompt: (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) =>
-      withPi(ctx, { models, model, tools: bank(ctx) }, async (pi) => ({ answer: await pi.prompt(id, text) })),
+      withPi(ctx, { tools: bank(ctx) }, async (pi) => ({ answer: await pi.prompt(id, text) })),
   },
   options: {
     ...restate.sqlOptions,

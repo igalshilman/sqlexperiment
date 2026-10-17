@@ -47,3 +47,19 @@ export const callTools = (calls: [name: string, args: ToolCall['arguments']][], 
   fauxAssistantMessage([...(text ? [fauxText(text)] : []), ...calls.map(([name, args]) => fauxToolCall(name, args))], {
     stopReason: 'toolUse',
   });
+
+/** The scripted teller: transfers and audits on request, and reports the tool's result. */
+export const teller: Respond = (context) => {
+  const text = lastText(context);
+  if (context.messages.at(-1)!.role === 'toolResult') return say(`Done: ${text}`);
+  const move = /move (\d+) from (\d+) to (\d+)/i.exec(text);
+  if (move) {
+    const [amount, from, to] = move.slice(1, 4).map(Number) as [number, number, number];
+    return callTools([['transfer', { from, to, amount }]], 'On it.');
+  }
+  if (/audit/i.test(text)) return callTools([['audit', {}]]);
+  return say('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+};
+
+/** The teller as the pi-ai provider `teller`, for PI_MODEL=teller/teller (see fakes.ts). */
+export const tellerProvider = () => fakeProvider('teller', 'teller', teller);

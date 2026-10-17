@@ -1,11 +1,13 @@
 // The agent's handler without a Restate server, through crashes of the
 // handler (see ../testing.ts): LangGraph gets no chance to save anything on the
 // way out of a crashed attempt. `npm run test:langgraph` (or make
-// test-langgraph).
+// test-langgraph). Its model is the teller (../testing/langgraph.ts).
 import { describe, expect, it, vi } from 'vitest';
 import { conversation } from '../testing.ts';
+import { Teller } from '../testing/langgraph.ts';
 import { prompt } from './agent.ts';
-import { Teller } from './teller.ts';
+
+vi.mock('@langchain/anthropic', () => import('../testing/langgraph.ts'));
 
 describe('the LangGraph agent', () => {
   it('answers a prompt once, by its id', async () => {

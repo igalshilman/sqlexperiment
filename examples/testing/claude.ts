@@ -1,11 +1,11 @@
-// The scripted teller: an Anthropic client whose `fetch` answers the Messages
-// API itself, so the agent example and the crash tests run without an API key.
-// It answers deterministically: it transfers and audits on request, and
-// reports the tool's result.
+// Test only: the scripted teller, an Anthropic client whose `fetch` answers
+// the Messages API itself, so the agent's tests and the crash test run without
+// an API key. It answers deterministically: it transfers and audits on
+// request, and reports the tool's result.
 //
-// `clientFromEnv()` gives the teller, or a real model with
-// CLAUDE_MODEL=claude-sonnet-5-5 (and ANTHROPIC_API_KEY).
-import Anthropic from '@anthropic-ai/sdk';
+// The module stands in for @anthropic-ai/sdk (see fakes.ts): its default
+// export is a client of the teller, whatever its options.
+import { Anthropic } from '@anthropic-ai/sdk/client';
 
 type MessageParam = Anthropic.Beta.Messages.BetaMessageParam;
 type Message = Anthropic.Beta.Messages.BetaMessage;
@@ -65,11 +65,14 @@ export class HttpError extends Error {
   }
 }
 
-/** A client of the teller. `teller.reply` can be replaced, to count or change replies. */
-export const teller = {
-  reply,
-  client: () =>
-    new Anthropic({
+/** The teller's replies. `teller.reply` can be replaced, to count or change replies. */
+export const teller = { reply };
+
+/** An Anthropic client of the teller. */
+export default class TellerClient extends Anthropic {
+  constructor(options: ConstructorParameters<typeof Anthropic>[0] = {}) {
+    super({
+      ...options,
       apiKey: 'teller',
       maxRetries: 0,
       fetch: async (_url, init) => {
@@ -84,11 +87,6 @@ export const teller = {
           return new Response(JSON.stringify(body), { status: error.status, headers });
         }
       },
-    }),
-};
-
-/** `{ client, model }`: the teller, or Claude with CLAUDE_MODEL. */
-export const clientFromEnv = (): { client: Anthropic; model: string } =>
-  process.env.CLAUDE_MODEL
-    ? { client: new Anthropic(), model: process.env.CLAUDE_MODEL }
-    : { client: teller.client(), model: 'teller' };
+    });
+  }
+}

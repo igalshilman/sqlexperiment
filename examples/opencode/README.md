@@ -29,14 +29,14 @@ built on (4.0.1). OpenCode needs Node 24.
 - [`agent.ts`](agent.ts): the OpenCodeAgent object. Its handler,
   `prompt(ctx, { id, text })`, gives the agent its bank tools, which move
   money in the [ledger](../node/ledger.ts), and answers the prompt.
-- [`teller.ts`](teller.ts): a scripted model, an AI SDK language model that
-  OpenCode calls through a plugin's `language` hook, so the agent and its
-  tests run without an API key; or a real model with
-  `OPENCODE_MODEL=provider/model-id` (such as
-  `anthropic/claude-sonnet-5-5`, with the provider's API key), which
-  OpenCode's own providers serve.
 - [`agent.test.ts`](agent.test.ts): the handler with a fake `ctx`, through
-  crashes.
+  crashes, and a scripted model
+  ([`../testing/opencode.ts`](../testing/opencode.ts)), an AI SDK language
+  model that OpenCode calls through a plugin's `language` hook.
+
+The model is `OPENCODE_MODEL=provider/model-id`, by default
+`anthropic/claude-sonnet-5-5` (with `ANTHROPIC_API_KEY`), which OpenCode's
+own providers serve.
 
 ## What embedded means here
 
@@ -48,8 +48,8 @@ in-process `fetch`: requests and responses are objects in memory. With the
 host booted and a turn answered, the process had no child process and no
 listening socket, and OpenCode's tables (20 of them) were in the object's
 database. Each attempt boots the host (about 100 ms) and closes it at the
-end. The only traffic out is the model's: none for the teller, the
-provider's API for a real model; tools reach other services through Restate.
+end. The only traffic out is the model's, to its provider's API; tools reach
+other services through Restate.
 
 It is OpenCode's agent core, not its terminal UI, and in the workerd
 profile it spawns nothing either: its shell, terminal, file and version
@@ -127,7 +127,7 @@ at a time, so a claim found at boot is always one a dead attempt left.
 
 [`agent.test.ts`](agent.test.ts) checks each of these, with a crash that
 stops an attempt in a tool call and abandons it, keeping what it stored (the
-next attempt fences it, as Restate does). The teller makes a fresh tool call
+next attempt fences it, as Restate does). Its scripted model makes a fresh tool call
 id for every call, as a model does, so a retry that started the prompt over
 would move the money twice: with a transfer tool that ignores `retryOf`,
 four of its five tests fail. The [crash test](../README.md#validation) runs

@@ -1,7 +1,7 @@
-// The scripted teller: an AI SDK language model that OpenCode calls like any
-// other, and that needs no API key and answers deterministically, so the agent
-// example and the crash tests run offline. It transfers and audits on
-// request, and reports the tool's result.
+// Test only: the scripted teller, an AI SDK language model that OpenCode
+// calls like any other, and that needs no API key and answers
+// deterministically, so the agent's tests and the crash test run offline. It
+// transfers and audits on request, and reports the tool's result.
 //
 // When OpenCode resumes a turn that a crash interrupted, a tool call that was
 // running gets an "interrupted" result, and OpenCode asks the model to
@@ -9,9 +9,9 @@
 // call, so it moves the money once; reports a result that came before the
 // crash; and otherwise answers the prompt again.
 //
-// `modelFromEnv()` gives the teller, or a real model with
-// OPENCODE_MODEL=provider/model-id (such as anthropic/claude-sonnet-5-5, with
-// the provider's API key), which OpenCode's own providers serve.
+// It is the model `teller/teller` of OpenCode booted with `tellerPlugin`, as
+// `withTeller(openOpenCode)` does: with OPENCODE_MODEL=teller/teller, an
+// agent's model.
 import { randomUUID } from 'node:crypto';
 import type {
   LanguageModelV3,
@@ -20,6 +20,7 @@ import type {
   LanguageModelV3StreamPart,
 } from '@ai-sdk/provider';
 import { Model, Provider, type Plugin } from '@opencode/plugin';
+import type { openOpenCode } from '../opencode/opencode-db.ts';
 
 /** A reply of the teller: text, and maybe a tool call. */
 export interface Reply {
@@ -182,15 +183,8 @@ export const tellerPlugin: Plugin.Plugin = {
   },
 };
 
-import type { ModelRef } from './with-opencode.ts';
-
-/**
- * `{ plugins, model }`: OPENCODE_MODEL=provider/model-id (with the provider's
- * API key), or by default the teller, which needs no key.
- */
-export function modelFromEnv(): { plugins: Plugin.Plugin[]; model: ModelRef } {
-  const name = process.env.OPENCODE_MODEL;
-  if (!name) return { plugins: [tellerPlugin], model: { providerID: 'teller', id: 'teller' } };
-  const [provider = '', ...id] = name.split('/');
-  return { plugins: [], model: { providerID: provider, id: id.join('/') } };
-}
+/** `open` (opencode-db.ts's openOpenCode), booting OpenCode with the teller too. */
+export const withTeller =
+  (open: typeof openOpenCode): typeof openOpenCode =>
+  (db, fence, options) =>
+    open(db, fence, { ...options, plugins: [tellerPlugin, ...(options.plugins ?? [])] });

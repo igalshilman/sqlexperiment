@@ -20,7 +20,7 @@ One npm package, here, on the patched Restate TypeScript SDK and the
   - [`shop.ts`](node/shop.ts): warehouses and orders, each object with its
     own database, over idempotent RPC and delayed sends.
 - [`pi/`](pi/README.md): a durable agent on pi-durable, whose storage is the
-  object's database, with a fake model for running agents without a key.
+  object's database.
 - [`langgraph/`](langgraph/README.md): a LangGraph agent, whose checkpoints
   are in the object's database, through a checkpointer that passes LangGraph's
   conformance suite.
@@ -41,6 +41,13 @@ One npm package, here, on the patched Restate TypeScript SDK and the
   crashes.
 - [`testing.ts`](testing.ts): test support: an object's state in memory, and
   a fake object for an agent's handler, through crashes.
+- [`testing/`](testing/fakes.ts): scripted models for the tests, which need
+  no API key, in place of the real ones: `vi.mock` in the unit tests, and
+  `node --import ./testing/fakes.ts` for the crash test's processes.
+
+The agents use real models, with their provider's API key: by default
+Anthropic's `claude-sonnet-5-5` (`ANTHROPIC_API_KEY`), and DeepSeek's
+`deepseek-flash` for the DeepSeek agent (`DEEPSEEK_API_KEY`).
 
 ## TypeScript
 

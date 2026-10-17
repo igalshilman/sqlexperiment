@@ -20,11 +20,13 @@
 // - A prompt is answered once per prompt id: its message carries the id, and
 //   a prompt asked again returns the answer of the turn that finished it.
 //
-// Environment: PORT (default 9080) and ABORT_PER_MILLE (see ../faults.ts).
+// Environment: DEEPSEEK_API_KEY, DEEPSEEK_MODEL (default deepseek-flash),
+// PORT (default 9080) and ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
 import { Context } from '@deepseek-ai/cordis';
 import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import { AgentLoop } from '@deepseek-ai/dsh-agent-loop';
+import * as deepseek from '@deepseek-ai/dsh-llm-deepseek-api-key';
 import { LlmRuntime, MessageId, freezeMessage, type Message, type UserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId, SessionStore, type SessionEvent } from '@deepseek-ai/dsh-session';
 import * as checkpoints from '@deepseek-ai/dsh-session-checkpoint-policy';
@@ -34,7 +36,6 @@ import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools';
 import { serveIfMain } from '../faults.ts';
 import { ledger } from '../node/ledger.ts';
 import { SqlSessionPersistence } from './persistence.ts';
-import { CONTINUE, teller } from './teller.ts';
 
 /**
  * The bank tools of one invocation: they reach the ledger through `ctx`. A
@@ -105,10 +106,13 @@ async function boot(db: restate.SqlSession): Promise<Context> {
   await harness.plugin(SessionProjectionRegistry);
   await harness.plugin(SqlSessionPersistence, { db });
   await harness.plugin(checkpoints);
-  harness.llm.registerAdapter(['teller'], teller);
+  await harness.plugin(deepseek, {}); // DEEPSEEK_API_KEY
   await harness.plugin(AgentLoop, { agents: [] });
   return harness;
 }
+
+/** The text that asks the agent to finish an interrupted prompt. */
+const CONTINUE = 'Continue: your last turn was interrupted. Finish the request.';
 
 const promptId = (id: string) => MessageId(`prompt:${id}`);
 const textOf = (message: Message) => message.content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
@@ -150,7 +154,7 @@ export const prompt = async (ctx: restate.SqlObjectContext, { id, text }: { id: 
   try {
     const sessionId = SessionId(ctx.key);
     const options = {
-      agentOptions: { provider: 'teller', model: 'teller' },
+      agentOptions: { provider: 'deepseek-official', model: process.env.DEEPSEEK_MODEL ?? 'deepseek-flash' },
       setup: (agentCtx: Context) => bank(ctx, fail).forEach((tool) => agentCtx.tools.register(tool)),
     };
     // Resuming closes a turn a crash left open.

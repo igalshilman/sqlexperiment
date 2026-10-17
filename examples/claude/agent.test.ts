@@ -1,12 +1,14 @@
 // The agent's handler without a Restate server, through crashes of the
 // handler (see ../testing.ts): the runner gets no chance to save anything on
 // the way out of a crashed attempt. `npm run test:claude` (or make
-// test-claude).
+// test-claude). Its client is the teller's (../testing/claude.ts).
 import * as restate from '@restatedev/restate-sdk';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { conversation } from '../testing.ts';
+import { HttpError, teller } from '../testing/claude.ts';
 import { prompt } from './agent.ts';
-import { HttpError, teller } from './teller.ts';
+
+vi.mock('@anthropic-ai/sdk', () => import('../testing/claude.ts'));
 
 describe('the Claude agent', () => {
   it('answers a prompt once, by its id', async () => {

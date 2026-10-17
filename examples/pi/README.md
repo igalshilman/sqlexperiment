@@ -35,13 +35,10 @@ again. Here its storage is a Restate virtual object's SQL database
 - [`pi-storage.test.ts`](pi-storage.test.ts): pi-durable's storage
   conformance suite on it (`npm run test:pi` in [`examples/`](..), or
   `make test-pi`): 24 tests pass.
-- [`utils.ts`](utils.ts): the models. A fake model for pi-ai,
-  `fakeProvider(name, respond)`, whose replies a function computes from the
-  conversation, so an agent runs without an API key, deterministically,
-  however many model calls retried attempts make; the scripted teller built on
-  it ("move 5 from 1 to 2" makes a transfer, "audit" audits the ledger); and
-  `modelFromEnv()`, which picks the teller, or a real model with
-  `PI_MODEL=anthropic/claude-sonnet-4-5` (and `ANTHROPIC_API_KEY`).
+
+The model is `PI_MODEL`, by default `anthropic/claude-sonnet-5-5` (with
+`ANTHROPIC_API_KEY`). The tests use a scripted one,
+[`../testing/pi.ts`](../testing/pi.ts), which needs no key.
 
 ```sh
 make examples-js   # from the repository root: the addon, the patched SDK, npm install

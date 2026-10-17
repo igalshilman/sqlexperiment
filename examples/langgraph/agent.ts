@@ -20,8 +20,11 @@
 // - A prompt is answered once per prompt id: the graph records each answer in
 //   its state, and a prompt asked again returns it.
 //
-// Environment: PORT (default 9080) and ABORT_PER_MILLE (see ../faults.ts).
+// Environment: ANTHROPIC_API_KEY, LANGGRAPH_MODEL (default
+// claude-sonnet-5-5), PORT (default 9080) and ABORT_PER_MILLE (see
+// ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
+import { ChatAnthropic } from '@langchain/anthropic';
 import { HumanMessage } from '@langchain/core/messages';
 import type { ToolCall } from '@langchain/core/messages/tool';
 import { tool } from '@langchain/core/tools';
@@ -31,7 +34,6 @@ import { z } from 'zod';
 import { serveIfMain } from '../faults.ts';
 import { ledger } from '../node/ledger.ts';
 import { SqlCheckpointSaver } from './checkpointer.ts';
-import { Teller } from './teller.ts';
 
 /** The id of the tool call a tool runs for: the ToolNode always passes it. */
 const callId = (toolCall?: ToolCall) => {
@@ -85,7 +87,7 @@ const State = Annotation.Root({
 });
 
 /** The agent's graph, with the tools of this invocation. */
-function graph(ctx: restate.SqlObjectContext, model: Teller) {
+function graph(ctx: restate.SqlObjectContext, model: ChatAnthropic) {
   const tools = bank(ctx);
   const withTools = model.bindTools(tools);
   return (
@@ -102,11 +104,10 @@ function graph(ctx: restate.SqlObjectContext, model: Teller) {
   );
 }
 
-const model = new Teller({});
-
 /** Answer prompt `text`, once per prompt `id`. */
 export const prompt = async (ctx: restate.SqlObjectContext, { id, text }: { id: string; text: string }) => {
   const db = ctx.db;
+  const model = new ChatAnthropic({ model: process.env.LANGGRAPH_MODEL ?? 'claude-sonnet-5-5' });
   const app = graph(ctx, model).compile({ checkpointer: new SqlCheckpointSaver(db) });
   const config = { configurable: { thread_id: ctx.key }, durability: 'sync' as const };
   for (;;) {

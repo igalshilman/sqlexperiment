@@ -55,8 +55,9 @@ gateway/demo.sh
    the same order reaches the same object, which remembers the first; and
    another tenant's order of the same number is another object, empty.
 
-`PI_MODEL` is the agent's model: by default a scripted one, which needs no
-key; or a real one, such as `openai/gpt-6-luna` with `OPENAI_API_KEY`.
+`PI_MODEL` is the agents' model, such as `openai/gpt-6-luna` with
+`OPENAI_API_KEY` (by default `anthropic/claude-sonnet-5-5`, with
+`ANTHROPIC_API_KEY`).
 On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`.
 
@@ -67,8 +68,7 @@ keyed per order: in a sandbox). Register both with the same Restate server.
 
 With `WORKSPACE` set, each agent object gets a directory of its own,
 `$WORKSPACE/<service>/<key>`, and pi's coding tools over it: `read`, `write`,
-`edit` and `bash`, on the local file system. The scripted model understands
-`Write notes.md: …`, `Read notes.md` and `Run: ls -la`. The files are on the
+`edit` and `bash`, on the local file system. The files are on the
 disk, not in Restate: the conversation outlives a lost disk, its files do
 not. `bash` runs any command, so run it in a sandbox.
 

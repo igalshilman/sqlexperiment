@@ -11,6 +11,9 @@
 // The agents get the same prompts. Each request is resent until answered,
 // some twice.
 //
+// The agents' models are the scripted tellers (testing/fakes.ts), which need
+// no API key: "move 5 from 1 to 2" makes a transfer.
+//
 // Checks: the warehouses' books balance and agree with every order, and every
 // agent prompt moved money exactly once.
 //
@@ -55,6 +58,7 @@ const PROCESSES: Process[] = [
 // The agents: the pi one, the LangGraph one, the Claude one, the DeepSeek
 // Harness one and the OpenCode one, with the same prompts.
 const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent', 'DeepSeekAgent', 'OpenCodeAgent'];
+const FAKES = fileURLToPath(new URL('testing/fakes.ts', import.meta.url));
 const EXPIRY_MS = 1500;
 const SKUS = ['apple', 'pear', 'plum'];
 const STOCK = 20;
@@ -118,9 +122,11 @@ const listening = (port: number) =>
 function supervise({ name, groups, port }: Process, perMille: number): Supervised {
   let failures = 0;
   const run = () =>
-    spawn(process.execPath, [fileURLToPath(new URL('serve.ts', import.meta.url)), ...groups], {
+    spawn(process.execPath, ['--import', FAKES, fileURLToPath(new URL('serve.ts', import.meta.url)), ...groups], {
       env: {
         ...process.env,
+        PI_MODEL: 'teller/teller',
+        OPENCODE_MODEL: 'teller/teller',
         PORT: String(port),
         ABORT_PER_MILLE: String(perMille),
         SHOP_EXPIRY_MS: String(EXPIRY_MS),

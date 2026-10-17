@@ -8,7 +8,7 @@ import { createModels } from '@earendil-works/pi-ai/models';
 import { open } from 'sqlite-kv';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from '../testing.ts';
-import { callTools, fakeProvider, say } from './utils.ts';
+import { callTools, fakeProvider, say } from '../testing/pi.ts';
 import { withPi } from './with-pi.ts';
 
 describe('withPi', () => {
@@ -18,7 +18,7 @@ describe('withPi', () => {
     const db = await open(`with-pi-${process.pid}`, memoryStore());
     const models = createModels();
     models.setProvider(
-      fakeProvider('scribe', (context) => {
+      fakeProvider('scribe', 'scribe', (context) => {
         const last = context.messages.at(-1)!;
         if (last.role === 'toolResult') return say(last.isError ? 'failed' : 'written');
         return callTools([['write', { path: 'notes.md', content: 'crushed' }]]);

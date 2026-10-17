@@ -1,12 +1,15 @@
 // The agent's handler without a Restate server, through crashes of the
 // handler (see ../testing.ts): the harness gets no chance to store anything on
 // the way out of a crashed attempt, and the next attempt fences it, as Restate
-// does. `npm run test:deepseek` (or make test-deepseek).
-import { describe, expect, it } from 'vitest';
+// does. Its model is the teller (../testing/deepseek.ts). `npm run
+// test:deepseek` (or make test-deepseek).
+import { describe, expect, it, vi } from 'vitest';
 import type { RequestMessage } from '@deepseek-ai/dsh-llm';
 import { conversation } from '../testing.ts';
+import { teller } from '../testing/deepseek.ts';
 import { prompt } from './agent.ts';
-import { teller } from './teller.ts';
+
+vi.mock('@deepseek-ai/dsh-llm-deepseek-api-key', () => import('../testing/deepseek.ts'));
 
 /** Count the model's replies while `body` runs. */
 async function counting(body: (calls: { model: number }) => Promise<void>) {

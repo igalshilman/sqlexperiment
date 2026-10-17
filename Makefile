@@ -99,7 +99,7 @@ test-deepseek: examples-js ## The DeepSeek Harness agent through crashes
 test-opencode: examples-js ## The OpenCode 2.0 agent through crashes
 	cd examples && npm run test:opencode
 
-test-gateway: examples-js ## The tool gateway's registry and scripted model
+test-gateway: examples-js ## The tool gateway's registry, prompt and workspaces
 	cd examples && npm run test:gateway
 
 lint: lint-core lint-examples ## Every lint
