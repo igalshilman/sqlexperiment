@@ -87,7 +87,8 @@ export const ledger = restate.object({
   handlers,
   options: {
     ...restate.sqlOptions,
-    retryPolicy: { initialInterval: 50, maxInterval: 500 },
+    // Without end: the server pauses an invocation after its default attempts.
+    retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
   },
 });
 
