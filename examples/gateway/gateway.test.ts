@@ -3,7 +3,7 @@
 import type { TranscriptContext } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { caseworker, concierge, EXAMPLES, investigates, PROMPT_SCHEMA, sentence } from './agent.ts';
+import { caseworker, concierge, EXAMPLES, PROMPT_SCHEMA, sentence, workspaceOf } from './agent.ts';
 import { identity } from './gateway.ts';
 import { PREBUILT } from './tools.ts';
 
@@ -75,9 +75,7 @@ describe('the scripted model', () => {
 });
 
 describe('case agents', () => {
-  it('are asked for only by a prompt that begins "Investigate"', () => {
-    expect(investigates('Investigate orders 103 and 104: crushed.')).toBe(true);
-    expect(investigates('Where are orders 101 to 103? Investigate them.')).toBe(false);
+  it('take each order of an "Investigate" prompt, in the scripted model', () => {
     expect(toolCalls(user('Investigate orders 103 and 104: the boxes arrived crushed.'))).toEqual([
       ['investigate', { order: '103', question: 'the boxes arrived crushed.' }],
       ['investigate', { order: '104', question: 'the boxes arrived crushed.' }],
@@ -97,6 +95,32 @@ describe('case agents', () => {
     const second = user('Order 103, from bob: still crushed.');
     expect(replyText(caseworker, first, ...results, { role: 'assistant' }, second, ...results)).toEqual([
       'Case 103: Order 103 is shipped, $40. Ticket T-1000 is open. Reported before: alice: "crushed.".',
+    ]);
+  });
+});
+
+describe('the workspace', () => {
+  it('is a directory per object, only with WORKSPACE', () => {
+    expect(workspaceOf('Assistant', 'acme.alice', '/w')).toBe('/w/Assistant/acme.alice');
+    expect(workspaceOf('Case', '../../etc', '/w')).toBe('/w/Case/.._.._etc');
+    expect(workspaceOf('Case', '..', '/w')).toBe('/w/Case/_..');
+    expect(workspaceOf('Case', 'acme.103', '')).toBeUndefined();
+  });
+
+  it('is written, read and run in by the scripted model', () => {
+    expect(toolCalls(user('Write notes.md: crushed, refund pending.'))).toEqual([
+      ['write', { path: 'notes.md', content: 'crushed, refund pending.' }],
+    ]);
+    expect(toolCalls(user('Read notes.md'))).toEqual([['read', { path: 'notes.md' }]]);
+    expect(toolCalls(user('Run: ls -la && cat notes.md'))).toEqual([['bash', { command: 'ls -la && cat notes.md' }]]);
+  });
+});
+
+describe('coding tasks', () => {
+  it('go to a coder each, by name, in the scripted model', () => {
+    expect(toolCalls(user('Code: fizzbuzz: write fizzbuzz.py; primes: write primes.py'))).toEqual([
+      ['code', { name: 'fizzbuzz', task: 'write fizzbuzz.py' }],
+      ['code', { name: 'primes', task: 'write primes.py' }],
     ]);
   });
 });

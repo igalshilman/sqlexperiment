@@ -9,16 +9,26 @@
 // tool call again with the same call id, and so reaches the gateway call
 // the first attempt made.
 //
-// Sub-agents: a prompt that begins "Investigate" (and only such a prompt)
-// gets one more tool, `investigate`, which hands an order to its case agent:
+// Sub-agents: the `investigate` tool hands an order to its case agent:
 // a Case object per order, keyed `<tenant>.<order>` (`acme.103`), a pi agent
 // of its own, with its own database and the gateway's tools. Each order is
 // another object: they run at once, and one holds no other up. The same
 // order is the same object for every user, and remembers each report on it.
 //
+// Coding: the `code` tool hands a coding task to a coding agent of its own,
+// OpenCode in a Coder object per task, keyed `<tenant>.<user>.<task>`
+// (coder.ts): two tasks are two objects, which run at once, each with its
+// own session and files, and in its own machine where each object gets one.
+//
+// Files: with WORKSPACE set, each object gets a directory of its own,
+// `$WORKSPACE/<service>/<key>`, and pi-durable's coding tools over it
+// (read, write, edit, bash; see ../pi/with-pi.ts). Run it in a sandbox:
+// `bash` runs any command, within the directory or outside it.
+//
 // Environment: PORT, PI_MODEL (the scripted `concierge/concierge` and
 // `caseworker/caseworker` below by default, or a real one for both, such as
-// anthropic/claude-sonnet-4-5) and ABORT_PER_MILLE (see ../faults.ts).
+// anthropic/claude-sonnet-4-5), WORKSPACE and ABORT_PER_MILLE (see
+// ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
 import { Type, type TranscriptContext } from '@earendil-works/pi-ai';
 import { createModels } from '@earendil-works/pi-ai/models';
@@ -27,7 +37,10 @@ import { z } from 'zod';
 import { serveIfMain } from '../faults.ts';
 import { callTools, fakeProvider, lastText, type Respond, say, textOf } from '../pi/utils.ts';
 import { withPi } from '../pi/with-pi.ts';
+import { coder, workspaceOf } from './coder.ts';
 import { gateway, identity } from './gateway.ts';
+
+export { workspaceOf };
 
 /** A tool's result, in a sentence: an order, a refund or a ticket, or else the text as it is. */
 export function sentence(text: string): string {
@@ -42,9 +55,6 @@ export function sentence(text: string): string {
   return text;
 }
 
-/** Whether a prompt asks for case agents: it begins "Investigate". */
-export const investigates = (text: string) => /^\s*investigate\b/i.test(text);
-
 /** The results of the last round of tool calls, a sentence each. */
 function lastResults({ messages }: TranscriptContext) {
   const results = [];
@@ -53,7 +63,9 @@ function lastResults({ messages }: TranscriptContext) {
 }
 
 /**
- * The scripted model: "investigate orders 103 and 104: …" hands each order
+ * The scripted model: "code: fizzbuzz: …; primes: …" hands each task to a
+ * coding agent of its own, "write notes.md: …", "read notes.md" and
+ * "run: ls -l" use the workspace's files, "investigate orders 103 and 104: …" hands each order
  * to its case agent at once, "where are orders 101 to 108?" looks them all
  * up at once, "refund 30 of order 103" refunds, "open a ticket for order
  * 104: …" opens one, and it reports what the tools answered, a sentence each.
@@ -62,7 +74,26 @@ export function concierge(context: TranscriptContext) {
   const results = lastResults(context);
   if (results.length > 0) return say(results.join('\n'));
   const text = lastText(context);
-  if (investigates(text)) {
+  const write = /^write ([^\s:]+):\s*([^]*)$/i.exec(text);
+  if (write) return callTools([['write', { path: write[1]!, content: write[2]! }]]);
+  const read = /^read (\S+)$/i.exec(text.trim());
+  if (read) return callTools([['read', { path: read[1]! }]]);
+  const run = /^run:?\s+([^]+)$/i.exec(text);
+  if (run) return callTools([['bash', { command: run[1]! }]]);
+  const code = /^code:\s*([^]+)$/i.exec(text);
+  if (code) {
+    const tasks = code[1]!
+      .split(';')
+      .map((t) => t.trim())
+      .filter(Boolean);
+    return callTools(
+      tasks.map((t, i) => {
+        const [, name = `task-${i + 1}`, task = t] = /^([\w-]+):\s*([^]+)$/.exec(t) ?? [];
+        return ['code', { name, task }];
+      }),
+    );
+  }
+  if (/^\s*investigate\b/i.test(text)) {
     const [orders = '', question = text] = text.split(/:\s*/, 2);
     return callTools((orders.match(/\d+/g) ?? []).map((order) => ['investigate', { order, question }]));
   }
@@ -110,6 +141,11 @@ export const EXAMPLES = [
   'Open a ticket for order 104: the box was empty.',
   'Where are orders 101 to 112?',
   'Investigate orders 103 and 104: the boxes arrived crushed.',
+  'Code: fizzbuzz: write fizzbuzz.py that prints FizzBuzz from 1 to 15 and run it; primes: write primes.py that prints the primes below 50 and run it',
+  // With a workspace only.
+  ...(process.env.WORKSPACE
+    ? ['Write notes.md: order 103 arrived crushed, refund pending.', 'Read notes.md', 'Run: ls -la && cat notes.md']
+    : []),
 ];
 
 // The suggestion is a JSON schema `default` only: a zod `.default()` would
@@ -130,7 +166,7 @@ const CaseReport = z.object({
 /** pi-ai models, with `name` the scripted model, unless PI_MODEL names a real one. */
 async function modelOr(name: string, respond: Respond) {
   const models = createModels();
-  const model = process.env.PI_MODEL ?? `${name}/${name}`;
+  const model = process.env.PI_MODEL || `${name}/${name}`;
   const [provider] = model.split('/');
   if (provider === name) {
     models.setProvider(fakeProvider(name, respond));
@@ -200,7 +236,8 @@ export const caseAgent = restate.object({
       async (ctx: restate.SqlObjectContext, { user, question }: z.infer<typeof CaseReport>) => {
         const [tenant = '', order = ''] = ctx.key.split('.', 2);
         const tools = await gatewayTools(ctx, tenant, user);
-        return withPi(ctx, { ...caseModel, tools }, async (pi) => ({
+        const workspace = workspaceOf('Case', ctx.key);
+        return withPi(ctx, { ...caseModel, tools, workspace }, async (pi) => ({
           answer: await pi.prompt(ctx.request().id, `Order ${order}, from ${user}: ${question}`),
         }));
       },
@@ -209,6 +246,70 @@ export const caseAgent = restate.object({
   metadata,
   options,
 });
+
+/** Answer prompt `text`, with the tenant's tools, case agents and coders. */
+export const prompt = async (ctx: restate.SqlObjectContext, text: z.infer<typeof PROMPT_SCHEMA>) => {
+  const { tenant, user } = identity(ctx.key);
+  const tools = await gatewayTools(ctx, tenant, user);
+  tools.push(
+    defineTool({
+      name: 'code',
+      description:
+        'Hand a coding task to a coding agent with a machine and files of its own, and answer with its report. ' +
+        'Name each task: tasks of different names run at once, each in its own machine; ' +
+        'the same name continues the same task, with its files.',
+      parameters: Type.Object({
+        name: Type.String({ description: 'A short name for the task, such as "fizzbuzz": letters, digits, -' }),
+        task: Type.String({ description: 'The task, in full: the coding agent sees nothing else' }),
+      }),
+      replay: 'safe',
+      execute: async ({ name, task }, api) => {
+        const slug =
+          name
+            .toLowerCase()
+            .replace(/[^a-z0-9-]+/g, '-')
+            .replace(/^-+|-+$/g, '') || 'task';
+        const { answer } = await ctx
+          .objectClient(coder, `${ctx.key}.${slug}`)
+          .code({ task }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${api.callId}` }));
+        return { content: [{ type: 'text', text: answer }], isError: false };
+      },
+    }),
+  );
+  tools.push(
+    defineTool({
+      name: 'investigate',
+      description:
+        "Hand an order to its case agent, which looks into it and remembers every report on it; answer with the case agent's answer. One call per order: they run at once.",
+      parameters: Type.Object({
+        order: Type.String({
+          description: 'The order id, such as "103"',
+        }),
+        question: Type.String({
+          description: "What happened to the order, in the customer's words",
+        }),
+      }),
+      replay: 'safe',
+      execute: async ({ order, question }, api) => {
+        const { answer } = await ctx.objectClient(caseAgent, `${tenant}.${order}`).report(
+          { user, question },
+          restate.rpc.opts({
+            idempotencyKey: `${ctx.request().id}:${api.callId}`,
+          }),
+        );
+        return {
+          content: [{ type: 'text', text: answer }],
+          isError: false,
+        };
+      },
+    }),
+  );
+  // Submitted once: a retried attempt resumes the prompt of the same invocation id.
+  const workspace = workspaceOf('Assistant', ctx.key);
+  return withPi(ctx, { ...assistantModel, tools, workspace }, async (pi) => ({
+    answer: await pi.prompt(ctx.request().id, text),
+  }));
+};
 
 export const assistant = restate.object({
   name: 'Assistant',
@@ -220,55 +321,19 @@ export const assistant = restate.object({
           'Prompts to try:',
           ...EXAMPLES.map((e) => `- ${e}`),
           'A refund waits for a manager: `Gateway/<tenant>/pending`, then `Gateway/<tenant>/decide`.',
-          'A prompt that begins "Investigate" hands each order to its case agent, `Case/<tenant>.<order>`.',
+          'Investigating an order hands it to its case agent, `Case/<tenant>.<order>`.',
+          'Coding tasks go to a coding agent each, `Coder/<tenant>.<user>.<task>`.',
         ].join('\n'),
         metadata: Object.fromEntries(EXAMPLES.map((e, i) => [`example.${i + 1}`, e])),
         input: restate.serde.schema(PROMPT_SCHEMA),
         output: restate.serde.schema(Answer),
         journalReplay: false,
       },
-      async (ctx: restate.SqlObjectContext, text: z.infer<typeof PROMPT_SCHEMA>) => {
-        const { tenant, user } = identity(ctx.key);
-        const tools = await gatewayTools(ctx, tenant, user);
-        // Only a prompt that asks for case agents gets them.
-        if (investigates(text))
-          tools.push(
-            defineTool({
-              name: 'investigate',
-              description:
-                "Hand an order to its case agent, which looks into it and remembers every report on it; answer with the case agent's answer. One call per order: they run at once.",
-              parameters: Type.Object({
-                order: Type.String({
-                  description: 'The order id, such as "103"',
-                }),
-                question: Type.String({
-                  description: "What happened to the order, in the customer's words",
-                }),
-              }),
-              replay: 'safe',
-              execute: async ({ order, question }, api) => {
-                const { answer } = await ctx.objectClient(caseAgent, `${tenant}.${order}`).report(
-                  { user, question },
-                  restate.rpc.opts({
-                    idempotencyKey: `${ctx.request().id}:${api.callId}`,
-                  }),
-                );
-                return {
-                  content: [{ type: 'text', text: answer }],
-                  isError: false,
-                };
-              },
-            }),
-          );
-        // Submitted once: a retried attempt resumes the prompt of the same invocation id.
-        return withPi(ctx, { ...assistantModel, tools }, async (pi) => ({
-          answer: await pi.prompt(ctx.request().id, text),
-        }));
-      },
+      prompt,
     ),
   },
   metadata,
   options,
 });
 
-serveIfMain(import.meta, [assistant, caseAgent]);
+serveIfMain(import.meta, [assistant, caseAgent, coder]);

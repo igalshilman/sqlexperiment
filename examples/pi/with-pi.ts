@@ -13,17 +13,27 @@
 // an answered prompt returns its answer, and unfinished work resumes: a model
 // call is made again, and a tool call declared `replay: 'safe'` runs again
 // with the same call id, which a tool passes on to stay idempotent.
+//
+// With a `workspace` directory, the agent also gets pi-durable's coding
+// tools (`read`, `write`, `edit`, `bash`) over it, on the local file system.
+// The files are not in the database: they last as long as the disk does,
+// and a coding tool cut off by a crash is not run again (the model is told
+// it was interrupted).
 import * as restate from '@restatedev/restate-sdk';
 import type { Context } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { mkdir } from 'node:fs/promises';
 import type { MutableModels } from '@earendil-works/pi-ai';
 import {
   AssistantEntry,
   createRegistry,
   defineExtension,
   Harness,
+  section,
   type ToolRegistration,
 } from '@earendil-works/pi-durable';
+import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
+import { CodingTools } from '@earendil-works/pi-durable/tools';
 import { textOf } from './utils.ts';
 import { openSqlKvStorage } from './pi-storage.ts';
 
@@ -42,6 +52,8 @@ export interface PiOptions {
   model: string;
   /** The agent's tools, made with pi-durable's `defineTool`. */
   tools?: ToolRegistration[];
+  /** A directory for the coding tools, made if missing; without one, the agent has no file system. */
+  workspace?: string;
 }
 
 /**
@@ -52,7 +64,7 @@ export interface PiOptions {
  */
 export const withPi = async <T>(
   ctx: restate.SqlObjectContext,
-  { models, model, tools = [] }: PiOptions,
+  { models, model, tools = [], workspace }: PiOptions,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const db = ctx.db;
@@ -60,7 +72,15 @@ export const withPi = async <T>(
   const context = BACKGROUND_CONTEXT;
   const registry = createRegistry();
   registry.install(defineExtension({ name: 'tools', tools }));
-  const harness = await Harness.open(await openSqlKvStorage(db), { models, registry }, context);
+  let env: (() => NodeExecutionEnv) | undefined;
+  if (workspace) {
+    await mkdir(workspace, { recursive: true });
+    env = () => new NodeExecutionEnv({ cwd: workspace });
+    registry.install(CodingTools);
+    // Tell the model where the coding tools work.
+    registry.install(defineExtension({ name: 'workspace', sections: [section('cwd', () => workspace)] }));
+  }
+  const harness = await Harness.open(await openSqlKvStorage(db), { models, registry, env }, context);
   try {
     return await work({
       harness,
