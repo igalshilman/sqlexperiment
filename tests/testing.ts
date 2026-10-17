@@ -44,6 +44,8 @@ export interface AttemptOptions {
   send?: (send: restate.GenericSend<Uint8Array>) => void;
   /** Before each of the attempt's state requests. */
   onRequest?: () => void;
+  /** A shared handler's attempt: its `ctx.db` reads beside the owner's, and writes nothing. */
+  shared?: boolean;
 }
 
 /**
@@ -59,6 +61,7 @@ export function sqlAttempt({
   id = 'inv',
   send = () => {},
   onRequest = () => {},
+  shared = false,
 }: AttemptOptions) {
   const check = () => {
     onRequest();
@@ -68,7 +71,7 @@ export function sqlAttempt({
   end.promise.catch(() => {});
   const target = { service: `test-${randomUUID()}` };
   const ctx = {
-    handlerKind: 1, // exclusive
+    handlerKind: shared ? 2 : 1, // shared, or exclusive
     journalReplay: false,
     key,
     request: () => ({ id, target }),
@@ -101,6 +104,7 @@ export function sqlAttempt({
       return value === null ? null : (JSON.parse(new TextDecoder().decode(value)) as T);
     },
     set: (name: string, value: unknown) => ctx.set(name, new TextEncoder().encode(JSON.stringify(value))),
+    clear: (name: string) => ctx.clear(name),
     transaction: <T>(body: (t: restate.SqlTransaction) => Promise<T>) => attempt.transaction(body),
     /** `handler`'s result, once its session ended. */
     end: <T>(handler: () => Promise<T>) => restate.internal.withSql(handler, () => attempt),
@@ -206,13 +210,12 @@ export function conversation(
       answer.catch(() => {});
       return Promise.race([crashed.promise, answer]);
     },
-    /** Another handler of the object (such as `messages`), with `input`, in an attempt of its own. */
+    /**
+     * A shared handler of the object (such as `messages`), with `input`, in an
+     * attempt of its own: it reads beside an attempt that runs, if any.
+     */
     async read<T, I>(other: (ctx: restate.SqlObjectContext, input: I) => Promise<T>, input?: I, requestId = 'read') {
-      fence.closed = true;
-      fence = { closed: false };
-      abort?.();
-      const sql = sqlAttempt({ map, fence, key, id: requestId });
-      abort = sql.abort;
+      const sql = sqlAttempt({ map, key, id: requestId, shared: true });
       const ctx = { key, request: () => ({ id: requestId }), ...sql };
       return sql.end(() => other(ctx as unknown as restate.SqlObjectContext, input as I));
     },
