@@ -9,16 +9,17 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  */
-import { serve } from 'restate-agents';
+import { serve, tool } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 import { z } from 'zod';
 
-const weather = opencode.tool({
+// A tool, for any framework's agent (the framework's own tools work too).
+const weather = tool({
   name: 'get_weather',
   description: 'The current weather in a city.',
   input: z.object({ city: z.string() }),
   // A stand-in for a real weather API.
-  execute: async ({ city }) => `Sunny and 21°C in ${city}`,
+  run: async ({ city }) => `Sunny and 21°C in ${city}`,
 });
 
 const assistant = opencode.agent({ name: 'assistant', tools: [weather] });

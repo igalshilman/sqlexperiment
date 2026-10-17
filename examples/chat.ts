@@ -10,17 +10,17 @@
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  *   curl localhost:8080/assistant/alice/chat -d 'What is my name?'
  */
-import { Type } from '@earendil-works/pi-ai';
-import { defineTool } from '@earendil-works/pi-durable';
-import { serve } from 'restate-agents';
+import { serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
+import { z } from 'zod';
 
-const weather = defineTool({
+// A tool, for any framework's agent (the framework's own tools work too).
+const weather = tool({
   name: 'get_weather',
   description: 'The current weather in a city.',
-  parameters: Type.Object({ city: Type.String() }),
+  input: z.object({ city: z.string() }),
   // A stand-in for a real weather API.
-  execute: async ({ city }) => ({ content: [{ type: 'text', text: `Sunny and 21°C in ${city}` }] }),
+  run: async ({ city }) => `Sunny and 21°C in ${city}`,
 });
 
 const assistant = pi.agent({ name: 'assistant', tools: [weather] });

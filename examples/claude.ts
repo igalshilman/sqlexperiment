@@ -10,15 +10,15 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  */
-import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
-import { serve } from 'restate-agents';
+import { serve, tool } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
 import { z } from 'zod';
 
-const weather = betaZodTool({
+// A tool, for any framework's agent (the framework's own tools work too).
+const weather = tool({
   name: 'get_weather',
   description: 'The current weather in a city.',
-  inputSchema: z.object({ city: z.string() }),
+  input: z.object({ city: z.string() }),
   // A stand-in for a real weather API.
   run: async ({ city }) => `Sunny and 21°C in ${city}`,
 });

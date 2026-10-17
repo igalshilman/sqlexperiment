@@ -9,15 +9,17 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  */
-import { serve } from 'restate-agents';
+import { serve, tool } from 'restate-agents';
 import * as deepseek from 'restate-agents/deepseek';
+import { z } from 'zod';
 
-const weather = deepseek.tool({
+// A tool, for any framework's agent (the framework's own tools work too).
+const weather = tool({
   name: 'get_weather',
   description: 'The current weather in a city.',
-  parameters: { city: { type: 'string', required: true } },
+  input: z.object({ city: z.string() }),
   // A stand-in for a real weather API.
-  execute: async ({ city }) => `Sunny and 21°C in ${city}`,
+  run: async ({ city }) => `Sunny and 21°C in ${city}`,
 });
 
 const assistant = deepseek.agent({
