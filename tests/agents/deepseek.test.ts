@@ -27,12 +27,13 @@ async function counting(body: (calls: { model: number }) => Promise<void>) {
 }
 
 describe('the DeepSeek Harness agent', () => {
-  it('gives the conversation: what was said, in order, without tool calls', async () => {
+  it('gives the conversation: what was said, in order, with the tool calls', async () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
     // Its teller calls tools without a word, unlike the others' "On it.".
-    expect(await c.read(deepseek.messages())).toEqual(SAID.filter((m) => m.text !== 'On it.'));
+    const said = [SAID[0], { ...SAID[1]!, parts: SAID[1]!.parts.slice(1) }, ...SAID.slice(2)];
+    expect(await c.read(deepseek.messages())).toEqual({ messages: said, more: false });
   });
 
   it('answers a message once per invocation', async () => {

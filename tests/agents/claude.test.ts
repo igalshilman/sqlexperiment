@@ -11,12 +11,27 @@ import { prompt } from './claude.ts';
 vi.mock('@anthropic-ai/sdk', () => import('../fakes/claude.ts'));
 
 describe('the Claude agent', () => {
-  it('gives the conversation: what was said, in order, without tool calls', async () => {
+  it('gives the conversation: what was said, in order, with the tool calls', async () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
-    const said = await c.read(claude.messages());
-    expect(said).toEqual(SAID);
+    expect(await c.read(claude.messages())).toEqual({ messages: SAID, more: false });
+  });
+
+  it('gives the conversation a page at a time', async () => {
+    const c = conversation(prompt, 'p');
+    await c.attempt('inv1', 'Please move 5 from 1 to 2');
+    await c.attempt('inv2', 'audit the books');
+    // The latest, then older ones before the oldest so far.
+    expect(await c.read(claude.messages(), { limit: 2 })).toEqual({ messages: SAID.slice(4), more: true });
+    expect(await c.read(claude.messages(), { limit: 3, before: 4 })).toEqual({
+      messages: SAID.slice(1, 4),
+      more: true,
+    });
+    expect(await c.read(claude.messages(), { before: 1 })).toEqual({ messages: SAID.slice(0, 1), more: false });
+    // Newer ones after the newest so far.
+    expect(await c.read(claude.messages(), { after: 2, limit: 2 })).toEqual({ messages: SAID.slice(3, 5), more: true });
+    expect(await c.read(claude.messages(), { after: 5 })).toEqual({ messages: [], more: false });
   });
 
   it('answers a message once per invocation', async () => {

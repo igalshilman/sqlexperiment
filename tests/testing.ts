@@ -1,6 +1,7 @@
 // Test support, for the examples' tests without a Restate server: an object's
 // state in memory, and a fake object for an agent's handler, with a ledger
 // that records its calls, through crashes of the handler.
+import { expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
 import type { Store } from 'sqlite-kv';
@@ -160,15 +161,15 @@ export function conversation(handler: PromptHandler, key: string) {
       };
       return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, prompt));
     },
-    /** Another handler of the object, without input (such as `messages`), in an attempt of its own. */
-    async read<T>(other: (ctx: restate.SqlObjectContext) => Promise<T>, requestId = 'read') {
+    /** Another handler of the object (such as `messages`), with `input`, in an attempt of its own. */
+    async read<T, I>(other: (ctx: restate.SqlObjectContext, input: I) => Promise<T>, input?: I, requestId = 'read') {
       fence.closed = true;
       fence = { closed: false };
       abort?.();
       const sql = sqlAttempt({ map, fence, key, id: requestId });
       abort = sql.abort;
       const ctx = { key, request: () => ({ id: requestId }), db: sql.db, transaction: sql.transaction };
-      return sql.end(() => other(ctx as unknown as restate.SqlObjectContext));
+      return sql.end(() => other(ctx as unknown as restate.SqlObjectContext, input as I));
     },
     /** An attempt that crashes in its next transfer. */
     async crash(requestId: string, prompt: string) {
@@ -180,11 +181,33 @@ export function conversation(handler: PromptHandler, key: string) {
   };
 }
 
-/** What `messages` gives after the bank conversation of the agents' tests: a transfer, then an audit. */
+/** A tool call of `messages`, by `name`, with any id. */
+const toolCall = (name: string, input: unknown, output: string) => ({
+  type: 'tool',
+  id: expect.any(String),
+  name,
+  input,
+  output,
+});
+
+/** The messages of the bank conversation of the agents' tests: a transfer, then an audit. */
 export const SAID = [
-  { role: 'user', text: 'Please move 5 from 1 to 2' },
-  { role: 'assistant', text: 'On it.' },
-  { role: 'assistant', text: 'Done: moved 5 from account 1 to account 2' },
-  { role: 'user', text: 'audit the books' },
-  { role: 'assistant', text: 'Done: {"accounts":8,"total":8000,"transfers":1,"inconsistent":0}' },
-];
+  { role: 'user', parts: [{ type: 'text', text: 'Please move 5 from 1 to 2' }] },
+  {
+    role: 'assistant',
+    parts: [
+      { type: 'text', text: 'On it.' },
+      toolCall('transfer', { from: 1, to: 2, amount: 5 }, 'moved 5 from account 1 to account 2'),
+    ],
+  },
+  { role: 'assistant', parts: [{ type: 'text', text: 'Done: moved 5 from account 1 to account 2' }] },
+  { role: 'user', parts: [{ type: 'text', text: 'audit the books' }] },
+  {
+    role: 'assistant',
+    parts: [toolCall('audit', {}, '{"accounts":8,"total":8000,"transfers":1,"inconsistent":0}')],
+  },
+  {
+    role: 'assistant',
+    parts: [{ type: 'text', text: 'Done: {"accounts":8,"total":8000,"transfers":1,"inconsistent":0}' }],
+  },
+].map((m, id) => ({ id, role: m.role, parts: m.parts }));

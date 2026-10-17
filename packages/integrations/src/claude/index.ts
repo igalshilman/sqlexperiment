@@ -22,7 +22,7 @@
 import type * as restate from '@restatedev/restate-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
-import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, said, type PerCall } from '../common.ts';
+import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -158,17 +158,23 @@ const respond = ({ model: named, system, tools = [] }: ChatOptions = {}) => {
  */
 export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
-/** The text of a stored message's content, without its tool calls and results. */
-const storedText = (content: Anthropic.Beta.Messages.BetaMessageParam['content']) =>
-  typeof content === 'string' ? content : content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
+/** The text of stored content, without its tool calls and results. */
+const storedText = (content: string | readonly { type: string; text?: string }[] | undefined) =>
+  typeof content === 'string' ? content : (content ?? []).flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
 
-/** A handler of the conversation: what was said, in order. */
+/** A handler of the conversation, a page at a time: what was said, in order, with the tool calls. */
 export const messages = () =>
-  messagesHandler(async (ctx) => {
+  messagesHandler(async (ctx, transcript) => {
     const conversation = await Conversation.open(ctx.db);
-    return (await conversation.messages()).flatMap((m) =>
-      m.role === 'system' ? [] : said(m.role, storedText(m.content)),
-    );
+    for (const m of await conversation.messages()) {
+      if (m.role === 'system') continue;
+      transcript.say(m.role, storedText(m.content));
+      if (typeof m.content === 'string') continue;
+      for (const block of m.content) {
+        if (block.type === 'tool_use') transcript.call(block.id, block.name, block.input);
+        if (block.type === 'tool_result') transcript.result(block.tool_use_id, storedText(block.content));
+      }
+    }
   });
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
