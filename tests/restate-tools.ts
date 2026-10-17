@@ -104,16 +104,16 @@ try {
 
   // The agent waits for the approval, and goes on once it comes.
   const answer = post('support/alice/chat', 'Refund order 103, please');
-  for (let i = 0; ((await post('signals/support:alice/pending')) as string[]).length === 0; i++) {
+  for (let i = 0; ((await post('support/alice/pending')) as string[]).length === 0; i++) {
     if (i > 300) throw new Error('the agent does not wait for the approval');
     await sleep(100);
   }
-  await post('signals/support:alice/resolve', { name: 'approval', value: 'approved by Kim' });
+  await post('support/alice/signal', { name: 'approval', value: 'approved by Kim' });
   assert.equal(await answer, 'order 103: delivered / approved by Kim / refunded 103');
-  assert.deepEqual(await post('signals/support:alice/pending'), []);
+  assert.deepEqual(await post('support/alice/pending'), []);
 
   // A signal resolved before the agent waits for it is kept for it.
-  await post('signals/support:bob/resolve', { name: 'approval', value: 'approved early' });
+  await post('support/bob/signal', { name: 'approval', value: 'approved early' });
   assert.equal(
     await post('support/bob/chat', 'Refund order 103'),
     'order 103: delivered / approved early / refunded 103',

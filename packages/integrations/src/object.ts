@@ -1,5 +1,6 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from '@restatedev/restate-sdk';
+import { signals, signalsOf } from './signals.ts';
 
 /**
  * The options of every object here: SQL (`ctx.db`: no journal replay, lazy
@@ -22,6 +23,26 @@ const METADATA = {
   'dev.restate.tooling.journal.hidden.name.prefix': 'v13/',
 };
 
+/**
+ * The handlers every object here has, beside its own: `signal`, which
+ * resolves a signal the object's tools wait for (see `signal` in tools.ts),
+ * and `pending`, the signals they wait for. Both are shared, so they run
+ * while the object's handler waits, and journaled: they use no `ctx.db`.
+ */
+const SIGNALS = {
+  signal: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.ObjectSharedContext, signal: { name: string; value?: unknown }) => {
+      await ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).resolve(signal);
+    },
+  ),
+  pending: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.ObjectSharedContext): Promise<string[]> =>
+      ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).pending(),
+  ),
+};
+
 /** A handler: `ctx` is the object's context, with `ctx.db`; the input, if any, is annotated. */
 type Handler = (ctx: restate.SqlObjectContext, input: never) => unknown;
 
@@ -36,6 +57,10 @@ type Handler = (ctx: restate.SqlObjectContext, input: never) => unknown;
  *     },
  *   });
  *
+ * Besides its own handlers, it has `signal({ name, value })`, which
+ * resolves a signal its tools wait for, and `pending`, the ones they wait
+ * for.
+ *
  * `options` and `metadata` add to (or replace) the ones set here, such as
  * `options: { journalRetention: { hours: 1 } }` to look at journals in the UI.
  */
@@ -45,10 +70,14 @@ export const object = <P extends string, H extends Record<string, Handler>>(defi
   description?: string;
   metadata?: Record<string, string>;
   options?: Omit<restate.ObjectOptions, 'journalReplay'>;
-}): restate.VirtualObjectDefinition<P, H> =>
-  restate.object<P, H, typeof OPTIONS>({
+}): restate.VirtualObjectDefinition<P, typeof SIGNALS & H> =>
+  restate.object<P, typeof SIGNALS & H, typeof OPTIONS>({
     ...definition,
-    handlers: definition.handlers as restate.ObjectOpts<H, restate.SqlObjectContext, restate.SqlObjectSharedContext>,
+    handlers: { ...SIGNALS, ...definition.handlers } as restate.ObjectOpts<
+      typeof SIGNALS & H,
+      restate.SqlObjectContext,
+      restate.SqlObjectSharedContext
+    >,
     metadata: { ...METADATA, ...definition.metadata },
     options: { ...OPTIONS, ...definition.options } as typeof OPTIONS,
   });

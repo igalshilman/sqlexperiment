@@ -10,7 +10,7 @@ import * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
 import type { PerCall } from './common.ts';
 import { forCall } from './common.ts';
-import { signals } from './signals.ts';
+import { signals, signalsOf } from './signals.ts';
 
 const TOOL = Symbol.for('restate-agents.tool');
 
@@ -230,10 +230,9 @@ export const subagent = <M>(
  * value: a person's approval, say, or another system's result. The agent
  * waits without holding a process.
  *
- * Signal it with the `signals` object (which {@link serve} serves), keyed
- * `<agent>:<key>`:
+ * Signal it through the agent's `signal` handler (each `object()` has one):
  *
- *   curl localhost:8080/signals/assistant:alice/resolve --json '{"name": "approval", "value": "approved"}'
+ *   curl localhost:8080/assistant/alice/signal --json '{"name": "approval", "value": "approved"}'
  *
  * A signal sent before the agent waits for it is kept until it does.
  */
@@ -244,6 +243,6 @@ export const signal = (name: string, options: { description: string }): Tool =>
     input: z.object({}),
     run: async (_input, { ctx, callId }) =>
       ctx
-        .objectClient(signals, `${ctx.request().target.service}:${ctx.key}`)
+        .objectClient(signals, signalsOf(ctx.request().target.service, ctx.key))
         .wait(name, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${callId}` })),
   });

@@ -11,8 +11,8 @@
  * The agent waits for approval; in another terminal, see what it waits for,
  * and approve:
  *
- *   curl localhost:8080/signals/support:alice/pending
- *   curl localhost:8080/signals/support:alice/resolve --json '{"name": "approval", "value": "approved"}'
+ *   curl localhost:8080/support/alice/pending
+ *   curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'
  */
 import * as restate from '@restatedev/restate-sdk';
 import { call, serve, signal, workflow } from 'restate-agents';
