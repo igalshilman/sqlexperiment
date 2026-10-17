@@ -3,7 +3,7 @@
 //
 // Environment: PORT (default 9080), DEEPSEEK_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
-import { object } from 'restate-agents';
+import { object, signals } from 'restate-agents';
 import * as deepseek from 'restate-agents/deepseek';
 import { serveIfMain } from '../faults.ts';
 import { ledger } from '../sql/ledger.ts';
@@ -17,4 +17,4 @@ export const prompt = deepseek.chat({
 
 export const agent = object({ name: 'DeepSeekAgent', handlers: { chat: prompt, messages: deepseek.messages() } });
 
-serveIfMain(import.meta, [agent, ledger]);
+serveIfMain(import.meta, [agent, ledger, signals]);

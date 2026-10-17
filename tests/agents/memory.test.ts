@@ -53,7 +53,7 @@ function store(key: string) {
   const map = new Map<string, Uint8Array>();
   return (handler: Handler, id: string, input = '') => {
     const sql = sqlAttempt({ map, key, id });
-    const ctx = { key, request: () => ({ id }), ...sql };
+    const ctx = { key, ...sql };
     return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, input));
   };
 }

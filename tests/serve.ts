@@ -1,7 +1,8 @@
 // Examples in one endpoint: every one, or the groups named on the command
 // line (ledger, shop, agent, langgraph, claude, deepseek, opencode), such as
-// `node serve.ts ledger shop`.
+// `node serve.ts ledger shop`; with the agents' `signals` object.
 import * as restate from '@restatedev/restate-sdk';
+import { signals } from 'restate-agents';
 
 type Services = restate.ServeOptions['services'];
 
@@ -27,4 +28,4 @@ const services = (
     }),
   )
 ).flat();
-await restate.serve({ services, port: Number(process.env.PORT ?? 9080) });
+await restate.serve({ services: [...services, signals], port: Number(process.env.PORT ?? 9080) });

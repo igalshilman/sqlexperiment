@@ -46,6 +46,9 @@ import {
   messagesHandler,
   modelOf,
   nextPromptId,
+  settleSteering,
+  type Steerable,
+  takeSteering,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -153,6 +156,31 @@ function toolsPlugin(tools: OpenCodeTool[], fail: (error: unknown) => Promise<ne
   };
 }
 
+/**
+ * An OpenCode plugin that gives the session the messages steered to the turn
+ * (`steerable`) at the end of each tool call: OpenCode's steering, which its
+ * next step takes.
+ */
+const steeringPlugin = (
+  ctx: restate.SqlObjectContext,
+  steerable: Steerable,
+  fail: (error: unknown) => Promise<never>,
+): Plugin.Plugin => ({
+  id: 'examples.steering',
+  async setup(plugin) {
+    const hook = await plugin.tool.hook('execute.after', async () => {
+      await takeSteering(ctx, steerable).catch(fail);
+    });
+    return () => hook.dispose();
+  },
+});
+
+/** OpenCode's message id of prompt (or steered message) `id`: letters, digits, `_` and `-`. */
+const messageIdOf = (id: string) => `msg_${id.replace(/[^\w-]/g, '_')}`;
+
+/** Whether message `id` is one steered to a turn (see `steer` in object.ts), not a prompt. */
+const steered = (id: string) => /_steer_\d+$/.test(id);
+
 /** A part of an assistant message: text, or a tool call (`id`, `name`, and its `state`). */
 interface Content {
   type: string;
@@ -206,10 +234,10 @@ async function outcome(host: Host, messageId: string) {
     if (cursor === undefined) return { state: 'absent' } as const;
   }
   // A turn ends at an idle marker, or where the next prompt, queued while it
-  // ran, starts.
+  // ran, starts (a message steered to it is not one).
   let last: Message | undefined;
   for (const m of after) {
-    if (m.type === 'idle' || (m.type === 'user' && last !== undefined)) {
+    if (m.type === 'idle' || (m.type === 'user' && last !== undefined && !steered(m.id))) {
       const text = textOf(last?.content);
       const error = last?.error?.message;
       const ended = m.type === 'idle' ? m.outcome : 'succeeded';
@@ -226,7 +254,8 @@ async function outcome(host: Host, messageId: string) {
 async function lastPrompt(host: Host): Promise<string | undefined> {
   const { session, message } = host.client;
   const inbox: { id: string }[] = await host.call(session.inbox.list({ sessionID: SESSION as never }));
-  if (inbox.length > 0) return inbox.at(-1)!.id;
+  const queued = inbox.findLast((item) => !steered(item.id));
+  if (queued) return queued.id;
   for (let cursor: string | undefined; ;) {
     const page: { data: Message[]; cursor: { next?: string | null } } = await host.call(
       message.list(
@@ -235,7 +264,7 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
           : { sessionID: SESSION as never, cursor },
       ),
     );
-    const user = page.data.find((m) => m.type === 'user');
+    const user = page.data.find((m) => m.type === 'user' && !steered(m.id));
     if (user) return user.id;
     cursor = page.cursor.next ?? undefined;
     if (cursor === undefined) return undefined;
@@ -294,9 +323,27 @@ export const withOpenCode = async <T>(
     return new Promise<never>(() => {});
   };
   turn?.addEventListener('abort', onCancel, { once: true });
+  // Messages steered to the turn: OpenCode's steering input (by its message
+  // id, once), which the session takes at its next step.
+  const steerable: Steerable = {
+    steer: async ({ id, text }) => {
+      const { session } = host.client;
+      await host.call(
+        session.prompt({ sessionID: SESSION as never, id: messageIdOf(id) as never, text, delivery: 'steer' }),
+      );
+    },
+    has: async (id) => {
+      const messageId = messageIdOf(id);
+      const inbox: { id: string }[] = await host.call(host.client.session.inbox.list({ sessionID: SESSION as never }));
+      return (
+        inbox.some((item) => item.id === messageId) || (await sessionMessages(host)).some((m) => m.id === messageId)
+      );
+    },
+  };
   const host = await openOpenCode(db, fence, {
     plugins: [
       ...plugins,
+      steeringPlugin(ctx, steerable, fail),
       toolsPlugin(
         tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
         fail,
@@ -318,8 +365,7 @@ export const withOpenCode = async <T>(
       work({
         host,
         async prompt(text, id = nextPromptId(ctx)) {
-          // OpenCode's ids are letters, digits, `_` and `-`.
-          const messageId = `msg_${id.replace(/[^\w-]/g, '_')}`;
+          const messageId = messageIdOf(id);
           const { session } = host.client;
           const sessionID = SESSION as never;
           try {
@@ -356,7 +402,10 @@ export const withOpenCode = async <T>(
             );
           }
           const now = await settled(messageId);
-          if (now.state === 'answered') return now.text;
+          if (now.state === 'answered') {
+            await settleSteering(ctx, steerable);
+            return now.text;
+          }
           if (now.state === 'failed') {
             // A prompt the cancellation's interrupt ended fails with the cancellation.
             if (cancelled) throw cancelled;

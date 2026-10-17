@@ -18,6 +18,11 @@ describe('the bank agent on pi', () => {
     expect(await crashedAnywhere(prompt, pi.messages(), { concurrency: 1 })).toEqual([]);
   }, 600_000);
 
+  it('answers a message once after a crash at any of its state requests, steered once', async () => {
+    // One at a time: pi-ai's faux provider answers from one queue.
+    expect(await crashedAnywhere(prompt, pi.messages(), { concurrency: 1, steered: true })).toEqual([]);
+  }, 600_000);
+
   it('gives the conversation: what was said, in order, with the tool calls', async () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');

@@ -17,7 +17,7 @@ export {
   type Configure,
 } from './common.ts';
 export { object, type Status, type Stopped } from './object.ts';
-export { signals, type Resolved, type Signal, type Waiting } from './signals.ts';
+export { signals, type Resolved, type Signal, type Steer, type Steered, type Waiting } from './signals.ts';
 export { call, send, signal, subagent, tool, workflow, type Tool, type ToolCall, type ToolContext } from './tools.ts';
 
 /**

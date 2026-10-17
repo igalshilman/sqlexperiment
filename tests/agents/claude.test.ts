@@ -9,6 +9,8 @@ import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  STEERED,
+  steeredWhileWorking,
   conversation,
   crashedAnywhere,
   SAID,
@@ -36,6 +38,12 @@ describe('the Claude agent', () => {
     expect(now.failed).toBeInstanceOf(restate.CancelledError);
     expect(now.answer).toBe(waiting.answer);
     expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
+  });
+
+  it('answers a message steered to the turn as a message of its own, once the turn ends', async () => {
+    const { answer, left } = await steeredWhileWorking((tools) => claude.chat({ tools }), claude.messages());
+    expect(answer).toBe('Done: moved 5 from account 1 to account 2');
+    expect(left).toEqual([STEERED]);
   });
 
   it('ends a cancelled turn, and answers the next message afresh', async () => {
@@ -76,13 +84,13 @@ describe('the Claude agent', () => {
       },
     });
     const owner = sqlAttempt({ map, key: 'mid', id: 'inv1' });
-    const ctx = { key: 'mid', request: () => ({ id: 'inv1' }), ...owner };
+    const ctx = { key: 'mid', ...owner };
     const answer = owner.end(() =>
       claude.chat({ tools: [transfer] })(ctx as unknown as restate.SqlObjectContext, 'Please move 5 from 1 to 2'),
     );
     await started.promise;
     const reader = sqlAttempt({ map, key: 'mid', id: 'read', shared: true });
-    const read = { key: 'mid', request: () => ({ id: 'read' }), ...reader };
+    const read = { key: 'mid', ...reader };
     const page = await reader.end(() => claude.messages()(read as unknown as restate.SqlObjectContext, {}));
     expect(page.messages.map((m) => m.parts)).toEqual([
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
@@ -97,6 +105,10 @@ describe('the Claude agent', () => {
 
   it('answers a message once after a crash at any of its state requests', async () => {
     expect(await crashedAnywhere(prompt, claude.messages())).toEqual([]);
+  }, 600_000);
+
+  it('answers a message once after a crash at any of its state requests, steered once', async () => {
+    expect(await crashedAnywhere(prompt, claude.messages(), { steered: true })).toEqual([]);
   }, 600_000);
 
   it('gives the conversation: what was said, in order, with the tool calls', async () => {

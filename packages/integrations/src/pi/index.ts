@@ -59,6 +59,9 @@ import {
   messagesHandler,
   modelOf,
   nextPromptId,
+  settleSteering,
+  type Steerable,
+  takeSteering,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -155,20 +158,39 @@ export const withPi = async <T>(
     failed(cancelled);
   };
   turn?.addEventListener('abort', onCancel, { once: true });
+  // The root conversation, once the Harness is open (below).
+  let conversation!: () => Promise<Conversation>;
+  // Messages steered to the turn: given as pi-durable's steering input (by
+  // its id, once), which the run takes once the round's tools are done.
+  const steerable: Steerable = {
+    steer: async ({ id, text }) => {
+      await (await conversation()).submit({ type: 'input', content: text, requestId: id, whenBusy: 'steer' }, context);
+    },
+    has: async (id) => {
+      const root = await conversation();
+      return (await root.commit((tx) => tx.submissionByRequest(root.id, id), context)) !== undefined;
+    },
+  };
   const failing = (t: ToolRegistration): ToolRegistration => ({
     ...t,
     execute: (args, api, task) =>
-      t.execute(args, api, task).catch((error: unknown) => {
-        // The turn was cancelled, and the abort ended the call: pi-durable records it.
-        if (cancelled) throw error;
-        failed(error);
-        if (error instanceof restate.CancelledError) {
-          cancelled = error;
-          return awaitWithContext(new Promise<never>(() => {}), task);
-        }
-        cancel(error);
-        return awaitWithContext(new Promise<never>(() => {}), context);
-      }),
+      t
+        .execute(args, api, task)
+        .then(async (result) => {
+          await takeSteering(ctx, steerable);
+          return result;
+        })
+        .catch((error: unknown) => {
+          // The turn was cancelled, and the abort ended the call: pi-durable records it.
+          if (cancelled) throw error;
+          failed(error);
+          if (error instanceof restate.CancelledError) {
+            cancelled = error;
+            return awaitWithContext(new Promise<never>(() => {}), task);
+          }
+          cancel(error);
+          return awaitWithContext(new Promise<never>(() => {}), context);
+        }),
   });
   const registry = createRegistry();
   registry.install(
@@ -187,7 +209,7 @@ export const withPi = async <T>(
   try {
     // The root conversation keeps the model it was created with: on another
     // one now (`model` or MODEL changed), it moves to this one.
-    const conversation = async () => {
+    conversation = async () => {
       const root = await harness.root(context, { agent: { model: { provider, modelId } } });
       const { model: current } = await root.agent(context);
       if (current?.provider !== provider || current.modelId !== modelId) {
@@ -220,6 +242,7 @@ export const withPi = async <T>(
           const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
           const reply = entry?.model?.at(-1);
           if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
+          await settleSteering(ctx, steerable);
           return textOf(reply.content);
         },
       }),
