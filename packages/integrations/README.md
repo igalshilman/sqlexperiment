@@ -52,7 +52,9 @@ curl localhost:8080/assistant/alice/messages                          # the conv
 
 `assistant` is a virtual object: each key (`alice`, `bob`) is a
 conversation of its own, with a database of its own, and answers one
-message at a time. `serve` serves it on PORT (default 9080).
+message at a time. `serve` serves it on PORT (default 9080), with the
+`signals` object every agent uses (its waits and steering); an endpoint of
+your own (`restate.serve`, `restate.endpoint()`) binds `signals` too.
 
 ## Choose a framework
 
@@ -333,8 +335,7 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 
 A wait ends with its agent's invocation: a cancelled one leaves `pending`.
 The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
-`serve` serves beside the agents; an endpoint of your own (`restate.serve`,
-`restate.endpoint()`) binds `signals` too. See
+`serve` serves beside the agents. See
 [`examples/support.ts`](../../examples/support.ts).
 
 ## Models
