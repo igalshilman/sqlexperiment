@@ -12,7 +12,7 @@ curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
 
 | File                            | What                                                                                                           |
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| [`chat.ts`](chat.ts)            | A durable chat agent on pi, with a tool: `chat: pi.chat({ tools: [weather] })`                                 |
+| [`chat.ts`](chat.ts)            | A durable chat agent on pi, with a tool: `pi.agent({ name: 'assistant', tools: [weather] })`                   |
 | [`opencode.ts`](opencode.ts)    | The same agent on OpenCode 2.0                                                                                 |
 | [`langgraph.ts`](langgraph.ts)  | The same agent on LangGraph                                                                                    |
 | [`claude.ts`](claude.ts)        | The same agent on Claude (the Anthropic SDK's tool runner)                                                     |
