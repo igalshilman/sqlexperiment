@@ -45,7 +45,7 @@ import {
 } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
-import { forCall, type PerCall } from '../common.ts';
+import { chatHandler, forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
@@ -161,8 +161,8 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolRegistration =>
     }),
   });
 
-/** A chat handler: each message an invocation, the conversation in the object's database. */
-export const chat =
+/** The answer to a message, each message an invocation, the conversation in the object's database. */
+const respond =
   ({ model, models, tools = [], workspace }: ChatOptions = {}) =>
   (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
     prompt(ctx, message, {
@@ -171,6 +171,13 @@ export const chat =
       tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),
       workspace: workspace === undefined ? undefined : forCall(workspace, ctx),
     });
+
+/**
+ * A chat handler: each message an invocation, the conversation in the object's database.
+ * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
+ * (`curl --json '"Hi"'`).
+ */
+export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
 export const agent = <P extends string>({

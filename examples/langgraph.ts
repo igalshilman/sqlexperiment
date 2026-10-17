@@ -7,7 +7,7 @@
  *
  *   ANTHROPIC_API_KEY=… node langgraph.ts
  *   restate deployments register http://localhost:9080
- *   curl localhost:8080/assistant/alice/chat --json '"Hi, I am Alice. Is it warm in Lisbon?"'
+ *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  */
 import { tool } from '@langchain/core/tools';
 import { serve } from 'restate-agents';

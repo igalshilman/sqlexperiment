@@ -42,7 +42,7 @@ import {
   type ToolRunContext,
   ToolRuntime,
 } from '@deepseek-ai/dsh-tools';
-import { forCall, type PerCall } from '../common.ts';
+import { chatHandler, forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
@@ -197,8 +197,8 @@ export interface ChatOptions {
   tools?: (PerCall<ToolDefinition> | AnyTool)[];
 }
 
-/** A chat handler: each message an invocation, the session in the object's database. */
-export const chat =
+/** The answer to a message, each message an invocation, the session in the object's database. */
+const respond =
   ({ model = process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL, system = 'Answer briefly.', tools = [] }: ChatOptions = {}) =>
   async (ctx: restate.SqlObjectContext, text: string): Promise<string> => {
     const id = ctx.request().id;
@@ -255,6 +255,13 @@ export const chat =
       await harness.fiber.dispose();
     }
   };
+
+/**
+ * A chat handler: each message an invocation, the session in the object's database.
+ * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
+ * (`curl --json '"Hi"'`).
+ */
+export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
 export const agent = <P extends string>({

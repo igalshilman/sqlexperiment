@@ -22,7 +22,7 @@
 import type * as restate from '@restatedev/restate-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
-import { forCall, type PerCall } from '../common.ts';
+import { chatHandler, forCall, type PerCall } from '../common.ts';
 import { object } from '../object.ts';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -128,8 +128,8 @@ export interface ChatOptions {
   tools?: (PerCall<BetaRunnableTool> | AnyTool)[];
 }
 
-/** A chat handler: each message an invocation, the conversation in the object's database. */
-export const chat = ({ model = process.env.CLAUDE_MODEL ?? DEFAULT_MODEL, system, tools = [] }: ChatOptions = {}) => {
+/** The answer to a message, each message an invocation, the conversation in the object's database. */
+const respond = ({ model = process.env.CLAUDE_MODEL ?? DEFAULT_MODEL, system, tools = [] }: ChatOptions = {}) => {
   const client = new Anthropic();
   return async (ctx: restate.SqlObjectContext, message: string): Promise<string> => {
     const agent = { client, model, system, tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))) };
@@ -149,6 +149,13 @@ export const chat = ({ model = process.env.CLAUDE_MODEL ?? DEFAULT_MODEL, system
     }
   };
 };
+
+/**
+ * A chat handler: each message an invocation, the conversation in the object's database.
+ * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
+ * (`curl --json '"Hi"'`).
+ */
+export const chat = (options: ChatOptions = {}) => chatHandler(respond(options));
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */
 export const agent = <P extends string>({

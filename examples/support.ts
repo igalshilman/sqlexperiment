@@ -6,7 +6,7 @@
  *
  *   ANTHROPIC_API_KEY=… node support.ts
  *   restate deployments register http://localhost:9080
- *   curl localhost:8080/support/alice/chat --json '"Order 103 arrived broken, can I get my $30 back?"'
+ *   curl localhost:8080/support/alice/chat -d 'Order 103 arrived broken, can I get my $30 back?'
  *
  * The agent waits for approval; in another terminal, see what it waits for,
  * and approve:
