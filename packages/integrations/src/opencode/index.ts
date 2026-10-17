@@ -93,7 +93,7 @@ const SESSION = 'ses_root';
 export interface OpenCodeSession {
   host: Host;
   /** Answer `text`, once per prompt `id`, with the answer's text. By default, each prompt of an invocation has an id of its own, the same on every attempt. */
-  prompt(text: string, id?: string): Promise<string>;
+  prompt: (text: string, id?: string) => Promise<string>;
 }
 
 /** An agent's options: `chat`, `prompt` and `withOpenCode` take them. */

@@ -73,7 +73,7 @@ export interface Pi {
   harness: Harness;
   context: Context;
   /** Answer `text`, once per prompt `id`, with the answer's text. By default, each prompt of an invocation has an id of its own, the same on every attempt. */
-  prompt(text: string, id?: string): Promise<string>;
+  prompt: (text: string, id?: string) => Promise<string>;
   /** The object's conversation, on the model: for `reset`, `compact`, `entries` and the like. */
   conversation: () => Promise<Conversation>;
 }

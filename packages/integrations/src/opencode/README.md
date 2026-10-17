@@ -24,6 +24,7 @@ await serve(coder);
 | `system`    | The system prompt                                                                                                                                                       |
 | `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`OpenCodeTool`)                                                                       |
 | `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...); use a sandbox. Without one, the agent has only `tools` |
+| `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples/review.ts`](../../../../examples/review.ts))                |
 
 For an object of your own, `opencode.chat(options)` and
 `opencode.messages()` are the handlers; `options` may be a function of the

@@ -44,6 +44,9 @@ importers:
       '@langchain/core':
         specifier: 1.2.12
         version: 1.2.12(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.4)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
+      '@opencode/plugin':
+        specifier: 2.0.27
+        version: 2.0.27(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.5.17(typescript@7.0.2)(web-tree-sitter@0.25.10))(redis@6.3.0(@opentelemetry/api@1.9.0))
       '@restatedev/restate-sdk':
         specifier: file:../packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
         version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz(sqlite-kv@packages+sql-node)
