@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests")
 
 from bank import transfer  # noqa: E402
 from fakes import Teller  # noqa: E402
-from memory import remember  # noqa: E402
+from memory import facts_table, remember  # noqa: E402
 from restate_agents import langgraph, serve, tool  # noqa: E402
 
 
@@ -28,14 +28,14 @@ async def bank_transfer(ctx, call_id, src: int, dst: int, amount: int) -> str:
 teller = langgraph.agent(
     "teller",
     model=Teller(),
-    schema="CREATE TABLE IF NOT EXISTS facts (fact TEXT PRIMARY KEY)",
     tools=[bank_transfer, remember],
 )
 
 
 @teller.handler
 async def facts(ctx) -> list[str]:
-    return [fact for (fact,) in await ctx.db.query("SELECT fact FROM facts ORDER BY rowid")]
+    db = await facts_table(ctx.db)
+    return [fact for (fact,) in await db.query("SELECT fact FROM facts ORDER BY rowid")]
 
 
 if __name__ == "__main__":

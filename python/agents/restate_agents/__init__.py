@@ -15,7 +15,7 @@ often an attempt crashes.
     serve(assistant)
 """
 
-from restate_agents.object import Object, context, serve
+from restate_agents.object import context, serve
 from restate_agents.tool import Tool, tool
 
-__all__ = ["Object", "Tool", "context", "serve", "tool"]
+__all__ = ["Tool", "context", "serve", "tool"]

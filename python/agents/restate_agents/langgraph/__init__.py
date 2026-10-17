@@ -140,7 +140,7 @@ def agent(
     **options: Any,
 ) -> Object:
     """
-    An agent: an ``Object`` ``name``, one per key (its thread), with the handlers
+    An agent: a virtual object ``name``, one per key (its thread), with the handlers
 
     - ``chat``: a message in, the answer out; the message as plain text
       (``curl -d 'Hi'``) or as a JSON string (``curl --json '"Hi"'``);
@@ -149,8 +149,8 @@ def agent(
     ``model``: ``anthropic/model-id``, or a LangChain chat model that calls
     tools, or a function of the invocation's context giving either.
     ``system``: the system prompt. ``tools``: ``tool``s, LangChain tools, or
-    functions of the invocation's context giving them. ``options``: the
-    ``Object``'s, such as ``schema``. Add handlers of your own with
+    functions of the invocation's context giving them. ``options``: those
+    of ``restate.VirtualObject``. Add handlers of your own with
     ``@agent.handler``.
     """
     if isinstance(model, str):

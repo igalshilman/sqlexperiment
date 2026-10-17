@@ -83,31 +83,16 @@ and LangGraph carries on from the last step it stored.
   run that a crash interrupted (its prompt without an answer) is finished
   before the next message starts.
 
-## Objects
+## Handlers of your own
 
-`Object(name, schema=...)` is a virtual object with a SQL database of its
-own, `ctx.db`, one per key: `restate.VirtualObject` with
-`restate.sql_options`, retries up to 100,000 times, 50 to 500 ms apart (each
-attempt resumes from the database), and the SQL storage hidden from the
-journal in Restate's UI. Each handler first runs `schema`, such as `CREATE
-TABLE IF NOT EXISTS`. A handler takes `ctx`, then its input: one parameter,
-or several, which a JSON object gives by name:
-
-```python
-account = Object("account", schema="CREATE TABLE IF NOT EXISTS moves (id TEXT PRIMARY KEY, amount INTEGER)")
-
-
-@account.handler
-async def deposit(ctx, id: str, amount: int) -> int:
-    await ctx.db.execute("INSERT OR IGNORE INTO moves VALUES (?, ?)", [id, amount])
-    [[balance]] = await ctx.db.query("SELECT sum(amount) FROM moves")
-    return balance
-```
-
-An agent is an `Object` too: `langgraph.agent(name, schema=..., ...)` takes
-its options, and `@agent.handler` adds handlers of your own
-([`examples-py/memory.py`](../../examples-py/memory.py)).
-`serve(*services)` serves them on `PORT`, or 9080.
+An agent is a virtual object with a SQL database of its own, `ctx.db`, one
+per key: `restate.VirtualObject` with `restate.sql_options`, retries up to
+100,000 times, 50 to 500 ms apart (each attempt resumes from the database),
+and the SQL storage hidden from the journal in Restate's UI.
+`@assistant.handler` adds a handler, which takes `ctx`, then its input: one
+parameter, or several, which a JSON object gives by name
+([`examples-py/memory.py`](../../examples-py/memory.py)). `serve(*services)`
+serves them on `PORT`, or 9080.
 
 ## Tests
 
