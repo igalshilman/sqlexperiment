@@ -40,7 +40,7 @@ index 18d3aa3..ca9b182 100644
    ClientSendOptions,
    RemoveVoidArgument,
 diff --git a/packages/libs/restate-sdk/src/context.ts b/packages/libs/restate-sdk/src/context.ts
-index 8ea15b1..9e359c4 100644
+index 8ea15b1..ad743c4 100644
 --- a/packages/libs/restate-sdk/src/context.ts
 +++ b/packages/libs/restate-sdk/src/context.ts
 @@ -9,11 +9,14 @@
@@ -122,7 +122,7 @@ index 8ea15b1..9e359c4 100644
  }
  
  /**
-@@ -1131,3 +1191,195 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
+@@ -1131,3 +1191,204 @@ export interface WorkflowContext<TState extends TypedState = UntypedState>
      WorkflowSharedContext<TState>,
      ObjectContext<TState>,
      RestateWorkflowContext {}
@@ -275,7 +275,16 @@ index 8ea15b1..9e359c4 100644
 +  extends
 +    SqlContext,
 +    Pick<ObjectSharedContext<TState>, "key" | "get" | "stateKeys">,
-+    RestateObjectSharedContext {}
++    RestateObjectSharedContext {
++  /**
++   * The object's database, to read while an exclusive handler of the object
++   * runs (or not): the state as of this handler's first call to it. What
++   * this handler writes stays in it, and is never stored. If an exclusive
++   * handler commits while this one reads, this attempt fails when it ends,
++   * and Restate retries it: what it returns was the stored state.
++   */
++  readonly db: SqlSession;
++}
 +
 +/**
 + * {@link DurablePromise} without journal replay.
@@ -778,10 +787,10 @@ index f14da79..bdc98ec 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..3eaa860
+index 0000000..bfdb020
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,644 @@
+@@ -0,0 +1,687 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -923,12 +932,17 @@ index 0000000..3eaa860
 +  transaction<T>(body: (tx: AddonTransaction) => Promise<T>): Promise<T>;
 +  version(): Promise<number>;
 +  isUsable(): boolean;
++  isCurrent(): Promise<boolean>;
 +  save(): Promise<void>;
 +  close(): Promise<void>;
 +}
 +
 +type Addon = {
-+  open: (namespace: string, store: SqlStore) => Promise<Session>;
++  open: (
++    namespace: string,
++    store: SqlStore,
++    options?: { reader?: boolean }
++  ) => Promise<Session>;
 +};
 +
 +// A variable, so that neither the bundler nor tsc resolves the optional addon.
@@ -1000,6 +1014,19 @@ index 0000000..3eaa860
 + * ends instead of holding its lock for the life of the process.
 + */
 +function objectStore(ctx: SqlHost, end: AttemptEnd): SqlStore {
++  if (ctx.handlerKind !== HandlerKind.EXCLUSIVE) {
++    // A shared handler's reader writes nothing.
++    const refused = () => {
++      throw new Error("a shared handler writes no state");
++    };
++    return {
++      get: async (key) =>
++        (await end.race(ctx.get(key, serde.binary))) ?? undefined,
++      set: refused,
++      clear: refused,
++      sync: async () => {},
++    };
++  }
 +  return {
 +    get: async (key) =>
 +      (await end.race(ctx.get(key, serde.binary))) ?? undefined,
@@ -1230,6 +1257,9 @@ index 0000000..3eaa860
 +   * made once it commits, and kept in the object's state until they are.
 +   */
 +  async transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T> {
++    if (this.#reader()) {
++      throw new TerminalError("ctx.transaction is for exclusive handlers");
++    }
 +    const db = await this.#open();
 +    const sends: Pending["sends"] = [];
 +    let open = true;
@@ -1339,10 +1369,15 @@ index 0000000..3eaa860
 +    return this.#session;
 +  }
 +
++  /** A shared handler's session: it reads beside the exclusive one, and stores nothing. */
++  #reader() {
++    return this.#ctx.handlerKind === HandlerKind.SHARED;
++  }
++
 +  async #start(): Promise<Session> {
 +    const ctx = this.#ctx;
-+    if (ctx.handlerKind !== HandlerKind.EXCLUSIVE) {
-+      throw new TerminalError("ctx.db is for exclusive object handlers");
++    if (ctx.handlerKind !== HandlerKind.EXCLUSIVE && !this.#reader()) {
++      throw new TerminalError("ctx.db is for the handlers of objects");
 +    }
 +    if (ctx.journalReplay) {
 +      throw new TerminalError(
@@ -1356,13 +1391,15 @@ index 0000000..3eaa860
 +    const store = objectStore(ctx, end);
 +    const db = await sqliteKv.open(
 +      namespace,
-+      wrapStore ? wrapStore(store) : store
++      wrapStore ? wrapStore(store) : store,
++      { reader: this.#reader() }
 +    );
 +    // A handler still waiting for something else when the attempt ends (a
 +    // model request, say) keeps the session no longer: it closes once no
 +    // statement runs, and the handler's later calls fail.
 +    this.#cancel = end.onEnd(() => void db.close().catch(() => {}));
 +    this.#db = db;
++    if (this.#reader()) return db;
 +    try {
 +      await this.#recover(db, store);
 +    } catch (error) {
@@ -1391,6 +1428,21 @@ index 0000000..3eaa860
 +      return settle(outcome);
 +    }
 +    this.#cancel();
++    if (this.#reader()) {
++      // What it read is the stored state only if no commit came since.
++      const current = await db.isCurrent().catch(() => false);
++      const usable = db.isUsable();
++      await db.close();
++      if (!current) {
++        throw new Error(
++          "the object's database changed while this shared handler read it: retrying"
++        );
++      }
++      if ("error" in outcome) {
++        throw this.#errors.classify(outcome.error, usable);
++      }
++      return outcome.value;
++    }
 +    if ("error" in outcome) {
 +      const error = this.#errors.classify(outcome.error, db.isUsable());
 +      // The handler's error stands: its writes are stored in order before

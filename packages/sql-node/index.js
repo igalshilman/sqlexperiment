@@ -11,9 +11,10 @@ const BARRIER = 4;
 
 /**
  * Open the database of `namespace` over `store`. Every store call goes through
- * one queue, so the store sees them in the order they were issued.
+ * one queue, so the store sees them in the order they were issued. A `reader`
+ * reads beside the namespace's owner, and writes nothing.
  */
-async function open(namespace, store) {
+async function open(namespace, store, { reader = false } = {}) {
   // A failed write cannot fail its caller, which has moved on: the next sync
   // reports it, so the session's writes are not confirmed.
   let failure = null;
@@ -41,7 +42,7 @@ async function open(namespace, store) {
         return Promise.reject(new Error(`unknown store operation ${op}`));
     }
   };
-  return new Database(await addon.open(namespace, dispatch));
+  return new Database(await addon.open(namespace, dispatch, reader));
 }
 
 // The transaction whose body is running, in that body's asynchronous context:
@@ -126,6 +127,14 @@ class Database {
    */
   version() {
     return this.#native.version();
+  }
+
+  /**
+   * A reader's: whether the store still holds the state it opened on, so that
+   * what it read is. If not, read again, in a new session.
+   */
+  isCurrent() {
+    return this.#serial(() => this.#native.isCurrent());
   }
 
   /** Whether SQL can still run: an SQL error leaves the session usable. */
