@@ -62,7 +62,10 @@ describe('the OpenCode agent', () => {
   });
 
   it('takes a message steered to the turn at its next tool call', async () => {
-    const { answer, parts, left } = await steeredWhileWorking((tools) => opencode.chat({ tools }), opencode.messages());
+    const { answer, parts, left, published } = await steeredWhileWorking(
+      (tools) => opencode.chat({ tools }),
+      opencode.messages(),
+    );
     expect(answer).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
     expect(parts).toEqual([
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
@@ -79,6 +82,8 @@ describe('the OpenCode agent', () => {
       [{ type: 'text', text: answer }],
     ]);
     expect(left).toEqual([]);
+    // Published at its start, as its tool call starts and ends, and at its end.
+    expect(published).toBe(4);
   });
 
   it('tells the model a tool it does not have is not there', async () => {

@@ -9,7 +9,7 @@
 //
 // Each user (`?user=alice`) is a conversation of its own: the agent's key.
 import * as clients from '@restatedev/restate-sdk-clients';
-import { agent, type ChatMessage, type Part, type Status } from 'restate-agents/client';
+import { agent, type ChatMessage, follow, type Part, type Status } from 'restate-agents/client';
 
 // Restate's ingress, through the dev server's proxy (vite.config.ts).
 const restate = clients.connect({ url: `${location.origin}/ingress` });
@@ -32,7 +32,6 @@ async function send(text: string) {
   const { answering } = await support.status();
   if (answering) await support.steer(text);
   else await restate.objectSendClient(agent('support'), user).chat(text);
-  await refresh();
 }
 
 /** A tool call: its name and input, and its output once it ran. */
@@ -63,7 +62,7 @@ function renderStatus({ answering, waiting }: Status) {
       const e = element('div', 'wait', `Waits for ${w.name}: ${JSON.stringify(w.input)}`);
       for (const value of ['approved', 'rejected']) {
         const button = element('button', value, value === 'approved' ? 'Approve' : 'Reject');
-        button.addEventListener('click', () => void support.signal({ id: w.id, value }).then(refresh));
+        button.addEventListener('click', () => void support.signal({ id: w.id, value }));
         e.append(button);
       }
       return e;
@@ -71,23 +70,20 @@ function renderStatus({ answering, waiting }: Status) {
   );
 }
 
-async function refresh() {
-  const [status, { messages }] = await Promise.all([support.status(), support.messages({ limit: 50 })]);
-  renderStatus(status);
-  renderMessages(messages);
-}
-
 $('user').textContent = user;
-$('stop').addEventListener('click', () => void support.stop().then(refresh));
+$('stop').addEventListener('click', () => void support.stop());
 $('composer').addEventListener('submit', (event) => {
   event.preventDefault();
   const input = $('text') as HTMLInputElement;
   if (input.value.trim()) void send(input.value);
   input.value = '';
 });
-// The conversation and the agent's status, every second: the tool calls
-// show up as it makes them.
-for (;;) {
-  await refresh().catch((error: unknown) => console.error(error));
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+// The conversation and the agent's status, as they change: the tool calls
+// show up as the agent makes them. A message that comes again (a tool call
+// with its output) replaces the one of its id.
+const messages = new Map<number, ChatMessage>();
+for await (const change of follow(restate, agent('support'), user)) {
+  for (const m of change.messages) messages.set(m.id, m);
+  renderStatus(change.status);
+  renderMessages([...messages.values()]);
 }

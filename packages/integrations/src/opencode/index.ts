@@ -48,7 +48,8 @@ import {
   nextPromptId,
   settleSteering,
   type Steerable,
-  takeSteering,
+  toolCallEnded,
+  toolCallStarted,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -157,9 +158,10 @@ function toolsPlugin(tools: OpenCodeTool[], fail: (error: unknown) => Promise<ne
 }
 
 /**
- * An OpenCode plugin that gives the session the messages steered to the turn
- * (`steerable`) at the end of each tool call: OpenCode's steering, which its
- * next step takes.
+ * An OpenCode plugin that publishes each tool call as it starts and ends
+ * (for the clients that follow the conversation), and gives the session the
+ * messages steered to the turn (`steerable`) at its end: OpenCode's
+ * steering, which its next step takes.
  */
 const steeringPlugin = (
   ctx: restate.SqlObjectContext,
@@ -168,10 +170,16 @@ const steeringPlugin = (
 ): Plugin.Plugin => ({
   id: 'examples.steering',
   async setup(plugin) {
-    const hook = await plugin.tool.hook('execute.after', async () => {
-      await takeSteering(ctx, steerable).catch(fail);
+    const before = await plugin.tool.hook('execute.before', async () => {
+      await toolCallStarted(ctx).catch(fail);
     });
-    return () => hook.dispose();
+    const after = await plugin.tool.hook('execute.after', async () => {
+      await toolCallEnded(ctx, steerable).catch(fail);
+    });
+    return async () => {
+      await before.dispose();
+      await after.dispose();
+    };
   },
 });
 

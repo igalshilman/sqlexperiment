@@ -33,10 +33,13 @@ export function memoryStore(map = new Map<string, Uint8Array>(), fence = { close
 }
 
 /**
- * The `signals` object of an agent's tests, as far as steering goes: the
- * messages steered to each turn, and the turns closed.
+ * The `signals` object of an agent's tests, as far as steering and following
+ * go: the messages steered to each turn, the turns closed, and how often the
+ * conversation was published.
  */
 export class Steering {
+  /** The conversation's revision: how often it was published. */
+  revision = 0;
   /** The messages steered to each turn, by its invocation id. */
   readonly turns = new Map<string, Steer[]>();
   /** Each turn closed, with the ids of the messages it took. */
@@ -139,7 +142,14 @@ export function sqlAttempt({
     /** The `signals` object, as steering calls it. */
     objectClient: (definition: { name: string }) => {
       if (definition.name !== 'signals') throw new Error(`no ${definition.name} in this test`);
-      return { steering: async (turn: string) => steering.turns.get(turn) ?? [] };
+      return {
+        steering: async (turn: string) => steering.turns.get(turn) ?? [],
+        publish: async () => ({ revision: ++steering.revision }),
+        progress: async (turn: string) => {
+          steering.revision++;
+          return steering.turns.get(turn) ?? [];
+        },
+      };
     },
     objectSendClient: (definition: { name: string }) => {
       if (definition.name !== 'signals') throw new Error(`no ${definition.name} in this test`);
@@ -458,8 +468,9 @@ export const STEERED = 'Only from account 1, please';
 /**
  * `chat` (with `tools`) on an object of its own, its message (a transfer)
  * steered ({@link STEERED}) while its tool `transfer` runs: its answer, the
- * conversation then (each message's parts), and the steering that the turn
- * did not take, which is answered as messages of their own.
+ * conversation then (each message's parts), the steering that the turn did
+ * not take, which is answered as messages of their own, and how often the
+ * turn published its conversation.
  */
 export async function steeredWhileWorking(
   chat: (tools: Tool[]) => PromptHandler,
@@ -484,7 +495,12 @@ export async function steeredWhileWorking(
   const answer = await turn.sql.end(() => chat([transfer])(turn.ctx, 'Please move 5 from 1 to 2'));
   const read = attempt('read', true);
   const page = await read.sql.end(() => messages(read.ctx, {}));
-  return { answer, parts: withoutIds(page.messages.map((m) => m.parts)), left: steering.left('inv1') };
+  return {
+    answer,
+    parts: withoutIds(page.messages.map((m) => m.parts)),
+    left: steering.left('inv1'),
+    published: steering.revision,
+  };
 }
 
 /** `parts` without their tool calls' ids, which differ from run to run. */

@@ -41,9 +41,11 @@ describe('the Claude agent', () => {
   });
 
   it('answers a message steered to the turn as a message of its own, once the turn ends', async () => {
-    const { answer, left } = await steeredWhileWorking((tools) => claude.chat({ tools }), claude.messages());
+    const { answer, left, published } = await steeredWhileWorking((tools) => claude.chat({ tools }), claude.messages());
     expect(answer).toBe('Done: moved 5 from account 1 to account 2');
     expect(left).toEqual([STEERED]);
+    // Published at its start, as its tool call starts and ends, and at its end.
+    expect(published).toBe(4);
   });
 
   it('ends a cancelled turn, and answers the next message afresh', async () => {

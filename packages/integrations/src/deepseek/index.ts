@@ -57,7 +57,8 @@ import {
   nextPromptId,
   settleSteering,
   type Steerable,
-  takeSteering,
+  toolCallEnded,
+  toolCallStarted,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -262,8 +263,9 @@ export const prompt = async (
             ...definition,
             execute: (args, exec) =>
               guard(fail, async () => {
+                await toolCallStarted(ctx);
                 const result = await definition.execute(args, exec);
-                await takeSteering(ctx, steerable);
+                await toolCallEnded(ctx, steerable);
                 return result;
               }),
           });
