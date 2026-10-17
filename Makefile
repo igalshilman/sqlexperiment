@@ -139,7 +139,7 @@ concurrency-test: js $(RESTATE_SERVER) ## The context without journal replay, ag
 concurrency-test-py: py $(RESTATE_SERVER) ## Python: the context without journal replay, an agent and the examples (examples-py), against a Restate server
 	cd python && uv run --locked pytest tests
 
-crash-test-py: py $(RESTATE_SERVER) ## Python: the bank example through crashes, against a Restate server
+crash-test-py: py $(RESTATE_SERVER) ## Python: a bank and an agent through crashes, against a Restate server
 	cd python && uv run --locked python tests/crash.py
 
 tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, workflow), against a Restate server
