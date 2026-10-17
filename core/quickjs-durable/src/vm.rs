@@ -231,10 +231,7 @@ impl Runtime {
         let mut ready_operations = 0_usize;
         let state = loop {
             vm.drain()?;
-            let state: State = serde_json::from_str(
-                &vm.eval("__durable.inspect()", true)?
-                    .context("Missing state")?,
-            )?;
+            let state = vm.inspect()?;
             let mut ready = false;
             for operation in &state.pending {
                 if !handled.insert(operation.id().to_owned()) {
@@ -290,11 +287,8 @@ impl Runtime {
                 // outcomes are now in the heap/job queue. No Wasm call or Rust
                 // operation future is live. Persist a local wakeup so recovery
                 // can schedule these queued continuations without replaying I/O.
-                vm.eval("__durable.pause()", false)?;
-                let state: State = serde_json::from_str(
-                    &vm.eval("__durable.inspect()", true)?
-                        .context("Missing state")?,
-                )?;
+                vm.call("pause", None)?;
+                let state = vm.inspect()?;
                 let wakeup = state.pending.last().context("Missing resume wakeup")?;
                 ensure!(
                     matches!(wakeup, Operation::Resume { .. }),
@@ -331,6 +325,10 @@ struct Vm {
     malloc: TypedFunc<i32, i32>,
     free: TypedFunc<i32, ()>,
     eval_fn: TypedFunc<(i32, i32, i32, i32), i32>,
+    call_fn: TypedFunc<(i32, i32, i32, i32), i32>,
+    global: TypedFunc<(), i32>,
+    property: TypedFunc<(i32, i32), i32>,
+    new_string: TypedFunc<(i32, i32), i32>,
     free_value: TypedFunc<i32, ()>,
     is_exception: TypedFunc<i32, i32>,
     get_exception: TypedFunc<(), i32>,
@@ -494,6 +492,10 @@ impl Vm {
             malloc: instance.get_typed_func(&mut store, "wasm_malloc")?,
             free: instance.get_typed_func(&mut store, "wasm_free")?,
             eval_fn: instance.get_typed_func(&mut store, "qjs_eval")?,
+            call_fn: instance.get_typed_func(&mut store, "qjs_call")?,
+            global: instance.get_typed_func(&mut store, "qjs_get_global")?,
+            property: instance.get_typed_func(&mut store, "qjs_get_prop_string")?,
+            new_string: instance.get_typed_func(&mut store, "qjs_new_string")?,
             free_value: instance.get_typed_func(&mut store, "qjs_free_value")?,
             is_exception: instance.get_typed_func(&mut store, "qjs_is_exception")?,
             get_exception: instance.get_typed_func(&mut store, "qjs_get_exception")?,
@@ -600,11 +602,64 @@ impl Vm {
         }
         Ok(result)
     }
+    /// Call a bridge hook, `__durable.<name>(argument)`, with an optional
+    /// string argument, returning its result as a string. A direct call: no
+    /// source to compile, so it costs a fraction of an eval, and no argument
+    /// can inject source. Every handle is freed before returning; after an
+    /// error the turn is discarded, so leaks then don't matter.
+    fn call(&mut self, name: &str, argument: Option<&str>) -> Result<String> {
+        let global = self.global.call(&mut self.store, ())?;
+        ensure!(global != 0, "Missing global object");
+        let bridge = self.property(global, "__durable")?;
+        self.free_value.call(&mut self.store, global)?;
+        let function = self.property(bridge, name)?;
+        let (argc, argv, value, text) = match argument {
+            Some(argument) => {
+                let text = self.alloc(argument.as_bytes())?;
+                let value = self
+                    .new_string
+                    .call(&mut self.store, (text, argument.len().try_into()?))?;
+                ensure!(value != 0, "Guest string allocation failed");
+                let argv = self.alloc(&value.to_le_bytes())?;
+                (1, argv, value, text)
+            }
+            None => (0, 0, 0, 0),
+        };
+        let result = self
+            .call_fn
+            .call(&mut self.store, (function, bridge, argc, argv))?;
+        for handle in [function, bridge, value] {
+            if handle != 0 {
+                self.free_value.call(&mut self.store, handle)?;
+            }
+        }
+        for buffer in [argv, text] {
+            if buffer != 0 {
+                self.free.call(&mut self.store, buffer)?;
+            }
+        }
+        ensure!(result != 0, "Missing call result");
+        if self.is_exception.call(&mut self.store, result)? != 0 {
+            self.free_value.call(&mut self.store, result)?;
+            bail!("Guest exception: {}", self.exception()?)
+        }
+        let string = self.string(result);
+        self.free_value.call(&mut self.store, result)?;
+        string
+    }
+    fn property(&mut self, object: i32, name: &str) -> Result<i32> {
+        let key = self.alloc(name.as_bytes())?;
+        let value = self.property.call(&mut self.store, (object, key))?;
+        self.free.call(&mut self.store, key)?;
+        ensure!(value != 0, "Missing property {name}");
+        Ok(value)
+    }
     fn invoke(&mut self, name: &str, value: &serde_json::Value) -> Result<()> {
-        // Double JSON encoding passes a string argument without source injection.
-        let argument = serde_json::to_string(&serde_json::to_string(value)?)?;
-        self.eval(&format!("__durable.{name}({argument})"), false)?;
+        self.call(name, Some(&serde_json::to_string(value)?))?;
         Ok(())
+    }
+    fn inspect(&mut self) -> Result<State> {
+        Ok(serde_json::from_str(&self.call("inspect", None)?)?)
     }
     fn drain(&mut self) -> Result<()> {
         while self.pending.call(&mut self.store, ())? != 0 {

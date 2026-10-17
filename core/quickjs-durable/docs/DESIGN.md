@@ -309,22 +309,27 @@ ID with another source or build is rejected.
 
 Relevant reactor exports, with wasm32 pointers/handles represented as i32:
 
-| Export                                                                | Use                                                             |
-| --------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `wasm_malloc(size) -> ptr`, `wasm_free(ptr)`                          | Allocate/free NUL-terminated source and bridge argument buffers |
-| `qjs_eval(code_ptr, byte_len, filename_ptr, flags=0) -> value_handle` | Evaluate a global script                                        |
-| `qjs_is_exception(handle) -> i32`, `qjs_get_exception() -> handle`    | Detect/extract exceptions                                       |
-| `qjs_get_string_len(handle, length_ptr) -> cstring_ptr`               | Convert result to UTF-8 bytes; length is little-endian u32      |
-| `qjs_free_cstring(ptr)`, `qjs_free_value(handle)`                     | Release temporary values before capture                         |
-| `qjs_is_job_pending() -> i32`, `qjs_execute_pending_job() -> i32`     | Drain jobs until none; a negative execution result is an error  |
-| `qjs_get_runtime_ptr()`, `qjs_get_context_ptr()`                      | Read snapshot offsets                                           |
-| `qjs_set_runtime_and_context(runtime, context)`                       | Rebind a restored heap                                          |
-| `qjs_set_memory_limit(bytes)`, `qjs_set_max_stack_size(bytes)`        | Apply limits on initialization and after restore                |
+| Export                                                                                          | Use                                                             |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `wasm_malloc(size) -> ptr`, `wasm_free(ptr)`                                                    | Allocate/free NUL-terminated source and bridge argument buffers |
+| `qjs_eval(code_ptr, byte_len, filename_ptr, flags=0) -> value_handle`                           | Evaluate a global script                                        |
+| `qjs_get_global() -> handle`, `qjs_get_prop_string(handle, name_ptr) -> handle`                 | Find a bridge hook                                              |
+| `qjs_new_string(ptr, byte_len) -> handle`, `qjs_call(function, this, argc, argv_ptr) -> handle` | Call a hook; `argv_ptr` is an array of handles                  |
+| `qjs_is_exception(handle) -> i32`, `qjs_get_exception() -> handle`                              | Detect/extract exceptions                                       |
+| `qjs_get_string_len(handle, length_ptr) -> cstring_ptr`                                         | Convert result to UTF-8 bytes; length is little-endian u32      |
+| `qjs_free_cstring(ptr)`, `qjs_free_value(handle)`                                               | Release temporary values before capture                         |
+| `qjs_is_job_pending() -> i32`, `qjs_execute_pending_job() -> i32`                               | Drain jobs until none; a negative execution result is an error  |
+| `qjs_get_runtime_ptr()`, `qjs_get_context_ptr()`                                                | Read snapshot offsets                                           |
+| `qjs_set_runtime_and_context(runtime, context)`                                                 | Rebind a restored heap                                          |
+| `qjs_set_memory_limit(bytes)`, `qjs_set_max_stack_size(bytes)`                                  | Apply limits on initialization and after restore                |
 
 Reject null handles/allocations and out-of-bounds memory operations. Bridge hooks
-accept JSON strings. Double JSON-encode the argument when constructing the eval
-source, for example `__durable.deliver(<JSON string literal>)`, to avoid source
-injection. Preserve explicit lengths so embedded NUL characters in values work.
+accept JSON strings. Call them directly, without compiling source: look up
+`__durable` and the hook with `qjs_get_global`/`qjs_get_prop_string`, make the
+argument with `qjs_new_string`, call `qjs_call`, and free every handle before
+capture. No value becomes source, so none can inject it; and a call costs a
+fraction of an eval. Preserve explicit lengths so embedded NUL characters in
+values work.
 Any trap/error during this process discards the working instance and transaction.
 
 Restore in this order:
