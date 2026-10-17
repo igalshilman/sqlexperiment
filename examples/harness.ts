@@ -16,7 +16,7 @@
  * A model of another provider takes its API key, such as
  * `{"model": "openai/gpt-6-luna"}` with OPENAI_API_KEY.
  */
-import { chatHandler, object, serve, tool } from 'restate-agents';
+import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import type * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
@@ -43,7 +43,7 @@ const clock = tool({
 });
 
 /** pi's options for the user of `ctx`: its model and persona, and the tools. */
-const options = async (ctx: restate.SqlObjectContext): Promise<pi.PiOptions> => {
+const options = async (ctx: restate.SqlObjectContext): Promise<pi.Options> => {
   const { model, persona } = await settingsOf(ctx);
   return { model, system: persona ?? 'You are a helpful assistant.', tools: [clock] };
 };
@@ -51,7 +51,7 @@ const options = async (ctx: restate.SqlObjectContext): Promise<pi.PiOptions> => 
 const assistant = object({
   name: 'assistant',
   handlers: {
-    chat: chatHandler(async (ctx, message) => pi.prompt(ctx, message, await options(ctx))),
+    chat: pi.chat(options),
     messages: pi.messages(),
 
     /** Set the model or the persona (or both) for the next messages. */

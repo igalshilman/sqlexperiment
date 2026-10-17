@@ -25,16 +25,24 @@ await serve(assistant);
 | `workspace` | A directory for pi-durable's coding tools (`read`, `write`, `edit`, `bash`), on the local file system; use a sandbox           |
 
 For an object of your own, `pi.chat(options)` and `pi.messages()` are the
-handlers. For more than a prompt, `withPi(ctx, options, work)` runs `work`
-with the Harness, on the same options as `chat` (each for this invocation):
-`prompt(text)` answers a prompt once per invocation, and `conversation()` is
-the object's conversation, on the model, for pi-durable's own API (`reset`,
-`compact`, `entries`...):
+handlers; `options` may be a function of the invocation's context, such as
+each user's model from the object's database. `pi.prompt(ctx, text,
+options)` answers a prompt in a handler of your own. For more than a prompt,
+`withPi(ctx, options, work)` runs `work` with the Harness: `prompt(text)`
+answers a prompt once, and `conversation()` is the object's conversation, on
+the model, for pi-durable's own API (`reset`, `compact`, `entries`...):
 
 ```ts
-chat: chatHandler(async (ctx, message) => pi.prompt(ctx, message, await optionsOf(ctx))),
-reset: (ctx, handoff: string) =>
-  pi.withPi(ctx, {}, async ({ conversation, context }) => (await conversation()).reset(handoff, context)),
+const options = async (ctx: restate.SqlObjectContext): Promise<pi.Options> => ({
+  model: (await settingsOf(ctx)).model,
+  tools: [clock],
+});
+
+handlers: {
+  chat: pi.chat(options),
+  reset: async (ctx, handoff: string) =>
+    pi.withPi(ctx, await options(ctx), async ({ conversation, context }) => (await conversation()).reset(handoff, context)),
+},
 ```
 
 A conversation goes on with the model of each invocation: a `model` (or

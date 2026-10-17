@@ -4,11 +4,12 @@
 //   const assistant = pi.agent({ name: 'assistant', tools: [weather] });
 //   const lead = pi.agent({ name: 'lead', tools: [subagent(coder)] });
 //
-// or a handler of an object of your own: `handlers: { chat: pi.chat() }`
+// or a handler of an object of your own: `handlers: { chat: pi.chat() }`,
+// with options for each invocation: `pi.chat(async (ctx) => ({ model }))`
 //
 // or, for more than a prompt:
 //
-//   chat: (ctx, message) => withPi(ctx, { tools }, (session) => session.prompt(message)),
+//   compact: (ctx) => withPi(ctx, { tools }, async ({ conversation, context }) => ...),
 //
 // The model is `model`, MODEL, or else anthropic/claude-sonnet-5-5, with the
 // provider's API key (such as ANTHROPIC_API_KEY).
@@ -52,11 +53,11 @@ import {
   CHECK_MODEL,
   chatHandler,
   checkModelName,
-  forCall,
+  type Configure,
+  configured,
   messagesHandler,
   modelOf,
   nextPromptId,
-  type PerCall,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -80,7 +81,8 @@ const textOf = (content: Message['content']): string =>
 /** The default model, as `provider/model-id`. */
 export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
 
-export interface PiOptions {
+/** An agent's options: `chat`, `prompt` and `withPi` take them. */
+export interface Options {
   /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** A pi-ai model registry; by default, one of the model's provider. */
@@ -128,7 +130,7 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolRegistration =>
  */
 export const withPi = async <T>(
   ctx: restate.SqlObjectContext,
-  { model: named, models, system, tools = [], workspace }: PiOptions,
+  { model: named, models, system, tools = [], workspace }: Options,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const db = ctx.db;
@@ -204,49 +206,29 @@ export const withPi = async <T>(
   }
 };
 
-/** Answer `text`, once per invocation: a retried attempt resumes the same prompt. */
-export const prompt = (ctx: restate.SqlObjectContext, text: string, options: PiOptions = {}) =>
+/**
+ * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
+ * of an invocation is a prompt of its own.
+ */
+export const prompt = (ctx: restate.SqlObjectContext, text: string, options: Options = {}) =>
   withPi(ctx, options, (session) => session.prompt(text));
 
-export interface ChatOptions {
-  /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
-  model?: string;
-  /** A pi-ai model registry, for a provider of your own; by default, one of the model's provider. */
-  models?: MutableModels;
-  /** The system prompt: who the agent is, and how it answers. */
-  system?: string;
-  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or pi-durable's `defineTool`s, or for an invocation. */
-  tools?: (PerCall<ToolRegistration> | AnyTool)[];
-  /** A directory for the coding tools (see {@link PiOptions.workspace}). */
-  workspace?: PerCall<string | undefined>;
-}
-
-/** The answer to a message, each message an invocation, the conversation in the object's database. */
-const respond =
-  ({ model, models, system, tools = [], workspace }: ChatOptions = {}) =>
-  (ctx: restate.SqlObjectContext, message: string): Promise<string> =>
-    prompt(ctx, message, {
-      model,
-      models,
-      system,
-      tools: tools.map((t) => (isTool(t) ? t : forCall(t, ctx))),
-      workspace: workspace === undefined ? undefined : forCall(workspace, ctx),
-    });
-
 /**
- * A chat handler: each message an invocation, the conversation in the object's database.
- * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
- * (`curl --json '"Hi"'`).
+ * A chat handler: each message an invocation, the conversation in the
+ * object's database, with `options`, or the options a function of the
+ * invocation's context gives (each user's model, say). It takes the message
+ * as plain text (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
-export const chat = (options: ChatOptions = {}) => {
-  checkModelName('pi', options.model);
-  return chatHandler(respond(options));
+export const chat = (options: Configure<Options> = {}) => {
+  if (typeof options === 'object') checkModelName('pi', options.model);
+  return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
 
 /** A handler of the conversation, a page at a time: what was said, in order, with the tool calls, from pi-durable's entries. */
 export const messages = () =>
   messagesHandler((ctx, transcript) =>
-    withPi(ctx, {}, async ({ harness, context }) => {
+    // An empty model registry: reading needs no model, nor MODEL's provider.
+    withPi(ctx, { models: createModels() }, async ({ harness, context }) => {
       const root = await harness.root(context);
       for (let cursor: Parameters<typeof root.entries>[2]; ;) {
         const page = await root.entries({ order: 'ascending' }, 100, cursor, context);
@@ -269,5 +251,5 @@ export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) =>
+}: Options & { name: P; description?: string }) =>
   object({ name, description, handlers: { chat: chat(options), messages: messages() } });

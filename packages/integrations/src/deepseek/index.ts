@@ -3,7 +3,9 @@
 //
 //   const assistant = deepseek.agent({ name: 'assistant', tools: [weather] });
 //
-// or a handler of an object of your own: `handlers: { chat: deepseek.chat() }`
+// or a handler of an object of your own: `handlers: { chat: deepseek.chat() }`,
+// with options for each invocation: `deepseek.chat(async (ctx) => ({ system }))`,
+// or a prompt of your own handler: `deepseek.prompt(ctx, text, options)`
 //
 // The model is DeepSeek's (@deepseek-ai/dsh-llm-deepseek-api-key): `model`,
 // or else MODEL, or else deepseek/deepseek-flash, with DEEPSEEK_API_KEY.
@@ -42,7 +44,15 @@ import {
   type ToolRunContext,
   ToolRuntime,
 } from '@deepseek-ai/dsh-tools';
-import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, type PerCall } from '../common.ts';
+import {
+  chatHandler,
+  type Configure,
+  configured,
+  messagesHandler,
+  modelIdOf,
+  modelOf,
+  nextPromptId,
+} from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
@@ -188,82 +198,89 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolDefinition =>
     execute: (args, exec) => t.run(t.input.parse(args), { ctx, callId: exec.callId }),
   });
 
-export interface ChatOptions {
+/** An agent's options: `chat` and `prompt` take them. */
+export interface Options {
   /** The model, as `deepseek/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
   model?: string;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
-  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the harness's (`defineTool`), or for an invocation. */
-  tools?: (PerCall<ToolDefinition> | AnyTool)[];
+  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the harness's (`defineTool`). */
+  tools?: (AnyTool | ToolDefinition)[];
 }
 
-/** The answer to a message, each message an invocation, the session in the object's database. */
-const respond =
-  ({ model: named, system, tools = [] }: ChatOptions = {}) =>
-  async (ctx: restate.SqlObjectContext, text: string): Promise<string> => {
-    const id = ctx.request().id;
-    const harness = await boot(ctx.db, system);
-    // A tool's error fails the attempt, which Restate retries: the harness
-    // stores nothing more, so the retry finds the tool's call without a result.
-    const { promise: failed, reject: fail } = Promise.withResolvers<never>();
-    failed.catch(() => {});
-    try {
-      const sessionId = SessionId(ctx.key);
-      const options = {
-        agentOptions: { provider: 'deepseek-official', model: modelIdOf(modelOf(named, DEFAULT_MODEL), 'deepseek') },
-        setup: (agentCtx: Context) =>
-          tools.forEach((t) => {
-            const definition = isTool(t) ? native(t, ctx) : forCall(t, ctx);
-            agentCtx.tools.register({
-              ...definition,
-              execute: (args, exec) => guard(fail, () => definition.execute(args, exec)),
-            });
-          }),
-      };
-      // Resuming closes a turn a crash left open.
-      const { agent } = (await harness.sessionPersistence.stat(sessionId))
-        ? await harness.agents.resume({ resumeSessionId: sessionId, ...options })
-        : await harness.agents.create({ sessionId, ...options });
-      // The log as this attempt found it: a turn that failed before is
-      // continued like an interrupted one.
-      const found = agent.session.snapshotEvents().length;
-      for (;;) {
-        const events = agent.session.snapshotEvents();
-        const answer = answerOf(events, promptId(id));
-        if (answer !== undefined) return answer;
-        // A turn of this attempt that failed (the model's request, or a
-        // checkpoint) fails the attempt. Its end may be stored already, so
-        // only this attempt's turns count: the retry asks the model again.
-        const end = events.slice(found).findLast((e): e is SessionEvent<'turn/end'> => e.type === 'turn/end')
-          ?.data.reason;
-        if (end?.kind === 'error') throw new Error(`the agent's turn failed: ${JSON.stringify(end.error)}`);
-        // Finish an unfinished prompt first (this one's, after a crash), then
-        // start this one.
-        const last = lastPrompt(events);
-        if (last !== undefined && answerOf(events, last) === undefined) {
-          agent.followup(message(`continue:${events.length}`, CONTINUE));
-        } else {
-          agent.followup(message(promptId(id), text));
-        }
-        await Promise.race([agent.whenIdle(), failed]);
-        await harness.sessions.flush(agent.session);
+/**
+ * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
+ * of an invocation is a prompt of its own. The session is the object's key.
+ */
+export const prompt = async (
+  ctx: restate.SqlObjectContext,
+  text: string,
+  { model: named, system, tools = [] }: Options = {},
+): Promise<string> => {
+  const id = nextPromptId(ctx);
+  const harness = await boot(ctx.db, system);
+  // A tool's error fails the attempt, which Restate retries: the harness
+  // stores nothing more, so the retry finds the tool's call without a result.
+  const { promise: failed, reject: fail } = Promise.withResolvers<never>();
+  failed.catch(() => {});
+  try {
+    const sessionId = SessionId(ctx.key);
+    const options = {
+      agentOptions: { provider: 'deepseek-official', model: modelIdOf(modelOf(named, DEFAULT_MODEL), 'deepseek') },
+      setup: (agentCtx: Context) =>
+        tools.forEach((t) => {
+          const definition = isTool(t) ? native(t, ctx) : t;
+          agentCtx.tools.register({
+            ...definition,
+            execute: (args, exec) => guard(fail, () => definition.execute(args, exec)),
+          });
+        }),
+    };
+    // Resuming closes a turn a crash left open.
+    const { agent } = (await harness.sessionPersistence.stat(sessionId))
+      ? await harness.agents.resume({ resumeSessionId: sessionId, ...options })
+      : await harness.agents.create({ sessionId, ...options });
+    // The log as this attempt found it: a turn that failed before is
+    // continued like an interrupted one.
+    const found = agent.session.snapshotEvents().length;
+    for (;;) {
+      const events = agent.session.snapshotEvents();
+      const answer = answerOf(events, promptId(id));
+      if (answer !== undefined) return answer;
+      // A turn of this attempt that failed (the model's request, or a
+      // checkpoint) fails the attempt. Its end may be stored already, so
+      // only this attempt's turns count: the retry asks the model again.
+      const end = events.slice(found).findLast((e): e is SessionEvent<'turn/end'> => e.type === 'turn/end')
+        ?.data.reason;
+      if (end?.kind === 'error') throw new Error(`the agent's turn failed: ${JSON.stringify(end.error)}`);
+      // Finish an unfinished prompt first (this one's, after a crash), then
+      // start this one.
+      const last = lastPrompt(events);
+      if (last !== undefined && answerOf(events, last) === undefined) {
+        agent.followup(message(`continue:${events.length}`, CONTINUE));
+      } else {
+        agent.followup(message(promptId(id), text));
       }
-    } catch (e) {
-      (harness.sessionPersistence as SqlSessionPersistence).abandon();
-      throw e;
-    } finally {
-      await harness.fiber.dispose();
+      await Promise.race([agent.whenIdle(), failed]);
+      await harness.sessions.flush(agent.session);
     }
-  };
+  } catch (e) {
+    (harness.sessionPersistence as SqlSessionPersistence).abandon();
+    throw e;
+  } finally {
+    await harness.fiber.dispose();
+  }
+};
 
 /**
- * A chat handler: each message an invocation, the session in the object's database.
- * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
- * (`curl --json '"Hi"'`).
+ * A chat handler: each message an invocation, the session in the object's
+ * database, with `options`, or the options a function of the invocation's
+ * context gives. It takes the message as plain text (`curl -d 'Hi'`) or as
+ * a JSON string (`curl --json '"Hi"'`).
  */
-export const chat = (options: ChatOptions = {}) => {
-  if (options.model !== undefined) modelIdOf(options.model, 'deepseek');
-  return chatHandler(respond(options));
+export const chat = (options: Configure<Options> = {}) => {
+  if (typeof options === 'object' && options.model !== undefined) modelIdOf(options.model, 'deepseek');
+  return chatHandler(async (ctx, text) => prompt(ctx, text, await configured(options, ctx)));
 };
 
 /** `json` parsed, or as it is if it is not JSON. */
@@ -292,5 +309,5 @@ export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) =>
+}: Options & { name: P; description?: string }) =>
   object({ name, description, handlers: { chat: chat(options), messages: messages() } });

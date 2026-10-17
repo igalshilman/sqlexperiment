@@ -78,6 +78,17 @@ function object(key: string) {
 const said = (id: number, role: string, text: string) => ({ id, role, parts: [{ type: 'text', text }] });
 
 describe('pi.messages', () => {
+  it("reads without MODEL's provider", async () => {
+    const alice = object('alice');
+    await alice.invoke(pi.chat(), 'inv1', 'Hi, I am Alice');
+    vi.stubEnv('MODEL', 'nowhere/nothing');
+    try {
+      expect((await alice.invoke(pi.messages(), 'read', {})).messages).toHaveLength(2);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('gives the conversation: what was said, in order, a page at a time', async () => {
     const alice = object('alice');
     await alice.invoke(pi.chat(), 'inv1', 'Hi, I am Alice');
@@ -105,6 +116,12 @@ const twice = async (ctx: restate.SqlObjectContext) => [
 ];
 
 describe('pi.chat', () => {
+  it('takes options for each invocation', async () => {
+    const ada = object('ada');
+    const chat = pi.chat(async (ctx) => ({ system: `You are ${ctx.key}.` }));
+    expect(await ada.invoke(chat, 'inv1', 'Who are you?')).toContain('You are ada.');
+  });
+
   it('gives the model its system prompt', async () => {
     const ada = object('ada');
     expect(await ada.invoke(pi.chat({ system: 'You are Ada.' }), 'inv1', 'Who are you?')).toContain('You are Ada.');

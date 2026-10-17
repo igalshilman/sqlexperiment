@@ -23,14 +23,19 @@ const assistant = claude.agent({ name: 'assistant', system: 'Answer briefly.', t
 await serve(assistant);
 ```
 
-| Option   | What                                                                                                   |
-| -------- | ------------------------------------------------------------------------------------------------------ |
-| `model`  | `anthropic/model-id`; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)     |
-| `system` | The system prompt                                                                                      |
-| `tools`  | `tool()`s and Restate's tools of `restate-agents`, or the SDK's runnable tools (such as `betaZodTool`) |
+| Option      | What                                                                                                   |
+| ----------- | ------------------------------------------------------------------------------------------------------ |
+| `model`     | `anthropic/model-id`; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)     |
+| `system`    | The system prompt                                                                                      |
+| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or the SDK's runnable tools (such as `betaZodTool`) |
+| `client`    | The Anthropic client (a base URL or a proxy of your own, say); by default one with `ANTHROPIC_API_KEY` |
+| `maxTokens` | The most tokens of each of the model's replies (default 4096)                                          |
 
 For an object of your own, `claude.chat(options)` and `claude.messages()`
-are the handlers.
+are the handlers; `options` may be a function of the
+invocation's context (each user's system prompt, say). `claude.prompt(ctx,
+text, options)` answers a prompt in a handler of your own, once, however
+often the handler runs; each prompt of an invocation is a prompt of its own.
 
 ## Through crashes
 

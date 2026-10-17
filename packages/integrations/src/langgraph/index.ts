@@ -3,7 +3,9 @@
 //
 //   const assistant = langgraph.agent({ name: 'assistant', tools: [search] });
 //
-// or a handler of an object of your own: `handlers: { chat: langgraph.chat() }`
+// or a handler of an object of your own: `handlers: { chat: langgraph.chat() }`,
+// with options for each invocation: `langgraph.chat(async (ctx) => ({ system }))`,
+// or a prompt of your own handler: `langgraph.prompt(ctx, text, options)`
 //
 // The graph is the usual tool-calling loop: a model node, a tools node, and
 // back to the model until it answers. The model is `model` (a chat model, or
@@ -29,7 +31,15 @@ import { AIMessage, type BaseMessage, HumanMessage, SystemMessage, ToolMessage }
 import { type StructuredToolInterface, tool } from '@langchain/core/tools';
 import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
-import { chatHandler, forCall, messagesHandler, modelIdOf, modelOf, type PerCall } from '../common.ts';
+import {
+  chatHandler,
+  type Configure,
+  configured,
+  messagesHandler,
+  modelIdOf,
+  modelOf,
+  nextPromptId,
+} from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 
@@ -74,56 +84,59 @@ const native = (t: AnyTool, ctx: restate.SqlObjectContext): StructuredToolInterf
     { name: t.name, description: t.description, schema: t.input },
   );
 
-export interface ChatOptions {
-  /**
-   * The model: `anthropic/model-id` (MODEL, or else {@link DEFAULT_MODEL}),
-   * or a chat model that calls tools, or for an invocation.
-   */
-  model?: PerCall<string | BaseChatModel>;
+/** An agent's options: `chat` and `prompt` take them. */
+export interface Options {
+  /** The model: `anthropic/model-id` (MODEL, or else {@link DEFAULT_MODEL}), or a chat model that calls tools. */
+  model?: string | BaseChatModel;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
-  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or LangChain's, or for an invocation. */
-  tools?: (PerCall<StructuredToolInterface> | AnyTool)[];
+  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or LangChain's. */
+  tools?: (AnyTool | StructuredToolInterface)[];
 }
 
-/** The answer to a message, each message an invocation, the thread (the object's key) in the object's database. */
-const respond =
-  ({ model, system, tools = [] }: ChatOptions = {}) =>
-  async (ctx: restate.SqlObjectContext, message: string): Promise<string> => {
-    const chosen = model === undefined ? undefined : forCall(model, ctx);
-    const llm =
-      typeof chosen === 'object'
-        ? chosen
-        : new ChatAnthropic({ model: modelIdOf(modelOf(chosen, DEFAULT_MODEL), 'anthropic') });
-    const app = graph(
-      llm,
-      tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),
-      system,
-    ).compile({ checkpointer: new SqlCheckpointSaver(ctx.db) });
-    const config = { configurable: { thread_id: ctx.key }, durability: 'sync' as const };
-    const id = ctx.request().id;
-    for (;;) {
-      const state = await app.getState(config);
-      const answer = state.values.answers?.[id];
-      if (answer !== undefined) return answer;
-      // Finish an interrupted run first (this message's, after a crash),
-      // then start this message's. A run is unfinished while its prompt has
-      // no answer: `next` does not say, as it leaves out the steps whose
-      // writes are stored.
-      const { prompt, answers = {} } = state.values;
-      const interrupted = prompt !== undefined && answers[prompt] === undefined;
-      await app.invoke(interrupted ? null : { messages: [new HumanMessage(message)], prompt: id }, config);
-    }
-  };
+/**
+ * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
+ * of an invocation is a prompt of its own. The thread is the object's key.
+ */
+export const prompt = async (
+  ctx: restate.SqlObjectContext,
+  text: string,
+  { model, system, tools = [] }: Options = {},
+): Promise<string> => {
+  const llm =
+    typeof model === 'object'
+      ? model
+      : new ChatAnthropic({ model: modelIdOf(modelOf(model, DEFAULT_MODEL), 'anthropic') });
+  const app = graph(
+    llm,
+    tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
+    system,
+  ).compile({ checkpointer: new SqlCheckpointSaver(ctx.db) });
+  const config = { configurable: { thread_id: ctx.key }, durability: 'sync' as const };
+  const id = nextPromptId(ctx);
+  for (;;) {
+    const state = await app.getState(config);
+    const answer = state.values.answers?.[id];
+    if (answer !== undefined) return answer;
+    // Finish an interrupted run first (this prompt's, after a crash), then
+    // start this prompt's. A run is unfinished while its prompt has no
+    // answer: `next` does not say, as it leaves out the steps whose writes
+    // are stored.
+    const { prompt: last, answers = {} } = state.values;
+    const interrupted = last !== undefined && answers[last] === undefined;
+    await app.invoke(interrupted ? null : { messages: [new HumanMessage(text)], prompt: id }, config);
+  }
+};
 
 /**
- * A chat handler: each message an invocation, the thread (the object's key) in the object's database.
- * It takes the message as plain text (`curl -d 'Hi'`) or as a JSON string
- * (`curl --json '"Hi"'`).
+ * A chat handler: each message an invocation, the thread (the object's key)
+ * in the object's database, with `options`, or the options a function of the
+ * invocation's context gives. It takes the message as plain text
+ * (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
-export const chat = (options: ChatOptions = {}) => {
-  if (typeof options.model === 'string') modelIdOf(options.model, 'anthropic');
-  return chatHandler(respond(options));
+export const chat = (options: Configure<Options> = {}) => {
+  if (typeof options === 'object' && typeof options.model === 'string') modelIdOf(options.model, 'anthropic');
+  return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
 
 /** A handler of the thread, a page at a time: what was said, in order, with the tool calls, from its last checkpoint. */
@@ -145,5 +158,5 @@ export const agent = <P extends string>({
   name,
   description,
   ...options
-}: ChatOptions & { name: P; description?: string }) =>
+}: Options & { name: P; description?: string }) =>
   object({ name, description, handlers: { chat: chat(options), messages: messages() } });

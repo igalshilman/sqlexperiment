@@ -126,6 +126,22 @@ describe('signal', () => {
   });
 });
 
+describe('tool', () => {
+  it('runs `run`, which may answer at once, with the tool call and its idempotency key', async () => {
+    const t = tool({
+      name: 'echo',
+      description: 'Echo',
+      input: z.object({ text: z.string() }),
+      run: ({ text }, { callId, idempotencyKey }) => ({ text, callId, idempotencyKey }),
+    });
+    expect(JSON.parse((await run(t, { text: 'hi' })).result)).toEqual({
+      text: 'hi',
+      callId: 'call_1',
+      idempotencyKey: 'inv1:call_1',
+    });
+  });
+});
+
 describe("Restate's tools", () => {
   it('make a call again with the call id of the attempt that first made it', async () => {
     const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });

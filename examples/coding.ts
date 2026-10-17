@@ -10,15 +10,19 @@
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/coordinator/alice/chat -d 'Write fizzbuzz.py and primes.py, and run them'
  */
-import { serve, subagent } from 'restate-agents';
+import { object, serve, subagent } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 import * as pi from 'restate-agents/pi';
 
 const workspace = process.env.WORKSPACE ?? '/tmp/coding';
 
-const coder = opencode.agent({
+// Each coder works in a directory of its own: options for each invocation.
+const coder = object({
   name: 'coder',
-  workspace: (ctx) => `${workspace}/${ctx.key}`,
+  handlers: {
+    chat: opencode.chat((ctx) => ({ workspace: `${workspace}/${ctx.key}` })),
+    messages: opencode.messages(),
+  },
 });
 
 const coordinator = pi.agent({

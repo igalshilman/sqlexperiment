@@ -154,8 +154,8 @@ const answer = await restate.objectClient(assistant, 'alice').chat('Hi, I am Ali
 ## Tools
 
 Any agent's `tools` take a framework's own tools, and the tools of
-`restate-agents`, which work the same in every framework. A tool may also be a function of
-the invocation's context, `(ctx) => tool`. A crash runs an unfinished tool
+`restate-agents`, which work the same in every framework. Tools for each
+invocation come from `chat(async (ctx) => ({ tools }))`. A crash runs an unfinished tool
 call again with the same call id, which a tool that must not run twice
 passes on (as an idempotency key, say):
 

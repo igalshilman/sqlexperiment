@@ -27,7 +27,10 @@ await serve(assistant);
 | `tools`  | `tool()`s and Restate's tools of `restate-agents`, or the harness's `defineTool`s            |
 
 For an object of your own, `deepseek.chat(options)` and
-`deepseek.messages()` are the handlers.
+`deepseek.messages()` are the handlers; `options` may be a function of the
+invocation's context (each user's system prompt, say). `deepseek.prompt(ctx,
+text, options)` answers a prompt in a handler of your own, once, however
+often the handler runs; each prompt of an invocation is a prompt of its own.
 
 ## Through crashes
 

@@ -1,12 +1,18 @@
 // What the integrations share.
 import * as restate from '@restatedev/restate-sdk';
 
-/** A value, or what it is for an invocation. */
-export type PerCall<T> = T | ((ctx: restate.SqlObjectContext) => T);
+/**
+ * A value, or a function of the invocation's context that gives it: the
+ * same for every message, or each user's (from the object's database, say).
+ *
+ *   pi.chat({ model: 'anthropic/claude-sonnet-5-5' })
+ *   pi.chat(async (ctx) => ({ model: await modelOf(ctx) }))
+ */
+export type Configure<T> = T | ((ctx: restate.SqlObjectContext) => T | Promise<T>);
 
 /** `value` for the invocation of `ctx`. */
-export const forCall = <T>(value: PerCall<T>, ctx: restate.SqlObjectContext): T =>
-  typeof value === 'function' ? (value as (ctx: restate.SqlObjectContext) => T)(ctx) : value;
+export const configured = async <T>(value: Configure<T>, ctx: restate.SqlObjectContext): Promise<T> =>
+  typeof value === 'function' ? (value as (ctx: restate.SqlObjectContext) => T | Promise<T>)(ctx) : value;
 
 /** The prompts each invocation made so far, by its context. */
 const prompts = new WeakMap<object, number>();
