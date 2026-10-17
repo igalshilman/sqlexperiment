@@ -8,6 +8,7 @@
     "@anthropic-ai/sdk": "0.133.0",
     "@earendil-works/pi-ai": "1.1.0",
     "@earendil-works/pi-durable": "1.1.0",
+    "@langchain/anthropic": "1.5.11",
     "@langchain/core": "1.2.12",
     "@opencode/plugin": "2.0.27",
     "@restatedev/restate-sdk": "1.17.3",

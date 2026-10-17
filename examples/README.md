@@ -17,6 +17,7 @@ the integrations they use.
 | [`support.ts`](support.ts)      | A support agent whose tools are Restate itself: a service call, a signal (a manager's approval) and a workflow                                |
 | [`memory.ts`](memory.ts)        | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a handler of your own beside the agent's |
 | [`harness.ts`](harness.ts)      | An agent each user configures: its model and persona from the object's database (`pi.chat(options)`), and `compact` and `reset` handlers      |
+| [`models.ts`](models.ts)        | Models you set up yourself: Claude through an Anthropic client of your own (a gateway, no retries of its own), LangGraph on a `ChatAnthropic` |
 | [`team.ts`](team.ts)            | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                       |
 | [`router.ts`](router.ts)        | A front desk of your own: a handler asks a model which team handles a message (`pi.prompt`), then calls that team's agent                     |
 | [`followup.ts`](followup.ts)    | An agent that schedules a check-in for a day later: `send` with a delay                                                                       |
