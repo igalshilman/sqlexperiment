@@ -18,6 +18,7 @@ the integrations they use.
 | [`memory.ts`](memory.ts)        | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a handler of your own beside the agent's |
 | [`harness.ts`](harness.ts)      | An agent each user configures: its model and persona from the object's database (`pi.chat(options)`), and `compact` and `reset` handlers      |
 | [`team.ts`](team.ts)            | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                       |
+| [`router.ts`](router.ts)        | A front desk of your own: a handler asks a model which team handles a message (`pi.prompt`), then calls that team's agent                     |
 | [`followup.ts`](followup.ts)    | An agent that schedules a check-in for a day later: `send` with a delay                                                                       |
 | [`triage.ts`](triage.ts)        | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review                                               |
 | [`ui/`](ui/app.ts)              | A chat page for `support.ts` on Restate's own client: the conversation as the agent works, Approve and Reject, Steer, Stop (`npx vite ui`)    |
