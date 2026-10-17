@@ -2,39 +2,34 @@
 #
 #   docker build -f examples/gateway/Dockerfile -t tool-gateway .
 #
-# It serves the endpoint (Orders, Payments, Gateway, Assistant) on 9080:
+# It serves the endpoint (Orders, Payments, Gateway, Assistant, Case) on 9080:
 #
 #   docker run -p 9080:9080 -e OPENAI_API_KEY tool-gateway
 #
-# or a part: `node serve.ts gateway-assistant` (the Assistant and Case), or
-# `node serve.ts gateway-tools` (the tools and the Gateway).
+# or a part: `node gateway/main.ts agents` (the Assistant and Case), or
+# `node gateway/main.ts tools` (the tools and the Gateway).
 #
-# Needs the patched SDK's tarball, vendor/typescript/.build (`make sdk-ts`).
+# Needs the patched SDK's tarball, packages/sdk/.build (`make sdk-ts`).
 
 # The sqlite-kv addon, for Linux.
 FROM rust:1-bookworm AS addon
 WORKDIR /src
 COPY sqlite-kv sqlite-kv
-RUN cd sqlite-kv/node && cargo build --locked --release \
+COPY packages/sql packages/sql
+RUN cd packages/sql && cargo build --locked --release \
   && cp target/release/libsqlite_kv_node.so sqlite_kv.node
 
-# The packages.
+# The workspace's packages that the examples use.
 FROM node:24-bookworm AS deps
+RUN corepack enable
 WORKDIR /app
-COPY sqlite-kv/node/package.json sqlite-kv/node/index.js sqlite-kv/node/index.d.ts sqlite-kv/node/
-COPY --from=addon /src/sqlite-kv/node/sqlite_kv.node sqlite-kv/node/
-COPY vendor/typescript/.build/restatedev-restate-sdk-1.17.3.tgz vendor/typescript/.build/
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz packages/sdk/.build/
+COPY packages/sql/package.json packages/sql/index.js packages/sql/index.d.ts packages/sql/
+COPY --from=addon /src/packages/sql/sqlite_kv.node packages/sql/
+COPY packages/integrations packages/integrations
 COPY examples/package.json examples/
-WORKDIR /app/examples
-# Only what the gateway needs, at the examples' versions.
-RUN node -e ' \
-  const fs = require("fs"); \
-  const p = JSON.parse(fs.readFileSync("package.json")); \
-  const keep = ["@restatedev/restate-sdk", "sqlite-kv", "zod", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"]; \
-  p.dependencies = Object.fromEntries(keep.map((k) => [k, p.dependencies[k]])); \
-  delete p.devDependencies; delete p.scripts; \
-  fs.writeFileSync("package.json", JSON.stringify(p, null, 2));' \
-  && npm install --omit=dev --no-audit --no-fund
+RUN pnpm install --frozen-lockfile --prod --filter examples...
 
 FROM node:24-bookworm-slim
 # For the agents' bash tool: Python and git, besides Node.
@@ -42,8 +37,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 git ca-
   && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app /app
 WORKDIR /app/examples
-COPY examples/serve.ts examples/faults.ts ./
-COPY examples/pi/with-pi.ts examples/pi/pi-storage.ts pi/
 COPY examples/gateway/*.ts gateway/
 ENV PORT=9080
 # The agents' model, for the Assistant and Case: give OPENAI_API_KEY.
@@ -53,4 +46,4 @@ ENV PI_MODEL=openai/gpt-6-luna
 ENV WORKSPACE=/data/workspace
 RUN mkdir -p /data/workspace
 EXPOSE 9080
-CMD ["node", "serve.ts", "gateway"]
+CMD ["node", "gateway/main.ts"]

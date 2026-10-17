@@ -14,7 +14,6 @@
 // Environment: PORT.
 import * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
-import { serveIfMain } from '../faults.ts';
 import type { Tool } from './gateway.ts';
 
 /** Order `id`: made up, the same every time. */
@@ -141,5 +140,3 @@ export const PREBUILT: Record<string, Tool> = {
     handler: 'ticket',
   },
 };
-
-serveIfMain(import.meta, tools);

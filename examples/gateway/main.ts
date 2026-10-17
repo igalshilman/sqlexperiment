@@ -1,0 +1,16 @@
+// The tool gateway's endpoint: everything, or a part, `tools` (the tools and
+// the Gateway: stateless, so anywhere) or `agents` (the Assistant, keyed per
+// user, and the Case, keyed per order: in a sandbox).
+//
+//   PI_MODEL=openai/gpt-6-luna OPENAI_API_KEY=… node gateway/main.ts [tools|agents]
+import * as restate from '@restatedev/restate-sdk';
+import { assistant, caseAgent } from './agent.ts';
+import { gateway } from './gateway.ts';
+import { tools } from './tools.ts';
+
+const parts = { tools: [...tools, gateway], agents: [assistant, caseAgent] };
+const part = process.argv[2] as keyof typeof parts | undefined;
+await restate.serve({
+  services: part ? parts[part] : [...parts.tools, ...parts.agents],
+  port: Number(process.env.PORT ?? 9080),
+});

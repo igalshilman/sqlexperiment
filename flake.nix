@@ -1,5 +1,5 @@
 {
-  description = "SQL in Restate virtual objects: the sqlite-kv crate, its Node.js addon, the patched Restate TypeScript SDK and the examples";
+  description = "SQL in Restate virtual objects: the sqlite-kv crate, its Node.js addon, the patched Restate TypeScript SDK, the agent integrations and the examples";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -48,8 +48,8 @@
               })
               # setup.sh needs exactly this version.
               wasm-bindgen-cli_0_2_121
-              # The SDK (node >= 22, pnpm 11) and the examples (node >= 24,
-              # which runs their TypeScript, and which OpenCode needs).
+              # The pnpm workspace: node >= 24 runs its TypeScript, and
+              # OpenCode needs it.
               nodejs_24
               pnpm_11
               git

@@ -1,0 +1,9 @@
+{
+  "name": "restate-sdk-patched",
+  "version": "1.17.3",
+  "private": true,
+  "description": "Builds the patched @restatedev/restate-sdk: .build/restatedev-restate-sdk-1.17.3.tgz (see README.md)",
+  "scripts": {
+    "build": "./setup.sh"
+  }
+}

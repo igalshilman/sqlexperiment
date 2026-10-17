@@ -1,6 +1,6 @@
 // A support agent on pi-durable whose tools are the gateway's: an Assistant
 // object per user, keyed `<tenant>.<user>` (`acme.alice`), whose pi-durable
-// storage is the object's database (../pi/with-pi.ts).
+// storage is the object's database (restate-agents/pi).
 //
 // Each attempt asks the tenant's gateway for its tools, and a tool call is
 // one Gateway.call, with an idempotency key made from the request id (the
@@ -17,17 +17,16 @@
 //
 // Files: with WORKSPACE set, each object gets a directory of its own,
 // `$WORKSPACE/<service>/<key>`, and pi-durable's coding tools over it
-// (read, write, edit, bash; see ../pi/with-pi.ts). Run it in a sandbox:
+// (read, write, edit, bash; see restate-agents/pi). Run it in a sandbox:
 // `bash` runs any command, within the directory or outside it.
 //
-// Environment: PORT, PI_MODEL (see ../pi/with-pi.ts) with its provider's
+// Environment: PORT, PI_MODEL (see restate-agents/pi) with its provider's
 // API key, WORKSPACE and ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { z } from 'zod';
-import { serveIfMain } from '../faults.ts';
-import { withPi } from '../pi/with-pi.ts';
+import { withPi } from 'restate-agents/pi';
 import { join } from 'node:path';
 import { gateway, identity } from './gateway.ts';
 
@@ -200,5 +199,3 @@ export const assistant = restate.object({
   metadata,
   options,
 });
-
-serveIfMain(import.meta, [assistant, caseAgent]);
