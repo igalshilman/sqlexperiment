@@ -8,7 +8,7 @@ PORT, alone (as in crash.py), or with the other test services (services.py).
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples-py"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests"))
 
 from bank import transfer  # noqa: E402

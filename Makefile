@@ -1,11 +1,12 @@
-# Build and test everything: the core crate, and the pnpm workspace: the
-# patched TypeScript SDK (packages/sdk-typescript, over the patched shared core
-# of packages/sdk-shared-core), the Node.js addon (packages/sql-node), the
-# integrations (packages/integrations), the tests (tests/) and the examples;
-# and, in python/, the uv workspace: the patched Python SDK (python/sdk, over
-# the same shared core), the Python extension (python/sqlite-kv), the Python
-# agent integrations (python/agents), and their tests; and the Python
-# examples (examples-py).
+# Build and test everything, part by part:
+#
+#   core/        the sqlite-kv crate, and the patch to the SDKs' shared core
+#                (core/sdk-shared-core) that both SDKs build on
+#   typescript/  the pnpm workspace: the patched TypeScript SDK, the Node.js
+#                addon, the integrations, their tests and the examples
+#   python/      the uv workspace: the patched Python SDK, the Python
+#                extension, the agent integrations, their tests; and the
+#                examples (python/examples, a project of their own)
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -18,11 +19,13 @@
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
-SDK_TARBALL := packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
-CORE := sqlite-kv
-ADDON := packages/sql-node/sqlite_kv.node
-CORE_PATCH := packages/sdk-shared-core/sdk-shared-core.patch
+SDK_TARBALL := typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
+CORE := core/sqlite-kv
+ADDON := typescript/packages/sql-node/sqlite_kv.node
+CORE_PATCH := core/sdk-shared-core/sdk-shared-core.patch
 SDK_PY := python/sdk/.build/sdk-python/.patched
+# Formats the TypeScript, JavaScript and Markdown of every part, as .oxfmtrc.json says.
+OXFMT := typescript/node_modules/.bin/oxfmt
 # The tests against a Restate server run a released restate-server: by default
 # RESTATE_VERSION's, downloaded from its GitHub release for this platform. Or
 # RESTATE_FROM=image takes it out of RESTATE_IMAGE with docker (Linux only), or
@@ -53,18 +56,18 @@ help: ## List the targets
 core: ## The sqlite-kv crate
 	cd $(CORE) && $(CARGO) build --locked --release
 
-addon: $(ADDON) ## The Node.js addon (packages/sql-node)
+addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)
 
-$(ADDON): $(wildcard packages/sql-node/src/*.rs $(CORE)/src/*.rs $(CORE)/src/*/*.rs) packages/sql-node/Cargo.toml $(CORE)/Cargo.toml
-	cd packages/sql-node && npm run build
+$(ADDON): $(wildcard typescript/packages/sql-node/src/*.rs $(CORE)/src/*.rs $(CORE)/src/*/*.rs) typescript/packages/sql-node/Cargo.toml $(CORE)/Cargo.toml
+	cd typescript/packages/sql-node && npm run build
 
-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK (packages/sdk-typescript)
+sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK (typescript/packages/sdk-typescript)
 
-$(SDK_TARBALL): $(wildcard packages/sdk-typescript/patches/*.patch) $(CORE_PATCH) packages/sdk-typescript/setup.sh packages/sdk-typescript/inline-wasm.mjs
-	packages/sdk-typescript/setup.sh
+$(SDK_TARBALL): $(wildcard typescript/packages/sdk-typescript/patches/*.patch) $(CORE_PATCH) typescript/packages/sdk-typescript/setup.sh typescript/packages/sdk-typescript/inline-wasm.mjs
+	typescript/packages/sdk-typescript/setup.sh
 
 js: $(ADDON) $(SDK_TARBALL) ## The pnpm workspace, installed with the patched SDK and the addon
-	pnpm install --force
+	cd typescript && pnpm install --force
 
 sdk-py: $(SDK_PY) ## The patched Python SDK's sources (python/sdk), for the uv workspace to build
 
@@ -97,13 +100,13 @@ test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked --features simulation
 
 test-addon: $(ADDON) ## The Node.js addon
-	cd packages/sql-node && npm test
+	cd typescript/packages/sql-node && npm test
 
 test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests, and its type tests
-	cd packages/sdk-typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx tsc -p test/tsconfig.types.json && npx vitest run
+	cd typescript/packages/sdk-typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx tsc -p test/tsconfig.types.json && npx vitest run
 
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
-	cd tests && pnpm exec vitest run $(T)
+	cd typescript/tests && pnpm exec vitest run $(T)
 
 # Its own environment, with the extras its tests use; its tests against a
 # Restate server in docker (the test harness) are left out.
@@ -122,39 +125,40 @@ lint: lint-core lint-ts lint-py ## Every lint
 
 lint-core: ## The Rust crates (the core, the addon and the Python extension): rustfmt --check and clippy
 	cd $(CORE) && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
-	cd packages/sql-node && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
+	cd typescript/packages/sql-node && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 	cd python/sqlite-kv && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
-	pnpm check
+	cd typescript && pnpm check
+	$(OXFMT) --check
 
-lint-py: py ## The Python (python/, examples-py/): ruff format --check and ruff check; and the patched SDK's ruff, as it configures it, and rustfmt
-	uv run --project python --locked ruff format --check python examples-py
-	uv run --project python --locked ruff check python examples-py
+lint-py: py ## The Python (python/): ruff format --check and ruff check; and the patched SDK's ruff, as it configures it, and rustfmt
+	uv run --project python --locked ruff format --check python
+	uv run --project python --locked ruff check python
 	cd python/sdk/.build/sdk-python && uv run --extra lint ruff format --check && uv run --extra lint ruff check \
 		&& $(CARGO) fmt --check
 
 format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Markdown) and ruff (Python)
 	cd $(CORE) && $(CARGO) fmt
-	cd packages/sql-node && $(CARGO) fmt
+	cd typescript/packages/sql-node && $(CARGO) fmt
 	cd python/sqlite-kv && $(CARGO) fmt
-	pnpm format
-	uv run --project python --locked ruff format python examples-py
+	$(OXFMT)
+	uv run --project python --locked ruff format python
 
 crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through crashes, against a Restate server
-	cd tests && node crash.ts
+	cd typescript/tests && node crash.ts
 
 concurrency-test: js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
-	cd tests && node concurrency.ts
+	cd typescript/tests && node concurrency.ts
 
-concurrency-test-py: py $(RESTATE_SERVER) ## Python: the context without journal replay, agents, Restate's tools and the examples (examples-py), against a Restate server
+concurrency-test-py: py $(RESTATE_SERVER) ## Python: the context without journal replay, agents, Restate's tools and the examples (python/examples), against a Restate server
 	cd python && uv run --locked pytest tests
 
 crash-test-py: py $(RESTATE_SERVER) ## Python: a bank and an agent through crashes, against a Restate server
 	cd python && uv run --locked python tests/crash.py
 
 tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, workflow), against a Restate server
-	cd tests && node restate-tools.ts
+	cd typescript/tests && node restate-tools.ts
 
 restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
@@ -176,5 +180,6 @@ endif
 	mv $@.tmp $@
 
 clean: ## Remove build outputs
-	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) packages/sdk-typescript/.build python/sdk/.build node_modules */node_modules packages/*/node_modules \
+	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) typescript/packages/sdk-typescript/.build python/sdk/.build \
+		typescript/node_modules typescript/*/node_modules typescript/packages/*/node_modules \
 		python/.venv python/sqlite-kv/python/sqlite_kv/*.so

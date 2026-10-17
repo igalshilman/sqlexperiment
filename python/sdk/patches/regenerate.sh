@@ -8,10 +8,10 @@ build=../.build
 
 core=$build/sdk-shared-core
 git -C "$core" add -N -- src
-git -C "$core" diff -- src Cargo.toml > ../../../packages/sdk-shared-core/sdk-shared-core.patch
+git -C "$core" diff -- src Cargo.toml > ../../../core/sdk-shared-core/sdk-shared-core.patch
 
 sdk=$build/sdk-python
 git -C "$sdk" add -N -- src python tests
 git -C "$sdk" diff -- src python tests Cargo.toml pyproject.toml > sdk-python.patch
 
-grep -h '^diff --git' ../../../packages/sdk-shared-core/sdk-shared-core.patch sdk-python.patch | awk '{print $3}'
+grep -h '^diff --git' ../../../core/sdk-shared-core/sdk-shared-core.patch sdk-python.patch | awk '{print $3}'

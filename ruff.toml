@@ -1,7 +1,0 @@
-# Ruff, for all the Python here (python/ and examples-py/): `make format`, `make lint-py`.
-line-length = 120
-target-version = "py313"
-extend-exclude = ["**/.build", "**/target"]
-
-[lint]
-select = ["E", "F", "I", "UP", "B"]
