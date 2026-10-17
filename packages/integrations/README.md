@@ -33,14 +33,55 @@ A tool may be given as itself, or as a function of the invocation's context,
 twice passes its tool call id on (as an idempotency key, say): a crash runs
 an unfinished tool call again, with the same id.
 
-The models are real ones. Every agent's `model` is `provider/model-id`, or
-else the `MODEL` environment variable, or else Anthropic's
-`anthropic/claude-sonnet-5-5`, with `ANTHROPIC_API_KEY` (DeepSeek's
-`deepseek/deepseek-flash`, with `DEEPSEEK_API_KEY`, for the DeepSeek
-Harness). pi and OpenCode take any provider they know (such as
-`openai/gpt-6-luna`, with `OPENAI_API_KEY`); Claude and LangGraph take
-Anthropic's models (or LangGraph, any LangChain chat model). The tests ([`../../tests`](../../tests/README.md)) run
-them on scripted models instead.
+## Models
+
+Every agent's `model` is `provider/model-id`, or else the `MODEL`
+environment variable, or else Anthropic's `anthropic/claude-sonnet-5-5`, with
+`ANTHROPIC_API_KEY` (DeepSeek's `deepseek/deepseek-flash`, with
+`DEEPSEEK_API_KEY`, for the DeepSeek Harness):
+
+```ts
+pi.agent({ name: 'assistant', model: 'openai/gpt-6-luna' }); // with OPENAI_API_KEY
+```
+
+pi and OpenCode take any provider they know; Claude and LangGraph take
+Anthropic's models (and LangGraph any LangChain chat model, as `model`). The
+tests ([`../../tests`](../../tests/README.md)) run the agents on scripted
+models.
+
+## Calling an agent
+
+Through Restate's ingress, the request's body is the message (text, or a
+JSON string), and the response is the answer:
+
+```sh
+curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
+```
+
+A caller that may send a message again (after a timeout, say) gives it an
+idempotency key: the same key is the same invocation, answered once, however
+often it is sent. To send without waiting, add `/send`:
+
+```sh
+curl localhost:8080/assistant/alice/chat -H 'idempotency-key: msg-1' -d 'Hi, I am Alice'
+curl localhost:8080/assistant/alice/chat/send -d 'Summarize our chat later'
+```
+
+From a Restate handler, through the agent's definition:
+
+```ts
+const answer = await ctx.objectClient(assistant, 'alice').chat('Hi, I am Alice');
+```
+
+From any other code, with Restate's client
+([`@restatedev/restate-sdk-clients`](https://docs.restate.dev/develop/ts/clients)):
+
+```ts
+import * as clients from '@restatedev/restate-sdk-clients';
+
+const restate = clients.connect({ url: 'http://localhost:8080' });
+const answer = await restate.objectClient(assistant, 'alice').chat('Hi, I am Alice');
+```
 
 ## Tools
 

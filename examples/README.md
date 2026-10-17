@@ -1,14 +1,7 @@
 # Examples
 
 Each one is a file you run with Node (24 or later), from here, after `make
-js` at the repository's root. Then register it with a Restate server and
-call it:
-
-```sh
-ANTHROPIC_API_KEY=… node chat.ts
-restate deployments register http://localhost:9080
-curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
-```
+js` at the repository's root. See [Run an example](#run-an-example).
 
 | File                            | What                                                                                                           |
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------- |
@@ -26,3 +19,25 @@ Each agent is a virtual object, one per key, whose conversation is in the
 object's SQL database: a message is answered once per invocation, and a
 crash resumes the reply. The integrations are in
 [`restate-agents`](../packages/integrations/README.md).
+
+## Run an example
+
+```sh
+ANTHROPIC_API_KEY=… node chat.ts                      # the agent, on port 9080
+restate-server                                         # Restate, in another terminal
+restate deployments register http://localhost:9080     # tell Restate where the agent is
+curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
+```
+
+With Restate in Docker, the agent is at the host's address, as the
+container sees it:
+
+```sh
+docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13
+restate deployments register http://host.docker.internal:9080
+```
+
+`MODEL` picks another model, such as `MODEL=openai/gpt-6-luna` with
+`OPENAI_API_KEY` (see [the models](../packages/integrations/README.md#models)).
+To call an agent from code, or to send a message again safely, see
+[Calling an agent](../packages/integrations/README.md#calling-an-agent).
