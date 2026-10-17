@@ -10,7 +10,7 @@
  *   restate deployments register http://localhost:9080
  *   curl localhost:8080/coordinator/alice/chat --json '"Write fizzbuzz.py and primes.py, and run them"'
  */
-import { serve } from 'restate-agents';
+import { serve, subagent } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 import * as pi from 'restate-agents/pi';
 
@@ -23,7 +23,7 @@ const coder = opencode.agent({
 
 const coordinator = pi.agent({
   name: 'coordinator',
-  tools: [pi.subagent(coder, { description: 'a coding agent with files of its own' })],
+  tools: [subagent(coder, { description: 'a coding agent with files of its own' })],
 });
 
 await serve(coordinator, coder);

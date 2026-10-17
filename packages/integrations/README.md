@@ -6,20 +6,20 @@ the agent's state in its SQL database (`ctx.db`, of the patched SDK in
 however often an attempt crashes.
 
 ```ts
-import * as restate from '@restatedev/restate-sdk';
+import { serve } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 
 const assistant = pi.agent({ name: 'assistant', tools: [weather] });
-await restate.serve({ services: [assistant] });
+await serve(assistant);
 ```
 
-| Import                                                | Framework                       | Its state in the database | `chat(options)`                                                                                 |
-| ----------------------------------------------------- | ------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------- |
-| [`restate-agents/pi`](src/pi/README.md)               | pi-durable                      | its storage               | `model`, `tools`, `workspace`; and `subagent(agent)`, a tool that hands a task to another agent |
-| [`restate-agents/opencode`](src/opencode/README.md)   | OpenCode 2.0, embedded          | its database              | `model`, `tools`, `directory`                                                                   |
-| [`restate-agents/langgraph`](src/langgraph/README.md) | LangGraph                       | its checkpoints           | `model`, `tools`                                                                                |
-| [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | the conversation          | `model`, `system`, `tools`                                                                      |
-| [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | its session's event log   | `model`, `system`, `tools`                                                                      |
+| Import                                                | Framework                       | Its state in the database | `chat(options)`               |
+| ----------------------------------------------------- | ------------------------------- | ------------------------- | ----------------------------- |
+| [`restate-agents/pi`](src/pi/README.md)               | pi-durable                      | its storage               | `model`, `tools`, `workspace` |
+| [`restate-agents/opencode`](src/opencode/README.md)   | OpenCode 2.0, embedded          | its database              | `model`, `tools`, `directory` |
+| [`restate-agents/langgraph`](src/langgraph/README.md) | LangGraph                       | its checkpoints           | `model`, `tools`              |
+| [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | the conversation          | `model`, `system`, `tools`    |
+| [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | its session's event log   | `model`, `system`, `tools`    |
 
 Each framework has `agent({ name, ...options })`, a virtual object with one
 handler, `chat`, which takes a message and returns the answer; and
@@ -44,7 +44,7 @@ Any agent's `tools` take a framework's own tools, and the tools of
 `restate-agents`, which work the same in every framework:
 
 ```ts
-import { call, send, signal, tool, workflow } from 'restate-agents';
+import { call, send, signal, subagent, tool, workflow } from 'restate-agents';
 ```
 
 | Tool                                                           | What the model gets                                                                                                                                   |
@@ -54,6 +54,10 @@ import { call, send, signal, tool, workflow } from 'restate-agents';
 | `send(target, handler, { description, input?, key?, delay? })` | Sends to a handler without waiting: a one-way call, after `delay` if given                                                                            |
 | `workflow(target, { description, input? })`                    | Runs a workflow to the end, a workflow of its own per tool call, and answers with its result                                                          |
 | `signal(name, { description })`                                | Waits for a signal (a person's approval, another system's result) without holding a process, and answers with its value                               |
+| `subagent(agent, { description?, handler? })`                  | Hands a named task to another agent (of any framework), keyed `<this key>.<task>`, and answers with its answer: the same name continues the task      |
+
+Handler names are checked against the target's handlers: a typo does not
+compile.
 
 Each Restate call has an idempotency key made of the invocation's id and the
 model's tool call id: a crash runs an unfinished tool call again, and it

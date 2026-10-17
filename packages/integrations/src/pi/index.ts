@@ -2,7 +2,7 @@
 // invocation, with its storage in the object's database.
 //
 //   const assistant = pi.agent({ name: 'assistant', tools: [weather] });
-//   const lead = pi.agent({ name: 'lead', tools: [pi.subagent(coder)] });
+//   const lead = pi.agent({ name: 'lead', tools: [subagent(coder)] });
 //
 // or a handler of an object of your own: `handlers: { chat: pi.chat() }`
 //
@@ -170,40 +170,6 @@ export const chat =
       models,
       tools: tools.map((t) => (isTool(t) ? native(t, ctx) : forCall(t, ctx))),
       workspace: workspace === undefined ? undefined : forCall(workspace, ctx),
-    });
-
-/**
- * A tool, named after `agent` (an object, such as one of {@link agent}), that
- * hands a task to it: to the object keyed `<this key>.<task name>`, through
- * its `handler` (`chat`). Tasks of different names run at once; the same name
- * continues the same task. A call is made once per tool call, however many
- * attempts run it.
- */
-export const subagent =
-  (agent: { name: string }, { description = `the ${agent.name} agent`, handler = 'chat' } = {}) =>
-  (ctx: restate.SqlObjectContext): ToolRegistration =>
-    defineTool({
-      name: agent.name,
-      description:
-        `Hand a task to ${description}, and get its answer. ` +
-        'Tasks of different names run at once; the same name continues the same task.',
-      parameters: Type.Object({
-        name: Type.String({ description: 'A short name for the task, such as "fizzbuzz"', pattern: '^[a-z0-9-]+$' }),
-        task: Type.String({ description: 'The task in full: the agent sees nothing else' }),
-      }),
-      replay: 'safe', // a crash runs it again, with the same call id: the same call
-      execute: async ({ name, task }, { callId }) => {
-        const answer = await ctx.genericCall<string, string>({
-          service: agent.name,
-          key: `${ctx.key}.${name}`,
-          method: handler,
-          parameter: task,
-          inputSerde: restate.serde.json,
-          outputSerde: restate.serde.json,
-          idempotencyKey: `${ctx.request().id}:${callId}`,
-        });
-        return { content: [{ type: 'text', text: answer }] };
-      },
     });
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}. */

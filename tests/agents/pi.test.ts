@@ -1,6 +1,7 @@
 // pi's chat without a Restate server or an API key: Anthropic's provider is a
 // fake model (../fakes/pi.ts).
 import type * as restate from '@restatedev/restate-sdk';
+import { subagent } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { callTools, fakeProvider, say, textOf } from '../fakes/pi.ts';
@@ -79,10 +80,13 @@ describe('pi.chat', () => {
   });
 });
 
-describe('pi.subagent', () => {
+/** A sub-agent with a `code` handler. */
+const coder = { name: 'coder' } as restate.VirtualObjectDefinition<'coder', { code: Handler }>;
+
+describe('subagent', () => {
   it('hands each task to the sub-agent of its name, once per tool call', async () => {
     const alice = object('alice');
-    const chat = pi.chat({ tools: [pi.subagent({ name: 'coder' }, { handler: 'code' })] });
+    const chat = pi.chat({ tools: [subagent(coder, { handler: 'code' })] });
     expect(await alice.invoke(chat, 'inv1', 'delegate fizzbuzz and primes')).toBe(
       'alice.fizzbuzz: done\nalice.primes: done',
     );

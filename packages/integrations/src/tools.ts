@@ -65,10 +65,25 @@ export const tool = <S extends z.ZodObject>(options: {
   run: async (input, context) => text(await options.run(input, context)),
 });
 
-/** A service, virtual object or workflow, as its definition (`restate.service(...)` and so on). */
-type Target = { name: string };
+/** A service, virtual object or workflow, as its definition (`restate.service(...)` and so on), of handlers `M`. */
+type Target<M = unknown> =
+  | restate.ServiceDefinition<string, M>
+  | restate.VirtualObjectDefinition<string, M>
+  | restate.WorkflowDefinition<string, M>;
 /** Whether a target is keyed: a virtual object (key) or a workflow (id). */
 const keyed = (target: Target) => 'object' in target || 'workflow' in target;
+
+/** Call `method` of `service`, with JSON in and out, once per tool call (see {@link ToolContext}). */
+const invoke = (
+  { ctx, callId }: ToolContext,
+  target: { service: string; method: string; key?: string; parameter: unknown },
+) =>
+  ctx.genericCall<unknown, unknown>({
+    ...target,
+    inputSerde: restate.serde.json,
+    outputSerde: restate.serde.json,
+    idempotencyKey: `${ctx.request().id}:${callId}`,
+  });
 
 interface TargetOptions<S extends z.ZodObject | undefined> {
   /** The tool's name, for the model; by default the handler's, such as `orders_status`. */
@@ -114,36 +129,26 @@ function split(
  *
  * Of a virtual object, the model chooses the key, unless `key` gives it.
  */
-export const call = <S extends z.ZodObject | undefined = undefined>(
-  target: Target,
-  handler: string,
+export const call = <M, S extends z.ZodObject | undefined = undefined>(
+  target: Target<M>,
+  handler: keyof M & string,
   options: TargetOptions<S>,
 ): Tool =>
   tool({
     name: options.name ?? `${target.name}_${handler}`,
     description: options.description,
     input: inputOf(target, options),
-    run: async (input, { ctx, callId }) => {
-      const { key, parameter } = split(target, options, input, ctx);
-      return ctx.genericCall<unknown, unknown>({
-        service: target.name,
-        method: handler,
-        key,
-        parameter,
-        inputSerde: restate.serde.json,
-        outputSerde: restate.serde.json,
-        idempotencyKey: `${ctx.request().id}:${callId}`,
-      });
-    },
+    run: async (input, context) =>
+      invoke(context, { service: target.name, method: handler, ...split(target, options, input, context.ctx) }),
   });
 
 /**
  * A tool that sends to `handler` of `target`, without waiting for it: a
  * one-way call, made once, after `delay` if given (such as `{ minutes: 5 }`).
  */
-export const send = <S extends z.ZodObject | undefined = undefined>(
-  target: Target,
-  handler: string,
+export const send = <M, S extends z.ZodObject | undefined = undefined>(
+  target: Target<M>,
+  handler: keyof M & string,
   options: TargetOptions<S> & { delay?: restate.Duration },
 ): Tool =>
   tool({
@@ -171,22 +176,52 @@ export const send = <S extends z.ZodObject | undefined = undefined>(
  * id made of the agent's key and the tool call's id, unless `key` gives one.
  */
 export const workflow = <S extends z.ZodObject | undefined = undefined>(
-  target: Target,
-  options: Omit<TargetOptions<S>, 'key'> & { key?: PerCall<string> },
+  target: restate.WorkflowDefinition<string, { run: unknown }>,
+  options: TargetOptions<S>,
 ): Tool =>
   tool({
     name: options.name ?? target.name,
     description: options.description,
     input: z.object(options.input?.shape ?? {}),
-    run: async (input, { ctx, callId }) =>
-      ctx.genericCall<unknown, unknown>({
+    run: async (input, context) =>
+      invoke(context, {
         service: target.name,
         method: 'run',
-        key: options.key === undefined ? `${ctx.key}-${callId}` : forCall(options.key, ctx),
+        key: options.key === undefined ? `${context.ctx.key}-${context.callId}` : forCall(options.key, context.ctx),
         parameter: options.input ? input : undefined,
-        inputSerde: restate.serde.json,
-        outputSerde: restate.serde.json,
-        idempotencyKey: `${ctx.request().id}:${callId}`,
+      }),
+  });
+
+/**
+ * A tool, named after `agent` (an agent, or any virtual object), that hands
+ * a task to it: to the object keyed `<this key>.<task name>`, through its
+ * `handler` (`chat`), and answers with its answer. Tasks of different names
+ * run at once; the same name continues the same task.
+ *
+ *   const lead = pi.agent({ name: 'lead', tools: [subagent(coder, { description: 'a coding agent' })] });
+ */
+export const subagent = <M>(
+  agent: restate.VirtualObjectDefinition<string, M>,
+  { description = `the ${agent.name} agent`, handler }: { description?: string; handler?: keyof M & string } = {},
+): Tool =>
+  tool({
+    name: agent.name,
+    description:
+      `Hand a task to ${description}, and get its answer. ` +
+      'Tasks of different names run at once; the same name continues the same task.',
+    input: z.object({
+      name: z
+        .string()
+        .regex(/^[a-z0-9-]+$/)
+        .describe('A short name for the task, such as "fizzbuzz"'),
+      task: z.string().describe('The task in full: the agent sees nothing else'),
+    }),
+    run: async ({ name, task }, context) =>
+      invoke(context, {
+        service: agent.name,
+        key: `${context.ctx.key}.${name}`,
+        method: handler ?? 'chat',
+        parameter: task,
       }),
   });
 
