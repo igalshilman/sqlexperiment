@@ -216,6 +216,11 @@ class Object:
         self.values: dict[str, Any] = {}
         self.sends: list[tuple[str, Any]] = []
         self.steered: list[dict[str, str]] = []
+        # The calls made (service, handler, key, idempotency key, request), and how a call answers its request.
+        self.calls: list[tuple[str, str, str | None, str | None, bytes]] = []
+        self.answer: Callable[[str, bytes], bytes] = lambda handler, request: request
+        # Called in the next call, after it was made: such as Object.crash.
+        self.crash_in_call: Callable[[], None] | None = None
 
     def steer(self, text: str) -> None:
         """Steer the turn being answered with ``text``, as the agent's ``steer`` handler does."""
@@ -296,6 +301,16 @@ class Context:
 
     def object_send(self, handler: Callable[..., Any], key: str, arg: Any, **options: Any) -> None:
         self.obj.sends.append((handler.__name__, arg))
+
+    async def generic_call(
+        self, service: str, handler: str, arg: bytes, key: str | None = None, idempotency_key: str | None = None
+    ) -> bytes:
+        self.obj.calls.append((service, handler, key, idempotency_key, arg))
+        if self.obj.crash_in_call is not None:
+            crash, self.obj.crash_in_call = self.obj.crash_in_call, None
+            crash()
+            raise ConnectionError("the process died")
+        return self.obj.answer(handler, arg)
 
     async def object_call(self, handler: Callable[..., Any], key: str, arg: Any, **options: Any) -> Any:
         assert handler.__name__ == "steering", f"the agents call {handler.__name__} here"

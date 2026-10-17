@@ -79,7 +79,39 @@ assistant = langgraph.agent("assistant", graph=graph)
 own, as `chat` does: once, however often an attempt crashes (an
 invocation's first prompt has its id, the next `<id>:2`, and so on).
 LangGraph's `interrupt()` does not work here: wait for a person with a
-`signal` tool.
+`signal` tool, or a `signal` node.
+
+### Restate's steps in a graph
+
+Restate's tools are for a model to choose; in a graph of your own, the
+graph can take Restate's steps itself, as nodes
+(`restate_agents.langgraph.nodes`): `call(handler)`, `send(handler)`,
+`workflow(target)` and `signal(name)`, each made once per run of its node,
+however often an attempt crashes (its idempotency key is the invocation's
+id and LangGraph's task id, which a step that a crash cut off keeps)
+([`examples-py/writer.py`](../../examples-py/writer.py): a person approves
+each post, and a workflow publishes it):
+
+```python
+from restate_agents.langgraph import nodes
+
+graph.add_node("status", nodes.call(status, input=lambda state: state["order"], update="status"))
+graph.add_node("approval", nodes.signal("approval", input=lambda state: {"draft": state["draft"]}, update="verdict"))
+graph.add_node("publish", nodes.workflow(publishing, input=lambda state: state["draft"], update="url"))
+graph.add_node("follow_up", nodes.send(checkin, input=lambda state: state["order"], delay=timedelta(days=1)))
+```
+
+- **`input`**: a function of the state giving the handler's input (or, for
+  `signal`, what it waits for, which `pending` shows).
+- **`update`**: where the result goes: a key of the state, or a function of
+  the state and the result giving the update. The result is the handler's,
+  as its output type says (a pydantic model, say), not text.
+- **`key`**: an object's or a workflow's key, or a function of the state
+  giving it. A `workflow` node runs a workflow of its own per run, keyed
+  `<this key>-<task id>`, unless given one.
+
+A handler's `restate.TerminalError` fails the turn: no model reads it. A
+stopped turn ends at a node that waits, as at a tool that does.
 
 ### Tools
 

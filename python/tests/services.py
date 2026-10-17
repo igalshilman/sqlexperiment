@@ -2,7 +2,7 @@
 The services of the tests against a Restate server: the notes example, a
 bank, a probe of the context without journal replay, the agent on the
 scripted teller (scripted_agent.py), and a support agent with Restate's
-tools, on LangGraph and on Pydantic AI. Served on PORT, as the examples are.
+tools, on LangGraph and on Pydantic AI; and a graph whose steps are Restate's. Served on PORT, as the examples are.
 """
 
 import asyncio
@@ -16,10 +16,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests")
 import restate  # noqa: E402
 from bank import account  # noqa: E402
 from fakes import Teller, pydantic_ai_model  # noqa: E402
+from langchain_core.messages import AIMessage  # noqa: E402
+from langgraph.graph import START, MessagesState, StateGraph  # noqa: E402
 from notes import add, notes  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from restate import Context, ObjectContext, WorkflowContext  # noqa: E402
 from restate_agents import call, langgraph, pydantic_ai, send, serve, signal, subagent, workflow  # noqa: E402
+from restate_agents.langgraph import nodes  # noqa: E402
 from scripted_agent import teller  # noqa: E402
 
 echo = restate.Service("echo")
@@ -165,5 +168,36 @@ support = langgraph.agent("support", model=Teller(), tools=SUPPORT_TOOLS)
 pydantic_support = pydantic_ai.agent("pydantic_support", model=pydantic_ai_model(Teller()), tools=SUPPORT_TOOLS)
 
 
+class RefundState(MessagesState):
+    status: str
+    approval: str
+    refunded: str
+
+
+def order(state: RefundState) -> str:
+    """The order the message is about: the message itself."""
+    return state["messages"][0].text
+
+
+# Restate's steps of a graph, rather than tools a model chooses: the order's status, an approval, the refund, a note.
+steps = StateGraph(RefundState)
+steps.add_node("status", nodes.call(status, input=order, update="status"))
+steps.add_node("approval", nodes.signal("approval", input=lambda state: {"order": order(state)}, update="approval"))
+steps.add_node(
+    "refund", nodes.workflow(refund, input=lambda state: Refund(order=order(state), amount=5), update="refunded")
+)
+steps.add_node(
+    "note", nodes.send(add, key=lambda state: f"refunds-{order(state)}", input=lambda state: state["refunded"])
+)
+steps.add_node(
+    "answer",
+    lambda state: {"messages": [AIMessage(" / ".join([state["status"], state["approval"], state["refunded"]]))]},
+)
+steps.add_edge(START, "status")
+for a, b in [("status", "approval"), ("approval", "refund"), ("refund", "note"), ("note", "answer")]:
+    steps.add_edge(a, b)
+refunds = langgraph.agent("refunds", graph=steps)
+
+
 if __name__ == "__main__":
-    serve(echo, probe, notes, account, teller, orders, refund, helper, support, pydantic_support)
+    serve(echo, probe, notes, account, teller, orders, refund, helper, support, pydantic_support, refunds)

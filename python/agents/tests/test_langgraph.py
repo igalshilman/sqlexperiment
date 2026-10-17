@@ -253,3 +253,47 @@ async def test_prompts_of_a_handler_of_your_own_are_answered_once_each():
 def test_an_agent_takes_a_graph_or_the_usual_options():
     with pytest.raises(TypeError, match="not both"):
         langgraph.agent("shouter", graph=shouting([]), system="Shout.")
+
+
+async def test_a_call_node_is_made_once_per_run_of_its_node_through_a_crash():
+    from langgraph.graph import START
+    from restate_agents.langgraph import nodes
+
+    orders = restate.Service("orders")
+
+    @orders.handler()
+    async def status(ctx, order: str) -> str:
+        """The status of an order."""
+
+    class Order(MessagesState):
+        status: str
+
+    graph = StateGraph(Order)
+    graph.add_node("status", nodes.call(status, input=lambda state: state["messages"][-1].content, update="status"))
+    graph.add_node("answer", lambda state: {"messages": [AIMessage(state["status"])]})
+    graph.add_edge(START, "status")
+    graph.add_edge("status", "answer")
+    chat = langgraph.agent("orders_desk", graph=graph).handlers["chat"].fn
+
+    alice = Object()
+    alice.answer = lambda handler, request: b'"delivered"'
+    alice.crash_in_call = alice.crash
+    assert await alice.invoke(chat, "103") == "delivered"
+    # The call ran again after the crash, with the same idempotency key; the next message's call has its own.
+    first, again = alice.calls
+    assert first == again and first[:2] == ("orders", "status") and first[4] == b'"103"'
+    assert await alice.invoke(chat, "104") == "delivered"
+    assert alice.calls[2][3] != first[3]
+
+
+def test_a_call_node_of_an_object_needs_its_key():
+    from restate_agents.langgraph import nodes
+
+    accounts = restate.VirtualObject("accounts")
+
+    @accounts.handler()
+    async def balance(ctx) -> int:
+        """The balance."""
+
+    with pytest.raises(TypeError, match="give the node its key"):
+        nodes.call(balance)
