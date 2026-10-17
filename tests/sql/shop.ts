@@ -41,8 +41,13 @@ const WAREHOUSE = `
 
 /** The stock of one SKU (the object key). */
 // Retried soon, as the ledger is: the crash test aborts attempts often, and
-// the server's default backoff would grow past its deadline.
-const OPTIONS = { ...restate.sqlOptions, retryPolicy: { initialInterval: 50, maxInterval: 500 } };
+// the server's default backoff would grow past its deadline; and without
+// end, as an invocation the server pauses after its default attempts (70)
+// would wait for a person.
+const OPTIONS = {
+  ...restate.sqlOptions,
+  retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
+};
 
 export const warehouse = restate.object({
   name: 'Warehouse',
