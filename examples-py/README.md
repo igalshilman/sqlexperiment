@@ -3,12 +3,13 @@
 Each one is a file you run with [uv](https://docs.astral.sh/uv/), from here,
 after `make py` at the repository's root. See [Run an example](#run-an-example).
 
-| File                       | What                                                                                                           |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| [`notes.py`](notes.py)     | SQL in a virtual object, with `ctx.db`                                                                         |
-| [`chat.py`](chat.py)       | A durable chat agent on LangGraph, with a tool                                                                 |
-| [`memory.py`](memory.py)   | An assistant that remembers facts about you in its own SQL table, through its tools, with handlers of your own |
-| [`support.py`](support.py) | A support agent whose tools are Restate itself: a service, a manager's approval (a signal), a workflow         |
+| File                         | What                                                                                                           |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| [`notes.py`](notes.py)       | SQL in a virtual object, with `ctx.db`                                                                         |
+| [`chat.py`](chat.py)         | A durable chat agent on LangGraph, with a tool                                                                 |
+| [`memory.py`](memory.py)     | An assistant that remembers facts about you in its own SQL table, through its tools, with handlers of your own |
+| [`on_modal.py`](on_modal.py) | The support agent on [Modal](https://modal.com), as a Modal Server                                             |
+| [`support.py`](support.py)   | A support agent whose tools are Restate itself: a service, a manager's approval (a signal), a workflow         |
 
 They are built from [`restate_agents`](../python/agents/README.md): an agent
 is a virtual object per conversation, and its tools are plain functions.
@@ -52,3 +53,23 @@ curl localhost:8080/assistant/alice/messages                          # the conv
 The agents take `MODEL` (`anthropic/<model-id>`), or else Claude Sonnet,
 with `ANTHROPIC_API_KEY`; `notes.py` needs no key. Each
 example's docstring has its requests.
+
+## Run on Modal
+
+[`on_modal.py`](on_modal.py) deploys `support.py` to Modal, as a Modal Server
+(`@app.server(h2_enabled=True)`): Restate calls it over HTTP/2, end to end.
+The agents need that: an attempt that waits runs its handler again from the
+start, so HTTP/1.1's request-response mode (Modal's web endpoints, AWS
+Lambda) cannot serve them. Its image installs the wheels of `make wheels`
+(the patched SDK and the SQL extension are not on PyPI).
+
+```sh
+make wheels                                          # at the repository's root: dist/
+uvx modal secret create anthropic ANTHROPIC_API_KEY=…
+uvx modal deploy on_modal.py
+restate deployments register https://<workspace>--restate-support-support.us-east.modal.direct \
+    --extra-header "Modal-Key: wk-…" --extra-header "Modal-Secret: ws-…"   # a Modal proxy token
+```
+
+Not tried on Modal yet: whether its Servers stream HTTP/2 both ways at once,
+and whether a long request (an agent's turn) has a limit there.

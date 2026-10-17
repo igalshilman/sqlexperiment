@@ -41,7 +41,7 @@ endif
 
 .PHONY: all help core addon sdk-ts sdk-py js py examples-rust test test-core test-addon test-sdk-ts test-ts \
 	test-sdk-py test-sql-py test-agents-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test \
-	crash-test-py concurrency-test-py restate-server clean
+	crash-test-py concurrency-test-py restate-server wheels clean
 
 # --- Build
 
@@ -73,6 +73,17 @@ $(SDK_PY): $(wildcard python/sdk/patches/*.patch) $(CORE_PATCH) python/sdk/setup
 
 py: $(SDK_PY) ## The uv workspace (python/.venv): the patched Python SDK and the Python extension, rebuilt when their Rust changes
 	cd python && uv sync --locked
+
+# Built with zig (maturin[zig]), for glibc 2.28 and later: the wheels run on
+# the usual Linux images (Debian, Ubuntu), whatever glibc builds them.
+MATURIN_WHEEL := uv tool run --from 'maturin[zig]>=1.9,<2' maturin build --release --zig --compatibility manylinux_2_28 \
+	-i python3.13 -o $(CURDIR)/dist
+
+wheels: $(SDK_PY) ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPython 3.13): the patched SDK, the extension and restate-agents
+	rm -rf dist
+	cd python/sdk/.build/sdk-python && $(MATURIN_WHEEL)
+	cd python/sqlite-kv && $(MATURIN_WHEEL)
+	uv build --wheel python/agents -o dist
 
 examples-rust: ## The Rust example: the core crate's lookup
 	cd $(CORE) && $(CARGO) build --locked --release --features simulation --example lookup
@@ -165,5 +176,5 @@ endif
 	mv $@.tmp $@
 
 clean: ## Remove build outputs
-	rm -rf $(CARGO_TARGET_DIR) $(ADDON) packages/sdk-typescript/.build python/sdk/.build node_modules */node_modules packages/*/node_modules \
+	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) packages/sdk-typescript/.build python/sdk/.build node_modules */node_modules packages/*/node_modules \
 		python/.venv python/sqlite-kv/python/sqlite_kv/*.so
