@@ -392,10 +392,16 @@ async function sessionMessages(host: Host): Promise<Message[]> {
   }
 }
 
-/** A handler of the session, a page at a time: what was said, in order, with the tool calls. */
+/**
+ * A handler of the session, a page at a time: what was said, in order, with
+ * the tool calls. It answers while a message is answered, with the messages
+ * stored so far: OpenCode boots on the database as stored, without resuming
+ * the turn.
+ */
 export const messages = () =>
-  messagesHandler((ctx, transcript) =>
-    withOpenCode(ctx, {}, async ({ host }) => {
+  messagesHandler(async (ctx, transcript) => {
+    const host = await openOpenCode(ctx.db, { closed: false }, { resume: false });
+    try {
       for (const m of await sessionMessages(host)) {
         if (m.type === 'user') transcript.say('user', m.text);
         if (m.type !== 'assistant') continue;
@@ -406,8 +412,10 @@ export const messages = () =>
           if (c.state.content) transcript.result(c.id, textOf(c.state.content));
         }
       }
-    }),
-  );
+    } finally {
+      await host.close();
+    }
+  });
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({

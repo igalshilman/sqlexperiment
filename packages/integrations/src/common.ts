@@ -72,23 +72,49 @@ const message: restate.Serde<string> = {
   },
 };
 
+/** The state key of the {@link Turn} being answered. */
+export const TURN = 'restate-agents.turn';
+
+/** The message a `chat` handler is answering: its invocation, and when it started. */
+export interface Turn {
+  /** The invocation's id: `/restate/invocation/<id>/attach` waits for its answer. */
+  invocationId: string;
+  /** When it started, as an ISO date. */
+  since: string;
+}
+
 /**
  * `answer` as a chat handler, which takes its message as plain text or as a
  * JSON string, so that both of these work:
  *
  *   curl localhost:8080/assistant/alice/chat -d 'Hi'
  *   curl localhost:8080/assistant/alice/chat --json '"Hi"'
+ *
+ * While it answers, the object's `status` says so (its {@link Turn}).
  */
 export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: string) => Promise<string>) =>
   restate.handlers.object.exclusive(
     { input: message, accept: '*/*', journalReplay: false },
     async (ctx: restate.SqlObjectContext, text: string) => {
+      const invocationId = ctx.request().id;
+      if ((await ctx.get<Turn>(TURN))?.invocationId !== invocationId) {
+        ctx.set(TURN, { invocationId, since: new Date().toISOString() } satisfies Turn);
+      }
+      let answered: string;
       try {
-        return await answer(ctx, text);
+        answered = await answer(ctx, text);
       } catch (error) {
-        if (error instanceof restate.TerminalError || !refused(error)) throw error;
+        if (error instanceof restate.TerminalError) {
+          ctx.clear(TURN);
+          throw error;
+        }
+        // Any other error fails the attempt, and Restate retries the turn.
+        if (!refused(error)) throw error;
+        ctx.clear(TURN);
         throw new restate.TerminalError(`the model's provider refused the request: ${CHECK_MODEL}. ${String(error)}`);
       }
+      ctx.clear(TURN);
+      return answered;
     },
   );
 
@@ -189,13 +215,14 @@ export class Transcript {
 
 /**
  * `read` as the handler of an agent's conversation, a page at a time: what
- * was said, in order, with the tool calls. It is exclusive, as `ctx.db` is:
- * it waits for a message being answered.
+ * was said, in order, with the tool calls. It is shared: it answers while a
+ * message is answered, from the database as stored (the tool calls made so
+ * far, say), and stores nothing.
  */
-export const messagesHandler = (read: (ctx: restate.SqlObjectContext, transcript: Transcript) => Promise<void>) =>
-  restate.handlers.object.exclusive(
+export const messagesHandler = (read: (ctx: restate.SqlObjectSharedContext, transcript: Transcript) => Promise<void>) =>
+  restate.handlers.object.shared(
     { journalReplay: false },
-    async (ctx: restate.SqlObjectContext, request?: MessagesRequest) => {
+    async (ctx: restate.SqlObjectSharedContext, request?: MessagesRequest) => {
       const transcript = new Transcript();
       await read(ctx, transcript);
       return transcript.page(request ?? {});

@@ -441,6 +441,25 @@ impl Session {
         Ok(session)
     }
 
+    /// Open a reader of a namespace that another owns, alongside it: a
+    /// session that writes nothing to the store (its SQL changes stay
+    /// private, [`Durability::Save`], and it is never saved) and keeps no
+    /// cache. It reads the state as of open, unless the owner checkpoints
+    /// meanwhile: [`Self::is_current`], once it has read, says whether it did.
+    /// The store must be [`KvStore::durable_when_visible`], as open would
+    /// otherwise confirm what it read by writing it again.
+    pub async fn open_reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
+        if !store.durable_when_visible() {
+            return Err("a reader needs a store whose visible values are durable".into());
+        }
+        let options = StorageOptions {
+            cache: None,
+            durability: Durability::Save,
+            ..options
+        };
+        Self::open_with_options(store, options).await
+    }
+
     /// Whether this session continued a previous session's engine.
     #[cfg(feature = "simulation")]
     pub fn reused_engine(&self) -> bool {
@@ -662,6 +681,15 @@ impl Session {
     /// from a later open whether that commit landed.
     pub fn version(&self) -> u64 {
         self.io.log_next()
+    }
+
+    /// Whether the store still holds the state this session opened on (see
+    /// [`Self::open_reader`]): if it does not, what the session read may mix
+    /// that state with a later checkpoint's pages, so read again in a new
+    /// session. A session's own commits change the state, so this is for a
+    /// session that has not committed.
+    pub async fn is_current(&self) -> Result<bool> {
+        Ok(self.io.snapshot().is_current().await?)
     }
 
     /// Whether the session can run more SQL. An SQL error (a syntax error, a

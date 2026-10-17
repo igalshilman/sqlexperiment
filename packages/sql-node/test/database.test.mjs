@@ -304,3 +304,55 @@ test('a statement resolves after its writes reached the store, however many', as
   assert.equal(atResolve, backend.unconfirmed.length);
   await db.save();
 });
+
+/** A reader's view of `backend`: what is stored and written so far, and no writes. */
+const readerOf = (backend) => ({
+  async get(key) {
+    for (let i = backend.unconfirmed.length - 1; i >= 0; i--) {
+      if (backend.unconfirmed[i][0] === key) return backend.unconfirmed[i][1];
+    }
+    return backend.stored.get(key);
+  },
+  set() {
+    throw new Error('a reader wrote');
+  },
+  clear() {
+    throw new Error('a reader wrote');
+  },
+  sync() {},
+});
+
+test('a reader reads beside the owner, writes nothing, and knows when the owner committed since', async () => {
+  const backend = new Backend();
+  const ns = fresh();
+  const owner = await open(ns, backend.request());
+  await owner.execute('CREATE TABLE t(n INTEGER)');
+  await owner.execute('INSERT INTO t VALUES (1)');
+
+  const reader = await open(ns, readerOf(backend), { reader: true });
+  assert.deepEqual(await reader.query('SELECT n FROM t'), [[1]]);
+  // Its own changes stay in the session.
+  await reader.execute('CREATE TABLE IF NOT EXISTS t(n INTEGER)');
+  await reader.execute('INSERT INTO t VALUES (99)');
+  assert.deepEqual(await reader.query('SELECT n FROM t ORDER BY n'), [[1], [99]]);
+  assert.equal(await reader.isCurrent(), true);
+
+  // The owner commits: the reader keeps the state it opened on, which is no longer current.
+  await owner.execute('INSERT INTO t VALUES (2)');
+  assert.deepEqual(await reader.query('SELECT n FROM t ORDER BY n'), [[1], [99]]);
+  assert.equal(await reader.isCurrent(), false);
+  await reader.close();
+
+  const again = await open(ns, readerOf(backend), { reader: true });
+  assert.deepEqual(await again.query('SELECT n FROM t ORDER BY n'), [[1], [2]]);
+  assert.equal(await again.isCurrent(), true);
+  await again.close();
+  await owner.save();
+});
+
+test('a reader of a namespace without a database reads none', async () => {
+  const reader = await open(fresh(), readerOf(new Backend()), { reader: true });
+  assert.deepEqual(await reader.query('SELECT count(*) FROM sqlite_schema'), [[0]]);
+  assert.equal(await reader.isCurrent(), true);
+  await reader.close();
+});

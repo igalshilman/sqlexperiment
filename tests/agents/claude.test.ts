@@ -3,7 +3,9 @@
 // the way out of a crashed attempt. `make test-ts T=claude`. Its client is the teller's (../fakes/claude.ts).
 import * as restate from '@restatedev/restate-sdk';
 import { describe, expect, it, vi } from 'vitest';
-import { conversation, crashedAnywhere, SAID } from '../testing.ts';
+import { tool } from 'restate-agents';
+import { z } from 'zod';
+import { conversation, crashedAnywhere, SAID, sqlAttempt } from '../testing.ts';
 import { HttpError, teller } from '../fakes/claude.ts';
 import * as claude from 'restate-agents/claude';
 import { bank } from './bank.ts';
@@ -19,6 +21,40 @@ const twice = async (ctx: restate.SqlObjectContext) =>
   ]);
 
 describe('the Claude agent', () => {
+  it('gives the conversation while it answers: the tool calls made so far', async () => {
+    const map = new Map<string, Uint8Array>();
+    const started = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<void>();
+    const transfer = tool({
+      name: 'transfer',
+      description: 'Move money.',
+      input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+      run: async () => {
+        started.resolve();
+        await gate.promise;
+        return 'moved 5 from account 1 to account 2';
+      },
+    });
+    const owner = sqlAttempt({ map, key: 'mid', id: 'inv1' });
+    const ctx = { key: 'mid', request: () => ({ id: 'inv1' }), ...owner };
+    const answer = owner.end(() =>
+      claude.chat({ tools: [transfer] })(ctx as unknown as restate.SqlObjectContext, 'Please move 5 from 1 to 2'),
+    );
+    await started.promise;
+    const reader = sqlAttempt({ map, key: 'mid', id: 'read', shared: true });
+    const read = { key: 'mid', request: () => ({ id: 'read' }), ...reader };
+    const page = await reader.end(() => claude.messages()(read as unknown as restate.SqlObjectContext, {}));
+    expect(page.messages.map((m) => m.parts)).toEqual([
+      [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
+      [
+        { type: 'text', text: 'On it.' },
+        { type: 'tool', id: 'toolu_1', name: 'transfer', input: { from: 1, to: 2, amount: 5 } },
+      ],
+    ]);
+    gate.resolve();
+    expect(await answer).toBe('Done: moved 5 from account 1 to account 2');
+  });
+
   it('answers a message once after a crash at any of its state requests', async () => {
     expect(await crashedAnywhere(prompt, claude.messages())).toEqual([]);
   }, 600_000);

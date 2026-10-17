@@ -50,6 +50,12 @@ export declare class Database implements Transaction {
    */
   version(): Promise<number>;
   isUsable(): boolean;
+  /**
+   * A reader's: whether the store still holds the state it opened on (no
+   * commit since), so that what it read is. If not, read again, in a new
+   * session.
+   */
+  isCurrent(): Promise<boolean>;
   save(): Promise<void>;
   close(): Promise<void>;
 }
@@ -60,4 +66,14 @@ export declare class Database implements Transaction {
  * its writes: a statement resolves once they reach the store, in order, and
  * `save()` waits until they are stored.
  */
-export declare function open(namespace: string, store: Store): Promise<Database>;
+export declare function open(namespace: string, store: Store, options?: OpenOptions): Promise<Database>;
+
+export interface OpenOptions {
+  /**
+   * Read the namespace beside its owner, which writes meanwhile (a virtual
+   * object's shared handler): without the page cache, and without writing to
+   * the store; SQL changes stay in the session. What it reads is the state
+   * as of open while `isCurrent()` says so.
+   */
+  reader?: boolean;
+}

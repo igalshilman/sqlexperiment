@@ -11,9 +11,10 @@ export {
   type Messages,
   type MessagesRequest,
   type Part,
+  type Turn,
   type Configure,
 } from './common.ts';
-export { object } from './object.ts';
+export { object, type Status } from './object.ts';
 export { signals, type Resolved, type Signal, type Waiting } from './signals.ts';
 export { call, send, signal, subagent, tool, workflow, type Tool, type ToolCall, type ToolContext } from './tools.ts';
 

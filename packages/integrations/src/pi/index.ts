@@ -224,11 +224,18 @@ export const chat = (options: Configure<Options> = {}) => {
   return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
 
-/** A handler of the conversation, a page at a time: what was said, in order, with the tool calls, from pi-durable's entries. */
+/**
+ * A handler of the conversation, a page at a time: what was said, in order,
+ * with the tool calls, from pi-durable's entries. It answers while a message
+ * is answered, with the entries committed so far.
+ */
 export const messages = () =>
-  messagesHandler((ctx, transcript) =>
-    // An empty model registry: reading needs no model, nor MODEL's provider.
-    withPi(ctx, { models: createModels() }, async ({ harness, context }) => {
+  messagesHandler(async (ctx, transcript) => {
+    const context = BACKGROUND_CONTEXT;
+    // Reading needs no model, nor MODEL's provider: an empty registry.
+    const options = { models: createModels(), registry: createRegistry() };
+    const harness = await Harness.open(await openSqlKvStorage(ctx.db), options, context);
+    try {
       const root = await harness.root(context);
       for (let cursor: Parameters<typeof root.entries>[2]; ;) {
         const page = await root.entries({ order: 'ascending' }, 100, cursor, context);
@@ -243,8 +250,10 @@ export const messages = () =>
         cursor = page.next;
         if (cursor === undefined) return;
       }
-    }),
-  );
+    } finally {
+      await harness.close(context);
+    }
+  });
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({

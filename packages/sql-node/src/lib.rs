@@ -157,11 +157,16 @@ pub struct Database {
 
 /// Open the database of `namespace` over the store behind `dispatch`; see
 /// `index.js` for the store object it is built from.
+///
+/// A `reader` reads the namespace beside its owner (see `Session::open_reader`):
+/// it writes nothing to the store, and `isCurrent` says whether what it read
+/// is still the stored state.
 #[napi(ts_return_type = "Promise<Database>")]
 pub fn open<'env>(
     env: &'env Env,
     namespace: String,
     dispatch: Function<'env, Args, Promise<Option<Uint8Array>>>,
+    reader: Option<bool>,
 ) -> Result<PromiseRaw<'env, Database>> {
     let dispatch: Dispatch = dispatch
         .build_threadsafe_function()
@@ -173,8 +178,12 @@ pub fn open<'env>(
         queued: AtomicBool::new(false),
     });
     env.spawn_future(async move {
+        let cache = match reader.unwrap_or(false) {
+            true => None,
+            false => Some(page_cache().await?.namespace(&namespace)),
+        };
         let options = StorageOptions {
-            cache: Some(page_cache().await?.namespace(&namespace)),
+            cache,
             durability: Durability::Commit,
             // Commits only append, compressed against the pages' previous
             // images, until the log holds 60 transactions or 256 KiB: then a
@@ -185,9 +194,11 @@ pub fn open<'env>(
             checkpoint_log_bytes: 256 * 1024,
             ..StorageOptions::default()
         };
-        let session = Session::open_with_options(store.clone(), options)
-            .await
-            .map_err(sql_error)?;
+        let session = match reader.unwrap_or(false) {
+            true => Session::open_reader(store.clone(), options).await,
+            false => Session::open_with_options(store.clone(), options).await,
+        }
+        .map_err(sql_error)?;
         store.barrier().await.map_err(sql_error_io)?;
         Ok(Database {
             session: Arc::new(Mutex::new(Some(session))),
@@ -291,6 +302,18 @@ impl Database {
             .as_ref()
             .ok_or_else(|| Error::from_reason("the database is closed"))?;
         Ok(session.version() as i64)
+    }
+
+    /// Whether the store still holds the state this reader opened on, so
+    /// that what it read is: if not, read again in a new session (see
+    /// `Session::is_current`).
+    #[napi]
+    pub async fn is_current(&self) -> Result<bool> {
+        let session = self.session.lock().await;
+        let session = session
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("the database is closed"))?;
+        session.is_current().await.map_err(sql_error)
     }
 
     /// End the session, confirming its writes (one `sync` if it wrote) so that

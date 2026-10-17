@@ -374,6 +374,18 @@ impl Snapshot {
         .with_fetched(prefetched_pages))
     }
 
+    /// Whether the store still holds the state this snapshot opened on, as far
+    /// as its reads go: `meta` unchanged, and nothing logged past its log.
+    /// Checkpoints overwrite pages only after logging what they hold, and
+    /// move `meta` before deleting the log, so if both hold, every page this
+    /// snapshot read was the one it opened on. A reader that is not the owner
+    /// (alongside it, without a cache) checks this once it has read.
+    pub(crate) async fn is_current(&self) -> io::Result<bool> {
+        let next = log_key(self.log.next);
+        let (meta, after) = futures::try_join!(self.store.get(META), self.store.get(&next))?;
+        Ok(meta == self.meta_bytes && after.is_none())
+    }
+
     /// Keep page values fetched at open, except pages the log overrides.
     fn with_fetched(self, pages: Vec<(u64, Fetched)>) -> Self {
         let mut fetched = self.fetched.lock().unwrap();

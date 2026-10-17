@@ -189,6 +189,22 @@ is advisory and outside the invariants: it is never confirmed or ordered
 against other writes, and a stale, missing or malformed hint only wastes or
 saves gets. It stays out of `meta`, which is on the correctness path.
 
+## Readers
+
+A reader (`Session::open_reader`) reads a namespace that another owns,
+alongside it, such as a virtual object's shared handler beside the exclusive
+one. It writes nothing to the store: no confirm at open (it needs a store
+whose visible values are durable), no cache, and its SQL changes stay in the
+session ([`Durability::Save`], never saved). It opens like anyone, and reads
+pages lazily, so a checkpoint by the owner meanwhile could give it a page
+newer than its log. `Session::is_current` tells, once it has read: `meta`
+unchanged, and no segment at its log's end. A checkpoint logs its
+transaction before it overwrites a page, and moves `meta` before it deletes
+the log, so a reader that read an overwritten page finds one or the other
+changed. It is conservative: any commit since open makes the reader stale,
+since a checkpoint in progress leaves no other trace. A stale reader reads
+again, in a new session.
+
 ## Failures
 
 Every step is idempotent, and a crash anywhere leaves state that replay reads

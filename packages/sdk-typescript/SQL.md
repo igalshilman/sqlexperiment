@@ -36,7 +36,8 @@ handler)`), and the object's other handlers keep replaying their journals.
 
 `ctx.db`, on the context of an exclusive object handler, is the object's
 database (namespace `service/key`) over the object's state, with the
-process's page cache. Each statement is its own transaction, and
+process's page cache. A shared handler's `ctx.db` reads it, while an exclusive
+handler runs or not: see [Shared handlers](#shared-handlers). Each statement is its own transaction, and
 `db.transaction(fn)` groups several; calls run one at a time, in call order.
 A crash between two commits keeps the first: statements that must stand or
 fall together go in one transaction.
@@ -295,8 +296,25 @@ transfers take 18.8 ms each on one local node.
   processes, so they check ordering and recovery, not storage durability
   across a machine crash.
 
+## Shared handlers
+
+A shared handler's `ctx.db` is the object's database as stored, read beside
+the exclusive handler, which may commit meanwhile (a chat UI's read of a
+conversation while the agent works, say). It opens as of its first call, and
+writes nothing: what the handler writes stays in its session, and is never
+stored. If the exclusive handler commits while it reads, the attempt fails
+when the handler ends, and Restate retries it, so what a shared handler
+returns was the stored state ([the reader](../../sqlite-kv/docs/DESIGN.md#readers)).
+`ctx.transaction` is the exclusive handlers'.
+
+```ts
+count: restate.handlers.object.shared({ journalReplay: false }, async (ctx: restate.SqlObjectSharedContext) =>
+  ctx.db.query('SELECT count(*) FROM accounts'),
+),
+```
+
 ## Not supported
 
-Shared handlers, awakeables, `ctx.db` in a handler that replays its journal,
+Writes from shared handlers, awakeables, `ctx.db` in a handler that replays its journal,
 and request/response deployments (such as Lambda), which suspend at every await,
 since a suspension is a restart.

@@ -161,6 +161,11 @@ export interface OpenOptions {
    * session's directory. Without it, the workerd profile has none.
    */
   local?: boolean;
+  /**
+   * Resume the turns a previous attempt left unfinished, as OpenCode does
+   * when it boots (default true). A reader beside a running turn does not.
+   */
+  resume?: boolean;
 }
 
 /** OpenCode's client, whose calls return Effects. */
@@ -180,7 +185,7 @@ export interface Host {
 export async function openOpenCode(
   db: SqlSession,
   fence: Fence,
-  { plugins = [], config = {}, local = false }: OpenOptions,
+  { plugins = [], config = {}, local = false, resume = true }: OpenOptions,
 ): Promise<Host> {
   // The workerd profile, but for its database, which comes first. (The
   // Promise API's OpenCode.create takes no replacements; the Effect API's does.)
@@ -204,7 +209,12 @@ export async function openOpenCode(
           Database.node.replace(Database.configuredClient(sqlClient(db, fence))),
           ...rest,
           SessionRestart.node.replace(
-            SessionRestart.node.mapLayer(() => SessionRestart.layer({ maxAttempts: Infinity }) as never),
+            SessionRestart.node.mapLayer(
+              () =>
+                (resume
+                  ? SessionRestart.layer({ maxAttempts: Infinity })
+                  : Layer.succeed(SessionRestart.Service, { resumeSuspendedSessions: Effect.void })) as never,
+            ),
           ),
         ],
       },

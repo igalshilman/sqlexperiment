@@ -3,7 +3,8 @@
 // model, which looks the order up, waits for approval, then refunds.
 //
 // Checks: the agent waits for the signal (`pending` lists the wait, with
-// what the model waits for) until it is resolved by its id, then answers
+// what the model waits for; `status` and `messages` answer meanwhile) until
+// it is resolved by its id, then answers
 // with every tool's result; a signal no one waits for is dropped, unless it
 // is kept; a cancelled wait leaves `pending`; a message may be plain text;
 // and a handler's terminal error is the tool's answer.
@@ -16,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as restate from '@restatedev/restate-sdk';
 import { createModels } from '@earendil-works/pi-ai/models';
-import { call, signal, signals, workflow, type Messages, type Waiting } from 'restate-agents';
+import { call, signal, signals, workflow, type Messages, type Status, type Waiting } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
@@ -142,11 +143,22 @@ try {
   const [wait] = await waits('support/alice');
   assert.equal(wait!.name, 'approval');
   assert.deepEqual(wait!.input, { order: '103' });
+  // While it waits, what it is doing, and the conversation so far, at once.
+  const status = (await post('support/alice/status')) as Status;
+  assert.ok(status.answering?.invocationId.startsWith('inv_'), JSON.stringify(status));
+  assert.deepEqual(status.waiting, [wait]);
+  const sofar = (await post('support/alice/messages')) as Messages;
+  assert.deepEqual(lines(sofar.messages), [
+    ['user', 'Refund order 103, please'],
+    ['assistant', 'orders_status({"order":"103"}): order 103: delivered'],
+    ['assistant', 'wait_for_approval({"order":"103"}): undefined'],
+  ]);
   assert.deepEqual(await post('support/alice/signal', { id: wait!.id, value: 'approved by Kim' }), {
     resolved: wait!.id,
   });
   assert.equal(await answer, 'order 103: delivered / approved by Kim / refunded 103');
   assert.deepEqual(await post('support/alice/pending'), []);
+  assert.deepEqual(await post('support/alice/status'), { answering: null, waiting: [] });
   // The conversation: what was said, with the tool calls, as plain `curl` gets it.
   const said = (await (await fetch(`${INGRESS}/support/alice/messages`, { method: 'POST' })).json()) as Messages;
   assert.deepEqual(lines(said.messages), [
