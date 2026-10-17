@@ -1,7 +1,7 @@
 // Restate's own tools (restate-agents' call, send, workflow and signal), run
 // with a fake context that records the calls they make.
 import * as restate from '@restatedev/restate-sdk';
-import { call, send, signal, workflow, type Tool } from 'restate-agents';
+import { call, send, signal, subagent, workflow, type Tool } from 'restate-agents';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -119,6 +119,19 @@ describe('signal', () => {
         parameter: 'approval',
         idempotencyKey: 'inv1:call_1',
       },
+    ]);
+  });
+});
+
+describe('subagent', () => {
+  it('hands a task to the agent keyed after this one and the task, once per tool call', async () => {
+    const t = subagent(carts, { description: 'a cart agent', handler: 'add' });
+    expect(t.name).toBe('carts');
+    expect(fields(t)).toEqual(['name', 'task']);
+    const { result, made } = await run(t, { name: 'pears', task: 'add pears' });
+    expect(result).toBe('add done');
+    expect(made).toMatchObject([
+      { service: 'carts', key: 'alice.pears', method: 'add', parameter: 'add pears', idempotencyKey: 'inv1:call_1' },
     ]);
   });
 });

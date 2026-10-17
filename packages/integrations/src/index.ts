@@ -8,7 +8,7 @@ import { signals } from './signals.ts';
 export type { PerCall } from './common.ts';
 export { object } from './object.ts';
 export { signals } from './signals.ts';
-export { call, send, signal, tool, workflow, type Tool, type ToolContext } from './tools.ts';
+export { call, send, signal, subagent, tool, workflow, type Tool, type ToolContext } from './tools.ts';
 
 /**
  * Serve `services` on PORT (default 9080), with what the agents need beside

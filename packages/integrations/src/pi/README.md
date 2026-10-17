@@ -31,9 +31,7 @@ again. Here its storage is a Restate virtual object's SQL database
 
   A caller that resends a message uses an idempotency key. With a
   `workspace` directory, the agent also gets pi-durable's coding tools over
-  it, on the local file system. `subagent(object, handler, description)` is a
-  tool that hands a named task to another object, keyed `<key>.<name>`, once
-  per tool call.
+  it, on the local file system.
 
 - [`storage.ts`](storage.ts) (`restate-agents/pi/storage`): pi-durable's
   SQLite storage on the session's database, through the `SqliteDatabase`
@@ -50,7 +48,7 @@ again. Here its storage is a Restate virtual object's SQL database
   (`ctx.request().id`) and the tool call id. [Its tests](../../../../tests/agents/pi.test.ts)
   run the handler through crashes.
 - [`examples/chat.ts`](../../../../examples/chat.ts): a durable chat agent with a tool, `pi.agent({ name: 'assistant', tools: [weather] })`; [`examples/coding.ts`](../../../../examples/coding.ts): a pi
-  coordinator that hands coding tasks to OpenCode coders with `pi.subagent`.
+  coordinator that hands coding tasks to OpenCode coders with `subagent` (of `restate-agents`).
 
 The model is `model`, or else `PI_MODEL`, by default
 `anthropic/claude-sonnet-5-5` (with `ANTHROPIC_API_KEY`). The tests use a
