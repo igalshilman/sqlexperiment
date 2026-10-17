@@ -54,7 +54,7 @@ export { SqlSessionPersistence };
  * A tool whose result is text: `defineTool` of @deepseek-ai/dsh-tools, with
  * the output that takes.
  */
-export const tool = <const S extends ParameterSchemaSpec>(options: {
+const textTool = <const S extends ParameterSchemaSpec>(options: {
   name: string;
   description: string;
   parameters: S;
@@ -181,7 +181,7 @@ function parameterSpec(node: Record<string, unknown>): ParameterSchemaSpec {
 
 /** `t` as a harness tool. */
 const native = (t: AnyTool, ctx: restate.SqlObjectContext): ToolDefinition =>
-  tool({
+  textTool({
     name: t.name,
     description: t.description,
     parameters: parameterSpec(z.toJSONSchema(t.input) as Record<string, unknown>),
@@ -193,7 +193,7 @@ export interface ChatOptions {
   model?: string;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
-  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the harness's (`tool` here, or `defineTool`), or for an invocation. */
+  /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the harness's (`defineTool`), or for an invocation. */
   tools?: (PerCall<ToolDefinition> | AnyTool)[];
 }
 

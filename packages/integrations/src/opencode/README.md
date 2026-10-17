@@ -26,7 +26,7 @@ built on (4.0.1). OpenCode needs Node 24.
   plugins, model, tools, directory }, work)` runs `work` with OpenCode for one
   invocation, over `ctx.db`, and its `prompt(text, id?)` answers a prompt
   in the object's session, once per id (by default the invocation's); `prompt(ctx, text, options)` answers a message once
-  per invocation (`ctx.request().id`); `tool(...)` defines a tool. `chat({
+  per invocation (`ctx.request().id`). `chat({
   model?, tools?, directory? })` makes a handler, `handlers: { chat:
   opencode.chat() }`, and `agent({ name, ...options })` a virtual object whose `chat` it is, that takes a message (a string) and returns the answer.
   The agent's tools replace OpenCode's own, unless it has a `directory` of
