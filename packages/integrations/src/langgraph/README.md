@@ -1,99 +1,78 @@
-# A LangGraph agent in a Restate virtual object
+# LangGraph
 
 [LangGraph](https://langchain-ai.github.io/langgraphjs/) runs an agent as a
 graph of steps and stores a checkpoint after each one, so a run can resume
-where it stopped. Here the checkpoints live in a Restate virtual object's SQL
-database ([SQL in Restate virtual objects](../../../sdk/SQL.md)): one object per
-conversation, which is the LangGraph thread.
+where it stopped. Here the checkpoints are in the agent's SQL database
+([SQL in Restate virtual objects](../../../sdk/SQL.md)), and the thread is
+the object's key.
 
-- [`checkpointer.ts`](checkpointer.ts): `SqlCheckpointSaver`, a LangGraph
-  checkpointer over the object's database (`ctx.db`).
-  Checkpoints, channel values and pending writes are rows in three tables.
-  A step stores only the channels it changed, at their new versions, so a long
-  conversation does not store its whole message list again at every step.
-  Each `put` and `putWrites` is one SQL transaction.
-- [`index.ts`](index.ts): `restate-agents/langgraph`. `chat({ model?,
-  tools? })` makes a handler, `handlers: { chat: langgraph.chat() }`, and `agent({ name, ...options })` a virtual object whose `chat` it is (with SQL set up, see [`object`](../object.ts)), that
-  takes a message (a string) and returns the answer. Its graph is the usual
-  tool-calling loop (a model node, a tools node, back to the model until it
-  answers):
+## Use
 
-  ```js
-  new StateGraph(State)
-    .addNode('model', async ({ messages }) => ({ messages: [await withTools.invoke(messages)] }))
-    .addNode('tools', new ToolNode(tools, { handleToolErrors: false }))
-    .addNode('answer', ({ prompt, messages }) => ({ answers: { [prompt]: messages.at(-1).text } }))
-    .addEdge(START, 'model')
-    .addConditionalEdges('model', toolsCondition, { tools: 'tools', [END]: 'answer' })
-    .addEdge('tools', 'model')
-    .addEdge('answer', END);
-  ```
+```ts
+import { serve } from 'restate-agents';
+import * as langgraph from 'restate-agents/langgraph';
 
-  The handler compiles the graph with the checkpointer over `ctx.db`, the
-  thread being the object's key, and answers the message once per invocation
-  (`ctx.request().id`).
+const assistant = langgraph.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
+await serve(assistant);
+```
 
-  Its model is `model`, or else `MODEL`, by default
-  `anthropic/claude-sonnet-5-5` (`ChatAnthropic`, with `ANTHROPIC_API_KEY`);
-  or any LangChain chat model that calls tools, as `model`. The tests use a scripted one,
-  [`tests/fakes/langgraph.ts`](../../../../tests/fakes/langgraph.ts).
+| Option   | What                                                                                                                                                               |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `model`  | `anthropic/model-id` (`ChatAnthropic`); or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`); or any LangChain chat model that calls tools |
+| `system` | The system prompt                                                                                                                                                  |
+| `tools`  | `tool()`s and Restate's tools of `restate-agents`, or LangChain's tools                                                                                            |
 
-- [`tests/storage/langgraph.test.ts`](../../../../tests/storage/langgraph.test.ts):
-  LangGraph's checkpointer conformance suite
-  (`@langchain/langgraph-checkpoint-validation`, 718 tests) on the
-  checkpointer, over a sqlite-kv database in memory.
-- [`tests/storage/langgraph-fork.test.ts`](../../../../tests/storage/langgraph-fork.test.ts):
-  a thread forked from an earlier checkpoint, which the suite does not cover:
-  each branch keeps its own values.
-- [`tests/storage/langgraph-upgrade.test.ts`](../../../../tests/storage/langgraph-upgrade.test.ts):
-  a thread checkpointed with numeric versions goes on with the current
-  checkpointer.
-- [`tests/agents/langgraph.ts`](../../../../tests/agents/langgraph.ts): a GraphAgent object
-  per conversation, whose tools move money in the [ledger](../../../../tests/sql/ledger.ts),
-  and [its tests](../../../../tests/agents/langgraph.test.ts): the handler with a fake
-  `ctx`, through crashes.
-- [`examples/langgraph.ts`](../../../../examples/langgraph.ts): a durable
-  chat agent with a tool, `langgraph.agent({ name: 'assistant', tools: [weather] })`.
+For an object of your own, `langgraph.chat(options)` and
+`langgraph.messages()` are the handlers. The graph is the usual tool-calling
+loop: a model node, a tools node, and back to the model until it answers.
 
 ## Through crashes
 
-The handler is not replayed: a retried attempt runs it again from the start,
-and LangGraph carries on from the last step it stored.
+The checkpointer ([`checkpointer.ts`](checkpointer.ts), `SqlCheckpointSaver`)
+keeps checkpoints, channel values and pending writes in three tables; a step
+stores only the channels it changed, so a long conversation does not store
+its whole message list at every step. The handler is not replayed: a retried
+attempt runs it again from the start, and LangGraph carries on from the last
+step it stored.
 
-- **Each step is stored before the next starts** (`durability: 'sync'`; by
-  default LangGraph stores a step while the next one runs). So the tool calls
-  a model made are stored before any tool runs, and a crash during the tools
-  resumes them with the same tool call ids, without asking the model again.
-  The checkpoint's commit is stored in order with everything after it, the
-  tools' calls included.
-- **A tool is idempotent by its tool call id**: the bank agent's uses it in
-  the transfer id, which the ledger dedupes on, so a tool run again moves the money once. Its
-  call to the ledger has an idempotency key made from the request id
-  (`ctx.request().id`, the same on every attempt) and the tool call id, so a
-  retried attempt reaches the call the first one made.
+- **Each step is stored before the next starts** (`durability: 'sync'`). So
+  the tool calls a model made are stored before any tool runs, and a crash
+  during the tools resumes them with the same tool call ids, without asking
+  the model again.
+- **A tool is idempotent by its tool call id** (`callId` of `tool()`'s
+  `run`), which it passes on, such as in an idempotency key.
 - **A tool's error fails the attempt** (`handleToolErrors: false`), and
-  Restate retries it. By default LangGraph's `ToolNode` would hand the error
-  to the model as the tool's result, and the model would answer with it.
+  Restate retries it; a `restate.TerminalError` of a `restate-agents` tool is
+  its answer to the model.
 - **A message is answered once per invocation**: the graph records each
-  answer in its state, by invocation id, and a retried attempt returns it; a
-  caller that resends a message uses an idempotency key. A run that a crash
-  interrupted is finished before the next message starts.
-
-[`langgraph.test.ts`](../../../../tests/agents/langgraph.test.ts) checks each of these, with a crash that
-stops an attempt in a tool call and abandons it, keeping what it committed;
-with `durability: 'async'` or `'exit'`, or `ToolNode`'s default error
-handling, it fails. The [crash test](../../../../tests/crash.ts) runs four
-conversations of eight transfers and an audit each, beside the other agents',
-against a real server: every message moves money exactly once.
+  answer in its state, by invocation id, and a retried attempt returns it. A
+  run that a crash interrupted is finished before the next message starts.
 
 ## Run
 
 ```sh
-make js   # from the repository root
-cd examples && ANTHROPIC_API_KEY=… node langgraph.ts   # a chat session, on port 9080
-curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
-make test-ts T=langgraph   # the conformance suite and the handler's tests, from the repository root
+cd examples && ANTHROPIC_API_KEY=… node langgraph.ts
 ```
 
-A Restate server runs beside it, with the agent registered: see
+With a Restate server, and the agent registered with it: see
 [Run an example](../../../../examples/README.md#run-an-example).
+
+## Tests
+
+The tests run on a scripted model, [`tests/fakes/langgraph.ts`](../../../../tests/fakes/langgraph.ts)
+(`make test-ts T=langgraph`, from the repository root):
+
+- [`tests/storage/langgraph.test.ts`](../../../../tests/storage/langgraph.test.ts):
+  LangGraph's checkpointer conformance suite
+  (`@langchain/langgraph-checkpoint-validation`, 718 tests);
+  [`langgraph-fork.test.ts`](../../../../tests/storage/langgraph-fork.test.ts),
+  a forked thread; and
+  [`langgraph-upgrade.test.ts`](../../../../tests/storage/langgraph-upgrade.test.ts),
+  a thread of an earlier version of the checkpointer.
+- [`tests/agents/langgraph.test.ts`](../../../../tests/agents/langgraph.test.ts):
+  each point above, with crashes that stop an attempt in a tool call; the
+  system prompt; and `messages`. With `durability: 'async'`, or `ToolNode`'s
+  default error handling, it fails.
+- [`tests/agents/langgraph.ts`](../../../../tests/agents/langgraph.ts): the
+  bank agent, through crashes in [the crash test](../../../../tests/crash.ts)
+  (`make crash-test`): every message moves money exactly once.
