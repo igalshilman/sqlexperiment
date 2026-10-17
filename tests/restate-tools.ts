@@ -130,12 +130,12 @@ try {
     return text ? (JSON.parse(text) as unknown) : undefined;
   };
 
-  /** The waits of `agent`, once there is one. */
-  const waits = async (agent: string) => {
+  /** The waits of `object` (such as `support/alice`), once there is one. */
+  const waits = async (object: string) => {
     for (let i = 0; ; i++) {
-      const pending = (await post(`${agent}/pending`)) as Waiting[];
+      const pending = (await post(`${object}/pending`)) as Waiting[];
       if (pending.length > 0) return pending;
-      if (i > 300) throw new Error(`${agent} does not wait for the approval`);
+      if (i > 300) throw new Error(`${object} does not wait for the approval`);
       await sleep(100);
     }
   };
