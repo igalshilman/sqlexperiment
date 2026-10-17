@@ -6,7 +6,7 @@
 name = "restate-sql"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["restate-sdk", "sqlite-kv"]
+dependencies = ["restate-sdk", "sqlite-kv", "hypercorn>=0.17"]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.14", "mypy>=1.18"]

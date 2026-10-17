@@ -54,3 +54,26 @@ take Anthropic's models, and DeepSeek its own (see
 [the models](../packages/integrations/README.md#models)). To call an agent
 from code, or to send a message again safely, see
 [Calling an agent](../packages/integrations/README.md#calling-an-agent).
+
+## Python
+
+The same SQL in virtual objects, on [the patched Python SDK](../packages/sdk-python/README.md),
+in [`python/`](python): each a file you run with uv, from the repository's
+root, after `make py`. They serve on port 9080 (or `PORT`), as the others do.
+
+| File                          | What                                                                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| [`notes.py`](python/notes.py) | SQL in a virtual object, with `ctx.db`                                                                                         |
+| [`bank.py`](python/bank.py)   | One object per account, and transfers that move money exactly once: the debit and the credit's send in one `ctx.transaction()` |
+
+```sh
+uv run examples/python/bank.py
+npx @restatedev/restate-server                                         # Restate, in another terminal
+npx @restatedev/restate deployments register http://localhost:9080
+curl localhost:8080/account/alice/deposit --json '{"id": "d1", "amount": 100}'
+curl localhost:8080/account/alice/transfer --json '{"id": "t1", "to": "bob", "amount": 30}'
+curl localhost:8080/account/bob/balance
+```
+
+`make concurrency-test-py` runs them against a Restate server, and
+`make crash-test-py` runs the bank through crashes.
