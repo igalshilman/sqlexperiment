@@ -24,8 +24,19 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import InjectedToolCallId, tool
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelResponse,
+    RetryPromptPart,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from restate.server_context import _restate_context_var
 from restate.sql import SqlAttempt
+from restate_agents import tool as restate_tool
 
 
 class Teller(BaseChatModel):
@@ -99,6 +110,32 @@ class Teller(BaseChatModel):
         return self._generate(messages, stop)
 
 
+def pydantic_ai_model(teller: Teller) -> FunctionModel:
+    """The teller, as a Pydantic AI model: it reads the conversation as LangChain messages."""
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        said: list[BaseMessage] = [SystemMessage(info.instructions)] if info.instructions else []
+        for m in messages:
+            if isinstance(m, ModelResponse):
+                text = "".join(p.content for p in m.parts if isinstance(p, TextPart))
+                calls = [{"name": c.tool_name, "args": c.args_as_dict(), "id": c.tool_call_id} for c in m.tool_calls]
+                said.append(AIMessage(content=text, tool_calls=calls))
+                continue
+            # A message steered to the turn comes after the tool results, in the same request.
+            results = False
+            for p in m.parts:
+                if isinstance(p, UserPromptPart):
+                    said.append(HumanMessage(str(p.content), id="turn:steer:" if results else None))
+                elif isinstance(p, ToolReturnPart | RetryPromptPart):
+                    said.append(ToolMessage(p.model_response_str(), tool_call_id=p.tool_call_id))
+                    results = True
+        reply = teller._answer(said)
+        calls = [ToolCallPart(c["name"], c["args"], tool_call_id=c["id"]) for c in reply.tool_calls]
+        return ModelResponse(parts=[*([TextPart(str(reply.content))] if reply.content else []), *calls])
+
+    return FunctionModel(answer)
+
+
 class Bank:
     """Accounts, and a transfer tool that moves money once per tool call id, as an idempotent service would."""
 
@@ -120,6 +157,25 @@ class Bank:
                 raise ConnectionError("the process died")
             bank.calls += 1
             bank.moves.setdefault(tool_call_id, (src, dst, amount))
+            if bank.crash_in_call is not None:
+                crash, bank.crash_in_call = bank.crash_in_call, None
+                crash()
+                raise ConnectionError("the process died")
+            return f"moved {amount} from {src} to {dst}"
+
+        return transfer
+
+    def restate_tool(self):
+        """The transfer tool as a ``restate_agents.tool``, for any framework."""
+        bank = self
+
+        @restate_tool
+        async def transfer(call_id: str, src: int, dst: int, amount: int) -> str:
+            """Move money between two accounts."""
+            if not bank.alive():
+                raise ConnectionError("the process died")
+            bank.calls += 1
+            bank.moves.setdefault(call_id, (src, dst, amount))
             if bank.crash_in_call is not None:
                 crash, bank.crash_in_call = bank.crash_in_call, None
                 crash()

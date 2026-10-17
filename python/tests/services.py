@@ -2,7 +2,7 @@
 The services of the tests against a Restate server: the notes example, a
 bank, a probe of the context without journal replay, the agent on the
 scripted teller (scripted_agent.py), and a support agent with Restate's
-tools. Served on PORT, as the examples are.
+tools, on LangGraph and on Pydantic AI. Served on PORT, as the examples are.
 """
 
 import asyncio
@@ -15,11 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests")
 
 import restate  # noqa: E402
 from bank import account  # noqa: E402
-from fakes import Teller  # noqa: E402
+from fakes import Teller, pydantic_ai_model  # noqa: E402
 from notes import add, notes  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from restate import Context, ObjectContext, WorkflowContext  # noqa: E402
-from restate_agents import call, langgraph, send, serve, signal, subagent, workflow  # noqa: E402
+from restate_agents import call, langgraph, pydantic_ai, send, serve, signal, subagent, workflow  # noqa: E402
 from scripted_agent import teller  # noqa: E402
 
 echo = restate.Service("echo")
@@ -154,18 +154,16 @@ async def run(ctx: WorkflowContext, request: Refund) -> str:
 helper = langgraph.agent("helper", model=Teller())
 
 # The scripted model's "use <tool> <json> then ..." calls these in turn.
-support = langgraph.agent(
-    "support",
-    model=Teller(),
-    tools=[
-        call(status),
-        signal("approval", description="Wait for a manager to approve a refund.", input=Refund),
-        workflow(refund, description="Refund an order, once a manager approved it."),
-        subagent(helper, description="a helper"),
-        send(add, description="Add a note to someone's notes."),
-    ],
-)
+SUPPORT_TOOLS = [
+    call(status),
+    signal("approval", description="Wait for a manager to approve a refund.", input=Refund),
+    workflow(refund, description="Refund an order, once a manager approved it."),
+    subagent(helper, description="a helper"),
+    send(add, description="Add a note to someone's notes."),
+]
+support = langgraph.agent("support", model=Teller(), tools=SUPPORT_TOOLS)
+pydantic_support = pydantic_ai.agent("pydantic_support", model=pydantic_ai_model(Teller()), tools=SUPPORT_TOOLS)
 
 
 if __name__ == "__main__":
-    serve(echo, probe, notes, account, teller, orders, refund, helper, support)
+    serve(echo, probe, notes, account, teller, orders, refund, helper, support, pydantic_support)

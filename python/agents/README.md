@@ -4,8 +4,8 @@ Agent frameworks in Restate virtual objects, in Python: each object (one per
 key) keeps the agent's state in its SQL database (`ctx.db`, of
 [the patched SDK](../sdk/README.md)), and each message is answered once per
 invocation, however often an attempt crashes. The Python counterpart of
-[`restate-agents`](../../packages/integrations/README.md); for now, with
-LangGraph.
+[`restate-agents`](../../packages/integrations/README.md), with
+[LangGraph](#langgraph) and [Pydantic AI](#pydantic-ai).
 
 ```python
 from restate_agents import langgraph, serve, tool
@@ -154,6 +154,54 @@ and LangGraph carries on from the last step it stored.
   there returns its answer. A run that a crash cut off (with steps left) is
   finished before the next message starts.
 
+## Pydantic AI
+
+`pydantic_ai.agent(name, model=, instructions=, tools=)` is the same virtual
+object (`chat`, `messages`, `status`, `stop`, `steer`, `pending`, `signal`)
+on [Pydantic AI](https://ai.pydantic.dev):
+
+```python
+from restate_agents import serve, tool
+from restate_agents.pydantic_ai import agent
+
+assistant = agent("assistant", instructions="Answer briefly.", tools=[get_weather])
+serve(assistant)
+```
+
+| Option         | What                                                                                                                                                                                                                   |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`        | `provider/model-id` (any of Pydantic AI's providers whose package is installed: `anthropic` is), a Pydantic AI model, or a function of the context giving one. Default: `MODEL`, or else `anthropic/claude-sonnet-5-5` |
+| `instructions` | The instructions                                                                                                                                                                                                       |
+| `tools`        | `tool`s, Restate's tools, and Pydantic AI's tools or tool functions (`RunContext` and all)                                                                                                                             |
+
+Or bring an `Agent` of your own, whose tools include Restate's through
+`toolset(tools)`; and ask it from handlers of your own with `prompt(ctx,
+agent, text, **run)` (`run`: `Agent.run`'s options, such as `output_type` or
+`deps`), each prompt answered once
+([`examples-py/trips.py`](../../examples-py/trips.py)):
+
+```python
+from pydantic_ai import Agent
+from restate_agents.pydantic_ai import agent, prompt, toolset
+
+planner = Agent("anthropic:claude-sonnet-5-5", tools=[weather], toolsets=[toolset([signal("approval")])])
+trips = agent("trips", planner)
+
+
+@trips.handler
+async def plan(ctx) -> Plan:
+    return await prompt(ctx, planner, "Write down the trip we planned, day by day.", output_type=Plan)
+```
+
+Through crashes, as with LangGraph: the conversation (a row per message, in
+`pydantic_ai_messages`) is stored before each model request and with each
+response, so a retried attempt carries on from there: the tool calls a model
+made run again with the same ids, without asking the model again; the
+message it answers is in it, marked with the invocation's id, and a retried
+attempt that finds it answered returns the answer (a structured output too)
+without asking the model again. A tool's `restate.TerminalError` is its
+answer to the model; any other error fails the attempt.
+
 ## Turns
 
 The message `chat` answers is a turn. While it answers, `status` says so
@@ -173,7 +221,8 @@ curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invoca
   (a tool's call or wait, a storage request); during a model request, once
   the request is answered.
 - **`steer`** adds a message to the turn: the agent takes it after its next
-  tool call (`tool_node`), and the model reads it with the tools' results.
+  tool call (LangGraph's `tool_node`; in Pydantic AI, before the next model
+  request), and the model reads it with the tools' results.
   A turn that ends before (no tool call came) answers it as a message of its
   own; with no turn, `steer` is a message of its own (`"steered": false`, and
   its invocation, to attach to). A stopped turn answers none of them. The
@@ -206,13 +255,17 @@ own, returning at once, as in a Modal Server
   a crash at each state request of a message (with `durability="async"`, it
   moves money twice), an interrupted run, the system prompt, and tools'
   errors.
+- [`tests/test_pydantic_ai.py`](tests/test_pydantic_ai.py): the same, for
+  the Pydantic AI agent (the teller as a Pydantic AI model), and agents of
+  your own, prompts of your own and a structured output, each answered once.
 - [`tests/test_tools.py`](tests/test_tools.py): Restate's tools on a fake
   context: their names, the model's input, and the calls they make.
 
 Against a real Restate server ([`../tests`](../tests)): `make
 concurrency-test-py` has the agent moving money through Restate calls, and
-Restate's tools ([`test_restate_tools.py`](../tests/test_restate_tools.py):
-a call, a signal and a workflow in one turn, signals kept and dropped, a
-cancelled wait, a subagent, a send), and
+Restate's tools on LangGraph and on Pydantic AI
+([`test_restate_tools.py`](../tests/test_restate_tools.py): a call, a signal
+and a workflow in one turn, signals kept and dropped, a cancelled wait, a
+subagent, a send, status, stop and steer), and
 `make crash-test-py` prompts it while the process crashes, checking that each
 prompt moved money exactly once.

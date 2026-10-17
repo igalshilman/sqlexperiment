@@ -1,7 +1,7 @@
 """
 Restate's tools for agents (``call``, ``send``, ``workflow``, ``subagent`` and
 ``signal``), on the scripted model, against a real Restate server: the
-support agent of services.py.
+support agents of services.py, on LangGraph and on Pydantic AI.
 
     make concurrency-test-py   # gets restate-server first
 """
@@ -10,6 +10,7 @@ import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 from harness import ADMIN, INGRESS, call, request, wait_until
 
 
@@ -26,103 +27,109 @@ REFUND = {"order": "103", "amount": 5}
 SUPPORT = use(("orders_status", {"order": "103"}), ("wait_for_approval", REFUND), ("refund", REFUND))
 
 
-def pending(k: str) -> list[dict]:
-    status, waits = call(f"support/{k}/pending")
+@pytest.fixture(params=["support", "pydantic_support"])
+def agent(request) -> str:
+    """The support agent: on LangGraph, and on Pydantic AI."""
+    return request.param
+
+
+def pending(agent: str, k: str) -> list[dict]:
+    status, waits = call(f"{agent}/{k}/pending")
     assert status == 200, waits
     return waits
 
 
-def test_call_signal_and_workflow():
+def test_call_signal_and_workflow(agent):
     k = key()
     with ThreadPoolExecutor() as pool:
-        answer = pool.submit(call, f"support/{k}/chat", SUPPORT, None, 60)
-        wait_until(lambda: len(pending(k)) == 1, timeout=20, what="the wait")
-        [waiting] = pending(k)
+        answer = pool.submit(call, f"{agent}/{k}/chat", SUPPORT, None, 60)
+        wait_until(lambda: len(pending(agent, k)) == 1, timeout=20, what="the wait")
+        [waiting] = pending(agent, k)
         assert (waiting["name"], waiting["input"]) == ("approval", REFUND)
-        assert call(f"support/{k}/signal", {"id": waiting["id"], "value": "approved by Kim"}) == (
+        assert call(f"{agent}/{k}/signal", {"id": waiting["id"], "value": "approved by Kim"}) == (
             200,
             {"resolved": waiting["id"]},
         )
         assert answer.result() == (200, "order 103: delivered / approved by Kim / refunded 103")
-    assert pending(k) == []
+    assert pending(agent, k) == []
 
 
-def test_a_signal_no_one_waits_for_is_dropped_unless_kept():
+def test_a_signal_no_one_waits_for_is_dropped_unless_kept(agent):
     dropped, kept = key(), key()
-    assert call(f"support/{dropped}/signal", {"name": "approval", "value": "early"}) == (200, {"resolved": None})
-    assert call(f"support/{kept}/signal", {"name": "approval", "value": "kept", "keep": True}) == (
+    assert call(f"{agent}/{dropped}/signal", {"name": "approval", "value": "early"}) == (200, {"resolved": None})
+    assert call(f"{agent}/{kept}/signal", {"name": "approval", "value": "kept", "keep": True}) == (
         200,
         {"resolved": None},
     )
-    assert call(f"support/{kept}/chat", use(("wait_for_approval", REFUND))) == (200, "kept")
+    assert call(f"{agent}/{kept}/chat", use(("wait_for_approval", REFUND))) == (200, "kept")
     with ThreadPoolExecutor() as pool:
-        answer = pool.submit(call, f"support/{dropped}/chat", use(("wait_for_approval", REFUND)), None, 60)
-        wait_until(lambda: len(pending(dropped)) == 1, timeout=20, what="the wait")
-        assert call(f"support/{dropped}/signal", {"name": "approval", "value": "fresh"})[0] == 200
+        answer = pool.submit(call, f"{agent}/{dropped}/chat", use(("wait_for_approval", REFUND)), None, 60)
+        wait_until(lambda: len(pending(agent, dropped)) == 1, timeout=20, what="the wait")
+        assert call(f"{agent}/{dropped}/signal", {"name": "approval", "value": "fresh"})[0] == 200
         assert answer.result() == (200, "fresh")
 
 
-def test_a_cancelled_wait_is_forgotten():
+def test_a_cancelled_wait_is_forgotten(agent):
     k = key()
-    status, body = request("POST", f"{INGRESS}/support/{k}/chat/send", use(("wait_for_approval", REFUND)))
+    status, body = request("POST", f"{INGRESS}/{agent}/{k}/chat/send", use(("wait_for_approval", REFUND)))
     assert status == 202, body
-    wait_until(lambda: len(pending(k)) == 1, timeout=20, what="the wait")
+    wait_until(lambda: len(pending(agent, k)) == 1, timeout=20, what="the wait")
     status, _ = request("PATCH", f"{ADMIN}/invocations/{body['invocationId']}/cancel")
     assert status in (200, 202)
-    wait_until(lambda: pending(k) == [], timeout=20, what="the wait to be forgotten")
+    wait_until(lambda: pending(agent, k) == [], timeout=20, what="the wait to be forgotten")
 
 
-def test_a_handlers_terminal_error_is_the_tools_answer():
-    assert call(f"support/{key()}/chat", use(("orders_status", {"order": "999"}))) == (200, "no order 999")
+def test_a_handlers_terminal_error_is_the_tools_answer(agent):
+    assert call(f"{agent}/{key()}/chat", use(("orders_status", {"order": "999"}))) == (200, "no order 999")
 
 
-def test_a_subagent_continues_its_task_by_name():
+def test_a_subagent_continues_its_task_by_name(agent):
     k = key()
     task = use(("helper", {"name": "greet", "task": "hello"}))
-    assert call(f"support/{k}/chat", task) == (200, "You said: hello")
+    assert call(f"{agent}/{k}/chat", task) == (200, "You said: hello")
     status, page = call(f"helper/{k}.greet/messages")
     assert status == 200 and [m["parts"][0]["text"] for m in page["messages"]] == ["hello", "You said: hello"]
 
 
-def test_send_does_not_wait():
+def test_send_does_not_wait(agent):
     k, other = key(), key()
     sent = use(("notes_add", {"key": other, "note": "call back"}))
-    assert call(f"support/{k}/chat", sent) == (200, f"sent to notes/{other}/add")
+    assert call(f"{agent}/{k}/chat", sent) == (200, f"sent to notes/{other}/add")
     wait_until(lambda: call(f"notes/{other}/list") == (200, ["call back"]), timeout=10, what="the note")
 
 
-def test_status_and_stop_a_turn():
+def test_status_and_stop_a_turn(agent):
     k = key()
-    assert call(f"support/{k}/status") == (200, {"answering": None, "waiting": []})
-    assert call(f"support/{k}/stop") == (200, {"stopped": None})
+    assert call(f"{agent}/{k}/status") == (200, {"answering": None, "waiting": []})
+    assert call(f"{agent}/{k}/stop") == (200, {"stopped": None})
     with ThreadPoolExecutor() as pool:
-        answer = pool.submit(call, f"support/{k}/chat", use(("wait_for_approval", REFUND)), None, 60)
-        wait_until(lambda: len(pending(k)) == 1, timeout=20, what="the wait")
-        status, now = call(f"support/{k}/status")
+        answer = pool.submit(call, f"{agent}/{k}/chat", use(("wait_for_approval", REFUND)), None, 60)
+        wait_until(lambda: len(pending(agent, k)) == 1, timeout=20, what="the wait")
+        status, now = call(f"{agent}/{k}/status")
         assert status == 200 and now["answering"]["invocationId"].startswith("inv_") and len(now["waiting"]) == 1
-        assert call(f"support/{k}/stop") == (200, {"stopped": now["answering"]["invocationId"]})
+        assert call(f"{agent}/{k}/stop") == (200, {"stopped": now["answering"]["invocationId"]})
         status, body = answer.result()
         assert status == 409, body
-    wait_until(lambda: call(f"support/{k}/status") == (200, {"answering": None, "waiting": []}), timeout=20)
+    wait_until(lambda: call(f"{agent}/{k}/status") == (200, {"answering": None, "waiting": []}), timeout=20)
     # The next message starts afresh.
-    assert call(f"support/{k}/chat", "hello") == (200, "You said: hello")
+    assert call(f"{agent}/{k}/chat", "hello") == (200, "You said: hello")
 
 
-def test_steer_a_turn_at_its_next_tool_call():
+def test_steer_a_turn_at_its_next_tool_call(agent):
     k = key()
     with ThreadPoolExecutor() as pool:
-        answer = pool.submit(call, f"support/{k}/chat", use(("wait_for_approval", REFUND)), None, 60)
-        wait_until(lambda: len(pending(k)) == 1, timeout=20, what="the wait")
-        status, steered = call(f"support/{k}/steer", "Only Monday, please")
+        answer = pool.submit(call, f"{agent}/{k}/chat", use(("wait_for_approval", REFUND)), None, 60)
+        wait_until(lambda: len(pending(agent, k)) == 1, timeout=20, what="the wait")
+        status, steered = call(f"{agent}/{k}/steer", "Only Monday, please")
         assert status == 200 and steered["steered"], steered
-        assert call(f"support/{k}/signal", {"name": "approval", "value": "approved"})[0] == 200
+        assert call(f"{agent}/{k}/signal", {"name": "approval", "value": "approved"})[0] == 200
         assert answer.result() == (200, "Steered: Only Monday, please")
-        assert call(f"support/{k}/status")[1]["answering"] is None
+        assert call(f"{agent}/{k}/status")[1]["answering"] is None
 
 
-def test_steer_with_no_turn_is_a_message_of_its_own():
+def test_steer_with_no_turn_is_a_message_of_its_own(agent):
     k = key()
-    status, steered = call(f"support/{k}/steer", "hello")
+    status, steered = call(f"{agent}/{k}/steer", "hello")
     assert status == 200 and not steered["steered"], steered
     attached = request("GET", f"{INGRESS}/restate/invocation/{steered['invocationId']}/attach")
     assert attached == (200, "You said: hello")

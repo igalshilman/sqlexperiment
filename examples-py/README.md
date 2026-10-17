@@ -10,6 +10,7 @@ after `make py` at the repository's root. See [Run an example](#run-an-example).
 | [`memory.py`](memory.py)     | An assistant that remembers facts about you in its own SQL table, through its tools, with handlers of your own  |
 | [`on_modal.py`](on_modal.py) | The support agent on [Modal](https://modal.com), as a Modal Server                                              |
 | [`support.py`](support.py)   | A support agent whose tools are Restate itself: a service, a manager's approval (a signal), a workflow          |
+| [`trips.py`](trips.py)       | A travel agent on Pydantic AI: an Agent of your own, an approval before booking, and its plan as typed output   |
 | [`triage.py`](triage.py)     | A LangGraph graph of your own: a router hands each message to the billing or the tech team, each with its tools |
 | [`writer.py`](writer.py)     | A LangGraph graph of your own: a writer drafts, an editor reviews, until the editor approves                    |
 

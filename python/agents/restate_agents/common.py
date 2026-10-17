@@ -54,6 +54,8 @@ def refused(error: BaseException) -> bool:
     """
     if type(error).__name__ in _FOR_GOOD:
         return True
+    if type(error).__name__ == "ModelHTTPError":  # Pydantic AI's, of any provider
+        return getattr(error, "status_code", None) in (400, 401, 403, 404)
     text = str(error).lower()
     return any(sign in text for sign in ("api key", "api_key", "could not resolve authentication"))
 
