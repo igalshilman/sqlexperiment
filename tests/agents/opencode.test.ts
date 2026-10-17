@@ -3,7 +3,7 @@
 // anything on the way out. Its model is the teller (../fakes/opencode.ts).
 // `make test-ts T=opencode`.
 import { describe, expect, it, vi } from 'vitest';
-import { conversation } from '../testing.ts';
+import { conversation, SAID } from '../testing.ts';
 import { teller, withTeller } from '../fakes/opencode.ts';
 import * as opencode from 'restate-agents/opencode';
 import { prompt } from './opencode.ts';
@@ -16,6 +16,13 @@ vi.mock('restate-agents/opencode/db', async (original) => {
 vi.stubEnv('MODEL', 'teller/teller');
 
 describe('the OpenCode agent', () => {
+  it('gives the conversation: what was said, in order, without tool calls', async () => {
+    const c = conversation(prompt, 'm');
+    await c.attempt('inv1', 'Please move 5 from 1 to 2');
+    await c.attempt('inv2', 'audit the books');
+    expect(await c.read(opencode.messages())).toEqual(SAID);
+  });
+
   it('gives the model its system prompt', async () => {
     const c = conversation(opencode.chat({ system: 'You are Ada.' }), 'ada');
     expect(await c.attempt('inv1', 'Who are you?')).toContain('You are Ada.');

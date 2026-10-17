@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS dsh_sessions (id TEXT PRIMARY KEY, header TEXT NOT NU
 CREATE TABLE IF NOT EXISTS dsh_events (session TEXT NOT NULL, seq INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY (session, seq));
 `;
 
+/** The stored events of session `id`, in order: for reading the log without a harness. */
+export async function storedEvents(db: SqlSession, id: SessionId): Promise<SessionEvent[]> {
+  await db.execute(SCHEMA);
+  const rows = await db.query('SELECT event FROM dsh_events WHERE session = ? ORDER BY seq', [id]);
+  return rows.map(([event]) => JSON.parse(String(event)) as SessionEvent);
+}
+
 /** A session as stored: its header, inherited prefix length and event count. */
 interface Stored {
   header: SessionHeader;
