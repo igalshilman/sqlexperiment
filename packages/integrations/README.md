@@ -124,8 +124,9 @@ uses Restate's explicit cancellation for this (`explicitCancellation`,
 **Steer a turn.** `steer` adds to the message being answered, such as for
 a message typed while the agent works: the agent takes it at its next tool
 call, as its framework steers a turn (pi-durable's, OpenCode's and the
-DeepSeek Harness's steering), and goes on with it. It answers the
-invocation that answers it, and whether it steers one:
+DeepSeek Harness's steering), and goes on with it. `steer` answers with
+the invocation that answers the message (to attach to), and whether it
+steers one:
 
 ```sh
 curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invocationId": "inv_1f…", "steered": true}
