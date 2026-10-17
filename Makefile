@@ -1,7 +1,9 @@
 # Build and test everything, part by part:
 #
-#   core/        the sqlite-kv crate, and the patch to the SDKs' shared core
-#                (core/sdk-shared-core) that both SDKs build on
+#   core/        the sqlite-kv crate, the patch to the SDKs' shared core
+#                (core/sdk-shared-core) that both SDKs build on, and the
+#                durable QuickJS runtime (core/quickjs-durable; its own
+#                targets: qjs, test-qjs, lint-qjs)
 #   typescript/  the pnpm workspace: the patched TypeScript SDK, the Node.js
 #                addon, the integrations and their tests; with the examples
 #                (examples-typescript/, a member of the workspace)
@@ -22,6 +24,7 @@ export CARGO_TARGET_DIR ?= $(CURDIR)/target
 CARGO ?= cargo
 SDK_TARBALL := typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 CORE := core/sqlite-kv
+QJS := core/quickjs-durable
 ADDON := typescript/packages/sql-node/sqlite_kv.node
 CORE_PATCH := core/sdk-shared-core/sdk-shared-core.patch
 SDK_PY := python/sdk/.build/sdk-python/.patched
@@ -46,8 +49,8 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core addon sdk-ts sdk-py js py examples-rust test test-core test-addon test-sdk-ts test-ts \
-	test-sdk-py test-sql-py test-agents-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test \
+.PHONY: all help core qjs addon sdk-ts sdk-py js py examples-rust test test-core test-addon test-sdk-ts test-ts \
+	test-sdk-py test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs format crash-test concurrency-test tools-test \
 	crash-test-py concurrency-test-py restate-server wheels clean
 
 # --- Build
@@ -59,6 +62,9 @@ help: ## List the targets
 
 core: ## The sqlite-kv crate
 	cd $(CORE) && $(CARGO) build --locked --release
+
+qjs: ## The durable QuickJS runtime (core/quickjs-durable), with its SQLite host
+	cd $(QJS) && $(CARGO) build --locked --release --features sqlite-host
 
 addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)
 
@@ -103,6 +109,13 @@ test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
 	cd $(CORE) && $(CARGO) test --locked --features simulation
 
+# Release builds: the guest interpreter is slow unoptimized. verify-dirty
+# checks after every turn that the write barriers marked each changed page;
+# full-scan is the uninstrumented build, which compares every page.
+test-qjs: ## The durable QuickJS runtime: with dirty-page tracking (verified), then with full scans
+	cd $(QJS) && $(CARGO) test --locked --release --features sqlite-host,verify-dirty --lib --tests
+	cd $(QJS) && $(CARGO) test --locked --release --features sqlite-host,full-scan --lib --test recovery --test host --test sqlite
+
 test-addon: $(ADDON) ## The Node.js addon
 	cd typescript/packages/sql-node && npm test
 
@@ -132,6 +145,11 @@ lint-core: ## The Rust crates (the core, the addon and the Python extension): ru
 	cd typescript/packages/sql-node && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 	cd python/sqlite-kv && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
+lint-qjs: ## The durable QuickJS runtime: rustfmt --check and clippy, in both capture modes
+	cd $(QJS) && $(CARGO) fmt --check
+	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,verify-dirty --all-targets -- -D warnings
+	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,full-scan --all-targets -- -D warnings
+
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	cd typescript && pnpm typecheck
 	$(OXLINT) --type-aware typescript examples-typescript
@@ -145,6 +163,7 @@ lint-py: py ## The Python (python/, examples-python/): ruff format --check and r
 
 format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Markdown) and ruff (Python)
 	cd $(CORE) && $(CARGO) fmt
+	cd $(QJS) && $(CARGO) fmt
 	cd typescript/packages/sql-node && $(CARGO) fmt
 	cd python/sqlite-kv && $(CARGO) fmt
 	$(OXFMT)

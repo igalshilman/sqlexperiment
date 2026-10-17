@@ -1,0 +1,49 @@
+[package]
+name = "quickjs-durable"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# Full scanning is only a benchmark/control build, never a production fallback.
+full-scan = []
+# Compare tracking coverage against every memory page after each turn.
+verify-dirty = []
+sqlite-host = ["dep:rusqlite"]
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+wasmtime = { version = "=49.0.3", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
+zstd = "0.13"
+wasmparser = "=0.258.3"
+wasm-encoder = { version = "=0.258.3", features = ["wasmparser"] }
+rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
+
+[dev-dependencies]
+futures-channel = "0.3.34"
+futures-executor = "0.3.34"
+tempfile = "3"
+wat = "=1.258.0"
+
+[[bench]]
+name = "checkpoints"
+harness = false
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[[example]]
+name = "sqlite"
+required-features = ["sqlite-host"]
+
+[[bench]]
+name = "sqlite"
+harness = false
+required-features = ["sqlite-host"]
