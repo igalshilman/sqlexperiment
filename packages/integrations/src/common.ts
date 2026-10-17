@@ -48,3 +48,20 @@ const message: restate.Serde<string> = {
  */
 export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: string) => Promise<string>) =>
   restate.handlers.object.exclusive({ input: message, accept: '*/*', journalReplay: false }, answer);
+
+/** A message of a conversation, as an agent's `messages` handler returns it. */
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+/**
+ * `read` as the handler of an agent's conversation: what was said, in order,
+ * without the tool calls and results. It is exclusive, as `ctx.db` is: it
+ * waits for a message being answered.
+ */
+export const messagesHandler = (read: (ctx: restate.SqlObjectContext) => Promise<ChatMessage[]>) =>
+  restate.handlers.object.exclusive({ journalReplay: false }, read);
+
+/** The non-empty `text`s as `role`'s messages. */
+export const said = (role: ChatMessage['role'], text: string): ChatMessage[] => (text.trim() ? [{ role, text }] : []);
