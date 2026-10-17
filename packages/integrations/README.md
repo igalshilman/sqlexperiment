@@ -58,7 +58,8 @@ message at a time. `serve` serves it on PORT (default 9080).
 
 The same agent runs on each of them: `agent({ name, ...options })`, with
 the handlers `chat` (a message in, the answer out) and `messages` (the
-conversation so far), and `signal` and `pending` ([Signals](#signals)).
+conversation so far), `status` (what it is doing), and `signal` and
+`pending` ([Signals](#signals)).
 
 | Import                                                | Framework                       | Choose it when                                                                                |
 | ----------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -142,8 +143,25 @@ curl localhost:8080/assistant/alice/messages --json '{"limit": 20, "before": 40}
 curl localhost:8080/assistant/alice/messages --json '{"after": 59}'
 ```
 
-It reads the framework's own storage, and waits, as a message does, for a
-message being answered.
+It answers at once, also while a message is answered: from the framework's
+own storage as stored, with the tool calls made so far.
+
+**What it is doing.** `status` says which message the agent answers, if
+any (its invocation id, to attach to its answer, and since when), and what
+its tools wait for ([Signals](#signals)):
+
+```sh
+curl localhost:8080/support/alice/status
+```
+
+```json
+{
+  "answering": { "invocationId": "inv_1f…", "since": "2026-10-17T15:00:00.000Z" },
+  "waiting": [
+    { "id": "inv_1f…:toolu_01", "name": "approval", "input": { "order": "103" }, "since": "2026-10-17T15:00:02.000Z" }
+  ]
+}
+```
 
 **From code.** From a Restate handler, through the agent's definition:
 
@@ -335,8 +353,10 @@ API, such as compacting the conversation (see their READMEs).
 (50 ms after a crash, then twice as long each time, up to 10 s apart), since
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and
-`metadata` add to these. Its own handlers cannot be named `signal` or
-`pending`, which every object has.
+`metadata` add to these. Its own handlers cannot be named `signal`,
+`pending` or `status`, which every object has. A shared handler of yours
+reads the database too: `ctx.db` is the database as stored, beside a
+message being answered.
 
 ## Build your own
 
