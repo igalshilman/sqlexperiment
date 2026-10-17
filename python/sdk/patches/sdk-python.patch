@@ -11,7 +11,7 @@ index ce23f1c..df22f3d 100644
 +[patch.crates-io]
 +restate-sdk-shared-core = { path = "../sdk-shared-core" }
 diff --git a/pyproject.toml b/pyproject.toml
-index 13b86df..42cfbe0 100644
+index 13b86df..3e2f13e 100644
 --- a/pyproject.toml
 +++ b/pyproject.toml
 @@ -31,6 +31,8 @@ openai = ["openai-agents>=0.6.1"]
@@ -37,9 +37,9 @@ index 13b86df..42cfbe0 100644
 +]
 +
 +# The sql extra's sqlite-kv, from the repository this clone is built in
-+# (packages/sdk-python/.build/sdk-python, next to packages/sql-python).
++# (python/sdk/.build/sdk-python, next to python/sqlite-kv).
 +[tool.uv.sources]
-+sqlite-kv = { path = "../../../sql-python" }
++sqlite-kv = { path = "../../../sqlite-kv" }
 +
  [tool.ruff]
  line-length = 120

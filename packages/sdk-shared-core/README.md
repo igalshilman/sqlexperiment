@@ -4,7 +4,7 @@ The Restate SDKs' shared core (the VM of the service protocol, in Rust), with
 the changes that SQL in a virtual object needs, as a patch for the SDKs' builds
 to apply to a fresh clone: the TypeScript SDK's
 ([`../sdk-typescript`](../sdk-typescript/README.md)) compiles it to
-WebAssembly, and the Python SDK's ([`../sdk-python`](../sdk-python/README.md))
+WebAssembly, and the Python SDK's ([`python/sdk`](../../python/sdk/README.md))
 links it natively.
 
 |                                                  | Version                                                                                                                                   |

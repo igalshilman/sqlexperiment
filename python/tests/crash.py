@@ -1,5 +1,5 @@
 """
-The bank example (examples/python/bank.py) through crashes, against a real
+The bank example (python/examples/bank.py) through crashes, against a real
 Restate server: its process aborts at random state requests (ABORT_PER_MILLE,
 default 15; see faults.py) and is restarted, and restate-server is killed
 and restarted once, while clients open accounts and transfer between them.
@@ -11,7 +11,7 @@ its amount once from its source to its destination, by its id; every refused
 one (insufficient funds) moved nothing; and every answer to a request sent
 again is the first one.
 
-    make crash-test-py   # or RESTATE_SERVER=... uv run python tests/python/crash.py
+    make crash-test-py   # or, in python/: RESTATE_SERVER=... uv run python tests/crash.py
 """
 
 import os
@@ -54,7 +54,7 @@ def answered(path: str, body: Any, key: str) -> tuple[int, Any]:
 def main() -> None:
     server = Server(dir / "server.log")
     bank = Service(
-        [ROOT / "tests/python/faults.py", ROOT / "examples/python/bank.py"],
+        [ROOT / "python/tests/faults.py", ROOT / "python/examples/bank.py"],
         9182,
         dir / "bank.log",
         # The page cache survives the process, so that a restarted one trusts only what was saved.
