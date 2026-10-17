@@ -8,7 +8,7 @@ build=../.build
 
 core=$build/sdk-shared-core
 git -C "$core" add -N -- src
-git -C "$core" diff -- src Cargo.toml > sdk-shared-core.patch
+git -C "$core" diff -- src Cargo.toml > ../../sdk-shared-core/sdk-shared-core.patch
 
 sdk=$build/sdk-typescript
 git -C "$sdk" add -N -- packages/libs/restate-sdk/src packages/libs/restate-sdk/test sdk-shared-core-wasm-bindings/src
@@ -16,4 +16,4 @@ git -C "$sdk" diff -- packages/libs/restate-sdk/src packages/libs/restate-sdk/te
   sdk-shared-core-wasm-bindings/src ':!packages/libs/restate-sdk/src/endpoint/handlers/vm' \
   > sdk-typescript.patch
 
-grep -h '^diff --git' sdk-shared-core.patch sdk-typescript.patch | awk '{print $3}'
+grep -h '^diff --git' ../../sdk-shared-core/sdk-shared-core.patch sdk-typescript.patch | awk '{print $3}'

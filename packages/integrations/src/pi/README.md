@@ -4,7 +4,7 @@
 durable agent harness: it commits conversations, model turns and tool calls
 to storage, and resumes unfinished work when the storage is opened again.
 Here its storage is the agent's SQL database, in the Restate virtual object
-([SQL in Restate virtual objects](../../../sdk/SQL.md)).
+([SQL in Restate virtual objects](../../../sdk-typescript/SQL.md)).
 
 ## Use
 

@@ -2,7 +2,7 @@
 
 Agent frameworks in Restate virtual objects: each object (one per key) keeps
 the agent's state in its SQL database (`ctx.db`, of the patched SDK in
-[`../sdk`](../sdk/SQL.md)), and each message is answered once per invocation,
+[`../sdk-typescript`](../sdk-typescript/SQL.md)), and each message is answered once per invocation,
 however often an attempt crashes.
 
 ```ts

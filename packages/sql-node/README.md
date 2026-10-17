@@ -3,8 +3,8 @@
 SQL over a key/value store implemented in JavaScript: a native addon
 ([napi-rs](https://napi.rs)) around `sqlite-kv`, for the Restate TypeScript
 SDK, where the store is an object's state: the patched SDK
-([`packages/sdk`](../sdk/README.md#typescript)) builds `ctx.db` on it
-([how it works](../sdk/SQL.md)), and [`examples`](../../examples) has the
+([`packages/sdk-typescript`](../sdk-typescript/README.md#typescript)) builds `ctx.db` on it
+([how it works](../sdk-typescript/SQL.md)), and [`examples`](../../examples) has the
 examples.
 
 ```js

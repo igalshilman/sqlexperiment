@@ -2,7 +2,8 @@
 # Build the patched Restate TypeScript SDK (see ../README.md).
 #
 # Clones the SDK and its shared core at the pinned revisions into .build/,
-# applies patches/, builds the core to WebAssembly and inlines it into the SDK,
+# applies patches/ and the shared core's patch (../sdk-shared-core), builds
+# the core to WebAssembly and inlines it into the SDK,
 # and packs the SDK as .build/restatedev-restate-sdk-1.17.3.tgz, which
 # the pnpm workspace installs (`make js`).
 #
@@ -25,7 +26,7 @@ checkout() { # url rev dir
 
 mkdir -p "$build"
 checkout https://github.com/restatedev/sdk-shared-core.git $SHARED_CORE_REV "$build/sdk-shared-core"
-git -C "$build/sdk-shared-core" apply "$here/patches/sdk-shared-core.patch"
+git -C "$build/sdk-shared-core" apply "$here/../sdk-shared-core/sdk-shared-core.patch"
 checkout https://github.com/restatedev/sdk-typescript.git $SDK_TYPESCRIPT_REV "$build/sdk-typescript"
 git -C "$build/sdk-typescript" apply "$here/patches/sdk-typescript.patch"
 

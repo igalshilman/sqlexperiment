@@ -1,5 +1,6 @@
 # Build and test everything: the core crate, and the pnpm workspace: the
-# patched TypeScript SDK (packages/sdk), the Node.js addon (packages/sql), the
+# patched TypeScript SDK (packages/sdk-typescript, over the patched shared core
+# of packages/sdk-shared-core), the Node.js addon (packages/sql-node), the
 # integrations (packages/integrations), the tests (tests/) and the examples.
 #
 #   make              build everything
@@ -12,9 +13,10 @@
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
-SDK_TARBALL := packages/sdk/.build/restatedev-restate-sdk-1.17.3.tgz
+SDK_TARBALL := packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 CORE := sqlite-kv
-ADDON := packages/sql/sqlite_kv.node
+ADDON := packages/sql-node/sqlite_kv.node
+CORE_PATCH := packages/sdk-shared-core/sdk-shared-core.patch
 # The tests against a Restate server run a released restate-server: by default
 # RESTATE_VERSION's, downloaded from its GitHub release for this platform. Or
 # RESTATE_FROM=image takes it out of RESTATE_IMAGE with docker (Linux only), or
@@ -44,15 +46,15 @@ help: ## List the targets
 core: ## The sqlite-kv crate
 	cd $(CORE) && $(CARGO) build --locked --release
 
-addon: $(ADDON) ## The Node.js addon (packages/sql)
+addon: $(ADDON) ## The Node.js addon (packages/sql-node)
 
-$(ADDON): $(wildcard packages/sql/src/*.rs $(CORE)/src/*.rs $(CORE)/src/*/*.rs) packages/sql/Cargo.toml $(CORE)/Cargo.toml
-	cd packages/sql && npm run build
+$(ADDON): $(wildcard packages/sql-node/src/*.rs $(CORE)/src/*.rs $(CORE)/src/*/*.rs) packages/sql-node/Cargo.toml $(CORE)/Cargo.toml
+	cd packages/sql-node && npm run build
 
-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK (packages/sdk)
+sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK (packages/sdk-typescript)
 
-$(SDK_TARBALL): $(wildcard packages/sdk/patches/*.patch) packages/sdk/setup.sh packages/sdk/inline-wasm.mjs
-	packages/sdk/setup.sh
+$(SDK_TARBALL): $(wildcard packages/sdk-typescript/patches/*.patch) $(CORE_PATCH) packages/sdk-typescript/setup.sh packages/sdk-typescript/inline-wasm.mjs
+	packages/sdk-typescript/setup.sh
 
 js: $(ADDON) $(SDK_TARBALL) ## The pnpm workspace, installed with the patched SDK and the addon
 	pnpm install --force
@@ -69,10 +71,10 @@ test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked --features simulation
 
 test-addon: $(ADDON) ## The Node.js addon
-	cd packages/sql && npm test
+	cd packages/sql-node && npm test
 
 test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests, and its type tests
-	cd packages/sdk/.build/sdk-typescript/packages/libs/restate-sdk && npx tsc -p test/tsconfig.types.json && npx vitest run
+	cd packages/sdk-typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx tsc -p test/tsconfig.types.json && npx vitest run
 
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
 	cd tests && pnpm exec vitest run $(T)
@@ -81,14 +83,14 @@ lint: lint-core lint-ts ## Every lint
 
 lint-core: ## The Rust crates (the core and the addon): rustfmt --check and clippy
 	cd $(CORE) && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
-	cd packages/sql && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
+	cd packages/sql-node && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	pnpm check
 
 format: js ## Format everything: rustfmt, and oxfmt (TypeScript, JavaScript, Markdown)
 	cd $(CORE) && $(CARGO) fmt
-	cd packages/sql && $(CARGO) fmt
+	cd packages/sql-node && $(CARGO) fmt
 	pnpm format
 
 crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through crashes, against a Restate server
@@ -120,4 +122,4 @@ endif
 	mv $@.tmp $@
 
 clean: ## Remove build outputs
-	rm -rf $(CARGO_TARGET_DIR) $(ADDON) packages/sdk/.build node_modules */node_modules packages/*/node_modules
+	rm -rf $(CARGO_TARGET_DIR) $(ADDON) packages/sdk-typescript/.build node_modules */node_modules packages/*/node_modules
