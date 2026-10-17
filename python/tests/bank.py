@@ -1,15 +1,10 @@
 """
-A bank: an object per account, its moves in its own SQL database, and
-transfers that move money exactly once. A transfer debits the account and
-sends the credit in one transaction: the credit is made once the debit
+The tests' bank: an object per account, its moves in its own SQL database,
+and transfers that move money exactly once. A transfer debits the account
+and sends the credit in one transaction: the credit is made once the debit
 commits, even if the process crashes in between. Moves have ids, so a
-deposit or transfer made twice moves money once.
-
-    uv run bank.py
-    restate deployments register http://localhost:9080
-    curl localhost:8080/account/alice/deposit --json '{"id": "d1", "amount": 100}'
-    curl localhost:8080/account/alice/transfer --json '{"id": "t1", "to": "bob", "amount": 30}'
-    curl localhost:8080/account/bob/balance
+deposit or transfer made twice moves money once. Served alone in crash.py,
+and with the other test services in services.py.
 """
 
 from restate import TerminalError

@@ -1,5 +1,5 @@
 """
-The services of the tests against a Restate server: the examples' notes and
+The services of the tests against a Restate server: the notes example, a
 bank, a probe of the context without journal replay, and the agent on the
 scripted teller (scripted_agent.py). Served on PORT, as the examples are.
 """

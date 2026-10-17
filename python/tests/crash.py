@@ -1,5 +1,5 @@
 """
-The bank example (examples-py/bank.py) and a LangGraph agent moving money
+A bank (bank.py) and a LangGraph agent moving money
 in it (scripted_agent.py, on the scripted teller: "move 5 from 1 to 2"), through
 crashes, against a real Restate server: their processes abort at random
 state requests (see faults.py; the bank's at ABORT_PER_MILLE, default 15,
@@ -68,7 +68,7 @@ def faulty(path: str, port: int, name: str) -> Service:
 
 def main() -> None:
     server = Server(dir / "server.log")
-    bank = faulty("examples-py/bank.py", 9182, "bank")
+    bank = faulty("python/tests/bank.py", 9182, "bank")
     agent = faulty("python/tests/scripted_agent.py", 9183, "agent")
     supervising = threading.Event()
     try:

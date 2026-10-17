@@ -1,6 +1,6 @@
 """
 An agent on the scripted teller (agents/tests/fakes.py): "move 5 from 1 to 2"
-moves money in the bank example's accounts, once per tool call, and
+moves money in the bank's accounts (bank.py), once per tool call, and
 "remember <fact>" remembers it with the memory example's tool. Served on
 PORT, alone (as in crash.py), or with the other test services (services.py).
 """

@@ -54,7 +54,7 @@ their types and the docstring describe. Two parameters are not the model's:
 `ctx`, the handler's context (`ctx.db`, calls, sends), and `call_id`, the
 tool call's id. A crash runs an unfinished tool call again with the same id,
 so a tool that must not run twice passes it on, as an idempotency key or a
-row's key ([`examples-py/teller.py`](../../examples-py/teller.py)):
+row's key:
 
 ```python
 @tool
