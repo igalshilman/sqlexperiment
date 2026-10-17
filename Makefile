@@ -94,7 +94,7 @@ test-ts: js ## The integrations, their storage and SQL in objects, without a Res
 # Its own environment, with the extras its tests use; its tests against a
 # Restate server in docker (the test harness) are left out.
 test-sdk-py: $(SDK_PY) ## The patched Python SDK's own tests
-	cd packages/sdk-python/.build/sdk-python && uv run --extra test --extra serde --extra client \
+	cd packages/sdk-python/.build/sdk-python && uv run --extra test --extra serde --extra client --extra sql \
 		pytest -o python_files='*.py' tests --ignore=tests/harness.py --ignore=tests/servercontext.py \
 		--ignore=tests/ext.py -k 'not end_to_end'
 

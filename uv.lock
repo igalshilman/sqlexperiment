@@ -327,9 +327,10 @@ requires-dist = [
     { name = "pyright", marker = "extra == 'lint'", specifier = ">=1.1.390" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6.9" },
+    { name = "sqlite-kv", marker = "extra == 'sql'", directory = "packages/sql-python" },
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
-provides-extras = ["adk", "client", "harness", "langchain", "lint", "openai", "pydantic-ai", "serde", "test", "tracing", "zstd"]
+provides-extras = ["adk", "client", "harness", "langchain", "lint", "openai", "pydantic-ai", "serde", "sql", "test", "tracing", "zstd"]
 
 [[package]]
 name = "restate-sql"
