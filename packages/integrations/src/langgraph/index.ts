@@ -61,6 +61,46 @@ const State = Annotation.Root({
   answers: Annotation<Record<string, string>>({ reducer: (a, b) => ({ ...a, ...b }), default: () => ({}) }),
 });
 
+/**
+ * The tools node: each tool call of the model's last message run by a
+ * ToolNode, whose tool's error fails the attempt; and a call of a tool the
+ * agent does not have answered with an error, for the model to see (the
+ * ToolNode would fail the attempt, and every retry the same way).
+ */
+function toolsNode(tools: StructuredToolInterface[]) {
+  const node = new ToolNode(tools, { handleToolErrors: false });
+  const names = new Set(tools.map((t) => t.name));
+  return async (state: typeof MessagesAnnotation.State, config: RunnableConfig) => {
+    const last = state.messages.at(-1) as AIMessage;
+    const calls = last.tool_calls ?? [];
+    const unknown = calls.filter((c) => !names.has(c.name));
+    if (unknown.length === 0) return node.invoke(state, config);
+    const known = calls.filter((c) => names.has(c.name));
+    const ran: { messages: BaseMessage[] } =
+      known.length === 0
+        ? { messages: [] }
+        : await node.invoke(
+            {
+              messages: [
+                ...state.messages.slice(0, -1),
+                new AIMessage({ id: last.id, content: last.content, tool_calls: known }),
+              ],
+            },
+            config,
+          );
+    const missing = unknown.map(
+      (c) =>
+        new ToolMessage({
+          tool_call_id: c.id!,
+          name: c.name,
+          status: 'error',
+          content: `Error: Tool "${c.name}" not found.`,
+        }),
+    );
+    return { messages: [...ran.messages, ...missing] };
+  };
+}
+
 /** The agent's graph: `model`, calling `tools`. */
 function graph(model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
   if (!model.bindTools) throw new Error(`${model.getName()} does not call tools`);
@@ -69,7 +109,7 @@ function graph(model: BaseChatModel, tools: StructuredToolInterface[], system?: 
     .addNode('model', async ({ messages }) => ({
       messages: [await withTools.invoke(system ? [new SystemMessage(system), ...messages] : messages)],
     }))
-    .addNode('tools', new ToolNode(tools, { handleToolErrors: false }))
+    .addNode('tools', toolsNode(tools))
     .addNode('answer', ({ prompt, messages }) => ({ answers: { [prompt]: messages.at(-1)!.text } }))
     .addEdge(START, 'model')
     .addConditionalEdges('model', toolsCondition, { tools: 'tools', [END]: 'answer' })
