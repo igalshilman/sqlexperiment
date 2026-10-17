@@ -8,7 +8,7 @@ patched shared core as the TypeScript side, in a uv workspace of its own
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`sqlite-kv/`](sqlite-kv/README.md) | **The extension**, the `sqlite-kv` Python package: the crate over a key/value store implemented in Python (PyO3), as the [Node.js addon](../packages/sql-node/README.md) is for JavaScript.                            |
 | [`sdk/`](sdk/README.md)             | **The SDK changes.** Patches to the Restate Python SDK, over [the patched shared core](../packages/sdk-shared-core/README.md): handlers without journal replay, and `ctx.db` and `ctx.transaction()` on the extension. |
-| [`agents/`](agents/README.md)       | **The agent integrations**, the `restate-agents` Python package: LangGraph agents in virtual objects, their checkpoints in the object's database.                                                                      |
+| [`agents/`](agents/README.md)       | **The agent integrations**, the `restate-agents` Python package: LangGraph and Pydantic AI agents in virtual objects, their state in the object's database.                                                            |
 | [`tests/`](tests)                   | **The tests** against a real Restate server: the examples (`../examples-py`), the context without journal replay, Restate's tools for agents, and a bank through crashes.                                              |
 
 The examples are in [`../examples-py`](../examples-py/README.md).
