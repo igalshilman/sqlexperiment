@@ -23,18 +23,18 @@ afresh to the parked database, so no connection state carries over. That costs
 about 25% more allocation than reusing the connection (72 → 91 MB at 100%) and
 little CPU.
 
-| Cache | Memory (of logical DB) | Page gets | Round trips | Allocated MB | CPU ms |
-|---|---|---|---|---|---|
-| encoded | 5% | 239 | 503 | 102.6 | 182 |
-| decoded | 5% | 239 | 503 | 102.4 | 217 |
-| encoded | 10% | 239 | 503 | 96.7 | 112 |
-| decoded | 10% | 239 | 503 | 91.8 | 133 |
-| encoded | 25% | 239 | 503 | 92.8 | 69 |
-| decoded | 25% | 239 | 503 | 83.8 | 86 |
-| encoded | 50% | 239 | 503 | 91.5 | 79 |
-| decoded | 50% | 239 | 503 | 82.2 | 70 |
-| encoded | 100% | 239 | 503 | 91.3 | 66 |
-| decoded | 100% | 239 | 503 | 81.2 | 66 |
+| Cache   | Memory (of logical DB) | Page gets | Round trips | Allocated MB | CPU ms |
+| ------- | ---------------------- | --------- | ----------- | ------------ | ------ |
+| encoded | 5%                     | 239       | 503         | 102.6        | 182    |
+| decoded | 5%                     | 239       | 503         | 102.4        | 217    |
+| encoded | 10%                    | 239       | 503         | 96.7         | 112    |
+| decoded | 10%                    | 239       | 503         | 91.8         | 133    |
+| encoded | 25%                    | 239       | 503         | 92.8         | 69     |
+| decoded | 25%                    | 239       | 503         | 83.8         | 86     |
+| encoded | 50%                    | 239       | 503         | 91.5         | 79     |
+| decoded | 50%                    | 239       | 503         | 82.2         | 70     |
+| encoded | 100%                   | 239       | 503         | 91.3         | 66     |
+| decoded | 100%                   | 239       | 503         | 81.2         | 66     |
 
 - **No backend misses beyond first touches at any memory size.** The in-memory
   LRU (below) needed 1,120 misses and 1,450 round trips at 5%; the disk tier
@@ -61,10 +61,10 @@ when nothing changed since: the cache validated `meta` and the log ends where
 that engine left it. Its parsed schema and engine page cache stay warm. Opening
 still reads `meta` and probes the log, so round trips do not change.
 
-| 300 sessions, encoded cache | CPU ms | Allocations | Allocated MB |
-|---|---|---|---|
-| Fresh engine per session | 221–232 | 965k–972k | 169–172 |
-| Reused engine | 39–43 | 205k–213k | 86–89 |
+| 300 sessions, encoded cache | CPU ms  | Allocations | Allocated MB |
+| --------------------------- | ------- | ----------- | ------------ |
+| Fresh engine per session    | 221–232 | 965k–972k   | 169–172      |
+| Reused engine               | 39–43   | 205k–213k   | 86–89        |
 
 CPU per session drops from about 0.74 ms to 0.14 ms (5.4×), and allocations
 drop 4.7×. Another writer's append or checkpoint, unsaved changes, a query error
@@ -75,18 +75,18 @@ is the primary guard.
 
 ## In-memory LRU with engine reuse (300 sessions)
 
-| Cache | Size (of logical DB) | Page misses | Round trips | Allocated MB | CPU ms |
-|---|---|---|---|---|---|
-| encoded | 5% | 1,120 | 1,450 | 88.7 | 43 |
-| decoded | 5% | 1,243 | 1,573 | 87.7 | 39 |
-| encoded | 10% | 375 | 705 | 86.2 | 42 |
-| decoded | 10% | 706 | 1,036 | 83.7 | 41 |
-| encoded | 25% | 207 | 537 | 85.7 | 41 |
-| decoded | 25% | 222 | 552 | 80.1 | 38 |
-| encoded | 50% | 179 | 509 | 85.6 | 39 |
-| decoded | 50% | 180 | 510 | 79.8 | 36 |
-| encoded | 100% | 179 | 509 | 85.6 | 43 |
-| decoded | 100% | 179 | 509 | 79.8 | 39 |
+| Cache   | Size (of logical DB) | Page misses | Round trips | Allocated MB | CPU ms |
+| ------- | -------------------- | ----------- | ----------- | ------------ | ------ |
+| encoded | 5%                   | 1,120       | 1,450       | 88.7         | 43     |
+| decoded | 5%                   | 1,243       | 1,573       | 87.7         | 39     |
+| encoded | 10%                  | 375         | 705         | 86.2         | 42     |
+| decoded | 10%                  | 706         | 1,036       | 83.7         | 41     |
+| encoded | 25%                  | 207         | 537         | 85.7         | 41     |
+| decoded | 25%                  | 222         | 552         | 80.1         | 38     |
+| encoded | 50%                  | 179         | 509         | 85.6         | 39     |
+| decoded | 50%                  | 180         | 510         | 79.8         | 36     |
+| encoded | 100%                 | 179         | 509         | 85.6         | 43     |
+| decoded | 100%                 | 179         | 509         | 79.8         | 39     |
 
 With the engine warm, decoding is a visible share of what remains: decoded
 caching saves about 7% CPU and 7% allocated bytes once the working set fits,
@@ -94,18 +94,18 @@ but still costs 11–88% more misses when it does not.
 
 ## In-memory LRU without engine reuse (300 sessions)
 
-| Cache | Size (of logical DB) | Page misses | Round trips | Allocated MB | CPU ms |
-|---|---|---|---|---|---|
-| encoded | 5% | 1,123 | 1,453 | 172.3 | 221 |
-| decoded | 5% | 1,390 | 1,720 | 168.0 | 222 |
-| encoded | 10% | 362 | 692 | 169.8 | 228 |
-| decoded | 10% | 670 | 1,000 | 162.7 | 213 |
-| encoded | 25% | 207 | 537 | 169.3 | 232 |
-| decoded | 25% | 222 | 552 | 159.4 | 216 |
-| encoded | 50% | 179 | 509 | 169.2 | 228 |
-| decoded | 50% | 180 | 510 | 159.1 | 220 |
-| encoded | 100% | 179 | 509 | 169.2 | 221 |
-| decoded | 100% | 179 | 509 | 159.1 | 219 |
+| Cache   | Size (of logical DB) | Page misses | Round trips | Allocated MB | CPU ms |
+| ------- | -------------------- | ----------- | ----------- | ------------ | ------ |
+| encoded | 5%                   | 1,123       | 1,453       | 172.3        | 221    |
+| decoded | 5%                   | 1,390       | 1,720       | 168.0        | 222    |
+| encoded | 10%                  | 362         | 692         | 169.8        | 228    |
+| decoded | 10%                  | 670         | 1,000       | 162.7        | 213    |
+| encoded | 25%                  | 207         | 537         | 169.3        | 232    |
+| decoded | 25%                  | 222         | 552         | 159.4        | 216    |
+| encoded | 50%                  | 179         | 509         | 169.2        | 228    |
+| decoded | 50%                  | 180         | 510         | 159.1        | 220    |
+| encoded | 100%                 | 179         | 509         | 169.2        | 221    |
+| decoded | 100%                 | 179         | 509         | 159.1        | 219    |
 
 The remaining 179 misses are first touches of cold pages, which no cache avoids.
 

@@ -11,10 +11,10 @@ examples.
 const { open } = require('sqlite-kv');
 
 const db = await open('Ledger/a', {
-  get: (key) => ctx.get(key, serde.binary),   // stored value, or this request's own write
+  get: (key) => ctx.get(key, serde.binary), // stored value, or this request's own write
   set: (key, value) => ctx.set(key, value, serde.binary),
   clear: (key) => ctx.clear(key),
-  sync: () => ctx.run('sync', () => {}),       // resolves once every write so far is stored
+  sync: () => ctx.run('sync', () => {}), // resolves once every write so far is stored
 });
 await db.transaction(async (tx) => {
   await tx.execute('INSERT INTO transfers VALUES(?, ?, ?, ?)', [id, from, to, amount]);
@@ -27,7 +27,7 @@ which builds the store inside the SDK.
 
 ## The store
 
-The store is *ordered*, as Restate state writes are: `set` and `clear` return
+The store is _ordered_, as Restate state writes are: `set` and `clear` return
 at once, the store keeps writes in the order they were issued, and a failure
 may lose a tail of unconfirmed writes, never one without the writes after it.
 `sync` resolves once every write so far is stored.
@@ -67,13 +67,13 @@ Restate clusters, say) must not share a process.
 
 ## Values
 
-| SQL | JavaScript |
-|---|---|
-| NULL | `null` (`undefined` as a parameter) |
+| SQL     | JavaScript                                                       |
+| ------- | ---------------------------------------------------------------- |
+| NULL    | `null` (`undefined` as a parameter)                              |
 | INTEGER | `number`, or `bigint` beyond 2^53; a boolean parameter is 0 or 1 |
-| REAL | `number` (a non-integral parameter) |
-| TEXT | `string` |
-| BLOB | `Buffer` (any `Uint8Array` as a parameter) |
+| REAL    | `number` (a non-integral parameter)                              |
+| TEXT    | `string`                                                         |
+| BLOB    | `Buffer` (any `Uint8Array` as a parameter)                       |
 
 ## Build and test
 

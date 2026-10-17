@@ -59,8 +59,7 @@ checkpoint slice per save and confirmation on weak backends. See
   owner probes the log exactly to where it left it. Up to 64 mutations of a
   save group are in flight, so saves with a cache take one round trip.
 - Working-set hint: checkpointing saves write the pages their owner read most
-  usefully (page 0, interior B-tree pages, recent leaves; 32 by default, at most
-  256) to `v12/hint`, and a cold open of a database larger than 16 pages fetches
+  usefully (page 0, interior B-tree pages, recent leaves; 32 by default, at most 256) to `v12/hint`, and a cold open of a database larger than 16 pages fetches
   them alongside replay. On 10,000 rows a cold point-read session went from 5.7
   to 3.2 round trips. The hint is advisory and outside the invariants. The
   compression benchmark disables it, because checkpoint timing (and so the hint)
@@ -136,6 +135,7 @@ session. They found these, all fixed with regression tests:
 Also added: bound parameters (`query_with`), cleanup errors reported in
 per-commit mode (`take_cleanup_error`), and checkpoint slices that count each
 page once.
+
 - Removed `map_codec.rs`, `pending.rs`, the radix map, object IDs, the intent and
   `MAX_PENDING_BYTES`.
 - Measurement fix: concurrent phases issue their requests when queued, and the
@@ -152,50 +152,50 @@ page once.
 The crash and handover campaigns were run against deliberately broken variants. Each was
 caught:
 
-| Broken rule | Result |
-|---|---|
-| Open skips confirming the log tail | Campaign fails |
-| `meta` passes a checkpoint before its pages are acknowledged | Campaign fails |
-| Garbage below a not-yet-durable `meta` is deleted | Campaign fails |
-| A large save writes its pages in place before its commit | Campaign fails |
-| Open keeps cached pages without refreshing them after a foreign checkpoint | Handover campaign fails |
-| The refresh loses the first changed segment's images | Handover campaign fails |
-| The refresh trusts whichever changed segments are still present | Handover campaign fails |
-| An engine parks at the cache's latest commit instead of its own position | Overlapping-session test fails |
-| Only the first block of the first page is resident | Large page size test fails |
-| Sessions that change connection state still park | Connection state test fails |
-| Page keys carry no generation | Six cache, crash and handover tests fail |
-| No prefetch, no readahead, no exact probe, or 16 mutations in flight | The matching round-trip test fails |
-| The hint is never written, or not used at open | Working-set hint test fails |
-| A continued session keeps a stale resident header page | Every commit-durability test fails |
-| A commit leaves values fetched ahead for the pages it rewrote | Continued-snapshot test fails |
-| Dropping checkpointed transactions also drops pages a later one changed | Continued-snapshot test and three commit-durability tests fail |
-| After a failed checkpoint, a continued session drops its transactions anyway | Commit campaign fails |
-| Checkpoints ignore other sessions' positions | Overlapping-reader test fails |
-| A parked engine keeps its position | Parked-engine checkpoint test fails |
-| An evicted namespace gets a second state while in use | Eviction test fails |
-| Reads are cached under the current key and checkpoints ignore positions | Read-race test reverts an acknowledged commit |
-| Catch-up checkpoints are disabled | Grown log does not shrink |
-| Parked engines are weighed without their schema | Schema-weight test keeps every small engine |
-| A failed synchronous engine read is not recorded | Synchronous-read test fails |
+| Broken rule                                                                  | Result                                                         |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| Open skips confirming the log tail                                           | Campaign fails                                                 |
+| `meta` passes a checkpoint before its pages are acknowledged                 | Campaign fails                                                 |
+| Garbage below a not-yet-durable `meta` is deleted                            | Campaign fails                                                 |
+| A large save writes its pages in place before its commit                     | Campaign fails                                                 |
+| Open keeps cached pages without refreshing them after a foreign checkpoint   | Handover campaign fails                                        |
+| The refresh loses the first changed segment's images                         | Handover campaign fails                                        |
+| The refresh trusts whichever changed segments are still present              | Handover campaign fails                                        |
+| An engine parks at the cache's latest commit instead of its own position     | Overlapping-session test fails                                 |
+| Only the first block of the first page is resident                           | Large page size test fails                                     |
+| Sessions that change connection state still park                             | Connection state test fails                                    |
+| Page keys carry no generation                                                | Six cache, crash and handover tests fail                       |
+| No prefetch, no readahead, no exact probe, or 16 mutations in flight         | The matching round-trip test fails                             |
+| The hint is never written, or not used at open                               | Working-set hint test fails                                    |
+| A continued session keeps a stale resident header page                       | Every commit-durability test fails                             |
+| A commit leaves values fetched ahead for the pages it rewrote                | Continued-snapshot test fails                                  |
+| Dropping checkpointed transactions also drops pages a later one changed      | Continued-snapshot test and three commit-durability tests fail |
+| After a failed checkpoint, a continued session drops its transactions anyway | Commit campaign fails                                          |
+| Checkpoints ignore other sessions' positions                                 | Overlapping-reader test fails                                  |
+| A parked engine keeps its position                                           | Parked-engine checkpoint test fails                            |
+| An evicted namespace gets a second state while in use                        | Eviction test fails                                            |
+| Reads are cached under the current key and checkpoints ignore positions      | Read-race test reverts an acknowledged commit                  |
+| Catch-up checkpoints are disabled                                            | Grown log does not shrink                                      |
+| Parked engines are weighed without their schema                              | Schema-weight test keeps every small engine                    |
+| A failed synchronous engine read is not recorded                             | Synchronous-read test fails                                    |
 
 ## Executed validation
 
 Rust/Cargo 1.97.0, locked dependencies, Linux x86_64.
 
-| Check | Outcome |
-|---|---|
-| `cargo test --locked` | 11 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature) |
-| `cargo test --locked --features simulation` | 93 tests pass: 40 unit, 51 integration, two public API; one rustdoc example also passes |
-| Interruption campaigns | 2,169 cases (below) |
-| `cargo clippy --locked --all-targets --all-features -- -D warnings` | Pass |
-| `cargo fmt --check` | Pass |
-| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps --all-features --document-private-items` | Pass |
-| Amplification benchmark, three repeats | 3,420 observations / 684 phases / 104 configurations; counters reconcile |
-| Page-compression benchmark, three repeats | 504 SQL observations / 84 Raw-LZ4 pairs / 72 codec timing samples; traffic agrees |
-| Small-database benchmark, three repeats | 495 observations; SQL/reopen checks pass |
-| Log-shipping benchmark, two repeats | 16 v12 configurations × 128 sessions plus re-measured v11; repeats identical; final reads verify every write |
-| All four benchmark analyzers | Pass on v12 evidence |
+| Check                                                                                             | Outcome                                                                                                      |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `cargo test --locked`                                                                             | 11 tests and one compile-checked rustdoc example pass (cache tests need the `simulation` feature)            |
+| `cargo test --locked --features simulation`                                                       | 93 tests pass: 40 unit, 51 integration, two public API; one rustdoc example also passes                      |
+| Interruption campaigns                                                                            | 2,169 cases (below)                                                                                          |
+| `cargo clippy --locked --all-targets --all-features -- -D warnings`                               | Pass                                                                                                         |
+| `cargo fmt --check`                                                                               | Pass                                                                                                         |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps --all-features --document-private-items` | Pass                                                                                                         |
+| Amplification benchmark, three repeats                                                            | 3,420 observations / 684 phases / 104 configurations; counters reconcile                                     |
+| Page-compression benchmark, three repeats                                                         | 504 SQL observations / 84 Raw-LZ4 pairs / 72 codec timing samples; traffic agrees                            |
+| Small-database benchmark, three repeats                                                           | 495 observations; SQL/reopen checks pass                                                                     |
+| Log-shipping benchmark, two repeats                                                               | 16 v12 configurations × 128 sessions plus re-measured v11; repeats identical; final reads verify every write |
+| All four benchmark analyzers                                                                      | Pass on v12 evidence                                                                                         |
 
 Interruption cases:
 

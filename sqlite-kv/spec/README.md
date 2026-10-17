@@ -56,12 +56,12 @@ spec/check.sh MCDeep.cfg      # three transactions
 The script downloads `tla2tools.jar` (TLA+ tools 1.8.0) on first use and
 needs Java 11 or later.
 
-| Configuration | Bounds | Distinct states | Result |
-|---|---|---|---|
-| `MC.cfg` | cache, weak backend; 2 pages, 2 processes, 2 transactions, 4 sequences, 1 crash | 3,972,016 | No violation |
-| `MCNoCache.cfg` | as `MC.cfg`, no cache | 417,252 | No violation |
-| `MCStrong.cfg` | as `MC.cfg`, strong backend (no confirmation) | 267,532 | No violation |
-| `MCDeep.cfg` | as `MC.cfg`, 3 transactions, 5 sequences | 91,795,185 | No violation (34 minutes on four cores) |
+| Configuration   | Bounds                                                                          | Distinct states | Result                                  |
+| --------------- | ------------------------------------------------------------------------------- | --------------- | --------------------------------------- |
+| `MC.cfg`        | cache, weak backend; 2 pages, 2 processes, 2 transactions, 4 sequences, 1 crash | 3,972,016       | No violation                            |
+| `MCNoCache.cfg` | as `MC.cfg`, no cache                                                           | 417,252         | No violation                            |
+| `MCStrong.cfg`  | as `MC.cfg`, strong backend (no confirmation)                                   | 267,532         | No violation                            |
+| `MCDeep.cfg`    | as `MC.cfg`, 3 transactions, 5 sequences                                        | 91,795,185      | No violation (34 minutes on four cores) |
 
 The two processes are symmetric, so TLC checks one of each pair of mirrored
 states (`Symmetry`). Bounds are small by design: a cache's `meta` moves only
@@ -76,13 +76,13 @@ bounds; the simulator's handover campaign covers it.
 Each deliberately broken protocol must fail a property, or the model is too
 weak to trust:
 
-| Broken rule | Found by |
-|---|---|
-| Open skips confirming what it did not write (weak backend) | `OpensReadTheHistory` |
-| `meta` passes a checkpoint whose page puts failed | `ReadyReadsTheHistory` |
-| The commit part is sent before the first part is acknowledged | `OpensReadTheHistory` |
-| Garbage is deleted up to the claim, not the durable `meta` (`MCDeep.cfg`) | `OpensReadTheHistory` |
-| Open keeps cached pages another owner's checkpoint replaced (`MCDeep.cfg`) | `OpensReadTheHistory` |
+| Broken rule                                                                | Found by               |
+| -------------------------------------------------------------------------- | ---------------------- |
+| Open skips confirming what it did not write (weak backend)                 | `OpensReadTheHistory`  |
+| `meta` passes a checkpoint whose page puts failed                          | `ReadyReadsTheHistory` |
+| The commit part is sent before the first part is acknowledged              | `OpensReadTheHistory`  |
+| Garbage is deleted up to the claim, not the durable `meta` (`MCDeep.cfg`)  | `OpensReadTheHistory`  |
+| Open keeps cached pages another owner's checkpoint replaced (`MCDeep.cfg`) | `OpensReadTheHistory`  |
 
 ## The code against the model
 
@@ -110,8 +110,8 @@ the handover campaign (400 tenures of two owners) and the per-commit campaign
 (621 cases), with no violation. Deliberately broken code is caught with the
 exact request:
 
-| Broken code | Monitor reports |
-|---|---|
+| Broken code                                             | Monitor reports                                  |
+| ------------------------------------------------------- | ------------------------------------------------ |
 | Garbage deleted up to the claim, not the durable `meta` | Segments deleted at or after the known log start |
-| The commit part sent with the earlier parts | A commit part whose earlier part is not known |
-| A failed checkpoint treated as done | `meta` passing a page not known at its key |
+| The commit part sent with the earlier parts             | A commit part whose earlier part is not known    |
+| A failed checkpoint treated as done                     | `meta` passing a page not known at its key       |

@@ -36,14 +36,14 @@ covers differs.
 
 A namespace holds three kinds of keys:
 
-| Key | Holds |
-|---|---|
-| `v13/meta` | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
-| `v13/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag. |
-| `v13/page/<n>` | Page *n* as of some checkpoint, overwritten in place. Absent means zeros. |
-| `v13/hint` | Advisory: pages a cold open should fetch. Never needed for correctness. |
+| Key             | Holds                                                                                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `v13/meta`      | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
+| `v13/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag.                                          |
+| `v13/page/<n>`  | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                    |
+| `v13/hint`      | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                      |
 
-**Read rule.** Page *n* is its latest image in the committed log from
+**Read rule.** Page _n_ is its latest image in the committed log from
 `meta.log_start`, else `page/<n>`, else zeros.
 
 Everything else follows from six invariants:
@@ -194,13 +194,13 @@ saves gets. It stays out of `meta`, which is on the correctness path.
 Every step is idempotent, and a crash anywhere leaves state that replay reads
 correctly.
 
-| Interrupted step | State afterwards | Recovery |
-|---|---|---|
-| Non-commit segment | Debris; transaction uncommitted | Ignored by replay; overwritten by the next commit |
-| Commit segment | Absent, or present and therefore committed | Replay decides; open confirms a present tail |
-| Checkpoint page put | Old or new committed image | The log still replays over it |
-| `meta` put | Old or new record; both valid | Open confirms what it read |
-| Garbage delete | Segment present or absent below a durable start | Deleted again later |
+| Interrupted step    | State afterwards                                | Recovery                                          |
+| ------------------- | ----------------------------------------------- | ------------------------------------------------- |
+| Non-commit segment  | Debris; transaction uncommitted                 | Ignored by replay; overwritten by the next commit |
+| Commit segment      | Absent, or present and therefore committed      | Replay decides; open confirms a present tail      |
+| Checkpoint page put | Old or new committed image                      | The log still replays over it                     |
+| `meta` put          | Old or new record; both valid                   | Open confirms what it read                        |
+| Garbage delete      | Segment present or absent below a durable start | Deleted again later                               |
 
 ## Engine integration
 
@@ -251,8 +251,9 @@ namespaces. Values are stored encoded (LZ4) by default, or decoded with
 `PageCacheConfig::decoded`.
 
 **Per-namespace state:**
+
 - the exact `meta` bytes this owner last read or wrote;
-- the *base*: the log start of that `meta`;
+- the _base_: the log start of that `meta`;
 - a claim (acknowledged deletes of garbage not yet in `meta`);
 - the last acknowledged commit;
 - a parked engine.
@@ -288,9 +289,10 @@ it is not persisted.
 **Sessions of one owner.** Sessions may overlap, such as a writer and readers
 for a virtual object's shared handlers, if they share the namespace's handle;
 one namespace keeps one state while any handle holds it.
-- *One writer.* A commit is refused when another session committed since this
+
+- _One writer._ A commit is refused when another session committed since this
   one opened, rather than writing the log position that session used.
-- *Isolation.* A session reads the state it opened at: pages outside its log
+- _Isolation._ A session reads the state it opened at: pages outside its log
   come from page keys and the cache, which checkpoints overwrite. So each open
   session registers its log position, and a checkpoint writes no image of a
   transaction after the oldest other session's position (like SQLite's WAL read
@@ -323,6 +325,7 @@ The cache would then describe writes that do not exist, and a later session
 would build on them. (A checkpoint is recorded by the save that wrote its
 pages, so a lost checkpoint is lost whole; but a lost commit would still be
 believed.) So with an ordered store:
+
 - a session that writes is counted as unconfirmed until `Session::save`
   confirms its writes (`KvStore::sync`);
 - a session that ends otherwise marks the namespace doubtful;
@@ -339,14 +342,14 @@ one-thread runtime of its own. It is the only background work.
 
 ## Costs
 
-| Operation | Round trips | Mutations |
-|---|---|---|
-| Save | 1, or 5 when it checkpoints | 1 commit put (more for over 240 pages); when the log is long, every logged page, `meta`, the log's deletes and `meta` |
-| SQL commit with `Durability::Commit` | Same as a save | Same as a save |
-| Open, with cache | 1 | None |
-| Open, fresh owner, weak backend | 2 to 3 | Re-put of the last commit and `meta` |
-| Cold open | Same as open; hinted pages (or a small database whole) arrive with replay | None, plus the hint put in checkpointing saves |
-| Cold page read | 1 get; sequential reads fetch up to 64 ahead | None |
+| Operation                            | Round trips                                                               | Mutations                                                                                                             |
+| ------------------------------------ | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Save                                 | 1, or 5 when it checkpoints                                               | 1 commit put (more for over 240 pages); when the log is long, every logged page, `meta`, the log's deletes and `meta` |
+| SQL commit with `Durability::Commit` | Same as a save                                                            | Same as a save                                                                                                        |
+| Open, with cache                     | 1                                                                         | None                                                                                                                  |
+| Open, fresh owner, weak backend      | 2 to 3                                                                    | Re-put of the last commit and `meta`                                                                                  |
+| Cold open                            | Same as open; hinted pages (or a small database whole) arrive with replay | None, plus the hint put in checkpointing saves                                                                        |
+| Cold page read                       | 1 get; sequential reads fetch up to 64 ahead                              | None                                                                                                                  |
 
 Each page is written twice, once to the log (compressed against its previous
 image) and once at checkpoint, and opens replay the log since the last

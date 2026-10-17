@@ -79,13 +79,16 @@ test-ts: js ## The integrations, their storage and SQL in objects, without a Res
 
 lint: lint-core lint-ts ## Every lint
 
-lint-core: ## Clippy on the core crate
-	cd $(CORE) && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
+lint-core: ## The Rust crates (the core and the addon): rustfmt --check and clippy
+	cd $(CORE) && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
+	cd packages/sql && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
-lint-ts: js ## The TypeScript: tsc, oxlint (type-aware) and oxfmt --check
+lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	pnpm check
 
-format: js ## Format the TypeScript with oxfmt
+format: js ## Format everything: rustfmt, and oxfmt (TypeScript, JavaScript, Markdown)
+	cd $(CORE) && $(CARGO) fmt
+	cd packages/sql && $(CARGO) fmt
 	pnpm format
 
 crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through crashes, against a Restate server
