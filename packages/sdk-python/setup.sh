@@ -23,6 +23,21 @@ checkout() { # url rev dir
   git -C "$3" checkout -q FETCH_HEAD
 }
 
+# Whether the clone in $1 has edits that the patch $2 does not (over the paths
+# regenerate.sh writes it from): re-cloning would lose them.
+unsaved() { # dir patch paths...
+  local dir=$1 patch=$2
+  shift 2
+  [ -d "$dir/.git" ] || return 1
+  git -C "$dir" add -N -- "$@" 2> /dev/null
+  ! git -C "$dir" diff -- "$@" | cmp -s - "$patch"
+}
+if unsaved "$build/sdk-shared-core" ../sdk-shared-core/sdk-shared-core.patch src Cargo.toml ||
+  unsaved "$build/sdk-python" patches/sdk-python.patch src python tests Cargo.toml pyproject.toml; then
+  echo "$build has edits that the patches do not: run patches/regenerate.sh first, or remove .build/ to drop them" >&2
+  exit 1
+fi
+
 mkdir -p "$build"
 checkout https://github.com/restatedev/sdk-shared-core.git $SHARED_CORE_REV "$build/sdk-shared-core"
 git -C "$build/sdk-shared-core" apply "$here/../sdk-shared-core/sdk-shared-core.patch"
