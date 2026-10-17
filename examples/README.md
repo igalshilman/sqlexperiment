@@ -7,6 +7,9 @@ example is [`sqlite-kv/examples/lookup.rs`](../sqlite-kv/examples/lookup.rs).
 One npm package, here, on the patched Restate TypeScript SDK and the
 [addon](../sqlite-kv/node/README.md) (`make examples-js` installs it):
 
+- [`chat/`](chat/chat.ts): the smallest one, a durable chat in a few
+  lines: a `session` object whose `chat` is a pi agent, its conversation in
+  the object's database.
 - [`node/`](node/README.md): SQL in Restate virtual objects, how it works,
   and two examples:
   - [`ledger.ts`](node/ledger.ts): accounts and transfers, deduped by

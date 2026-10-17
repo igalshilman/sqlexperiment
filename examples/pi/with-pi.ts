@@ -1,8 +1,14 @@
 // withPi: a pi-durable Harness for one Restate invocation, with its storage in
 // the virtual object's database.
 //
-//   prompt: (ctx, { id, text }) =>
-//     withPi(ctx, { models, model: 'anthropic/claude-sonnet-4-5', tools }, (pi) => pi.prompt(id, text)),
+//   chat: (ctx, message) => prompt(ctx, message),
+//
+// or, for more than a prompt:
+//
+//   chat: (ctx, message) => withPi(ctx, { tools }, (pi) => pi.prompt(ctx.request().id, message)),
+//
+// The model is `model`, PI_MODEL, or else anthropic/claude-sonnet-5-5, with
+// the provider's API key (such as ANTHROPIC_API_KEY).
 //
 // It runs `work` over `ctx.db`: pi-durable's storage is the object's
 // database (pi-storage.ts), and each pi-durable commit is an SQL transaction
@@ -24,6 +30,7 @@ import type { Context } from '@earendil-works/chord';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { mkdir } from 'node:fs/promises';
 import type { MutableModels } from '@earendil-works/pi-ai';
+import { createModels } from '@earendil-works/pi-ai/models';
 import {
   AssistantEntry,
   createRegistry,
@@ -45,30 +52,42 @@ export interface Pi {
   prompt(id: string, text: string): Promise<string>;
 }
 
+/** The default model, as `provider/model-id`. */
+export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
+
 export interface PiOptions {
-  /** A pi-ai model registry. */
-  models: MutableModels;
-  /** The model to use, as `provider/model-id`. */
-  model: string;
+  /** The model, as `provider/model-id`: PI_MODEL, or else {@link DEFAULT_MODEL}. */
+  model?: string;
+  /** A pi-ai model registry; by default, one of the model's provider. */
+  models?: MutableModels;
   /** The agent's tools, made with pi-durable's `defineTool`. */
   tools?: ToolRegistration[];
   /** A directory for the coding tools, made if missing; without one, the agent has no file system. */
   workspace?: string;
 }
 
+/** A registry of `provider`'s models, such as anthropicProvider() from @earendil-works/pi-ai/providers/anthropic. */
+async function modelsOf(provider: string): Promise<MutableModels> {
+  const models = createModels();
+  const module = await import(`@earendil-works/pi-ai/providers/${provider}`);
+  models.setProvider(module[`${provider}Provider`]());
+  return models;
+}
+
 /**
- * Run `work(pi)` with a Harness over the object's database: `models` is a
- * pi-ai model registry, `model` the model to use as `provider/model-id`, and
- * `tools` the agent's tools. `pi` has `prompt(id, text)`, and the `harness`
- * and chord `context` for anything else.
+ * Run `work(pi)` with a Harness over the object's database: `model` is the
+ * model to use as `provider/model-id`, and `tools` the agent's tools. `pi`
+ * has `prompt(id, text)`, and the `harness` and chord `context` for anything
+ * else.
  */
 export const withPi = async <T>(
   ctx: restate.SqlObjectContext,
-  { models, model, tools = [], workspace }: PiOptions,
+  { model = process.env.PI_MODEL || DEFAULT_MODEL, models, tools = [], workspace }: PiOptions,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const db = ctx.db;
   const [provider = '', modelId = ''] = model.split('/');
+  models ??= await modelsOf(provider);
   const context = BACKGROUND_CONTEXT;
   const registry = createRegistry();
   registry.install(defineExtension({ name: 'tools', tools }));
@@ -103,3 +122,7 @@ export const withPi = async <T>(
     await harness.close(context);
   }
 };
+
+/** Answer `text`, once per invocation: a retried attempt resumes the same prompt. */
+export const prompt = (ctx: restate.SqlObjectContext, text: string, options: PiOptions = {}) =>
+  withPi(ctx, options, (pi) => pi.prompt(ctx.request().id, text));

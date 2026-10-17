@@ -9,6 +9,7 @@
     "test": "node test.ts",
     "test:concurrency": "node concurrency.ts",
     "test:node": "vitest run node",
+    "test:chat": "vitest run chat",
     "test:pi": "vitest run pi",
     "test:langgraph": "vitest run langgraph",
     "test:claude": "vitest run claude",
@@ -54,7 +55,7 @@
   "devDependencies": {
     "@langchain/langgraph-checkpoint-validation": "1.1.1",
     "@standard-schema/spec": "1.1.0",
-    "@types/node": "22.20.5",
+    "@types/node": "24.19.2",
     "oxfmt": "0.72.0",
     "oxlint": "1.87.0",
     "oxlint-tsgolint": "7.0.2004",
