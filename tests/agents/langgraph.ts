@@ -3,7 +3,7 @@
 //
 // Environment: PORT (default 9080), ANTHROPIC_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
-import { object } from 'restate-agents';
+import { object, signals } from 'restate-agents';
 import * as langgraph from 'restate-agents/langgraph';
 import { serveIfMain } from '../faults.ts';
 import { ledger } from '../sql/ledger.ts';
@@ -14,4 +14,4 @@ export const prompt = langgraph.chat({ tools: bank('GraphAgent') });
 
 export const agent = object({ name: 'GraphAgent', handlers: { chat: prompt, messages: langgraph.messages() } });
 
-serveIfMain(import.meta, [agent, ledger]);
+serveIfMain(import.meta, [agent, ledger, signals]);

@@ -3,7 +3,7 @@
 //
 // Environment: PORT (default 9080), ANTHROPIC_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
-import { object } from 'restate-agents';
+import { object, signals } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
 import { serveIfMain } from '../faults.ts';
 import { ledger } from '../sql/ledger.ts';
@@ -17,4 +17,4 @@ export const prompt = claude.chat({
 
 export const agent = object({ name: 'ClaudeAgent', handlers: { chat: prompt, messages: claude.messages() } });
 
-serveIfMain(import.meta, [agent, ledger]);
+serveIfMain(import.meta, [agent, ledger, signals]);

@@ -10,7 +10,7 @@
 // Environment: PORT (default 9080), MODEL with its provider's API key,
 // and ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
-import { object } from 'restate-agents';
+import { object, signals } from 'restate-agents';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
 import { serveIfMain } from '../faults.ts';
@@ -61,4 +61,4 @@ export const prompt = pi.chat((ctx) => ({ tools: [transfer(ctx), audit(ctx)] }))
 
 export const agent = object({ name: 'Agent', handlers: { chat: prompt, messages: pi.messages() } });
 
-serveIfMain(import.meta, [agent, ledger]);
+serveIfMain(import.meta, [agent, ledger, signals]);
