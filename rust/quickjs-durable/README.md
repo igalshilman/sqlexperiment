@@ -84,16 +84,5 @@ Node 22), one restate-server 1.7.13 on 4 vCPUs:
 | Primes below 100,000                          | 46 ms            | 480 ms           |
 | Written to Restate by a run of 20 waits       | ~20 KiB          | ~137 KiB         |
 
-## Limits
-
-- **One synchronous job runs at most ~10^8 Wasm instructions** (fuel): a loop
-  that never awaits fails the run. Awaiting anything, even `ctx.kv.get`,
-  splits the work; past half a turn's fuel, the run commits and goes on.
-- **CPU-bound code is ~10x slower than V8**: QuickJS is an interpreter.
-- **A run's journal grows with its turns**: each turn's state writes stay in
-  the invocation's journal until the run ends.
-- **A re-issued call attaches only within the callee's idempotency retention**
-  (24 hours by default).
-
 Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md). Tests:
 `make test-qjs` (with a Restate server), `make lint-qjs`.
