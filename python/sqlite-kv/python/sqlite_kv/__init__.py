@@ -36,8 +36,9 @@ class Store(Protocol):
     """A key/value store.
 
     ``set`` and ``clear`` return at once, and ``sync`` completes once every
-    write before it is stored. Writes are stored in no particular order: until
-    a sync completes, any of them may be lost. ``get`` issues its read when
+    write before it is stored. Writes are stored in the order they were made:
+    until a sync completes, a crash may lose the last of them, never one
+    without the ones after it. ``get`` issues its read when
     called, and returns the stored value
     or this request's own latest write (``None`` when absent), or an awaitable
     of it: so a plain ``async def get`` does not do, as its read would be

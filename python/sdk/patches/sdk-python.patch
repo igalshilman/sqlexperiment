@@ -2261,10 +2261,10 @@ index 0000000..7f2296c
 +    assert len(vm.tasks) == 2
 diff --git a/tests/sql_attempt.py b/tests/sql_attempt.py
 new file mode 100644
-index 0000000..abc8fcc
+index 0000000..4da0efe
 --- /dev/null
 +++ b/tests/sql_attempt.py
-@@ -0,0 +1,333 @@
+@@ -0,0 +1,324 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -2280,7 +2280,6 @@ index 0000000..abc8fcc
 +import asyncio
 +import itertools
 +import json
-+import random
 +from datetime import timedelta
 +from typing import Any, Callable, Dict, List, Optional, Tuple
 +
@@ -2369,32 +2368,25 @@ index 0000000..abc8fcc
 +    def sql_on_attempt_end(self, listener: Callable[[], None]) -> Callable[[], None]:
 +        return lambda: None
 +
-+    def kept(self, n: Optional[int] = None, seed: Optional[int] = None) -> List[Tuple[str, str, Any]]:
++    def kept(self, n: Optional[int] = None) -> List[Tuple[str, str, Any]]:
 +        """
-+        The commands a crash after the first n keeps: those before a sync that
-+        completed (one the attempt went on after), and of the others all, or
-+        a random subset by ``seed``, in no order.
++        The commands a crash after the first n keeps: Restate keeps an
++        attempt's commands in order, so a crash keeps a prefix of them.
 +        """
-+        issued = self.log[:n]
-+        synced = max((i for i, (op, _, _) in enumerate(issued[:-1]) if op == "sync"), default=0)
-+        rest = issued[synced:]
-+        if seed is not None:
-+            chance = random.Random(seed)
-+            rest = [command for command in rest if chance.random() < 0.5]
-+        return issued[:synced] + rest
++        return self.log[:n]
 +
-+    def store(self, n: Optional[int] = None, seed: Optional[int] = None) -> Dict[str, bytes]:
++    def store(self, n: Optional[int] = None) -> Dict[str, bytes]:
 +        """The state once the commands a crash after the first n keeps are stored."""
 +        state = dict(self.state)
-+        for op, key, value in self.kept(n, seed):
++        for op, key, value in self.kept(n):
 +            if op == "set":
 +                state[key] = value
 +            elif op == "clear":
 +                state.pop(key, None)
 +        return state
 +
-+    def sends(self, n: Optional[int] = None, seed: Optional[int] = None) -> List[Tuple[str, Any]]:
-+        return [(key, value) for op, key, value in self.kept(n, seed) if op == "send"]
++    def sends(self, n: Optional[int] = None) -> List[Tuple[str, Any]]:
++        return [(key, value) for op, key, value in self.kept(n) if op == "send"]
 +
 +
 +def fresh() -> str:
@@ -2536,10 +2528,10 @@ index 0000000..abc8fcc
 +
 +async def test_the_sends_of_a_commit_are_made_once_wherever_the_attempt_crashed():
 +    """
-+    For every point an attempt may crash at, and the writes and sends a crash
-+    keeps then (all those not yet synced, or a random subset), the next
-+    attempt makes the transaction's sends if, and only if, its commit landed:
-+    with the same keys, so that each is made once, and empties the outbox.
++    For every point an attempt may crash at, keeping the commands before it,
++    the next attempt makes the transaction's sends if, and only if, its
++    commit landed: with the same keys, so that each is made once, and empties
++    the outbox.
 +    """
 +    base = FakeHost({}, fresh())
 +    await run(base, lambda a: a.db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)"))
@@ -2554,16 +2546,15 @@ index 0000000..abc8fcc
 +    assert len(crashed.sends()) == 1
 +
 +    for n in range(len(crashed.log) + 1):
-+        for seed in [None, 1, 2, 3, 4]:
-+            after = FakeHost(crashed.store(n, seed), fresh())
++        after = FakeHost(crashed.store(n), fresh())
 +
-+            async def recover(attempt: SqlAttempt):
-+                return await attempt.db.query("SELECT count(*) FROM t")
++        async def recover(attempt: SqlAttempt):
++            return await attempt.db.query("SELECT count(*) FROM t")
 +
-+            [[rows]] = await run(after, recover)
-+            made = {key for key, _ in crashed.sends(n, seed) + after.sends()}
-+            assert len(made) == rows, f"{n} commands, seed {seed}: {rows} rows, sends made with keys {made}"
-+            assert await outbox(after.store()) == [], f"{n} commands, seed {seed}"
++        [[rows]] = await run(after, recover)
++        made = {key for key, _ in crashed.sends(n) + after.sends()}
++        assert len(made) == rows, f"{n} commands: {rows} rows, sends made with keys {made}"
++        assert await outbox(after.store()) == [], f"{n} commands"
 +
 +
 +async def test_the_outbox_holds_the_transactions_sends_until_they_are_stored():

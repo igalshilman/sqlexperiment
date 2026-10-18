@@ -212,21 +212,19 @@ describe('the sends of ctx.transaction', () => {
     expect(sets).toEqual([COMMIT]);
   });
 
-  it('leaves out of the outbox the sends stored before a commit', async () => {
+  it('leaves out of the outbox the sends made before a commit', async () => {
     const o = object();
     const a = o.attempt();
     await a.end(async () => {
       await transfer(a);
       const first = await o.outbox();
       expect(first).toHaveLength(2);
-      // The first's sends are made after its commit's sync: the second's
-      // commit keeps them, and its sync stores them, so the third's drops them.
+      // The first's sends are made after its commit, and before the second's:
+      // Restate stores them whenever it stores that commit, which drops them.
       await transfer(a);
-      expect(await o.outbox()).toHaveLength(4);
-      await transfer(a);
-      const third = await o.outbox();
-      expect(third).toHaveLength(4);
-      expect(third).not.toContain(first[0]);
+      const second = await o.outbox();
+      expect(second).toHaveLength(2);
+      expect(second).not.toContain(first[0]);
     });
     expect(await o.outbox()).toEqual([]);
   });
