@@ -28,6 +28,7 @@ QJS := core/quickjs-durable
 ADDON := typescript/packages/sql-node/sqlite_kv.node
 CORE_PATCH := core/sdk-shared-core/sdk-shared-core.patch
 SDK_PY := python/sdk/.build/sdk-python/.patched
+SDK_RS := rust/sdk/.build/sdk-rust/.patched
 # Formats the TypeScript, JavaScript and Markdown of every part, as .oxfmtrc.json says.
 OXFMT := typescript/node_modules/.bin/oxfmt
 # Lints the TypeScript of every part, as .oxlintrc.json says; its type-aware
@@ -49,8 +50,8 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core qjs addon sdk-ts sdk-py js py examples-rust test test-core test-addon test-sdk-ts test-ts \
-	test-sdk-py test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs format crash-test concurrency-test tools-test \
+.PHONY: all help core qjs addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
+	test-sdk-py test-sdk-rs test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs format crash-test concurrency-test tools-test \
 	crash-test-py concurrency-test-py restate-server wheels clean
 
 # --- Build
@@ -83,6 +84,11 @@ sdk-py: $(SDK_PY) ## The patched Python SDK's sources (python/sdk), for the uv w
 
 $(SDK_PY): $(wildcard python/sdk/patches/*.patch) $(CORE_PATCH) python/sdk/setup.sh
 	python/sdk/setup.sh
+
+sdk-rs: $(SDK_RS) ## The patched Rust SDK's sources (rust/sdk)
+
+$(SDK_RS): $(wildcard rust/sdk/patches/*.patch) $(CORE_PATCH) rust/sdk/setup.sh
+	rust/sdk/setup.sh
 
 py: $(SDK_PY) ## The uv workspace (python/.venv): the patched Python SDK and the Python extension, rebuilt when their Rust changes
 	cd python && uv sync --locked
@@ -131,6 +137,9 @@ test-sdk-py: $(SDK_PY) ## The patched Python SDK's own tests
 	cd python/sdk/.build/sdk-python && uv run --extra test --extra serde --extra client --extra sql \
 		pytest -o python_files='*.py' tests --ignore=tests/harness.py --ignore=tests/servercontext.py \
 		--ignore=tests/ext.py -k 'not end_to_end'
+
+test-sdk-rs: $(SDK_RS) ## The patched Rust SDK's unit tests
+	cd rust/sdk/.build/sdk-rust && $(CARGO) test --lib
 
 test-sql-py: py ## The Python extension
 	cd python && uv run --locked pytest sqlite-kv/tests
