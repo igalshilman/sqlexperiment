@@ -142,7 +142,8 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .local_addr()
         .unwrap()
         .port();
-    let endpoint = quickjs_durable::bind(Endpoint::builder(), programs)
+    let cache = quickjs_durable::page_cache().await.unwrap();
+    let endpoint = quickjs_durable::bind(Endpoint::builder(), programs, &cache)
         .bind(Doubler)
         .bind(fakes::Claude)
         .bind(quickjs_durable::Workspace::new(workspaces()))

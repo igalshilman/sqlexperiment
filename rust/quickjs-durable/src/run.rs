@@ -1,37 +1,30 @@
 //! A run: one invocation of a program's `main`, turn by turn. A turn delivers
 //! one event to the VM, runs the JavaScript until it waits, and commits.
 //!
-//! A scope's storage is three kinds of key: `commit`, its current run as of
-//! its last turn ([`Commit`]); `batch/<n>`, immutable batches of changed
-//! pages; and `kv/<key>`, the scope's KV. The image is a chain of batches over
-//! the program's golden image: the first holds the pages that differ from
-//! golden, each next one the pages one turn changed, each compressed against
-//! what it replaces, so a turn writes little more than what it changed. A turn
-//! puts its batch, then `commit`: the turn happened once `commit` is
-//! stored, and a crash that loses a suffix of the writes never keeps a commit
-//! without its batch. Then it applies what the commit lists: the turn's KV
-//! writes, and deleting the batches no longer referenced. The next attempt
-//! that reads the commit applies them again, so a crash in between loses
-//! nothing; a crash before the commit loses the whole turn, which runs again.
+//! A scope's storage is a sqlite-kv database ([`Scope`]). A turn is one
+//! commit of it, one put: the run's state ([`Commit`]) as the record's
+//! effects, the pages the turn changed as a value of the record's chain, and
+//! the turn's KV writes as SQL in its `kv` table. The image is the program's
+//! golden image with the chain applied: the first batch holds the pages that
+//! differ from golden, each next one the pages one turn changed, each
+//! compressed against what it replaces, so a turn writes little more than
+//! what it changed. Nothing is applied after a commit, and a crash before one
+//! loses the whole turn, which runs again.
 //!
 //! The VM stays live from turn to turn of one attempt; a new attempt restores
 //! it from the commit, once, when a delivery needs it.
 use crate::{
-    Store, codec,
+    Scope, codec,
     model::*,
     program::{Program, Programs},
     vm::{self, Vm},
 };
 use anyhow::{Context, Result, ensure};
-use futures::future;
+use bytes::Bytes;
 use serde_json::{Value, json};
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::Arc,
-};
+use sqlite_kv::{ChainUpdate, Session, Value as SqlValue};
+use std::{collections::HashSet, sync::Arc};
 
-const COMMIT: &str = "commit";
-const MAX_RECORD: usize = 16 * 1024 * 1024;
 /// Most batches in an image's chain. Restoring reads them all at once and
 /// applies them in order; past this many, or once the later batches outweigh
 /// twice the first, a turn writes every page that differs from golden into a
@@ -39,13 +32,9 @@ const MAX_RECORD: usize = 16 * 1024 * 1024;
 /// size rule keeps rewriting to a third of what a run writes; this one only
 /// bounds the reads, as each new first batch costs a whole image.
 const MAX_CHAIN: usize = 256;
+/// The scope's KV, a table of its database: values are JSON.
+const KV_TABLE: &str = "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL)";
 
-fn batch_key(batch: u64) -> String {
-    format!("batch/{batch}")
-}
-fn kv_key(key: &str) -> String {
-    format!("kv/{key}")
-}
 /// The pages at `indexes`, back to back.
 fn pages<'a>(page: impl Fn(u32) -> &'a [u8], indexes: &[u32]) -> Vec<u8> {
     let mut pages = Vec::with_capacity(indexes.len() * PAGE);
@@ -57,6 +46,9 @@ fn pages<'a>(page: impl Fn(u32) -> &'a [u8], indexes: &[u32]) -> Vec<u8> {
 fn input_size<T: serde::Serialize>(input: &T) -> Result<()> {
     ensure!(json_bytes(input)?.len() <= MAX_INPUT, "Input exceeds limit");
     Ok(())
+}
+fn sql(error: Box<dyn std::error::Error + Send + Sync>) -> anyhow::Error {
+    anyhow::anyhow!(error)
 }
 
 /// The pages a turn changed, and what they held before it.
@@ -71,9 +63,9 @@ struct Changed {
 /// unusable: the attempt starts again, from the store.
 pub struct Run {
     programs: Arc<Programs>,
+    /// The scope's database, this attempt's session of it.
+    db: Session,
     commit: Commit,
-    /// Batches of the scope's previous run, for the first commit to collect.
-    inherited: Vec<u64>,
     /// The VM, and its memory as of the last commit: restored when a delivery
     /// needs it, and dropped once the run has settled.
     live: Option<Live>,
@@ -103,15 +95,15 @@ enum Delivery {
 }
 
 impl Run {
-    /// Start run `run` of `program` on `input`, in `scope` (the program's
-    /// `ctx.key`): its first turn runs `main` until it waits or settles, and
-    /// commits. When the scope's commit is
+    /// Start run `run` of `program` on `input`, in the scope `key` (the
+    /// program's `ctx.key`), stored in `scope`: its first turn runs `main`
+    /// until it waits or settles, and commits. When the scope's commit is
     /// already this run's, this is another attempt at it: the run continues as
     /// committed, and `input` is the one it started with.
     pub async fn start(
         programs: &Arc<Programs>,
-        store: &impl Store,
-        scope: &str,
+        scope: &Scope,
+        key: &str,
         run: &str,
         program: &str,
         input: Value,
@@ -123,21 +115,19 @@ impl Run {
         );
         validate_time(now)?;
         input_size(&input)?;
-        let previous = load(store).await?;
-        if let Some(commit) = &previous {
-            apply(store, commit).await?;
-        }
-        if let Some(commit) = previous.as_ref().filter(|commit| commit.run == run) {
+        let db = scope.open().await?;
+        let previous = load(&db)?;
+        if let Some(commit) = previous.filter(|commit| commit.run == run) {
             ensure!(
                 commit.program == program,
                 "Run {run} is of program {}",
                 commit.program
             );
-            check(programs, commit)?;
+            check(programs, &commit)?;
             return Ok(Self {
                 programs: programs.clone(),
-                commit: previous.unwrap(),
-                inherited: Vec::new(),
+                db,
+                commit,
                 live: None,
                 last: Written::default(),
                 usable: true,
@@ -154,11 +144,10 @@ impl Run {
             turns: 0,
             meta: golden.meta.clone(),
             memory_len: golden.len(),
-            chain: Vec::new(),
+            batches: 0,
             base_bytes: 0,
             delta_bytes: 0,
             live_pages: 0,
-            next_batch: previous.as_ref().map_or(0, |commit| commit.next_batch),
             state: State {
                 pending: Vec::new(),
                 next_operation: 0,
@@ -166,23 +155,20 @@ impl Run {
                 status: Status::Waiting,
                 outcome: None,
             },
-            writes: BTreeMap::new(),
-            deletes: Vec::new(),
-            garbage: Vec::new(),
         };
         let mut this = Self {
             programs: programs.clone(),
+            db,
             commit,
-            inherited: previous.map_or_else(Vec::new, |commit| commit.chain),
             live: Some(Live { vm, base: golden }),
             last: Written::default(),
             usable: false,
         };
         let start = Delivery::Start {
-            scope: scope.into(),
+            scope: key.into(),
             input,
         };
-        this.turn(store, start, now).await?;
+        this.turn(start, now).await?;
         this.usable = true;
         Ok(this)
     }
@@ -190,14 +176,8 @@ impl Run {
     /// Deliver the outcome of the pending request `operation` at `now`, and
     /// run a turn. A request delivered before, or dropped when the run
     /// settled, changes nothing.
-    pub async fn deliver(
-        &mut self,
-        store: &impl Store,
-        operation: &str,
-        outcome: Outcome,
-        now: u64,
-    ) -> Result<View> {
-        self.deliver_all(store, vec![(operation.to_owned(), outcome)], now)
+    pub async fn deliver(&mut self, operation: &str, outcome: Outcome, now: u64) -> Result<View> {
+        self.deliver_all(vec![(operation.to_owned(), outcome)], now)
             .await
     }
 
@@ -206,7 +186,6 @@ impl Run {
     /// delivered before, or dropped when the run settled, are skipped.
     pub async fn deliver_all(
         &mut self,
-        store: &impl Store,
         outcomes: Vec<(String, Outcome)>,
         now: u64,
     ) -> Result<View> {
@@ -243,9 +222,9 @@ impl Run {
         }
         self.usable = false;
         if self.live.is_none() {
-            self.live = Some(self.restore(store, now).await?);
+            self.live = Some(self.restore(now)?);
         }
-        self.turn(store, Delivery::Complete(pending), now).await?;
+        self.turn(Delivery::Complete(pending), now).await?;
         self.usable = true;
         Ok(self.view())
     }
@@ -268,7 +247,7 @@ impl Run {
     }
 
     /// The committed image, from golden and the batches, in a new VM.
-    async fn restore(&self, store: &impl Store, now: u64) -> Result<Live> {
+    fn restore(&self, now: u64) -> Result<Live> {
         let commit = &self.commit;
         let mut base = check(&self.programs, commit)?.image();
         ensure!(
@@ -279,15 +258,11 @@ impl Run {
         );
         base.meta = commit.meta.clone();
         base.grow(commit.memory_len);
-        let batches = future::try_join_all(
-            commit
-                .chain
-                .iter()
-                .map(|batch| async move { store.get(&batch_key(*batch)).await }),
-        )
-        .await?;
+        // Read with the record at open: the chain is this run's since its
+        // first turn restarted it.
+        let batches = self.db.chain();
+        ensure!(batches.len() == commit.batches, "Missing page batch");
         for bytes in batches {
-            let bytes = bytes.context("Missing page batch")?;
             let (indexes, frame) = codec::page_indexes(&bytes)?;
             ensure!(
                 indexes
@@ -306,18 +281,12 @@ impl Run {
     }
 
     /// Run the JavaScript on `delivery`, capture what changed, and commit.
-    async fn turn(&mut self, store: &impl Store, delivery: Delivery, now: u64) -> Result<()> {
+    async fn turn(&mut self, delivery: Delivery, now: u64) -> Result<()> {
+        // The turn's KV writes, and its pages and state, commit together.
+        self.db.execute("BEGIN").await.map_err(sql)?;
+        self.db.execute(KV_TABLE).await.map_err(sql)?;
         let live = self.live.as_mut().context("No live VM")?;
-        let mut writes = BTreeMap::new();
-        let ran = run(
-            &mut live.vm,
-            store,
-            &self.commit,
-            delivery,
-            now,
-            &mut writes,
-        )
-        .await;
+        let ran = run(&mut live.vm, &mut self.db, &self.commit, delivery, now).await;
         let mut written = Written::default();
         let mut live_pages = self.commit.live_pages;
         let (state, meta, memory_len, changed) = match ran {
@@ -363,55 +332,49 @@ impl Run {
             },
         };
         let previous = &self.commit;
-        let mut chain = previous.chain.clone();
         let (mut base_bytes, mut delta_bytes) = (previous.base_bytes, previous.delta_bytes);
-        let mut next_batch = previous.next_batch;
+        let mut batches = previous.batches;
         let settled = state.status != Status::Waiting;
-        if settled {
+        let empty = self.db.chain().is_empty();
+        let update = if settled || (batches == 0 && changed.indexes.is_empty()) {
             // A settled run never restores again: it keeps its outcome, not
-            // its image.
-            chain.clear();
-            live_pages = 0;
+            // its image. A run that has changed no page yet keeps none of the
+            // scope's previous run's.
+            if settled {
+                live_pages = 0;
+                batches = 0;
+            }
+            (!empty).then_some(ChainUpdate::Clear)
+        } else if batches == 0 {
+            // The run's first batch, against golden: it replaces whatever the
+            // scope's previous run left.
+            let bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
+            (base_bytes, delta_bytes, batches) = (bytes.len(), 0, 1);
+            written.batch_bytes = bytes.len();
+            Some(ChainUpdate::Restart(bytes.into()))
         } else if !changed.indexes.is_empty() {
-            let mut bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
-            if chain.is_empty() {
-                base_bytes = bytes.len();
-            } else if chain.len() >= MAX_CHAIN || delta_bytes + bytes.len() > 2 * base_bytes {
+            let bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
+            if batches >= MAX_CHAIN || delta_bytes + bytes.len() > 2 * base_bytes {
                 // A new first batch: every page that differs from golden.
                 let base = &self.live.as_ref().context("No live VM")?.base;
                 let live: Vec<u32> = base.changed().collect();
-                bytes = codec::encode_pages(
+                let bytes = codec::encode_pages(
                     &live,
                     &pages(|i| base.page(i), &live),
                     &pages(|i| base.original(i), &live),
                 )?;
-                chain.clear();
-                (base_bytes, delta_bytes) = (bytes.len(), 0);
+                (base_bytes, delta_bytes, batches) = (bytes.len(), 0, 1);
+                written.batch_bytes = bytes.len();
+                Some(ChainUpdate::Restart(bytes.into()))
             } else {
                 delta_bytes += bytes.len();
+                batches += 1;
+                written.batch_bytes = bytes.len();
+                Some(ChainUpdate::Append(bytes.into()))
             }
-            written.batch_bytes = bytes.len();
-            store.put(&batch_key(next_batch), bytes).await?;
-            chain.push(next_batch);
-            next_batch += 1;
-        }
-        let garbage = previous
-            .chain
-            .iter()
-            .chain(&self.inherited)
-            .filter(|batch| !chain.contains(batch))
-            .copied()
-            .collect();
-        let mut kv_writes = BTreeMap::new();
-        let mut deletes = Vec::new();
-        for (key, value) in writes {
-            match value {
-                Some(value) => {
-                    kv_writes.insert(key, value);
-                }
-                None => deletes.push(key),
-            }
-        }
+        } else {
+            None
+        };
         let commit = Commit {
             run: previous.run.clone(),
             program: previous.program.clone(),
@@ -420,23 +383,20 @@ impl Run {
             turns: previous.turns + 1,
             meta,
             memory_len,
-            chain,
+            batches,
             base_bytes,
             delta_bytes,
             live_pages,
-            next_batch,
             state,
-            writes: kv_writes,
-            deletes,
-            garbage,
         };
-        let bytes = json_bytes(&commit)?;
-        ensure!(bytes.len() <= MAX_RECORD, "Commit exceeds limit");
-        written.commit_bytes = bytes.len();
-        store.put(COMMIT, bytes).await?;
-        apply(store, &commit).await?;
+        let effects = Bytes::from(json_bytes(&commit)?);
+        written.commit_bytes = effects.len();
+        match update {
+            Some(update) => self.db.commit_turn(effects, update).await,
+            None => self.db.commit_with(effects).await,
+        }
+        .map_err(sql)?;
         self.commit = commit;
-        self.inherited.clear();
         self.last = written;
         match &mut self.live {
             Some(_) if settled => self.live = None,
@@ -449,14 +409,14 @@ impl Run {
 
 /// Deliver to the VM, and run the JavaScript until it waits on what the host
 /// answers (RPCs, timers, wakeups), settles, or spends half its fuel. KV
-/// requests are answered here, in the turn: a read sees the turn's own writes.
+/// requests are answered here, in the turn's SQL transaction: a read sees the
+/// turn's own writes.
 async fn run(
     vm: &mut Vm,
-    store: &impl Store,
+    db: &mut Session,
     commit: &Commit,
     delivery: Delivery,
     now: u64,
-    writes: &mut BTreeMap<String, Option<Value>>,
 ) -> wasmtime::Result<State> {
     vm.begin_turn(now)?;
     // The host keeps the requests pending: those of earlier turns, less the
@@ -487,26 +447,16 @@ async fn run(
         let report = vm.inspect()?;
         let mut answered = false;
         for operation in report.issued.iter().cloned() {
-            let value = match &operation {
-                Operation::KvGet { key, .. } => match writes.get(key) {
-                    Some(value) => value.clone().unwrap_or(Value::Null),
-                    None => read(store, key)
-                        .await
-                        .map_err(wasmtime::Error::from_anyhow)?,
-                },
-                Operation::KvSet { key, value, .. } => {
-                    writes.insert(key.clone(), Some(value.clone()));
-                    Value::Null
-                }
-                Operation::KvDelete { key, .. } => {
-                    writes.insert(key.clone(), None);
-                    Value::Null
-                }
+            let kv = match &operation {
+                Operation::KvGet { key, .. } => read(db, key).await,
+                Operation::KvSet { key, value, .. } => write(db, key, Some(value)).await,
+                Operation::KvDelete { key, .. } => write(db, key, None).await,
                 _ => {
                     pending.push(operation);
                     continue;
                 }
             };
+            let value = kv.map_err(wasmtime::Error::from_anyhow)?;
             let outcome = Outcome::success(value);
             vm.invoke("deliver", &completion(operation.id(), outcome, now))?;
             answered = true;
@@ -549,36 +499,47 @@ fn completion(operation: &str, outcome: Outcome, now: u64) -> Value {
     json!({"kind": "complete", "operationId": operation, "outcome": outcome, "now": now})
 }
 
-/// The scope's KV value for `key`, as committed.
-async fn read(store: &impl Store, key: &str) -> Result<Value> {
-    let Some(bytes) = store.get(&kv_key(key)).await? else {
-        return Ok(Value::Null);
+/// The scope's KV value for `key`, as this turn sees it.
+async fn read(db: &mut Session, key: &str) -> Result<Value> {
+    let rows = db
+        .query_with(
+            "SELECT value FROM kv WHERE key = ?",
+            [SqlValue::build_text(key.to_owned())],
+        )
+        .await
+        .map_err(sql)?;
+    let text = match rows.first().and_then(|row| row.first()) {
+        None => return Ok(Value::Null),
+        Some(SqlValue::Text(text)) => text.as_str(),
+        Some(_) => anyhow::bail!("KV value is not text"),
     };
-    ensure!(bytes.len() <= MAX_INPUT, "KV value exceeds limit");
-    Ok(serde_json::from_slice(&bytes)?)
+    ensure!(text.len() <= MAX_INPUT, "KV value exceeds limit");
+    Ok(serde_json::from_str(text)?)
 }
 
-async fn load(store: &impl Store) -> Result<Option<Commit>> {
-    let Some(bytes) = store.get(COMMIT).await? else {
+/// Set `key` to `value`, or with `None` delete it, in this turn.
+async fn write(db: &mut Session, key: &str, value: Option<&Value>) -> Result<Value> {
+    let key = SqlValue::build_text(key.to_owned());
+    match value {
+        Some(value) => {
+            let value = SqlValue::build_text(serde_json::to_string(value)?);
+            let set =
+                "INSERT INTO kv VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+            db.execute_with(set, [key, value]).await
+        }
+        None => db.execute_with("DELETE FROM kv WHERE key = ?", [key]).await,
+    }
+    .map_err(sql)?;
+    Ok(Value::Null)
+}
+
+/// The scope's current run, as its database's last commit holds it.
+fn load(db: &Session) -> Result<Option<Commit>> {
+    let effects = db.effects();
+    if effects.is_empty() {
         return Ok(None);
-    };
-    ensure!(bytes.len() <= MAX_RECORD, "Commit exceeds limit");
-    Ok(Some(serde_json::from_slice(&bytes)?))
-}
-
-/// What follows a commit: its KV writes, and deleting the batches it no
-/// longer needs. Applying it again changes nothing.
-async fn apply(store: &impl Store, commit: &Commit) -> Result<()> {
-    for (key, value) in &commit.writes {
-        store.put(&kv_key(key), json_bytes(value)?).await?;
     }
-    for key in &commit.deletes {
-        store.delete(&kv_key(key)).await?;
-    }
-    for batch in &commit.garbage {
-        store.delete(&batch_key(*batch)).await?;
-    }
-    Ok(())
+    Ok(Some(serde_json::from_slice(&effects)?))
 }
 
 /// The run's program, as the version and runtime it started on.

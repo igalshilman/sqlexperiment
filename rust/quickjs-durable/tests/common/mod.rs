@@ -2,12 +2,72 @@
 //! a driver that answers a run's requests until it settles.
 #![allow(dead_code)]
 use anyhow::Result;
-use quickjs_durable::{MemoryStore, Operation, Outcome, Programs, Run, Runtime, Store, View};
+use quickjs_durable::{Operation, Outcome, Programs, Run, Runtime, Scope, View};
 use serde_json::{Value, json};
+use sqlite_kv::{Session, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, OnceLock},
 };
+
+/// A scope's store in memory: what the tests read back from it.
+#[derive(Clone, Default)]
+pub struct Store {
+    pub kv: Arc<MemoryKv>,
+}
+
+impl Store {
+    pub fn scope(&self) -> Scope {
+        Scope::new(self.kv.clone() as Arc<dyn KvStore>)
+    }
+
+    /// Every key and its value.
+    pub fn values(&self) -> BTreeMap<String, Vec<u8>> {
+        (self.kv.keys().into_iter())
+            .map(|key| {
+                let value = block(self.kv.get(&key)).unwrap().unwrap();
+                (key, value.to_vec())
+            })
+            .collect()
+    }
+
+    /// Bytes put so far, keys included.
+    pub fn bytes_written(&self) -> usize {
+        self.kv.stats().bytes_written as usize
+    }
+
+    /// Puts and deletes so far.
+    pub fn writes(&self) -> usize {
+        let stats = self.kv.stats();
+        (stats.puts + stats.deletes) as usize
+    }
+
+    fn open(&self) -> Session {
+        block(Session::open(self.kv.clone())).unwrap()
+    }
+
+    /// The scope's current run, as its last commit holds it.
+    pub fn commit(&self) -> Value {
+        serde_json::from_slice(&self.open().effects()).unwrap()
+    }
+
+    /// Commit `commit` as the scope's current run, as if a turn did.
+    pub fn set_commit(&self, commit: &Value) {
+        let options = sqlite_kv::StorageOptions {
+            durability: sqlite_kv::Durability::Commit,
+            ..Default::default()
+        };
+        let mut db = block(Session::open_with_options(self.kv.clone(), options)).unwrap();
+        block(db.execute("BEGIN")).unwrap();
+        let effects = serde_json::to_vec(commit).unwrap();
+        block(db.commit_with(effects.into())).unwrap();
+    }
+
+    /// Batches in the image's chain.
+    pub fn batches(&self) -> usize {
+        self.open().chain().len()
+    }
+}
 
 /// The runtime every catalog of a test binary is on: compiling it is slow.
 pub fn runtime() -> Arc<Runtime> {
@@ -38,10 +98,15 @@ pub fn block<F: Future>(future: F) -> F::Output {
 }
 
 /// Run "r" of `source`'s program "v1" in `store`: started, or another attempt.
-pub fn start(store: &MemoryStore, source: &str, input: Value, now: u64) -> Result<Run> {
+pub fn start(store: &Store, source: &str, input: Value, now: u64) -> Result<Run> {
+    start_in(&store.scope(), source, input, now)
+}
+
+/// [`start`], in `scope`.
+pub fn start_in(scope: &Scope, source: &str, input: Value, now: u64) -> Result<Run> {
     block(Run::start(
         &programs(source),
-        store,
+        scope,
         "s",
         "r",
         "v1",
@@ -59,19 +124,14 @@ pub fn value(view: &View) -> Value {
 }
 
 /// The scope's KV value of `key`.
-pub fn kv(store: &MemoryStore, key: &str) -> Option<Value> {
-    block(store.get(&format!("kv/{key}")))
-        .unwrap()
-        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
-}
-
-/// Keys stored under `prefix`.
-pub fn stored(store: &MemoryStore, prefix: &str) -> usize {
-    store
-        .values()
-        .keys()
-        .filter(|key| key.starts_with(prefix))
-        .count()
+pub fn kv(store: &Store, key: &str) -> Option<Value> {
+    let mut db = store.open();
+    let select = "SELECT value FROM kv WHERE key = ?";
+    let rows = block(db.query_with(select, [SqlValue::build_text(key.to_owned())])).ok()?;
+    match rows.first()?.first()? {
+        SqlValue::Text(text) => Some(serde_json::from_str(text.as_str()).unwrap()),
+        other => panic!("KV value {other:?}"),
+    }
 }
 
 /// The answer the tests' host gives each request: an RPC's input back, with
@@ -84,20 +144,20 @@ pub fn answer(operation: &Operation) -> Outcome {
 }
 
 /// Deliver the first pending request's answer, at its deadline for a timer.
-pub fn step(run: &mut Run, store: &MemoryStore) -> Result<View> {
+pub fn step(run: &mut Run) -> Result<View> {
     let state = run.view().state;
     let operation = state.pending.first().expect("a pending request").clone();
     let now = match &operation {
         Operation::Sleep { deadline, .. } => *deadline,
         _ => state.now + 1,
     };
-    block(run.deliver(store, operation.id(), answer(&operation), now))
+    block(run.deliver(operation.id(), answer(&operation), now))
 }
 
 /// Answer the run's requests until it settles.
-pub fn finish(run: &mut Run, store: &MemoryStore) -> Result<View> {
+pub fn finish(run: &mut Run) -> Result<View> {
     while run.view().state.outcome.is_none() {
-        step(run, store)?;
+        step(run)?;
     }
     Ok(run.view())
 }

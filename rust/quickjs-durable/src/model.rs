@@ -236,11 +236,9 @@ impl Image {
     }
 }
 
-/// A scope's commit: its current run, as of its last turn. It is the one record
-/// a turn writes last, after the batch of pages it references: the turn
-/// happened once it is stored. What follows it (the turn's KV writes, and the
-/// batches no longer referenced) is applied after it, and again by the next
-/// attempt that reads it, so a crash in between loses nothing.
+/// A scope's current run, as of its last turn: the effects of the scope's
+/// database commit record, so the turn happened exactly when its SQL (the KV
+/// writes) and its pages (the chain) did.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Commit {
@@ -254,23 +252,18 @@ pub(crate) struct Commit {
     pub turns: u64,
     pub meta: VmMeta,
     pub memory_len: usize,
-    /// The image, as batches to apply in order over golden (zeros beyond its
-    /// length): the first holds the pages that differ from golden, each next
-    /// one the pages one turn changed. Empty once the run has settled.
-    pub chain: Vec<u64>,
+    /// Batches in the database's chain since this run restarted it: the image
+    /// is golden (zeros beyond its length) with the chain applied in order.
+    /// The first holds the pages that differ from golden, each next one the
+    /// pages one turn changed. Zero until the run's first turn, and once it
+    /// has settled.
+    pub batches: usize,
     /// Bytes of the chain's first batch, and of the others.
     pub base_bytes: usize,
     pub delta_bytes: usize,
     /// Pages that differ from golden.
     pub live_pages: usize,
-    /// The number of the next batch a turn writes.
-    pub next_batch: u64,
     pub state: State,
-    /// The turn's KV writes and deletes, applied after the commit.
-    pub writes: BTreeMap<String, Value>,
-    pub deletes: Vec<String>,
-    /// Batches no longer referenced, deleted after the commit.
-    pub garbage: Vec<u64>,
 }
 
 /// A run as of its last commit, and what that turn wrote.

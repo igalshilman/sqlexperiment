@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
     names.sort();
     let port = std::env::var("PORT").unwrap_or_else(|_| "9080".into());
     println!("Serving {} on port {port}", names.join(", "));
-    HttpServer::new(quickjs_durable::endpoint(&programs))
+    HttpServer::new(quickjs_durable::endpoint(&programs).await?)
         .listen_and_serve(format!("0.0.0.0:{port}").parse()?)
         .await;
     Ok(())
