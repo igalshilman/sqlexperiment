@@ -839,10 +839,10 @@ index f14da79..82ed9e5 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..6f3cb2e
+index 0000000..cb62f9b
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,715 @@
+@@ -0,0 +1,699 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -1186,9 +1186,10 @@ index 0000000..6f3cb2e
 +// they are stored. They are made once the transaction commits; a later open
 +// makes again those still in the outbox, with the same idempotency keys
 +// (`transaction/<id>/<index>`, with a random id of the transaction), so
-+// making them again is dropped. A send is stored once a sync of the store
-+// that started after it resolved: the next commit leaves it out of the
-+// outbox then, and so does the end of the attempt.
++// making them again is dropped. Restate keeps an attempt's commands in the
++// order they were made, so a send made before a commit is stored whenever the
++// commit is: the next commit leaves the sends this attempt made out of the
++// outbox, and so does the end of the attempt.
 +
 +/** A send, but its parameter, as it is stored. */
 +type StoredSend = Omit<
@@ -1299,12 +1300,8 @@ index 0000000..6f3cb2e
 +  #session: Promise<Session> | undefined;
 +  // The session, once open.
 +  #db: Session | undefined;
-+  // The store, its syncs counted.
-+  #store: SqlStore | undefined;
-+  readonly #syncs = { started: 0, resolved: 0 };
-+  // The outbox's transactions made in this attempt, by id: each with the
-+  // syncs started before its sends.
-+  readonly #made = new Map<string, number>();
++  // The ids of the outbox's transactions this attempt made the sends of.
++  readonly #made = new Set<string>();
 +  #ended = false;
 +  #cancel: () => void = () => {};
 +  /** `ctx.db`. */
@@ -1394,36 +1391,25 @@ index 0000000..6f3cb2e
 +        idempotencyKey: send.idempotencyKey ?? `transaction/${id}/${index}`,
 +      });
 +    });
-+    this.#made.set(id, this.#syncs.started);
-+  }
-+
-+  /** The outbox as committed, but the transactions whose sends are stored. */
-+  async #unstored(db: Session): Promise<Outgoing[]> {
-+    return decodeOutbox(await db.effects()).filter(({ id }) => {
-+      const before = this.#made.get(id);
-+      return before === undefined || this.#syncs.resolved <= before;
-+    });
-+  }
-+
-+  /** `store`, its syncs counted (see {@link #unstored}). */
-+  #counted(store: SqlStore): SqlStore {
-+    return {
-+      ...store,
-+      sync: async () => {
-+        const n = ++this.#syncs.started;
-+        await store.sync();
-+        this.#syncs.resolved = Math.max(this.#syncs.resolved, n);
-+      },
-+    };
++    this.#made.add(id);
 +  }
 +
 +  /**
-+   * Empty the outbox once its sends are stored, so that a later open does
-+   * not make them again: a sync, then a commit of the empty outbox.
++   * The outbox as committed, but the transactions this attempt made the sends
++   * of: a commit made after them stores them first.
++   */
++  async #unstored(db: Session): Promise<Outgoing[]> {
++    return decodeOutbox(await db.effects()).filter(
++      ({ id }) => !this.#made.has(id)
++    );
++  }
++
++  /**
++   * Empty the outbox, so that a later open does not make its sends again: a
++   * commit after them, which stores them first.
 +   */
 +  async #flush(db: Session) {
 +    if ((await db.effects()).length === 0) return;
-+    await this.#store!.sync();
 +    const outbox = encodeOutbox(await this.#unstored(db));
 +    await db.transaction(async (tx) => tx.commitEffects(outbox));
 +  }
@@ -1462,8 +1448,7 @@ index 0000000..6f3cb2e
 +    const namespace = this.#namespace();
 +    const end = new AttemptEnd(ctx.invocationEndPromise.promise);
 +    const object = objectStore(ctx, end);
-+    const store = this.#counted(wrapStore ? wrapStore(object) : object);
-+    this.#store = store;
++    const store = wrapStore ? wrapStore(object) : object;
 +    const db = await sqliteKv.open(namespace, store, {
 +      reader: this.#reader(),
 +    });
@@ -1487,8 +1472,7 @@ index 0000000..6f3cb2e
 +
 +  /**
 +   * The handler ended with `outcome`: an SQL error that escaped it becomes
-+   * terminal, then the outbox is emptied once its sends are stored, and the
-+   * session is saved. One that a storage error ended closes now, rather than
++   * terminal, then the outbox is emptied, and the session is saved. One that a storage error ended closes now, rather than
 +   * when it is collected.
 +   */
 +  async end<T>(outcome: Outcome<T>): Promise<T> {

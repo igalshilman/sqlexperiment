@@ -958,10 +958,10 @@ index cecd90f..26736b9 100644
              return wrapped
 diff --git a/python/restate/sql.py b/python/restate/sql.py
 new file mode 100644
-index 0000000..9e20a5d
+index 0000000..b0788bb
 --- /dev/null
 +++ b/python/restate/sql.py
-@@ -0,0 +1,653 @@
+@@ -0,0 +1,616 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -989,7 +989,7 @@ index 0000000..9e20a5d
 +import uuid
 +from contextlib import asynccontextmanager
 +from datetime import timedelta
-+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
++from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
 +
 +from restate.context import HandlerType, SendHandle
 +from restate.exceptions import TerminalError
@@ -1237,9 +1237,10 @@ index 0000000..9e20a5d
 +# they are stored. They are made once the transaction commits; a later open
 +# makes again those still in the outbox, with the same idempotency keys
 +# (`transaction/<id>/<index>`, with a random id of the transaction), so making
-+# them again is dropped. A send is stored once a sync of the store that
-+# started after it completed: the next commit leaves it out of the outbox
-+# then, and so does the end of the attempt.
++# them again is dropped. Restate keeps an attempt's commands in the order they
++# were made, so a send made before a commit is stored whenever the commit is:
++# the next commit leaves the sends this attempt made out of the outbox, and so
++# does the end of the attempt.
 +
 +
 +def _encode_outbox(outbox: List[Dict[str, Any]]) -> bytes:
@@ -1386,13 +1387,8 @@ index 0000000..9e20a5d
 +        self._db: Any = None
 +        self._ended = False
 +        self._cancel: Callable[[], None] = lambda: None
-+        # The store, its syncs counted.
-+        self._store: Optional[SqlStore] = None
-+        self._syncs_started = 0
-+        self._syncs_completed = 0
-+        # The outbox's transactions made in this attempt, by id: each with the
-+        # syncs started before its sends.
-+        self._made: Dict[str, int] = {}
++        # The ids of the outbox's transactions this attempt made the sends of.
++        self._made: Set[str] = set()
 +        self.db: SqlSession = _Session(self)
 +        """``ctx.db``."""
 +
@@ -1475,33 +1471,22 @@ index 0000000..9e20a5d
 +                send.get("idempotency_key") or f"transaction/{outgoing['id']}/{index}",
 +                send.get("headers"),
 +            )
-+        self._made[outgoing["id"]] = self._syncs_started
++        self._made.add(outgoing["id"])
 +
 +    async def _unstored(self, db: Any) -> List[Dict[str, Any]]:
-+        """The outbox as committed, but the transactions whose sends are stored."""
-+
-+        def unstored(outgoing: Dict[str, Any]) -> bool:
-+            before = self._made.get(outgoing["id"])
-+            return before is None or self._syncs_completed <= before
-+
-+        return [outgoing for outgoing in _decode_outbox(await db.effects()) if unstored(outgoing)]
-+
-+    async def _sync(self, store: SqlStore) -> None:
-+        """``store``'s sync, counted (see ``_unstored``)."""
-+        self._syncs_started += 1
-+        n = self._syncs_started
-+        await store.sync()
-+        self._syncs_completed = max(self._syncs_completed, n)
++        """
++        The outbox as committed, but the transactions this attempt made the
++        sends of: a commit made after them stores them first.
++        """
++        return [outgoing for outgoing in _decode_outbox(await db.effects()) if outgoing["id"] not in self._made]
 +
 +    async def _flush(self, db: Any) -> None:
 +        """
-+        Empty the outbox once its sends are stored, so that a later open does
-+        not make them again: a sync, then a commit of the empty outbox.
++        Empty the outbox, so that a later open does not make its sends again:
++        a commit after them, which stores them first.
 +        """
 +        if not await db.effects():
 +            return
-+        assert self._store is not None
-+        await self._store.sync()
 +        outbox = _encode_outbox(await self._unstored(db))
 +        async with db.transaction() as tx:
 +            tx.commit_effects(outbox)
@@ -1532,8 +1517,6 @@ index 0000000..9e20a5d
 +        store: SqlStore = ObjectStore(host)
 +        if _wrap_store is not None:
 +            store = _wrap_store(store)
-+        store = _Counted(store, self._sync)
-+        self._store = store
 +        try:
 +            db = await sqlite_kv.open(host.sql_namespace, store)
 +        except Exception as error:  # pylint: disable=broad-exception-caught
@@ -1554,8 +1537,8 @@ index 0000000..9e20a5d
 +
 +    async def end(self, failed: bool) -> None:
 +        """
-+        The handler ended (``failed``, or not): the outbox is emptied once its
-+        sends are stored, and the session is saved. One that a storage error
++        The handler ended (``failed``, or not): the outbox is emptied, and the
++        session is saved. One that a storage error
 +        ended closes now.
 +        """
 +        self._ended = True
@@ -1590,26 +1573,6 @@ index 0000000..9e20a5d
 +                await db.close()
 +        except Exception as error:  # pylint: disable=broad-exception-caught
 +            _reraise(error, self.classify)
-+
-+
-+class _Counted:
-+    """A store whose syncs go through ``sync``."""
-+
-+    def __init__(self, store: SqlStore, sync: Callable[[SqlStore], Awaitable[None]]) -> None:
-+        self._store = store
-+        self._counted = sync
-+
-+    def get(self, key: str) -> Awaitable[Optional[bytes]]:
-+        return self._store.get(key)
-+
-+    def set(self, key: str, value: bytes) -> None:
-+        self._store.set(key, value)
-+
-+    def clear(self, key: str) -> None:
-+        self._store.clear(key)
-+
-+    def sync(self) -> Awaitable[None]:
-+        return self._counted(self._store)
 +
 +
 +def _close_soon(db: Any) -> None:

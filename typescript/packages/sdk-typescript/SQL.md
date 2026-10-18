@@ -124,15 +124,16 @@ its own `SQLITE_KV_CACHE_FILE` and restart it after recreating a cluster.
 **State access.** A get is a state read left out of the journal (protocol
 v8's ephemeral get), from the runtime unless this attempt wrote the key or
 the invocation started with it (lazy state, so an invocation does not start
-by loading every page). A set or clear is a state write, and returns at once. The protocol
-assumes nothing of their order: a write is stored once an empty `ctx.run`
-made after it resolves, and until then a crash may lose any of the writes
-before it, and keep the others. Each transaction is one write, of the commit
-record, which holds the log since the last checkpoint (a large transaction's
-log also goes to segments, written and synced before the record). A
-checkpoint writes the pages, syncs, and only then the record that no longer
-needs the log. So whatever subset of unsynced writes a crash keeps, the
-stored record names only what is stored.
+by loading every page). A set or clear is a state write, and returns at once.
+Restate keeps an attempt's writes, and its sends, in the order they were
+made: a crash loses a suffix of them, never a write without the ones before
+it. Each transaction is one write, of the commit record, which holds the log
+since the last checkpoint (a large transaction's log also goes to segments,
+written before the record). A checkpoint writes the pages after that record,
+then the record that no longer needs the log. Then one empty `ctx.run` waits
+until all of it is stored: a commit is one round trip. Whatever prefix a crash
+keeps, the stored record names only what is stored, and its log covers the
+pages a checkpoint rewrote.
 
 **The page cache.** The process's page cache keeps the pages it read and
 wrote, with the commit record they belong to, for the object's next
