@@ -130,8 +130,8 @@ fn workspaces() -> &'static std::path::Path {
     DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
 }
 
-/// Serve `programs`, calling a scripted model, with `Doubler` and
-/// `workspace`, and register them with the server.
+/// Serve `programs`, `Doubler`, a scripted `claude` and `workspace`, and
+/// register them with the server.
 async fn serve_programs(programs: &Arc<Programs>) -> u16 {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
@@ -142,8 +142,9 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .local_addr()
         .unwrap()
         .port();
-    let endpoint = quickjs_durable::bind(Endpoint::builder(), programs, Arc::new(fakes::Claude))
+    let endpoint = quickjs_durable::bind(Endpoint::builder(), programs)
         .bind(Doubler)
+        .bind(fakes::Claude)
         .bind(quickjs_durable::Workspace::new(workspaces()))
         .build();
     tokio::spawn(

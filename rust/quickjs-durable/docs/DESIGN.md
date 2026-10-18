@@ -71,7 +71,6 @@ one frozen API. Its nested KV and RPC objects are frozen too.
 | `ctx.rpc.call(target, input = null)` | `kind:"rpc", target, input`         | JSON response                   |
 | `ctx.call(name, args = null)`        | `kind:"call", name, args`           | Custom host response            |
 | `ctx.sleep(ms)`                      | `kind:"sleep", deadline: now + ms`  | null at/after deadline          |
-| `ctx.claude.messages(request)`       | `kind:"model"` (no request)         | Messages API response           |
 
 `ctx.key` is the scope: the key of the object the program is served as.
 
@@ -80,15 +79,12 @@ are nonempty; unknown fields are rejected. The optional key selects the remote
 object/workflow, not the caller's KV scope. KV keys are strings; custom names are
 nonempty strings. There is **no public JavaScript checkpoint method**.
 
-Host-facing values cross as `JSON.stringify` makes them, serialized once,
-in C: `toJSON` applies, a `Map` becomes `{}`, `undefined` properties are
-dropped and `undefined` itself is null. A function or symbol as the value
-itself, a BigInt or a cycle is a catchable TypeError before a request is
-issued. Strings and object keys crossing into Rust must contain Unicode scalar
-values: `JSON.stringify` escapes lone UTF-16 surrogates, and only those, so a
-match in its output is a TypeError too. (A walk of the value in JavaScript,
-which also refused other prototypes, made a long agent's every request cost
-~1,000 Wasm instructions a byte, and ran out of fuel at ~145 KiB.)
+Host-facing values are acyclic JSON: null, booleans, finite numbers, strings,
+arrays and plain objects. Reject undefined, functions, BigInt, cycles and other
+object prototypes. Validate both the original value and the parsed result of
+JSON serialization: getters can return different values on successive accesses.
+Strings and object keys crossing into Rust must contain Unicode scalar values;
+lone UTF-16 surrogates produce a catchable TypeError before issuing a request.
 Arbitrary objects, cycles and UTF-16 code units may remain inside the VM heap.
 Guest error diagnostics replace lone surrogates with U+FFFD.
 JSON numbers have JavaScript's numeric semantics; do not rely on lossless integer
@@ -126,39 +122,22 @@ Keep these values inside the QuickJS heap:
 - An insertion-ordered map `pending[id] = {operation, resolve, reject}`.
 - An optional `rootOutcome`.
 
-Request creation serializes its value before assigning an ID, then:
+Request creation validates/copies arguments before assigning an ID, then:
 
 ```text
-issue(fields, name?, json?, kept?):
+request(fields):
     require runId is initialized
     id = runId + "/" + decimal(nextOperation)
     nextOperation += 1
-    issued.append({fields: {id, ...fields}, name, json})
-    return new Promise((resolve, reject) => pending.set(id, {resolve, reject, kept}))
+    issued.append({id, ...fields})
+    return new Promise((resolve, reject) => pending.set(id, {resolve, reject}))
 ```
-
-`inspect()` builds its report around each value's JSON, which is not
-serialized again.
 
 The guest keeps only each request's resolvers. The request itself goes to the
 host at the next `inspect()` and is forgotten: the host keeps it pending, in
 the commit, so a big input made and sent in one turn is freed in that turn and
 never saved with the heap (a turn sending a 39 KiB request saved 6 KiB of
-pages, against 23 KiB when the guest kept it).
-
-A model call is the other way around. Its request is an agent's whole
-conversation, again at every step, so the commit holds only `{id,
-kind:"model"}`, and the guest keeps a reference to the request object
-(`kept`), which the program holds anyway. The host reads it with the
-`request(id)` hook when it sends the call (`Run::request`), and again after a
-restore. Reading it serializes it, at ~300 Wasm instructions a byte, with a
-fuel budget of its own (50 turns') rather than the turn's. The host calls the
-API itself, not through Restate, so nothing journals the request either. The
-response comes back as a delivery, and is saved with the heap. A crash before
-that commit sends the request again, the same as a call whose result was lost.
-The program must not change a request while it waits.
-
-A request that loses a race may
+pages, against 23 KiB when the guest kept it). A request that loses a race may
 reject later with no handler: no rejection tracker is installed, so that is
 not an error, and no handler is attached to every request (one cost ~230 B a
 turn). Creating a request performs no host I/O.
@@ -166,7 +145,7 @@ The operation counter covers local KV requests and internal wakeups as well as
 external effects. IDs are stable across restore. Uncommitted IDs may be reused
 because uncommitted requests must never have dispatched.
 
-The internal bridge exposes six host hooks, not application API methods:
+The internal bridge exposes five host hooks, not application API methods:
 
 | Hook                 | Behavior                                                                                                             |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
@@ -174,7 +153,6 @@ The internal bridge exposes six host hooks, not application API methods:
 | `start(inputJson)`   | Queue `main(input, durable)` through `Promise.resolve().then(...)`; capture its normalized root outcome              |
 | `deliver(eventJson)` | Advance logical time monotonically; find and remove the pending entry; resolve/reject its promise; do not drain jobs |
 | `pause()`            | Create an internal `{kind:"resume"}` request through the same ID/map mechanism                                       |
-| `request(id)`        | The kept request of a pending model call as an outcome: its JSON, or the error that kept it from being JSON          |
 | `inspect()`          | Return the requests issued since the last `inspect()`, then forget them; and where the run stands                    |
 
 `inspect()` returns:
@@ -997,29 +975,24 @@ and the interpreter runs compute-bound code ~10x slower than V8.
 ### 10.1. A long coding session
 
 `cargo bench --bench agent` runs the shipped `coder` program through a
-scripted session of 400 steps over `MemoryStore`. Each step is a few hundred
-bytes of model text and one tool call: a file read (~6 KiB), a command
-(~1.5 KiB of output), an edit, or a written file (~3 KiB). Each request to
-the model is the whole conversation so far. On 18 October 2026:
+scripted session of up to 300 steps over `MemoryStore`. Each step is a few
+hundred bytes of model text and one tool call: a file read (~6 KiB), a
+command (~1.5 KiB of output), an edit, or a written file (~3 KiB). On
+18 October 2026:
 
-| Step | Request | Reading it | Stored by the step | Model turn | Tool turn | Memory |
-| ---: | ------: | ---------: | -----------------: | ---------: | --------: | -----: |
-|    1 | 1.7 KiB |     0.3 ms |             7.7 KB |     0.7 ms |    0.6 ms |  1 MiB |
-|   40 | 130 KiB |     8.2 ms |             8.3 KB |     1.1 ms |    0.9 ms |  1 MiB |
-|  100 | 331 KiB |      24 ms |              11 KB |     1.9 ms |    1.2 ms |  2 MiB |
-|  200 | 668 KiB |      42 ms |              12 KB |     2.3 ms |    1.5 ms |  3 MiB |
-|  400 | 1.3 MiB |     110 ms |              14 KB |     4.4 ms |    3.3 ms |  5 MiB |
+| Step | Request to the model | Stored by the step | Of it, the commit | Tool turn |
+| ---: | -------------------: | -----------------: | ----------------: | --------: |
+|    1 |              1.7 KiB |              12 KB |            4.4 KB |    2.7 ms |
+|   10 |               31 KiB |              44 KB |             33 KB |    8.8 ms |
+|   20 |               62 KiB |              85 KB |             71 KB |     18 ms |
+|   40 |              130 KiB |             153 KB |            140 KB |     35 ms |
 
-The whole session stored 6.3 MiB, of which 1.9 MiB went to the nine new first
-batches the chain policy wrote (§5). Reading a request is the one cost that
-grows with the conversation, at ~80 ms a MiB, beside a model call of seconds.
-A 900-step probe, with a 3 MiB conversation, ran the same way.
-
-Before model requests stayed in the heap (§2.2), each was an `rpc` request:
-copied and checked in the guest, kept in the commit, and journaled by Restate
-at every step. At step 40 a step stored 153 KB, 140 KB of it the commit, its
-tool turn took 35 ms, and at step 45 (~145 KiB) copying the request ran out of
-fuel and ended the run.
+At step 45 (a request of ~145 KiB) the run fails: copying the request out
+of the VM runs out of fuel. Each request is the whole conversation so far,
+and it is copied, checked and serialized in the guest, then kept in the
+commit record as a pending request. Every step therefore costs time and
+storage in proportion to the conversation, quadratic in total. The page
+batches stay at 4–11 KB a step.
 
 ## 11. Scope limits, provenance and references
 

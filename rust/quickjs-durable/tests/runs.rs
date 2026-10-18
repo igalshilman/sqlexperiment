@@ -200,7 +200,7 @@ fn memory_growth_survives_a_restore() -> Result<()> {
     let mut run = start(&store, source, Value::Null, 1)?;
     let initial = run.view().memory_bytes;
     let grown = step(&mut run, &store)?;
-    assert!(grown.memory_bytes > initial + 2 * 1024 * 1024);
+    assert!(grown.memory_bytes >= initial + 3 * 1024 * 1024);
     assert!(grown.batch_bytes < 100_000);
     step(&mut run, &store)?;
     let mut run = start(&store, source, Value::Null, 1)?;
@@ -529,20 +529,21 @@ fn delivering_one_request_leaves_the_others_pending() -> Result<()> {
 #[test]
 fn invalid_requests_are_refused_in_the_guest() -> Result<()> {
     let source = r#"async function main(_,ctx){
-        const cycle={};cycle.self=cycle;
+        let reads=0;
+        const value={get text(){return ++reads===1 ? 'valid' : '\ud800';}};
         const bad=[()=>ctx.kv.get(7),()=>ctx.kv.set(null,1),()=>ctx.kv.delete({}),
-          ()=>ctx.kv.set('x',()=>1),()=>ctx.kv.set('x',cycle),()=>ctx.kv.set('x',1n),
+          ()=>ctx.kv.set('x',undefined),()=>ctx.kv.set('x',new Map()),
           ()=>ctx.rpc.call(null),()=>ctx.rpc.call({service:'',handler:'x'}),
           ()=>ctx.rpc.call({service:'x',handler:'x',key:7}),
           ()=>ctx.rpc.call({service:'x',handler:'x',typo:true}),
           ()=>ctx.rpc.call({service:'x',handler:'x'},()=>1),
           ()=>ctx.kv.set('x','\ud800'),()=>ctx.kv.get('\ud800'),
           ()=>ctx.kv.set('x',{['\ud800']:1}),()=>ctx.call('\ud800'),
-          ()=>ctx.claude.messages([]),()=>ctx.claude.messages('hi')];
+          ()=>ctx.kv.set('bad',value)];
         return bad.map(f=>{try{f();return false;}catch(e){return e instanceof TypeError;}});
     }"#;
     let run = start(&MemoryStore::default(), source, Value::Null, 1000)?;
-    assert_eq!(value(&run.view()), json!(vec![true; 17]));
+    assert_eq!(value(&run.view()), json!(vec![true; 15]));
     assert_eq!(run.view().state.next_operation, 0);
     // A timer past the host clock's range.
     let source = "async function main(_,ctx){try{await ctx.sleep(1);return false;}catch(e){return e instanceof RangeError;}}";
@@ -553,62 +554,5 @@ fn invalid_requests_are_refused_in_the_guest() -> Result<()> {
         u64::MAX / 1_000_000,
     )?;
     assert_eq!(value(&run.view()), true);
-    Ok(())
-}
-
-/// Values cross to the host as JSON.stringify makes them: a pair of
-/// surrogates and a backslash before "ud800" are text, not lone surrogates.
-#[test]
-fn values_cross_as_json() -> Result<()> {
-    let source = r#"async function main(_,ctx){
-        await ctx.kv.set('x',{map:new Map([[1,2]]),skip:undefined,date:new Date(0),
-          list:[undefined,()=>1],text:'\\ud800 \ud83d\ude00'});
-        await ctx.kv.set('nothing',undefined);
-        return await ctx.kv.get('x');
-    }"#;
-    let store = MemoryStore::default();
-    let run = start(&store, source, Value::Null, 1)?;
-    let expected = json!({"map": {}, "date": "1970-01-01T00:00:00.000Z", "list": [null, null],
-        "text": "\\ud800 \u{1F600}"});
-    assert_eq!(value(&run.view()), expected);
-    assert_eq!(kv(&store, "nothing"), Some(Value::Null));
-    Ok(())
-}
-
-/// A model call's request stays in the heap: the commit holds only the call,
-/// however long the conversation, and the host reads the request from the
-/// VM, also after a restore. A request that is not JSON fails its call.
-#[test]
-fn a_model_request_is_read_from_the_heap() -> Result<()> {
-    let source = r#"async function main(_,ctx){
-        const messages=[{role:'user',content:'x'.repeat(100000)}];
-        const reply=await ctx.claude.messages({model:'m',messages});
-        try{await ctx.claude.messages({model:'m',big:1n});}
-        catch(e){return [reply,e.name];}
-    }"#;
-    let store = MemoryStore::default();
-    let run = start(&store, source, Value::Null, 1)?;
-    assert!(
-        run.view().commit_bytes < 2000,
-        "{}",
-        run.view().commit_bytes
-    );
-    let mut run = start(&store, source, Value::Null, 2)?;
-    let request = block(run.request(&store, "r/0"))?.expect("a request");
-    assert_eq!(
-        request["messages"][0]["content"].as_str().unwrap().len(),
-        100000
-    );
-    assert!(block(run.request(&store, "r/1")).is_err());
-    let reply = json!({"content": [{"type": "text", "text": "hi"}]});
-    block(run.deliver(&store, "r/0", Outcome::success(reply.clone()), 3))?;
-    let error = block(run.request(&store, "r/1"))?.expect_err("not JSON");
-    let done = block(run.deliver(
-        &store,
-        "r/1",
-        Outcome::failure(error.name, error.message),
-        4,
-    ))?;
-    assert_eq!(value(&done), json!([reply, "TypeError"]));
     Ok(())
 }

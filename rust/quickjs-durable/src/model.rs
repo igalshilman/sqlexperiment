@@ -5,9 +5,6 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(crate) const PAGE: usize = 4096;
 pub(crate) const MAX_MEMORY: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_INPUT: usize = 1024 * 1024;
-/// A string out of the VM: a report, or a model request (the Messages API
-/// takes up to 32 MB).
-pub(crate) const MAX_STRING: usize = 32 * 1024 * 1024;
 // WASI clock_time_get converts milliseconds to unsigned 64-bit nanoseconds.
 pub(crate) const MAX_TIME: u64 = u64::MAX / 1_000_000;
 
@@ -104,11 +101,6 @@ pub enum Operation {
         id: String,
         deadline: u64,
     },
-    /// A call to Claude's Messages API. Its request stays in the heap, not
-    /// here: the host reads it with [`crate::Run::request`] when it sends it.
-    Model {
-        id: String,
-    },
     /// Internal host-scheduled wakeup, never an application API request.
     Resume {
         id: String,
@@ -123,7 +115,6 @@ impl Operation {
             | Self::KvDelete { id, .. }
             | Self::Rpc { id, .. }
             | Self::Sleep { id, .. }
-            | Self::Model { id }
             | Self::Resume { id } => id,
         }
     }
