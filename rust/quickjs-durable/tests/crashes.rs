@@ -1,8 +1,9 @@
-//! A crash at any point: a write to the store fails (it landed or not), the
-//! attempt ends, and what was not acknowledged may be lost, in any order.
-//! Another attempt starts over what is left, through the process's owner
-//! cache or as a new process. Every such attempt must end exactly as the run
-//! without a crash: the same outcome, the same KV, no batch left behind.
+//! A crash at any point: the attempt ends, and of its writes since the last
+//! sync, the store keeps a prefix (as Restate keeps a prefix of an attempt's
+//! journal). Another attempt starts over what is left, through the process's
+//! owner cache or as a new process. Every such attempt must end exactly as
+//! the run without a crash: the same outcome, the same KV, no batch left
+//! behind.
 use anyhow::Result;
 use common::*;
 use quickjs_durable::{Run, Scope, View};
@@ -28,7 +29,8 @@ const FLOW: &str = r#"async function main(input, ctx){
     return {sum:big[0]+big[1000], id:echoed.id};
 }"#;
 
-/// A store whose `nth` write (put or delete) fails, read back through `memory`.
+/// A store whose `nth` sync fails, storing nothing, read back through
+/// `memory`.
 struct Faulty {
     memory: Store,
     faults: Arc<FaultKv>,
@@ -36,7 +38,10 @@ struct Faulty {
 
 impl Faulty {
     fn new() -> Self {
-        let memory = MemoryKv::default();
+        Self::over(MemoryKv::default())
+    }
+
+    fn over(memory: MemoryKv) -> Self {
         Self {
             memory: Store {
                 kv: Arc::new(memory.clone()),
@@ -53,12 +58,12 @@ impl Faulty {
         }
     }
 
-    fn arm(&self, operation: Operation, effect: Effect, nth: usize) {
+    fn arm(&self, nth: usize) {
         drop(self.faults.arm(Failpoint {
-            operation,
-            key_prefix: "v14/".into(),
+            operation: Operation::Sync,
+            key_prefix: String::new(),
             nth,
-            effect,
+            effect: Effect::None,
             cancel: false,
         }));
     }
@@ -68,10 +73,18 @@ impl Faulty {
         self.faults.events().iter().any(|event| event.faulted)
     }
 
-    /// Stop failing; lose what was not acknowledged.
-    fn crash(&self) {
+    /// The writes since the last sync: what a crash may lose.
+    fn unsynced(&self) -> usize {
+        self.faults.inner.unsynced().len()
+    }
+
+    /// The store as a crash leaves it, keeping the first `kept` writes since
+    /// the last sync.
+    fn crashed(&self, kept: usize) -> Faulty {
         self.faults.disarm();
-        self.faults.inner.crash(&[]);
+        let memory = self.faults.inner.fork();
+        memory.crash_keeping(kept);
+        Self::over(memory)
     }
 }
 
@@ -105,23 +118,28 @@ fn an_attempt_after_a_crash_at_any_write_ends_as_without_one() -> Result<()> {
     let expected = reference()?;
     let mut cases = 0;
     for cached in [false, true] {
-        for effect in [Effect::None, Effect::After] {
-            for operation in [Operation::Put, Operation::Delete] {
-                for nth in 1.. {
-                    let store = Faulty::new();
-                    let cache = cached.then(fresh_namespace);
-                    store.arm(operation, effect, nth);
-                    let failed = attempt(&store.scope(&cache)).is_err();
-                    if !store.faulted() {
-                        assert!(!failed, "a run fails without a fault");
-                        break;
-                    }
-                    store.crash();
-                    let case = format!("{effect:?} {operation:?} #{nth} cached={cached}");
-                    let done = attempt(&store.scope(&cache))?;
-                    assert_ended_as(&store.memory, &done, &expected, &case);
-                    cases += 1;
-                }
+        for nth in 1.. {
+            let store = Faulty::new();
+            let cache = cached.then(fresh_namespace);
+            store.arm(nth);
+            let failed = attempt(&store.scope(&cache)).is_err();
+            if !store.faulted() {
+                assert!(!failed, "a run fails without a fault");
+                break;
+            }
+            for kept in 0..=store.unsynced() {
+                let crashed = store.crashed(kept);
+                // The process's owner cache follows one history: the crash
+                // that loses every write since the sync, here; a new process
+                // for the others.
+                let cache = match kept {
+                    0 => cache.clone(),
+                    _ => cached.then(fresh_namespace),
+                };
+                let case = format!("sync #{nth}, {kept} kept, cached={cached}");
+                let done = attempt(&crashed.scope(&cache))?;
+                assert_ended_as(&crashed.memory, &done, &expected, &case);
+                cases += 1;
             }
         }
     }
@@ -129,41 +147,39 @@ fn an_attempt_after_a_crash_at_any_write_ends_as_without_one() -> Result<()> {
     Ok(())
 }
 
-/// A crash, then another during the attempt that recovers from it, at each
-/// of its own writes: a third attempt still ends as without a crash.
+/// A crash at a sync, keeping none or all of its writes, then another during
+/// the attempt that recovers from it: a third attempt still ends as without a
+/// crash.
 #[test]
 fn a_crash_while_recovering_from_one_changes_nothing() -> Result<()> {
     let expected = reference()?;
     let mut attempts = 0;
     for first in 1.. {
-        let probe = Faulty::new();
-        probe.arm(Operation::Put, Effect::None, first);
-        let _ = attempt(&probe.scope(&None));
-        if !probe.faulted() {
+        let store = Faulty::new();
+        store.arm(first);
+        let _ = attempt(&store.scope(&None));
+        if !store.faulted() {
             break;
         }
-        for second in 1.. {
-            let store = Faulty::new();
-            store.arm(Operation::Put, Effect::None, first);
-            // A failed seal or cleanup leaves the attempt standing.
-            let _ = attempt(&store.scope(&None));
-            store.crash();
-            store.arm(Operation::Put, Effect::After, second);
-            let recovered = attempt(&store.scope(&None));
-            let faulted = store.faulted();
-            store.crash();
-            if !faulted {
-                assert_ended_as(&store.memory, &recovered?, &expected, "");
-                break;
+        for crashed in [store.crashed(0), store.crashed(store.unsynced())] {
+            for second in 1.. {
+                let store = Faulty::over(crashed.faults.inner.fork());
+                store.arm(second);
+                let recovered = attempt(&store.scope(&None));
+                if !store.faulted() {
+                    assert_ended_as(&store.memory, &recovered?, &expected, "");
+                    break;
+                }
+                let store = store.crashed(store.unsynced());
+                let done = attempt(&store.scope(&None))?;
+                assert_ended_as(
+                    &store.memory,
+                    &done,
+                    &expected,
+                    &format!("#{first}, then #{second}"),
+                );
+                attempts += 1;
             }
-            let done = attempt(&store.scope(&None))?;
-            assert_ended_as(
-                &store.memory,
-                &done,
-                &expected,
-                &format!("#{first}, then #{second}"),
-            );
-            attempts += 1;
         }
     }
     assert!(attempts > 10, "{attempts} attempts");

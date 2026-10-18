@@ -229,7 +229,7 @@ fn replay_reads_stored_values() -> io::Result<()> {
         let last = encode_transaction(&third, &log.chain)?;
         // The second transaction sealed with the third, into one value.
         let value = stored_value(&[sealed[0].clone(), last[0].clone()]);
-        store.put(&log_key(5), value.clone()).await?;
+        store.put(&log_key(5), value.clone())?;
         let commit = Commit {
             version: 3,
             size: 2 * 4096,
@@ -258,7 +258,7 @@ fn replay_reads_stored_values() -> io::Result<()> {
         assert_eq!(values, Values::from([(5, value.clone())]));
 
         // A value held already is not read again.
-        store.delete(&log_key(5)).await?;
+        store.delete(&log_key(5))?;
         replay(&store, &commit, values).await?;
         assert!(replay(&store, &commit, Values::new()).await.is_err());
         let mut beyond = commit.clone();

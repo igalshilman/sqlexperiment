@@ -6,12 +6,12 @@ discovery. Storage is assumed reliable (a value reads back as written), so
 pages have no checksums; decoding checks structure and the bounds below. A log
 segment's zstd frame carries one.
 
-| Key                                   | Value                                                                   |
-| ------------------------------------- | ----------------------------------------------------------------------- |
-| `v14/commit`                          | Commit record, with the log; absent until the first                     |
-| `v14/log/<16-digit hex number>`       | Stored log value: segments, sealed or of a large transaction; immutable |
-| `v14/page/<16-digit hex page number>` | Checkpointed page, overwritten in place                                 |
-| `v14/hint`                            | Working-set hint; advisory, may be absent or stale                      |
+| Key                                   | Value                                                                                                            |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `v14/commit`                          | Commit record, with the log; absent until the first                                                              |
+| `v14/log/<16-digit hex number>`       | Stored log value: segments, sealed or of a large transaction; immutable, written before the record that names it |
+| `v14/page/<16-digit hex page number>` | Checkpointed page, overwritten in place                                                                          |
+| `v14/hint`                            | Working-set hint; advisory, may be absent or stale                                                               |
 
 The commit record is the only key whose write commits. Integers are LEB128
 varints unless stated otherwise.

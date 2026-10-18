@@ -13,7 +13,7 @@ async fn baseline() -> Result<MemoryKv> {
     db.execute("INSERT INTO t VALUES(1,10,printf('%09000d',1))")
         .await?;
     db.save().await?;
-    store.crash(&[]);
+    store.crash();
     Ok(store)
 }
 
@@ -60,7 +60,7 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
                         );
                     }
                     assert_eq!(store.stats().puts, 0);
-                    store.crash(&[]);
+                    store.crash();
                     let mut db = Session::open(Arc::new(store)).await?;
                     assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
                     assert_eq!(
@@ -143,7 +143,7 @@ fn host_driver_handles_cold_schema_stats_and_cache_eviction() -> Result<()> {
         }
         db.execute("ANALYZE").await?;
         db.save().await?;
-        store.crash(&[]);
+        store.crash();
         let mut db = Session::open(store.clone()).await?;
         assert!(!db.query("SELECT * FROM sqlite_stat1").await?.is_empty());
         db.execute("PRAGMA cache_size=5").await?;

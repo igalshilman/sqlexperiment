@@ -61,7 +61,7 @@ fn sql_errors_leave_the_session_usable() -> Result<()> {
             } else {
                 drop(db);
             }
-            store.crash(&[]);
+            store.crash();
             let mut db = Session::open_with_options(store, options(durability)).await?;
             assert_eq!(
                 rows(&mut db).await?,
@@ -251,7 +251,7 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
             } else {
                 drop(db);
             }
-            store.crash(&[]);
+            store.crash();
             let mut db = Session::open_with_options(store, options(durability)).await?;
             let got: Vec<String> = db
                 .query("SELECT id, n FROM t ORDER BY id")

@@ -9,28 +9,31 @@
 //!
 //! # Save
 //!
-//! A save commits its changed pages as one transaction (see [`crate::log`]):
+//! A save commits its changed pages as one transaction (see [`crate::log`]).
+//! It queues its writes in this order, then one sync makes them durable:
 //!
-//! - **Commit:** one put of the commit record, the log so far plus the new
-//!   transaction. A transaction larger than the record's inline budget
-//!   ([`StorageOptions::inline_log_bytes`]) is put first at stored values,
-//!   and the record, put once they are acknowledged, names them. Past the
-//!   budget, the record's inline log is sealed into a stored value with the
-//!   record, which the next commit names.
-//! - **Checkpoint:** once more than [`StorageOptions::checkpoint_after`]
-//!   transactions or [`StorageOptions::checkpoint_log_bytes`] are in the log,
-//!   the save then checkpoints it ([`Snapshot::compact`]): the latest image
-//!   of every page it changed is put to `page/<n>`, and once those are
-//!   acknowledged, a record with an empty log and the next epoch. Overwriting
-//!   in place is safe: until that record lands, the log applies its images over
-//!   whatever is there. Holes are deletes.
-//! - **Garbage:** stored segments the log no longer names are listed in the
-//!   record, and deleted in the next save's round trip.
+//! 1. **Garbage:** deletes of the stored values the durable record lists as
+//!    garbage (it names them no more).
+//! 2. **Stored values:** a transaction larger than the record's inline budget
+//!    ([`StorageOptions::inline_log_bytes`]), or a large chain value, goes to
+//!    stored values; past the budget, the record's inline parts are sealed
+//!    into one.
+//! 3. **Commit:** the record: the log so far plus the new transaction, naming
+//!    those values, and listing as garbage the ones it names no more.
+//! 4. **Checkpoint:** once more than [`StorageOptions::checkpoint_after`]
+//!    transactions or [`StorageOptions::checkpoint_log_bytes`] are in the log,
+//!    the latest image of every page it changed to `page/<n>` (holes are
+//!    deletes), the working-set hint, and a record with an empty log and the
+//!    next epoch, whose garbage takes the log's stored values.
 //!
-//! Nothing depends on the order the store applies writes in: a write is relied
-//! on only once acknowledged. A crash at any point leaves state that open reads
-//! correctly. There are no object IDs, no intent and no orphans: pages are
-//! overwritten, never allocated.
+//! The store keeps writes in issue order, and a crash keeps a prefix of them
+//! (see [`crate::kv`]). So a record is stored only with every value it names,
+//! a checkpoint record only with the pages it moves past, and a delete only
+//! with the record that stopped naming its value. A crash at any point leaves
+//! a record whose log replays over whatever pages it kept: a checkpoint
+//! overwrites only pages of the log of the record before it. There are no
+//! object IDs, no intent and no orphans: pages are overwritten, never
+//! allocated.
 //!
 //! # Open
 //!
@@ -47,7 +50,6 @@ use crate::{
     page_codec::{self, Page, PageCompression},
 };
 use bytes::Bytes;
-use futures::{StreamExt, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, HashMap},
     io,
@@ -57,8 +59,6 @@ use std::{
 /// Logical page replacements from the session; `None` is a hole.
 type Changes = BTreeMap<u64, Option<Page>>;
 
-/// Upper bound on concurrent backend mutations of each save group.
-pub(crate) const MAX_MUTATIONS_IN_FLIGHT: usize = 64;
 /// Default [`StorageOptions::prefetch_pages`].
 pub const PREFETCH_PAGES: u64 = 16;
 /// Default [`StorageOptions::hint_pages`].
@@ -122,11 +122,9 @@ pub struct StorageOptions {
     /// whole log.
     pub checkpoint_log_bytes: usize,
     /// Bytes of log the commit record holds inline, which every commit
-    /// rewrites. A transaction that takes more is put first at stored values,
-    /// one per segment: a round trip more. Once the inline log would pass it,
-    /// a commit seals the inline segments into a stored value: with a cache,
-    /// in its own round trip, and the owner's next commit names it; without
-    /// one, before its record, which names it.
+    /// rewrites. A transaction that takes more goes to stored values, one per
+    /// segment. Once the inline log would pass it, a commit seals the inline
+    /// parts into one stored value, which the record names.
     pub inline_log_bytes: usize,
     /// A cold open (no warm cache pages) fetches every page of a database of
     /// at most this many pages, alongside replay.
@@ -162,50 +160,14 @@ impl Default for StorageOptions {
     }
 }
 
-/// `Ok` means the transaction committed. A cleanup error is checkpoint or
-/// garbage work that failed after the commit; a later save retries it.
+/// `Ok` means the transaction is durable, with this save's checkpoint, if any.
 #[derive(Debug, Default)]
 pub struct SaveReport {
     /// Pages written in place by this save's checkpoint; 0 when it did not
-    /// checkpoint, or its checkpoint failed.
+    /// checkpoint.
     pub checkpointed_pages: usize,
-    /// Committed, but checkpoint work failed. Do not replay SQL.
-    pub cleanup_error: Option<io::Error>,
     /// The database's version after this save.
     pub(crate) version: u64,
-}
-
-/// One backend mutation of a save.
-enum Mutation {
-    Put(String, Bytes),
-    Delete(String),
-}
-
-/// Apply mutations of distinct keys, at most [`MAX_MUTATIONS_IN_FLIGHT`] at once.
-/// After the first error no new mutation starts; running ones are awaited.
-///
-/// Each request is issued when it is queued, not when the stream first polls it,
-/// so a window of requests really is in flight together.
-async fn concurrently(store: &dyn KvStore, mut mutations: Vec<Mutation>) -> io::Result<()> {
-    let mut queued = mutations.iter_mut().map(|mutation| match mutation {
-        Mutation::Put(key, value) => store.put(key, std::mem::take(value)),
-        Mutation::Delete(key) => store.delete(key),
-    });
-    let mut running = FuturesUnordered::new();
-    let mut error = None;
-    loop {
-        while error.is_none() && running.len() < MAX_MUTATIONS_IN_FLIGHT {
-            let Some(request) = queued.next() else { break };
-            running.push(request);
-        }
-        match running.next().await {
-            Some(Ok(())) => {}
-            Some(Err(e)) => {
-                error.get_or_insert(e);
-            }
-            None => return error.map_or(Ok(()), Err),
-        }
-    }
 }
 
 /// The committed view a session reads and extends.
@@ -231,9 +193,6 @@ pub(crate) struct Snapshot {
     usage: Mutex<Usage>,
     /// This view's registration with the owner cache while a session uses it.
     reader: Mutex<Option<Reader>>,
-    /// The value the last commit sealed and had acknowledged, which the next
-    /// commit names.
-    sealed: Option<Sealed>,
 }
 
 /// A stored page value, with the cache key taken before it was read (see
@@ -286,7 +245,7 @@ impl Snapshot {
             }
         };
         let (commit_bytes, hint) = futures::try_join!(store.get(COMMIT), read_hint)?;
-        let mut commit = match &commit_bytes {
+        let commit = match &commit_bytes {
             Some(bytes) => Commit::decode(bytes)?,
             None => Commit::default(),
         };
@@ -324,16 +283,6 @@ impl Snapshot {
             cache.record(commit_bytes.clone(), commit.epoch, committed);
         }
         let reader = cache.map(|cache| cache.reader(commit.version));
-        // This owner's seal, acknowledged, that the record lists as garbage:
-        // the next commit names it.
-        let sealed = (cache.filter(|_| known))
-            .and_then(NamespaceCache::sealed)
-            .filter(|sealed| commit.garbage.contains(&sealed.n));
-        // Garbage this owner deleted since the record was written: the next
-        // record leaves it out.
-        if let Some(cache) = cache.filter(|_| known) {
-            commit.garbage = &commit.garbage - &cache.collected();
-        }
         Ok(Self {
             store,
             options,
@@ -342,7 +291,6 @@ impl Snapshot {
             log,
             chain,
             unchanged,
-            sealed,
             page: Mutex::default(),
             fetched: Mutex::default(),
             readahead: Mutex::default(),
@@ -530,7 +478,7 @@ impl Snapshot {
     /// `effects`, the record's effects become them, and with `chain`, the
     /// host's chain changes, in the same put. Without SQL changes the log
     /// gains no transaction; without any change nothing is committed. A commit
-    /// that leaves the log long checkpoints it ([`Self::compact`]).
+    /// that leaves the log long also checkpoints it, before the one sync.
     pub(crate) async fn commit(
         &self,
         dirty: Changes,
@@ -564,46 +512,43 @@ impl Snapshot {
             false => Vec::new(),
         };
         let logged_bytes = segments.iter().map(Bytes::len).sum::<usize>();
-        let store = &*self.store;
         let mut commit = self.commit.clone();
-        // Stored values this record names, durable: for the cache.
+        // Stored values this record names, for the cache.
         let mut named = log::Values::new();
-        // The value the last commit sealed, acknowledged since: this record
-        // names it in place of the inline parts it holds.
-        if let Some(sealed) = &self.sealed {
-            commit.name(sealed);
-            named.insert(sealed.n, sealed.value.clone());
-        }
-        // What the record names before this commit changes it: values it
-        // stops naming become garbage.
         let named_before = commit.stored_values();
-        // The record's inline budget. A commit the save then checkpoints may
-        // hold up to the checkpoint's: the checkpoint record drops the log, so
-        // stored values would only add round trips. Bounded still, as the
-        // checkpoint may fail.
-        let checkpoints =
-            changed && self.too_long(1, logged_bytes) && self.checkpoint_limit() == u64::MAX;
-        let budget = match checkpoints {
-            true => self.options.checkpoint_log_bytes,
-            false => self.options.inline_log_bytes,
+        let budget = self.options.inline_log_bytes;
+        // Every write is queued: a failure leaves the commit's outcome unknown.
+        let write = |key: &str, value: Option<Bytes>| {
+            let queued = match value {
+                Some(value) => self.store.put(key, value),
+                None => self.store.delete(key),
+            };
+            queued.map_err(|error| self.failed(error))
         };
-        // A transaction past the budget, or a chain value, goes to stored
-        // values first, durable before the record that names them.
-        let mut first = Vec::new();
+        // 1. The durable record's garbage: this record no longer lists it.
+        for &n in &commit.garbage {
+            write(&log_key(n), None)?;
+        }
+        commit.garbage.clear();
+        // 2. A transaction past the budget, or a chain value, goes to a
+        // stored value of its own, before the record that names it.
+        let mut store_value = |commit: &mut Commit, parts: &[Bytes]| {
+            let n = commit.next_segment;
+            commit.next_segment += 1;
+            let value = log::stored_value(parts);
+            named.insert(n, value.clone());
+            write(&log_key(n), Some(value)).map(|()| n)
+        };
         let large = logged_bytes > budget;
         let parts: Vec<Part> = match large {
             true => (segments.iter())
                 .map(|segment| {
-                    let n = commit.next_segment;
-                    commit.next_segment += 1;
-                    first.push((n, log::stored_value(std::slice::from_ref(segment))));
-                    Part::Stored(n, 0)
+                    store_value(&mut commit, std::slice::from_ref(segment))
+                        .map(|n| Part::Stored(n, 0))
                 })
-                .collect(),
+                .collect::<io::Result<_>>()?,
             false => segments.into_iter().map(Part::Inline).collect(),
         };
-        // The durable record's inline parts, which a seal may hold.
-        let (log_inline, mut chain_inline) = commit.inline_parts();
         let mut values = self.chain.clone();
         let (restart, value) = match &chain {
             None => (false, None),
@@ -614,7 +559,25 @@ impl Snapshot {
         if restart {
             commit.chain.clear();
             values.clear();
-            chain_inline.clear();
+        }
+        // Past its budget, the record's inline parts are sealed into a stored
+        // value, which the record names in their place.
+        let added = if large { 0 } else { logged_bytes };
+        let added = added
+            + value
+                .filter(|value| value.len() <= budget)
+                .map_or(0, Bytes::len);
+        let (log_inline, chain_inline) = commit.inline_parts();
+        if (!log_inline.is_empty() || !chain_inline.is_empty())
+            && commit.inline_bytes() + added > budget
+        {
+            let parts = [&log_inline[..], &chain_inline[..]].concat();
+            let n = store_value(&mut commit, &parts)?;
+            commit.name(&Sealed {
+                n,
+                log: log_inline.len(),
+                chain: chain_inline.len(),
+            });
         }
         if let Some(value) = value {
             if value.len() > log::MAX_CHAIN_VALUE_BYTES {
@@ -623,56 +586,14 @@ impl Snapshot {
                     "chain value too large",
                 ));
             }
-            let part = if value.len() > budget {
-                let n = commit.next_segment;
-                commit.next_segment += 1;
-                first.push((n, log::stored_value(std::slice::from_ref(value))));
-                Part::Stored(n, 0)
-            } else {
-                Part::Inline(value.clone())
+            let part = match value.len() > budget {
+                true => Part::Stored(store_value(&mut commit, std::slice::from_ref(value))?, 0),
+                false => Part::Inline(value.clone()),
             };
             commit.chain.push(part);
             values.push(value.clone());
         }
-        if !first.is_empty() {
-            let puts = (first.iter())
-                .map(|(n, value)| Mutation::Put(log_key(*n), value.clone()))
-                .collect();
-            if let Err(error) = concurrently(store, puts).await {
-                return Err(self.failed(error));
-            }
-            named.extend(first);
-        }
-        // Past its budget, the durable record's inline parts are sealed into a
-        // stored value (those of the chain kept: a value this commit adds goes
-        // after them). With a cache it is put in this commit's round trip:
-        // this record still holds them inline, and lists the value as garbage
-        // until the owner's next commit names it. Without one, nothing would
-        // carry the seal to the next session: it is put first, and named now.
-        let added = if large { 0 } else { logged_bytes };
-        let sealable = !log_inline.is_empty() || !chain_inline.is_empty();
-        let mut seal = (sealable && commit.inline_bytes() + added > budget).then(|| {
-            let n = commit.next_segment;
-            commit.next_segment += 1;
-            commit.garbage.insert(n);
-            Sealed {
-                n,
-                value: log::stored_value(&[&log_inline[..], &chain_inline[..]].concat()),
-                log: log_inline.len(),
-                chain: chain_inline.len(),
-            }
-        });
-        if cache.is_none()
-            && let Some(sealed) = seal.take()
-            && store
-                .put(&log_key(sealed.n), sealed.value.clone())
-                .await
-                .is_ok()
-        {
-            // A seal that failed stays garbage, deleted by a later commit.
-            commit.name(&sealed);
-            named.insert(sealed.n, sealed.value);
-        }
+        // 3. The record, listing as garbage the values it names no more.
         commit.version += 1;
         if changed {
             commit.size = size;
@@ -681,119 +602,81 @@ impl Snapshot {
         if let Some(effects) = effects {
             commit.effects = effects;
         }
-        commit
-            .garbage
-            .extend(&named_before - &commit.stored_values());
+        commit.garbage = &named_before - &commit.stored_values();
         let bytes = commit.encode();
-        // The previous record's garbage, but the value named now, goes in the
-        // commit's round trip; the record after this one forgets it, once
-        // deleted.
-        let garbage: Vec<u64> = (self.commit.garbage.iter())
-            .filter(|&&n| self.sealed.as_ref().is_none_or(|sealed| sealed.n != n))
-            .copied()
-            .collect();
-        let deletes = garbage
-            .iter()
-            .map(|&n| Mutation::Delete(log_key(n)))
-            .collect();
-        let sealing = async {
-            match &seal {
-                Some(seal) => store
-                    .put(&log_key(seal.n), seal.value.clone())
-                    .await
-                    .is_ok(),
-                None => false,
-            }
-        };
-        let (committed, collected, sealed) = futures::join!(
-            store.put(COMMIT, bytes.clone()),
-            concurrently(store, deletes),
-            sealing
-        );
-        if let Err(error) = committed {
-            return Err(self.failed(error));
-        }
+        write(COMMIT, Some(bytes.clone()))?;
         let version = commit.version;
-        if let Some(cache) = cache {
-            cache.record(Some(bytes.clone()), commit.epoch, Some(version));
-            cache.keep_values(&commit.stored_values(), named);
-            cache.keep_sealed(seal.clone().filter(|_| sealed));
-            let deleted = collected.is_ok().then(|| garbage.iter().copied().collect());
-            cache.keep_collected(deleted.unwrap_or_default());
-        }
         let mut after = self.continued(commit, Some(bytes));
         after.chain = values;
         if changed {
             after.extend(size, images, logged_bytes);
         }
-        if collected.is_ok() {
-            for n in &garbage {
-                after.commit.garbage.remove(n);
-            }
+        // 4. A long log is checkpointed in the same sync. This view is not
+        // used again: it must not hold the checkpoint back.
+        drop(self.reader.lock().unwrap().take());
+        let checkpoint = match after.wants_checkpoint() && after.checkpoint_limit() == u64::MAX {
+            true => Some(after.checkpoint(&write)?),
+            false => None,
+        };
+        if let Err(error) = self.store.sync().await {
+            return Err(self.failed(error));
         }
-        // A seal whose put failed stays garbage, deleted by a later commit.
-        after.sealed = seal.filter(|_| sealed);
-        let after = after.registered();
-        let report = SaveReport {
+        if let Some(cache) = cache {
+            let (bytes, epoch) = (
+                after.commit_bytes.clone().unwrap_or_default(),
+                after.commit.epoch,
+            );
+            match checkpoint {
+                Some(_) => cache.checkpointed(bytes, epoch, version),
+                None => cache.record(Some(bytes), epoch, Some(version)),
+            }
+            cache.keep_values(&after.commit.stored_values(), named);
+        }
+        let mut report = SaveReport {
             checkpointed_pages: 0,
-            cleanup_error: collected.err(),
             version,
         };
-        if !after.wants_checkpoint() {
-            return Ok((report, after));
+        if let Some(checkpoint) = checkpoint {
+            report.checkpointed_pages = checkpoint.images.len();
+            if let Some(cache) = cache {
+                for (index, image) in &checkpoint.images {
+                    match image {
+                        Some(image) => cache.replace(*index, image.clone()),
+                        None => cache.remove(*index),
+                    }
+                }
+                if let Some(hint) = &after.hint {
+                    cache.wrote_hint(hint.to_vec());
+                }
+            }
         }
-        // This view is not used again: it must not hold the checkpoint back.
-        drop(self.reader.lock().unwrap().take());
-        let (mut checkpoint, after) = after.compact().await?;
-        checkpoint.cleanup_error = checkpoint.cleanup_error.or(report.cleanup_error);
-        Ok((checkpoint, after))
+        Ok((report, after.registered()))
     }
 
     /// A commit's outcome is unknown: forget what the cache knows.
     fn failed(&self, error: io::Error) -> io::Error {
-        self.forget();
-        error
-    }
-
-    fn forget(&self) {
         if let Some(cache) = &self.options.cache {
             cache.forget();
         }
+        error
     }
 
-    /// Checkpoint the whole log, and continue on the result: each page's latest
-    /// image once, then, once those are acknowledged, a record with an empty
-    /// log and the next epoch. The stored values the log named become
-    /// garbage, which the next commit deletes in its round trip. Nothing to do
-    /// without a log, or while another session's view still needs it. A
-    /// failure is a [`SaveReport::cleanup_error`]: the log keeps covering the
-    /// pages, and a later save retries.
-    pub(crate) async fn compact(&self) -> io::Result<(SaveReport, Self)> {
-        let unchanged = |cleanup_error| {
-            let report = SaveReport {
-                cleanup_error,
-                version: self.version(),
-                ..SaveReport::default()
-            };
-            let after = self.continued(self.commit.clone(), self.commit_bytes.clone());
-            (report, after.registered())
-        };
-        let cache = self.options.cache.as_ref();
-        let own = cache.is_none_or(|cache| cache.committed() == Some(self.version()));
-        if self.log.transactions.is_empty() || !own || self.checkpoint_limit() != u64::MAX {
-            return Ok(unchanged(None));
-        }
-        let store = &*self.store;
+    /// Queue a checkpoint of the whole log with `write`, and move this view
+    /// past it: each page's latest image once, the working-set hint, then a
+    /// record with an empty log at the next epoch. The stored values the log
+    /// named become garbage, which the next commit deletes.
+    fn checkpoint(
+        &mut self,
+        write: &impl Fn(&str, Option<Bytes>) -> io::Result<()>,
+    ) -> io::Result<Checkpoint> {
         let checkpoint = Checkpoint::new(&self.log.images, self.options.page_compression)?;
+        for (index, image) in &checkpoint.images {
+            write(&page_key(*index), image.clone())?;
+        }
         let hint = self.hint();
-        let mut pages = checkpoint.mutations();
         if let Some(hint) = &hint {
-            pages.push(Mutation::Put(HINT.to_owned(), hint.clone().into()));
+            write(HINT, Some(Bytes::from(hint.clone())))?;
         }
-        if let Err(error) = concurrently(store, pages).await {
-            return Ok(unchanged(Some(error)));
-        }
-        // The record passes the log only now that its pages are acknowledged.
         let mut commit = Commit {
             epoch: self.commit.epoch + 1,
             log: Vec::new(),
@@ -803,38 +686,14 @@ impl Snapshot {
         commit.garbage =
             &self.commit.garbage | &(&self.commit.stored_values() - &commit.stored_values());
         let bytes = commit.encode();
-        if let Err(error) = store.put(COMMIT, bytes.clone()).await {
-            // It may have landed: the next open sees which epoch did.
-            self.forget();
-            return Ok(unchanged(Some(error)));
-        }
-        if let Some(cache) = cache {
-            cache.checkpointed(bytes.clone(), commit.epoch, commit.version);
-            cache.keep_sealed(None);
-            cache.keep_collected(Default::default());
-            for (index, image) in &checkpoint.images {
-                match image {
-                    Some(image) => cache.replace(*index, image.clone()),
-                    None => cache.remove(*index),
-                }
-            }
-            if let Some(hint) = &hint {
-                cache.wrote_hint(hint.clone());
-            }
-        }
-        let mut after = self.continued(commit, Some(bytes));
+        write(COMMIT, Some(bytes.clone()))?;
+        self.commit = commit;
+        self.commit_bytes = Some(bytes);
+        self.log = Log::new();
         if let Some(hint) = hint {
-            after.hint = Some(Bytes::from(hint));
+            self.hint = Some(Bytes::from(hint));
         }
-        after.log = Log::new();
-        // A seal not yet named is garbage now, with the log's values.
-        after.sealed = None;
-        let report = SaveReport {
-            checkpointed_pages: checkpoint.images.len(),
-            cleanup_error: None,
-            version: self.version(),
-        };
-        Ok((report, after.registered()))
+        Ok(checkpoint)
     }
 
     /// This view under another commit record, for a session that continues
@@ -863,7 +722,6 @@ impl Snapshot {
             log,
             chain: self.chain.clone(),
             unchanged: false,
-            sealed: self.sealed.clone(),
             page: Mutex::default(),
             fetched: Mutex::new(std::mem::take(&mut *self.fetched.lock().unwrap())),
             readahead: Mutex::default(),
@@ -880,7 +738,6 @@ impl Snapshot {
         idle.log = Log::new();
         idle.fetched = Mutex::default();
         idle.usage = Mutex::default();
-        idle.sealed = None;
         idle
     }
 
@@ -933,16 +790,6 @@ impl Checkpoint {
             })
             .collect::<io::Result<_>>()?;
         Ok(Self { images })
-    }
-
-    fn mutations(&self) -> Vec<Mutation> {
-        self.images
-            .iter()
-            .map(|(index, image)| match image {
-                Some(image) => Mutation::Put(page_key(*index), image.clone()),
-                None => Mutation::Delete(page_key(*index)),
-            })
-            .collect()
     }
 }
 

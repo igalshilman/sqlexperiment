@@ -1,9 +1,10 @@
 //! SQLite-compatible SQL over an asynchronous key/value store.
 //!
 //! The engine is Turso's Rust implementation (`turso_core`); this crate supplies
-//! its file I/O and makes the database durable in a KV store. It requires only
-//! [`kv::KvStore::get`], [`kv::KvStore::put`] and [`kv::KvStore::delete`], not a
-//! multi-key transaction, compare-and-swap, listing operation or backend WAL API.
+//! its file I/O and makes the database durable in a KV store: a Restate
+//! object's state, which keeps writes in issue order and makes them durable at
+//! a sync (see [`kv`]). It needs no multi-key transaction, compare-and-swap,
+//! listing operation or backend WAL API.
 //!
 //! # When changes become durable
 //!
@@ -23,19 +24,19 @@
 //! | Pages | `page/<n>`, overwritten in place by checkpoints | Yes |
 //!
 //! A save commits by putting the record with one more transaction, usually a
-//! single put. An unchanged save performs no mutations. If [`SaveReport::cleanup_error`] is set,
-//! the SQL changes **are committed**; only checkpoint work failed. An error or
-//! cancellation can have an unknown commit outcome. Settle outstanding backend
-//! requests and reopen before deciding whether to retry application work.
+//! single put, then one sync. An unchanged save performs no mutations. An
+//! error or cancellation can have an unknown commit outcome. Settle
+//! outstanding backend requests and reopen before deciding whether to retry
+//! application work.
 //!
 //! # Why a log and pages in place?
 //!
-//! One put is the only atomic operation the backend offers, and writes are not
-//! ordered: only an acknowledged one is known durable. The record turns one put
-//! into a multi-page commit: a transaction is visible once a record holding it
-//! is. Because the log holds every page a checkpoint has not yet recorded,
-//! checkpoints may overwrite `page/<n>` in place: replay applies the log over
-//! whatever they left. This is SQLite's own WAL design, applied to KV keys.
+//! One put is the only atomic operation the backend offers: a crash may keep
+//! some of a save's writes and lose the ones after them. The record turns one
+//! put into a multi-page commit: a transaction is visible once a record
+//! holding it is. Because the log holds every page a checkpoint has not yet
+//! recorded, checkpoints may overwrite `page/<n>` in place, after the record:
+//! replay applies the log over whatever they left. This is SQLite's own WAL design, applied to KV keys.
 //! There is no page map, no object allocation, no intent and no orphan collection.
 //! See `docs/DESIGN.md` and the private `snapshot` and `log` modules.
 //!
@@ -48,11 +49,11 @@
 //!
 //! The host grants one owner exclusive use of a namespace, including settlement
 //! of cancelled requests before reopening or handing ownership to another session.
-//! There is no distributed lock or fence here. A save issues its commit, then,
-//! when the log is long, checkpoints it: at most 64 mutations of distinct keys
-//! at a time per group. Open reads the record, and the stored segments its log
-//! names, if any. The I/O pump batches adjacent file
-//! reads without crossing write, truncate or sync barriers.
+//! There is no distributed lock or fence here. A save queues its commit, then,
+//! when the log is long, its checkpoint, and syncs once. Open reads the
+//! record, and the stored segments its log names, if any. The I/O pump
+//! batches adjacent file reads without crossing write, truncate or sync
+//! barriers.
 //!
 //! Sessions of one owner may overlap when they share a [`NamespaceCache`]:
 //! each reads the state it opened at (a checkpoint waits while another session
@@ -96,11 +97,7 @@
 //! let mut session = Session::open(store).await?;
 //! session.execute("CREATE TABLE messages(body TEXT)").await?;
 //! session.execute("INSERT INTO messages VALUES('hello')").await?;
-//! let saved = session.save().await?;
-//! if let Some(error) = saved.cleanup_error {
-//!     // Committed: reopen to finish cleanup; do not replay the INSERT.
-//!     eprintln!("cleanup pending: {error}");
-//! }
+//! session.save().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -192,8 +189,6 @@ pub struct Session {
     /// Set when a [`Self::transaction`] future is dropped or unwinds before
     /// finishing, which may leave its SQL transaction open.
     abandoned: Arc<AtomicBool>,
-    /// A checkpoint failure after a commit, kept for [`Self::take_cleanup_error`].
-    cleanup_error: Option<std::io::Error>,
     /// Bytes of the schema's SQL as of the last commit, to weigh a parked
     /// engine; `None` when unknown, which prevents parking.
     schema_bytes: Option<usize>,
@@ -317,7 +312,6 @@ impl Session {
                 effects: None,
                 chain: None,
                 abandoned: Arc::default(),
-                cleanup_error: None,
                 schema_bytes: Some(warm.schema_bytes),
                 schema_changed: false,
             };
@@ -341,7 +335,6 @@ impl Session {
             effects: None,
             chain: None,
             abandoned: Arc::default(),
-            cleanup_error: None,
             schema_bytes: None,
             schema_changed: false,
         };
@@ -506,11 +499,8 @@ impl Session {
             }
             // Until the commit is acknowledged its outcome is unknown.
             self.poisoned = true;
-            let report = self.io.publish_with(Some(effects), chain).await?;
+            self.io.publish_with(Some(effects), chain).await?;
             self.poisoned = false;
-            if let Some(error) = report.cleanup_error {
-                self.cleanup_error = Some(error);
-            }
             return Ok(());
         }
         self.effects = Some(effects);
@@ -617,8 +607,7 @@ impl Session {
         Ok(bytes.unwrap_or(0).max(0) as usize)
     }
 
-    /// Make the committed SQL state durable and continue on it. A cleanup error
-    /// leaves it committed; a later commit retries the checkpoint work.
+    /// Make the committed SQL state durable and continue on it.
     async fn publish(&mut self) -> Result<SaveReport> {
         self.checkpoint().await?;
         // Until the commit is acknowledged the engine may hold uncommitted pages,
@@ -753,9 +742,8 @@ impl Session {
             if idle
                 && self.durability == Durability::Commit
                 && (!self.io.is_clean() || self.effects.is_some() || self.chain.is_some())
-                && let Some(error) = self.publish().await?.cleanup_error
             {
-                self.cleanup_error = Some(error);
+                self.publish().await?;
             }
         }
         rows.ok_or_else(|| "the SQL contains no statements".into())
@@ -775,13 +763,6 @@ impl Session {
         };
         self.poisoned = false;
         Ok(rows)
-    }
-
-    /// Take the error of checkpoint work that failed after a commit with
-    /// [`Durability::Commit`]. The commit is durable; a later commit retries
-    /// the work. [`Self::save`] also reports it.
-    pub fn take_cleanup_error(&mut self) -> Option<std::io::Error> {
-        self.cleanup_error.take()
     }
 
     /// Execute one statement and discard its collected result rows.
@@ -812,9 +793,8 @@ impl Session {
     }
 
     /// Checkpoints the private WAL, durably publishes only database pages, and consumes the session.
-    /// Ok confirms durable publication. Inspect SaveReport::cleanup_error: Some
-    /// means committed with pending cleanup, retried on open. Err/cancellation
-    /// may have an unknown publication outcome: settle requests and reopen.
+    /// Ok confirms durable publication. Err/cancellation may have an unknown
+    /// publication outcome: settle requests and reopen.
     /// With [`Durability::Commit`] every SQL transaction is already durable, so
     /// this only ends the session.
     pub async fn save(mut self) -> Result<SaveReport> {
@@ -824,8 +804,7 @@ impl Session {
         if !self.connection.as_ref().unwrap().get_auto_commit() {
             return Err("cannot save an open SQL transaction".into());
         }
-        let mut report = self.publish().await?;
-        report.cleanup_error = report.cleanup_error.or(self.cleanup_error.take());
+        let report = self.publish().await?;
         self.park();
         Ok(report)
     }

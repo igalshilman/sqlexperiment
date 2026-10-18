@@ -43,7 +43,7 @@ fn statements_are_durable_without_save() -> Result<()> {
         db.query("SELECT * FROM t").await?;
         assert_eq!(store.stats().kind("commit").puts, 2, "reads commit nothing");
         drop(db);
-        store.crash(&[]);
+        store.crash();
 
         let mut db = Session::open_with_options(store.clone(), options(None)).await?;
         assert_eq!(count(&mut db).await?, 1);
@@ -87,7 +87,7 @@ fn a_transaction_commits_as_a_whole_or_not_at_all() -> Result<()> {
         db.execute("BEGIN").await?;
         db.execute("INSERT INTO t VALUES(4, 1)").await?;
         drop(db);
-        store.crash(&[]);
+        store.crash();
         let mut db = Session::open_with_options(store.clone(), options(None)).await?;
         assert_eq!(count(&mut db).await?, 2);
         Ok(())
@@ -127,7 +127,7 @@ fn a_long_session_checkpoints_and_reads_its_writes() -> Result<()> {
                 "the log was checkpointed"
             );
             drop(db);
-            store.crash(&[]);
+            store.crash();
 
             let mut db = Session::open_with_options(store.clone(), options(cache)).await?;
             assert_eq!(count(&mut db).await?, 120);
@@ -168,23 +168,20 @@ fn a_commit_is_one_round_trip_with_a_cache() -> Result<()> {
     })
 }
 
-/// Fail every mutation of a commit-per-transaction run in turn. Every
-/// transaction acknowledged before the failure survives a crash, the failed one
-/// may or may not, and nothing else appears.
+/// Crash a commit-per-transaction run at every sync, keeping each prefix of
+/// the writes the sync would have stored. Every transaction acknowledged
+/// before the crash survives, the one it interrupted may or may not, and
+/// nothing else appears.
 #[test]
-fn every_acknowledged_commit_survives_any_single_failure() -> Result<()> {
+fn every_acknowledged_commit_survives_a_crash_at_any_write() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         for cached in [false, true] {
-            for effect in [Effect::None, Effect::After] {
-                for operation in [Operation::Put, Operation::Delete] {
-                    for nth in 1.. {
-                        if !run_case(cached, effect, operation, nth).await? {
-                            break;
-                        }
-                        cases += 1;
-                    }
-                }
+            for nth in 1.. {
+                let Some(prefixes) = run_case(cached, nth).await? else {
+                    break;
+                };
+                cases += prefixes;
             }
         }
         println!("commit campaign: {cases} cases");
@@ -193,9 +190,16 @@ fn every_acknowledged_commit_survives_any_single_failure() -> Result<()> {
     })
 }
 
-/// Returns whether the failpoint was reached.
-async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize) -> Result<bool> {
+/// Crash at the `nth` sync, keeping each prefix of its writes in turn: the
+/// number of prefixes, or `None` if the run made fewer syncs.
+async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
     let cache = cached.then(fresh_namespace);
+    // Seals and checkpoints happen within the run.
+    let options = |cache| StorageOptions {
+        checkpoint_after: 8,
+        inline_log_bytes: 512,
+        ..options(cache)
+    };
     let store = Arc::new(MonitorKv::new(FaultKv::new(
         MemoryKv::default(),
         nth as u64,
@@ -204,14 +208,13 @@ async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, body TEXT)")
         .await?;
     let _signal = store.arm(Failpoint {
-        operation,
-        key_prefix: "v14/".into(),
+        operation: Operation::Sync,
+        key_prefix: String::new(),
         nth,
-        effect,
+        effect: Effect::None,
         cancel: false,
     });
     let mut acknowledged = 0;
-    let mut failed = false;
     for i in 0..30i64 {
         let result = db
             .transaction(async |db| {
@@ -226,39 +229,48 @@ async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize
             .await;
         match result {
             Ok(()) => acknowledged += 2,
-            Err(_) => {
-                failed = true;
-                break;
-            }
+            Err(_) => break,
         }
     }
-    let reached = store.events().iter().any(|event| event.faulted);
     drop(db);
     store.disarm();
-    store.inner.inner.crash(&[]);
-
-    // Reopen through the same owner cache, as a restarted handler would.
-    let mut db = Session::open_with_options(store.clone(), options(cache)).await?;
-    let survived = count(&mut db).await?;
-    assert!(
-        survived == acknowledged || (failed && survived == acknowledged + 2),
-        "{effect:?} {operation:?} #{nth} cached={cached}: {survived} rows, {acknowledged} acknowledged"
-    );
-    assert_eq!(
-        db.query("PRAGMA integrity_check").await?[0][0].to_string(),
-        "ok"
-    );
-    // The namespace stays writable.
-    db.execute("INSERT INTO t VALUES(1000, 0, 'y')").await?;
-    drop(db);
-    let mut db = Session::open_with_options(store.clone(), options(None)).await?;
-    assert_eq!(count(&mut db).await?, survived + 1);
-    assert_eq!(
-        store.violations(),
-        Vec::<String>::new(),
-        "{effect:?} {operation:?} #{nth}"
-    );
-    Ok(reached)
+    if !store.events().iter().any(|event| event.faulted) {
+        return Ok(None);
+    }
+    assert_eq!(store.violations(), Vec::<String>::new(), "sync #{nth}");
+    let writes = store.inner.inner.unsynced().len();
+    for kept in 0..=writes {
+        let memory = store.inner.inner.fork();
+        memory.crash_keeping(kept);
+        let store = Arc::new(MonitorKv::seeded(memory.clone(), memory.values()));
+        // Reopen through the same owner cache, as a restarted handler would:
+        // only to read, as the cache follows one history, and the forks are
+        // each another.
+        let mut db = Session::open_with_options(store.clone(), options(cache.clone())).await?;
+        let survived = count(&mut db).await?;
+        assert!(
+            survived == acknowledged || survived == acknowledged + 2,
+            "sync #{nth}, {kept} of {writes} writes kept, cached={cached}: \
+             {survived} rows, {acknowledged} acknowledged"
+        );
+        assert_eq!(
+            db.query("PRAGMA integrity_check").await?[0][0].to_string(),
+            "ok"
+        );
+        drop(db);
+        // The namespace stays writable.
+        let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+        db.execute("INSERT INTO t VALUES(1000, 0, 'y')").await?;
+        drop(db);
+        let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+        assert_eq!(count(&mut db).await?, survived + 1);
+        assert_eq!(
+            store.violations(),
+            Vec::<String>::new(),
+            "sync #{nth}, {kept} kept"
+        );
+    }
+    Ok(Some(writes + 1))
 }
 
 /// A string of several statements runs all of them, each under the same rules
@@ -289,7 +301,7 @@ fn every_statement_of_a_string_runs() -> Result<()> {
             } else {
                 drop(db);
             }
-            store.crash(&[]);
+            store.crash();
             let mut db = Session::open_with_options(store, options).await?;
             assert_eq!(count(&mut db).await?, 3, "{durability:?}");
         }
@@ -317,7 +329,7 @@ fn a_transaction_body_cannot_commit_itself() -> Result<()> {
             assert!(result.is_err(), "{end}");
             assert!(db.execute("SELECT 1").await.is_err(), "{end}: poisoned");
             drop(db);
-            store.crash(&[]);
+            store.crash();
             let mut db = Session::open_with_options(store.clone(), options(None)).await?;
             assert_eq!(count(&mut db).await?, 0, "{end}");
         }
@@ -355,38 +367,6 @@ fn an_abandoned_transaction_poisons_the_session() -> Result<()> {
         }
         assert!(db.execute("INSERT INTO t VALUES(2, 0)").await.is_err());
         assert!(db.save().await.is_err());
-        Ok(())
-    })
-}
-
-/// A checkpoint failure after a durable commit is reported, not swallowed.
-#[test]
-fn commit_cleanup_errors_are_reported() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
-        let mut db = Session::open_with_options(store.clone(), options(None)).await?;
-        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
-            .await?;
-        let _signal = store.arm(Failpoint {
-            operation: Operation::Put,
-            key_prefix: "v14/page/".into(),
-            nth: 1,
-            effect: Effect::None,
-            cancel: false,
-        });
-        let mut i = 0;
-        while store.events().iter().all(|event| !event.faulted) {
-            db.execute(&format!("INSERT INTO t VALUES({i}, 0)")).await?;
-            i += 1;
-        }
-        assert!(db.take_cleanup_error().is_some());
-        assert!(db.take_cleanup_error().is_none());
-        db.execute("INSERT INTO t VALUES(-1, 0)").await?;
-        store.disarm();
-        db.execute("INSERT INTO t VALUES(-2, 0)").await?;
-        drop(db);
-        let mut db = Session::open_with_options(store, options(None)).await?;
-        assert_eq!(count(&mut db).await?, i + 2);
         Ok(())
     })
 }
@@ -553,7 +533,7 @@ fn effects_commit_with_their_transaction() -> Result<()> {
         }
         assert!(db.is_usable());
         drop(db);
-        store.crash(&[]);
+        store.crash();
 
         let mut db = Session::open_with_options(store.clone(), options(None)).await?;
         assert_eq!(db.effects(), &b"sends 1"[..]);
@@ -568,51 +548,6 @@ fn effects_commit_with_their_transaction() -> Result<()> {
         drop(db);
         let db = Session::open_with_options(store.clone(), options(None)).await?;
         assert!(db.effects().is_empty());
-        Ok(())
-    })
-}
-
-/// A checkpoint whose record put failed may have landed or not: the session
-/// continues on the log, which covers the pages either way, and a new one
-/// reads whichever record did.
-#[test]
-fn a_session_continues_after_a_checkpoint_of_unknown_outcome() -> Result<()> {
-    futures::executor::block_on(async {
-        for effect in [Effect::None, Effect::After] {
-            let store = Arc::new(MonitorKv::new(FaultKv::new(MemoryKv::default(), 1)));
-            let options = StorageOptions {
-                checkpoint_after: 1,
-                ..options(None)
-            };
-            let mut db = Session::open_with_options(store.clone(), options.clone()).await?;
-            db.execute("CREATE TABLE t(n INTEGER)").await?;
-            // The next commit checkpoints: its record is the second put.
-            let signal = store.arm(Failpoint {
-                operation: Operation::Put,
-                key_prefix: "v14/commit".into(),
-                nth: 2,
-                effect,
-                cancel: false,
-            });
-            db.execute("INSERT INTO t VALUES(1)").await?;
-            assert!(db.take_cleanup_error().is_some(), "{effect:?}");
-            drop(signal);
-            store.disarm();
-            for n in 2..6 {
-                db.execute(&format!("INSERT INTO t VALUES({n})")).await?;
-            }
-            drop(db);
-
-            let mut db = Session::open_with_options(store.clone(), options).await?;
-            let rows = db.query("SELECT sum(n), count(*) FROM t").await?;
-            assert_eq!(rows[0][0].as_int(), Some(15), "{effect:?}");
-            assert_eq!(rows[0][1].as_int(), Some(5));
-            assert_eq!(
-                db.query("PRAGMA integrity_check").await?[0][0].to_string(),
-                "ok"
-            );
-            assert_eq!(store.violations(), Vec::<String>::new());
-        }
         Ok(())
     })
 }

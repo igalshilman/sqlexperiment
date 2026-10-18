@@ -1,24 +1,27 @@
 //! A protocol monitor: checks every request the code issues against the
 //! invariants of `docs/DESIGN.md`, as `spec/Protocol.tla` states them.
 //!
-//! The monitor wraps a store and keeps what an observer knows is durable: the
-//! values of acknowledged puts and deletes, and values it read. A failed or
-//! cancelled request makes its key unknown, and adds its value to a page key's
-//! possible values. Each put or delete is then checked when it is issued:
+//! The store keeps writes in issue order, and a crash keeps a prefix of them,
+//! so a write may rely on every write issued before it. The monitor wraps a
+//! store and keeps the state those writes make: each write applied as it is
+//! issued, and values it read (after a crash, a read learns what was kept).
+//! A write that fails makes its key unknown, and adds its value to a page
+//! key's possible values. Each write is checked against that state when it is
+//! issued:
 //!
-//! 1. **Name only the durable**: a commit record names only stored segments
-//!    known to hold their segment.
-//! 2. **Build on durable**: a commit record holds the known record's log plus
+//! 1. **Name only what is written**: a commit record names only stored
+//!    segments written before it.
+//! 2. **Build on the record**: a commit record holds the record's log plus
 //!    one transaction, at the next version (its earlier transactions decode to
 //!    the same images, inline or sealed); or is that record again.
 //! 3. **Checkpoint before recording**: a record that empties the log (the next
-//!    epoch) comes only when every page the known log changed is known at its
-//!    page key, with the log's latest image of it.
+//!    epoch) comes only once every page the log changed is at its page key,
+//!    with the log's latest image of it.
 //! 4. **Overwrite only what the log covers**: a page key gets only an image of
-//!    a transaction in the known record's log.
+//!    a transaction in the record's log.
 //! 5. **Fresh segments, deleted unnamed**: a stored segment is put only at a
-//!    number the known record has not allocated, and deleted only if it names
-//!    it no more.
+//!    number the record has not allocated, and deleted only if it names it no
+//!    more; the record lists as garbage only values the record before named.
 //! 6. **Decodable**: every record put decodes, its log against the segments
 //!    it names.
 use crate::{
@@ -49,7 +52,7 @@ impl<S> Deref for MonitorKv<S> {
     }
 }
 
-/// What is known to be durable.
+/// The state the writes issued so far make.
 #[derive(Default)]
 struct Known {
     /// Stored segments, by number.
@@ -173,13 +176,11 @@ impl Known {
                 && earlier.is_some()
                 && earlier == self.transactions(&known)
                 && chain_follows
-                // garbage grows only by numbers the known record has not
-                // allocated (a seal not yet named), or names no more
-                && commit.garbage.iter().all(|n| {
-                    known.garbage.contains(n)
-                        || *n >= known.next_segment
-                        || (known_named.contains(n) && !named.contains(n))
-                });
+                // garbage: values the known record named, and this one no more
+                && commit
+                    .garbage
+                    .iter()
+                    .all(|n| known_named.contains(n) && !named.contains(n));
             if !extends {
                 self.violation(format!(
                     "commit {}: does not extend the known record",
@@ -252,7 +253,7 @@ impl Known {
         }
     }
 
-    /// Record a value now known durable; `None`: known absent.
+    /// Record a value written or read; `None`: absent.
     fn learn(&mut self, key: &str, value: Option<Bytes>) {
         if let Some(n) = parse(key, LOG_PREFIX) {
             match value {
@@ -277,30 +278,12 @@ impl Known {
         }
         // A record may have moved forward or not: the known one is the older,
         // so checks against it stay conservative until a read learns which.
+        // (A write fails only as its session ends.)
     }
 }
 
 fn parse(key: &str, prefix: &str) -> Option<u64> {
     u64::from_str_radix(key.strip_prefix(prefix)?, 16).ok()
-}
-
-/// Forgets a key whose request did not complete.
-struct Outstanding<'a> {
-    known: &'a Mutex<Known>,
-    key: &'a str,
-    value: Option<Bytes>,
-    done: bool,
-}
-
-impl Drop for Outstanding<'_> {
-    fn drop(&mut self) {
-        if !self.done {
-            self.known
-                .lock()
-                .unwrap()
-                .forget(self.key, self.value.as_ref());
-        }
-    }
 }
 
 impl<S: KvStore> MonitorKv<S> {
@@ -344,43 +327,29 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
         })
     }
 
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            self.known.lock().unwrap().check_put(key, &value);
-            let mut outstanding = Outstanding {
-                known: &self.known,
-                key,
-                value: Some(value.clone()),
-                done: false,
-            };
-            let result = self.inner.put(key, value.clone()).await;
-            outstanding.done = true;
-            let mut known = self.known.lock().unwrap();
-            match &result {
-                Ok(()) => known.learn(key, Some(value)),
-                Err(_) => known.forget(key, Some(&value)),
-            }
-            result
-        })
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        let mut known = self.known.lock().unwrap();
+        known.check_put(key, &value);
+        let result = self.inner.put(key, value.clone());
+        match &result {
+            Ok(()) => known.learn(key, Some(value)),
+            Err(_) => known.forget(key, Some(&value)),
+        }
+        result
     }
 
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            self.known.lock().unwrap().check_delete(key);
-            let mut outstanding = Outstanding {
-                known: &self.known,
-                key,
-                value: None,
-                done: false,
-            };
-            let result = self.inner.delete(key).await;
-            outstanding.done = true;
-            let mut known = self.known.lock().unwrap();
-            match &result {
-                Ok(()) => known.learn(key, None),
-                Err(_) => known.forget(key, None),
-            }
-            result
-        })
+    fn delete(&self, key: &str) -> io::Result<()> {
+        let mut known = self.known.lock().unwrap();
+        known.check_delete(key);
+        let result = self.inner.delete(key);
+        match &result {
+            Ok(()) => known.learn(key, None),
+            Err(_) => known.forget(key, None),
+        }
+        result
+    }
+
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        self.inner.sync()
     }
 }

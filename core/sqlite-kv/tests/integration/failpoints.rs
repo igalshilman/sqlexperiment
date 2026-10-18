@@ -17,7 +17,7 @@ async fn baseline() -> Result<MemoryKv> {
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
     db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30) INSERT INTO t SELECT x,x,printf('%09000d',x) FROM n").await?;
-    assert!(db.save().await?.cleanup_error.is_none());
+    db.save().await?;
     // Checkpoint `t` so that queries read its pages from the backend.
     let mut db = Session::open_with_options(Arc::new(store.clone()), all()).await?;
     db.execute("CREATE TABLE other(x)").await?;
@@ -143,7 +143,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
                             (0, 0)
                         );
                         store.disarm();
-                        store.inner.crash(&[]);
+                        store.inner.crash();
                         assert_eq!(store.inner.keys(), base.keys());
                         assert_eq!(store.inner.stored_bytes(), base.stored_bytes());
                         check(store, false).await?;
@@ -157,41 +157,31 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
     })
 }
 
-/// A failed commit changes nothing; a failed checkpoint after an acknowledged
-/// commit only reports a cleanup error. Either way the failed phase drains.
+/// A commit that fails, at a write of its checkpoint or at its sync, has an
+/// unknown outcome: after a crash it is there only if the sync stored it.
 #[test]
-fn commit_and_checkpoint_errors_drain_and_keep_the_outcome() -> Result<()> {
+fn a_failed_commit_is_there_only_if_its_sync_stored_it() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
-        for (prefix, nth) in [("v14/commit", 1), ("v14/page/", 1)] {
+        for (operation, prefix) in [(Operation::Put, "v14/page/"), (Operation::Sync, "")] {
             for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
                 // The save checkpoints the log once it has committed.
                 let mut db = Session::open_with_options(store.clone(), all()).await?;
                 db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
                     .await?;
-                let _gate = store.arm(plan(Operation::Put, prefix, nth, effect, false));
-                let result = db.save().await;
-                assert_eq!(store.active(), 0, "the failed phase must drain");
+                let _gate = store.arm(plan(operation, prefix, 1, effect, false));
+                assert!(db.save().await.is_err());
+                assert_eq!(store.active(), 0, "the failed sync must settle");
                 store.disarm();
-                if prefix == "v14/page/" {
-                    let report = result?;
-                    assert!(report.cleanup_error.is_some());
-                    // The checkpoint failed: no page counts as checkpointed.
-                    assert_eq!(report.checkpointed_pages, 0);
-                    // At most 64 at a time.
-                    assert!((2..=64).contains(&store.max_active()), "page puts overlap");
-                } else {
-                    assert!(result.is_err());
-                }
-                store.inner.crash(&[]);
-                let committed = prefix == "v14/page/" || matches!(effect, Effect::After);
-                check(store.clone(), committed).await?;
+                store.inner.crash();
+                let synced = operation == Operation::Sync && matches!(effect, Effect::After);
+                check(store.clone(), synced).await?;
                 cases += 1;
             }
         }
-        println!("commit and checkpoint errors: {cases} cases");
+        println!("commit failures: {cases} cases");
         Ok(())
     })
 }
@@ -253,11 +243,11 @@ fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<(
         let store = MemoryKv::default();
         let key = "v14/page/0000000000000001";
         assert!(store.get(key).await?.is_none());
-        store.put(key, vec![1; 4096].into()).await?;
+        store.put(key, vec![1; 4096].into())?;
         store.get(key).await?;
         store.get(key).await?;
-        store.delete(key).await?;
-        store.delete(key).await?;
+        store.delete(key)?;
+        store.delete(key)?;
         let s = store.stats();
         let t = &s.by_kind["page"];
         assert_eq!((t.gets, t.misses, t.puts, t.deletes), (3, 1, 1, 2));

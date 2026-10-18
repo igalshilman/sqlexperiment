@@ -24,8 +24,8 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
             .await?;
     }
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x, x, x, 0, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
-    assert!(db.save().await?.cleanup_error.is_none());
-    store.crash(&[]);
+    db.save().await?;
+    store.crash();
     Ok(store)
 }
 fn print_row(
@@ -137,14 +137,14 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
                         db.execute(&format!("UPDATE t SET note={n} WHERE id={id}"))
                             .await?;
                         if op == "ten_updates_ten_saves" && n < 10 {
-                            assert!(db.save().await?.cleanup_error.is_none());
+                            db.save().await?;
                             db = Session::open(store.clone()).await?;
                         }
                     }
                 }
                 _ => unreachable!(),
             }
-            assert!(db.save().await?.cleanup_error.is_none());
+            db.save().await?;
             let elapsed = start.elapsed();
             let stats = store.stats();
             print_row(
@@ -157,7 +157,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             );
             // Validate results after timing/count capture, with simulated loss of
             // all unacknowledged state and a fresh engine.
-            store.crash(&[]);
+            store.crash();
             let mut reopened = Session::open(store.clone()).await?;
             let count = reopened.query("SELECT count(*) FROM t").await?[0][0].to_string();
             let expected_count =

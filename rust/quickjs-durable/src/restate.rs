@@ -36,7 +36,7 @@ use std::{
 };
 
 mod store;
-use sqlite_kv::{PageCache, PageCacheConfig, kv::Synced};
+use sqlite_kv::{PageCache, PageCacheConfig};
 use store::StateQueue;
 
 /// Fault injection, for tests.
@@ -110,7 +110,7 @@ impl JsObject {
     ) -> HandlerResult<Outcome> {
         // One store for the whole attempt: its handler is the object's only
         // writer meanwhile, so what it read or wrote stays true.
-        let store = Arc::new(Synced::new(StateQueue::new(ctx.raw_state())));
+        let store = Arc::new(StateQueue::new(ctx.raw_state()));
         let namespace = format!("{}/{}", self.program, ctx.key());
         let scope = Scope::new(store.clone()).cached(self.cache.namespace(&namespace));
         let started = Run::start(
@@ -123,7 +123,7 @@ impl JsObject {
             now(),
         )
         .await;
-        let mut run = committed(store.queue(), started)?;
+        let mut run = committed(&store, started)?;
         let mut waiting = DurableFuturesUnordered::<Waiting<'ctx>>::new();
         let mut operations: Vec<String> = Vec::new();
         let mut awaited: HashSet<String> = HashSet::new();
@@ -182,7 +182,7 @@ impl JsObject {
                 }
             };
             let delivered = run.deliver_all(outcomes, now().max(at)).await;
-            committed(store.queue(), delivered)?;
+            committed(&store, delivered)?;
         }
     }
 }

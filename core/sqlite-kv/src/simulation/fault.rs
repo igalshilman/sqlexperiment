@@ -11,15 +11,15 @@ pub enum Operation {
     Get,
     Put,
     Delete,
+    Sync,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum Effect {
-    /// Fail before touching the underlying store.
+    /// Fail before touching the underlying store: a write is not queued, a
+    /// sync stores nothing.
     None,
-    /// Atomic visible-only mutation; reads behave like After.
-    Visible,
-    /// Complete the underlying operation, then lose its acknowledgement.
+    /// Complete the underlying operation, then report a failure.
     After,
 }
 
@@ -30,7 +30,8 @@ pub struct Failpoint {
     /// One-based ordinal among matching operations since arm().
     pub nth: usize,
     pub effect: Effect,
-    /// Signal the caller and stay pending until it drops the future.
+    /// Signal the caller and stay pending until it drops the future (a get or
+    /// a sync: a write returns at once).
     pub cancel: bool,
 }
 
@@ -102,33 +103,50 @@ impl FaultKv {
         self.control.lock().unwrap().max_active
     }
 
-    async fn run(
+    /// Count `operation` on `key`, and return the failpoint it hits, if any.
+    fn hit(&self, operation: Operation, key: &str) -> (Option<Failpoint>, u64) {
+        let mut c = self.control.lock().unwrap();
+        let matches = c
+            .plan
+            .as_ref()
+            .is_some_and(|p| p.operation == operation && key.starts_with(&p.key_prefix));
+        let plan = if matches {
+            c.seen += 1;
+            c.plan.as_ref().filter(|p| p.nth == c.seen).cloned()
+        } else {
+            None
+        };
+        c.events.push(Event {
+            operation,
+            key: key.into(),
+            faulted: plan.is_some(),
+        });
+        (plan, c.events.len() as u64)
+    }
+
+    fn signal(&self) {
+        if let Some(tx) = self.control.lock().unwrap().signal.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    fn injected(operation: Operation, key: &str) -> io::Error {
+        io::Error::other(format!("injected {operation:?} failure at {key}"))
+    }
+
+    /// A get or a sync: may be delayed, fail, or stay pending until dropped.
+    async fn run<T>(
         &self,
         operation: Operation,
         key: &str,
-        value: Option<Bytes>,
-    ) -> io::Result<Option<Bytes>> {
-        let (plan, ordinal) = {
+        request: impl Future<Output = io::Result<T>>,
+    ) -> io::Result<T> {
+        let (plan, ordinal) = self.hit(operation, key);
+        {
             let mut c = self.control.lock().unwrap();
-            let matches = c
-                .plan
-                .as_ref()
-                .is_some_and(|p| p.operation == operation && key.starts_with(&p.key_prefix));
-            let plan = if matches {
-                c.seen += 1;
-                c.plan.as_ref().filter(|p| p.nth == c.seen).cloned()
-            } else {
-                None
-            };
-            c.events.push(Event {
-                operation,
-                key: key.into(),
-                faulted: plan.is_some(),
-            });
             c.active += 1;
             c.max_active = c.max_active.max(c.active);
-            (plan, c.events.len() as u64)
-        };
+        }
         let _active = Active(self);
         // Stable differing delays perturb concurrent completion order without a
         // wall clock, a runtime dependency, or sleeps.
@@ -138,46 +156,48 @@ impl FaultKv {
         for _ in 0..if self.seed == 0 { 0 } else { 1 + hash % 11 } {
             yield_now().await;
         }
-        let mut result = None;
-        match plan.as_ref().map(|p| p.effect) {
-            Some(Effect::None) => {}
-            Some(Effect::Visible) if operation != Operation::Get => match value {
-                Some(v) => self.inner.simulate_unacknowledged_put(key, v),
-                None => self.inner.simulate_unacknowledged_delete(key),
-            },
-            _ => match operation {
-                Operation::Get => result = self.inner.get(key).await?,
-                Operation::Put => {
-                    self.inner
-                        .put(key, value.expect("put requires value"))
-                        .await?
-                }
-                Operation::Delete => self.inner.delete(key).await?,
-            },
+        let Some(plan) = plan else {
+            return request.await;
+        };
+        if let Effect::After = plan.effect {
+            request.await?;
         }
-        if let Some(plan) = plan {
-            if let Some(tx) = self.control.lock().unwrap().signal.take() {
-                let _ = tx.send(());
-            }
-            if plan.cancel {
-                futures::future::pending::<()>().await;
-            }
-            return Err(io::Error::other(format!(
-                "injected {operation:?} failure at {key}"
-            )));
+        self.signal();
+        if plan.cancel {
+            futures::future::pending::<()>().await;
         }
-        Ok(result)
+        Err(Self::injected(operation, key))
+    }
+
+    /// A write: queued at once, unless it hits a failpoint.
+    fn write(&self, operation: Operation, key: &str, value: Option<Bytes>) -> io::Result<()> {
+        let (plan, _) = self.hit(operation, key);
+        let queue = || match value {
+            Some(value) => self.inner.put(key, value),
+            None => self.inner.delete(key),
+        };
+        let Some(plan) = plan else {
+            return queue();
+        };
+        if let Effect::After = plan.effect {
+            queue()?;
+        }
+        self.signal();
+        Err(Self::injected(operation, key))
     }
 }
 
 impl KvStore for FaultKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
-        Box::pin(self.run(Operation::Get, key, None))
+        Box::pin(self.run(Operation::Get, key, self.inner.get(key)))
     }
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move { self.run(Operation::Put, key, Some(value)).await.map(|_| ()) })
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.write(Operation::Put, key, Some(value))
     }
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move { self.run(Operation::Delete, key, None).await.map(|_| ()) })
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.write(Operation::Delete, key, None)
+    }
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        Box::pin(self.run(Operation::Sync, "", self.inner.sync()))
     }
 }

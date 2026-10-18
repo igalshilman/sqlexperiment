@@ -31,7 +31,7 @@
 //!
 //! # Durability knowledge
 //!
-//! Besides pages, the namespace remembers its last acknowledged commit (so a
+//! Besides pages, the namespace remembers its last durable commit (so a
 //! session can tell another committed since it opened) and an idle engine at
 //! that commit, for the next session.
 //!
@@ -219,7 +219,7 @@ struct Owner {
     commit: Option<Page>,
     /// The checkpoint epoch the cached pages belong to; `None` when unknown.
     epoch: Option<u64>,
-    /// The version of this owner's last acknowledged commit.
+    /// The version of this owner's last durable commit.
     committed: Option<u64>,
     /// Pages this owner's sessions read, for the working-set hint.
     usage: Usage,
@@ -232,11 +232,6 @@ struct Owner {
     /// Stored log values a durable record named, by number: a number is never
     /// reused once named, so they stay valid while a record names them.
     values: crate::log::Values,
-    /// This owner's last seal, acknowledged, for the next commit to name.
-    sealed: Option<crate::log::Sealed>,
-    /// Garbage the record lists that this owner deleted since, acknowledged:
-    /// the next commit leaves it out instead of deleting it again.
-    collected: std::collections::BTreeSet<u64>,
 }
 
 impl NamespaceCache {
@@ -276,7 +271,7 @@ impl NamespaceCache {
     }
 
     /// Record the durable commit record `bytes`, in epoch `epoch`, and this
-    /// owner's acknowledged commit, if any. Cached pages must be current as of
+    /// owner's durable commit, if any. Cached pages must be current as of
     /// that epoch.
     pub(crate) fn record(&self, bytes: Option<Page>, epoch: u64, committed: Option<u64>) {
         let mut owner = self.owner();
@@ -334,25 +329,6 @@ impl NamespaceCache {
             .extend(values.into_iter().filter(|(n, _)| named.contains(n)));
     }
 
-    /// This owner's last seal, acknowledged, if the record is still the one
-    /// that lists it.
-    pub(crate) fn sealed(&self) -> Option<crate::log::Sealed> {
-        self.owner().sealed.clone()
-    }
-
-    pub(crate) fn keep_sealed(&self, sealed: Option<crate::log::Sealed>) {
-        self.owner().sealed = sealed;
-    }
-
-    /// Garbage the record lists, deleted since by this owner, acknowledged.
-    pub(crate) fn collected(&self) -> std::collections::BTreeSet<u64> {
-        self.owner().collected.clone()
-    }
-
-    pub(crate) fn keep_collected(&self, collected: std::collections::BTreeSet<u64>) {
-        self.owner().collected = collected;
-    }
-
     /// Register an open session at version `next`; see [`Reader`].
     pub(crate) fn reader(&self, next: u64) -> Reader {
         *self.owner().readers.entry(next).or_default() += 1;
@@ -377,8 +353,6 @@ impl NamespaceCache {
     fn forget_locked(&self, owner: &mut Owner) {
         owner.commit = None;
         owner.committed = None;
-        owner.sealed = None;
-        owner.collected.clear();
         self.take_engine_of(owner.id);
     }
 
@@ -394,12 +368,12 @@ impl NamespaceCache {
         (owner.hint.as_ref() != Some(&hint)).then_some(hint)
     }
 
-    /// Remember an acknowledged hint.
+    /// Remember the hint this owner wrote.
     pub(crate) fn wrote_hint(&self, hint: Vec<u8>) {
         self.owner().hint = Some(hint);
     }
 
-    /// The version of this owner's last acknowledged commit, if still known.
+    /// The version of this owner's last durable commit, if still known.
     pub(crate) fn committed(&self) -> Option<u64> {
         self.owner().committed
     }
@@ -505,8 +479,6 @@ impl Owner {
             hint: None,
             readers: BTreeMap::new(),
             values: crate::log::Values::new(),
-            sealed: None,
-            collected: std::collections::BTreeSet::new(),
         }
     }
 

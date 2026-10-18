@@ -7,16 +7,16 @@
 //! they were scheduled, so a read sees the writes before it.
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
-//! is stored. Writes are stored in no particular order: a write counts as
-//! done once a `sync` after it resolved, and writes queued together share one
-//! ([`Synced`]), so a statement that commits completes once its writes are
-//! stored. A process-wide page cache is built in.
+//! is stored. The object's state keeps writes in issue order, so a crash
+//! loses only a suffix of them (see [`sqlite_kv::kv`]): a statement that
+//! commits queues its writes, then completes at one `sync`. A process-wide
+//! page cache is built in.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
-use sqlite_kv::kv::{Queued, Synced};
+use sqlite_kv::kv::KvStore;
 use sqlite_kv::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use std::io;
 use std::path::PathBuf;
@@ -102,14 +102,17 @@ impl PyStore {
     }
 }
 
-impl Queued for PyStore {
+impl KvStore for PyStore {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(self.request(GET, key))
     }
 
-    fn queue(&self, key: &str, value: Option<Bytes>) -> io::Result<()> {
-        let op = if value.is_some() { SET } else { CLEAR };
-        self.schedule(op, key, value, None)
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.schedule(SET, key, Some(value), None)
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.schedule(CLEAR, key, None, None)
     }
 
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
@@ -170,10 +173,10 @@ fn open<'py>(
     dispatch: Py<PyAny>,
     event_loop: Py<PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let store = Arc::new(Synced::new(PyStore {
+    let store = Arc::new(PyStore {
         event_loop,
         dispatch,
-    }));
+    });
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let options = StorageOptions {
             cache: Some(page_cache().await?.namespace(&namespace)),
