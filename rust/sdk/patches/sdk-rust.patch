@@ -72,7 +72,7 @@ index dd43c1c..910f8b2 100644
  
  impl<'ctx> From<(&'ctx ContextInternal, InputMetadata)> for ObjectContext<'ctx> {
 diff --git a/src/endpoint/builder.rs b/src/endpoint/builder.rs
-index 1995d07..44040bd 100644
+index 1995d07..32a54f9 100644
 --- a/src/endpoint/builder.rs
 +++ b/src/endpoint/builder.rs
 @@ -17,6 +17,7 @@ pub struct ServiceOptions {
@@ -83,7 +83,21 @@ index 1995d07..44040bd 100644
      // Retry policy options
      pub(crate) retry_policy_initial_interval: Option<Duration>,
      pub(crate) retry_policy_exponentiation_factor: Option<f64>,
-@@ -83,6 +84,16 @@ impl ServiceOptions {
+@@ -33,6 +34,13 @@ impl ServiceOptions {
+         Self::default()
+     }
+ 
++    /// The service's name, instead of the type's: to bind one type as several
++    /// services, each with state of its own.
++    pub fn name(mut self, name: impl Into<String>) -> Self {
++        self.name = Some(name.into());
++        self
++    }
++
+     /// This timer guards against stalled invocations. Once it expires, Restate triggers a graceful
+     /// termination by asking the invocation to suspend (which preserves intermediate progress).
+     ///
+@@ -83,6 +91,16 @@ impl ServiceOptions {
          self
      }
  
@@ -100,7 +114,7 @@ index 1995d07..44040bd 100644
      /// When set to `true` this service, with all its handlers, cannot be invoked from the restate-server
      /// HTTP and Kafka ingress, but only from other services.
      pub fn ingress_private(mut self, private: bool) -> Self {
-@@ -163,6 +174,7 @@ pub struct HandlerOptions {
+@@ -163,6 +181,7 @@ pub struct HandlerOptions {
      pub(crate) journal_retention: Option<Duration>,
      pub(crate) ingress_private: Option<bool>,
      pub(crate) enable_lazy_state: Option<bool>,
@@ -108,7 +122,7 @@ index 1995d07..44040bd 100644
      // Retry policy options
      pub(crate) retry_policy_initial_interval: Option<Duration>,
      pub(crate) retry_policy_exponentiation_factor: Option<f64>,
-@@ -237,6 +249,16 @@ impl HandlerOptions {
+@@ -237,6 +256,16 @@ impl HandlerOptions {
          self
      }
  
@@ -125,7 +139,7 @@ index 1995d07..44040bd 100644
      /// When set to `true`, lazy state will be enabled for all invocations to this handler. This is
      /// relevant only for workflows and virtual objects.
      pub fn enable_lazy_state(mut self, enable: bool) -> Self {
-@@ -297,6 +319,7 @@ impl HandlerOptions {
+@@ -297,6 +326,7 @@ impl HandlerOptions {
  pub struct Builder {
      svcs: HashMap<String, BoxedService>,
      discovery_services: Vec<crate::discovery::Service>,
@@ -133,7 +147,7 @@ index 1995d07..44040bd 100644
      identity_verifier: IdentityVerifier,
  }
  
-@@ -335,9 +358,13 @@ impl Builder {
+@@ -335,9 +365,13 @@ impl Builder {
          let ServiceDefinition {
              mut discovery,
              dispatcher,
@@ -147,7 +161,7 @@ index 1995d07..44040bd 100644
          self.svcs.insert(discovery.name.to_string(), dispatcher);
          self.discovery_services.push(discovery);
          self
-@@ -354,7 +381,55 @@ impl Builder {
+@@ -354,7 +388,55 @@ impl Builder {
          Endpoint(Arc::new(EndpointInner {
              svcs: self.svcs,
              discovery_services: self.discovery_services,
