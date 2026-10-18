@@ -41,12 +41,12 @@ covers differs.
 
 A namespace holds four kinds of keys:
 
-| Key            | Holds                                                                                                                         |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `v14/commit`   | The commit record: the version, the epoch, the size, the log since the last checkpoint (its tail inline, the rest naming stored values), the host's effects. |
+| Key            | Holds                                                                                                                                                                 |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v14/commit`   | The commit record: the version, the epoch, the size, the log since the last checkpoint (its tail inline, the rest naming stored values), the host's effects.          |
 | `v14/log/<n>`  | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, named once acknowledged, deleted once no record names it. |
-| `v14/page/<n>` | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                     |
-| `v14/hint`     | Advisory: pages a cold open should fetch. Never needed for correctness.                                                       |
+| `v14/page/<n>` | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                             |
+| `v14/hint`     | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                               |
 
 **Read rule.** Page _n_ is its latest image in the record's log, else
 `page/<n>`, else zeros.
@@ -194,8 +194,7 @@ acknowledged work when a later step fails.
 3. **Cold opens prefetch.** The engine reads one dependent page at a time, so
    without warm cache pages each B-tree level of a query would cost a round
    trip. An owner whose cache holds no pages of the record's epoch fetches,
-   alongside replay, a database of at most `prefetch_pages` pages (default
-   16) whole, or else the pages the hint lists. Pages the log holds are
+   alongside replay, a database of at most `prefetch_pages` pages (default 16) whole, or else the pages the hint lists. Pages the log holds are
    dropped from the prefetch; the log wins as always.
 
 There is nothing to confirm or repair: the record read is durable, and
@@ -231,13 +230,13 @@ stale. A stale reader reads again, in a new session.
 A crash anywhere leaves a durable record, and replay of its log reads
 correctly whatever else survived.
 
-| Interrupted step           | State afterwards                                | Recovery                                                 |
-| -------------------------- | ----------------------------------------------- | -------------------------------------------------------- |
-| Stored segment put         | Present or absent; no record names it           | Ignored; the next save reuses its number                 |
-| Record put                 | Old or new record; both valid                   | Open reads whichever is durable                          |
+| Interrupted step            | State afterwards                                     | Recovery                                                 |
+| --------------------------- | ---------------------------------------------------- | -------------------------------------------------------- |
+| Stored segment put          | Present or absent; no record names it                | Ignored; the next save reuses its number                 |
+| Record put                  | Old or new record; both valid                        | Open reads whichever is durable                          |
 | Checkpoint page or hint put | Old or new image, under a record whose log covers it | The log replays over it; the next save checkpoints again |
-| Checkpoint record put      | Old record (log still covers the pages) or new  | Either is valid                                          |
-| Garbage delete             | Segment present or absent; no record names it   | Deleted again by the next save                           |
+| Checkpoint record put       | Old record (log still covers the pages) or new       | Either is valid                                          |
+| Garbage delete              | Segment present or absent; no record names it        | Deleted again by the next save                           |
 
 ## Engine integration
 
@@ -351,13 +350,13 @@ one-thread runtime of its own. It is the only background work.
 
 ## Costs
 
-| Operation                            | Round trips                                                  | Mutations                                                                                 |
-| ------------------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| Operation                            | Round trips                                                                         | Mutations                                                                                                                                                                            |
+| ------------------------------------ | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Save                                 | 1; 2 for a large transaction, or a seal without a cache; 2 more when it checkpoints | The record (its inline tail rewritten); a seal now and then; a large transaction's segments; the garbage's deletes; when the log is long, every logged page, the hint and the record |
-| SQL commit with `Durability::Commit` | Same as a save                                               | Same as a save                                                                            |
-| Open, with cache                     | 1, plus 1 if the log names stored values the cache lacks      | None                                                                                      |
-| Cold open                            | 1, then the hinted pages (or a small database whole) and stored values together | None                                                                     |
-| Cold page read                       | 1 get; sequential reads fetch up to 64 ahead                 | None                                                                                      |
+| SQL commit with `Durability::Commit` | Same as a save                                                                      | Same as a save                                                                                                                                                                       |
+| Open, with cache                     | 1, plus 1 if the log names stored values the cache lacks                            | None                                                                                                                                                                                 |
+| Cold open                            | 1, then the hinted pages (or a small database whole) and stored values together     | None                                                                                                                                                                                 |
+| Cold page read                       | 1 get; sequential reads fetch up to 64 ahead                                        | None                                                                                                                                                                                 |
 
 Each page is written twice, once to the log (compressed against its previous
 image, and rewritten with the record until a checkpoint) and once at

@@ -24,13 +24,13 @@ filtered by each custom entry point. The page compression target also writes
 
 ## Targets
 
-| Target             | Coverage                                                                                                                                                                    | Evidence                                             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `amplification`    | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                                               | [AMPLIFICATION_RESULTS.md](AMPLIFICATION_RESULTS.md) |
-| `page_compression` | Paired Raw/LZ4 on repetitive, JSON and random payloads; isolated codec timing                                                                                               | [COMPRESSION_RESULTS.md](COMPRESSION_RESULTS.md)     |
-| `small_databases`  | Tiny databases, index counts, save grouping and a larger control                                                                                                            | `results/small_databases.csv`                        |
-| `cache_cpu`        | Process-wide memory and disk cache by memory size, encoded versus decoded: misses, round trips, allocations and CPU time                                                    | [CACHE_RESULTS.md](CACHE_RESULTS.md)                 |
-| `log_shipping`     | The commit record by checkpoint policy and owner cache, in critical-path round trips, against the recorded v13 format (`results/log-shipping-v13.csv`)                       | [LOG_RESULTS.md](LOG_RESULTS.md)                     |
+| Target             | Coverage                                                                                                                                               | Evidence                                             |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
+| `amplification`    | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                          | [AMPLIFICATION_RESULTS.md](AMPLIFICATION_RESULTS.md) |
+| `page_compression` | Paired Raw/LZ4 on repetitive, JSON and random payloads; isolated codec timing                                                                          | [COMPRESSION_RESULTS.md](COMPRESSION_RESULTS.md)     |
+| `small_databases`  | Tiny databases, index counts, save grouping and a larger control                                                                                       | `results/small_databases.csv`                        |
+| `cache_cpu`        | Process-wide memory and disk cache by memory size, encoded versus decoded: misses, round trips, allocations and CPU time                               | [CACHE_RESULTS.md](CACHE_RESULTS.md)                 |
+| `log_shipping`     | The commit record by checkpoint policy and owner cache, in critical-path round trips, against the recorded v13 format (`results/log-shipping-v13.csv`) | [LOG_RESULTS.md](LOG_RESULTS.md)                     |
 
 All SQL result checks remain active in release builds. Successful writes are
 reopened and verified. The analyzers check repeat agreement, complete workload

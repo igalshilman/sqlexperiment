@@ -6,29 +6,29 @@ discovery. Storage is assumed reliable (a value reads back as written), so
 pages have no checksums; decoding checks structure and the bounds below. A log
 segment's zstd frame carries one.
 
-| Key                                   | Value                                                 |
-| ------------------------------------- | ----------------------------------------------------- |
-| `v14/commit`                          | Commit record, with the log; absent until the first   |
+| Key                                   | Value                                                                   |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `v14/commit`                          | Commit record, with the log; absent until the first                     |
 | `v14/log/<16-digit hex number>`       | Stored log value: segments, sealed or of a large transaction; immutable |
-| `v14/page/<16-digit hex page number>` | Checkpointed page, overwritten in place               |
-| `v14/hint`                            | Working-set hint; advisory, may be absent or stale    |
+| `v14/page/<16-digit hex page number>` | Checkpointed page, overwritten in place                                 |
+| `v14/hint`                            | Working-set hint; advisory, may be absent or stale                      |
 
 The commit record is the only key whose write commits. Integers are LEB128
 varints unless stated otherwise.
 
 ## Commit record
 
-| Field             | Encoding                                                                         |
-| ----------------- | -------------------------------------------------------------------------------- |
-| Magic             | `SC14`                                                                           |
-| Version           | Transactions ever committed; at most 2^62                                        |
-| Epoch             | Checkpoints ever recorded; at most 2^62                                          |
-| Database length   | In 512-byte units, after the log; at most 2^44 bytes                             |
-| Next segment      | The number the next stored value gets; at most 2^62                              |
+| Field             | Encoding                                                                                                               |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Magic             | `SC14`                                                                                                                 |
+| Version           | Transactions ever committed; at most 2^62                                                                              |
+| Epoch             | Checkpoints ever recorded; at most 2^62                                                                                |
+| Database length   | In 512-byte units, after the log; at most 2^44 bytes                                                                   |
+| Next segment      | The number the next stored value gets; at most 2^62                                                                    |
 | Garbage           | Count, then ascending numbers, each from the one before: stored values no transaction names, to delete; below the next |
-| Effects           | Length (at most 1 MiB), then the host's bytes, opaque here                       |
-| Transaction count | At most the version, and 2^20                                                    |
-| Transactions      | Each: its database length in 512-byte units, its part count, then its parts      |
+| Effects           | Length (at most 1 MiB), then the host's bytes, opaque here                                                             |
+| Transaction count | At most the version, and 2^20                                                                                          |
+| Transactions      | Each: its database length in 512-byte units, its part count, then its parts                                            |
 
 A part is `0`, a length and an inline segment (at most 1 MiB), or `1`, the
 number of a stored value (below the next segment, not in the garbage) and the

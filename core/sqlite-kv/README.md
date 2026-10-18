@@ -95,11 +95,11 @@ pages a checkpoint wrote) is ignored, or covered by the log.
 **What a crash leaves.** Interrupting any step leaves a state the next open
 reads correctly:
 
-| Interrupted                 | Result                                                  |
-| --------------------------- | ------------------------------------------------------- |
-| A commit                    | Either all of the transaction or none of it             |
-| A checkpoint                | Pages hold old or new images; the log replays over them |
-| A deletion of old segments  | Repeated by a later save                                |
+| Interrupted                | Result                                                  |
+| -------------------------- | ------------------------------------------------------- |
+| A commit                   | Either all of the transaction or none of it             |
+| A checkpoint               | Pages hold old or new images; the log replays over them |
+| A deletion of old segments | Repeated by a later save                                |
 
 **What it relies on.**
 
