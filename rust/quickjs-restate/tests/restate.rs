@@ -1,12 +1,14 @@
 //! The services against a real Restate server (RESTATE_SERVER, or the one
 //! `make restate-server` gets): `make test-qjs-restate`. Ignored by a plain
 //! `cargo test`, which has no server.
+use quickjs_durable::{Programs, Runtime};
 use restate_sdk::prelude::*;
 use serde_json::{Value, json};
 use std::{
     net::TcpListener,
     path::PathBuf,
     process::{Child, Command},
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -81,7 +83,22 @@ where
     }
 }
 
-/// Serve the services, and register them with the server.
+/// The test programs: `counter` calls `Doubler`, `failing` throws.
+fn programs() -> Arc<Programs> {
+    static PROGRAMS: OnceLock<Arc<Programs>> = OnceLock::new();
+    PROGRAMS
+        .get_or_init(|| {
+            let runtime = Arc::new(Runtime::new().unwrap());
+            let programs = Programs::new(runtime)
+                .compile("counter", COUNTER)
+                .and_then(|p| p.compile("failing", FAILING))
+                .unwrap();
+            Arc::new(programs)
+        })
+        .clone()
+}
+
+/// Serve the programs and `Doubler`, and register them with the server.
 async fn serve() -> u16 {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
@@ -92,8 +109,7 @@ async fn serve() -> u16 {
         .local_addr()
         .unwrap()
         .port();
-    let endpoint = quickjs_restate::bind(Endpoint::builder())
-        .unwrap()
+    let endpoint = quickjs_restate::bind(Endpoint::builder(), &programs())
         .bind(Doubler)
         .build();
     tokio::spawn(
@@ -166,56 +182,26 @@ async fn runs_wait_on_rpcs_and_timers_and_share_their_scope() {
     let _server = server().await;
     serve().await;
 
-    let (status, _) = call(
-        "JsScope/alice/register",
-        json!({"id": "counter", "source": COUNTER}),
-    )
-    .await;
-    assert_eq!(status, 200);
-    let (status, first) = call(
-        "Js/run",
-        json!({"scope": "alice", "app": "counter", "input": 20}),
-    )
-    .await;
+    let (status, first) = call("counter/alice/run", json!(20)).await;
     assert_eq!(
         (status, first),
         (200, json!({"n": 20, "doubled": 40, "slept": true}))
     );
-    let (_, second) = call(
-        "Js/run",
-        json!({"scope": "alice", "app": "counter", "input": 1}),
-    )
-    .await;
+    let (_, second) = call("counter/alice/run", json!(1)).await;
     assert_eq!(second, json!({"n": 21, "doubled": 42, "slept": true}));
 
-    // Another scope has its own applications and KV.
-    let (status, _) = call(
-        "Js/run",
-        json!({"scope": "bob", "app": "counter", "input": 1}),
-    )
-    .await;
-    assert_eq!(status, 500, "bob has no counter");
-    call(
-        "JsScope/bob/register",
-        json!({"id": "counter", "source": COUNTER}),
-    )
-    .await;
-    let (_, bob) = call(
-        "Js/run",
-        json!({"scope": "bob", "app": "counter", "input": 1}),
-    )
-    .await;
+    // Another scope has a KV of its own.
+    let (_, bob) = call("counter/bob/run", json!(1)).await;
     assert_eq!(bob, json!({"n": 1, "doubled": 2, "slept": true}));
 
     // An application's error is the run's terminal error.
-    call(
-        "JsScope/alice/register",
-        json!({"id": "failing", "source": FAILING}),
-    )
-    .await;
-    let (status, error) = call("Js/run", json!({"scope": "alice", "app": "failing"})).await;
+    let (status, error) = call("failing/alice/run", Value::Null).await;
     assert_eq!(status, 500);
     assert!(error.to_string().contains("RangeError: no luck"), "{error}");
+
+    // There is no program to run but those served.
+    let (status, _) = call("missing/alice/run", Value::Null).await;
+    assert_eq!(status, 404);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -223,30 +209,18 @@ async fn runs_wait_on_rpcs_and_timers_and_share_their_scope() {
 async fn a_turn_that_crashes_after_its_commit_dispatches_on_the_retry() {
     let _server = server().await;
     serve().await;
-    call(
-        "JsScope/carol/register",
-        json!({"id": "counter", "source": COUNTER}),
-    )
-    .await;
 
     // Every turn of this run commits, then crashes: the start (the RPC is due),
     // the RPC's completion (the timer is due), and the timer's.
     quickjs_restate::faults::crash_after_commit(3);
-    let (status, run) = call(
-        "Js/run",
-        json!({"scope": "carol", "app": "counter", "input": 5}),
-    )
-    .await;
+    let (status, run) = call("counter/carol/run", json!(5)).await;
     assert_eq!(
         (status, run),
         (200, json!({"n": 5, "doubled": 10, "slept": true}))
     );
+    assert_eq!(quickjs_restate::faults::pending(), 0);
 
     // The KV write of the run's first attempt, once.
-    let (_, again) = call(
-        "Js/run",
-        json!({"scope": "carol", "app": "counter", "input": 0}),
-    )
-    .await;
+    let (_, again) = call("counter/carol/run", json!(0)).await;
     assert_eq!(again["n"], json!(5));
 }
