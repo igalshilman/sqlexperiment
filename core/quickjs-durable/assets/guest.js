@@ -152,8 +152,10 @@
     },
     inspect() {
       if (!rootOutcome && pending.size === 0) rootOutcome = failure(new Error('Execution stalled: no durable wakeup'));
-      // Drain losing races and fire-and-forget operations before terminal state.
-      const status = pending.size ? 'waiting' : rootOutcome.ok ? 'completed' : 'failed';
+      // The run ends when main settles: requests still pending are dropped,
+      // and their continuations never run.
+      if (rootOutcome) pending.clear();
+      const status = !rootOutcome ? 'waiting' : rootOutcome.ok ? 'completed' : 'failed';
       return JSON.stringify({
         pending: [...pending.values()].map((x) => x.operation),
         nextOperation,

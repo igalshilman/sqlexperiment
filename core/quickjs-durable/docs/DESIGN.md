@@ -180,13 +180,14 @@ State = {
 ```
 
 After draining jobs, a root still unsettled with no pending request is a failed
-"Execution stalled: no durable wakeup" outcome. With any pending request, status
-is waiting even if the root has settled. Otherwise status follows root success
-or failure. Thus losing `Promise.race` branches and ignored promises drain
-with full JavaScript semantics before the run is terminal: their continuations
-are application code. The answer is known earlier: `outcome` is present from
-the turn the root settles, while status is still waiting, and an embedding
-replies to its caller then. No cancellation or detached-effect lifetime exists.
+"Execution stalled: no durable wakeup" outcome. Status is waiting until the root
+settles, then follows its success or failure: **the run ends when `main`
+settles**, as a request handler does, not when every promise has (as a Node.js
+process would). Requests still pending then, such as a losing `Promise.race`
+branch or an ignored promise, are dropped with the pending map: their results
+are never delivered and their continuations never run, and the engine abandons
+the run's outstanding effects in the terminal turn's transaction. A result that
+arrives later finds no pending request and changes nothing.
 When pausing with queued jobs, create the resume request **before** inspecting
 state so the queued continuation is not misclassified as stalled.
 
@@ -717,19 +718,19 @@ budget counts Ready requests, not JS statements or elapsed time. A batch can
 exceed it. A checkpoint may preserve queued continuations of already-resolved
 promises; the committed Resume makes them schedulable after a crash.
 
-| Situation                                   | Action                                                               |
-| ------------------------------------------- | -------------------------------------------------------------------- |
-| Local KV/custom result                      | Deliver and continue in the same turn unless budget reached          |
-| Rust operation future awaiting I/O          | Retain VM, transaction and tracker; do not capture                   |
-| Durable RPC/timer wait, no runnable jobs    | Capture and commit pending effect identities                         |
-| Host budget reached                         | Finish batch, stage ready Resume, capture before queued jobs run     |
-| Root settled, no pending requests           | Capture terminal state; publish only after commit                    |
-| Infinite synchronous job or microtask chain | Fuel traps; the run ends failed. No native-stack preemption snapshot |
+| Situation                                   | Action                                                                  |
+| ------------------------------------------- | ----------------------------------------------------------------------- |
+| Local KV/custom result                      | Deliver and continue in the same turn unless budget reached             |
+| Rust operation future awaiting I/O          | Retain VM, transaction and tracker; do not capture                      |
+| Durable RPC/timer wait, no runnable jobs    | Capture and commit pending effect identities                            |
+| Host budget reached                         | Finish batch, stage ready Resume, capture before queued jobs run        |
+| Root settled                                | Capture terminal state, dropping pending requests; publish after commit |
+| Infinite synchronous job or microtask chain | Fuel traps; the run ends failed. No native-stack preemption snapshot    |
 
 Any available effect can be delivered next, not just Resume. If an RPC arrives
 before Resume, its turn also drains already queued jobs. More than one Resume
 can coexist; each remains a pending effect until consumed, and none replays an
-old host operation. Final status must still wait for all pending IDs to drain.
+old host operation. Once the root settles, the run is final, whatever is pending.
 
 ## 7. SQLite validation host
 
@@ -1060,9 +1061,8 @@ checkpoint to drain the last continuation and record the terminal outcome.
 For `Promise.all([rpcA(), rpcB()])`, the first checkpoint registers both requests
 atomically. Completing B removes/consumes only B; `handled` prevents re-emitting A.
 The next image retains B's resolved value while waiting for A. Completing A then
-returns values in application array order. For Promise.race, the winner's
-outcome is published in the turn it settles; the losing effect still drains, and
-its continuation runs, before the run is completed.
+returns values in application array order. For Promise.race, the run completes in
+the turn the winner settles it; the losing effect is abandoned.
 
 ## 10. Restate binding and implementation acceptance
 
@@ -1075,8 +1075,7 @@ and uses its explicit durable recovery path to call complete.
 Ship programs with their golden dumps, retain initial admission until first commit,
 and include checkpoint storage, KV changes, effect registration and consumption
 in the same host transaction. Scope selection and RPC authorization belong to
-the host. Publish only committed terminal status; outcome alone may exist while
-waiting. Choose an explicit concurrency policy for different invocations sharing
+the host. Publish only committed terminal status. Choose an explicit concurrency policy for different invocations sharing
 a scope.
 
 ### 10.1. The Restate binding
@@ -1098,9 +1097,9 @@ Rust SDK with journal replay off:
   the original invocation, within the callee's idempotency retention. Nothing
   is replayed, and the host keeps no results: `effects` only checks that a
   delivered ID is pending.
-- `run` returns once `outcome` appears (§2.2). Requests still outstanding then
-  are finished by a `drain` invocation of the same object, which recovers the
-  run and continues it until its status is terminal.
+- `run` returns once `main` settles, when the run ends (§2.2): requests still
+  outstanding are dropped, and a call already made finishes at its callee
+  unobserved.
 
 An implementation can be built and accepted in this order:
 

@@ -437,7 +437,14 @@ impl<K: Transaction> Engine<K> {
             )
             .await?;
         let (capture, state) = match turn {
-            Turn::Captured(capture, state) => (capture, state),
+            Turn::Captured(capture, state) => {
+                // The run ends when main settles: its requests still
+                // outstanding are dropped, results and all.
+                if state.status != Status::Waiting {
+                    self.kv.abandon(run).await?;
+                }
+                (capture, state)
+            }
             Turn::Trapped(message) => {
                 let image = match (current, first) {
                     (Some(c), _) => c.image,

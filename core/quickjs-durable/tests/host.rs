@@ -523,26 +523,27 @@ fn rpc_delivery_before_resume_preserves_jobs_and_multiple_wakeups() -> Result<()
             .all(|op| matches!(op, Operation::Resume { .. }))
     );
     let mut e = make(e.into_storage()?);
-    let waiting = futures_executor::block_on(e.complete(
+    let done = futures_executor::block_on(e.complete(
         "r",
         second.state.pending[1].id(),
         Outcome::success(Value::Null),
         1002,
     ))?;
-    assert_eq!(waiting.state.status, Status::Waiting);
+    // Main has settled: the run ends, its other wakeup dropped.
+    assert_eq!(done.state.status, Status::Completed);
     assert_eq!(
-        waiting.state.outcome,
+        done.state.outcome,
         Some(Outcome::success(json!({"n":7,"remote":42})))
     );
+    assert!(done.state.pending.is_empty());
     let mut e = make(e.into_storage()?);
-    let done = futures_executor::block_on(e.complete(
+    let late = futures_executor::block_on(e.complete(
         "r",
         first.state.pending[1].id(),
         Outcome::success(Value::Null),
         1003,
     ))?;
-    assert_eq!(done.state.status, Status::Completed);
-    assert_eq!(done.state.outcome, waiting.state.outcome);
+    assert_eq!(late.checkpoint_id, done.checkpoint_id);
     assert_eq!(e.storage().state["n"], 8); // queued continuation ran exactly once
     assert!(e.storage().effects.is_empty());
     Ok(())

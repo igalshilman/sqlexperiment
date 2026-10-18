@@ -228,32 +228,31 @@ fn promise_race_all_any_settled_and_errors() -> Result<()> {
 }
 
 #[test]
-fn a_race_answers_early_and_drains_its_loser() -> Result<()> {
+fn a_run_ends_when_main_settles() -> Result<()> {
     let mut e = engine(
         "async function main(){const a=durable.call('a'), b=durable.call('b').catch(()=>durable.call('after'));return await Promise.race([a,b]);}",
     );
     let start = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
-    let waiting = futures_executor::block_on(e.complete(
+    assert_eq!(start.state.pending.len(), 2);
+    let done = futures_executor::block_on(e.complete(
         "r",
         start.state.pending[0].id(),
         Outcome::success(7),
         2,
     ))?;
-    assert_eq!(waiting.state.status, Status::Waiting);
-    assert_eq!(value(&waiting.state.outcome), 7);
-    let lost = futures_executor::block_on(e.complete(
+    // The loser is dropped: nothing waits on it, and its continuation never runs.
+    assert_eq!(done.state.status, Status::Completed);
+    assert_eq!(value(&done.state.outcome), 7);
+    assert!(done.state.pending.is_empty());
+    assert!(e.storage().effects.is_empty(), "no request is left outstanding");
+    // Its late result changes nothing.
+    let late = futures_executor::block_on(e.complete(
         "r",
         start.state.pending[1].id(),
         Outcome::failure("Error", "loser"),
         3,
     ))?;
-    // The loser's continuation is application code: it runs, and its request too.
-    assert_eq!(lost.state.status, Status::Waiting);
-    assert_eq!(value(&lost.state.outcome), 7);
-    let after = lost.state.pending[0].id().to_owned();
-    let done = futures_executor::block_on(e.complete("r", &after, Outcome::success(0), 4))?;
-    assert_eq!(done.state.status, Status::Completed);
-    assert_eq!(value(&done.state.outcome), 7);
+    assert_eq!(late.checkpoint_id, done.checkpoint_id);
     Ok(())
 }
 
