@@ -23,7 +23,7 @@ const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
 /// The runtime's version: an image restores only on the runtime that made it.
 /// Bump it with anything an image depends on: the Wasm, the bridge
 /// (`guest.js`), the limits above, the imports' behavior, the VM metadata.
-pub(crate) const VERSION: u64 = 1;
+pub(crate) const VERSION: u64 = 2;
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.
@@ -558,29 +558,43 @@ impl Vm {
     fn snapshot(&mut self) -> Result<Image> {
         // Only golden registration needs a complete copy of guest memory.
         let meta = self.metadata()?;
-        let memory = self.memory.data(&self.store).to_vec();
+        let memory = self.memory.data_mut(&mut self.store);
+        memory[..meta.stack as u32 as usize].fill(0);
+        let memory = memory.to_vec();
         ensure!(memory.len() <= MAX_MEMORY, "Image exceeds limit");
         Ok(Image { meta, memory })
     }
+    /// What changed since `base`, with the stack below its pointer zeroed
+    /// first: between calls no frame is live there, and the leftovers of the
+    /// turn's calls would otherwise be saved as changes.
     pub(crate) fn capture(&mut self, base: &Image) -> Result<Capture> {
         let meta = self.metadata()?;
-        let memory = self.memory.data(&self.store);
+        let stack = meta.stack as u32 as usize;
+        let memory_len = self.memory.data_size(&self.store);
         ensure!(
-            memory.len() <= MAX_MEMORY && memory.len() >= base.memory.len(),
+            memory_len <= MAX_MEMORY && memory_len >= base.memory.len() && stack <= memory_len,
             "Invalid captured memory size"
         );
         #[cfg(not(feature = "full-scan"))]
+        let candidates: Vec<usize> = self
+            .dirty
+            .data(&self.store)
+            .iter()
+            .take(memory_len / PAGE)
+            .enumerate()
+            .filter_map(|(index, bit)| (*bit != 0).then_some(index))
+            .collect();
+        #[cfg(feature = "full-scan")]
+        let candidates: Vec<usize> = (0..memory_len / PAGE).collect();
+        let memory = self.memory.data_mut(&mut self.store);
+        for &index in candidates.iter().take_while(|&&index| index * PAGE < stack) {
+            memory[index * PAGE..((index + 1) * PAGE).min(stack)].fill(0);
+        }
+        let memory = self.memory.data(&self.store);
+        #[cfg(all(feature = "verify-dirty", not(feature = "full-scan")))]
         let dirty = self.dirty.data(&self.store);
         let mut pages = Vec::new();
         let mut examined_pages = 0;
-        #[cfg(not(feature = "full-scan"))]
-        let candidates = dirty
-            .iter()
-            .take(memory.len() / PAGE)
-            .enumerate()
-            .filter_map(|(index, bit)| (*bit != 0).then_some(index));
-        #[cfg(feature = "full-scan")]
-        let candidates = 0..memory.len() / PAGE;
         for index in candidates {
             examined_pages += 1;
             let range = index * PAGE..(index + 1) * PAGE;
@@ -601,7 +615,7 @@ impl Vm {
         }
         Ok(Capture {
             meta,
-            memory_len: memory.len(),
+            memory_len,
             pages,
             examined_pages,
         })
