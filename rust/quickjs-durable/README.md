@@ -64,7 +64,20 @@ restore ─▶ deliver one result ─▶ run until the JavaScript waits ─▶ c
 - **No replay**: a retry restores the last commit and waits again on its
   requests under the same idempotency keys, attaching to calls already made.
 
-The cost: against a regular TypeScript object, a run that waits is ~6x slower
-and writes ~50x more per wait. Details, formats and measurements:
-[docs/DESIGN.md](docs/DESIGN.md). Tests: `make test-qjs` (with a Restate
-server), `make lint-qjs`.
+## What it costs
+
+Against the same workloads as regular TypeScript virtual objects (SDK 1.17.3,
+Node 22), one restate-server 1.7.13 on 4 vCPUs:
+
+| Workload                                      | TypeScript       | QuickJS           |
+| --------------------------------------------- | ---------------- | ----------------- |
+| KV read and write, a new key each, 32 at once | 520/s, p50 57 ms | 220/s, p50 140 ms |
+| KV read and write, one key, one at a time     | p50 8 ms         | p50 64 ms         |
+| One wait (a 1 ms timer), one run at a time    | 4 ms             | 68 ms             |
+| 5 waits, 32 runs at once                      | 243/s            | 40/s              |
+| `Promise.all` of 10 calls, 8 at once          | 47/s             | 8.3/s             |
+| Primes below 100,000                          | 60 ms            | 1.8 s             |
+| Written to Restate per wait                   | ~1 KiB           | ~55 KiB           |
+
+Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md). Tests:
+`make test-qjs` (with a Restate server), `make lint-qjs`.
