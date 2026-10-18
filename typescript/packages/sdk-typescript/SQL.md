@@ -121,9 +121,10 @@ its own `SQLITE_KV_CACHE_FILE` and restart it after recreating a cluster.
 
 ## How it works
 
-**State access.** A get is a state read, from the runtime unless this attempt
-wrote the key (lazy state, so an invocation does not start by loading every
-page). A set or clear is a state write, and returns at once. The protocol
+**State access.** A get is a state read left out of the journal (protocol
+v8's ephemeral get), from the runtime unless this attempt wrote the key or
+the invocation started with it (lazy state, so an invocation does not start
+by loading every page). A set or clear is a state write, and returns at once. The protocol
 assumes nothing of their order: a write is stored once an empty `ctx.run`
 made after it resolves, and until then a crash may lose any of the writes
 before it, and keep the others. Each transaction is one write, of the commit

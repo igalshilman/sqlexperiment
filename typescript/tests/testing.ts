@@ -119,6 +119,11 @@ export function sqlAttempt({
       onRequest();
       return map.get(k) ?? null;
     },
+    // The store's reads, left out of the journal.
+    ephemeralStateGet: async (k: string) => {
+      onRequest();
+      return map.get(k) ?? null;
+    },
     set: (k: string, value: Uint8Array) => {
       check();
       map.set(k, Uint8Array.from(value));
