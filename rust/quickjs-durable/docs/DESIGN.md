@@ -838,13 +838,15 @@ SDK 1.17.3 on Node 22:
 | 5 waits, 32 runs at once                      | 220/s            | 155/s            |
 | `Promise.all` of 10 calls, 8 at once          | 47/s             | 27/s             |
 | Primes below 100,000                          | 53 ms            | 488 ms           |
-| Written to Restate by a run of 20 waits       | ~21 KiB          | ~70 KiB          |
+| Written to Restate by a run of 20 waits       | ~21 KiB          | ~56 KiB          |
 
 Rows vary by ~10% from run to run. Before the commit record and the live VM,
 the same rows were 220/s, 64 ms, 1.36 s, 40/s, 8.3/s, 1.8 s and 1.1 MiB;
-before the chain of batches, the run of 20 waits wrote 137 KiB. These rows
-predate compressing pages against their previous contents (§4) and zeroing
-dead bytes, which wrote 31-53% fewer bytes in `MemoryStore`. The Rust
+before the chain of batches, the run of 20 waits wrote 137 KiB, and ~70
+KiB before compressing pages against their previous contents (§4) and
+zeroing dead bytes; the throughput rows did not move with those (an A/B of
+both binaries on one server). Most of what is left is Restate's: a commit
+record and the journal per turn. The Rust
 SDK's server now sets `TCP_NODELAY`, which saved ~40 ms per round trip. One
 synchronous JavaScript job is still capped at about 10^8 Wasm instructions,
 and the interpreter runs compute-bound code ~10x slower than V8.

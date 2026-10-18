@@ -85,7 +85,7 @@ Node 22), one restate-server 1.7.13 on 4 vCPUs:
 | 5 waits, 32 runs at once                      | 220/s            | 155/s            |
 | `Promise.all` of 10 calls, 8 at once          | 47/s             | 27/s             |
 | Primes below 100,000                          | 53 ms            | 488 ms           |
-| Written to Restate by a run of 20 waits       | ~21 KiB          | ~70 KiB          |
+| Written to Restate by a run of 20 waits       | ~21 KiB          | ~56 KiB          |
 
 Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md). Tests:
 `make test-qjs` (with a Restate server), `make lint-qjs`.
