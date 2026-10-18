@@ -126,14 +126,18 @@ request(fields):
     require runId is initialized
     id = runId + "/" + decimal(nextOperation)
     nextOperation += 1
-    promise = new Promise((resolve, reject) =>
-        pending.set(id, {operation: {id, ...fields}, resolve, reject}))
-    attach a no-op rejection handler to promise
-    return promise
+    issued.append({id, ...fields})
+    return new Promise((resolve, reject) => pending.set(id, {resolve, reject}))
 ```
 
-The handler avoids unhandled rejections from losing races; the original promise
-still rejects for application consumers. Creating a request performs no host I/O.
+The guest keeps only each request's resolvers. The request itself goes to the
+host at the next `inspect()` and is forgotten: the host keeps it pending, in
+the commit, so a big input made and sent in one turn is freed in that turn and
+never saved with the heap (a turn sending a 39 KiB request saved 6 KiB of
+pages, against 23 KiB when the guest kept it). A request that loses a race may
+reject later with no handler: no rejection tracker is installed, so that is
+not an error, and no handler is attached to every request (one cost ~230 B a
+turn). Creating a request performs no host I/O.
 The operation counter covers local KV requests and internal wakeups as well as
 external effects. IDs are stable across restore. Uncommitted IDs may be reused
 because uncommitted requests must never have dispatched.
@@ -146,13 +150,13 @@ The internal bridge exposes five host hooks, not application API methods:
 | `start(inputJson)`   | Queue `main(input, durable)` through `Promise.resolve().then(...)`; capture its normalized root outcome              |
 | `deliver(eventJson)` | Advance logical time monotonically; find and remove the pending entry; resolve/reject its promise; do not drain jobs |
 | `pause()`            | Create an internal `{kind:"resume"}` request through the same ID/map mechanism                                       |
-| `inspect()`          | Return JSON state with descriptors only, excluding resolvers                                                         |
+| `inspect()`          | Return the requests issued since the last `inspect()`, then forget them; and where the run stands                    |
 
 `inspect()` returns:
 
 ```text
-State = {
-    pending: Operation[],       // insertion/issue order
+Report = {
+    issued: Operation[],        // issue order, since the last inspect()
     nextOperation: unsigned integer,
     now: milliseconds,
     status: "waiting" | "completed" | "failed",
@@ -166,8 +170,8 @@ settles, then follows its success or failure: **the run ends when `main`
 settles**, as a request handler does, not when every promise has (as a Node.js
 process would). Requests still pending then, such as a losing `Promise.race`
 branch or an ignored promise, are dropped with the pending map: their results
-are never delivered and their continuations never run; the terminal commit
-has no pending request. A result that arrives later changes nothing.
+are never delivered and their continuations never run; the terminal report
+issues nothing, and the terminal commit has no pending request. A result that arrives later changes nothing.
 When pausing with queued jobs, create the resume request **before** inspecting
 state so the queued continuation is not misclassified as stalled.
 
@@ -704,29 +708,29 @@ All native calls below return before the run awaits the store:
 
 ```text
 begin: reset fuel, set logical time
-seen = IDs pending in the last commit, or empty for a start
+pending = the last commit's pending requests, less those delivered
 loop:
     drain all QuickJS jobs
-    state = inspect bridge
+    report = inspect bridge
+    if the run settled: break with no pending request
     answered = false
-    for op in state.pending, in issue order, not in seen:
-        add op.id to seen
+    for op in report.issued, in issue order:
         if op is a KV request:
             get: the turn's own write or delete of the key, else kv/<key>
             set/delete: record it in the turn's writes
             deliver the result, with this turn's logical time
             answered = true
-        // other requests stay pending: effects for the host
-    if not answered: break with state
+        else: append op to pending              // an effect for the host
+    if not answered: break
     if the turn has spent half its fuel:
         invoke internal pause(), then inspect without draining jobs
-        require the last pending request is a Resume
-        break with that state
+        require it issued exactly one Resume; append it to pending
+        break
 capture (§5.3) and commit (§7)
 ```
 
-Pre-populating `seen` keeps effects already issued from being issued again
-when a sibling finishes. A turn continues through local requests until only
+As the guest reports each request once, effects already issued are never
+issued again when a sibling finishes. A turn continues through local requests until only
 effects remain, the run settles, or it has spent half its fuel: one local KV
 await costs roughly 300,000 fuel (more with write barriers), so a few hundred
 sequential awaits would otherwise exhaust a turn, trap, and trap again on
@@ -811,8 +815,8 @@ commit, a repeated delivery is a no-op and another attempt returns the outcome.
 ### 8.2. Fan-out
 
 For `Promise.all([rpcA(), rpcB()])`, the first commit has both pending.
-Delivering B commits a turn that keeps A pending; `seen` keeps A from being
-issued again. Delivering A then returns values in array order. For
+Delivering B commits a turn that keeps A pending, and A is not issued again:
+the guest reported it once. Delivering A then returns values in array order. For
 `Promise.race`, the run completes in the turn the winner settles it; the loser
 is dropped.
 
