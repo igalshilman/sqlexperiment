@@ -66,8 +66,9 @@ A namespace holds:
 
 - **The commit record** (`commit`): the database's version and size, and the
   log since the last checkpoint: each transaction's changed pages, compressed
-  against their previous images. A large transaction's log is stored at
-  `log/<n>` keys, which the record names.
+  against their previous images. The record holds the log's last few KiB
+  inline; older parts, and large transactions, are stored at `log/<n>` keys,
+  which the record names.
 - **Pages** (`page/<n>`): each page as of the last checkpoint, overwritten in
   place.
 
@@ -77,7 +78,9 @@ page key.
 **Commit.** A transaction is one put: the record, with the log so far plus
 this transaction. When that put is acknowledged, the transaction is durable;
 before it, it doesn't exist. A large transaction's segments are put first,
-and the record names them only once they are acknowledged.
+and the record names them only once they are acknowledged. Once the inline
+log outgrows a few KiB, a commit also puts it, sealed, into a stored value,
+which the next commit names: so every commit rewrites a small record.
 
 **Checkpoint.** Once the log holds more than a few transactions, a save also
 copies the latest image of each page in it to its page key. Only once those

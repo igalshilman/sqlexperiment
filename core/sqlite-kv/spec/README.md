@@ -15,10 +15,15 @@ fault schedules at random, while this enumerates all of them up to a size.
   moves only after every request settles. Those in `Cached` keep an owner
   cache across their sessions (the record they saw, its epoch, their last
   commit and the epoch's pages) and lose it when they crash.
-- **Save.** One transaction, inline in the record or in a stored segment put
-  first; the record goes out once the segment is acknowledged, with the
+- **Save.** One transaction, inline in the record or in a stored value put
+  first; the record goes out once the value is acknowledged, with the
   garbage's deletes in the same round trip. One writer: a cached process
   commits only on its own last record.
+- **Seal.** A save may seal the record's inline transactions into a stored
+  value. A cached process puts it with its record, which lists it as garbage,
+  and keeps the acknowledged seal in its cache: its next commit names it (if
+  the record still lists it) and drops it from the garbage. A process without
+  a cache puts it first, and names it in that record if acknowledged.
 - **Checkpoint.** At any time a ready session's log is not empty: each page's
   latest image, then, once all are acknowledged, a record with an empty log at
   the next epoch, then the deletes of the stored segments no record names any
@@ -49,23 +54,26 @@ overlapping sessions within one process (reader marks), and deleted pages.
 - `ReadyReadsTheHistory`: a ready session reads the history at every moment,
   through its log, its cache and the page keys; no checkpoint, garbage
   collection or other owner exposes a stale page.
+- `NothingLeaks`: every stored value present is named by the durable record,
+  listed as its garbage, or at a number it has not allocated.
 
 ## Running
 
 ```sh
-spec/check.sh                 # MC.cfg, MCNoCache.cfg, MCMixed.cfg
-spec/check.sh MCDeep.cfg      # three transactions, three segments
+spec/check.sh                 # MC.cfg, MCNoCache.cfg, MCMixed.cfg, MCSeal.cfg
+spec/check.sh MCDeep.cfg      # three transactions, three values, two pages
 ```
 
 The script downloads `tla2tools.jar` (TLA+ tools 1.8.0) on first use and
 needs Java 11 or later.
 
-| Configuration   | Bounds                                                                        | Distinct states | Result       |
-| --------------- | ----------------------------------------------------------------------------- | --------------- | ------------ |
-| `MC.cfg`        | both processes cached; 2 pages, 2 processes, 2 transactions, 2 segments, 1 crash | 1,702,483       | No violation |
-| `MCNoCache.cfg` | as `MC.cfg`, no cache                                                         | 95,885          | No violation |
-| `MCMixed.cfg`   | as `MC.cfg`, one process cached and one not                                   | 854,074         | No violation |
-| `MCDeep.cfg`    | as `MCMixed.cfg`, 3 transactions, 3 segments                                  | 31,607,575      | No violation (10 minutes) |
+| Configuration   | Bounds                                                                            | Distinct states | Result       |
+| --------------- | --------------------------------------------------------------------------------- | --------------- | ------------ |
+| `MC.cfg`        | both processes cached; 2 pages, 2 processes, 2 transactions, 2 values, 1 crash    | 2,536,222       | No violation |
+| `MCNoCache.cfg` | as `MC.cfg`, no cache                                                             | 141,173         | No violation |
+| `MCMixed.cfg`   | as `MC.cfg`, one process cached and one not                                       | 1,285,307       | No violation |
+| `MCSeal.cfg`    | as `MCMixed.cfg`, 1 page, 3 transactions, 3 values: a seal and the commit naming it | 1,143,597       | No violation |
+| `MCDeep.cfg`    | as `MCMixed.cfg`, 3 transactions, 3 values                                        | DEEP            | DEEPRESULT   |
 
 The two processes of `MC.cfg` and `MCNoCache.cfg` are symmetric, so TLC
 checks one of each pair of mirrored states (`Symmetry`).
@@ -82,12 +90,18 @@ weak to trust:
 | The garbage is deleted with the checkpoint record, not after it        | `OpensReadTheHistory`  |
 | Open keeps cached pages of another epoch                               | `OpensReadTheHistory`  |
 | This owner's checkpoint keeps cached pages without writing its log's   | `ReadyReadsTheHistory` |
+| A cached process names its seal though the put was not acknowledged    | `OpensReadTheHistory`  |
+| A commit deletes the seal it names                                     | `OpensReadTheHistory`  |
+| A process without a cache names a seal whose put failed                | `OpensReadTheHistory`  |
+| A seal is put without listing it as garbage                            | `NothingLeaks`         |
 
-Two rules no bounded run breaks, as expected: the one-writer check guards
-sessions that overlap within one process, which the model leaves out; and a
-session may go on committing after a checkpoint record of unknown outcome,
-since ownership moves only once its sessions end, so no other process can
-have seen the epoch it might put again.
+Three rules no bounded run breaks: the one-writer check guards sessions that
+overlap within one process, which the model leaves out; a session may go on
+committing after a checkpoint record of unknown outcome, since ownership moves
+only once its sessions end, so no other process can have seen the epoch it
+might put again; and keeping a seal across another owner's record is masked by
+the check that the record still lists it as garbage (the code also drops the
+seal when the record is not the one this owner wrote).
 
 ## The code against the model
 

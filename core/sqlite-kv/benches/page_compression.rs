@@ -1,4 +1,5 @@
-//! Paired raw/LZ4 SQL traffic and isolated codec CPU measurements.
+//! Paired raw/compressed SQL traffic (the default codec, zstd) and isolated codec
+//! CPU measurements of every codec.
 //! All payloads are deterministic synthetic data; no network or replication model.
 use sqlite_kv::{
     PageCompression, Result, Session, StorageOptions,
@@ -14,6 +15,9 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+
+/// The codec compared with raw pages in SQL traffic: the default.
+const COMPRESSED: PageCompression = PageCompression::Zstd;
 
 #[derive(Clone, Copy, Debug)]
 enum Payload {
@@ -235,7 +239,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
         store.crash(&[]);
         // Read with the opposite write policy: stored codec tags must decide.
         let other = if sample.codec == PageCompression::Raw {
-            PageCompression::Lz4
+            COMPRESSED
         } else {
             PageCompression::Raw
         };
@@ -276,11 +280,12 @@ fn codec_bench(out: &mut impl Write, case: Case, pages: &[Vec<u8>], run: usize) 
         .collect();
     let iterations = 200;
     // Reverse order on alternate runs to reduce consistent ordering bias.
-    let policies = if run.is_multiple_of(2) {
-        [PageCompression::Raw, PageCompression::Lz4]
-    } else {
-        [PageCompression::Lz4, PageCompression::Raw]
-    };
+    let mut policies = [
+        PageCompression::Raw,
+        PageCompression::Lz4,
+        PageCompression::Zstd,
+    ];
+    policies.rotate_left(run % 3);
     for policy in policies {
         let encoded: Vec<_> = selected
             .iter()
@@ -354,7 +359,7 @@ fn main() -> Result<()> {
                 };
                 eprintln!("compression: {rows} rows / {bytes} bytes / {kind:?}");
                 let raw = baseline(case, PageCompression::Raw).await?;
-                let compressed = baseline(case, PageCompression::Lz4).await?;
+                let compressed = baseline(case, COMPRESSED).await?;
                 let raw_pages = pages(&raw).await?;
                 assert_eq!(
                     raw_pages,
@@ -364,9 +369,9 @@ fn main() -> Result<()> {
                 for run in 0..repeats {
                     codec_bench(&mut cpu, case, &raw_pages, run)?;
                     let policies = if run.is_multiple_of(2) {
-                        [PageCompression::Raw, PageCompression::Lz4]
+                        [PageCompression::Raw, COMPRESSED]
                     } else {
-                        [PageCompression::Lz4, PageCompression::Raw]
+                        [COMPRESSED, PageCompression::Raw]
                     };
                     for codec in policies {
                         let base = if codec == PageCompression::Raw {

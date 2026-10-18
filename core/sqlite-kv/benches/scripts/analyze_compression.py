@@ -30,7 +30,7 @@ for row in rows:
     groups[tuple(row[k] for k in DIMS)].append(row)
 expected = set(itertools.product(
     [("100", "64"), ("100", "512"), ("100", "9000"), ("10000", "256")],
-    ["Repetitive", "Json", "Random"], ["Raw", "Lz4"],
+    ["Repetitive", "Json", "Random"], ["Raw", "Zstd"],
     ["cold_pk", "range_10", "full_scan", "replace_payload", "ten_adjacent", "ten_scattered", "read_only_save"]))
 assert set(groups) == {(*size, payload, codec, op) for size, payload, codec, op in expected}
 summaries = {}
@@ -63,24 +63,24 @@ traffic = ["read_key_value_bytes", "mutation_key_value_bytes", "page_write_bytes
 for key, raw in summaries.items():
     if raw["codec"] != "Raw":
         continue
-    lz4 = summaries[(*key[:3], "Lz4", key[4])]
+    compressed = summaries[(*key[:3], "Zstd", key[4])]
     for metric in equal:
-        assert raw[metric] == lz4[metric], (key, metric)
+        assert raw[metric] == compressed[metric], (key, metric)
     for metric in traffic:
-        assert lz4[metric] <= raw[metric], (key, metric)
+        assert compressed[metric] <= raw[metric], (key, metric)
     out = {k: raw[k] for k in DIMS if k != "codec"}
     for metric in traffic:
         out[f"{metric}_raw"] = raw[metric]
-        out[f"{metric}_lz4"] = lz4[metric]
-        out[f"{metric}_reduction_pct"] = round(100 * (1 - lz4[metric] / raw[metric]), 4) if raw[metric] else ""
-    out["lz4_app_write_amplification"] = round(lz4["mutation_key_value_bytes"] / lz4["app_write_bytes"], 6) if lz4["app_write_bytes"] else ""
+        out[f"{metric}_zstd"] = compressed[metric]
+        out[f"{metric}_reduction_pct"] = round(100 * (1 - compressed[metric] / raw[metric]), 4) if raw[metric] else ""
+    out["zstd_app_write_amplification"] = round(compressed["mutation_key_value_bytes"] / compressed["app_write_bytes"], 6) if compressed["app_write_bytes"] else ""
     comparisons.append(out)
 write("page-compression-comparison.csv", comparisons)
 
 cpu_groups = defaultdict(list)
 for r in read("page-codec.csv"):
     cpu_groups[tuple(r[k] for k in ["rows", "payload_bytes", "payload", "codec"])].append(r)
-assert set(cpu_groups) == {(a, b, p, c) for a, b in [("100", "64"), ("100", "512"), ("100", "9000"), ("10000", "256")] for p in ["Repetitive", "Json", "Random"] for c in ["Raw", "Lz4"]}
+assert set(cpu_groups) == {(a, b, p, c) for a, b in [("100", "64"), ("100", "512"), ("100", "9000"), ("10000", "256")] for p in ["Repetitive", "Json", "Random"] for c in ["Raw", "Lz4", "Zstd"]}
 cpu = []
 for key, copies in cpu_groups.items():
     assert {r["run"] for r in copies} == {"0", "1", "2"} and len(copies) == 3, key
@@ -93,9 +93,9 @@ for key, copies in cpu_groups.items():
         out.update({f"{op}_ns_per_page_min": min(samples), f"{op}_ns_per_page_median": statistics.median(samples), f"{op}_ns_per_page_max": max(samples)})
     cpu.append(out)
 write("page-codec-summary.csv", cpu)
-print(f"Validated {len(rows)} SQL observations, {len(summaries)} configurations, {len(comparisons)} raw/LZ4 pairs; all three traffic repeats match.")
+print(f"Validated {len(rows)} SQL observations, {len(summaries)} configurations, {len(comparisons)} raw/zstd pairs; all three traffic repeats match.")
 print(f"Validated {len(cpu_groups) * 3} CPU samples; identical page selections and sizes across repeats.")
-print("Raw/LZ4 pairs have identical operation counts, commit record bytes and logical page counts; no encoded-traffic regressions.")
+print("Raw/zstd pairs have identical operation counts, commit record bytes and logical page counts; no encoded-traffic regressions.")
 for row in comparisons:
     if row["operation"] == "replace_payload" and (row["rows"], row["payload_bytes"]) in [("100", "64"), ("10000", "256")]:
-        print({k: row[k] for k in ["rows", "payload_bytes", "payload", "mutation_key_value_bytes_raw", "mutation_key_value_bytes_lz4", "mutation_key_value_bytes_reduction_pct"]})
+        print({k: row[k] for k in ["rows", "payload_bytes", "payload", "mutation_key_value_bytes_raw", "mutation_key_value_bytes_zstd", "mutation_key_value_bytes_reduction_pct"]})
