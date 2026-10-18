@@ -1,3 +1,4 @@
+use crate::heap;
 use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, State, VmMeta, fingerprint};
 use wasmtime::error::Context;
 use wasmtime::{
@@ -560,13 +561,17 @@ impl Vm {
         let meta = self.metadata()?;
         let memory = self.memory.data_mut(&mut self.store);
         memory[..meta.stack as u32 as usize].fill(0);
+        for range in heap::dead(memory).context("Unexpected heap layout")? {
+            memory[range].fill(0);
+        }
         let memory = memory.to_vec();
         ensure!(memory.len() <= MAX_MEMORY, "Image exceeds limit");
         Ok(Image { meta, memory })
     }
-    /// What changed since `base`, with the stack below its pointer zeroed
-    /// first: between calls no frame is live there, and the leftovers of the
-    /// turn's calls would otherwise be saved as changes.
+    /// What changed since `base`, with the dead bytes of the pages it compares
+    /// zeroed first: the stack below its pointer (between calls no frame is
+    /// live there), and free heap chunks. The turn's leftover frames and the
+    /// memory it allocated and freed would otherwise be saved as changes.
     pub(crate) fn capture(&mut self, base: &Image) -> Result<Capture> {
         let meta = self.metadata()?;
         let stack = meta.stack as u32 as usize;
@@ -587,8 +592,17 @@ impl Vm {
         #[cfg(feature = "full-scan")]
         let candidates: Vec<usize> = (0..memory_len / PAGE).collect();
         let memory = self.memory.data_mut(&mut self.store);
-        for &index in candidates.iter().take_while(|&&index| index * PAGE < stack) {
-            memory[index * PAGE..((index + 1) * PAGE).min(stack)].fill(0);
+        let mut compared = vec![false; memory_len / PAGE];
+        for &index in &candidates {
+            compared[index] = true;
+        }
+        let dead = std::iter::once(0..stack).chain(heap::dead(memory).unwrap_or_default());
+        for range in dead {
+            let pages = range.start / PAGE..range.end.div_ceil(PAGE);
+            for index in pages.filter(|&index| compared[index]) {
+                let page = index * PAGE..(index + 1) * PAGE;
+                memory[page.start.max(range.start)..page.end.min(range.end)].fill(0);
+            }
         }
         let memory = self.memory.data(&self.store);
         #[cfg(all(feature = "verify-dirty", not(feature = "full-scan")))]
