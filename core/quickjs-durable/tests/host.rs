@@ -1,22 +1,12 @@
 use anyhow::{Result, bail};
+use common::programs;
 use quickjs_durable::{
-    Engine, Kv, MemoryTransaction, Operation, Outcome, Resolution, Runtime, Status, Transaction,
-    View,
+    Engine, Kv, MemoryTransaction, Operation, Outcome, Resolution, Status, Transaction, View,
 };
 use serde_json::{Value, json};
-use std::sync::{Arc, OnceLock};
 
-fn runtime() -> Arc<Runtime> {
-    static RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
-    RUNTIME
-        .get_or_init(|| Arc::new(Runtime::new().unwrap()))
-        .clone()
-}
-fn registered(source: &str) -> Result<MemoryTransaction> {
-    let mut engine = Engine::new(MemoryTransaction::default(), runtime());
-    futures_executor::block_on(engine.register("v1", source))?;
-    engine.into_storage()
-}
+mod common;
+
 fn value(view: &View) -> Value {
     assert_eq!(view.state.status, Status::Completed);
     match &view.state.outcome {
@@ -30,15 +20,16 @@ fn image(tx: &MemoryTransaction) -> Value {
 
 #[test]
 fn local_kv_awaits_share_one_checkpoint_and_observe_staged_writes() -> Result<()> {
-    let committed = registered(
+    let programs = programs(
         r#"async function main(_,ctx){
         await Promise.resolve();
         const v={n:1};const set=ctx.kv.set('x',v);v.n=99;
         await set;const seen=await ctx.kv.get('x');
         await ctx.kv.set('temporary',true);await ctx.kv.delete('temporary');
         return {seen,missing:await ctx.kv.get('temporary')};}"#,
-    )?;
-    let mut engine = Engine::new(committed.clone(), runtime());
+    );
+    let committed = MemoryTransaction::default();
+    let mut engine = Engine::new(committed.clone(), programs.clone());
     let view = futures_executor::block_on(engine.start("r", "v1", Value::Null, 1000))?;
     assert_eq!(value(&view), json!({"seen":{"n":1},"missing":null}));
     assert_eq!(view.checkpoint_sequence, 0);
@@ -56,7 +47,8 @@ fn local_kv_awaits_share_one_checkpoint_and_observe_staged_writes() -> Result<()
     assert!(committed.state.is_empty()); // staging did not publish anything
     assert!(committed.values.keys().all(|k| !k.ends_with("/head")));
     let committed = engine.into_storage()?; // host's atomic publish
-    let recovered = futures_executor::block_on(Engine::new(committed, runtime()).recover("r"))?;
+    let recovered =
+        futures_executor::block_on(Engine::new(committed, programs.clone()).recover("r"))?;
     assert_eq!(recovered.checkpoint_id, view.checkpoint_id);
     Ok(())
 }
@@ -132,10 +124,11 @@ impl Transaction for FaultTransaction {
 
 #[test]
 fn atomic_commit_couples_snapshot_state_and_effects_without_replay() -> Result<()> {
-    let initial = registered(FLOW)?;
+    let programs = programs(FLOW);
+    let initial = MemoryTransaction::default();
     for complete in [false, true] {
         let (committed, op) = if complete {
-            let mut e = Engine::new(initial.clone(), runtime());
+            let mut e = Engine::new(initial.clone(), programs.clone());
             let view = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
             (
                 e.into_storage()?,
@@ -152,7 +145,10 @@ fn atomic_commit_couples_snapshot_state_and_effects_without_replay() -> Result<(
                 None => futures_executor::block_on(e.start("r", "v1", Value::Null, 1000)),
             }
         };
-        let mut trial = Engine::new(FaultTransaction::new(committed.clone(), None), runtime());
+        let mut trial = Engine::new(
+            FaultTransaction::new(committed.clone(), None),
+            programs.clone(),
+        );
         let expected = apply(&mut trial)?;
         let action_count = trial.storage().actions;
         assert!(action_count >= 6);
@@ -161,7 +157,7 @@ fn atomic_commit_couples_snapshot_state_and_effects_without_replay() -> Result<(
                 let before = image(&committed);
                 let mut e = Engine::new(
                     FaultTransaction::new(committed.clone(), Some((action, after))),
-                    runtime(),
+                    programs.clone(),
                 );
                 assert!(
                     apply(&mut e).is_err(),
@@ -172,8 +168,10 @@ fn atomic_commit_couples_snapshot_state_and_effects_without_replay() -> Result<(
                 assert_eq!(e.storage().actions, actions);
                 assert!(e.into_storage().is_err()); // cannot extract for commit
                 assert_eq!(image(&committed), before);
-                let mut retry =
-                    Engine::new(FaultTransaction::new(committed.clone(), None), runtime());
+                let mut retry = Engine::new(
+                    FaultTransaction::new(committed.clone(), None),
+                    programs.clone(),
+                );
                 let view = apply(&mut retry)?; // explicit host redelivery, not recover replay
                 assert_eq!(view.state, expected.state);
                 let published = retry.into_storage()?.inner; // atomic host commit
@@ -183,7 +181,7 @@ fn atomic_commit_couples_snapshot_state_and_effects_without_replay() -> Result<(
                 assert!(!published.values.keys().any(|k| k.contains("/event/")));
                 let mut read_only = Engine::new(
                     FaultTransaction::new(published, Some((1, false))),
-                    runtime(),
+                    programs.clone(),
                 );
                 assert_eq!(
                     futures_executor::block_on(read_only.recover("r"))?.checkpoint_id,
@@ -198,10 +196,11 @@ fn atomic_commit_couples_snapshot_state_and_effects_without_replay() -> Result<(
 
 #[test]
 fn committed_result_consumption_is_not_repeated_after_lost_commit_ack() -> Result<()> {
-    let mut e = Engine::new(registered(FLOW)?, runtime());
+    let programs = programs(FLOW);
+    let mut e = Engine::new(MemoryTransaction::default(), programs.clone());
     let start = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
     let committed = e.into_storage()?;
-    let mut e = Engine::new(committed.clone(), runtime());
+    let mut e = Engine::new(committed.clone(), programs.clone());
     let next = futures_executor::block_on(e.complete(
         "r",
         start.state.pending[0].id(),
@@ -213,7 +212,7 @@ fn committed_result_consumption_is_not_repeated_after_lost_commit_ack() -> Resul
     assert_eq!(committed.effects.len(), 1);
     let mut e = Engine::new(
         FaultTransaction::new(committed, Some((1, false))),
-        runtime(),
+        programs.clone(),
     );
     assert_eq!(
         futures_executor::block_on(e.recover("r"))?.state,
@@ -232,16 +231,17 @@ fn committed_result_consumption_is_not_repeated_after_lost_commit_ack() -> Resul
 
 #[test]
 fn aborted_read_needs_no_receipt_and_can_observe_new_transaction_state() -> Result<()> {
-    let mut committed = registered(
+    let programs = programs(
         "async function main(_,ctx){const n=await ctx.kv.get('n');return await ctx.rpc.call({service:'Echo',handler:'echo'},n);}",
-    )?;
+    );
+    let mut committed = MemoryTransaction::default();
     committed.state.insert("n".into(), json!(7));
-    let mut attempt = Engine::new(committed.clone(), runtime());
+    let mut attempt = Engine::new(committed.clone(), programs.clone());
     let before = futures_executor::block_on(attempt.start("r", "v1", Value::Null, 1000))?;
     assert!(matches!(&before.state.pending[0],Operation::Rpc{input,..} if *input==json!(7)));
     drop(attempt); // no effect or snapshot was published
     committed.state.insert("n".into(), json!(99));
-    let mut retry = Engine::new(committed, runtime());
+    let mut retry = Engine::new(committed, programs.clone());
     let after = futures_executor::block_on(retry.start("r", "v1", Value::Null, 1001))?;
     assert_eq!(before.state.pending[0].id(), after.state.pending[0].id());
     assert!(matches!(&after.state.pending[0],Operation::Rpc{input,..} if *input==json!(99)));
@@ -250,19 +250,23 @@ fn aborted_read_needs_no_receipt_and_can_observe_new_transaction_state() -> Resu
 
 #[test]
 fn completing_one_fanout_effect_does_not_reemit_other_effects() -> Result<()> {
-    let initial = registered(
+    let programs = programs(
         r#"async function main(_,ctx){return await Promise.all([
         ctx.rpc.call({service:'Echo',handler:'echo'},1),
         ctx.rpc.call({service:'Echo',handler:'echo'},2)]);}"#,
-    )?;
-    let mut e = Engine::new(initial, runtime());
+    );
+    let initial = MemoryTransaction::default();
+    let mut e = Engine::new(initial, programs.clone());
     let start = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
     assert_eq!(start.state.pending.len(), 2);
-    let mut e = Engine::new(FaultTransaction::new(e.into_storage()?, None), runtime());
+    let mut e = Engine::new(
+        FaultTransaction::new(e.into_storage()?, None),
+        programs.clone(),
+    );
     futures_executor::block_on(e.complete("r", "r/1", Outcome::success(2), 1001))?;
     assert!(e.storage().requests.is_empty());
     assert_eq!(e.storage().inner.effects.len(), 1);
-    let mut e = Engine::new(e.into_storage()?.inner, runtime());
+    let mut e = Engine::new(e.into_storage()?.inner, programs.clone());
     assert_eq!(
         value(&futures_executor::block_on(e.complete(
             "r",
@@ -278,16 +282,15 @@ fn completing_one_fanout_effect_does_not_reemit_other_effects() -> Result<()> {
 
 #[test]
 fn host_checkpoint_stops_local_kv_chain_until_host_wakes_it() -> Result<()> {
-    let mut e = Engine::new(
-        registered(
-            "async function main(_,ctx){await ctx.kv.set('n',1);await ctx.kv.set('n',2);return await ctx.kv.get('n');}",
-        )?,
-        runtime(),
-    ).with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
+    let programs = programs(
+        "async function main(_,ctx){await ctx.kv.set('n',1);await ctx.kv.set('n',2);return await ctx.kv.get('n');}",
+    );
+    let mut e = Engine::new(MemoryTransaction::default(), programs.clone())
+        .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
     let first = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
     assert_eq!(e.storage().state["n"], 1);
     assert!(matches!(first.state.pending[0], Operation::Resume { .. }));
-    let mut e = Engine::new(e.into_storage()?, runtime());
+    let mut e = Engine::new(e.into_storage()?, programs.clone());
     let done = futures_executor::block_on(e.complete(
         "r",
         first.state.pending[0].id(),
@@ -302,7 +305,7 @@ fn host_checkpoint_stops_local_kv_chain_until_host_wakes_it() -> Result<()> {
 
 #[test]
 fn guest_api_has_no_checkpoint_and_host_pause_preserves_queued_results() -> Result<()> {
-    let mut committed = registered(
+    let programs = programs(
         r#"async function main(_,ctx){
         if ('checkpoint' in ctx || 'checkpoint' in durable) throw Error('guest checkpoint API');
         const rpc=ctx.rpc.call({service:'Remote',handler:'read'});
@@ -312,9 +315,10 @@ fn guest_api_has_no_checkpoint_and_host_pause_preserves_queued_results() -> Resu
         trace.push(n+1);
         return {n,trace,remote:await rpc};
     }"#,
-    )?;
+    );
+    let mut committed = MemoryTransaction::default();
     committed.state.insert("n".into(), json!(7));
-    let mut e = Engine::new(committed, runtime())
+    let mut e = Engine::new(committed, programs.clone())
         .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
     let first = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
     let rpc = first
@@ -337,7 +341,7 @@ fn guest_api_has_no_checkpoint_and_host_pause_preserves_queued_results() -> Resu
     // Another committed application update must not replace the read result
     // already captured inside the pending QuickJS job queue.
     committed.state.insert("n".into(), json!(99));
-    let mut e = Engine::new(FaultTransaction::new(committed, None), runtime());
+    let mut e = Engine::new(FaultTransaction::new(committed, None), programs.clone());
     assert_eq!(
         futures_executor::block_on(e.recover("r"))?.state,
         first.state
@@ -351,7 +355,7 @@ fn guest_api_has_no_checkpoint_and_host_pause_preserves_queued_results() -> Resu
     assert_eq!(waiting.state.pending.len(), 1);
     assert_eq!(waiting.state.pending[0].id(), rpc);
     let committed = e.into_storage()?.inner;
-    let mut e = Engine::new(FaultTransaction::new(committed, None), runtime());
+    let mut e = Engine::new(FaultTransaction::new(committed, None), programs.clone());
     let duplicate =
         futures_executor::block_on(e.complete("r", &wakeup, Outcome::success(Value::Null), 1002))?;
     assert_eq!(duplicate.checkpoint_id, waiting.checkpoint_id);
@@ -364,18 +368,21 @@ fn guest_api_has_no_checkpoint_and_host_pause_preserves_queued_results() -> Resu
 
 #[test]
 fn a_trap_ends_the_run_in_the_same_staged_transaction() -> Result<()> {
-    let committed = registered(
+    let programs = programs(
         "async function main(_,ctx){await ctx.kv.set('n',1);ctx.rpc.call({service:'Echo',handler:'echo'});await ctx.kv.set('n',2);while(true){} }",
-    )?;
+    );
+    let committed = MemoryTransaction::default();
     let before = image(&committed);
-    let mut e = Engine::new(committed.clone(), runtime());
+    let mut e = Engine::new(committed.clone(), programs.clone());
     let failed = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
     assert_eq!(failed.state.status, Status::Failed);
     assert_eq!(e.storage().state["n"], 2); // staged, as for a thrown error
     assert!(e.storage().effects.is_empty()); // abandoned
     drop(e); // nothing is visible until the host publishes
     assert_eq!(image(&committed), before);
-    assert!(futures_executor::block_on(Engine::new(committed, runtime()).recover("r")).is_err());
+    assert!(
+        futures_executor::block_on(Engine::new(committed, programs.clone()).recover("r")).is_err()
+    );
     Ok(())
 }
 
@@ -410,10 +417,10 @@ fn custom_rust_function_and_guest_errors_resolve_inside_the_transaction() -> Res
             self.0.abandon(run).await
         }
     }
-    let tx = registered(
+    let programs = programs(
         "async function main(_,ctx){const n=await ctx.call('double',21);try{await ctx.rpc.call({service:'Missing',handler:'x'});}catch(e){return {n,error:e.name};}}",
-    )?;
-    let mut e = Engine::new(Local(tx), runtime());
+    );
+    let mut e = Engine::new(Local(MemoryTransaction::default()), programs.clone());
     let done = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
     assert_eq!(value(&done), json!({"n":42,"error":"NotFound"}));
     assert_eq!(done.checkpoint_sequence, 0);
@@ -423,7 +430,7 @@ fn custom_rust_function_and_guest_errors_resolve_inside_the_transaction() -> Res
 
 #[test]
 fn invalid_guest_bindings_do_not_stage_operations() -> Result<()> {
-    let initial = registered(
+    let programs = programs(
         r#"async function main(_,ctx){
         const bad=[()=>ctx.kv.get(7),()=>ctx.kv.set(null,1),()=>ctx.kv.delete({}),
           ()=>ctx.kv.set('x',undefined),()=>ctx.kv.set('x',new Map()),
@@ -435,8 +442,9 @@ fn invalid_guest_bindings_do_not_stage_operations() -> Result<()> {
           ()=>ctx.kv.set('x',{['\ud800']:1}),()=>ctx.call('\ud800')];
         return bad.map(f=>{try{f();return false;}catch(e){return e instanceof TypeError;}});
     }"#,
-    )?;
-    let mut e = Engine::new(FaultTransaction::new(initial, None), runtime());
+    );
+    let initial = MemoryTransaction::default();
+    let mut e = Engine::new(FaultTransaction::new(initial, None), programs.clone());
     let done = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
     assert_eq!(value(&done), json!(vec![true; 14]));
     assert_eq!(done.state.next_operation, 0);
@@ -446,15 +454,16 @@ fn invalid_guest_bindings_do_not_stage_operations() -> Result<()> {
 
 #[test]
 fn serialized_accessor_values_are_validated_before_staging() -> Result<()> {
-    let initial = registered(
+    let programs = programs(
         r#"async function main(_,ctx){
         let reads=0;
         const value={get text(){return ++reads===1 ? 'valid' : '\ud800';}};
         try {await ctx.kv.set('bad',value);return false;}
         catch(e){return e instanceof TypeError;}
     }"#,
-    )?;
-    let mut engine = Engine::new(FaultTransaction::new(initial, None), runtime());
+    );
+    let initial = MemoryTransaction::default();
+    let mut engine = Engine::new(FaultTransaction::new(initial, None), programs.clone());
     let done = futures_executor::block_on(engine.start("r", "v1", Value::Null, 1000))?;
     assert_eq!(value(&done), true);
     assert!(engine.storage().requests.is_empty());
@@ -463,12 +472,13 @@ fn serialized_accessor_values_are_validated_before_staging() -> Result<()> {
 
 #[test]
 fn timers_cannot_exceed_the_host_clock_range() -> Result<()> {
-    let initial = registered(
+    let programs = programs(
         r#"async function main(_,ctx){
         try {await ctx.sleep(1);return false;}catch(e){return e instanceof RangeError;}
     }"#,
-    )?;
-    let mut engine = Engine::new(FaultTransaction::new(initial, None), runtime());
+    );
+    let initial = MemoryTransaction::default();
+    let mut engine = Engine::new(FaultTransaction::new(initial, None), programs.clone());
     let done =
         futures_executor::block_on(engine.start("r", "v1", Value::Null, u64::MAX / 1_000_000))?;
     assert_eq!(value(&done), true);
@@ -478,17 +488,19 @@ fn timers_cannot_exceed_the_host_clock_range() -> Result<()> {
 
 #[test]
 fn rpc_delivery_before_resume_preserves_jobs_and_multiple_wakeups() -> Result<()> {
-    let mut committed = registered(
+    let programs = programs(
         r#"async function main(_,ctx){
         const remote=ctx.rpc.call({service:'Echo',handler:'echo'});
         const n=await ctx.kv.get('n');
         await ctx.kv.set('n',n+1);
         return {n,remote:await remote};
     }"#,
-    )?;
+    );
+    let mut committed = MemoryTransaction::default();
     committed.state.insert("n".into(), json!(7));
     let make = |tx| {
-        Engine::new(tx, runtime()).with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap())
+        Engine::new(tx, programs.clone())
+            .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap())
     };
     let mut e = make(committed);
     let first = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
@@ -585,10 +597,11 @@ fn checkpoint_storage_may_suspend() -> Result<()> {
         inner,
         suspended: 0,
     };
-    let mut e = Engine::new(remote(registered(FLOW)?), runtime());
+    let programs = programs(FLOW);
+    let mut e = Engine::new(remote(MemoryTransaction::default()), programs.clone());
     let start = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
     let rpc = start.state.pending[0].id().to_owned();
-    let mut e = Engine::new(remote(e.into_storage()?.inner), runtime());
+    let mut e = Engine::new(remote(e.into_storage()?.inner), programs.clone());
     let next = futures_executor::block_on(e.complete("r", &rpc, Outcome::success(7), 1001))?;
     let audit = next.state.pending[0].id().to_owned();
     let done =

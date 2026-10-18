@@ -1,9 +1,13 @@
 #![cfg(all(unix, feature = "sqlite-host"))]
 use anyhow::{Context, Result, ensure};
+use common::programs;
 use futures_executor::block_on;
-use quickjs_durable::{Engine, Outcome, Runtime, Status, sqlite::Host};
+use quickjs_durable::{Engine, Outcome, Status, sqlite::Host};
 use serde_json::{Value, json};
-use std::{os::unix::process::ExitStatusExt, process::Command, sync::Arc};
+use std::{os::unix::process::ExitStatusExt, process::Command};
+
+mod common;
+
 const SOURCE: &str = "async function main(_,ctx){await ctx.kv.set('n',0);const n=await ctx.rpc.call({service:'Counter',handler:'next'});await ctx.kv.set('n',n);return n;}";
 fn kill() -> ! {
     unsafe {
@@ -19,8 +23,7 @@ fn sqlite_crash_child() -> Result<()> {
     let completion = std::env::var("QJD_SQLITE_COMPLETION")? == "true";
     let after = std::env::var("QJD_SQLITE_AFTER")? == "true";
     let mut host = Host::open(path)?;
-    let runtime = Arc::new(Runtime::new()?);
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime);
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs(SOURCE));
     if completion {
         engine = engine.with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
         let id = futures_executor::block_on(engine.recover("r"))?
@@ -40,17 +43,14 @@ fn sqlite_crash_child() -> Result<()> {
 }
 #[test]
 fn sigkill_around_start_and_completion_commits_recovers_whole_sqlite_domain() -> Result<()> {
-    let runtime = Arc::new(Runtime::new()?);
+    let programs = programs(SOURCE);
     for completion in [false, true] {
         for after in [false, true] {
             let dir = tempfile::tempdir()?;
             let path = dir.path().join("host.sqlite");
             let mut host = Host::open(&path)?;
-            let mut engine = Engine::new(host.begin("r", "scope")?, runtime.clone());
-            futures_executor::block_on(engine.register("v1", SOURCE))?;
-            engine.into_storage()?.commit()?;
             if completion {
-                let mut engine = Engine::new(host.begin("r", "scope")?, runtime.clone());
+                let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
                 let start = block_on(engine.start("r", "v1", Value::Null, 1000))?;
                 engine.into_storage()?.commit()?;
                 host.record_result(start.state.pending[0].id(), &Outcome::success(42), 1001)?;
@@ -80,7 +80,7 @@ fn sigkill_around_start_and_completion_commits_recovers_whole_sqlite_domain() ->
             if completion && !after {
                 assert_eq!(effects[0].outcome, Some(Outcome::success(42)));
             }
-            let mut engine = Engine::new(host.begin("r", "scope")?, runtime.clone());
+            let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
             if !completion && !after {
                 assert!(futures_executor::block_on(engine.recover("r")).is_err());
             } else {
@@ -103,7 +103,7 @@ fn sigkill_around_start_and_completion_commits_recovers_whole_sqlite_domain() ->
                     host.record_result(effect.operation.id(), &Outcome::success(42), 1001)?;
                 }
                 let ready = host.effects("r")?.into_iter().next().unwrap();
-                let mut engine = Engine::new(host.begin("r", "scope")?, runtime.clone());
+                let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
                 view = block_on(engine.complete(
                     "r",
                     ready.operation.id(),

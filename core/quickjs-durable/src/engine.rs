@@ -1,7 +1,8 @@
 use crate::{
     Transaction, codec,
     model::*,
-    vm::{Runtime, Turn},
+    program::{Program, Programs},
+    vm::Turn,
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -26,7 +27,7 @@ const MAX_BATCHES: usize = 16;
 /// Never commit a transaction whose start/complete future did not finish.
 pub struct Engine<K: Transaction> {
     kv: K,
-    runtime: Arc<Runtime>,
+    programs: Arc<Programs>,
     checkpoint_interval: Option<NonZeroUsize>,
     usable: bool,
 }
@@ -36,25 +37,8 @@ struct Loaded {
     image: Image,
     manifest_bytes: usize,
 }
-struct Golden {
-    application: Application,
-    /// Shared by every turn of the application's runs: see `Runtime::cached_golden`.
-    memory: Arc<Vec<u8>>,
-}
-impl Golden {
-    fn image(&self) -> Image {
-        Image {
-            meta: self.application.meta.clone(),
-            memory: self.memory.to_vec(),
-        }
-    }
-}
-
 fn run_prefix(run: &str) -> String {
     format!("run/{}/", hash(run.as_bytes()))
-}
-fn app_key(id: &str) -> String {
-    format!("application/{}", hash(id.as_bytes()))
 }
 fn blob_key(id: &str) -> String {
     format!("blob/{id}")
@@ -82,10 +66,10 @@ fn page(memory: &[u8], index: usize) -> &[u8] {
 }
 
 impl<K: Transaction> Engine<K> {
-    pub fn new(kv: K, runtime: Arc<Runtime>) -> Self {
+    pub fn new(kv: K, programs: Arc<Programs>) -> Self {
         Self {
             kv,
-            runtime,
+            programs,
             checkpoint_interval: None,
             usable: true,
         }
@@ -123,54 +107,19 @@ impl<K: Transaction> Engine<K> {
         Ok(())
     }
 
-    /// Stage a golden image once, before invocation-specific state is bound.
-    /// Reusing an ID with different source or a different build is rejected.
-    pub async fn register(&mut self, id: &str, source: &str) -> Result<()> {
-        self.begin_mutation()?;
-        let result = self.register_inner(id, source).await;
-        self.usable = result.is_ok();
-        result
-    }
-
-    async fn register_inner(&mut self, id: &str, source: &str) -> Result<()> {
-        identifier(id)?;
-        if self.kv.get(&app_key(id)).await?.is_some() {
-            let golden = self.golden(id).await?;
-            ensure!(
-                golden.application.source_hash == hash(source.as_bytes()),
-                "Application version is immutable"
-            );
-            return Ok(());
-        }
-        let image = self.runtime.golden(id, source)?;
-        let bytes = codec::compress(&image.memory)?;
-        let blob = app_key(id);
-        self.put_blob(&blob, &bytes).await?;
-        let application = Application {
-            format: FORMAT,
-            id: id.into(),
-            source_hash: hash(source.as_bytes()),
-            build: self.runtime.build.clone(),
-            blob,
-            memory_len: image.memory.len(),
-            meta: image.meta,
-        };
-        self.kv.put(&app_key(id), &json_bytes(&application)?).await
-    }
-
     /// Stage the initial checkpoint, local KV mutations and outgoing effects.
     /// A retry after an ambiguous host commit returns the already-staged/committed
-    /// head if application and input agree. The input record is identity metadata;
+    /// head if program and input agree. The input record is identity metadata;
     /// it is never replayed by recovery.
     pub async fn start(
         &mut self,
         run: &str,
-        application: &str,
+        program: &str,
         input: Value,
         now: u64,
     ) -> Result<View> {
         self.begin_mutation()?;
-        let result = self.start_inner(run, application, input, now).await;
+        let result = self.start_inner(run, program, input, now).await;
         self.usable = result.is_ok();
         result
     }
@@ -178,12 +127,12 @@ impl<K: Transaction> Engine<K> {
     async fn start_inner(
         &mut self,
         run: &str,
-        application: &str,
+        program: &str,
         input: Value,
         now: u64,
     ) -> Result<View> {
         identifier(run)?;
-        identifier(application)?;
+        let source = self.programs.get(program)?.source_hash().to_owned();
         self.kv.check_run(run)?;
         validate_time(now)?;
         input_size(&input)?;
@@ -197,14 +146,16 @@ impl<K: Transaction> Engine<K> {
                     .context("Missing invocation input")?,
             )?;
             ensure!(
-                current.manifest.application == application && original == input,
-                "Run already belongs to another application/input"
+                current.manifest.program == program
+                    && current.manifest.source == source
+                    && original == input,
+                "Run already belongs to another program/input"
             );
             return Ok(Self::view(current));
         }
         self.kv.put(&key, &json_bytes(&input)?).await?;
         let event = Event::Start {
-            application_id: application.into(),
+            program: program.into(),
             input,
             now,
         };
@@ -291,7 +242,7 @@ impl<K: Transaction> Engine<K> {
         let m = loaded.manifest;
         View {
             checkpoint_id: loaded.id,
-            application_id: m.application,
+            program: m.program,
             checkpoint_sequence: m.sequence,
             state: m.state,
             image_bytes: m.memory_len,
@@ -313,40 +264,15 @@ impl<K: Transaction> Engine<K> {
     async fn put_blob(&mut self, id: &str, bytes: &[u8]) -> Result<()> {
         self.kv.put(&blob_key(id), bytes).await
     }
-    async fn golden(&mut self, id: &str) -> Result<Golden> {
-        let application: Application = decode(
-            &self
-                .kv
-                .get(&app_key(id))
-                .await?
-                .context("Missing application")?,
-        )?;
+    /// The run's program, the version it started on.
+    fn program(&self, manifest: &Manifest) -> Result<&Program> {
+        let program = self.programs.get(&manifest.program)?;
         ensure!(
-            application.format == FORMAT
-                && application.id == id
-                && application.build == self.runtime.build,
-            "Incompatible application build/format"
+            program.source_hash() == manifest.source,
+            "The run started on another version of program {}",
+            manifest.program
         );
-        ensure!(
-            application.memory_len <= MAX_MEMORY && application.memory_len.is_multiple_of(65536),
-            "Invalid golden memory size"
-        );
-        let memory = match self.runtime.cached_golden(&application) {
-            Some(memory) => memory,
-            None => {
-                let blob = self.get_blob(&application.blob).await?;
-                let memory = codec::decompress(&blob, application.memory_len)?;
-                ensure!(
-                    memory.len() == application.memory_len,
-                    "Golden image size mismatch"
-                );
-                self.runtime.cache_golden(&application, memory)
-            }
-        };
-        Ok(Golden {
-            application,
-            memory,
-        })
+        Ok(program)
     }
     async fn load(&mut self, run: &str) -> Result<Option<Loaded>> {
         let Some(head) = self.kv.get(&format!("{}head", run_prefix(run))).await? else {
@@ -360,17 +286,17 @@ impl<K: Transaction> Engine<K> {
             .context("Missing checkpoint")?;
         let manifest: Manifest = decode(&bytes)?;
         ensure!(
-            manifest.format == FORMAT && manifest.build == self.runtime.build,
+            manifest.format == FORMAT && manifest.build == self.programs.runtime().build,
             "Incompatible checkpoint build/format"
         );
-        let golden = self.golden(&manifest.application).await?;
+        let golden = self.program(&manifest)?.memory().clone();
         ensure!(
-            manifest.memory_len >= golden.memory.len()
+            manifest.memory_len >= golden.len()
                 && manifest.memory_len <= MAX_MEMORY
                 && manifest.memory_len.is_multiple_of(65536),
             "Invalid checkpoint memory size"
         );
-        let mut memory = golden.memory.to_vec();
+        let mut memory = golden.to_vec();
         memory.resize(manifest.memory_len, 0);
         // Group references, then release each decoded blob before loading the
         // next. Keeping all historical batches can vastly exceed VM memory.
@@ -418,7 +344,7 @@ impl<K: Transaction> Engine<K> {
         run: &str,
         id: String,
         sequence: u64,
-        application: String,
+        program: (String, String),
         previous: Option<String>,
         pages: BTreeMap<u32, PageRef>,
         image: Image,
@@ -436,8 +362,9 @@ impl<K: Transaction> Engine<K> {
         };
         let manifest = Manifest {
             format: FORMAT,
-            application,
-            build: self.runtime.build.clone(),
+            program: program.0,
+            source: program.1,
+            build: self.programs.runtime().build.clone(),
             previous,
             sequence,
             meta: image.meta.clone(),
@@ -477,13 +404,14 @@ impl<K: Transaction> Engine<K> {
     ) -> Result<Loaded> {
         let sequence = current.as_ref().map_or(0, |c| c.manifest.sequence + 1);
         let id = format!("{}{sequence}", run_prefix(run));
-        let application = match (&current, event) {
-            (None, Event::Start { application_id, .. }) => application_id.clone(),
-            (Some(c), Event::Complete { .. }) => c.manifest.application.clone(),
+        let program = match (&current, event) {
+            (None, Event::Start { program, .. }) => self.programs.get(program)?,
+            (Some(c), Event::Complete { .. }) => self.program(&c.manifest)?,
             _ => anyhow::bail!("Invalid delivery"),
         };
-        let golden = self.golden(&application).await?;
-        let first = current.is_none().then(|| golden.image());
+        let golden = program.memory().clone();
+        let first = current.is_none().then(|| program.image());
+        let program = (program.name().to_owned(), program.source_hash().to_owned());
         let base = current
             .as_ref()
             .map_or_else(|| first.as_ref().unwrap(), |c| &c.image);
@@ -497,7 +425,8 @@ impl<K: Transaction> Engine<K> {
             .as_ref()
             .map(|c| (c.id.clone(), c.manifest.pages.clone()));
         let turn = self
-            .runtime
+            .programs
+            .runtime()
             .turn(
                 run,
                 base,
@@ -523,7 +452,7 @@ impl<K: Transaction> Engine<K> {
                         run,
                         id,
                         sequence,
-                        application,
+                        program,
                         previous,
                         pages,
                         image,
@@ -547,7 +476,7 @@ impl<K: Transaction> Engine<K> {
         let changed = capture.pages.len();
         let mut deltas = Vec::new();
         for (index, new) in capture.pages {
-            let original = page(&golden.memory, index as usize);
+            let original = page(&golden, index as usize);
             memory[index as usize * PAGE..(index as usize + 1) * PAGE].copy_from_slice(&new);
             if original == new {
                 pages.remove(&index);
@@ -577,7 +506,7 @@ impl<K: Transaction> Engine<K> {
                 .into_iter()
                 .map(|index| {
                     let current = page(&next.memory, index as usize);
-                    let original = page(&golden.memory, index as usize);
+                    let original = page(&golden, index as usize);
                     (
                         index,
                         current.iter().zip(original).map(|(n, o)| n ^ o).collect(),
@@ -603,8 +532,9 @@ impl<K: Transaction> Engine<K> {
         }
         let manifest = Manifest {
             format: FORMAT,
-            application,
-            build: self.runtime.build.clone(),
+            program: program.0,
+            source: program.1,
+            build: self.programs.runtime().build.clone(),
             previous: current.as_ref().map(|c| c.id.clone()),
             sequence,
             meta: next.meta.clone(),

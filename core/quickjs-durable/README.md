@@ -45,6 +45,14 @@ path and it recovers the saved result instead of incrementing again.
 cargo run --release --features sqlite-host --example sqlite -- /tmp/quickjs.sqlite
 ```
 
+A program is a static `.js` file defining `main(input, ctx)`, evaluated once
+into its golden image, which every run starts from: `golden` computes the
+dump a host ships beside the source, and loads with `Programs::load`.
+
+```sh
+cargo run --release --bin golden -- programs/*.js   # writes programs/<name>.golden
+```
+
 | Path                               | What                                                                        |
 | ---------------------------------- | --------------------------------------------------------------------------- |
 | `src/`                             | The engine, the transaction interfaces, the VM and the Wasm instrumentation |

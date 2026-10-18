@@ -1,5 +1,9 @@
+//! One run across processes: each step is a new process that compiles the
+//! program, restores the committed run and commits the next turn.
+//!
+//! cargo run --release --example recovery
 use anyhow::{Context, Result, ensure};
-use quickjs_durable::{Engine, FileKv, MemoryTransaction, Outcome, Runtime};
+use quickjs_durable::{Engine, FileKv, MemoryTransaction, Outcome, Programs, Runtime};
 use serde_json::Value;
 use std::{path::PathBuf, process::Command, sync::Arc};
 
@@ -29,12 +33,11 @@ fn main() -> Result<()> {
         .map(|b| serde_json::from_slice(&b))
         .transpose()?
         .unwrap_or_default();
-    let mut engine = Engine::new(tx, Arc::new(Runtime::new()?));
+    // Every process compiles the same program; its runs restore against it.
+    let programs = Programs::new(Arc::new(Runtime::new()?)).compile("demo-v1", SOURCE)?;
+    let mut engine = Engine::new(tx, Arc::new(programs));
     let view = match args[1].as_str() {
-        "start" => {
-            futures_executor::block_on(engine.register("demo-v1", SOURCE))?;
-            futures_executor::block_on(engine.start("demo", "demo-v1", Value::Null, 1000))?
-        }
+        "start" => futures_executor::block_on(engine.start("demo", "demo-v1", Value::Null, 1000))?,
         "first" => futures_executor::block_on(engine.complete(
             "demo",
             "demo/0",

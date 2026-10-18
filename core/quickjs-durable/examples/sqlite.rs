@@ -3,7 +3,7 @@
 //! to the counter. The Calculator is pure Rust; a remote transport would use the
 //! same durable effect IDs and deliver results through record_result.
 use anyhow::{Context, Result, bail};
-use quickjs_durable::{Engine, Operation, Outcome, Runtime, Status, sqlite::Host};
+use quickjs_durable::{Engine, Operation, Outcome, Programs, Runtime, Status, sqlite::Host};
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
@@ -28,16 +28,16 @@ async fn run() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("quickjs-checkpoints.sqlite"));
     let mut host = Host::open(&path)?;
-    let runtime = Arc::new(Runtime::new()?);
-    let mut engine = Engine::new(host.begin("example", "counter")?, runtime.clone());
-    futures_executor::block_on(engine.register("sqlite-demo-v1", SOURCE))?;
-    engine.into_storage()?.commit()?; // shared golden, outside measured VM turns
+    // Compiled once, outside the measured VM turns: every run starts from its
+    // golden image.
+    let programs =
+        Arc::new(Programs::new(Arc::new(Runtime::new()?)).compile("sqlite-demo-v1", SOURCE)?);
     println!("SQLite {}: WAL, synchronous=FULL", rusqlite::version());
     println!("sequence | changed pages | blob bytes | VM/stage ms | COMMIT ms");
     let mut next: Option<(String, Outcome, u64)> = None;
     loop {
         let before = Instant::now();
-        let mut engine = Engine::new(host.begin("example", "counter")?, runtime.clone())
+        let mut engine = Engine::new(host.begin("example", "counter")?, programs.clone())
             .with_checkpoint_interval(std::num::NonZeroUsize::new(2).unwrap());
         let view = match next.take() {
             None => {

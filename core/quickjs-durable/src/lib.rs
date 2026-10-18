@@ -13,6 +13,7 @@ mod kv;
 mod model;
 #[cfg(feature = "sqlite-kv-host")]
 pub mod namespace;
+mod program;
 #[cfg(feature = "sqlite-host")]
 pub mod sqlite;
 pub mod tracking;
@@ -22,6 +23,7 @@ pub use engine::Engine;
 pub use host::{Resolution, Transaction};
 pub use kv::{FileKv, Kv, MemoryTransaction};
 pub use model::{GuestError, Operation, Outcome, RpcTarget, State, Status, View};
+pub use program::{Program, Programs};
 pub use vm::Runtime;
 
 #[cfg(test)]

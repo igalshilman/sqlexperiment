@@ -1,18 +1,13 @@
 use anyhow::Result;
-use quickjs_durable::{Engine, MemoryTransaction, Operation, Outcome, Runtime, Status};
+use common::{programs, runtime};
+use quickjs_durable::{Engine, MemoryTransaction, Operation, Outcome, Program, Programs, Status};
 use serde_json::{Value, json};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-fn runtime() -> Arc<Runtime> {
-    static RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
-    RUNTIME
-        .get_or_init(|| Arc::new(Runtime::new().expect("compile QuickJS")))
-        .clone()
-}
+mod common;
+
 fn engine(source: &str) -> Engine<MemoryTransaction> {
-    let mut e = Engine::new(MemoryTransaction::default(), runtime());
-    futures_executor::block_on(e.register("v1", source)).expect("register");
-    e
+    Engine::new(MemoryTransaction::default(), programs(source))
 }
 fn value(outcome: &Option<Outcome>) -> Value {
     match outcome {
@@ -33,14 +28,14 @@ fn closure_cycles_map_and_cold_resume() -> Result<()> {
     let mut e = engine(PROGRAM);
     let start = futures_executor::block_on(e.start("run", "v1", Value::Null, 1000))?;
     assert_eq!(start.state.status, Status::Waiting);
-    let mut e = Engine::new(e.into_storage()?, runtime());
+    let mut e = Engine::new(e.into_storage()?, programs(PROGRAM));
     let step = futures_executor::block_on(e.complete(
         "run",
         start.state.pending[0].id(),
         Outcome::success(2),
         1001,
     ))?;
-    let mut e = Engine::new(e.into_storage()?, runtime());
+    let mut e = Engine::new(e.into_storage()?, programs(PROGRAM));
     let done = futures_executor::block_on(e.complete(
         "run",
         step.state.pending[0].id(),
@@ -67,19 +62,14 @@ fn closure_cycles_map_and_cold_resume() -> Result<()> {
 #[test]
 fn golden_versions_and_invocation_isolation() -> Result<()> {
     let source = "const shared={n:10}; async function main(input){ shared.n+=input; await durable.call('observe'); return shared.n; }";
-    let mut e = engine(source);
-    futures_executor::block_on(e.register("v1", source))?;
-    let registered = e.into_storage()?;
-    let mut invalid = Engine::new(registered.clone(), runtime());
-    assert!(
-        futures_executor::block_on(invalid.register("v1", "async function main(){return 0}"))
-            .is_err()
+    let programs = Arc::new(
+        Programs::new(runtime())
+            .compile("v1", source)?
+            .compile("v2", "async function main(){return 99}")?,
     );
-    assert!(invalid.into_storage().is_err());
-    let mut e = Engine::new(registered, runtime());
+    let mut e = Engine::new(MemoryTransaction::default(), programs.clone());
     let a = futures_executor::block_on(e.start("a", "v1", json!(2), 1000))?;
     let b = futures_executor::block_on(e.start("b", "v1", json!(7), 1000))?;
-    futures_executor::block_on(e.register("v2", "async function main(){return 99}"))?;
     assert_eq!(
         value(
             &futures_executor::block_on(e.complete(
@@ -114,19 +104,86 @@ fn golden_versions_and_invocation_isolation() -> Result<()> {
         ),
         json!(99)
     );
-    assert_eq!(
-        e.storage()
-            .values
-            .keys()
-            .filter(|k| k.starts_with("application/"))
-            .count(),
-        2
-    );
     let committed = e.into_storage()?;
     for (version, input) in [("v2", json!(2)), ("v1", json!(3))] {
-        let mut invalid = Engine::new(committed.clone(), runtime());
+        let mut invalid = Engine::new(committed.clone(), programs.clone());
         assert!(futures_executor::block_on(invalid.start("a", version, input, 1003)).is_err());
         assert!(invalid.into_storage().is_err());
+    }
+    Ok(())
+}
+
+/// A run continues only on the version of its program it started on: a
+/// catalog whose v1 has another source refuses to load it.
+#[test]
+fn a_run_refuses_another_version_of_its_program() -> Result<()> {
+    let source = "async function main(){await durable.call('observe');return 1}";
+    let mut e = engine(source);
+    let start = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
+    let committed = e.into_storage()?;
+    let changed = programs("async function main(){await durable.call('observe');return 2}");
+    let error =
+        futures_executor::block_on(Engine::new(committed.clone(), changed.clone()).recover("r"))
+            .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("another version of program v1"),
+        "{error:#}"
+    );
+    let operation = start.state.pending[0].id();
+    let mut e = Engine::new(committed.clone(), changed.clone());
+    assert!(
+        futures_executor::block_on(e.complete("r", operation, Outcome::success(Value::Null), 2))
+            .is_err()
+    );
+    assert!(e.into_storage().is_err());
+    let mut e = Engine::new(committed.clone(), changed);
+    assert!(futures_executor::block_on(e.start("r", "v1", Value::Null, 1)).is_err());
+    // Its own version still completes it.
+    let mut e = Engine::new(committed, programs(source));
+    let done =
+        futures_executor::block_on(e.complete("r", operation, Outcome::success(Value::Null), 2))?;
+    assert_eq!(value(&done.state.outcome), json!(1));
+    Ok(())
+}
+
+/// A program loaded from its dump is the compiled one: a run moves between the
+/// two and ends exactly as on the compiled one alone. A dump of another source
+/// is refused.
+#[test]
+fn a_program_round_trips_through_its_dump() -> Result<()> {
+    let compiled = Program::compile(&runtime(), "v1", PROGRAM)?;
+    let dump = compiled.dump()?;
+    let loaded = Program::load(&runtime(), "v1", PROGRAM, &dump)?;
+    assert_eq!(loaded.name(), "v1");
+    assert_eq!(loaded.source_hash(), compiled.source_hash());
+    assert!(Program::load(&runtime(), "v1", "async function main(){}", &dump).is_err());
+    let loaded = Arc::new(Programs::new(runtime()).with(loaded)?);
+    let compiled = Arc::new(Programs::new(runtime()).with(compiled)?);
+    let run = |catalogs: [&Arc<Programs>; 3]| -> Result<(Value, MemoryTransaction)> {
+        let mut e = Engine::new(MemoryTransaction::default(), catalogs[0].clone());
+        let start = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
+        let mut e = Engine::new(e.into_storage()?, catalogs[1].clone());
+        let step = futures_executor::block_on(e.complete(
+            "r",
+            start.state.pending[0].id(),
+            Outcome::success(2),
+            2,
+        ))?;
+        let mut e = Engine::new(e.into_storage()?, catalogs[2].clone());
+        let done = futures_executor::block_on(e.complete(
+            "r",
+            step.state.pending[0].id(),
+            Outcome::success(Value::Null),
+            3,
+        ))?;
+        Ok((value(&done.state.outcome), e.into_storage()?))
+    };
+    let (expected, expected_storage) = run([&compiled; 3])?;
+    assert_eq!(expected, json!({"n":42,"identity":true}));
+    for catalogs in [[&loaded; 3], [&compiled, &loaded, &compiled]] {
+        let (result, storage) = run(catalogs)?;
+        assert_eq!(result, expected);
+        assert_eq!(storage.values, expected_storage.values);
     }
     Ok(())
 }
@@ -208,7 +265,7 @@ fn logical_time_prng_and_timer() -> Result<()> {
     let start = futures_executor::block_on(a.start("same", "v1", Value::Null, 1000))?;
     futures_executor::block_on(b.start("same", "v1", Value::Null, 1000))?;
     let committed = a.into_storage()?;
-    let mut a = Engine::new(committed.clone(), runtime());
+    let mut a = Engine::new(committed.clone(), programs(source));
     assert!(
         futures_executor::block_on(a.complete(
             "same",
@@ -219,7 +276,7 @@ fn logical_time_prng_and_timer() -> Result<()> {
         .is_err()
     );
     assert!(a.into_storage().is_err());
-    let mut a = Engine::new(committed, runtime());
+    let mut a = Engine::new(committed, programs(source));
     let x = futures_executor::block_on(a.complete(
         "same",
         start.state.pending[0].id(),
@@ -242,9 +299,8 @@ fn logical_time_prng_and_timer() -> Result<()> {
 
 #[test]
 fn zero_growth_overwrites_and_no_history_dependency() -> Result<()> {
-    let mut e = engine(
-        "async function main(){await durable.call('observe'); const b=new Uint8Array(3*1024*1024); b[0]=7;b[b.length-1]=9;await durable.call('observe');b[0]=0;await durable.call('observe');return [b[0],b[b.length-1],b[4096]];}",
-    );
+    let source = "async function main(){await durable.call('observe'); const b=new Uint8Array(3*1024*1024); b[0]=7;b[b.length-1]=9;await durable.call('observe');b[0]=0;await durable.call('observe');return [b[0],b[b.length-1],b[4096]];}";
+    let mut e = engine(source);
     let mut state = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
     let initial = state.image_bytes;
     state = futures_executor::block_on(e.complete(
@@ -265,7 +321,7 @@ fn zero_growth_overwrites_and_no_history_dependency() -> Result<()> {
     // History IDs remain in metadata, but are not needed to restore this head.
     kv.values
         .retain(|key, _| !key.starts_with("checkpoint/") || key.ends_with(&state.checkpoint_id));
-    let mut e = Engine::new(kv, runtime());
+    let mut e = Engine::new(kv, programs(source));
     assert_eq!(
         futures_executor::block_on(e.recover("r"))?.checkpoint_id,
         state.checkpoint_id
@@ -280,30 +336,29 @@ fn zero_growth_overwrites_and_no_history_dependency() -> Result<()> {
     Ok(())
 }
 
+/// Recovery needs the run's program in the catalog, and a checkpoint of this
+/// build of the runtime.
 #[test]
-fn missing_golden_and_incompatible_build_are_rejected() -> Result<()> {
+fn a_missing_program_and_another_build_are_rejected() -> Result<()> {
     let mut e = engine(PROGRAM);
     futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
-    let original = e.into_storage()?;
-    for mode in ["application", "build"] {
-        let mut kv = original.clone();
-        if mode == "application" {
-            kv.values.retain(|k, _| !k.starts_with("application/"));
+    let committed = e.into_storage()?;
+    let renamed = Arc::new(Programs::new(runtime()).compile("v2", PROGRAM)?);
+    assert!(
+        futures_executor::block_on(Engine::new(committed.clone(), renamed).recover("r")).is_err()
+    );
+    let mut rebuilt = committed.clone();
+    for (key, manifest) in &mut rebuilt.values {
+        if key.starts_with("checkpoint/") {
+            let mut json: Value = serde_json::from_slice(manifest)?;
+            json["build"] = json!("wrong");
+            *manifest = serde_json::to_vec(&json)?;
         }
-        if mode == "build" {
-            for (k, v) in &mut kv.values {
-                if k.starts_with("application/") {
-                    let mut j: Value = serde_json::from_slice(v)?;
-                    j["build"] = json!("wrong");
-                    *v = serde_json::to_vec(&j)?;
-                }
-            }
-        }
-        assert!(
-            futures_executor::block_on(Engine::new(kv, runtime()).recover("r")).is_err(),
-            "mode={mode}"
-        );
     }
+    assert!(
+        futures_executor::block_on(Engine::new(rebuilt, programs(PROGRAM)).recover("r")).is_err()
+    );
+    futures_executor::block_on(Engine::new(committed, programs(PROGRAM)).recover("r"))?;
     Ok(())
 }
 
@@ -312,16 +367,18 @@ fn initialization_and_guest_failure_contract() -> Result<()> {
     for source in [
         "durable.call('forbidden');async function main(){}",
         "async function main( {",
+        "async function notMain(){}",
     ] {
-        let mut e = Engine::new(MemoryTransaction::default(), runtime());
-        assert!(futures_executor::block_on(e.register("bad", source)).is_err());
-        assert!(
-            !e.storage()
-                .values
-                .keys()
-                .any(|k| k.starts_with("application/"))
-        );
+        assert!(Programs::new(runtime()).compile("bad", source).is_err());
     }
+    let main = "async function main(){}";
+    assert!(Program::compile(&runtime(), "not a name", main).is_err());
+    assert!(
+        Programs::new(runtime())
+            .compile("v1", main)?
+            .compile("v1", main)
+            .is_err()
+    );
     for source in [
         "async function main(){throw new Error('boom')}",
         "async function main(){return ()=>1}",
@@ -352,13 +409,12 @@ fn initialization_and_guest_failure_contract() -> Result<()> {
 /// abandoning its outstanding requests.
 #[test]
 fn a_trap_ends_the_run() -> Result<()> {
-    let mut e = engine(
-        "async function main(_,ctx){await ctx.kv.set('before',1);const a=ctx.rpc.call({service:'S',handler:'h'});await durable.call('observe');await ctx.kv.set('after',1);while(true){}}",
-    );
+    let source = "async function main(_,ctx){await ctx.kv.set('before',1);const a=ctx.rpc.call({service:'S',handler:'h'});await durable.call('observe');await ctx.kv.set('after',1);while(true){}}";
+    let mut e = engine(source);
     let before = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
     assert_eq!(before.state.pending.len(), 2);
     let committed = e.into_storage()?;
-    let mut e = Engine::new(committed, runtime());
+    let mut e = Engine::new(committed, programs(source));
     let failed = futures_executor::block_on(e.complete(
         "r",
         before.state.pending[1].id(),
@@ -378,7 +434,7 @@ fn a_trap_ends_the_run() -> Result<()> {
     assert!(e.storage().effects.is_empty());
     let committed = e.into_storage()?;
     // A late result for an abandoned request changes nothing.
-    let mut e = Engine::new(committed, runtime());
+    let mut e = Engine::new(committed, programs(source));
     let late = futures_executor::block_on(e.complete(
         "r",
         before.state.pending[0].id(),
@@ -396,11 +452,12 @@ fn a_trap_ends_the_run() -> Result<()> {
 /// A trap in the first turn ends the run over the golden image.
 #[test]
 fn a_trap_in_the_first_turn_ends_the_run() -> Result<()> {
-    let mut e = engine("async function main(){while(true){}}");
+    let source = "async function main(){while(true){}}";
+    let mut e = engine(source);
     let failed = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
     assert_eq!(failed.state.status, Status::Failed);
     assert_eq!(failed.checkpoint_sequence, 0);
-    let mut e = Engine::new(e.into_storage()?, runtime());
+    let mut e = Engine::new(e.into_storage()?, programs(source));
     let again = futures_executor::block_on(e.start("r", "v1", Value::Null, 2))?;
     assert_eq!(again.checkpoint_id, failed.checkpoint_id);
     Ok(())
@@ -408,8 +465,7 @@ fn a_trap_in_the_first_turn_ends_the_run() -> Result<()> {
 
 #[test]
 fn stack_limit_and_unicode_survive_cold_restore() -> Result<()> {
-    let mut e = engine(
-        r#"function overflow(){
+    let source = r#"function overflow(){
         function recurse(){return recurse()+1;}
         try{recurse();return false;}catch(e){return /stack/i.test(e.message);}
     }
@@ -418,10 +474,10 @@ fn stack_limit_and_unicode_survive_cold_restore() -> Result<()> {
         const text='nul:\u0000 lone:\ud800 snow:\u96ea';
         await durable.call('observe');
         return {before,after:overflow(),nul:text.charCodeAt(4),surrogate:text.charCodeAt(11),snow:text.endsWith('雪')};
-    }"#,
-    );
+    }"#;
+    let mut e = engine(source);
     let first = futures_executor::block_on(e.start("r", "v1", Value::Null, 1000))?;
-    let mut e = Engine::new(e.into_storage()?, runtime());
+    let mut e = Engine::new(e.into_storage()?, programs(source));
     let done = futures_executor::block_on(e.complete(
         "r",
         first.state.pending[0].id(),

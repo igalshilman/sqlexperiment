@@ -1,6 +1,10 @@
 //! Host-owned atomic commit and explicit recovery. No replay log.
+//!
+//! cargo run --release --example host -- [directory]
 use anyhow::{Context, Result, bail};
-use quickjs_durable::{Engine, FileKv, MemoryTransaction, Operation, Outcome, Runtime, Status};
+use quickjs_durable::{
+    Engine, FileKv, MemoryTransaction, Operation, Outcome, Programs, Runtime, Status,
+};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 
@@ -21,7 +25,9 @@ fn main() -> Result<()> {
             std::env::temp_dir().join(format!("quickjs-tx-demo-{}", std::process::id()))
         });
     let mut store = FileKv::open(&directory)?;
-    let runtime = Arc::new(Runtime::new()?);
+    // The programs this host serves, each compiled once into its golden image.
+    let programs =
+        Arc::new(Programs::new(Arc::new(Runtime::new()?)).compile("transaction-demo-v1", SOURCE)?);
     // The demo host atomically publishes its whole domain as one KV value. A
     // real host supplies its own multi-key transaction spanning the same data.
     let initial: MemoryTransaction = store
@@ -29,8 +35,7 @@ fn main() -> Result<()> {
         .map(|bytes| serde_json::from_slice(&bytes))
         .transpose()?
         .unwrap_or_default();
-    let mut engine = Engine::new(initial, runtime.clone());
-    futures_executor::block_on(engine.register("transaction-demo-v1", SOURCE))?;
+    let mut engine = Engine::new(initial, programs.clone());
     let mut view =
         futures_executor::block_on(engine.start("r", "transaction-demo-v1", json!(21), 1000))?;
     store.put("domain", &serde_json::to_vec(&engine.into_storage()?)?)?; // COMMIT
@@ -40,7 +45,7 @@ fn main() -> Result<()> {
         let committed: MemoryTransaction =
             serde_json::from_slice(&store.get("domain")?.context("Missing domain")?)?;
         let recovered = futures_executor::block_on(
-            Engine::new(committed.clone(), runtime.clone()).recover("r"),
+            Engine::new(committed.clone(), programs.clone()).recover("r"),
         )?;
         let id = recovered.state.pending[0].id().to_owned();
         let effect = committed.effects.get(&id).context("Missing host effect")?;
@@ -55,7 +60,7 @@ fn main() -> Result<()> {
         };
         // The local Calculator is pure Rust. Remote effects would be completed
         // by the host transport, which supplies its durable result here.
-        let mut engine = Engine::new(committed, runtime.clone())
+        let mut engine = Engine::new(committed, programs.clone())
             .with_checkpoint_interval(std::num::NonZeroUsize::new(3).unwrap());
         view = futures_executor::block_on(engine.complete(
             "r",

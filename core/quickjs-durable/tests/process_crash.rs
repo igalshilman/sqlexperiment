@@ -1,8 +1,11 @@
 #![cfg(unix)]
 use anyhow::{Result, ensure};
-use quickjs_durable::{Engine, FileKv, MemoryTransaction, Outcome, Runtime, Status};
+use common::programs;
+use quickjs_durable::{Engine, FileKv, MemoryTransaction, Outcome, Status};
 use serde_json::Value;
-use std::{process::Command, sync::Arc};
+use std::process::Command;
+
+mod common;
 
 const SOURCE: &str = "async function main(_,ctx){await ctx.kv.set('n',0);const n=await ctx.rpc.call({service:'Counter',handler:'next'});await ctx.kv.set('n',n);return n;}";
 fn kill() -> ! {
@@ -19,7 +22,7 @@ fn child_crash() -> Result<()> {
     let after = std::env::var("QJD_CRASH_AFTER")? == "true";
     let mut store = FileKv::open(dir)?;
     let tx: MemoryTransaction = serde_json::from_slice(&store.get("domain")?.unwrap())?;
-    let mut engine = Engine::new(tx, Arc::new(Runtime::new()?))
+    let mut engine = Engine::new(tx, programs(SOURCE))
         .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
     let pending = futures_executor::block_on(engine.recover("run"))?
         .state
@@ -37,12 +40,10 @@ fn child_crash() -> Result<()> {
 #[test]
 fn sigkill_before_and_after_host_commit_preserves_atomic_domain() -> Result<()> {
     use std::os::unix::process::ExitStatusExt;
-    let runtime = Arc::new(Runtime::new()?);
     for after in [false, true] {
         let dir = tempfile::tempdir()?;
         let mut store = FileKv::open(dir.path())?;
-        let mut engine = Engine::new(MemoryTransaction::default(), runtime.clone());
-        futures_executor::block_on(engine.register("v1", SOURCE))?;
+        let mut engine = Engine::new(MemoryTransaction::default(), programs(SOURCE));
         let start = futures_executor::block_on(engine.start("run", "v1", Value::Null, 1000))?;
         store.put("domain", &serde_json::to_vec(&engine.into_storage()?)?)?;
         let status = Command::new(std::env::current_exe()?)
@@ -57,7 +58,7 @@ fn sigkill_before_and_after_host_commit_preserves_atomic_domain() -> Result<()> 
         let tx: MemoryTransaction = serde_json::from_slice(&store.get("domain")?.unwrap())?;
         assert_eq!(tx.state["n"], if after { 42 } else { 0 });
         assert_eq!(tx.effects.len(), 1);
-        let mut engine = Engine::new(tx, runtime.clone())
+        let mut engine = Engine::new(tx, programs(SOURCE))
             .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
         let recovered = futures_executor::block_on(engine.recover("run"))?;
         assert_eq!(recovered.checkpoint_sequence, if after { 1 } else { 0 });

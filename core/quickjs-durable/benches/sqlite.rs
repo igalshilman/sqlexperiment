@@ -1,7 +1,7 @@
 //! End-to-end SQLite commits, separate from correctness tests. No artificial
 //! read latency: pending-I/O/cancellation semantics are verified in tests/sqlite.
 use anyhow::{Context, Result, ensure};
-use quickjs_durable::{Engine, Operation, Outcome, Runtime, Status, sqlite::Host};
+use quickjs_durable::{Engine, Operation, Outcome, Programs, Runtime, Status, sqlite::Host};
 use serde_json::json;
 use std::{sync::Arc, time::Instant};
 
@@ -43,12 +43,10 @@ async fn run() -> Result<()> {
                 }
             )
         };
+        let programs = Arc::new(Programs::new(runtime.clone()).compile("v1", &source)?);
         for repeat in 0..4 {
             let path = directory.path().join(format!("{name}-{repeat}.sqlite"));
             let mut host = Host::open(&path)?;
-            let mut engine = Engine::new(host.begin("bench", "scope")?, runtime.clone());
-            futures_executor::block_on(engine.register("v1", &source))?;
-            engine.into_storage()?.commit()?;
             let wal_path = path.with_extension("sqlite-wal");
             let mut peak_wal_bytes = 0;
             let mut next: Option<(String, Outcome, u64)> = None;
@@ -58,7 +56,7 @@ async fn run() -> Result<()> {
             let total = Instant::now();
             loop {
                 let before = Instant::now();
-                let mut engine = Engine::new(host.begin("bench", "scope")?, runtime.clone());
+                let mut engine = Engine::new(host.begin("bench", "scope")?, programs.clone());
                 if name != "rpc-every-1" {
                     engine = engine
                         .with_checkpoint_interval(std::num::NonZeroUsize::new(2 * batch).unwrap());
@@ -122,7 +120,7 @@ async fn run() -> Result<()> {
             let mut host = Host::open(&path)?;
             let before = Instant::now();
             let recovered = futures_executor::block_on(
-                Engine::new(host.begin("bench", "scope")?, runtime.clone()).recover("bench"),
+                Engine::new(host.begin("bench", "scope")?, programs.clone()).recover("bench"),
             )?;
             let recover_ms = before.elapsed().as_secs_f64() * 1000.0;
             ensure!(
@@ -148,8 +146,8 @@ async fn run() -> Result<()> {
         "turn_ms includes BEGIN IMMEDIATE, cold VM restore/execution/capture, SQL staging and COMMIT. No warm VM cache.",
         "commit_ms is SQLite COMMIT only, including any automatic WAL checkpoint; storage is the local container filesystem.",
         "RPC results are durably stored in an extra transaction each; run elapsed_ms includes those commits and effect queries; turn_ms does not.",
-        "Compilation, golden registration and final reopen validation are excluded from run elapsed_ms.",
-        "checkpoint_write_bytes counts logical checkpoint keys/values, not physical disk writes. Database bytes include golden and all historical snapshots; no GC.",
+        "Compiling the runtime and the program, and the final reopen validation, are excluded from run elapsed_ms.",
+        "checkpoint_write_bytes counts logical checkpoint keys/values, not physical disk writes. Database bytes include all historical snapshots, not the golden image; no GC.",
         "peak_wal_allocated_bytes is file allocation length, not cumulative WAL traffic; SQLite reuses that file.",
         "No network or artificial KV latency in timing runs; yielding reads and cancellation are exercised separately in tests."],
         "rows":rows,"runs":runs});

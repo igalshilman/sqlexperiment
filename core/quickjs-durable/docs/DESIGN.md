@@ -210,10 +210,12 @@ trait Transaction: Kv {
     async fn abandon(&mut self, run: &str) -> Result<()>; // the run trapped
 }
 
-Engine::new(transaction, shared_runtime)
+Program::compile(runtime, name, source) -> Result<Program>   // golden creation
+Program::dump() -> Result<bytes>; Program::load(runtime, name, source, dump)
+Programs::new(shared_runtime).compile(name, source)? / .load(name, source, dump)?
+Engine::new(transaction, shared_programs)
 Engine::with_checkpoint_interval(NonZeroUsize) // optional host request budget
-Engine::register(application_id, source).await -> Result<()>
-Engine::start(run, application_id, input, now).await -> Result<View>
+Engine::start(run, program, input, now).await -> Result<View>
 Engine::complete(run, operation_id, outcome, now).await -> Result<View>
 Engine::recover(run).await -> Result<View>
 Engine::into_storage() -> Result<Transaction>
@@ -300,9 +302,9 @@ required to capture an otherwise safe boundary.
 Compile the instrumented module once and share it. Each current turn uses a fresh
 Wasmtime Store/instance, deliberately exercising cold restore.
 
-Golden creation, once per application version:
+Golden creation, once per program version, ahead of time (§5.3):
 
-1. Instantiate with logical time zero and host identity `application/<application_id>`.
+1. Instantiate with logical time zero and host identity `program/<name>`.
 2. Call `_initialize()`, then `qjs_init2(~((1<<9)|(1<<10)))`; require return zero.
    These flags disable weak references/finalization and the performance intrinsic.
 3. Apply QuickJS allocator and stack limits. Evaluate bridge code, then application
@@ -310,7 +312,7 @@ Golden creation, once per application version:
 4. Require `typeof main === 'function'`. Durable requests during initialization
    throw because the bridge has no run ID yet.
 5. Free temporary handles/strings, read runtime/context pointers and stack global,
-   and copy complete linear memory. Compress and stage the golden/catalog atomically.
+   and copy complete linear memory: the program's golden image.
 
 Runtime-dependent initialization values become shared defaults. Keep per-invocation
 input, identity and entropy out of top-level initialization. Reusing an application
@@ -400,7 +402,8 @@ Reference limits, not a general resource-management API:
 | Application source, input, host outcome                   |                      1 MiB each |
 | VM string extraction, including aggregate inspected state |                           1 MiB |
 | Stored JSON metadata                                      |                          16 MiB |
-| Application/run ID                                        |             1–1,024 UTF-8 bytes |
+| Run ID                                                    |             1–1,024 UTF-8 bytes |
+| Program name                                              | 1–128 letters, digits, `-`, `_` |
 
 The 32 KiB stack limit is deliberately lower than upstream's 512 KiB ceiling:
 the latter exhausted the instrumented Wasmtime native stack in the recursion
@@ -471,35 +474,29 @@ writes to golden pages, but must supplement complete write tracking.
 
 ### 5.1. Record identities and layouts
 
-Let `H(s)` be lowercase hex SHA-256 of UTF-8 s, `A=H(application_id)`, `R=H(run)`.
+Let `H(s)` be lowercase hex SHA-256 of UTF-8 s, and `R=H(run)`.
 The first checkpoint sequence is zero. Its checkpoint/blob ID is `run/R/sequence`.
 A blob reference is an ID; prepend `blob/` to fetch it. This is naming and build
 identity, not snapshot content addressing or integrity verification.
 
 | Logical key                 | Encoded value                                    |
 | --------------------------- | ------------------------------------------------ |
-| `application/A`             | Application JSON record                          |
-| `blob/application/A`        | Zstd-compressed complete golden memory           |
 | `blob/run/R/sequence`       | Compressed changed-page batch, if nonempty       |
 | `checkpoint/run/R/sequence` | Manifest JSON record                             |
 | `run/R/input`               | Original input JSON for duplicate-start checking |
 | `run/R/head`                | Raw UTF-8 checkpoint ID, not a JSON string       |
 
-Record field spelling matches the Rust experiment. Application/manifest fields
+Programs and their golden images are not stored here: the host supplies them
+(§5.3). Record field spelling matches the Rust experiment. Manifest fields
 use snake_case; nested State uses camelCase. Optional State.outcome is omitted;
 Manifest.previous is null for sequence zero. Integer page keys are decimal strings
 in a JSON object. JSON whitespace/property order are not semantically significant.
 
 ```text
 VmMeta = {stack: i32, runtime: i32, context: i32}
-Application = {
-    format: 1, id: original_application_id,
-    source_hash: H(source), build: exact_runtime_build_id,
-    blob: "application/A", memory_len: byte_count, meta: VmMeta
-}
 PageRef = {blob: blob_id, slot: zero_based_entry_index}
 Manifest = {
-    format: 1, application: original_application_id, build: runtime_build_id,
+    format: 1, program: name, source: H(program_source), build: runtime_build_id,
     previous: prior_checkpoint_id_or_null, sequence: unsigned_integer,
     meta: VmMeta, memory_len: byte_count,
     pages: {decimal_page_index: PageRef, ...},
@@ -521,16 +518,16 @@ intrinsics=<flags>`. It covers what a restored image depends on, not the host's 
 code: editing the host keeps stored runs restorable. Bump the ABI version when the
 restore contract changes in a way these inputs don't show (import behavior, the bridge
 protocol, VM metadata). A new implementation may use its own immutable compatibility
-identity, but must pin all state-layout and restore semantics. Different source/runtime builds require new application
-versions; retain old artifacts for old runs. There is no heap migration.
+identity, but must pin all state-layout and restore semantics. A run restores only
+with the program source and build it started on: a changed program needs a new
+name while the old one's runs finish. There is no heap migration.
 
-The returned View contains checkpoint ID, application ID, sequence, State, image
+The returned View contains checkpoint ID, program name, sequence, State, image
 length and diagnostics: changed/examined/override page counts, new blob bytes and
 manifest bytes. It contains no host commit acknowledgement.
 
 ### 5.2. Binary page batch
 
-Golden payload: Zstd level-3 compression of exactly `Application.memory_len` bytes.
 Changed-page payload: Zstd level-3 compression of this uncompressed structure:
 
 | Offset/entry      | Encoding                                                      |
@@ -617,16 +614,32 @@ manifest then references that one alone. A long run's restore reads at most that
 many batches instead of one per turn. Retain golden and every referenced blob. No
 record GC is implemented.
 
+### 5.3. Programs and their dumps
+
+A program is static: a source file, named, and its golden image, computed
+ahead of time and shipped with it (the `golden` binary writes `<name>.golden`
+beside `<name>.js`). A host loads its programs at startup into a catalog
+(`Programs`), which every engine of the process shares; golden memory is
+decompressed once. A dump is:
+
+| Offset/entry | Encoding                                                               |
+| ------------ | ---------------------------------------------------------------------- |
+| 0..7         | ASCII `QJSDUMP1`                                                       |
+| 8..11        | Header length L, unsigned 32-bit little-endian                         |
+| 12..12+L     | Header JSON: `{sourceHash: H(source), build, memoryLen, meta: VmMeta}` |
+| Rest         | Zstd level-3 compression of exactly `memoryLen` bytes of golden memory |
+
+Loading requires the runtime's build and the source's hash: a dump of another
+build or source is refused, so it is computed again rather than restored
+wrongly.
+
 ## 6. Engine algorithms and checkpoint boundaries
 
-### 6.1. Registration, start, completion and read-only recovery
+### 6.1. Start, completion and read-only recovery
 
-Registration validates the ID/source, then either verifies an existing immutable
-catalog's source/build or creates a golden. Stage golden and catalog together.
-Only the outer host transaction publishes them.
-
-Start validates run/application IDs, input and time and calls `check_run`.
-If the run already has a head, require the same application and structurally equal
+Start validates the run ID, input and time, finds the program in the catalog
+and calls `check_run`. If the run already has a head, require the same program
+(name and source hash) and structurally equal
 original input; return its current View without guest execution. Otherwise stage
 input identity, restore golden, bind run ID/time/seed, queue main and execute one
 turn. The host must retain/redeliver initial admission until that first commit;
@@ -1059,7 +1072,7 @@ to KV requests, target service/handler/key to RPC routing, sleep to the host tim
 service, and Resume to local scheduling. The host chooses an available completion
 and uses its explicit durable recovery path to call complete.
 
-Persist golden/runtime artifacts, retain initial admission until first commit,
+Ship programs with their golden dumps, retain initial admission until first commit,
 and include checkpoint storage, KV changes, effect registration and consumption
 in the same host transaction. Scope selection and RPC authorization belong to
 the host. Publish only committed terminal status; outcome alone may exist while
@@ -1085,7 +1098,9 @@ Rust SDK with journal replay off:
 - The `complete` invocation is the inbox: Restate retries it until its turn
   commits, so the host keeps no results. The proxy's call is a normal,
   journaled invocation.
-- A caller (`Js.run`) waits on a signal, sent by the turn in which `outcome`
+- Each program is a virtual object of its name, with no registration: the
+  binary embeds its programs and their dumps.
+- A caller (the object's shared `run`) waits on a signal, sent by the turn in which `outcome`
   first appears, even while losers of a race are still outstanding (§2.2).
 
 An implementation can be built and accepted in this order:

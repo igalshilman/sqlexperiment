@@ -1,14 +1,10 @@
 use crate::model::{
-    Application, Capture, Event, Image, MAX_INPUT, MAX_MEMORY, MAX_TIME, PAGE, State, VmMeta, hash,
+    Capture, Event, Image, MAX_INPUT, MAX_MEMORY, MAX_TIME, PAGE, State, VmMeta, hash,
 };
 use crate::{Operation, Resolution, Transaction};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    num::NonZeroUsize,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashSet, num::NonZeroUsize};
 use wasmtime::error::Context;
 use wasmtime::{
     Caller, Config, Engine, Global, Instance, Linker, Memory, Module, Store, StoreLimits,
@@ -107,16 +103,7 @@ pub struct Runtime {
     engine: Engine,
     module: Module,
     pub(crate) build: String,
-    /// Decompressed golden memory per application version (ID and source).
-    /// Golden creation is deterministic for a build, so an entry is valid for
-    /// any store whose catalog names that version.
-    goldens: Mutex<HashMap<String, Arc<Vec<u8>>>>,
 }
-// The source hash is hexadecimal: no `/` in it, so the key is unambiguous.
-fn golden_key(application: &Application) -> String {
-    format!("{}/{}", application.source_hash, application.id)
-}
-
 struct Host {
     now: u64,
     seed: [u8; 32],
@@ -154,34 +141,15 @@ impl Runtime {
             engine,
             module,
             build,
-            goldens: Mutex::default(),
         })
     }
 
-    /// The application's golden memory, if this runtime has decompressed it.
-    pub(crate) fn cached_golden(&self, application: &Application) -> Option<Arc<Vec<u8>>> {
-        self.goldens
-            .lock()
-            .unwrap()
-            .get(&golden_key(application))
-            .cloned()
-    }
-    pub(crate) fn cache_golden(&self, application: &Application, memory: Vec<u8>) -> Arc<Vec<u8>> {
-        let memory = Arc::new(memory);
-        let mut goldens = self.goldens.lock().unwrap();
-        goldens.insert(golden_key(application), memory.clone());
-        memory
-    }
     pub fn build_id(&self) -> &str {
         &self.build
     }
 
-    pub(crate) fn golden(&self, id: &str, source: &str) -> Result<Image> {
-        ensure!(
-            source.len() <= MAX_INPUT,
-            "Application source exceeds limit"
-        );
-        let mut vm = Vm::new(self, &format!("application/{id}"), 0)?;
+    pub(crate) fn golden(&self, name: &str, source: &str) -> Result<Image> {
+        let mut vm = Vm::new(self, &format!("program/{name}"), 0)?;
         vm.instance
             .get_typed_func::<(), ()>(&mut vm.store, "_initialize")?
             .call(&mut vm.store, ())?;
@@ -198,7 +166,7 @@ impl Runtime {
         vm.drain()?;
         ensure!(
             vm.eval("typeof main === 'function'", true)?.as_deref() == Some("true"),
-            "Application must define main(input)"
+            "A program must define main(input, ctx)"
         );
         vm.snapshot()
     }

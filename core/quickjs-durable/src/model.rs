@@ -148,7 +148,7 @@ pub struct State {
 /// Transient delivery to the VM, never an operation replay log.
 pub(crate) enum Event {
     Start {
-        application_id: String,
+        program: String,
         input: Value,
         now: u64,
     },
@@ -189,18 +189,6 @@ pub(crate) struct Image {
     pub memory: Vec<u8>,
 }
 
-/// Catalog records are immutable under the supplied application-version ID.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Application {
-    pub format: u32,
-    pub id: String,
-    pub source_hash: String,
-    pub build: String,
-    pub blob: String,
-    pub memory_len: usize,
-    pub meta: VmMeta,
-}
-
 /// One compressed blob batches multiple XOR pages. The slot selects a page in
 /// that blob; each page is relative to golden, never another invocation page.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -216,7 +204,9 @@ pub(crate) struct PageRef {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Manifest {
     pub format: u32,
-    pub application: String,
+    /// The program, and the hash of the source this run started on.
+    pub program: String,
+    pub source: String,
     pub build: String,
     pub previous: Option<String>,
     pub sequence: u64,
@@ -232,7 +222,7 @@ pub(crate) struct Manifest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct View {
     pub checkpoint_id: String,
-    pub application_id: String,
+    pub program: String,
     pub checkpoint_sequence: u64,
     pub state: State,
     pub image_bytes: usize,

@@ -1,31 +1,21 @@
 #![cfg(feature = "sqlite-host")]
 use anyhow::Result;
+use common::programs;
 use futures_channel::oneshot;
 use futures_executor::block_on;
 use quickjs_durable::{
-    Engine, Kv, Operation, Outcome, Resolution, Runtime, Status, Transaction,
+    Engine, Kv, Operation, Outcome, Resolution, Status, Transaction,
     sqlite::{Host, SqliteTransaction},
 };
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::{
     future::Future,
-    sync::{Arc, OnceLock},
     task::{Context, Poll, Waker},
 };
 
-fn runtime() -> Arc<Runtime> {
-    static RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
-    RUNTIME
-        .get_or_init(|| Arc::new(Runtime::new().unwrap()))
-        .clone()
-}
-fn register(host: &mut Host, source: &str) -> Result<()> {
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
-    futures_executor::block_on(engine.register("v1", source))?;
-    engine.into_storage()?.commit()?;
-    Ok(())
-}
+mod common;
+
 fn count(reader: &Connection, sql: &str) -> i64 {
     reader.query_row(sql, [], |r| r.get(0)).unwrap()
 }
@@ -69,17 +59,16 @@ fn pending_kv_read_retains_transaction_and_produces_only_one_checkpoint() -> Res
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("host.sqlite");
     let mut host = Host::open(&path)?;
-    register(
-        &mut host,
+    let programs = programs(
         "async function main(_,ctx){await ctx.kv.set('n',1);const n=await ctx.kv.get('n');await ctx.kv.set('n',n+1);return n+1;}",
-    )?;
+    );
     let reader = Connection::open(&path)?;
     let (send, receive) = oneshot::channel();
     let tx = GatedRead {
         inner: host.begin("r", "scope")?,
         gate: Some(receive),
     };
-    let mut engine = Engine::new(tx, runtime());
+    let mut engine = Engine::new(tx, programs.clone());
     let mut future = Box::pin(engine.start("r", "v1", Value::Null, 1000));
     assert!(matches!(
         future
@@ -120,17 +109,16 @@ fn cancelling_a_pending_read_rolls_back_state_effects_and_input() -> Result<()> 
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("host.sqlite");
     let mut host = Host::open(&path)?;
-    register(
-        &mut host,
+    let programs = programs(
         "async function main(_,ctx){await ctx.kv.set('n',1);const p=ctx.rpc.call({service:'Echo',handler:'echo'},1);await ctx.kv.get('n');return await p;}",
-    )?;
+    );
     let (_send, receive) = oneshot::channel();
     let mut engine = Engine::new(
         GatedRead {
             inner: host.begin("r", "scope")?,
             gate: Some(receive),
         },
-        runtime(),
+        programs.clone(),
     );
     let mut future = Box::pin(engine.start("r", "v1", Value::Null, 1000));
     assert!(
@@ -158,7 +146,7 @@ fn cancelling_a_pending_read_rolls_back_state_effects_and_input() -> Result<()> 
         ),
         0
     );
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     assert!(futures_executor::block_on(engine.recover("r")).is_err());
     let retry = block_on(engine.start("r", "v1", Value::Null, 1001))?;
     assert_eq!(retry.state.status, Status::Waiting);
@@ -174,14 +162,14 @@ fn completion_consumption_rolls_back_with_vm_and_state_then_commits_once() -> Re
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("host.sqlite");
     let mut host = Host::open(&path)?;
-    register(&mut host, FLOW)?;
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    let programs = programs(FLOW);
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     let first = block_on(engine.start("r", "v1", Value::Null, 1000))?;
     engine.into_storage()?.commit()?;
     let id = first.state.pending[0].id();
     assert!(host.record_result(id, &Outcome::success(42), 1001)?);
     assert!(!host.record_result(id, &Outcome::success(999), 1002)?);
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime())
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone())
         .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
     let provisional = block_on(engine.complete("r", id, Outcome::success(42), 1001))?;
     assert_eq!(provisional.checkpoint_sequence, 1);
@@ -192,7 +180,7 @@ fn completion_consumption_rolls_back_with_vm_and_state_then_commits_once() -> Re
     let effects = host.effects("r")?;
     assert_eq!(effects.len(), 1);
     assert_eq!(effects[0].outcome, Some(Outcome::success(42)));
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime())
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone())
         .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
     assert_eq!(
         futures_executor::block_on(engine.recover("r"))?.checkpoint_id,
@@ -208,7 +196,7 @@ fn completion_consumption_rolls_back_with_vm_and_state_then_commits_once() -> Re
     assert_eq!(effects.len(), 1);
     assert!(matches!(effects[0].operation, Operation::Resume { .. }));
     assert_eq!(effects[0].outcome, Some(Outcome::success(Value::Null)));
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime())
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone())
         .with_checkpoint_interval(std::num::NonZeroUsize::new(1).unwrap());
     let duplicate = block_on(engine.complete("r", id, Outcome::success(999), 1002))?;
     assert_eq!(duplicate.checkpoint_id, next.checkpoint_id);
@@ -231,18 +219,18 @@ fn a_trap_ends_the_run_in_one_commit() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("host.sqlite");
     let mut host = Host::open(&path)?;
-    register(
-        &mut host,
+    let programs = programs(
         "async function main(_,ctx){await ctx.kv.set('n',1);ctx.rpc.call({service:'Echo',handler:'echo'},1);await ctx.kv.get('n');while(true){} }",
-    )?;
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    );
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     let failed = block_on(engine.start("r", "v1", Value::Null, 1000))?;
     assert_eq!(failed.state.status, quickjs_durable::Status::Failed);
     assert_eq!(engine.storage().io().effect_inserts, 1);
     engine.into_storage()?.commit()?;
     assert_eq!(host.state("scope", "n")?, Some(Value::from(1)));
     assert!(host.effects("r")?.is_empty());
-    let recovered = block_on(Engine::new(host.begin("r", "scope")?, runtime()).recover("r"))?;
+    let recovered =
+        block_on(Engine::new(host.begin("r", "scope")?, programs.clone()).recover("r"))?;
     assert_eq!(recovered.state.status, quickjs_durable::Status::Failed);
     Ok(())
 }
@@ -251,12 +239,11 @@ fn a_trap_ends_the_run_in_one_commit() -> Result<()> {
 fn application_scope_is_host_selected_and_reads_observe_prior_commits() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut host = Host::open(dir.path().join("host.sqlite"))?;
-    register(
-        &mut host,
+    let programs = programs(
         "async function main(_,ctx){const n=(await ctx.kv.get('n'))??0;await ctx.kv.set('n',n+1);await ctx.kv.set('temp',1);await ctx.kv.delete('temp');return n+1;}",
-    )?;
+    );
     for (run, scope, expected) in [("r1", "A", 1), ("r2", "B", 1), ("r3", "A", 2)] {
-        let mut engine = Engine::new(host.begin(run, scope)?, runtime());
+        let mut engine = Engine::new(host.begin(run, scope)?, programs.clone());
         assert_eq!(
             block_on(engine.start(run, "v1", Value::Null, 1000))?
                 .state
@@ -275,20 +262,20 @@ fn application_scope_is_host_selected_and_reads_observe_prior_commits() -> Resul
 fn delivery_must_match_the_durable_result() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut host = Host::open(dir.path().join("host.sqlite"))?;
-    register(&mut host, FLOW)?;
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    let programs = programs(FLOW);
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     let first = block_on(engine.start("r", "v1", Value::Null, 1000))?;
     engine.into_storage()?.commit()?;
     let id = first.state.pending[0].id();
     host.record_result(id, &Outcome::success(42), 1005)?;
     for (outcome, now) in [(Outcome::success(999), 1005), (Outcome::success(42), 1004)] {
-        let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+        let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
         assert!(block_on(engine.complete("r", id, outcome, now)).is_err());
         drop(engine);
         assert_eq!(host.effects("r")?[0].outcome, Some(Outcome::success(42)));
         assert_eq!(host.state("scope", "n")?, Some(json!(0)));
     }
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     let done = block_on(engine.complete("r", id, Outcome::success(42), 1006))?;
     assert_eq!(done.state.outcome, Some(Outcome::success(42)));
     engine.into_storage()?.commit()?;
@@ -300,16 +287,18 @@ fn committed_run_scope_cannot_change_on_recovery() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("host.sqlite");
     let mut host = Host::open(&path)?;
-    register(&mut host, FLOW)?;
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    let programs = programs(FLOW);
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     block_on(engine.start("r", "v1", Value::Null, 1000))?;
     engine.into_storage()?.commit()?;
     drop(host);
     let mut host = Host::open(&path)?;
     assert!(host.begin("r", "different-scope").is_err());
     assert!(
-        futures_executor::block_on(Engine::new(host.begin("r", "scope")?, runtime()).recover("r"))
-            .is_ok()
+        futures_executor::block_on(
+            Engine::new(host.begin("r", "scope")?, programs.clone()).recover("r")
+        )
+        .is_ok()
     );
     Ok(())
 }
@@ -318,15 +307,15 @@ fn committed_run_scope_cannot_change_on_recovery() -> Result<()> {
 fn transaction_checks_run_even_without_guest_requests() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut host = Host::open(dir.path().join("host.sqlite"))?;
-    register(&mut host, "function main(){return 42;}")?;
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    let programs = programs("function main(){return 42;}");
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     block_on(engine.start("r", "v1", Value::Null, 1000))?;
     engine.into_storage()?.commit()?;
-    let mut engine = Engine::new(host.begin("other", "scope")?, runtime());
+    let mut engine = Engine::new(host.begin("other", "scope")?, programs.clone());
     assert!(futures_executor::block_on(engine.recover("r")).is_err());
     assert!(block_on(engine.start("r", "v1", Value::Null, 1000)).is_err());
     assert!(engine.into_storage().is_err());
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     assert!(block_on(engine.start("new-run", "v1", Value::Null, 1000)).is_err());
     assert!(engine.into_storage().is_err());
     Ok(())
@@ -336,11 +325,8 @@ fn transaction_checks_run_even_without_guest_requests() -> Result<()> {
 fn unusable_timer_results_do_not_poison_the_inbox() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut host = Host::open(dir.path().join("host.sqlite"))?;
-    register(
-        &mut host,
-        "async function main(_,ctx){await ctx.sleep(10);return 42;}",
-    )?;
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    let programs = programs("async function main(_,ctx){await ctx.sleep(10);return 42;}");
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     let first = block_on(engine.start("r", "v1", Value::Null, 1000))?;
     engine.into_storage()?.commit()?;
     let id = first.state.pending[0].id();
@@ -354,7 +340,7 @@ fn unusable_timer_results_do_not_poison_the_inbox() -> Result<()> {
     );
     assert!(host.effects("r")?[0].outcome.is_none());
     assert!(host.record_result(id, &Outcome::success(Value::Null), 1010)?);
-    let mut engine = Engine::new(host.begin("r", "scope")?, runtime());
+    let mut engine = Engine::new(host.begin("r", "scope")?, programs.clone());
     assert_eq!(
         block_on(engine.complete("r", id, Outcome::success(Value::Null), 1010))?
             .state

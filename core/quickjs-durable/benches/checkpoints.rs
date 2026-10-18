@@ -1,6 +1,7 @@
 use anyhow::{Result, ensure};
 use quickjs_durable::{
-    Engine, Kv, MemoryTransaction, Operation, Outcome, Resolution, Runtime, Status, Transaction,
+    Engine, Kv, MemoryTransaction, Operation, Outcome, Program, Programs, Resolution, Runtime,
+    Status, Transaction,
 };
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Instant};
@@ -83,16 +84,17 @@ fn main() -> Result<()> {
     ];
     let mut rows = Vec::new();
     for (name, source, expected) in cases {
-        // One warm-up, then three independent runs. Same application/ID/input for
+        // One warm-up, then three independent runs. Same program/ID/input for
         // reproducible images; MemoryTransaction keeps storage latency out of the result.
         for repeat in 0..4 {
-            let mut engine = Engine::new(MeasuredKv::default(), runtime.clone());
             let before = Instant::now();
-            futures_executor::block_on(engine.register(name, source))?;
-            let register_ms = before.elapsed().as_secs_f64() * 1000.0;
-            let golden_bytes = engine.storage().bytes;
-            let mut previous_bytes = golden_bytes;
-            let mut previous_writes = engine.storage().writes;
+            let program = Program::compile(&runtime, name, source)?;
+            let program_ms = before.elapsed().as_secs_f64() * 1000.0;
+            let golden_dump_bytes = program.dump()?.len();
+            let programs = Arc::new(Programs::new(runtime.clone()).with(program)?);
+            let mut engine = Engine::new(MeasuredKv::default(), programs);
+            let mut previous_bytes = 0;
+            let mut previous_writes = 0;
             let mut before = Instant::now();
             let mut view =
                 futures_executor::block_on(engine.start("bench", name, Value::Null, 1000))?;
@@ -112,8 +114,8 @@ fn main() -> Result<()> {
                 if repeat != 0 {
                     rows.push(
                         json!({"workload":name,"repeat":repeat,"turn":view.checkpoint_sequence,
-                        "turn_ms":turn_ms,"restore_ms":restore_ms,"register_ms":register_ms,
-                        "golden_storage_bytes":golden_bytes,"image_bytes":view.image_bytes,
+                        "turn_ms":turn_ms,"restore_ms":restore_ms,"program_ms":program_ms,
+                        "golden_dump_bytes":golden_dump_bytes,"image_bytes":view.image_bytes,
                         "changed_pages":view.changed_pages,"override_pages":view.override_pages,
                         "examined_pages":view.examined_pages,"captured_bytes":view.changed_pages*4096,
                         "new_blob_bytes":view.new_blob_bytes,"manifest_bytes":view.manifest_bytes,
