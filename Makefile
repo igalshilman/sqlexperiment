@@ -1,13 +1,16 @@
 # Build and test everything, part by part:
 #
 #   core/        the sqlite-kv crate, and the patch to the SDKs' shared core
-#                (core/sdk-shared-core) that both SDKs build on
+#                (core/sdk-shared-core) that the SDKs build on
 #   typescript/  the pnpm workspace: the patched TypeScript SDK, the Node.js
 #                addon, the integrations and their tests; with the examples
 #                (examples-typescript/, a member of the workspace)
 #   python/      the uv workspace: the patched Python SDK, the Python
 #                extension, the agent integrations and their tests; and the
 #                examples (examples-python/, a project of their own)
+#   rust/        the patched Rust SDK (rust/sdk), and durable JavaScript in
+#                Restate objects on it (rust/quickjs-durable; its own
+#                targets: qjs, test-qjs, lint-qjs)
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -22,9 +25,11 @@ export CARGO_TARGET_DIR ?= $(CURDIR)/target
 CARGO ?= cargo
 SDK_TARBALL := typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 CORE := core/sqlite-kv
+QJS := rust/quickjs-durable
 ADDON := typescript/packages/sql-node/sqlite_kv.node
 CORE_PATCH := core/sdk-shared-core/sdk-shared-core.patch
 SDK_PY := python/sdk/.build/sdk-python/.patched
+SDK_RS := rust/sdk/.build/sdk-rust/.patched
 # Formats the TypeScript, JavaScript and Markdown of every part, as .oxfmtrc.json says.
 OXFMT := typescript/node_modules/.bin/oxfmt
 # Lints the TypeScript of every part, as .oxlintrc.json says; its type-aware
@@ -46,8 +51,8 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core addon sdk-ts sdk-py js py examples-rust test test-core test-addon test-sdk-ts test-ts \
-	test-sdk-py test-sql-py test-agents-py lint lint-core lint-ts lint-py format crash-test concurrency-test tools-test \
+.PHONY: all help core qjs addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
+	test-sdk-py test-sdk-rs test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs format crash-test concurrency-test tools-test \
 	crash-test-py concurrency-test-py restate-server wheels clean
 
 # --- Build
@@ -59,6 +64,9 @@ help: ## List the targets
 
 core: ## The sqlite-kv crate
 	cd $(CORE) && $(CARGO) build --locked --release
+
+qjs: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/quickjs-durable): a binary serving its programs (programs/, or QJS_PROGRAMS)
+	cd $(QJS) && $(CARGO) build --locked --release
 
 addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)
 
@@ -77,6 +85,11 @@ sdk-py: $(SDK_PY) ## The patched Python SDK's sources (python/sdk), for the uv w
 
 $(SDK_PY): $(wildcard python/sdk/patches/*.patch) $(CORE_PATCH) python/sdk/setup.sh
 	python/sdk/setup.sh
+
+sdk-rs: $(SDK_RS) ## The patched Rust SDK's sources (rust/sdk)
+
+$(SDK_RS): $(wildcard rust/sdk/patches/*.patch) $(CORE_PATCH) rust/sdk/setup.sh
+	rust/sdk/setup.sh
 
 py: $(SDK_PY) ## The uv workspace (python/.venv): the patched Python SDK and the Python extension, rebuilt when their Rust changes
 	cd python && uv sync --locked
@@ -103,6 +116,10 @@ test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
 	cd $(CORE) && $(CARGO) test --locked --features simulation
 
+# Release builds: the guest interpreter is slow unoptimized. verify-dirty
+# checks after every turn that the write barriers marked each changed page;
+# full-scan is the uninstrumented build, which compares every page.
+
 test-addon: $(ADDON) ## The Node.js addon
 	cd typescript/packages/sql-node && npm test
 
@@ -119,6 +136,9 @@ test-sdk-py: $(SDK_PY) ## The patched Python SDK's own tests
 		pytest -o python_files='*.py' tests --ignore=tests/harness.py --ignore=tests/servercontext.py \
 		--ignore=tests/ext.py -k 'not end_to_end'
 
+test-sdk-rs: $(SDK_RS) ## The patched Rust SDK's unit tests
+	cd rust/sdk/.build/sdk-rust && $(CARGO) test --lib
+
 test-sql-py: py ## The Python extension
 	cd python && uv run --locked pytest sqlite-kv/tests
 
@@ -131,6 +151,11 @@ lint-core: ## The Rust crates (the core, the addon and the Python extension): ru
 	cd $(CORE) && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 	cd typescript/packages/sql-node && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 	cd python/sqlite-kv && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
+
+lint-qjs: $(SDK_RS) ## Durable JavaScript in Restate objects: rustfmt --check and clippy, in both capture modes
+	cd $(QJS) && $(CARGO) fmt --check
+	cd $(QJS) && $(CARGO) clippy --locked --release --features verify-dirty --all-targets -- -D warnings
+	cd $(QJS) && $(CARGO) clippy --locked --release --features full-scan --all-targets -- -D warnings
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	cd typescript && pnpm typecheck
@@ -145,6 +170,7 @@ lint-py: py ## The Python (python/, examples-python/): ruff format --check and r
 
 format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Markdown) and ruff (Python)
 	cd $(CORE) && $(CARGO) fmt
+	cd $(QJS) && $(CARGO) fmt
 	cd typescript/packages/sql-node && $(CARGO) fmt
 	cd python/sqlite-kv && $(CARGO) fmt
 	$(OXFMT)
@@ -164,6 +190,12 @@ crash-test-py: py $(RESTATE_SERVER) ## Python: a bank and an agent through crash
 
 tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, workflow), against a Restate server
 	cd typescript/tests && node restate-tools.ts
+
+# One server at a time, on the default ports.
+test-qjs: $(SDK_RS) $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: the runtime with dirty-page tracking (verified) and with full scans, then the programs against a Restate server
+	cd $(QJS) && $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes
+	cd $(QJS) && $(CARGO) test --locked --release --features full-scan --lib --test runs --test crashes
+	cd $(QJS) && $(CARGO) test --locked --release --test restate -- --include-ignored --test-threads 1
 
 restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)

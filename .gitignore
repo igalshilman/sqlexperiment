@@ -1,6 +1,7 @@
-/target/
+target/
 /.direnv/
 node_modules/
 .venv/
 __pycache__/
 /dist/
+/rust/quickjs-durable/bench-*.json

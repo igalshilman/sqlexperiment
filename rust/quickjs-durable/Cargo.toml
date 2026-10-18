@@ -1,0 +1,43 @@
+[package]
+name = "quickjs-durable"
+version = "0.1.0"
+edition = "2024"
+description = "Durable JavaScript in Restate virtual objects: QuickJS memory images, no journal replay"
+license = "MIT"
+publish = false
+
+[features]
+# Capture by scanning every page, not by dirty-page tracking: a control for
+# the tests and the benchmark, never a production mode.
+full-scan = []
+# Compare the tracked pages against every memory page after each turn.
+verify-dirty = []
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+futures = "0.3"
+libc = "0.2"
+reqwest = { version = "0.13", features = ["json"] }
+restate-sdk = { path = "../sdk/.build/sdk-rust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3"
+wasm-encoder = { version = "=0.258.3", features = ["wasmparser"] }
+wasmparser = "=0.258.3"
+wasmtime = { version = "=49.0.3", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
+zstd = "0.13"
+
+[dev-dependencies]
+futures-executor = "0.3.34"
+tempfile = "3"
+wat = "=1.258.0"
+
+[[bench]]
+name = "checkpoints"
+harness = false
+
+# The patched shared core, cloned next to the SDK by rust/sdk/setup.sh.
+[patch.crates-io]
+restate-sdk-shared-core = { path = "../sdk/.build/sdk-shared-core" }

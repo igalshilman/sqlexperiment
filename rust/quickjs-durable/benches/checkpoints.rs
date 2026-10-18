@@ -1,0 +1,140 @@
+//! Turns of a few workloads over a store in memory: `cargo bench --bench
+//! checkpoints` (and `--features full-scan`, the control). Each run goes once
+//! with its VM live from turn to turn, and once restoring it at every turn, as
+//! a new attempt would. Results go to bench-<mode>.json.
+use anyhow::{Result, ensure};
+use quickjs_durable::{MemoryStore, Outcome, Program, Programs, Run, Runtime, Status};
+use serde_json::{Value, json};
+use std::{sync::Arc, time::Instant};
+
+fn main() -> Result<()> {
+    if cfg!(debug_assertions) {
+        println!("Use cargo bench --bench checkpoints for optimized measurements");
+        return Ok(());
+    }
+    ensure!(
+        !cfg!(feature = "verify-dirty"),
+        "Benchmarks must not include the verification scan"
+    );
+    let mode = if cfg!(feature = "full-scan") {
+        "full-scan"
+    } else {
+        "tracked"
+    };
+    let before = Instant::now();
+    let runtime = Arc::new(Runtime::new()?);
+    let compile_ms = before.elapsed().as_secs_f64() * 1000.0;
+    let cases = [
+        (
+            "scalar",
+            "async function main(){let n=0;for(let i=0;i<3;i++){n+=i;await durable.call('observe');}return n;}",
+            json!(3),
+        ),
+        (
+            "sparse-256k",
+            "const bytes=new Uint8Array(256*1024);async function main(){for(let i=0;i<3;i++){bytes[i*8192]=i+1;await durable.call('observe');}return bytes[16384];}",
+            json!(3),
+        ),
+        (
+            "heap-churn",
+            "async function main(){let a;for(let i=0;i<3;i++){a=Array.from({length:2000},(_,j)=>({id:j,value:'item-'+i+'-'+j}));await durable.call('observe');}return a.length;}",
+            json!(2000),
+        ),
+        (
+            "growth-3m",
+            "async function main(){await durable.call('observe');const b=new Uint8Array(3*1024*1024);b[0]=7;b[b.length-1]=9;await durable.call('observe');b[4096]=8;await durable.call('observe');return b[0]+b[4096];}",
+            json!(15),
+        ),
+        (
+            "sparse-8m",
+            "const bytes=new Uint8Array(8*1024*1024);async function main(){for(let i=0;i<2;i++){bytes[i*1024*1024]=i+1;await durable.call('observe');}return bytes[0];}",
+            json!(1),
+        ),
+        (
+            "write-heavy",
+            "const bytes=new Uint8Array(256*1024);async function main(){for(let t=0;t<3;t++){for(let i=0;i<10000;i++)bytes[(i*97)%bytes.length]^=i;await durable.call('observe');}return bytes[97];}",
+            json!(1),
+        ),
+    ];
+    let mut rows = Vec::new();
+    for (name, source, expected) in cases {
+        // One warm-up, then three repetitions. Same program, run and input:
+        // reproducible images.
+        for repeat in 0..4 {
+            let before = Instant::now();
+            let program = Program::compile(&runtime, name, source)?;
+            let program_ms = before.elapsed().as_secs_f64() * 1000.0;
+            let programs = Arc::new(Programs::new(runtime.clone()).with(program)?);
+            for restored in [false, true] {
+                let store = MemoryStore::default();
+                let started = Instant::now();
+                let mut run = futures_executor::block_on(Run::start(
+                    &programs,
+                    &store,
+                    "bench",
+                    name,
+                    Value::Null,
+                    1000,
+                ))?;
+                let mut turn_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let mut written = store.bytes_written();
+                let mut writes = store.writes();
+                loop {
+                    let view = run.view();
+                    if repeat != 0 {
+                        rows.push(json!({"workload":name,"repeat":repeat,"restored":restored,
+                            "turn":view.turns,"turn_ms":turn_ms,"program_ms":program_ms,
+                            "memory_bytes":view.memory_bytes,"live_pages":view.live_pages,
+                            "changed_pages":view.changed_pages,"examined_pages":view.examined_pages,
+                            "batch_bytes":view.batch_bytes,"commit_bytes":view.commit_bytes,
+                            "written_bytes":written,"writes":writes}));
+                    }
+                    if view.state.status != Status::Waiting {
+                        ensure!(
+                            view.state.outcome == Some(Outcome::success(expected.clone())),
+                            "Wrong result: {:?}",
+                            view.state
+                        );
+                        break;
+                    }
+                    let operation = view.state.pending[0].id().to_owned();
+                    let (bytes, count) = (store.bytes_written(), store.writes());
+                    let started = Instant::now();
+                    if restored {
+                        run = futures_executor::block_on(Run::start(
+                            &programs,
+                            &store,
+                            "bench",
+                            name,
+                            Value::Null,
+                            1000,
+                        ))?;
+                    }
+                    futures_executor::block_on(run.deliver(
+                        &store,
+                        &operation,
+                        Outcome::success(Value::Null),
+                        1001 + view.turns,
+                    ))?;
+                    turn_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    written = store.bytes_written() - bytes;
+                    writes = store.writes() - count;
+                }
+            }
+        }
+    }
+    let rust = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()?;
+    let output = json!({"rustc":String::from_utf8_lossy(&rust.stdout).trim(),"arch":std::env::consts::ARCH,
+        "os":std::env::consts::OS,"wasmtime":"49.0.3",
+        "compile_ms":compile_ms,"capture_mode":mode,"native_tracking_probe":quickjs_durable::tracking::probe(),
+        "notes":["Optimized Rust; one warm-up and three repetitions; a store in memory, not a network or a disk.",
+        "A live turn delivers to the VM kept from the last one: execution, capture, compression and the writes. A restored turn starts a new attempt first: reading the commit and its batches, and a new Wasm instance.",
+        "written_bytes: the turn's batch, its commit, and the writes and deletes that follow it.",
+        "Tracked mode examines only pages marked by Wasm write barriers and host writes. Full-scan mode compiles the original uninstrumented module and examines all pages."],"rows":rows});
+    let output = serde_json::to_string_pretty(&output)?;
+    std::fs::write(format!("bench-{mode}.json"), &output)?;
+    println!("{output}");
+    Ok(())
+}
