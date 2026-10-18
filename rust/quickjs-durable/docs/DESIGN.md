@@ -991,6 +991,8 @@ Retain `assets/quickjs-wasi-LICENSE`, `quickjs-ng-LICENSE`, `wasi-libc-LICENSE`
 and component notices in `assets/licenses/`. Replacing the binary requires
 ABI review, cold-restore validation, a new runtime version, and its heap's
 first chunk as `heap::START` (§5.6).
+Which parts are QuickJS's, what another engine must provide, and the
+candidates: [ENGINES.md](ENGINES.md).
 
 Supporting sources for the already selected mechanisms:
 

@@ -1,8 +1,11 @@
 # Durable JavaScript in Restate objects
 
-JavaScript that waits on Restate for as long as it takes, and survives crashes
-without replaying anything: at each wait the VM's memory is saved, and a crash
-or a result restores it.
+Run plain JavaScript as a Restate virtual object. A program can wait as long
+as it needs to: on a timer, a call to another service, or a model. It survives
+crashes and restarts, and Restate never replays it. Each time the program
+waits, the runtime saves the JavaScript VM's memory. When a result arrives, or
+after a crash, the runtime restores that memory and carries on from where the
+program stopped.
 
 ```js
 // programs/counter.js: served as the virtual object `counter`
@@ -22,11 +25,12 @@ curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
 curl localhost:8080/counter/alice/run --json 20       # 20, a second later
 ```
 
-Each `programs/<name>.js` is the object `<name>`; its key is a scope, whose
-runs share `ctx.kv`. More in [`programs/`](programs): a saga
-([`checkout`](programs/checkout.js)), retries with backoff
-([`retry`](programs/retry.js)), a deadline ([`timeout`](programs/timeout.js)),
-and an AI agent with the shop as its tools ([`assistant`](programs/assistant.js)).
+Each file `programs/<name>.js` becomes the virtual object `<name>`. The
+object's key names a scope: runs under the same key share `ctx.kv`. More in
+[`programs/`](programs): a saga ([`checkout`](programs/checkout.js)), retries
+with backoff ([`retry`](programs/retry.js)), a deadline
+([`timeout`](programs/timeout.js)), and an AI agent with the shop as its tools
+([`assistant`](programs/assistant.js)).
 
 ## Writing a program
 
@@ -88,6 +92,11 @@ Node 22), one restate-server 1.7.13 on 4 vCPUs:
 | `Promise.all` of 10 calls, 8 at once          | 38/s             | 28/s             |
 | Primes below 100,000                          | 47 ms            | 519 ms           |
 | Written to Restate by a run of 20 waits       | ~20 KiB          | ~53 KiB          |
+
+Primes is the interpreter: QuickJS interprets, V8 compiles. The other rows
+are mostly what each turn writes to Restate, not the JavaScript. Which parts
+are QuickJS's, and which engines could replace it:
+[docs/ENGINES.md](docs/ENGINES.md).
 
 Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md). Tests:
 `make test-qjs` (with a Restate server), `make lint-qjs`.
