@@ -14,7 +14,15 @@
 //! enters the snapshot cache. A valid-looking bit change can remain undetected:
 //! there is no checksum or corruption repair.
 use crate::io::BLOCK_SIZE;
+use std::cell::RefCell;
 use std::io;
+use zstd_safe::{CCtx, DCtx};
+
+thread_local! {
+    // A zstd context costs more to set up than a page to code: one per thread.
+    static ZSTD_C: RefCell<CCtx<'static>> = RefCell::new(CCtx::create());
+    static ZSTD_D: RefCell<DCtx<'static>> = RefCell::new(DCtx::create());
+}
 
 const HEADER: usize = 3;
 /// A page held in memory, encoded or decoded, shared without copying.
@@ -52,7 +60,8 @@ pub fn encode(page: &[u8], policy: PageCompression) -> io::Result<Vec<u8>> {
         PageCompression::Lz4 => Some((1, lz4_flex::block::compress(page))),
         PageCompression::Zstd => {
             let mut frame = Vec::with_capacity(zstd_safe::compress_bound(BLOCK_SIZE));
-            zstd_safe::compress(&mut frame, page, ZSTD_LEVEL)
+            ZSTD_C
+                .with_borrow_mut(|cctx| cctx.compress(&mut frame, page, ZSTD_LEVEL))
                 .map_err(|e| io::Error::other(zstd_safe::get_error_name(e)))?;
             Some((2, frame))
         }
@@ -97,7 +106,8 @@ pub(crate) fn decode_bytes(bytes: &bytes::Bytes) -> io::Result<Page> {
         }
         2 if !payload.is_empty() && payload.len() < BLOCK_SIZE => {
             let mut page = Vec::with_capacity(BLOCK_SIZE);
-            let decoded = zstd_safe::decompress(&mut page, payload)
+            let decoded = ZSTD_D
+                .with_borrow_mut(|dctx| dctx.decompress(&mut page, payload))
                 .map_err(|_| invalid("invalid zstd page"))?;
             if decoded != BLOCK_SIZE {
                 return Err(invalid("invalid zstd decoded length"));

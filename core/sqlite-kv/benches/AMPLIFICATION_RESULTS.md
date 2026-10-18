@@ -14,37 +14,37 @@ Observed (commit record gets, stored segment gets, page gets, puts) during open:
 
 | Operation | DB pages | Open gets | Query page gets | Distinct query pages | Total gets | Read bytes + keys | Read amp |
 |---|---|---|---|---|---|---|---|
-| pk_hit | 6 | 8 | 0 | 0 | 8 | 3,277 | 51.20× |
-| pk_miss | 6 | 8 | 0 | 0 | 8 | 3,277 | — |
-| range_10 | 6 | 8 | 0 | 0 | 8 | 3,277 | 5.12× |
-| covering_index | 6 | 8 | 0 | 0 | 8 | 3,277 | 40.96× |
-| secondary_rows | 6 | 8 | 0 | 0 | 8 | 3,277 | 5.12× |
-| unindexed_filter | 6 | 8 | 0 | 0 | 8 | 3,277 | 51.20× |
-| full_scan | 6 | 8 | 0 | 0 | 8 | 3,277 | 0.51× |
+| pk_hit | 6 | 8 | 0 | 0 | 8 | 2,106 | 32.91× |
+| pk_miss | 6 | 8 | 0 | 0 | 8 | 2,106 | — |
+| range_10 | 6 | 8 | 0 | 0 | 8 | 2,106 | 3.29× |
+| covering_index | 6 | 8 | 0 | 0 | 8 | 2,106 | 26.32× |
+| secondary_rows | 6 | 8 | 0 | 0 | 8 | 2,106 | 3.29× |
+| unindexed_filter | 6 | 8 | 0 | 0 | 8 | 2,106 | 32.91× |
+| full_scan | 6 | 8 | 0 | 0 | 8 | 2,106 | 0.33× |
 
 ## Reads: 10,000 rows, 256-byte payload
 
 | Operation | DB pages | Open gets | Query page gets | Distinct query pages | Total gets | Read bytes + keys | Read amp |
 |---|---|---|---|---|---|---|---|
-| pk_hit | 697 | 3 | 3 | 3 | 6 | 8,016 | 31.31× |
-| pk_miss | 697 | 3 | 3 | 3 | 6 | 7,990 | — |
-| range_10 | 697 | 3 | 3 | 3 | 6 | 8,016 | 3.13× |
-| covering_index | 697 | 3 | 4 | 4 | 7 | 12,221 | 1.53× |
-| secondary_rows | 697 | 3 | 696 | 694 | 699 | 268,509 | 1.05× |
-| unindexed_filter | 697 | 3 | 692 | 691 | 695 | 256,620 | 1,002.42× |
-| full_scan | 697 | 3 | 692 | 691 | 695 | 256,620 | 0.10× |
+| pk_hit | 697 | 3 | 3 | 3 | 6 | 5,660 | 22.11× |
+| pk_miss | 697 | 3 | 3 | 3 | 6 | 5,614 | — |
+| range_10 | 697 | 3 | 3 | 3 | 6 | 5,660 | 2.21× |
+| covering_index | 697 | 3 | 4 | 4 | 7 | 6,859 | 0.86× |
+| secondary_rows | 697 | 3 | 696 | 694 | 699 | 212,945 | 0.83× |
+| unindexed_filter | 697 | 3 | 692 | 691 | 695 | 206,388 | 806.20× |
+| full_scan | 697 | 3 | 692 | 691 | 695 | 206,388 | 0.08× |
 
 ## Reads: 100 rows, 9,000-byte payload
 
 | Operation | DB pages | Open gets | Query page gets | Distinct query pages | Total gets | Read bytes + keys | Read amp |
 |---|---|---|---|---|---|---|---|
-| pk_hit | 229 | 3 | 8 | 8 | 11 | 1,104 | 0.12× |
-| pk_miss | 229 | 3 | 2 | 2 | 5 | 751 | — |
-| range_10 | 229 | 3 | 27 | 27 | 30 | 2,367 | 0.03× |
-| covering_index | 229 | 3 | 1 | 1 | 4 | 1,073 | 13.41× |
-| secondary_rows | 229 | 3 | 32 | 32 | 35 | 3,842 | 0.04× |
-| unindexed_filter | 229 | 3 | 228 | 227 | 231 | 15,863 | 1.76× |
-| full_scan | 229 | 3 | 228 | 227 | 231 | 15,863 | 0.02× |
+| pk_hit | 229 | 3 | 8 | 8 | 11 | 967 | 0.11× |
+| pk_miss | 229 | 3 | 2 | 2 | 5 | 659 | — |
+| range_10 | 229 | 3 | 27 | 27 | 30 | 2,064 | 0.02× |
+| covering_index | 229 | 3 | 1 | 1 | 4 | 721 | 9.01× |
+| secondary_rows | 229 | 3 | 32 | 32 | 35 | 3,132 | 0.03× |
+| unindexed_filter | 229 | 3 | 228 | 227 | 231 | 13,817 | 1.54× |
+| full_scan | 229 | 3 | 228 | 227 | 231 | 13,817 | 0.02× |
 
 ## Writes: 100 rows, 64-byte payload
 
@@ -52,28 +52,28 @@ Observed (commit record gets, stored segment gets, page gets, puts) during open:
 |---|---|---|---|---|---|---|---|---|---|
 | read_only_save | 8 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | — |
 | rollback | 8 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | — |
-| replace_payload | 8 | 0 | 1 | 0 | 447 | 0 | 447 | 457 | 7.14× |
-| update_index | 8 | 0 | 1 | 0 | 825 | 0 | 825 | 835 | 104.38× |
-| insert | 8 | 0 | 1 | 0 | 774 | 0 | 774 | 784 | 9.80× |
-| delete | 8 | 0 | 1 | 0 | 827 | 0 | 827 | 837 | — |
-| ten_adjacent | 8 | 0 | 1 | 0 | 449 | 0 | 449 | 459 | 0.72× |
-| ten_scattered | 8 | 0 | 1 | 0 | 724 | 0 | 724 | 734 | 1.15× |
+| replace_payload | 8 | 0 | 1 | 0 | 446 | 0 | 446 | 456 | 7.12× |
+| update_index | 8 | 0 | 1 | 0 | 824 | 0 | 824 | 834 | 104.25× |
+| insert | 8 | 0 | 1 | 0 | 773 | 0 | 773 | 783 | 9.79× |
+| delete | 8 | 0 | 1 | 0 | 826 | 0 | 826 | 836 | — |
+| ten_adjacent | 8 | 0 | 1 | 0 | 448 | 0 | 448 | 458 | 0.72× |
+| ten_scattered | 8 | 0 | 1 | 0 | 723 | 0 | 723 | 733 | 1.15× |
 
 ## Update locality: 10,000 rows, 256-byte payload
 
 | Operation | Log bytes | Checkpointed page bytes | Commit record bytes | App write amp | Stored values/DB |
 |---|---|---|---|---|---|
-| replace_payload | 0 | 0 | 240 | 1.26× | 0.09× |
-| ten_adjacent | 0 | 0 | 211 | 0.11× | 0.09× |
-| ten_scattered | 0 | 0 | 1,159 | 0.48× | 0.09× |
+| replace_payload | 0 | 0 | 239 | 0.97× | 0.07× |
+| ten_adjacent | 0 | 0 | 210 | 0.09× | 0.07× |
+| ten_scattered | 0 | 0 | 1,158 | 0.46× | 0.07× |
 
 ## Recovery cost: 100 rows, 64-byte payload
 
 | Interruption | Gets | Puts | Deletes | Read bytes + keys | Mutation bytes + keys | Reclaimed value bytes |
 |---|---|---|---|---|---|---|
-| commit_lost | 8 | 0 | 0 | 3,277 | 0 | 0 |
-| commit_ack_lost | 7 | 0 | 0 | 2,967 | 0 | 0 |
-| checkpoint_error | 7 | 0 | 0 | 2,969 | 0 | 0 |
-| checkpoint_record_error | 7 | 0 | 0 | 2,969 | 0 | 0 |
+| commit_lost | 8 | 0 | 0 | 2,106 | 0 | 0 |
+| commit_ack_lost | 7 | 0 | 0 | 2,089 | 0 | 0 |
+| checkpoint_error | 7 | 0 | 0 | 2,091 | 0 | 0 |
+| checkpoint_record_error | 7 | 0 | 0 | 2,091 | 0 | 0 |
 
 Same-session warm queries: 28/28 configurations issued zero gets. The raw files retain wide rows, phase splits, local WAL writes, key lengths, reclaimed bytes and retained storage.

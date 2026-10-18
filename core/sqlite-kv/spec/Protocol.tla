@@ -11,8 +11,8 @@
 (* is acknowledged and durable, durable without the acknowledgement, or   *)
 (* lost, independently, and reads return durable values. Processes take   *)
 (* turns owning the namespace; some keep an owner cache across their      *)
-(* sessions (the record they saw, its epoch's pages, their last commit)   *)
-(* and lose it when they crash. A ghost history records the acknowledged  *)
+(* sessions (the record they saw, its epoch's pages, their last commit,   *)
+(* garbage they deleted since) and lose it when they crash. A ghost history records the acknowledged  *)
 (* transactions, plus at most one whose outcome is unknown.               *)
 (*                                                                         *)
 (* Page values are transaction ids, so a page's value names the            *)
@@ -111,6 +111,8 @@ Down == [pc |-> "down",
          cRec |-> None, cEpoch |-> None, cCommitted |-> None,
          \* this owner's last seal, acknowledged, for its next commit to name
          cSealed |-> None,
+         \* garbage the record lists that this owner deleted since, acknowledged
+         cCollected |-> {},
          cPages |-> [p \in Pages |-> None]]
 
 \* A ready session reads its log, then its cache, then the page key.
@@ -122,7 +124,7 @@ ReadPage(pr, st, p) ==
 View(pr, st) == [p \in Pages |-> ReadPage(pr, st, p)]
 
 \* Forget the record: an outcome is unknown.
-Forget(st) == [st EXCEPT !.cRec = None, !.cCommitted = None, !.cSealed = None]
+Forget(st) == [st EXCEPT !.cRec = None, !.cCommitted = None, !.cSealed = None, !.cCollected = {}]
 
 (*************************************************************************)
 (* The store.                                                            *)
@@ -167,13 +169,16 @@ Open(pr) ==
            cached == pr \in Cached
            known == cached /\ st.cRec = r
            sameEpoch == cached /\ st.cEpoch = r.epoch
-           opened == [st EXCEPT !.pc = "ready", !.rec = r,
+           \* garbage this owner deleted since: the next record leaves it out
+           opened == [st EXCEPT !.pc = "ready",
+                                !.rec = IF known THEN [r EXCEPT !.garbage = @ \ st.cCollected] ELSE r,
                                 !.cRec = IF cached THEN r ELSE None,
                                 !.cEpoch = IF cached THEN r.epoch ELSE None,
                                 !.cCommitted = IF ~cached THEN None
                                                ELSE IF known THEN st.cCommitted
                                                ELSE r.version,
                                 !.cSealed = IF known THEN st.cSealed ELSE None,
+                                !.cCollected = IF known THEN st.cCollected ELSE {},
                                 !.cPages = IF sameEpoch THEN st.cPages
                                            ELSE [p \in Pages |-> None]]
            view == View(pr, opened)
@@ -305,7 +310,8 @@ Committed(pr) ==
                               !.cRec = IF pr \in Cached THEN op.rec ELSE None,
                               !.cCommitted = IF pr \in Cached THEN r.version ELSE None,
                               !.cSealed = IF pr \in Cached /\ op.sealed # None /\ Acked(op.seal)
-                                          THEN op.sealed ELSE None]]
+                                          THEN op.sealed ELSE None,
+                              !.cCollected = IF pr \in Cached /\ Acked(op.deletes) THEN op.old ELSE {}]]
                   /\ UNCHANGED unknown
     /\ UNCHANGED <<store, pending, owner, txCount, crashes, violation>>
 
@@ -345,40 +351,28 @@ CheckpointRecord(pr) ==
 CheckpointRecorded(pr) ==
     /\ ps[pr].pc = "record"
     /\ Settled(ps[pr].op.keys)
+    /\ results' = NoResults
     /\ LET st == ps[pr]
            r == st.op.rec
            cached == pr \in Cached
-           deletes == {[key |-> <<"seg", s>>, val |-> Nil] : s \in r.garbage}
        IN IF ~Acked(st.op.keys)
           THEN \* it may have landed: the session continues on its log, which
                \* covers the pages either way, and forgets the record
-               /\ ps' = [ps EXCEPT ![pr] = [Forget(st) EXCEPT !.pc = "ready", !.op = [none |-> TRUE]]]
-               /\ results' = NoResults
-               /\ UNCHANGED pending
+               ps' = [ps EXCEPT ![pr] = [Forget(st) EXCEPT !.pc = "ready", !.op = [none |-> TRUE]]]
           ELSE \* the next epoch: the cache keeps the previous one's pages, but
-               \* those of the log, which it writes through. No durable record
-               \* names the garbage now: delete it.
-               /\ Issue(deletes)
-               /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "collect", !.rec = r,
-                           !.op = [keys |-> Keys(deletes)],
+               \* those of the log, which it writes through. The next commit
+               \* deletes the garbage.
+               ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "ready", !.rec = r,
+                           !.op = [none |-> TRUE],
                            !.cRec = IF cached THEN r ELSE None,
                            !.cEpoch = IF cached THEN r.epoch ELSE None,
                            !.cCommitted = IF cached THEN r.version ELSE None,
                            !.cSealed = None,
+                           !.cCollected = {},
                            !.cPages = [p \in Pages |->
                                IF cached /\ p \in LogPages(st.rec.log) THEN LatestIn(st.rec.log, p)
                                ELSE IF cached /\ st.cEpoch = st.rec.epoch THEN st.cPages[p]
                                ELSE None]]]
-    /\ UNCHANGED <<store, owner, truth, unknown, txCount, crashes, violation>>
-
-\* Acknowledged deletes leave the next record's garbage.
-Collected(pr) ==
-    /\ ps[pr].pc = "collect"
-    /\ Settled(ps[pr].op.keys)
-    /\ results' = NoResults
-    /\ LET st == ps[pr] IN
-       ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "ready", !.op = [none |-> TRUE],
-                 !.rec = [st.rec EXCEPT !.garbage = IF Acked(st.op.keys) THEN {} ELSE @]]]
     /\ UNCHANGED <<store, pending, owner, truth, unknown, txCount, crashes, violation>>
 
 (*************************************************************************)
@@ -440,7 +434,6 @@ Next ==
     \/ Resolve
     \/ \E pr \in Procs : Open(pr) \/ Save(pr) \/ Prepare(pr) \/ Sealed(pr) \/ CommitRecord(pr) \/ Committed(pr)
                          \/ Checkpoint(pr) \/ CheckpointRecord(pr) \/ CheckpointRecorded(pr)
-                         \/ Collected(pr)
                          \/ Read(pr) \/ EndSession(pr)
     \/ Handover \/ CrashProc
 

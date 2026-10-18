@@ -88,8 +88,11 @@ and commits them:
 2. **Inline or stored.** A transaction whose segments total at most
    `inline_log_bytes` (4 KiB) goes inline in the record. A larger one is put
    first at fresh `log/<n>` keys, a segment each, concurrently, and the record
-   names them once acknowledged (invariant 1): a round trip more.
-3. **Seal.** Once the record's inline log would pass `inline_log_bytes`, the
+   names them once acknowledged (invariant 1): a round trip more. A commit
+   the save then checkpoints (step 6) has a budget of `checkpoint_log_bytes`
+   instead, as the checkpoint record drops its log: no stored values, no
+   round trip more.
+3. **Seal.** Once the record's inline log would pass that budget, the
    commit seals the inline segments (the durable record's) into one stored
    value, put in the record's round trip. This record still holds them
    inline, and lists the value as garbage; the owner's next commit, its put
@@ -102,16 +105,18 @@ and commits them:
    transaction, at the next version, with the host's effects if it set them.
    One put, one round trip, for a small transaction.
 5. **Garbage, in the same round trip.** Delete the stored values in the
-   record's garbage (a seal never named, a checkpoint's deletes that failed);
-   once acknowledged, the next record forgets them.
+   record's garbage (those a checkpoint dropped, a seal never named); once
+   acknowledged, the next record leaves them out. The owner cache remembers
+   the acknowledged deletes, so the next session's commit leaves them out
+   rather than deleting them again.
 6. **Checkpoint the whole log, now and then.** When the log then holds more
    than `checkpoint_after` transactions (32) or `checkpoint_log_bytes`
    (64 KiB), the save checkpoints it after committing: each page's latest
    image to its page key (holes become deletes) and the hint, then, once all
    are acknowledged, a record with an empty log at the next epoch, whose
-   garbage takes the stored values the log named, and once that is
-   acknowledged, their deletes. Two more round trips, three with stored
-   values. This owner's cache keeps its pages into the next epoch: only the
+   garbage takes the stored values the log named; the next commit deletes
+   them (step 5). Two more round trips, plus one per 64 pages past the first
+   64 (the mutations in flight at once). This owner's cache keeps its pages into the next epoch: only the
    log's pages changed, and it writes those through.
 
 **Compression.** A commit rewrites the same few pages as the ones before it,
@@ -348,7 +353,7 @@ one-thread runtime of its own. It is the only background work.
 
 | Operation                            | Round trips                                                  | Mutations                                                                                 |
 | ------------------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| Save                                 | 1; 2 for a large transaction, or a seal without a cache; 2 more when it checkpoints, 3 with stored values | The record (its inline tail rewritten); a seal now and then; a large transaction's segments; when the log is long, every logged page, the hint, the record and the stored values' deletes |
+| Save                                 | 1; 2 for a large transaction, or a seal without a cache; 2 more when it checkpoints | The record (its inline tail rewritten); a seal now and then; a large transaction's segments; the garbage's deletes; when the log is long, every logged page, the hint and the record |
 | SQL commit with `Durability::Commit` | Same as a save                                               | Same as a save                                                                            |
 | Open, with cache                     | 1, plus 1 if the log names stored values the cache lacks      | None                                                                                      |
 | Cold open                            | 1, then the hinted pages (or a small database whole) and stored values together | None                                                                     |

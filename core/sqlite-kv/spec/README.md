@@ -69,11 +69,11 @@ needs Java 11 or later.
 
 | Configuration   | Bounds                                                                            | Distinct states | Result       |
 | --------------- | --------------------------------------------------------------------------------- | --------------- | ------------ |
-| `MC.cfg`        | both processes cached; 2 pages, 2 processes, 2 transactions, 2 values, 1 crash    | 2,536,222       | No violation |
-| `MCNoCache.cfg` | as `MC.cfg`, no cache                                                             | 141,173         | No violation |
-| `MCMixed.cfg`   | as `MC.cfg`, one process cached and one not                                       | 1,285,307       | No violation |
-| `MCSeal.cfg`    | as `MCMixed.cfg`, 1 page, 3 transactions, 3 values: a seal and the commit naming it | 1,143,597       | No violation |
-| `MCDeep.cfg`    | as `MCMixed.cfg`, 3 transactions, 3 values                                        | 79,532,399      | No violation (31 min) |
+| `MC.cfg`        | both processes cached; 2 pages, 2 processes, 2 transactions, 2 values, 1 crash    | 2,292,239       | No violation |
+| `MCNoCache.cfg` | as `MC.cfg`, no cache                                                             | 115,430         | No violation |
+| `MCMixed.cfg`   | as `MC.cfg`, one process cached and one not                                       | 1,091,830       | No violation |
+| `MCSeal.cfg`    | as `MCMixed.cfg`, 1 page, 3 transactions, 3 values: a seal and the commit naming it | 896,406         | No violation |
+| `MCDeep.cfg`    | as `MCMixed.cfg`, 3 transactions, 3 values                                        | 79,532,399 (before deferred deletes) | No violation (31 min) |
 
 The two processes of `MC.cfg` and `MCNoCache.cfg` are symmetric, so TLC
 checks one of each pair of mirrored states (`Symmetry`).

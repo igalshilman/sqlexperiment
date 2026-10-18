@@ -234,6 +234,9 @@ struct Owner {
     values: crate::log::Values,
     /// This owner's last seal, acknowledged, for the next commit to name.
     sealed: Option<crate::log::Sealed>,
+    /// Garbage the record lists that this owner deleted since, acknowledged:
+    /// the next commit leaves it out instead of deleting it again.
+    collected: std::collections::BTreeSet<u64>,
 }
 
 impl NamespaceCache {
@@ -341,6 +344,15 @@ impl NamespaceCache {
         self.owner().sealed = sealed;
     }
 
+    /// Garbage the record lists, deleted since by this owner, acknowledged.
+    pub(crate) fn collected(&self) -> std::collections::BTreeSet<u64> {
+        self.owner().collected.clone()
+    }
+
+    pub(crate) fn keep_collected(&self, collected: std::collections::BTreeSet<u64>) {
+        self.owner().collected = collected;
+    }
+
     /// Register an open session at version `next`; see [`Reader`].
     pub(crate) fn reader(&self, next: u64) -> Reader {
         *self.owner().readers.entry(next).or_default() += 1;
@@ -366,6 +378,7 @@ impl NamespaceCache {
         owner.commit = None;
         owner.committed = None;
         owner.sealed = None;
+        owner.collected.clear();
         self.take_engine_of(owner.id);
     }
 
@@ -493,6 +506,7 @@ impl Owner {
             readers: BTreeMap::new(),
             values: crate::log::Values::new(),
             sealed: None,
+            collected: std::collections::BTreeSet::new(),
         }
     }
 
