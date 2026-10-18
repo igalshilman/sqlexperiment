@@ -283,10 +283,12 @@ pub fn bind(
     builder
 }
 
-/// An endpoint serving `programs`, and [`crate::Claude`] for them to call.
+/// An endpoint serving `programs`, and [`crate::Claude`] and
+/// [`crate::Workspace`] for them to call.
 pub fn endpoint(programs: &Arc<Programs>) -> Endpoint {
     bind(Endpoint::builder(), programs)
         .bind(crate::Claude::from_env())
+        .bind(crate::Workspace::from_env())
         .build()
 }
 

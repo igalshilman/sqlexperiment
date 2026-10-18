@@ -29,8 +29,10 @@ Each file `programs/<name>.js` becomes the virtual object `<name>`. The
 object's key names a scope: runs under the same key share `ctx.kv`. More in
 [`programs/`](programs): a saga ([`checkout`](programs/checkout.js)), retries
 with backoff ([`retry`](programs/retry.js)), a deadline
-([`timeout`](programs/timeout.js)), and an AI agent with the shop as its tools
-([`assistant`](programs/assistant.js)).
+([`timeout`](programs/timeout.js)), an AI agent with the shop as its tools
+([`assistant`](programs/assistant.js)), and a coding agent with a shell and
+files ([`coder`](programs/coder.js)), served by the
+[`workspace`](src/workspace.rs) object.
 
 ## Writing a program
 

@@ -124,8 +124,14 @@ async fn serve() -> u16 {
     serve_programs(&programs()).await
 }
 
-/// Serve `programs`, `Doubler` and a scripted `claude`, and register them
-/// with the server.
+/// The `workspace` service's directories, for the whole test binary.
+fn workspaces() -> &'static std::path::Path {
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
+}
+
+/// Serve `programs`, `Doubler`, a scripted `claude` and `workspace`, and
+/// register them with the server.
 async fn serve_programs(programs: &Arc<Programs>) -> u16 {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
@@ -139,6 +145,7 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
     let endpoint = quickjs_durable::bind(Endpoint::builder(), programs)
         .bind(Doubler)
         .bind(fakes::Claude)
+        .bind(quickjs_durable::Workspace::new(workspaces()))
         .build();
     tokio::spawn(
         HttpServer::new(endpoint).listen_and_serve(format!("127.0.0.1:{port}").parse().unwrap()),
@@ -358,6 +365,7 @@ async fn the_shop_programs_compose() {
 async fn the_assistant_shops_with_tools() {
     let _server = server().await;
     serve_programs(&quickjs_durable::embedded().unwrap()).await;
+    fakes::REQUESTS.lock().unwrap().clear();
     call("inventory/widget/run", json!({"restock": 5})).await;
     call("payments/dana/run", json!({"deposit": 100})).await;
     let ask = |message: &str| json!({"customer": "dana", "message": message});
@@ -391,4 +399,90 @@ async fn the_assistant_shops_with_tools() {
     let requests = fakes::REQUESTS.lock().unwrap().clone();
     assert_eq!(requests[3]["messages"].as_array().unwrap().len(), 7);
     assert_eq!(call("payments/dana/run", json!({})).await.1, json!(60));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-qjs"]
+async fn the_coder_works_in_its_workspace() {
+    let _server = server().await;
+    serve_programs(&quickjs_durable::embedded().unwrap()).await;
+    fakes::REQUESTS.lock().unwrap().clear();
+
+    let (status, done) = call("coder/hello/run", json!({"task": "Say goodbye"})).await;
+    assert_eq!(
+        (status, done),
+        (200, json!({"answer": "Done.", "steps": 4}))
+    );
+    let script = std::fs::read_to_string(workspaces().join("hello/bin/hello.sh")).unwrap();
+    assert_eq!(script, "echo goodbye from $1");
+
+    // Each step's tool results, as the model got them in the next request.
+    let requests = fakes::REQUESTS.lock().unwrap().clone();
+    let results = |step: usize| -> Vec<(String, bool)> {
+        let messages = requests[step]["messages"].as_array().unwrap();
+        let results = messages.last().unwrap()["content"].as_array().unwrap();
+        results
+            .iter()
+            .map(|r| {
+                (
+                    r["content"].as_str().unwrap().to_owned(),
+                    r["is_error"] == true,
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        results(1),
+        [
+            ("Wrote 18 bytes to bin/hello.sh".into(), false),
+            ("exit 0\nhello from world\n".into(), false),
+        ]
+    );
+    let failed = results(2);
+    assert_eq!(failed[0], ("bin/hello.sh: text not found".into(), true));
+    assert!(
+        failed[1].0.starts_with("missing.txt: No such file"),
+        "{failed:?}"
+    );
+    assert!(
+        failed[2].0.contains("relative to the workspace"),
+        "{failed:?}"
+    );
+    assert!(failed.iter().all(|(_, error)| *error));
+    assert_eq!(
+        results(3),
+        [
+            ("Edited bin/hello.sh".into(), false),
+            ("exit 3\ngoodbye from world\noops\n".into(), false),
+        ]
+    );
+    // The conversation's end is cached; the commands' environment is clean.
+    let last = &requests[3]["messages"].as_array().unwrap().last().unwrap()["content"];
+    assert_eq!(
+        last.as_array().unwrap().last().unwrap()["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert!(requests[1]["messages"][2]["content"][0]["cache_control"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-qjs"]
+async fn a_workspace_command_sees_no_secrets_and_times_out() {
+    let _server = server().await;
+    serve_programs(&programs()).await;
+    let bash = |command: &str, timeout: u64| {
+        call(
+            "workspace/env/bash",
+            json!({"command": command, "timeout": timeout}),
+        )
+    };
+    // SAFETY: set before any command runs, read only by them.
+    unsafe { std::env::set_var("SECRET_FOR_TEST", "leaked") };
+    let (_, env) = bash("echo \"[$SECRET_FOR_TEST]\" $HOME", 10).await;
+    let home = workspaces().join("env");
+    assert_eq!(env["output"], format!("[] {}\n", home.display()));
+    let started = Instant::now();
+    let (_, slow) = bash("sleep 30 & sleep 30", 1).await;
+    assert_eq!(slow, json!({"exit": -1, "output": "Killed after 1 s"}));
+    assert!(started.elapsed() < Duration::from_secs(10));
 }

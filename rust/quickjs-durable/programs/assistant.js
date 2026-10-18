@@ -6,7 +6,7 @@
 // the loop and the conversation are saved with the rest of the heap: a crash
 // resumes them, and a model call already answered is not made again.
 //
-//   ANTHROPIC_API_KEY=... target/release/quickjs-restate
+//   ANTHROPIC_API_KEY=... target/release/quickjs-durable
 //   curl localhost:8080/inventory/widget/run --json '{"restock": 5}'
 //   curl localhost:8080/payments/alice/run --json '{"deposit": 100}'
 //   curl localhost:8080/assistant/alice/run --json \

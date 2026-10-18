@@ -9,6 +9,8 @@
 //!   from turn to turn, and commits each turn to a [`Store`] (in Restate, the
 //!   object's state; in tests, a [`MemoryStore`]).
 //! - [`Claude`]: the `claude` service, for programs to call models.
+//! - [`Workspace`]: the `workspace` object, a directory and a shell for
+//!   coding agents.
 //!
 //! The design: [docs/DESIGN.md](../docs/DESIGN.md).
 
@@ -23,6 +25,7 @@ mod run;
 mod store;
 mod tracking;
 mod vm;
+mod workspace;
 
 pub use claude::Claude;
 pub use model::{GuestError, Operation, Outcome, RpcTarget, State, Status, View};
@@ -31,6 +34,7 @@ pub use restate::{bind, embedded, endpoint, faults};
 pub use run::Run;
 pub use store::{MemoryStore, Store};
 pub use vm::Runtime;
+pub use workspace::Workspace;
 
 #[cfg(test)]
 #[path = "../tests/unit/codec.rs"]
