@@ -1,6 +1,6 @@
 //! Durable JavaScript in Restate virtual objects. A program is a static
-//! JavaScript file defining `main(input, ctx)`, shipped with its golden memory
-//! dump (the `golden` binary of quickjs-durable computes it). Each program is
+//! JavaScript file defining `main(input, ctx)`, which the build script
+//! evaluates into its golden memory image, embedded with it. Each program is
 //! served as a virtual object of its name, whose key is a scope: its runs
 //! share their `ctx.kv`, kept with the runs' images in one SQL database
 //! (sqlite-kv) in the object's state.
@@ -264,7 +264,7 @@ fn wait<'ctx>(ctx: &'ctx ObjectContext<'ctx>, operation: &Operation) -> Option<W
 }
 
 /// The programs built into this binary, from `QJS_PROGRAMS` (by default
-/// `programs/`) at build time: each `<name>.js` with its `<name>.golden`.
+/// `programs/`) at build time, each with the golden image the build computed.
 pub fn embedded() -> anyhow::Result<Arc<Programs>> {
     let mut programs = Programs::new(Arc::new(Runtime::new()?));
     for (name, source, dump) in built::PROGRAMS {

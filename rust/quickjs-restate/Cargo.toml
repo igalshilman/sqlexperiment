@@ -18,6 +18,10 @@ sqlite-kv = { path = "../../core/sqlite-kv" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "0.3"
 
+# The build script evaluates the programs into their golden images.
+[build-dependencies]
+quickjs-durable = { path = "../../core/quickjs-durable" }
+
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 tempfile = "3"
@@ -25,3 +29,11 @@ tempfile = "3"
 # The patched shared core, cloned next to the SDK by rust/sdk/setup.sh.
 [patch.crates-io]
 restate-sdk-shared-core = { path = "../sdk/.build/sdk-shared-core" }
+
+# The build script compiles QuickJS with Wasmtime: optimized, it takes
+# seconds, not minutes.
+[profile.release.build-override]
+opt-level = 3
+
+[profile.dev.build-override]
+opt-level = 3

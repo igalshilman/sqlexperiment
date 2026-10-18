@@ -12,8 +12,7 @@
 #                examples (examples-python/, a project of their own)
 #   rust/        the patched Rust SDK (rust/sdk), and durable JavaScript in
 #                Restate objects on it (rust/quickjs-restate; its own
-#                targets: goldens, qjs-restate, test-qjs-restate,
-#                lint-qjs-restate)
+#                targets: qjs-restate, test-qjs-restate, lint-qjs-restate)
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -30,10 +29,6 @@ SDK_TARBALL := typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-
 CORE := core/sqlite-kv
 QJS := core/quickjs-durable
 QJS_RESTATE := rust/quickjs-restate
-# The programs the binary serves: each <name>.js, with the golden dump
-# <name>.golden that `make goldens` computes beside it.
-export QJS_PROGRAMS ?= $(CURDIR)/$(QJS_RESTATE)/programs
-GOLDENS := $(patsubst %.js,%.golden,$(wildcard $(QJS_PROGRAMS)/*.js))
 ADDON := typescript/packages/sql-node/sqlite_kv.node
 CORE_PATCH := core/sdk-shared-core/sdk-shared-core.patch
 SDK_PY := python/sdk/.build/sdk-python/.patched
@@ -59,7 +54,7 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core qjs qjs-restate goldens addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
+.PHONY: all help core qjs qjs-restate addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
 	test-sdk-py test-sdk-rs test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs lint-qjs-restate format crash-test concurrency-test tools-test \
 	crash-test-py concurrency-test-py test-qjs-restate restate-server wheels clean
 
@@ -96,15 +91,8 @@ $(SDK_PY): $(wildcard python/sdk/patches/*.patch) $(CORE_PATCH) python/sdk/setup
 
 sdk-rs: $(SDK_RS) ## The patched Rust SDK's sources (rust/sdk)
 
-qjs-restate: $(SDK_RS) goldens ## Durable JavaScript in Restate objects (rust/quickjs-restate): a binary serving QJS_PROGRAMS
+qjs-restate: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/quickjs-restate): a binary serving its programs (QJS_PROGRAMS, by default programs/)
 	cd $(QJS_RESTATE) && $(CARGO) build --locked --release
-
-goldens: $(GOLDENS) ## The programs' golden dumps (QJS_PROGRAMS/<name>.golden), computed again when their source or the runtime changes
-
-# A dump is valid for one source and one build of the runtime: its Wasm, its
-# bridge and its limits.
-$(QJS_PROGRAMS)/%.golden: $(QJS_PROGRAMS)/%.js $(QJS)/assets/quickjs.wasm $(QJS)/assets/guest.js $(QJS)/src/vm.rs
-	cd $(QJS) && $(CARGO) run --locked --release --quiet --bin golden -- $<
 
 $(SDK_RS): $(wildcard rust/sdk/patches/*.patch) $(CORE_PATCH) rust/sdk/setup.sh
 	rust/sdk/setup.sh
@@ -178,7 +166,7 @@ lint-qjs: ## The durable QuickJS runtime: rustfmt --check and clippy, in both ca
 	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,sqlite-kv-host,verify-dirty --all-targets -- -D warnings
 	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,sqlite-kv-host,full-scan --all-targets -- -D warnings
 
-lint-qjs-restate: $(SDK_RS) goldens ## Durable JavaScript in Restate objects: rustfmt --check and clippy
+lint-qjs-restate: $(SDK_RS) ## Durable JavaScript in Restate objects: rustfmt --check and clippy
 	cd $(QJS_RESTATE) && $(CARGO) fmt --check && $(CARGO) clippy --locked --release --all-targets -- -D warnings
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
@@ -217,7 +205,7 @@ tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, wor
 	cd typescript/tests && node restate-tools.ts
 
 # One server at a time, on the default ports.
-test-qjs-restate: $(SDK_RS) goldens $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: runs, scopes, races and a crash during a call, against a Restate server
+test-qjs-restate: $(SDK_RS) $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: runs, scopes, races and a crash during a call, against a Restate server
 	cd $(QJS_RESTATE) && $(CARGO) test --locked --release -- --include-ignored --test-threads 1
 
 restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM

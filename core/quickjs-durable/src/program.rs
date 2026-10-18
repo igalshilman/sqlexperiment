@@ -1,8 +1,8 @@
 //! Programs: static JavaScript, each evaluated once into a golden memory image
 //! that every run of it starts from and every checkpoint is relative to.
 //!
-//! A program's dump is its golden image, computed ahead of time (the `golden`
-//! binary) and shipped beside its source. It is valid for one build of the
+//! A program's dump is its golden image, computed ahead of time (such as by a
+//! build script) and shipped with its source. It is valid for one build of the
 //! runtime and one source: loading it with another refuses.
 use crate::{
     codec,

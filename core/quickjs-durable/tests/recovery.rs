@@ -244,7 +244,10 @@ fn a_run_ends_when_main_settles() -> Result<()> {
     assert_eq!(done.state.status, Status::Completed);
     assert_eq!(value(&done.state.outcome), 7);
     assert!(done.state.pending.is_empty());
-    assert!(e.storage().effects.is_empty(), "no request is left outstanding");
+    assert!(
+        e.storage().effects.is_empty(),
+        "no request is left outstanding"
+    );
     // Its late result changes nothing.
     let late = futures_executor::block_on(e.complete(
         "r",

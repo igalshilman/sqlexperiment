@@ -1,5 +1,5 @@
 //! Serve the programs built into this binary, each as a virtual object of its
-//! name: `make qjs-restate` computes their golden dumps and builds it. Run it
+//! name: `cargo build --release` evaluates the programs and embeds them. Run it
 //! (PORT, by default 9080), then register it with Restate:
 //!
 //! ```sh

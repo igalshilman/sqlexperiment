@@ -6,12 +6,11 @@ ABI, record formats, execution algorithms, host transactions and recovery rules.
 It is self-contained: source links and references are supporting material, not
 substitutes for protocol steps. Last consolidated: 17 October 2026.
 
-The implementation in `rust/` uses QuickJS compiled to WebAssembly, Wasmtime,
+The implementation in this crate uses QuickJS compiled to WebAssembly, Wasmtime,
 4 KiB page tracking, and XOR/Zstd checkpoint payloads relative to a shared golden
-image. The SQLite host implements the transaction contract. The atomic-KV WAL
-specified below is **not implemented yet**, and there is no live Rust integration
-with Restate. The root TypeScript code is a historical bsdiff/journal experiment;
-it does not define this design.
+image. The SQLite host and the sqlite-kv host (§7.1) implement the transaction
+contract; `rust/quickjs-restate` binds the latter to Restate (§10.1). The atomic-KV
+WAL of §8 is not implemented: sqlite-kv's atomic save replaces it.
 
 Reading map: [ownership](#1-model-ownership-and-durability),
 [interfaces](#2-guest-and-host-interfaces), [VM ABI](#3-quickjswasm-snapshot-abi),
@@ -303,7 +302,7 @@ required to capture an otherwise safe boundary.
 Compile the instrumented module once and share it. Each current turn uses a fresh
 Wasmtime Store/instance, deliberately exercising cold restore.
 
-Golden creation, once per program version, ahead of time (§5.3):
+Golden creation, once per program version, ahead of time (§5.5):
 
 1. Instantiate with logical time zero and host identity `program/<name>`.
 2. Call `_initialize()`, then `qjs_init2(~((1<<9)|(1<<10)))`; require return zero.
@@ -488,7 +487,7 @@ identity, not snapshot content addressing or integrity verification.
 | `run/R/head`                | Raw UTF-8 checkpoint ID, not a JSON string       |
 
 Programs and their golden images are not stored here: the host supplies them
-(§5.3). Record field spelling matches the Rust experiment. Manifest fields
+(§5.5). Record field spelling matches the Rust experiment. Manifest fields
 use snake_case; nested State uses camelCase. Optional State.outcome is omitted;
 Manifest.previous is null for sequence zero. Integer page keys are decimal strings
 in a JSON object. JSON whitespace/property order are not semantically significant.
@@ -603,9 +602,8 @@ reconstruct(run):
     return Image(memory, manifest.meta), manifest.State
 ```
 
-The golden image is immutable per application version, so a runtime may keep it
-decompressed across turns; the reference caches it by application ID and source
-hash. Each live page is applied once, against golden/zero bytes. Do not apply a golden-
+The golden image is immutable per program version, so a host keeps it
+decompressed across turns: the reference's catalog holds it. Each live page is applied once, against golden/zero bytes. Do not apply a golden-
 relative delta to the previous invocation page. Do not retain every decoded old
 batch simultaneously: mostly superseded batches can amplify retained memory.
 Each referenced batch is still read/decompressed in full, so capture bounds how
@@ -615,11 +613,11 @@ manifest then references that one alone. A long run's restore reads at most that
 many batches instead of one per turn. Retain golden and every referenced blob. No
 record GC is implemented.
 
-### 5.3. Programs and their dumps
+### 5.5. Programs and their dumps
 
 A program is static: a source file, named, and its golden image, computed
-ahead of time and shipped with it (the `golden` binary writes `<name>.golden`
-beside `<name>.js`). A host loads its programs at startup into a catalog
+ahead of time and shipped with it (`rust/quickjs-restate` computes it in its
+build script, and embeds both). A host loads its programs at startup into a catalog
 (`Programs`), which every engine of the process shares; golden memory is
 decompressed once. A dump is:
 
@@ -1084,7 +1082,7 @@ a scope.
 Rust SDK with journal replay off:
 
 - Each program is a virtual object of its name, with no registration: the
-  binary embeds its programs and their dumps (§5.3). An object key is a
+  binary embeds its programs and their dumps (§5.5). An object key is a
   scope; its exclusive handlers serialize its runs, one writer at a time.
 - A run is one invocation of the object's `run` handler, which drives its
   turns itself. After each turn commits, the handler waits on Restate for the
