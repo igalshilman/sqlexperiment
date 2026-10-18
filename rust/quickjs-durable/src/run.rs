@@ -96,19 +96,22 @@ struct Written {
 }
 
 enum Delivery {
-    Start(Value),
+    /// The run's first turn: `main(input)`, in `scope`.
+    Start { scope: String, input: Value },
     /// Requests' outcomes, delivered in order before the JavaScript runs.
     Complete(Vec<(String, Outcome)>),
 }
 
 impl Run {
-    /// Start run `run` of `program` on `input`: its first turn runs `main`
-    /// until it waits or settles, and commits. When the scope's commit is
+    /// Start run `run` of `program` on `input`, in `scope` (the program's
+    /// `ctx.key`): its first turn runs `main` until it waits or settles, and
+    /// commits. When the scope's commit is
     /// already this run's, this is another attempt at it: the run continues as
     /// committed, and `input` is the one it started with.
     pub async fn start(
         programs: &Arc<Programs>,
         store: &impl Store,
+        scope: &str,
         run: &str,
         program: &str,
         input: Value,
@@ -175,7 +178,11 @@ impl Run {
             last: Written::default(),
             usable: false,
         };
-        this.turn(store, Delivery::Start(input), now).await?;
+        let start = Delivery::Start {
+            scope: scope.into(),
+            input,
+        };
+        this.turn(store, start, now).await?;
         this.usable = true;
         Ok(this)
     }
@@ -456,9 +463,15 @@ async fn run(
     // ones delivered, then those the guest issues, as it reports them.
     let mut pending = commit.state.pending.clone();
     match delivery {
-        Delivery::Start(input) => {
+        Delivery::Start { scope, input } => {
             let seed = fingerprint(commit.run.as_bytes()) as u32;
-            let init = json!({"runId": commit.run, "now": now, "maxTime": MAX_TIME, "seed": seed});
+            let init = json!({
+                "runId": commit.run,
+                "scope": scope,
+                "now": now,
+                "maxTime": MAX_TIME,
+                "seed": seed,
+            });
             vm.invoke("init", &init)?;
             vm.invoke("start", &input)?;
         }

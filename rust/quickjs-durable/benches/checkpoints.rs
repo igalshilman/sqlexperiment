@@ -73,6 +73,7 @@ fn main() -> Result<()> {
                 let mut run = futures_executor::block_on(Run::start(
                     &programs,
                     &store,
+                    "scope",
                     "bench",
                     name,
                     Value::Null,
@@ -106,6 +107,7 @@ fn main() -> Result<()> {
                         run = futures_executor::block_on(Run::start(
                             &programs,
                             &store,
+                            "scope",
                             "bench",
                             name,
                             Value::Null,

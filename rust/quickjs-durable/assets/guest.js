@@ -1,5 +1,6 @@
 (() => {
   let runId,
+    scope,
     nextOperation = 0,
     now = 0,
     maxTime = 0,
@@ -60,6 +61,10 @@
     return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
   }
   globalThis.durable = Object.freeze({
+    // The scope: the key of the object this program is served as.
+    get key() {
+      return scope;
+    },
     kv: Object.freeze({
       get(key) {
         return request({ kind: 'kv.get', key: kvKey(key) });
@@ -116,6 +121,7 @@
       if (runId !== undefined) throw new Error('Invocation is already initialized');
       const config = JSON.parse(json);
       runId = config.runId;
+      scope = config.scope;
       now = config.now;
       maxTime = config.maxTime;
       random = config.seed || 1;

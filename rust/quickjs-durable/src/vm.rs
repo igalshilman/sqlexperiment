@@ -32,7 +32,7 @@ const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
 /// The runtime's version: an image restores only on the runtime that made it.
 /// Bump it with anything an image depends on: the Wasm, the bridge
 /// (`guest.js`), the limits above, the imports' behavior, the VM metadata.
-pub(crate) const VERSION: u64 = 4;
+pub(crate) const VERSION: u64 = 5;
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.

@@ -107,7 +107,16 @@ impl JsObject {
         // One store for the whole attempt: its handler is the object's only
         // writer meanwhile, so what it read or wrote stays true.
         let store = ObjectStore::new(ctx.raw_state());
-        let started = Run::start(&self.programs, &store, run, &self.program, input, now()).await;
+        let started = Run::start(
+            &self.programs,
+            &store,
+            ctx.key(),
+            run,
+            &self.program,
+            input,
+            now(),
+        )
+        .await;
         let mut run = committed(&store, started)?;
         let mut waiting = DurableFuturesUnordered::<Waiting<'ctx>>::new();
         let mut operations: Vec<String> = Vec::new();

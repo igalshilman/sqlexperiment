@@ -72,6 +72,8 @@ one frozen API. Its nested KV and RPC objects are frozen too.
 | `ctx.call(name, args = null)`        | `kind:"call", name, args`           | Custom host response            |
 | `ctx.sleep(ms)`                      | `kind:"sleep", deadline: now + ms`  | null at/after deadline          |
 
+`ctx.key` is the scope: the key of the object the program is served as.
+
 `target` is `{service: string, handler: string, key?: string}`. Service and handler
 are nonempty; unknown fields are rejected. The optional key selects the remote
 object/workflow, not the caller's KV scope. KV keys are strings; custom names are
