@@ -14,12 +14,12 @@ const db = await open('Ledger/a', {
   get: (key) => ctx.get(key, serde.binary), // stored value, or this request's own write
   set: (key, value) => ctx.set(key, value, serde.binary),
   clear: (key) => ctx.clear(key),
-  sync: () => ctx.run('sync', () => {}), // resolves once every write so far is stored
+  sync: () => ctx.run('sync', () => {}), // resolves once every write before it is stored
 });
 await db.transaction(async (tx) => {
   await tx.execute('INSERT INTO transfers VALUES(?, ?, ?, ?)', [id, from, to, amount]);
 });
-await db.save(); // confirms the session's writes for the page cache
+await db.save(); // ends the session, leaving its engine to the next one
 ```
 
 This is the shape of the store. With the Restate SDK, use `ctx.db` instead,
@@ -27,43 +27,39 @@ which builds the store inside the SDK.
 
 ## The store
 
-The store is _ordered_, as Restate state writes are: `set` and `clear` return
-at once, the store keeps writes in the order they were issued, and a failure
-may lose a tail of unconfirmed writes, never one without the writes after it.
-`sync` resolves once every write so far is stored.
-
-Every call to the store goes through one queue (a single thread-safe
-function), so the store sees them in the order the engine issued them: a write
-before a later read of its key, and every write before a `sync`. A `set` or
-`clear` that throws fails the next `sync`.
+`set` and `clear` return at once, and `sync` resolves once every write before
+it is stored. The store keeps no order: until a sync resolves, a failure may
+lose any of the writes before it, and keep any others. A `set` or `clear` that
+throws fails the next `sync`. A database's writes are its commit record and
+pages (see the crate's [format](../../../core/sqlite-kv/docs/FORMAT.md)): a
+transaction commits with one put of the record, so a commit is durable once a
+sync after it resolves.
 
 ## Sessions and the page cache
 
-`open` returns a session of the namespace's database. Each SQL commit is
-durable once the store has stored its writes (a statement resolves once they
-reached the store, and `save()` waits until they are stored); `transaction` commits a body as a whole. Calls
-run one at a time, in call order, and a transaction holds the session until it
-commits or rolls back: calls made meanwhile wait, so none runs inside it. The
-body uses the handle it gets, which is invalid once the body settles; a call
-to the session from inside the body is refused, as it would wait for the body.
-A COMMIT that fails rolls back. An SQL error leaves the session usable
-(`isUsable()`); a storage error ends it. `version()` is a number that grows
-with each commit that changes the database, and only then; it does not wait
-for queued calls, so a transaction's body can record it before its COMMIT, and
-a later session can tell from its own whether that commit landed. A body that
-may change nothing calls `tx.recordCommit()` for that: its commit is then
-logged, and grows the version, all the same.
+`open` returns a session of the namespace's database. A statement that commits
+resolves once its writes are stored; `transaction` commits a body as a whole.
+Calls run one at a time, in call order, and a transaction holds the session
+until it commits or rolls back: calls made meanwhile wait, so none runs inside
+it. The body uses the handle it gets, which is invalid once the body settles;
+a call to the session from inside the body is refused, as it would wait for
+the body. A COMMIT that fails rolls back. An SQL error leaves the session
+usable (`isUsable()`); a storage error ends it.
+
+A body may commit _effects_ with its transaction: `tx.commitEffects(bytes)`
+puts them in the same commit record, so they are stored exactly when the
+transaction is, even if it changes nothing, and stay until a later
+transaction commits others. `effects()` returns them. The SDK keeps a
+transaction's sends there, its outbox, and makes them once it commits.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, unlinked once open so that it goes away
-with the process, or the file `SQLITE_KV_CACHE_FILE` names. `save()` ends a
-session and confirms its writes (one `sync`, if it wrote), so the cache may
-trust them. A session that ends otherwise (`close()`,
-a failed `save`, or garbage collection) makes the next session of that
-namespace in the process start cold, since its writes may be lost. The logic
-is the main crate's ordered-store mode. The cache knows a database only by its
-namespace: two stores holding different databases under one namespace (two
-Restate clusters, say) must not share a process.
+with the process, or the file `SQLITE_KV_CACHE_FILE` names. It knows a
+database by its commit record: a session opens on the cached pages when the
+record is the one the cache saw last. `save()` (or `close()`) ends a session,
+leaving its engine to the next one when it is idle. The cache knows a
+database only by its namespace: two stores holding different databases under
+one namespace (two Restate clusters, say) must not share a process.
 
 ## Values
 
@@ -80,7 +76,7 @@ Restate clusters, say) must not share a process.
 ```sh
 npm run build      # release build, copied to sqlite_kv.node (or `make addon`)
 npm run build:debug
-npm test           # node:test, against an in-memory ordered store
+npm test           # node:test, against an in-memory store
 ```
 
 The tests cover SQL and value round trips, SQL errors and rollback, a write the

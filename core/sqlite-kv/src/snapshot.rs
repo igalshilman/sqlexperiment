@@ -360,6 +360,11 @@ impl Snapshot {
         self.commit.size
     }
 
+    /// The commit record's effects (see [`crate::Session::commit_with`]).
+    pub fn effects(&self) -> &Bytes {
+        &self.commit.effects
+    }
+
     /// Decode a logical page; `None` means a hole. The log's latest image wins,
     /// then the cache, then the checkpointed value at `page/<n>`.
     pub async fn block(&self, index: u64) -> io::Result<Option<Page>> {
@@ -461,21 +466,23 @@ impl Snapshot {
     /// cancellation. After an error, reopen; never reuse this snapshot.
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
-        Ok(self.commit(dirty, size, false).await?.0)
+        Ok(self.commit(dirty, size, None).await?.0)
     }
 
     /// [`Self::publish`], also returning the committed view afterwards, which a
-    /// session may continue on. This snapshot is not used again. Without
-    /// changes nothing is committed, unless `record`: then an empty transaction
-    /// is, and the version grows all the same. A commit that leaves the log
-    /// long checkpoints it ([`Self::compact`]).
+    /// session may continue on. This snapshot is not used again. With
+    /// `effects`, the record's effects become them, in the same put. Without
+    /// changes nothing is committed, unless the effects change: then an empty
+    /// transaction is. A commit that leaves the log long checkpoints it
+    /// ([`Self::compact`]).
     pub(crate) async fn commit(
         &self,
         dirty: Changes,
         size: u64,
-        record: bool,
+        effects: Option<Bytes>,
     ) -> io::Result<(SaveReport, Self)> {
-        if dirty.is_empty() && size == self.size() && !record {
+        let effects = effects.filter(|effects| *effects != self.commit.effects);
+        if dirty.is_empty() && size == self.size() && effects.is_none() {
             let report = SaveReport {
                 version: self.version(),
                 ..SaveReport::default()
@@ -525,6 +532,9 @@ impl Snapshot {
         commit.version += 1;
         commit.size = size;
         commit.log.push(Logged { size, parts });
+        if let Some(effects) = effects {
+            commit.effects = effects;
+        }
         let bytes = commit.encode();
         // Garbage goes in the commit's round trip; the record after this one
         // forgets it, once deleted.

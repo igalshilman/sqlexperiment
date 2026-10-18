@@ -571,12 +571,15 @@ impl KvIo {
     /// the committed view.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn publish(&self) -> io::Result<crate::SaveReport> {
-        self.publish_recorded(false).await
+        self.publish_with(None).await
     }
 
-    /// [`Self::publish`]; with `record`, a commit without changes is logged
-    /// too (see [`Snapshot::commit`]).
-    pub(crate) async fn publish_recorded(&self, record: bool) -> io::Result<crate::SaveReport> {
+    /// [`Self::publish`], setting the commit record's `effects` (see
+    /// [`Snapshot::commit`]).
+    pub(crate) async fn publish_with(
+        &self,
+        effects: Option<bytes::Bytes>,
+    ) -> io::Result<crate::SaveReport> {
         if self.pending_count() != 0 {
             return Err(invalid("cannot save with pending I/O"));
         }
@@ -600,7 +603,7 @@ impl KvIo {
             }
             (dirty, state.sizes[0])
         };
-        let (report, after) = self.snapshot().commit(dirty, size, record).await?;
+        let (report, after) = self.snapshot().commit(dirty, size, effects).await?;
         *self.version.lock().unwrap() = report.version;
         *self.snapshot.lock().unwrap() = Arc::new(after);
         Ok(report)

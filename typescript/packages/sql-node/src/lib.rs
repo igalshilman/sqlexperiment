@@ -2,22 +2,20 @@
 //!
 //! The host passes one dispatcher function, `([op, key, value])`, which `index.js`
 //! builds from a store object `{ get, set, clear, sync }`. Every request goes
-//! through it, so they reach the store in the order they were issued: a write
-//! before a later read of its key, and every write before a `sync`.
+//! through it in the order it was issued, so a read sees the writes before it.
 //!
-//! The store is ordered ([`KvStore::ordered`]): `set` and `clear` return
-//! nothing, and are acknowledged once queued; `sync` resolves once every write
-//! so far is stored. A statement resolves once its writes have reached the
-//! store (a barrier through the same queue), so what its caller does next
-//! comes after them. A process-wide page cache is built in, and
-//! [`Database::save`] confirms a session's writes before the cache trusts them.
+//! `set` and `clear` queue a write; `sync` resolves once every write before it
+//! is stored. Writes are stored in no particular order: a write counts as
+//! done once a `sync` after it resolved, and writes queued together share one
+//! ([`Synced`]), so a statement that commits resolves once its writes are
+//! stored. A process-wide page cache is built in.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use sqlite_kv::kv::KvStore;
+use sqlite_kv::kv::{Queued, Synced};
 use sqlite_kv::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use std::io;
 use std::path::PathBuf;
@@ -30,47 +28,21 @@ const GET: u32 = 0;
 const SET: u32 = 1;
 const CLEAR: u32 = 2;
 const SYNC: u32 = 3;
-const BARRIER: u32 = 4;
 
 type Args = (u32, String, Option<Buffer>);
 type Dispatch = ThreadsafeFunction<Args, Promise<Option<Uint8Array>>, Args, Status, false, true>;
 
-/// The JavaScript store.
-struct JsStore {
+/// The JavaScript store's queue.
+struct JsQueue {
     dispatch: Dispatch,
-    /// Writes were queued since the last barrier.
-    queued: AtomicBool,
 }
+
 
 fn failed(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
-impl JsStore {
-    /// Queue a write; it is acknowledged once queued.
-    fn write(&self, op: u32, key: &str, value: Option<Buffer>) -> io::Result<()> {
-        self.queued.store(true, Ordering::Release);
-        match self.dispatch.call(
-            (op, key.to_owned(), value),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        ) {
-            Status::Ok => Ok(()),
-            status => Err(failed(format!("store call failed: {status}"))),
-        }
-    }
-
-    /// Wait until the store has every write queued so far. The writes and a
-    /// statement's result reach JavaScript through different queues, and
-    /// Node.js dispatches a bounded batch of a queue per turn: without this,
-    /// a statement could resolve before its commit's writes reached the store,
-    /// and what the caller did next would come before them.
-    async fn barrier(&self) -> io::Result<()> {
-        if self.queued.swap(false, Ordering::AcqRel) {
-            self.request(BARRIER, "").await?;
-        }
-        Ok(())
-    }
-
+impl JsQueue {
     async fn request(&self, op: u32, key: &str) -> io::Result<Option<Bytes>> {
         let promise = self
             .dispatch
@@ -82,28 +54,23 @@ impl JsStore {
     }
 }
 
-impl KvStore for JsStore {
+impl Queued for JsQueue {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(self.request(GET, key))
     }
 
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        let result = self.write(SET, key, Some(Buffer::from(value.to_vec())));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        let result = self.write(CLEAR, key, None);
-        Box::pin(std::future::ready(result))
-    }
-
-    /// A read returns stored values, or this request's own writes.
-    fn durable_when_visible(&self) -> bool {
-        true
-    }
-
-    fn ordered(&self) -> bool {
-        true
+    fn queue(&self, key: &str, value: Option<Bytes>) -> io::Result<()> {
+        let (op, value) = match value {
+            Some(value) => (SET, Some(Buffer::from(value.to_vec()))),
+            None => (CLEAR, None),
+        };
+        match self.dispatch.call(
+            (op, key.to_owned(), value),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        ) {
+            Status::Ok => Ok(()),
+            status => Err(failed(format!("store call failed: {status}"))),
+        }
     }
 
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
@@ -141,15 +108,10 @@ fn sql_error(error: Box<dyn std::error::Error + Send + Sync>) -> Error {
     Error::from_reason(error.to_string())
 }
 
-fn sql_error_io(error: io::Error) -> Error {
-    Error::from_reason(error.to_string())
-}
-
 /// One session of a namespace's database.
 #[napi]
 pub struct Database {
     session: Arc<Mutex<Option<Session>>>,
-    store: Arc<JsStore>,
     /// Whether the session can still run SQL, as of the last call that ended:
     /// read without the lock, which a running call holds.
     usable: Arc<AtomicBool>,
@@ -173,10 +135,7 @@ pub fn open<'env>(
         .callee_handled::<false>()
         .weak::<true>()
         .build()?;
-    let store = Arc::new(JsStore {
-        dispatch,
-        queued: AtomicBool::new(false),
-    });
+    let store = Arc::new(Synced::new(JsQueue { dispatch }));
     env.spawn_future(async move {
         let cache = match reader.unwrap_or(false) {
             true => None,
@@ -185,13 +144,6 @@ pub fn open<'env>(
         let options = StorageOptions {
             cache,
             durability: Durability::Commit,
-            // Commits only append, compressed against the pages' previous
-            // images, until the log holds 60 transactions or 256 KiB: then a
-            // commit writes each changed page once. Open replays the log: a
-            // cold one reads at most 64 keys (meta, the hint, and probes of
-            // 2, 4, 8, 16 and 32 log keys).
-            checkpoint_after: 60,
-            checkpoint_log_bytes: 256 * 1024,
             ..StorageOptions::default()
         };
         let session = match reader.unwrap_or(false) {
@@ -199,10 +151,8 @@ pub fn open<'env>(
             false => Session::open_with_options(store.clone(), options).await,
         }
         .map_err(sql_error)?;
-        store.barrier().await.map_err(sql_error_io)?;
         Ok(Database {
             session: Arc::new(Mutex::new(Some(session))),
-            store,
             usable: Arc::new(AtomicBool::new(true)),
         })
     })
@@ -211,8 +161,7 @@ pub fn open<'env>(
 #[napi]
 impl Database {
     /// Run SQL (one or more statements; parameters bind to a single one) and
-    /// return the result rows. Each commit is durable once ordered: its writes
-    /// have reached the store when this resolves.
+    /// return the result rows. A commit is durable when this resolves.
     #[napi(
         ts_args_type = "sql: string, params?: SqlValue[]",
         ts_return_type = "Promise<SqlValue[][]>"
@@ -234,7 +183,6 @@ impl Database {
             None => session.query(&sql).await,
         };
         self.usable.store(session.is_usable(), Ordering::Release);
-        self.store.barrier().await.map_err(sql_error_io)?;
         let rows = rows.map_err(sql_error)?;
         Ok(rows
             .into_iter()
@@ -260,7 +208,6 @@ impl Database {
         let params = params.map(|params| params.into_iter().map(|p| p.0).collect());
         let result = session.query_columns(&sql, params).await;
         self.usable.store(session.is_usable(), Ordering::Release);
-        self.store.barrier().await.map_err(sql_error_io)?;
         let (columns, rows) = result.map_err(sql_error)?;
         Ok(QueryResult {
             columns,
@@ -271,17 +218,19 @@ impl Database {
         })
     }
 
-    /// `COMMIT` the open transaction; with `record`, log it even if it changed
-    /// nothing, so that the version grows (see `Session::commit`).
+    /// `COMMIT` the open transaction; with `effects`, they commit with it
+    /// (see `Session::commit_with`).
     #[napi]
-    pub async fn commit(&self, record: bool) -> Result<()> {
+    pub async fn commit(&self, effects: Option<Buffer>) -> Result<()> {
         let mut session = self.session.lock().await;
         let session = session
             .as_mut()
             .ok_or_else(|| Error::from_reason("the database is closed"))?;
-        let result = session.commit(record).await;
+        let result = match effects {
+            Some(effects) => session.commit_with(Bytes::copy_from_slice(&effects)).await,
+            None => session.execute("COMMIT").await,
+        };
         self.usable.store(session.is_usable(), Ordering::Release);
-        self.store.barrier().await.map_err(sql_error_io)?;
         result.map_err(sql_error)
     }
 
@@ -293,15 +242,14 @@ impl Database {
         self.usable.load(Ordering::Acquire)
     }
 
-    /// The database's version: it grows with each commit that changes the
-    /// database or is recorded, and only then (see `Session::version`).
+    /// The effects of the last commit that set them (see `Session::effects`).
     #[napi]
-    pub async fn version(&self) -> Result<i64> {
+    pub async fn effects(&self) -> Result<Buffer> {
         let session = self.session.lock().await;
         let session = session
             .as_ref()
             .ok_or_else(|| Error::from_reason("the database is closed"))?;
-        Ok(session.version() as i64)
+        Ok(Buffer::from(session.effects().to_vec()))
     }
 
     /// Whether the store still holds the state this reader opened on, so
@@ -316,8 +264,7 @@ impl Database {
         session.is_current().await.map_err(sql_error)
     }
 
-    /// End the session, confirming its writes (one `sync` if it wrote) so that
-    /// the page cache may trust them.
+    /// End the session, leaving its engine to the next one.
     #[napi]
     pub async fn save(&self) -> Result<()> {
         let session = self.session.lock().await.take();
@@ -326,8 +273,7 @@ impl Database {
         session.save().await.map(drop).map_err(sql_error)
     }
 
-    /// End the session without confirming its writes: the next session in
-    /// this process starts cold.
+    /// End the session.
     #[napi]
     pub async fn close(&self) {
         self.session.lock().await.take();

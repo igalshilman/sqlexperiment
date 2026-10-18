@@ -127,7 +127,7 @@ mod snapshot;
 
 pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
-pub use log::MAX_SEGMENT_BYTES;
+pub use log::{MAX_EFFECTS_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::PageCompression;
 pub use snapshot::{
     CHECKPOINT_LOG_BYTES, Durability, MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport,
@@ -139,6 +139,7 @@ pub use turso_core::Value;
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use crate::kv::KvStore;
 use crate::snapshot::Snapshot;
+use bytes::Bytes;
 use std::{
     future::poll_fn,
     sync::{
@@ -182,9 +183,9 @@ pub struct Session {
     durability: Durability,
     /// A [`Self::transaction`] body is running.
     in_body: bool,
-    /// The statement running is a [`Self::commit`] that logs even a commit
-    /// without changes.
-    record: bool,
+    /// The statement running is a [`Self::commit_with`]: the effects it
+    /// commits.
+    effects: Option<Bytes>,
     /// Set when a [`Self::transaction`] future is dropped or unwinds before
     /// finishing, which may leave its SQL transaction open.
     abandoned: Arc<AtomicBool>,
@@ -311,7 +312,7 @@ impl Session {
                 reusable: true,
                 durability,
                 in_body: false,
-                record: false,
+                effects: None,
                 abandoned: Arc::default(),
                 cleanup_error: None,
                 schema_bytes: Some(warm.schema_bytes),
@@ -334,7 +335,7 @@ impl Session {
             reusable: true,
             durability,
             in_body: false,
-            record: false,
+            effects: None,
             abandoned: Arc::default(),
             cleanup_error: None,
             schema_bytes: None,
@@ -461,16 +462,34 @@ impl Session {
         self.query_with(sql, params).await.map(|_| ())
     }
 
-    /// `COMMIT` the open transaction. With `record` and [`Durability::Commit`],
-    /// the commit is logged even if the transaction changed nothing (it only
-    /// read, or its writes matched no rows), so [`Self::version`] grows all
-    /// the same: a host that recorded the version before can tell from a
-    /// later open that this commit landed. A `COMMIT` that fails logs nothing.
-    pub async fn commit(&mut self, record: bool) -> Result<()> {
-        self.record = record;
+    /// `COMMIT` the open transaction, with [`Durability::Commit`], and make
+    /// `effects` the commit record's: they are durable exactly when the
+    /// transaction is, in the same put, even if it changed nothing. They are
+    /// the host's bytes, opaque here (the sends a transaction makes once it
+    /// commits, say), and stay until a later commit replaces them; see
+    /// [`Self::effects`]. A `COMMIT` that fails changes nothing.
+    pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
+        if self.durability != Durability::Commit {
+            return Err("effects commit with Durability::Commit".into());
+        }
+        if effects.len() > log::MAX_EFFECTS_BYTES {
+            return Err(format!(
+                "effects of {} bytes exceed {}",
+                effects.len(),
+                log::MAX_EFFECTS_BYTES
+            )
+            .into());
+        }
+        self.effects = Some(effects);
         let result = self.execute("COMMIT").await;
-        self.record = false;
+        self.effects = None;
         result
+    }
+
+    /// The effects of the last commit that set them, as this session holds
+    /// the database (opened on, or committed itself); empty if none did.
+    pub fn effects(&self) -> Bytes {
+        self.io.snapshot().effects().clone()
     }
 
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
@@ -564,7 +583,7 @@ impl Session {
         // Until the commit is acknowledged the engine may hold uncommitted pages,
         // so a failure must not leave it for reuse.
         self.poisoned = true;
-        let report = self.io.publish_recorded(self.record).await?;
+        let report = self.io.publish_with(self.effects.take()).await?;
         // Resident already, unless the page size grew. The commit is durable
         // either way; a failure here only ends the session.
         if self.io.prepare_engine().await.is_ok() {
@@ -578,12 +597,9 @@ impl Session {
         Ok(report)
     }
 
-    /// The database's version: it grows with each commit that changes the
-    /// database, or that [`Self::commit`] records, and only then. It is one
-    /// past the log sequence of the last committed transaction this
-    /// session holds (opened on, or committed itself); an open transaction
-    /// does not change it. A host can record it before a commit, and tell
-    /// from a later open whether that commit landed.
+    /// The database's version: the transactions ever committed, as this
+    /// session holds the database (opened on, or committed itself); an open
+    /// transaction does not change it.
     pub fn version(&self) -> u64 {
         self.io.version()
     }
@@ -693,7 +709,7 @@ impl Session {
             }
             if idle
                 && self.durability == Durability::Commit
-                && (!self.io.is_clean() || self.record)
+                && (!self.io.is_clean() || self.effects.is_some())
                 && let Some(error) = self.publish().await?.cleanup_error
             {
                 self.cleanup_error = Some(error);

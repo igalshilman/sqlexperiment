@@ -87,6 +87,7 @@ fn record() -> io::Result<Commit> {
         size: 3 * 4096,
         next_segment: 12,
         garbage: 4..7,
+        effects: Bytes::from_static(b"out"),
         log: vec![
             Logged {
                 size: 4096,
@@ -111,8 +112,12 @@ fn commit_records_round_trip() -> io::Result<()> {
     assert_eq!(commit.stored_segments().collect::<Vec<_>>(), [7, 8]);
     let empty = Commit::default();
     assert_eq!(Commit::decode(&empty.encode())?, empty);
-    // `SC14`, version, epoch, units, next segment, garbage 4..7, 3 transactions.
-    assert_eq!(commit.encode()[..11], *b"SC14\x09\x02\x18\x0c\x04\x07\x03");
+    // `SC14`, version, epoch, units, next segment, garbage 4..7, the effects,
+    // 3 transactions.
+    assert_eq!(
+        commit.encode()[..15],
+        *b"SC14\x09\x02\x18\x0c\x04\x07\x03out\x03"
+    );
     Ok(())
 }
 
@@ -177,6 +182,9 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
     ] {
         invalid.push(bad.encode().to_vec());
     }
+    let mut large = record()?;
+    large.effects = Bytes::from(vec![0; MAX_EFFECTS_BYTES + 1]);
+    invalid.push(large.encode().to_vec());
     let mut named = record()?;
     named.log[1].parts[0] = Part::Stored(12); // not allocated
     invalid.push(named.encode().to_vec());

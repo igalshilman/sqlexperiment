@@ -6,6 +6,7 @@ use sqlite_kv::{
         logged_transactions,
     },
 };
+use bytes::Bytes;
 use std::sync::Arc;
 
 fn options(cache: Option<NamespaceCache>) -> StorageOptions {
@@ -511,7 +512,7 @@ fn a_parked_engine_does_not_hold_back_checkpoints() -> Result<()> {
 }
 
 #[test]
-fn the_version_grows_with_each_commit_that_changes_or_records() -> Result<()> {
+fn effects_commit_with_their_transaction() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let mut db = Session::open_with_options(store.clone(), options(None)).await?;
@@ -521,40 +522,45 @@ fn the_version_grows_with_each_commit_that_changes_or_records() -> Result<()> {
              CREATE TABLE c(pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)",
         )
         .await?;
+        assert!(db.effects().is_empty());
         let v0 = db.version();
-        // A commit that changes nothing is not logged...
-        db.execute("BEGIN").await?;
-        db.execute("UPDATE p SET id = 2 WHERE id = 1").await?;
-        db.commit(false).await?;
-        assert_eq!(db.version(), v0);
-        // ...unless recorded.
+        // Effects commit even with a transaction that changes nothing...
         db.execute("BEGIN").await?;
         db.query("SELECT * FROM p").await?;
-        db.commit(true).await?;
-        let v1 = db.version();
-        assert!(v1 > v0);
-        // A rollback, or a COMMIT that fails, logs nothing.
+        db.commit_with(Bytes::from_static(b"sends 1")).await?;
+        assert_eq!(db.effects(), &b"sends 1"[..]);
+        assert_eq!(db.version(), v0 + 1);
+        // ...but the same effects again, without changes, log nothing.
         db.execute("BEGIN").await?;
-        db.execute("ROLLBACK").await?;
+        db.commit_with(Bytes::from_static(b"sends 1")).await?;
+        assert_eq!(db.version(), v0 + 1);
+        // A COMMIT that fails commits neither.
         db.execute("BEGIN").await?;
         db.execute("INSERT INTO c VALUES(7)").await?;
-        assert!(db.commit(true).await.is_err());
+        assert!(db.commit_with(Bytes::from_static(b"sends 2")).await.is_err());
         db.execute("ROLLBACK").await?;
-        assert_eq!(db.version(), v1);
-        // The next commit is not recorded unless asked.
-        db.execute("SELECT 1").await?;
-        assert_eq!(db.version(), v1);
+        assert_eq!(db.effects(), &b"sends 1"[..]);
+        // Commits without effects keep them, through checkpoints.
+        for i in 0..10 {
+            db.execute(&format!("INSERT INTO p VALUES({i})")).await?;
+        }
         assert!(db.is_usable());
         drop(db);
         store.crash(&[]);
 
-        // The recorded commit is durable: a later open is at its version.
         let mut db = Session::open_with_options(store.clone(), options(None)).await?;
-        assert_eq!(db.version(), v1);
+        assert_eq!(db.effects(), &b"sends 1"[..]);
+        assert_eq!(db.version(), v0 + 11);
         assert_eq!(
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
         );
+        // An empty transaction clears them.
+        db.execute("BEGIN").await?;
+        db.commit_with(Bytes::new()).await?;
+        drop(db);
+        let db = Session::open_with_options(store.clone(), options(None)).await?;
+        assert!(db.effects().is_empty());
         Ok(())
     })
 }

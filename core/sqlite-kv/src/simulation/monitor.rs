@@ -127,7 +127,9 @@ impl Known {
         if commit == known {
             return;
         }
-        let same = |a: &Commit, b: &Commit| (a.size, a.next_segment) == (b.size, b.next_segment);
+        let same = |a: &Commit, b: &Commit| {
+            (a.size, a.next_segment, &a.effects) == (b.size, b.next_segment, &b.effects)
+        };
         if commit.version == known.version + 1 {
             // 2: the known log plus one transaction
             let extends = commit.epoch == known.epoch

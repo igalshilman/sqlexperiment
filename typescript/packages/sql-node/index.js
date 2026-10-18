@@ -7,16 +7,14 @@ const GET = 0;
 const SET = 1;
 const CLEAR = 2;
 const SYNC = 3;
-const BARRIER = 4;
 
 /**
- * Open the database of `namespace` over `store`. Every store call goes through
- * one queue, so the store sees them in the order they were issued. A `reader`
- * reads beside the namespace's owner, and writes nothing.
+ * Open the database of `namespace` over `store`. A `reader` reads beside the
+ * namespace's owner, and writes nothing.
  */
 async function open(namespace, store, { reader = false } = {}) {
   // A failed write cannot fail its caller, which has moved on: the next sync
-  // reports it, so the session's writes are not confirmed.
+  // reports it.
   let failure = null;
   // The native side passes [op, key, value].
   const dispatch = ([op, key, value]) => {
@@ -35,9 +33,6 @@ async function open(namespace, store, { reader = false } = {}) {
       case SYNC:
         if (failure) return Promise.reject(failure);
         return Promise.resolve(store.sync()).then(() => null);
-      case BARRIER:
-        // Reached after every write queued before it.
-        return Promise.resolve(null);
       default:
         return Promise.reject(new Error(`unknown store operation ${op}`));
     }
@@ -103,10 +98,10 @@ class Database {
         await rollback(native);
         throw error;
       }
-      const record = tx.recorded;
+      const effects = tx.effects;
       tx.end();
       try {
-        await native.commit(record);
+        await native.commit(effects);
       } catch (error) {
         // A COMMIT that fails (a deferred constraint) leaves the transaction
         // open: without the rollback, the calls after it would run inside it.
@@ -118,15 +113,14 @@ class Database {
   }
 
   /**
-   * The database's version: it grows with each commit that changes the
-   * database, or whose transaction called `recordCommit()`, and only then. It
-   * does not wait for queued calls, so a transaction's body may read it:
-   * before the COMMIT, it is the version that the commit would advance. It
-   * waits for a statement that is running, and rejects once the session has
-   * ended.
+   * The effects of the last commit that set them (see
+   * `TransactionHandle.commitEffects`), as of the session's last commit; empty
+   * if none did. It does not wait for queued calls, so a transaction's body
+   * may read them. It waits for a statement that is running, and rejects once
+   * the session has ended.
    */
-  version() {
-    return this.#native.version();
+  async effects() {
+    return new Uint8Array(await this.#native.effects());
   }
 
   /**
@@ -142,18 +136,12 @@ class Database {
     return this.#native.isUsable();
   }
 
-  /**
-   * End the session, after the calls before it, confirming its writes so that
-   * the page cache may trust them.
-   */
+  /** End the session, after the calls before it. */
   save() {
     return this.#serial(() => this.#native.save());
   }
 
-  /**
-   * End the session without confirming: the next one in this process starts
-   * cold. It does not wait for queued calls, which then fail.
-   */
+  /** End the session now: queued calls fail. */
   close() {
     return this.#native.close();
   }
@@ -177,8 +165,8 @@ class Transaction {
   // The transaction whose body this one's runs in, if any: of another
   // session, since a session's own are refused.
   #outer;
-  /** See {@link recordCommit}. */
-  recorded = false;
+  /** See {@link commitEffects}. */
+  effects = undefined;
 
   constructor(database, nativeDatabase, outer) {
     this.#database = database;
@@ -201,12 +189,13 @@ class Transaction {
   }
 
   /**
-   * Log this transaction's commit even if it changes nothing (it only reads,
-   * or its writes match no rows), so that the version grows when it commits.
+   * Commit `effects` with this transaction, in the same write: they are
+   * stored exactly when it is, even if it changes nothing, and stay until a
+   * later transaction commits others.
    */
-  recordCommit() {
+  commitEffects(effects) {
     this.#check();
-    this.recorded = true;
+    this.effects = Buffer.from(effects);
   }
 
   query(sql, params) {

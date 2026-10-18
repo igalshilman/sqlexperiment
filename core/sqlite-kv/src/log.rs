@@ -44,6 +44,8 @@ pub const MAX_SEGMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_SEGMENT_PAGES: usize = 240;
 /// Most transactions, and segments of one, a stored record may hold.
 const MAX_TRANSACTIONS: u64 = 1 << 20;
+/// Bytes of a commit record's effects.
+pub const MAX_EFFECTS_BYTES: usize = 1024 * 1024;
 const MAGIC: usize = 4;
 const ZSTD_LEVEL: i32 = 3;
 /// Largest version, epoch or segment number a stored record may name, far
@@ -258,7 +260,8 @@ pub(crate) struct Logged {
 ///
 /// Encoding: `SC14`, then LEB128 varints: the version, the epoch, the
 /// database size in 512-byte units, the next segment number, the garbage
-/// range's start and end, and the transaction count; per transaction its
+/// range's start and end, the effects' length and bytes, and the
+/// transaction count; per transaction its
 /// size in 512-byte units and its part count; per part 0 and the segment's
 /// length and bytes (inline), or 1 and its segment number (stored).
 #[derive(Clone, Debug, PartialEq)]
@@ -273,6 +276,9 @@ pub(crate) struct Commit {
     pub next_segment: u64,
     /// Stored segments no transaction in the log names, to delete.
     pub garbage: Range<u64>,
+    /// The host's bytes, committed with the last transaction that set them
+    /// (its outbox, say): opaque here, and kept by checkpoints.
+    pub effects: Bytes,
     /// The log since the last checkpoint, in order.
     pub log: Vec<Logged>,
 }
@@ -286,6 +292,7 @@ impl Default for Commit {
             size: 0,
             next_segment: 0,
             garbage: 0..0,
+            effects: Bytes::new(),
             log: Vec::new(),
         }
     }
@@ -302,7 +309,7 @@ impl Commit {
                 Part::Stored(_) => 10,
             })
             .sum();
-        let mut out = Vec::with_capacity(64 + 4 * self.log.len() + inline);
+        let mut out = Vec::with_capacity(64 + self.effects.len() + 4 * self.log.len() + inline);
         out.extend_from_slice(COMMIT_MAGIC);
         for n in [
             self.version,
@@ -311,10 +318,12 @@ impl Commit {
             self.next_segment,
             self.garbage.start,
             self.garbage.end,
-            self.log.len() as u64,
         ] {
             put_varint(&mut out, n);
         }
+        put_varint(&mut out, self.effects.len() as u64);
+        out.extend_from_slice(&self.effects);
+        put_varint(&mut out, self.log.len() as u64);
         for transaction in &self.log {
             put_varint(&mut out, transaction.size / 512);
             put_varint(&mut out, transaction.parts.len() as u64);
@@ -347,6 +356,13 @@ impl Commit {
         let size = varint(&mut at)?.checked_mul(512).ok_or_else(record)?;
         let next_segment = varint(&mut at)?;
         let garbage = varint(&mut at)?..varint(&mut at)?;
+        let len = varint(&mut at)? as usize;
+        let end = at.checked_add(len).filter(|&end| end <= bytes.len());
+        let end = end
+            .filter(|_| len <= MAX_EFFECTS_BYTES)
+            .ok_or_else(record)?;
+        let effects = bytes.slice(at..end);
+        at = end;
         let count = varint(&mut at)?;
         let plausible = [version, epoch, next_segment]
             .iter()
@@ -400,6 +416,7 @@ impl Commit {
             size,
             next_segment,
             garbage,
+            effects,
             log,
         })
     }
