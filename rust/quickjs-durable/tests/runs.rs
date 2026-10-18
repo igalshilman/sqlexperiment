@@ -366,6 +366,26 @@ fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
     Ok(())
 }
 
+/// A big image and small turns: the chain grows instead, and the image is
+/// written once, not again every few turns. A restore reads the whole chain.
+#[test]
+fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
+    let source = "async function main(){const words=new Uint32Array(8*1024);for(let i=0;i<words.length;i++)words[i]=Math.random()*2**32;for(let i=0;i<40;i++){words[i]=i;await durable.call('tick');}return words[39];}";
+    let store = MemoryStore::default();
+    let mut run = start(&store, source, Value::Null, 1)?;
+    for _ in 0..39 {
+        step(&mut run, &store)?;
+    }
+    assert_eq!(stored(&store, "batch/"), 40);
+    // The first batch holds 32 KiB of noise; the others, a word each. A new
+    // first batch every 16 turns took ~155 KiB.
+    let written = store.bytes_written();
+    assert!(written < 112 * 1024, "{written} bytes");
+    let mut run = start(&store, source, Value::Null, 1)?;
+    assert_eq!(value(&finish(&mut run, &store)?), json!(39));
+    Ok(())
+}
+
 /// A scope's KV: a turn's reads see its own writes, the scope's runs share
 /// it, and a new run replaces the scope's last one, collecting its batches.
 #[test]

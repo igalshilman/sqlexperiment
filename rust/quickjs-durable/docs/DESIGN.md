@@ -528,7 +528,7 @@ capture(G, P, chain, VM):
     if the run settled: chain = []                  // no image is kept
     else if batch is not empty:
         if chain is empty: the batch is the base     // P was G
-        else if chain has 16 batches, or deltaBytes + batch > 2 * baseBytes:
+        else if chain has 256 batches, or deltaBytes + batch > 2 * baseBytes:
             batch = every page of P that differs from G, against G
             chain = []                               // a new base
         chain.append(nextBatch)
@@ -541,8 +541,25 @@ golden is captured with all its dead bytes zeroed. Dead bytes in pages not
 compared stay as they were, in the VM and in P alike. Updating P with
 each changed page keeps it equal to the VM's memory as of the commit: the
 `verify-dirty` build checks that every page that differs from it was marked.
-A new base bounds restoring to at most 16 batches, and at most three times the
-base's size. The batches it replaces become garbage.
+A new base bounds restoring to at most 256 batches, and at most three times
+the base's size. The batches it replaces become garbage.
+
+The size rule alone keeps a run's rewrites to a third of what it writes: a
+new base, of size B, follows 2B of deltas. The batch count only bounds the
+reads of a restore, which fetches the chain's batches all at once; each new
+base it forces costs a whole image. Measured on 18 October 2026, total bytes
+written in `MemoryStore` (batches and commits):
+
+| New base when                          | sleep loop, 400 turns | agent, 400 turns | Map of 5,000 entries, 100 turns |
+| -------------------------------------- | --------------------- | ---------------- | ------------------------------- |
+| 16 batches, or deltas > 2 × base       | 633 KiB               | 1,085 KiB        | 5,878 KiB                       |
+| 256 batches, or deltas > 2 × base      | 620 KiB               | 1,010 KiB        | 2,256 KiB (58 batches)          |
+| deltas > 1 × base                      | 735 KiB               | 1,229 KiB        | 2,669 KiB                       |
+| deltas > 4 × base                      | 570 KiB               | 904 KiB          | 2,547 KiB                       |
+
+The sleep loop and the agent write mostly commits and small deltas, over a
+base of 5-10 KiB once dead bytes are zeroed; the Map's base is ~600 KiB, and
+16 batches rewrote it every 16 turns.
 
 ### 5.4. Reconstruction algorithm
 
@@ -551,6 +568,7 @@ reconstruct(commit):
     require the program's version and the runtime's match the commit's
     require golden_length <= memoryLen <= limit, 64-KiB aligned
     memory = golden bytes, extended with zeros to memoryLen
+    read every batch in commit.chain, at once
     for each batch in commit.chain, in order:
         indexes = its page indexes; require each within memory
         pages = its frame, decoded against memory's pages at indexes
