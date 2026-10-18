@@ -2,28 +2,28 @@
 //! invariants of `docs/DESIGN.md`, as `spec/Protocol.tla` states them.
 //!
 //! The monitor wraps a store and keeps what an observer knows is durable: the
-//! values of acknowledged puts and deletes (and, on a store whose visible
-//! values are durable, values it read). A failed or cancelled request makes a
-//! log key unknown, and adds its value to a page key's possible values. Each
-//! put or delete is then checked when it is issued:
+//! values of acknowledged puts and deletes, and values it read. A failed or
+//! cancelled request makes its key unknown, and adds its value to a page key's
+//! possible values. Each put or delete is then checked when it is issued:
 //!
-//! 1. **Commit**: a commit part is sent only once the transaction's earlier
-//!    parts are known.
-//! 2. **Build on durable**: a transaction starts where a known commit ends (or
-//!    at the known log start), unless it re-puts a known segment.
-//! 3. **Checkpoint before recording**: `meta` passes a transaction only when
-//!    every page it changed is known at its page key, with that image or a
-//!    newer committed one.
-//! 4. **Delete behind a durable meta**: a segment is deleted only below the
-//!    known log start.
-//! 5. **Overwrite only what the log covers**: a page key gets only an image of
-//!    a known committed transaction at or after the known log start.
-//! 6. **Chain from the log start**: a segment's compression chain starts at
-//!    or after the known log start, so replay from there can decode it.
+//! 1. **Name only the durable**: a commit record names only stored segments
+//!    known to hold their segment.
+//! 2. **Build on durable**: a commit record holds the known record's log plus
+//!    one transaction, at the next version; or is that record again.
+//! 3. **Checkpoint before recording**: a record that empties the log (the next
+//!    epoch) comes only when every page the known log changed is known at its
+//!    page key, with the log's latest image of it.
+//! 4. **Overwrite only what the log covers**: a page key gets only an image of
+//!    a transaction in the known record's log.
+//! 5. **Fresh segments, deleted unnamed**: a stored segment is put only at a
+//!    number the known record has not allocated, and deleted only if it names
+//!    it no more.
+//! 6. **Decodable**: every record put decodes, its log against the segments
+//!    it names.
 use crate::{
-    format::{LOG_PREFIX, META, PAGE_PREFIX},
+    format::{COMMIT, LOG_PREFIX, PAGE_PREFIX},
     kv::KvStore,
-    log::{self, Chain, Images, Meta},
+    log::{self, Commit, Images, Part},
     page_codec,
 };
 use bytes::Bytes;
@@ -51,57 +51,38 @@ impl<S> Deref for MonitorKv<S> {
 /// What is known to be durable.
 #[derive(Default)]
 struct Known {
-    log: BTreeMap<u64, Bytes>,
+    /// Stored segments, by number.
+    segments: BTreeMap<u64, Bytes>,
     /// The values each page key may hold durably; `None` is a hole.
     pages: HashMap<u64, Vec<Option<Bytes>>>,
-    meta: Option<Meta>,
+    commit: Option<Commit>,
     violations: Vec<String>,
     checked: usize,
 }
 
-/// A committed transaction among known segments.
-struct Transaction {
-    end: u64,
-    images: Images,
-}
-
 impl Known {
-    fn meta(&self) -> Meta {
-        self.meta.unwrap_or_default()
+    fn commit(&self) -> Commit {
+        self.commit.clone().unwrap_or_default()
     }
 
-    fn segment(&self, seq: u64) -> Option<log::Header> {
-        self.log
-            .get(&seq)
-            .and_then(|bytes| log::header(bytes, seq).ok())
-            .map(|(header, _)| header)
-    }
-
-    /// Known committed transactions from `start`, in order, as replay from
-    /// there decodes them.
-    fn committed(&self, start: u64) -> Vec<Transaction> {
+    /// Each transaction's images in `commit`'s log, as replay decodes them;
+    /// `None` when a segment it names is unknown or undecodable.
+    fn transactions(&self, commit: &Commit) -> Option<Vec<Images>> {
+        let mut chain = log::Chain::default();
         let mut transactions = Vec::new();
-        let (mut seq, mut first, mut images) = (start, start, Images::new());
-        let mut chain = Chain::new(start);
-        while let Some(bytes) = self.log.get(&seq) {
-            if self.segment(seq).is_none_or(|header| header.first != first) {
-                break;
+        for transaction in &commit.log {
+            let mut images = Images::new();
+            for part in &transaction.parts {
+                let segment = match part {
+                    Part::Inline(bytes) => bytes.clone(),
+                    Part::Stored(n) => self.segments.get(n)?.slice(4..),
+                };
+                images.extend(log::decode_segment(&segment, &chain).ok()?);
             }
-            let Ok(segment) = log::decode(bytes, seq, &mut chain) else {
-                break;
-            };
-            images.extend(segment.images);
-            seq += 1;
-            if segment.commit {
-                chain.images.extend(images.clone());
-                transactions.push(Transaction {
-                    end: seq,
-                    images: std::mem::take(&mut images),
-                });
-                first = seq;
-            }
+            chain.images.extend(images.clone());
+            transactions.push(images);
         }
-        transactions
+        Some(transactions)
     }
 
     /// The logical image a page key's value holds; `None` for a hole.
@@ -119,138 +100,136 @@ impl Known {
     /// Check a put before it is issued.
     fn check_put(&mut self, key: &str, value: &Bytes) {
         self.checked += 1;
-        if let Some(seq) = parse(key, LOG_PREFIX) {
-            let Ok((segment, _)) = log::header(value, seq) else {
-                return self.violation(format!("{key}: undecodable segment"));
-            };
-            if self.log.get(&seq) == Some(value) {
-                return; // a re-put of a known value: confirmation
-            }
-            // 1: earlier parts of its transaction are known
-            for part in segment.first..seq {
-                if self
-                    .segment(part)
-                    .is_none_or(|known| known.first != segment.first)
-                {
-                    self.violation(format!(
-                        "{key}: part {part} of its transaction is not known"
-                    ));
-                }
-            }
-            // 6: its chain starts at or after the known log start
-            if segment.base < self.meta().log_start {
-                self.violation(format!("{key}: chain starts before the known log start"));
-            }
-            // 2: a new transaction starts where a known commit ends
-            if segment.first == seq {
-                let previous_commit = seq > 1 && self.segment(seq - 1).is_some_and(|s| s.commit);
-                if seq != self.meta().log_start && !previous_commit {
-                    self.violation(format!("{key}: starts after no known commit"));
-                }
+        if let Some(n) = parse(key, LOG_PREFIX) {
+            // 5: at a number not yet allocated
+            if n < self.commit().next_segment {
+                self.violation(format!("{key}: a segment number already allocated"));
             }
         } else if let Some(page) = parse(key, PAGE_PREFIX) {
             self.check_image(key, page, Some(value));
-        } else if key == META {
-            let Ok(meta) = Meta::decode(value) else {
-                return self.violation(format!("{key}: undecodable"));
-            };
-            let known = self.meta();
-            if meta.log_start <= known.log_start {
-                return;
-            }
-            // 3: every page of the passed transactions is known at its key
-            let transactions = self.committed(known.log_start);
-            let Some(last) = transactions.iter().position(|t| t.end == meta.log_start) else {
-                return self.violation(format!(
-                    "meta to {}: not at a known commit after {}",
-                    meta.log_start, known.log_start
-                ));
-            };
-            let mut changed: Vec<u64> = transactions[..=last]
-                .iter()
-                .flat_map(|t| t.images.keys().copied())
-                .collect();
-            changed.sort_unstable();
-            changed.dedup();
-            for page in changed {
-                // the image of the last passed transaction to change it, or newer
-                let from = (0..=last)
-                    .rev()
-                    .find(|&i| transactions[i].images.contains_key(&page))
-                    .expect("changed by some transaction");
-                let allowed: Vec<&Option<Bytes>> = transactions[from..]
-                    .iter()
-                    .filter_map(|t| t.images.get(&page))
-                    .collect();
-                let held = self.pages.get(&page).map_or(&[][..], Vec::as_slice);
-                let held: Vec<_> = held.iter().map(Self::image).collect();
-                if held.is_empty()
-                    || !held
-                        .iter()
-                        .all(|image| image.as_ref().is_some_and(|i| allowed.contains(&i)))
-                {
-                    self.violation(format!(
-                        "meta to {}: page {page} not known at its key",
-                        meta.log_start
-                    ));
-                }
-            }
+        } else if key == COMMIT {
+            self.check_commit(value);
         }
     }
 
-    /// 5: a page key gets an image of a known committed transaction still in
-    /// the log.
+    fn check_commit(&mut self, value: &Bytes) {
+        let Ok(commit) = Commit::decode(value) else {
+            return self.violation("commit: undecodable".into());
+        };
+        let known = self.commit();
+        // 1, 6: it names known segments, and its log decodes
+        if self.transactions(&commit).is_none() {
+            return self.violation(format!(
+                "commit {}: names an unknown segment, or does not decode",
+                commit.version
+            ));
+        }
+        if commit == known {
+            return;
+        }
+        let same = |a: &Commit, b: &Commit| (a.size, a.next_segment) == (b.size, b.next_segment);
+        if commit.version == known.version + 1 {
+            // 2: the known log plus one transaction
+            let extends = commit.epoch == known.epoch
+                && commit.log.len() == known.log.len() + 1
+                && commit.log[..known.log.len()] == known.log[..]
+                && commit.garbage.end <= known.next_segment;
+            if !extends {
+                self.violation(format!(
+                    "commit {}: does not extend the known record",
+                    commit.version
+                ));
+            }
+        } else if commit.version == known.version
+            && commit.epoch == known.epoch + 1
+            && commit.log.is_empty()
+            && same(&commit, &known)
+        {
+            // 3: every page of the known log is known at its key
+            let Some(known_log) = self.transactions(&known) else {
+                return self.violation("checkpoint: the known log does not decode".into());
+            };
+            let mut latest = Images::new();
+            for images in known_log {
+                latest.extend(images);
+            }
+            for (page, image) in latest {
+                let held = self.pages.get(&page).map_or(&[][..], Vec::as_slice);
+                let ok = !held.is_empty()
+                    && held
+                        .iter()
+                        .all(|value| Self::image(value) == Some(image.clone()));
+                if !ok {
+                    self.violation(format!(
+                        "checkpoint to epoch {}: page {page} not known at its key",
+                        commit.epoch
+                    ));
+                }
+            }
+        } else {
+            self.violation(format!(
+                "commit {} (epoch {}): neither a commit nor a checkpoint after {} (epoch {})",
+                commit.version, commit.epoch, known.version, known.epoch
+            ));
+        }
+    }
+
+    /// 4: a page key gets an image of a transaction in the known log.
     fn check_image(&mut self, key: &str, page: u64, value: Option<&Bytes>) {
         let Some(value) = Self::image(&value.cloned()) else {
             return self.violation(format!("{key}: undecodable page"));
         };
+        let known = self.commit();
         let covered = self
-            .committed(self.meta().log_start)
+            .transactions(&known)
+            .unwrap_or_default()
             .iter()
-            .filter_map(|t| t.images.get(&page))
+            .filter_map(|images| images.get(&page))
             .any(|image| *image == value);
         if !covered {
-            self.violation(format!("{key}: image of no known committed transaction"));
+            self.violation(format!("{key}: image of no transaction in the known log"));
         }
     }
 
     fn check_delete(&mut self, key: &str) {
         self.checked += 1;
-        if let Some(seq) = parse(key, LOG_PREFIX) {
-            // 4: only below the known log start
-            if seq >= self.meta().log_start {
-                self.violation(format!("{key}: deleted at or after the known log start"));
+        if let Some(n) = parse(key, LOG_PREFIX) {
+            // 5: only a segment the known record does not name
+            if self.commit().stored_segments().any(|named| named == n) {
+                self.violation(format!("{key}: deleted while the known record names it"));
             }
         } else if let Some(page) = parse(key, PAGE_PREFIX) {
             self.check_image(key, page, None);
+        } else if key == COMMIT {
+            self.violation("commit: deleted".into());
         }
     }
 
     /// Record a value now known durable; `None`: known absent.
     fn learn(&mut self, key: &str, value: Option<Bytes>) {
-        if let Some(seq) = parse(key, LOG_PREFIX) {
+        if let Some(n) = parse(key, LOG_PREFIX) {
             match value {
-                Some(value) => self.log.insert(seq, value),
-                None => self.log.remove(&seq),
+                Some(value) => self.segments.insert(n, value),
+                None => self.segments.remove(&n),
             };
         } else if let Some(page) = parse(key, PAGE_PREFIX) {
             self.pages.insert(page, vec![value]);
-        } else if key == META {
-            self.meta = value.and_then(|bytes| Meta::decode(&bytes).ok());
+        } else if key == COMMIT {
+            self.commit = value.and_then(|bytes| Commit::decode(&bytes).ok());
         }
     }
 
     /// A request with an unknown outcome: its key may hold either value.
     fn forget(&mut self, key: &str, value: Option<&Bytes>) {
-        if let Some(seq) = parse(key, LOG_PREFIX) {
-            self.log.remove(&seq);
+        if let Some(n) = parse(key, LOG_PREFIX) {
+            self.segments.remove(&n);
         } else if let Some(page) = parse(key, PAGE_PREFIX)
             && let Some(held) = self.pages.get_mut(&page)
         {
             held.push(value.cloned());
         }
-        // A meta may have moved forward or not: the known one is the older, so
-        // checks against it stay conservative.
+        // A record may have moved forward or not: the known one is the older,
+        // so checks against it stay conservative until a read learns which.
     }
 }
 
@@ -313,9 +292,7 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             let value = self.inner.get(key).await?;
-            if self.inner.durable_when_visible() {
-                self.known.lock().unwrap().learn(key, value.clone());
-            }
+            self.known.lock().unwrap().learn(key, value.clone());
             Ok(value)
         })
     }
@@ -358,9 +335,5 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
             }
             result
         })
-    }
-
-    fn durable_when_visible(&self) -> bool {
-        self.inner.durable_when_visible()
     }
 }

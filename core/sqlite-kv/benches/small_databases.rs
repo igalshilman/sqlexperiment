@@ -51,7 +51,7 @@ fn print_row(
         s.bytes_written,
         s.kind("page").bytes_written,
         s.kind("log").bytes_written,
-        s.kind("meta").bytes_written
+        s.kind("commit").bytes_written
     );
 }
 async fn run(case: Case, repeats: usize) -> Result<()> {
@@ -198,7 +198,7 @@ fn main() -> Result<()> {
         return Err("repeats must be positive".into());
     }
     println!(
-        "rows,payload_bytes,indexes,operation,run,db_bytes,stored_before,stored_after,elapsed_us,gets,puts,deletes,bytes_read,bytes_written,page_bytes,log_bytes,meta_bytes"
+        "rows,payload_bytes,indexes,operation,run,db_bytes,stored_before,stored_after,elapsed_us,gets,puts,deletes,bytes_read,bytes_written,page_bytes,log_bytes,commit_bytes"
     );
     futures::executor::block_on(async {
         for rows in [10, 100, 300] {

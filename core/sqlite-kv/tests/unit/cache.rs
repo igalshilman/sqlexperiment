@@ -38,74 +38,44 @@ fn replaced_and_removed_pages_get_new_keys() {
     })
 }
 
+/// The same commit record is known; another one in the same epoch keeps the
+/// pages, and another epoch drops them.
 #[test]
-fn a_different_meta_forgets_claims_and_keeps_pages_to_refresh() {
+fn another_record_forgets_the_commit_and_another_epoch_the_pages() {
     futures::executor::block_on(async {
-        let meta = Meta {
-            log_start: 5,
-            deleted_below: 2,
-            size: 4096,
-        };
-        let claim = Meta {
-            log_start: 7,
-            ..meta
-        };
+        let record = |n: u8| Page::from(vec![b'S', b'C', b'1', b'4', n]);
         let cache = fresh_namespace();
-        assert_eq!(cache.expected_start(), None, "a fresh owner knows nothing");
-        assert_eq!(
-            cache.validate(Some(&meta.encode()), 5),
-            Reuse::Changed(None)
-        );
-        cache.record(None, None, 1);
-        assert_eq!(
-            cache.validate(None, 1),
-            Reuse::Known(None, Some(1)),
-            "absent meta"
-        );
+        assert!(!cache.validate(None, 0), "a fresh owner knows nothing");
+        assert!(!cache.knows_pages());
+        cache.record(None, 0, Some(0));
+        assert!(cache.validate(None, 0), "an absent record, as recorded");
+        assert!(!cache.validate(Some(&record(1)), 0), "not after another");
+        cache.record(Some(record(1)), 0, Some(3));
         cache.insert(1, value(4));
-        cache.insert(2, value(4));
-        cache.record(Some(meta.encode().into()), Some(claim), 9);
-        assert_eq!(cache.expected_start(), Some(7));
-        assert_eq!(
-            cache.validate(Some(&meta.encode()), 5),
-            Reuse::Known(Some(claim), Some(9))
-        );
+        assert!(cache.validate(Some(&record(1)), 0));
+        assert_eq!(cache.committed(), Some(3));
 
-        // Another writer moved meta: refresh what it changed from the base.
+        // Another writer committed in the same epoch: the pages stay.
         let generation = cache.generation();
-        assert_eq!(
-            cache.validate(Some(&claim.encode()), 7),
-            Reuse::Changed(Some(5))
-        );
-        assert_eq!(cache.expected_start(), Some(5), "the claim is forgotten");
-        cache.refresh(Some(&std::collections::BTreeSet::from([1, 3])));
-        assert_eq!(cache.get(1).await, None, "changed pages are dropped");
-        assert_eq!(cache.get(3).await, None, "uncached pages stay uncached");
-        assert_eq!(cache.get(2).await, Some(value(4)), "unchanged pages stay");
+        assert!(!cache.validate(Some(&record(2)), 0));
+        assert_eq!(cache.committed(), None);
+        assert!(cache.knows_epoch(0));
+        assert_eq!(cache.get(1).await, Some(value(4)));
         assert_eq!(cache.generation(), generation);
-        assert_eq!(
-            cache.validate(Some(&claim.encode()), 7),
-            Reuse::Changed(Some(5)),
-            "until recorded"
-        );
-        cache.record(Some(claim.encode().into()), None, 9);
-        cache.forget();
-        assert_eq!(
-            cache.validate(Some(&claim.encode()), 7),
-            Reuse::Changed(Some(7))
-        );
 
-        // Unreadable changes, or a log start before the base, drop every page.
-        cache.refresh(None);
-        assert_eq!(cache.expected_start(), None);
-        assert_eq!(cache.get(2).await, None);
-        cache.insert(1, value(4));
-        cache.record(Some(claim.encode().into()), None, 9);
-        assert_eq!(
-            cache.validate(Some(&meta.encode()), 5),
-            Reuse::Changed(None)
-        );
+        // Or checkpointed: every page goes.
+        cache.record(Some(record(2)), 0, Some(4));
+        assert!(!cache.validate(Some(&record(3)), 1));
+        assert!(!cache.knows_pages());
         assert_eq!(cache.get(1).await, None);
+        assert_ne!(cache.generation(), generation);
+
+        // A commit with an unknown outcome forgets the record, not the pages.
+        cache.record(Some(record(3)), 1, Some(5));
+        cache.insert(2, value(4));
+        cache.forget();
+        assert!(!cache.validate(Some(&record(3)), 1));
+        assert_eq!(cache.get(2).await, Some(value(4)));
     })
 }
 

@@ -172,7 +172,7 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
 
 async fn run(case: Case, policy: u32, strong: bool, cached: bool, run: usize) -> Result<()> {
     let store: Store =
-        Arc::new(LatencyKv::new(baseline(case).await?).with_durable_when_visible(strong));
+        Arc::new(LatencyKv::new(baseline(case).await?));
     let cache = cached.then(|| open_cache(cache_config(256 << 20, 1 << 30)).namespace("bench"));
     // Warm the owner state outside the measurement.
     let mut db = Session::open_with_options(store.clone(), options(policy, &cache)).await?;
@@ -210,7 +210,8 @@ fn main() -> Result<()> {
     futures::executor::block_on(async {
         for case in CASES {
             for policy in POLICIES {
-                for strong in [false, true] {
+                // A read returns only durable values: the backend is strong.
+                for strong in [true] {
                     for cached in [false, true] {
                         for repeat in 0..repeats {
                             run(case, policy, strong, cached, repeat).await?;

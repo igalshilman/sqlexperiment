@@ -158,7 +158,7 @@ impl Sample {
             stats.bytes_written,
             page.bytes_written,
             stats.kind("log").bytes_written,
-            stats.kind("meta").bytes_written,
+            stats.kind("commit").bytes_written,
             page.gets,
             page.puts,
             store.stored_bytes(),
@@ -342,7 +342,7 @@ fn main() -> Result<()> {
         "rows,payload_bytes,payload,codec,run,sample_pages,iterations,encoded_bytes,compressed_pages,encode_ns,decode_ns"
     )?;
     println!(
-        "rows,payload_bytes,payload,codec,run,operation,db_pages,gets,puts,deletes,read_key_value_bytes,mutation_key_value_bytes,put_value_bytes,page_write_bytes,log_write_bytes,meta_write_bytes,page_gets,page_puts,stored_value_bytes,stored_key_bytes,app_read_bytes,app_write_bytes,elapsed_ns,page_read_bytes"
+        "rows,payload_bytes,payload,codec,run,operation,db_pages,gets,puts,deletes,read_key_value_bytes,mutation_key_value_bytes,put_value_bytes,page_write_bytes,log_write_bytes,commit_write_bytes,page_gets,page_puts,stored_value_bytes,stored_key_bytes,app_read_bytes,app_write_bytes,elapsed_ns,page_read_bytes"
     );
     futures::executor::block_on(async {
         for (rows, bytes) in [(100, 64), (100, 512), (100, 9000), (10_000, 256)] {

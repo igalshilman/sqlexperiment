@@ -195,80 +195,6 @@ pub struct Session {
     schema_bytes: Option<usize>,
     /// SQL since the last commit may have changed the schema.
     schema_changed: bool,
-    /// This session's writes to an ordered store with an owner cache.
-    ordered: Option<Arc<Ordered>>,
-}
-
-/// Tracks a session's writes to an ordered store (see [`KvStore::ordered`]):
-/// the owner cache trusts them only once [`Session::save`] confirms them.
-struct Ordered {
-    store: Arc<dyn KvStore>,
-    cache: NamespaceCache,
-    unconfirmed: AtomicBool,
-}
-
-impl Ordered {
-    fn wrote(&self) {
-        if !self.unconfirmed.swap(true, Ordering::SeqCst) {
-            self.cache.write_unconfirmed();
-        }
-    }
-
-    /// Confirm the writes so far, if any.
-    async fn confirm(&self) -> std::io::Result<()> {
-        if self.unconfirmed.load(Ordering::SeqCst) {
-            self.store.sync().await?;
-            self.settle(true);
-        }
-        Ok(())
-    }
-
-    fn settle(&self, confirmed: bool) {
-        if self.unconfirmed.swap(false, Ordering::SeqCst) {
-            self.cache.settle(confirmed);
-        }
-    }
-}
-
-impl Drop for Ordered {
-    fn drop(&mut self) {
-        self.settle(false);
-    }
-}
-
-impl KvStore for Ordered {
-    fn get<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> futures::future::BoxFuture<'a, std::io::Result<Option<bytes::Bytes>>> {
-        self.store.get(key)
-    }
-
-    fn put<'a>(
-        &'a self,
-        key: &'a str,
-        value: bytes::Bytes,
-    ) -> futures::future::BoxFuture<'a, std::io::Result<()>> {
-        self.wrote();
-        self.store.put(key, value)
-    }
-
-    fn delete<'a>(&'a self, key: &'a str) -> futures::future::BoxFuture<'a, std::io::Result<()>> {
-        self.wrote();
-        self.store.delete(key)
-    }
-
-    fn durable_when_visible(&self) -> bool {
-        self.store.durable_when_visible()
-    }
-
-    fn ordered(&self) -> bool {
-        true
-    }
-
-    fn sync(&self) -> futures::future::BoxFuture<'_, std::io::Result<()>> {
-        self.store.sync()
-    }
 }
 
 /// Marks a session abandoned unless it finished; see [`Session::transaction`].
@@ -292,8 +218,8 @@ impl Drop for Abandon {
 pub(crate) struct WarmEngine {
     database: Arc<Database>,
     io: Arc<KvIo>,
-    /// The log position its state corresponds to.
-    next: u64,
+    /// The version its state corresponds to.
+    version: u64,
     /// Bytes of its schema's SQL, which sizes its parsed schema.
     schema_bytes: usize,
 }
@@ -366,25 +292,11 @@ impl Session {
     ) -> Result<Self> {
         let cache = options.cache.clone();
         let durability = options.durability;
-        // With an ordered store, start cold after a session whose writes were
-        // not confirmed, and track this session's.
-        let (store, ordered) = match &cache {
-            Some(cache) if store.ordered() => {
-                cache.open_ordered();
-                let ordered = Arc::new(Ordered {
-                    store,
-                    cache: cache.clone(),
-                    unconfirmed: AtomicBool::new(false),
-                });
-                (ordered.clone() as Arc<dyn KvStore>, Some(ordered))
-            }
-            _ => (store, None),
-        };
         let snapshot = Snapshot::open_with_options(store, options).await?;
         let warm = match &cache {
             Some(cache) if snapshot.unchanged => cache
                 .take_engine()
-                .filter(|warm| warm.next == snapshot.log.next && warm.io.is_clean()),
+                .filter(|warm| warm.version == snapshot.version() && warm.io.is_clean()),
             _ => None,
         };
         if let Some(warm) = warm {
@@ -404,7 +316,6 @@ impl Session {
                 cleanup_error: None,
                 schema_bytes: Some(warm.schema_bytes),
                 schema_changed: false,
-                ordered,
             };
             session.io.resume(snapshot).await?;
             session.connection = Some(connect(&session.io, &warm.database).await?);
@@ -428,7 +339,6 @@ impl Session {
             cleanup_error: None,
             schema_bytes: None,
             schema_changed: false,
-            ordered,
         };
         session.io.prepare_engine().await?;
         let database = open_engine(&session.io).await?;
@@ -446,12 +356,7 @@ impl Session {
     /// private, [`Durability::Save`], and it is never saved) and keeps no
     /// cache. It reads the state as of open, unless the owner checkpoints
     /// meanwhile: [`Self::is_current`], once it has read, says whether it did.
-    /// The store must be [`KvStore::durable_when_visible`], as open would
-    /// otherwise confirm what it read by writing it again.
     pub async fn open_reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        if !store.durable_when_visible() {
-            return Err("a reader needs a store whose visible values are durable".into());
-        }
         let options = StorageOptions {
             cache: None,
             durability: Durability::Save,
@@ -471,8 +376,8 @@ impl Session {
     /// overlapping session left behind holds an older state.
     fn park(&mut self) {
         let Some(cache) = &self.cache else { return };
-        let next = self.io.log_next();
-        if cache.committed() != Some(next) || !self.reusable || self.schema_changed {
+        let version = self.io.version();
+        if cache.committed() != Some(version) || !self.reusable || self.schema_changed {
             return;
         }
         let Some(schema_bytes) = self.schema_bytes else {
@@ -497,7 +402,7 @@ impl Session {
             cache.park(WarmEngine {
                 database,
                 io: self.io.clone(),
-                next,
+                version,
                 schema_bytes,
             });
             self.parked = true;
@@ -680,7 +585,7 @@ impl Session {
     /// does not change it. A host can record it before a commit, and tell
     /// from a later open whether that commit landed.
     pub fn version(&self) -> u64 {
-        self.io.log_next()
+        self.io.version()
     }
 
     /// Whether the store still holds the state this session opened on (see
@@ -862,9 +767,6 @@ impl Session {
         }
         let mut report = self.publish().await?;
         report.cleanup_error = report.cleanup_error.or(self.cleanup_error.take());
-        if let Some(ordered) = &self.ordered {
-            ordered.confirm().await?;
-        }
         self.park();
         Ok(report)
     }
@@ -872,11 +774,6 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Writes not confirmed by a save may be lost (before the engine, which
-        // holds the store, is parked).
-        if let Some(ordered) = &self.ordered {
-            ordered.settle(false);
-        }
         // A clean read-only session leaves its engine for the next one.
         self.park();
         if !self.parked {

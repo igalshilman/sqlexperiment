@@ -3,6 +3,7 @@ use sqlite_kv::{
     Durability, NamespaceCache, Result, Session, StorageOptions,
     simulation::{
         Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, MonitorKv, Operation, fresh_namespace,
+        logged_transactions,
     },
 };
 use std::sync::Arc;
@@ -32,14 +33,14 @@ fn statements_are_durable_without_save() -> Result<()> {
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         assert_eq!(
-            store.stats().kind("log").puts,
+            store.stats().kind("commit").puts,
             1,
             "one commit per statement"
         );
         db.execute("INSERT INTO t VALUES(1, 0)").await?;
-        assert_eq!(store.stats().kind("log").puts, 2);
+        assert_eq!(store.stats().kind("commit").puts, 2);
         db.query("SELECT * FROM t").await?;
-        assert_eq!(store.stats().kind("log").puts, 2, "reads commit nothing");
+        assert_eq!(store.stats().kind("commit").puts, 2, "reads commit nothing");
         drop(db);
         store.crash(&[]);
 
@@ -56,7 +57,7 @@ fn a_transaction_commits_as_a_whole_or_not_at_all() -> Result<()> {
         let mut db = Session::open_with_options(store.clone(), options(None)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
-        let before = store.stats().kind("log").puts;
+        let before = store.stats().kind("commit").puts;
         let id = db
             .transaction(async |db| {
                 db.execute("INSERT INTO t VALUES(1, 5)").await?;
@@ -66,7 +67,7 @@ fn a_transaction_commits_as_a_whole_or_not_at_all() -> Result<()> {
             .await?;
         assert_eq!(id, 2);
         assert_eq!(
-            store.stats().kind("log").puts,
+            store.stats().kind("commit").puts,
             before + 1,
             "one log transaction"
         );
@@ -78,7 +79,7 @@ fn a_transaction_commits_as_a_whole_or_not_at_all() -> Result<()> {
             })
             .await;
         assert!(failed.is_err());
-        assert_eq!(store.stats().kind("log").puts, before + 1, "rolled back");
+        assert_eq!(store.stats().kind("commit").puts, before + 1, "rolled back");
         assert_eq!(count(&mut db).await?, 2, "the session continues");
 
         // An open transaction is all that dropping a session loses.
@@ -172,7 +173,7 @@ fn every_acknowledged_commit_survives_any_single_failure() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         for cached in [false, true] {
-            for effect in [Effect::None, Effect::Visible, Effect::After] {
+            for effect in [Effect::None, Effect::After] {
                 for operation in [Operation::Put, Operation::Delete] {
                     for nth in 1.. {
                         if !run_case(cached, effect, operation, nth).await? {
@@ -201,7 +202,7 @@ async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize
         .await?;
     let _signal = store.arm(Failpoint {
         operation,
-        key_prefix: "v13/".into(),
+        key_prefix: "v14/".into(),
         nth,
         effect,
         cancel: false,
@@ -365,7 +366,7 @@ fn commit_cleanup_errors_are_reported() -> Result<()> {
             .await?;
         let _signal = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v13/page/".into(),
+            key_prefix: "v14/page/".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,
@@ -431,16 +432,15 @@ fn an_overlapping_reader_keeps_its_view() -> Result<()> {
         );
         drop(reader);
 
-        let logs = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/log/")).count();
-        let held = logs(&store);
+        let held = logged_transactions(&*store).await?;
         assert!(held > 8, "the reader held checkpoints back: {held}");
         for _ in 0..30 {
             writer.execute("UPDATE t SET n = n + 1").await?;
         }
+        let caught_up = logged_transactions(&*store).await?;
         assert!(
-            logs(&store) <= 8,
-            "checkpoints catch up: {held} then {}",
-            logs(&store)
+            caught_up <= 8,
+            "checkpoints catch up: {held} then {caught_up}"
         );
         let rows = writer.query("SELECT sum(n) FROM t").await?;
         assert_eq!(rows[0][0].as_int(), Some(200 * 41));

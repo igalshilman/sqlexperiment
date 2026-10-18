@@ -164,8 +164,8 @@ fn commit_and_checkpoint_errors_drain_and_keep_the_outcome() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
-        for (prefix, nth) in [("v13/log/", 1), ("v13/page/", 1)] {
-            for effect in [Effect::None, Effect::Visible, Effect::After] {
+        for (prefix, nth) in [("v14/commit", 1), ("v14/page/", 1)] {
+            for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
                 // The save checkpoints the log once it has committed.
                 let mut db = Session::open_with_options(store.clone(), all()).await?;
@@ -175,7 +175,7 @@ fn commit_and_checkpoint_errors_drain_and_keep_the_outcome() -> Result<()> {
                 let result = db.save().await;
                 assert_eq!(store.active(), 0, "the failed phase must drain");
                 store.disarm();
-                if prefix == "v13/page/" {
+                if prefix == "v14/page/" {
                     let report = result?;
                     assert!(report.cleanup_error.is_some());
                     // The checkpoint failed: no page counts as checkpointed.
@@ -186,7 +186,7 @@ fn commit_and_checkpoint_errors_drain_and_keep_the_outcome() -> Result<()> {
                     assert!(result.is_err());
                 }
                 store.inner.crash(&[]);
-                let committed = prefix == "v13/page/" || matches!(effect, Effect::After);
+                let committed = prefix == "v14/page/" || matches!(effect, Effect::After);
                 check(store.clone(), committed).await?;
                 cases += 1;
             }
@@ -196,13 +196,11 @@ fn commit_and_checkpoint_errors_drain_and_keep_the_outcome() -> Result<()> {
     })
 }
 
-/// Open only reads until it confirms what it found: read failures mutate
-/// nothing, and failed confirmations can be retried.
+/// Open only reads: read failures mutate nothing, and open can be retried.
 #[test]
-fn open_read_and_confirmation_failures_are_retryable() -> Result<()> {
+fn open_read_failures_are_retryable() -> Result<()> {
     futures::executor::block_on(async {
         let mut read_cases = 0;
-        let mut confirm_cases = 0;
         let base = baseline().await?;
         let reads = {
             let probe = Arc::new(FaultKv::new(base.fork(), 0));
@@ -215,7 +213,7 @@ fn open_read_and_confirmation_failures_are_retryable() -> Result<()> {
                 .take_while(|e| e.operation == Operation::Get)
                 .count()
         };
-        assert!(reads >= 2, "meta and a probe batch");
+        assert!(reads >= 2, "the record and the hint, then pages");
         for nth in 1..=reads {
             for effect in [Effect::None, Effect::After] {
                 for cancel in [false, true] {
@@ -244,21 +242,7 @@ fn open_read_and_confirmation_failures_are_retryable() -> Result<()> {
                 }
             }
         }
-        // A fresh owner on a weak backend confirms the log tail; interrupt that.
-        let store = Arc::new(FaultKv::new(base.fork(), 3));
-        for attempt in 0..4 {
-            let effect = [Effect::None, Effect::Visible, Effect::After][attempt % 3];
-            let _gate = store.arm(plan(Operation::Put, "v13/", 1, effect, false));
-            assert!(Session::open(store.clone()).await.is_err());
-            assert_eq!(store.active(), 0);
-            store.disarm();
-            store.inner.crash(&[]);
-            confirm_cases += 1;
-        }
-        check(store, false).await?;
-        println!(
-            "open read failpoints: {read_cases} cases; interrupted confirmations: {confirm_cases}"
-        );
+        println!("open read failpoints: {read_cases} cases");
         Ok(())
     })
 }
@@ -267,7 +251,7 @@ fn open_read_and_confirmation_failures_are_retryable() -> Result<()> {
 fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let key = "v13/page/0000000000000001";
+        let key = "v14/page/0000000000000001";
         assert!(store.get(key).await?.is_none());
         store.put(key, vec![1; 4096].into()).await?;
         store.get(key).await?;

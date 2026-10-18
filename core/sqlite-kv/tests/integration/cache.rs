@@ -161,7 +161,7 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v13/log/".into(),
+            key_prefix: "v14/commit".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,

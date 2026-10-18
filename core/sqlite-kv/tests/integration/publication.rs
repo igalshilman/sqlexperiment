@@ -56,7 +56,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
         for cached in [false, true] {
             for operation in [Operation::Put, Operation::Delete] {
                 'ordinal: for nth in 1.. {
-                    for effect in [Effect::None, Effect::Visible, Effect::After] {
+                    for effect in [Effect::None, Effect::After] {
                         for crash in [false, true] {
                             let cache = cached.then(fresh_namespace);
                             let base = baseline(cache.as_ref()).await?;

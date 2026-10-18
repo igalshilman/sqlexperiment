@@ -13,8 +13,6 @@ use std::{io, sync::Mutex};
 pub struct LatencyKv<S> {
     pub inner: S,
     now: Mutex<u64>,
-    /// Override of the inner store's [`KvStore::durable_when_visible`].
-    strong: Option<bool>,
 }
 
 impl<S: KvStore> LatencyKv<S> {
@@ -22,15 +20,7 @@ impl<S: KvStore> LatencyKv<S> {
         Self {
             inner,
             now: Mutex::new(0),
-            strong: None,
         }
-    }
-
-    /// Model a backend whose visible values are always durable (or not). Only for
-    /// measurements: the inner simulator still exposes unacknowledged writes.
-    pub fn with_durable_when_visible(mut self, strong: bool) -> Self {
-        self.strong = Some(strong);
-        self
     }
 
     /// Round trips on the critical path since creation or the last reset.
@@ -65,10 +55,6 @@ impl<S: KvStore> KvStore for LatencyKv<S> {
     }
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
         self.timed(self.inner.delete(key))
-    }
-    fn durable_when_visible(&self) -> bool {
-        self.strong
-            .unwrap_or_else(|| self.inner.durable_when_visible())
     }
 }
 

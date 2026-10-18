@@ -164,8 +164,8 @@ impl Drop for Completing<'_> {
 pub struct KvIo {
     /// The committed view; replaced when a warm engine continues in a new session.
     snapshot: Mutex<Arc<Snapshot>>,
-    /// See [`Self::log_next`].
-    log_next: Mutex<u64>,
+    /// See [`Self::version`].
+    version: Mutex<u64>,
     state: Mutex<State>,
     queue: Mutex<VecDeque<Pending>>,
     driver: futures::lock::Mutex<()>,
@@ -199,7 +199,7 @@ impl KvIo {
             ..State::default()
         };
         Arc::new(Self {
-            log_next: Mutex::new(snapshot.log.next),
+            version: Mutex::new(snapshot.version()),
             snapshot: Mutex::new(Arc::new(snapshot)),
             state: Mutex::new(state),
             queue: Mutex::default(),
@@ -211,10 +211,10 @@ impl KvIo {
         })
     }
 
-    /// One past the last transaction of the committed state the engine holds: the
-    /// snapshot it was opened or resumed on, or its own acknowledged save.
-    pub(crate) fn log_next(&self) -> u64 {
-        *self.log_next.lock().unwrap()
+    /// The version of the committed state the engine holds: the snapshot it
+    /// was opened or resumed on, or its own acknowledged save.
+    pub(crate) fn version(&self) -> u64 {
+        *self.version.lock().unwrap()
     }
 
     /// Release the committed view while the engine is parked: it reads
@@ -249,7 +249,7 @@ impl KvIo {
             sizes: [snapshot.size(), 0],
             ..State::default()
         };
-        *self.log_next.lock().unwrap() = snapshot.log.next;
+        *self.version.lock().unwrap() = snapshot.version();
         *self.snapshot.lock().unwrap() = Arc::new(snapshot);
         self.prepare_engine().await
     }
@@ -601,7 +601,7 @@ impl KvIo {
             (dirty, state.sizes[0])
         };
         let (report, after) = self.snapshot().commit(dirty, size, record).await?;
-        *self.log_next.lock().unwrap() = report.log_next;
+        *self.version.lock().unwrap() = report.version;
         *self.snapshot.lock().unwrap() = Arc::new(after);
         Ok(report)
     }
