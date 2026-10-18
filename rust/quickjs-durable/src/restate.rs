@@ -28,11 +28,11 @@ use restate_sdk::{
     prelude::*,
 };
 use serde_json::Value;
-use sqlite_kv::StorageOptions;
+use sqlite_kv::{PageCache, PageCacheConfig, StorageOptions};
 use std::{
     collections::HashSet,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -124,8 +124,15 @@ impl JsObject {
         // One store for the whole invocation: its handler is the object's
         // only writer meanwhile, so what a turn read or wrote stays true.
         let store = Arc::new(ObjectStore::new(ctx.raw_state()));
+        let options = StorageOptions {
+            cache: Some(page_cache()?.namespace(&format!("{}/{}", self.program, ctx.key()))),
+            // A turn's log segment is small (~5 KiB), and a checkpoint copies
+            // every changed page into place: rarely, then.
+            checkpoint_after: 32,
+            ..StorageOptions::default()
+        };
         loop {
-            let state = self.turn(&store, run, event).await?.state;
+            let state = self.turn(&store, &options, run, event).await?.state;
             if let Some(outcome) = state.outcome {
                 return Ok(outcome);
             }
@@ -175,8 +182,17 @@ impl JsObject {
         }
     }
 
-    async fn turn(&self, store: &Arc<ObjectStore>, run: &str, event: Event) -> HandlerResult<View> {
-        match self.commit(store.clone(), run, event).await {
+    async fn turn(
+        &self,
+        store: &Arc<ObjectStore>,
+        options: &StorageOptions,
+        run: &str,
+        event: Event,
+    ) -> HandlerResult<View> {
+        match self
+            .commit(store.clone(), options.clone(), run, event)
+            .await
+        {
             Ok(view) => {
                 faults::after_commit()?;
                 Ok(view)
@@ -193,11 +209,11 @@ impl JsObject {
     async fn commit(
         &self,
         store: Arc<ObjectStore>,
+        options: StorageOptions,
         run: &str,
         event: Event,
     ) -> anyhow::Result<View> {
-        let transaction =
-            NamespaceTransaction::begin(store, StorageOptions::default(), run).await?;
+        let transaction = NamespaceTransaction::begin(store, options, run).await?;
         let mut engine = Engine::new(transaction, self.programs.clone());
         let view = match event {
             // On a retried attempt, the run as it is.
@@ -310,6 +326,39 @@ pub fn endpoint(programs: &Arc<Programs>) -> Endpoint {
     bind(Endpoint::builder(), programs)
         .bind(crate::Claude::from_env())
         .build()
+}
+
+/// The page cache of the process's objects: 256 MiB of memory and 1 GiB of
+/// disk, in a file under the temporary directory. It keeps what each object's
+/// database last read and wrote, so a turn reads from Restate only what
+/// changed meanwhile, and does not write again what this process already
+/// wrote and confirmed. Opened outside any async runtime, it runs its disk I/O
+/// on a runtime of its own, which outlives the caller's.
+fn page_cache() -> std::io::Result<&'static PageCache> {
+    static CACHE: OnceLock<PageCache> = OnceLock::new();
+    static OPENING: Mutex<()> = Mutex::new(());
+    if let Some(cache) = CACHE.get() {
+        return Ok(cache);
+    }
+    let _opening = OPENING.lock().unwrap();
+    if let Some(cache) = CACHE.get() {
+        return Ok(cache);
+    }
+    let file = std::env::temp_dir().join(format!("quickjs-durable-{}.cache", std::process::id()));
+    let config = PageCacheConfig {
+        // No idle SQL engines kept: they are far larger than the cache's
+        // estimate (~3.6 MiB each, measured, against ~50 KiB), so a thousand
+        // objects took gigabytes.
+        engine_bytes: 0,
+        ..PageCacheConfig::new(&file, 256 << 20, 1 << 30)
+    };
+    let cache = std::thread::spawn(move || futures::executor::block_on(PageCache::open(config)))
+        .join()
+        .map_err(|_| std::io::Error::other("Opening the page cache panicked"))??;
+    // The cache keeps the file open: unlinked now, it goes away with the
+    // process however it ends.
+    let _ = std::fs::remove_file(&file);
+    Ok(CACHE.get_or_init(|| cache))
 }
 
 /// Milliseconds since the epoch: a turn's logical time never runs backwards.
