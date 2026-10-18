@@ -22,7 +22,8 @@ KV writes, the new effects and the consumed result commit together, or not at
 all. Two hosts implement it: one on a SQLite file (`--features sqlite-host`),
 and the same tables on [sqlite-kv](../sqlite-kv/README.md), in one namespace of
 a key/value store such as a Restate object's state (`--features
-sqlite-kv-host`). There is no binding to Restate's SDKs yet.
+sqlite-kv-host`). [`rust/quickjs-restate`](../../rust/quickjs-restate/README.md)
+binds the second to Restate objects.
 
 An experiment, imported from its own repository: see
 [the design](docs/DESIGN.md), the complete specification.

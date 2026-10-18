@@ -1064,7 +1064,29 @@ and include checkpoint storage, KV changes, effect registration and consumption
 in the same host transaction. Scope selection and RPC authorization belong to
 the host. Publish only committed terminal status; outcome alone may exist while
 waiting. Choose an explicit concurrency policy for different invocations sharing
-a scope. This protocol has not yet been bound to a live Restate server's internals.
+a scope.
+
+### 10.1. The Restate binding
+
+`rust/quickjs-restate` binds §7.1's host to a live Restate server, on the
+Rust SDK with journal replay off:
+
+- A scope is a virtual object key; exclusive handlers serialize its turns, so
+  every run in a scope shares one writer. A turn is one invocation of `start`
+  or `complete`; a retried attempt runs it again against the stored state, and
+  the engine's duplicate handling makes it a no-op.
+- The `effects` table is an outbox. After the commit, the turn sends each new
+  request with its operation ID as idempotency key: an RPC to a proxy service
+  that makes the call and sends the outcome to `complete`, a timer as a delayed
+  send to `complete`, Resume as an immediate one. It then records the IDs it
+  sent in the object's state; Restate stores state writes in order, so a
+  stored record implies stored sends, and a retry sends what the record lacks.
+  Uncommitted IDs are never sent, so their reuse is safe (§2.2).
+- The `complete` invocation is the inbox: Restate retries it until its turn
+  commits, so the host keeps no results. The proxy's call is a normal,
+  journaled invocation.
+- A caller (`Js.run`) waits on a signal, sent by the turn in which `outcome`
+  first appears, even while losers of a race are still outstanding (§2.2).
 
 An implementation can be built and accepted in this order:
 

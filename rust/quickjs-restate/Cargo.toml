@@ -1,0 +1,27 @@
+[package]
+name = "quickjs-restate"
+version = "0.1.0"
+edition = "2024"
+description = "Durable JavaScript in Restate virtual objects: QuickJS images, no journal replay"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+futures = "0.3"
+quickjs-durable = { path = "../../core/quickjs-durable", features = ["sqlite-kv-host"] }
+restate-sdk = { path = "../sdk/.build/sdk-rust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlite-kv = { path = "../../core/sqlite-kv" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+tempfile = "3"
+
+# The patched shared core, cloned next to the SDK by rust/sdk/setup.sh.
+[patch.crates-io]
+restate-sdk-shared-core = { path = "../sdk/.build/sdk-shared-core" }
