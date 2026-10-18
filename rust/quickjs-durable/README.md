@@ -36,16 +36,12 @@ files ([`coder`](programs/coder.js)), served by the
 
 ## Writing a program
 
-- `ctx.kv.get/set/delete(key)` for the scope's JSON state.
-- `ctx.rpc.call({ service, handler, key? }, input)` for any Restate service.
-- `ctx.sleep(ms)`.
-- `ctx.claude.messages(request)` for Claude: a
-  [Messages API](https://platform.claude.com/docs/en/api/messages) request.
-  The runtime sends it, and keeps no copy of it: an agent's growing
-  conversation costs nothing extra per step.
-- `ctx.key` is the object's key.
+`ctx.kv.get/set/delete(key)` for the scope's JSON state,
+`ctx.rpc.call({ service, handler, key? }, input)` for any Restate service, and
+`ctx.sleep(ms)`; `ctx.key` is the object's key. Models are a service too: `claude/messages` takes a
+[Messages API](https://platform.claude.com/docs/en/api/messages) request.
 
-- All I/O goes through `ctx`; values cross as `JSON.stringify` makes them.
+- All I/O goes through `ctx`; values are JSON.
 - The run ends when `main` settles: unlike Node.js, promises still pending are
   dropped. Await what must happen.
 - A scope runs one run at a time.

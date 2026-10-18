@@ -14,7 +14,6 @@
 //! | ------------------------- | ----------------------------------------------------------- |
 //! | `ctx.rpc.call(target, x)` | A call to `target`, its idempotency key the operation's ID |
 //! | `ctx.sleep(ms)`           | A timer, until the request's deadline                       |
-//! | `ctx.claude.messages(r)`  | The Claude API, called here ([`crate::claude`])             |
 //! | `ctx.kv.*`                | Nothing: answered in the turn, from the object's state     |
 //!
 //! A retried attempt replays nothing: it restores the last committed image and
@@ -22,8 +21,7 @@
 //! made before the crash is attached to, not made again. The run ends when
 //! `main` settles: requests still outstanding (a race's loser) are dropped,
 //! and their continuations never run.
-use crate::{Model, Operation, Outcome, Programs, Run, Runtime, vm};
-use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use crate::{Operation, Outcome, Programs, Run, Runtime, vm};
 use restate_sdk::{
     context::{DurableFuture, RequestTarget},
     prelude::*,
@@ -76,13 +74,10 @@ pub mod faults {
 pub struct JsObject {
     program: String,
     programs: Arc<Programs>,
-    model: Arc<dyn Model>,
 }
 
 /// A request the handler waits on: its outcome, and the time to deliver it at.
 type Waiting<'ctx> = Pin<Box<dyn DurableFuture<Output = (Outcome, u64)> + Send + 'ctx>>;
-/// A model call the handler makes itself: its operation and outcome.
-type Calling = BoxFuture<'static, (String, Outcome)>;
 
 #[restate_sdk::object]
 impl JsObject {
@@ -125,7 +120,6 @@ impl JsObject {
         let mut run = committed(&store, started)?;
         let mut waiting = DurableFuturesUnordered::<Waiting<'ctx>>::new();
         let mut operations: Vec<String> = Vec::new();
-        let mut calls = FuturesUnordered::<Calling>::new();
         let mut awaited: HashSet<String> = HashSet::new();
         loop {
             let state = run.view().state;
@@ -153,17 +147,6 @@ impl JsObject {
                             0,
                         ));
                     }
-                    Operation::Model { .. } => {
-                        awaited.insert(id.to_owned());
-                        let request = run.request(&store, id).await;
-                        match request.map_err(|error| failed(&store, error))? {
-                            Ok(request) => calls.push(self.call(id, request)),
-                            Err(error) => {
-                                let outcome = Outcome::failure(error.name, error.message);
-                                now_ready.get_or_insert((id.to_owned(), outcome, 0));
-                            }
-                        }
-                    }
                     _ => {
                         if let Some(future) = wait(ctx, operation) {
                             waiting.push(future);
@@ -176,26 +159,18 @@ impl JsObject {
             let (outcomes, at) = match now_ready {
                 Some((operation, outcome, at)) => (vec![(operation, outcome)], at),
                 None => {
-                    let (first, mut at) = tokio::select! {
-                        ready = waiting.next(), if !waiting.is_empty() => {
-                            let (index, (outcome, at)) = ready?.expect("a request to wait on");
-                            ((operations[index].clone(), outcome), at)
-                        }
-                        Some(called) = calls.next() => (called, 0),
-                        else => return Err(TerminalError::new("The run waits on nothing").into()),
+                    let Some((index, (outcome, mut at))) = waiting.next().await? else {
+                        return Err(TerminalError::new("The run waits on nothing").into());
                     };
                     // What else has arrived goes in the same turn, and commits
                     // with it.
-                    let mut outcomes = vec![first];
+                    let mut outcomes = vec![(operations[index].clone(), outcome)];
                     while let Some(ready) = futures::FutureExt::now_or_never(waiting.next()) {
                         let Some((index, (outcome, ready_at))) = ready? else {
                             break;
                         };
                         outcomes.push((operations[index].clone(), outcome));
                         at = at.max(ready_at);
-                    }
-                    while let Some(Some(called)) = futures::FutureExt::now_or_never(calls.next()) {
-                        outcomes.push(called);
                     }
                     (outcomes, at)
                 }
@@ -206,34 +181,17 @@ impl JsObject {
     }
 }
 
-/// A turn's result. Once it committed, the crash a test injects, if any.
+/// A turn's result. Once it committed, the crash a test injects, if any. A
+/// storage failure is the attempt's, and retried; anything else would fail
+/// again, the same way.
 fn committed<T>(store: &ObjectStore, result: anyhow::Result<T>) -> HandlerResult<T> {
-    let value = result.map_err(|error| failed(store, error))?;
-    faults::after_commit()?;
-    Ok(value)
-}
-
-/// A storage failure, or a full pool, is the attempt's, and retried; anything
-/// else would fail again, the same way.
-fn failed(store: &ObjectStore, error: anyhow::Error) -> HandlerError {
-    if store.failed() || vm::exhausted(&error) {
-        error.into()
-    } else {
-        TerminalError::new(format!("{error:#}")).into()
-    }
-}
-
-impl JsObject {
-    /// Call the model with `request`, for the pending operation `id`.
-    fn call(&self, id: &str, request: Value) -> Calling {
-        let (id, response) = (id.to_owned(), self.model.messages(request));
-        Box::pin(async move {
-            let outcome = match response.await {
-                Ok(response) => Outcome::success(response),
-                Err(error) => Outcome::failure("Error", format!("{error:#}")),
-            };
-            (id, outcome)
-        })
+    match result {
+        Ok(value) => {
+            faults::after_commit()?;
+            Ok(value)
+        }
+        Err(error) if store.failed() || vm::exhausted(&error) => Err(error.into()),
+        Err(error) => Err(TerminalError::new(format!("{error:#}")).into()),
     }
 }
 
@@ -306,13 +264,11 @@ mod shipped {
 pub fn bind(
     mut builder: restate_sdk::endpoint::Builder,
     programs: &Arc<Programs>,
-    model: Arc<dyn Model>,
 ) -> restate_sdk::endpoint::Builder {
     for name in programs.names() {
         let object = JsObject {
             program: name.to_owned(),
             programs: programs.clone(),
-            model: model.clone(),
         };
         builder = builder.bind(
             object.into_service_definition().options(
@@ -327,16 +283,13 @@ pub fn bind(
     builder
 }
 
-/// An endpoint serving `programs`, calling [`crate::Claude`], and
+/// An endpoint serving `programs`, and [`crate::Claude`] and
 /// [`crate::Workspace`] for them to call.
 pub fn endpoint(programs: &Arc<Programs>) -> Endpoint {
-    bind(
-        Endpoint::builder(),
-        programs,
-        Arc::new(crate::Claude::from_env()),
-    )
-    .bind(crate::Workspace::from_env())
-    .build()
+    bind(Endpoint::builder(), programs)
+        .bind(crate::Claude::from_env())
+        .bind(crate::Workspace::from_env())
+        .build()
 }
 
 /// Milliseconds since the epoch: a turn's logical time never runs backwards.

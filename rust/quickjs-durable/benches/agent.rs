@@ -4,17 +4,16 @@
 //! until the conversation is long. Every 25 steps the run is restored, as a
 //! new attempt after a crash would be. Results go to bench-agent.json.
 //!
-//! Per step it reports the request the run sends the model (the whole
-//! conversation, read from the heap), the time to read it, the time of the
-//! step's two turns (the model's answer in, the tool's result in), and what
-//! the step stored.
+//! Per step it reports the request the run sends the model (which Restate
+//! journals, whole, at every call), the time of the step's two turns (the
+//! model's answer in, the tool's result in), and what the step stored.
 use anyhow::{Result, bail, ensure};
 use futures_executor::block_on as block;
 use quickjs_durable::{MemoryStore, Operation, Outcome, Programs, Run, Runtime, Status};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Instant};
 
-const STEPS: usize = 400;
+const STEPS: usize = 300;
 const RESTORE_EVERY: usize = 25;
 
 fn main() -> Result<()> {
@@ -34,14 +33,14 @@ fn main() -> Result<()> {
     };
     let mut run = start(1000)?;
     let mut session = Session::default();
-    let mut stored = store.bytes_written();
+    let (mut journaled, mut stored) = (0, store.bytes_written());
     let mut rows = Vec::new();
     let mut ended = None;
-    println!("step  request KiB  request ms  model ms  tool ms  stored B/step  stored MiB");
+    println!("step  request KiB  model ms  tool ms  stored B/step  journaled MiB  stored MiB");
     'session: for step in 1..=STEPS {
         // The model's answer, then the tool's result.
         let mut turns = [0.0; 2];
-        let (mut request, mut request_ms) = (0, 0.0);
+        let mut request = 0;
         for turn in &mut turns {
             let view = run.view();
             if view.state.status != Status::Waiting {
@@ -50,25 +49,22 @@ fn main() -> Result<()> {
                 ended = Some(json!({"step": step, "outcome": outcome}));
                 break 'session;
             }
-            let answer = match &view.state.pending[0] {
-                Operation::Model { id } => {
-                    let started = Instant::now();
-                    let read = block(run.request(&store, id))?;
-                    request_ms = started.elapsed().as_secs_f64() * 1000.0;
-                    let Ok(read) = read else {
-                        bail!("Step {step}: no request to send: {read:?}");
-                    };
-                    request = serde_json::to_vec(&read)?.len();
+            let operation = view.state.pending[0].clone();
+            let Operation::Rpc { id, target, input } = &operation else {
+                bail!("Step {step}: unexpected request {operation:?}");
+            };
+            let answer = match target.service.as_str() {
+                "claude" => {
+                    request = serde_json::to_vec(input)?.len();
                     session.model(step)
                 }
-                Operation::Rpc { target, .. } => session.tool(&target.handler),
-                operation => bail!("Step {step}: unexpected request {operation:?}"),
+                _ => session.tool(&target.handler),
             };
-            let id = view.state.pending[0].id();
             let started = Instant::now();
             block(run.deliver(&store, id, Outcome::success(answer), view.state.now + 1))?;
             *turn = started.elapsed().as_secs_f64() * 1000.0;
         }
+        journaled += request;
         let written = store.bytes_written() - stored;
         stored = store.bytes_written();
         let mut restore_ms = None;
@@ -81,18 +77,18 @@ fn main() -> Result<()> {
         rows.push(
             json!({"step": step, "request_bytes": request, "model_turn_ms": turns[0],
             "tool_turn_ms": turns[1], "restore_ms": restore_ms, "stored_bytes": written,
-            "request_ms": request_ms, "memory_bytes": view.memory_bytes,
+            "journaled_bytes": journaled, "memory_bytes": view.memory_bytes,
             "live_pages": view.live_pages, "batch_bytes": view.batch_bytes,
             "commit_bytes": view.commit_bytes}),
         );
         if step.is_multiple_of(10) || step == 1 {
             println!(
-                "{step:>4}  {:>11.0}  {:>10.2}  {:>8.2}  {:>7.2}  {:>13}  {:>10.1}",
+                "{step:>4}  {:>11.0}  {:>8.2}  {:>7.2}  {:>13}  {:>13.1}  {:>10.1}",
                 request as f64 / 1024.0,
-                request_ms,
                 turns[0],
                 turns[1],
                 written,
+                journaled as f64 / (1 << 20) as f64,
                 stored as f64 / (1 << 20) as f64,
             );
         }
@@ -110,9 +106,9 @@ fn main() -> Result<()> {
         );
     }
     let output = json!({"steps": STEPS, "ended": ended, "notes": [
-        "request_bytes: the step's request to the model, the whole conversation so far, read from the heap in request_ms.",
+        "request_bytes: the step's request to the model, the whole conversation so far; journaled_bytes, their sum.",
         "stored_bytes: what the step's two turns stored (batches, commits); MemoryStore, no network.",
-        "restore_ms: a new attempt after the step, reading its commit; its VM is restored when the next request is read, in that step's request_ms."],
+        "restore_ms: a new attempt after the step, reading the commit and its batches into a new VM."],
         "rows": rows});
     std::fs::write("bench-agent.json", serde_json::to_string_pretty(&output)?)?;
     Ok(())
@@ -184,11 +180,7 @@ impl Session {
         let mut text = String::new();
         while text.len() < bytes {
             text.push_str(WORDS[(self.next() % 16) as usize]);
-            text.push(if self.next().is_multiple_of(12) {
-                '\n'
-            } else {
-                ' '
-            });
+            text.push(if self.next().is_multiple_of(12) { '\n' } else { ' ' });
         }
         text
     }
