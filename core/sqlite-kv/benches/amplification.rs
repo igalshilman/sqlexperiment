@@ -346,11 +346,39 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
 /// logged transaction after committing, then puts the record again.
 async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     for (op, operation, prefix, nth, effect, committed) in [
-        ("commit_lost", Operation::Put, "v14/commit", 1, Effect::None, false),
-        ("commit_ack_lost", Operation::Put, "v14/commit", 1, Effect::After, true),
-        ("checkpoint_error", Operation::Put, "v14/page/", 1, Effect::None, true),
+        (
+            "commit_lost",
+            Operation::Put,
+            "v14/commit",
+            1,
+            Effect::None,
+            false,
+        ),
+        (
+            "commit_ack_lost",
+            Operation::Put,
+            "v14/commit",
+            1,
+            Effect::After,
+            true,
+        ),
+        (
+            "checkpoint_error",
+            Operation::Put,
+            "v14/page/",
+            1,
+            Effect::None,
+            true,
+        ),
         // The checkpoint's own record: the second record a save puts.
-        ("checkpoint_record_error", Operation::Put, "v14/commit", 2, Effect::None, true),
+        (
+            "checkpoint_record_error",
+            Operation::Put,
+            "v14/commit",
+            2,
+            Effect::None,
+            true,
+        ),
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
         let mut db = Session::open_with_options(store.clone(), checkpoint_all()).await?;

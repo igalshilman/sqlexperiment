@@ -171,8 +171,7 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
 }
 
 async fn run(case: Case, policy: u32, strong: bool, cached: bool, run: usize) -> Result<()> {
-    let store: Store =
-        Arc::new(LatencyKv::new(baseline(case).await?));
+    let store: Store = Arc::new(LatencyKv::new(baseline(case).await?));
     let cache = cached.then(|| open_cache(cache_config(256 << 20, 1 << 30)).namespace("bench"));
     // Warm the owner state outside the measurement.
     let mut db = Session::open_with_options(store.clone(), options(policy, &cache)).await?;

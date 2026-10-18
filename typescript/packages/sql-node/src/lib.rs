@@ -37,7 +37,6 @@ struct JsQueue {
     dispatch: Dispatch,
 }
 
-
 fn failed(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
@@ -144,6 +143,11 @@ pub fn open<'env>(
         let options = StorageOptions {
             cache,
             durability: Durability::Commit,
+            // Commits rewrite the record with the log inline, so its size is
+            // the cost of each: a checkpoint once it holds 64 KiB keeps it
+            // small, and 60 transactions of a few hundred bytes stay inline.
+            checkpoint_after: 60,
+            checkpoint_log_bytes: 64 * 1024,
             ..StorageOptions::default()
         };
         let session = match reader.unwrap_or(false) {

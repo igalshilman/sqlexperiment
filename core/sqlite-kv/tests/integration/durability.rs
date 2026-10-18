@@ -1,4 +1,5 @@
 //! `Durability::Commit`: every SQL commit is durable when its statement returns.
+use bytes::Bytes;
 use sqlite_kv::{
     Durability, NamespaceCache, Result, Session, StorageOptions,
     simulation::{
@@ -6,7 +7,6 @@ use sqlite_kv::{
         logged_transactions,
     },
 };
-use bytes::Bytes;
 use std::sync::Arc;
 
 fn options(cache: Option<NamespaceCache>) -> StorageOptions {
@@ -537,7 +537,11 @@ fn effects_commit_with_their_transaction() -> Result<()> {
         // A COMMIT that fails commits neither.
         db.execute("BEGIN").await?;
         db.execute("INSERT INTO c VALUES(7)").await?;
-        assert!(db.commit_with(Bytes::from_static(b"sends 2")).await.is_err());
+        assert!(
+            db.commit_with(Bytes::from_static(b"sends 2"))
+                .await
+                .is_err()
+        );
         db.execute("ROLLBACK").await?;
         assert_eq!(db.effects(), &b"sends 1"[..]);
         // Commits without effects keep them, through checkpoints.

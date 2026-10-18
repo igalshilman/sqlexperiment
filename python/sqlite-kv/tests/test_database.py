@@ -1,18 +1,21 @@
-"""The binding over an in-memory ordered store: SQL, values, and lost writes."""
+"""The binding over an in-memory store: SQL, values, effects, and lost writes."""
 
 import asyncio
 import itertools
+import random
 
 import pytest
 import sqlite_kv
 
 
 class Backend:
-    """Stored values, and writes acknowledged but not yet confirmed."""
+    """Stored values, and writes issued but not yet synced."""
 
-    def __init__(self):
+    def __init__(self, seed=None):
         self.stored = {}
         self.unconfirmed = []
+        # Which unsynced writes a failure keeps: none, or a random subset.
+        self.random = None if seed is None else random.Random(seed)
 
     def confirm(self):
         for key, value in self.unconfirmed:
@@ -23,7 +26,10 @@ class Backend:
         self.unconfirmed.clear()
 
     def lose(self):
-        self.unconfirmed.clear()
+        """A failure: the store keeps some of the unsynced writes, in no order."""
+        kept = [write for write in self.unconfirmed if self.random is not None and self.random.random() < 0.5]
+        self.unconfirmed = kept
+        self.confirm()
 
     def request(self, fails=False):
         """A request's view: its own writes over the stored values."""
@@ -110,43 +116,43 @@ async def test_an_sql_error_leaves_the_session_usable_and_a_transaction_rolls_ba
     await db.save()
 
 
-async def consistent_after_loss(lost, close_first):
-    """Requests insert a row each and save; request ``lost`` fails and loses its
-    writes, its confirmation failing or the session closed first. The owner and
-    a process without cached state must then read exactly the stored rows."""
-    backend = Backend()
+async def consistent_after_loss(lost, seed):
+    """Requests insert a row each; request ``lost`` fails, its sync losing some
+    of its writes (none kept, or a subset by ``seed``). The owner and a process
+    without cached state must then read the rows of the other requests, and the
+    lost one's only if both do."""
+    backend = Backend(seed)
     ns = fresh()
     db = await sqlite_kv.open(ns, backend.request())
     await db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)")
     await db.save()
-    expected = 0
     for id in range(20):
         fails = id == lost
         db = await sqlite_kv.open(ns, backend.request(fails))
-        await db.execute("INSERT INTO t VALUES(?, randomblob(3000))", [id])
-        if not fails:
-            await db.save()
-            expected += 1
-        elif close_first:
-            await db.close()
-            backend.lose()
-        else:
+        insert = db.execute("INSERT INTO t VALUES(?, randomblob(3000))", [id])
+        if fails:
             with pytest.raises(RuntimeError, match="the request failed"):
-                await db.save()
+                await insert
+            await db.close()
+        else:
+            await insert
+            await db.save()
+    seen = []
     for name in [ns, fresh()]:
         view = await sqlite_kv.open(name, backend.request())
-        [[rows]] = await view.query("SELECT count(*) FROM t")
+        [[rows, landed]] = await view.query("SELECT count(*), count(*) FILTER (WHERE id = ?) FROM t", [lost])
         [[integrity]] = await view.query("PRAGMA integrity_check")
         await view.save()
-        if rows != expected or integrity != "ok":
+        if rows != 19 + landed or integrity != "ok":
             return False
-    return True
+        seen.append(landed)
+    return seen[0] == seen[1]
 
 
 async def test_lost_writes_leave_every_reader_consistent():
-    for close_first in [False, True]:
+    for seed in [None, 1, 2, 3, 4, 5]:
         for lost in range(1, 15):
-            assert await consistent_after_loss(lost, close_first), f"lost request {lost}, closed first: {close_first}"
+            assert await consistent_after_loss(lost, seed), f"lost request {lost}, seed {seed}"
 
 
 async def test_a_write_the_store_rejects_is_reported_by_the_next_sync():
@@ -157,9 +163,10 @@ async def test_a_write_the_store_rejects_is_reported_by_the_next_sync():
 
     store.set = rejected
     db = await sqlite_kv.open(fresh(), store)
-    await db.execute("CREATE TABLE t(id INTEGER)")
     with pytest.raises(RuntimeError, match="state is closed"):
-        await db.save()
+        await db.execute("CREATE TABLE t(id INTEGER)")
+    assert not db.is_usable()
+    await db.close()
 
 
 async def test_a_transaction_holds_the_session_other_calls_wait_until_it_ends():
@@ -217,13 +224,13 @@ async def test_a_call_running_meanwhile_does_not_make_the_session_look_unusable(
     db = await sqlite_kv.open(fresh(), Backend().request())
     await db.execute("CREATE TABLE t(id INTEGER)")
     for _ in range(50):
-        # The body fails while version() holds the session: the rollback still runs.
+        # The body fails while effects() holds the session: the rollback still runs.
         with pytest.raises(ValueError, match="no"):
             async with db.transaction() as tx:
                 await tx.execute("INSERT INTO t VALUES(1)")
-                versions = [asyncio.ensure_future(db.version()) for _ in range(4)]
+                reads = [asyncio.ensure_future(db.effects()) for _ in range(4)]
                 raise ValueError("no")
-        await asyncio.gather(*versions)
+        await asyncio.gather(*reads)
     assert await db.query("SELECT count(*) FROM t") == [[0]]
     # Nor while a statement runs.
     running = asyncio.ensure_future(
@@ -238,40 +245,35 @@ async def test_a_call_running_meanwhile_does_not_make_the_session_look_unusable(
     assert not db.is_usable()
 
 
-async def test_the_version_grows_with_each_commit_and_only_then():
+async def test_effects_commit_with_their_transaction_and_only_then():
     backend = Backend()
     namespace = fresh()
     db = await sqlite_kv.open(namespace, backend.request())
-    v0 = await db.version()
     await db.execute("CREATE TABLE t(id INTEGER)")
-    v1 = await db.version()
-    assert v1 > v0
-    await db.query("SELECT * FROM t")
-    assert await db.version() == v1
+    assert await db.effects() == b""
+    # Even with a transaction that changes nothing.
     async with db.transaction() as tx:
-        await tx.execute("INSERT INTO t VALUES(1)")
-        inside = await db.version()
-    assert inside == v1
-    v2 = await db.version()
-    assert v2 > v1
+        await tx.query("SELECT * FROM t")
+        tx.commit_effects(b"sends 1")
+        inside = await db.effects()
+    assert inside == b""
+    assert await db.effects() == b"sends 1"
+    # A rollback commits none; nor does a commit without effects change them.
     with pytest.raises(ValueError, match="no"):
         async with db.transaction() as tx:
             await tx.execute("INSERT INTO t VALUES(2)")
+            tx.commit_effects(b"sends 2")
             raise ValueError("no")
-    assert await db.version() == v2
-    # A commit that changes nothing grows it only when recorded.
     async with db.transaction() as tx:
-        await tx.query("SELECT * FROM t")
-    assert await db.version() == v2
-    async with db.transaction() as tx:
-        await tx.execute("UPDATE t SET id = 5 WHERE id = 99")
-        tx.record_commit()
-    v3 = await db.version()
-    assert v3 > v2
+        await tx.execute("INSERT INTO t VALUES(3)")
+    assert await db.effects() == b"sends 1"
     await db.save()
-    # A later session opens at the same version.
+    # A later session opens with them; an empty transaction clears them.
     again = await sqlite_kv.open(namespace, backend.request())
-    assert await again.version() == v3
+    assert await again.effects() == b"sends 1"
+    async with again.transaction() as tx:
+        tx.commit_effects(b"")
+    assert await again.effects() == b""
     await again.save()
 
 
@@ -313,7 +315,7 @@ async def test_a_call_to_a_session_inside_a_transaction_of_another_inside_its_ow
     await b.save()
 
 
-async def test_a_statement_completes_after_its_writes_reached_the_store_however_many():
+async def test_a_statement_that_commits_completes_once_its_writes_are_stored_however_many():
     backend = Backend()
     db = await sqlite_kv.open(fresh(), backend.request())
     await db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)")
@@ -322,10 +324,8 @@ async def test_a_statement_completes_after_its_writes_reached_the_store_however_
         "INSERT INTO t(b) SELECT randomblob(3000) FROM "
         "(WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c)"
     )
-    at_completion = len(backend.unconfirmed)
-    await asyncio.sleep(0.05)
-    assert at_completion > 1000
-    assert at_completion == len(backend.unconfirmed)
+    assert backend.unconfirmed == []
+    assert len(backend.stored) > 1000
     await db.save()
 
 

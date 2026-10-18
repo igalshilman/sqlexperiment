@@ -226,11 +226,13 @@ test('a call running meanwhile does not make the session look unusable', async (
   assert.equal(db.isUsable(), false);
 });
 
+/** A session's effects, as text. */
+const text = async (session) => new TextDecoder().decode(await session.effects());
+
 test('effects commit with their transaction, and only then', async () => {
   const backend = new Backend();
   const namespace = fresh();
   const db = await open(namespace, backend.request());
-  const text = async (db) => new TextDecoder().decode(await db.effects());
   await db.execute('CREATE TABLE t(id INTEGER)');
   assert.equal(await text(db), '');
   // Even with a transaction that changes nothing.
