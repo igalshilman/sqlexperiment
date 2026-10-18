@@ -250,6 +250,56 @@ impl Run {
         Ok(self.view())
     }
 
+    /// The request of the pending model call `operation` (an
+    /// [`Operation::Model`]), read from the heap, where the guest keeps it:
+    /// the commit holds only the call, so however long the conversation, it
+    /// is not stored again at every step. An `Err` is why the guest has none
+    /// to send (it is not JSON, or reading it trapped), to fail the call with.
+    pub async fn request(
+        &mut self,
+        store: &impl Store,
+        operation: &str,
+    ) -> Result<std::result::Result<Value, GuestError>> {
+        ensure!(
+            self.usable,
+            "This attempt at the run failed: start it again"
+        );
+        let state = &self.commit.state;
+        ensure!(
+            state
+                .pending
+                .iter()
+                .any(|p| matches!(p, Operation::Model { id } if id == operation)),
+            "No pending model call {operation}"
+        );
+        let now = state.now;
+        self.usable = false;
+        if self.live.is_none() {
+            self.live = Some(self.restore(store, now).await?);
+        }
+        let vm = &mut self.live.as_mut().context("No live VM")?.vm;
+        // What this writes in the heap is garbage by the next turn, whose
+        // capture sees it as any other write.
+        vm.begin_request()?;
+        let read = vm.call("request", Some(operation));
+        self.usable = true;
+        let outcome = match read {
+            Ok(outcome) => serde_json::from_str(&outcome)?,
+            Err(error) => match vm::trap(&error) {
+                // The VM is unusable; the committed one is not.
+                Some(message) => {
+                    self.live = None;
+                    Outcome::failure("Trap", message)
+                }
+                None => return Err(error.into()),
+            },
+        };
+        Ok(match outcome {
+            Outcome::Success { value, .. } => Ok(value),
+            Outcome::Failure { error, .. } => Err(error),
+        })
+    }
+
     /// The run as of its last commit.
     pub fn view(&self) -> View {
         let commit = &self.commit;

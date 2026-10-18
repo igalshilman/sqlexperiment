@@ -8,7 +8,7 @@
 //! - [`Run`], [`Runtime`], [`Programs`]: the runtime. A run keeps its VM live
 //!   from turn to turn, and commits each turn to a [`Store`] (in Restate, the
 //!   object's state; in tests, a [`MemoryStore`]).
-//! - [`Claude`]: the `claude` service, for programs to call models.
+//! - [`Claude`]: the Claude API, for programs' `ctx.claude.messages`.
 //! - [`Workspace`]: the `workspace` object, a directory and a shell for
 //!   coding agents.
 //!
@@ -27,7 +27,7 @@ mod tracking;
 mod vm;
 mod workspace;
 
-pub use claude::Claude;
+pub use claude::{Claude, Model};
 pub use model::{GuestError, Operation, Outcome, RpcTarget, State, Status, View};
 pub use program::{Program, Programs};
 pub use restate::{bind, embedded, endpoint, faults};
