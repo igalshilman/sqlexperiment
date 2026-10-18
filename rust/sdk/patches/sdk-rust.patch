@@ -22,10 +22,10 @@ index 5dcf242..0000000
 -profile = "minimal"
 -components = ["rustfmt", "clippy"]
 diff --git a/src/context/mod.rs b/src/context/mod.rs
-index dd43c1c..910f8b2 100644
+index dd43c1c..be3d155 100644
 --- a/src/context/mod.rs
 +++ b/src/context/mod.rs
-@@ -199,6 +199,45 @@ impl ObjectContext<'_> {
+@@ -199,6 +199,47 @@ impl ObjectContext<'_> {
      pub fn idempotency_key(&self) -> Option<&str> {
          self.idempotency_key.as_deref()
      }
@@ -39,7 +39,9 @@ index dd43c1c..910f8b2 100644
 +}
 +
 +/// An object's state as bytes, for this invocation: see [`ObjectContext::raw_state`].
-+/// Its reads and writes are the invocation's, in the order they are made.
++/// Its writes are the invocation's, in the order they are made; its reads are
++/// ephemeral (protocol V8): not journaled, they see the stored state and this
++/// invocation's own writes. For a handler that replays nothing.
 +#[derive(Clone)]
 +pub struct RawState(ContextInternal);
 +
@@ -49,7 +51,7 @@ index dd43c1c..910f8b2 100644
 +        &'a self,
 +        key: &'a str,
 +    ) -> impl Future<Output = Result<Option<bytes::Bytes>, TerminalError>> + Send + 'a {
-+        self.0.get(key)
++        self.0.get_ephemeral(key)
 +    }
 +
 +    /// Set `key` to `value`.
@@ -218,10 +220,27 @@ index 1995d07..32a54f9 100644
 +    }
 +}
 diff --git a/src/endpoint/context.rs b/src/endpoint/context.rs
-index dbe2730..f7816f3 100644
+index dbe2730..da3913a 100644
 --- a/src/endpoint/context.rs
 +++ b/src/endpoint/context.rs
-@@ -38,6 +38,10 @@ pub struct ContextInternalInner {
+@@ -4,6 +4,7 @@ use crate::context::{
+ };
+ use crate::endpoint::futures::async_result_poll::VmAsyncResultPollFuture;
+ use crate::endpoint::futures::durable_future_impl::DurableFutureImpl;
++use crate::endpoint::futures::ephemeral_poll::EphemeralGetFuture;
+ use crate::endpoint::futures::intercept_error::InterceptErrorFuture;
+ use crate::endpoint::futures::select_poll::VmSelectAsyncResultPollFuture;
+ use crate::endpoint::futures::trap::TrapFuture;
+@@ -17,7 +18,7 @@ use pin_project_lite::pin_project;
+ use restate_sdk_shared_core::{
+     AttachInvocationTarget, AwaitResponse, AwakeableHandle, CoreVM, Error as CoreError, Header,
+     NonEmptyValue, NotificationHandle, OnMaxAttempts, PayloadOptions, RetryPolicy, RunExitResult,
+-    RunHandle, Target, TerminalFailure, UnresolvedFuture, VM, Value,
++    EphemeralCompletionId, RunHandle, Target, TerminalFailure, UnresolvedFuture, VM, Value,
+ };
+ use std::borrow::Cow;
+ use std::collections::HashMap;
+@@ -38,6 +39,14 @@ pub struct ContextInternalInner {
      /// We remember here the state of the span replaying field state, because setting it might be expensive (it's guarded behind locks and other stuff).
      /// For details, see [ContextInternalInner::maybe_flip_span_replaying_field]
      pub(super) span_replaying_field_state: bool,
@@ -229,35 +248,80 @@ index dbe2730..f7816f3 100644
 +    /// The futures waiting for input. The one that reads it wakes the others,
 +    /// whose results it may have completed: the input channel wakes one.
 +    input_waiters: Vec<std::task::Waker>,
++
++    /// Ephemeral notifications another future's `do_await` reported, kept
++    /// for the future waiting on each.
++    pub(crate) ephemeral: HashMap<EphemeralCompletionId, Value>,
  }
  
  impl ContextInternalInner {
-@@ -53,9 +57,23 @@ impl ContextInternalInner {
+@@ -53,7 +62,35 @@ impl ContextInternalInner {
              write,
              handler_state,
              span_replaying_field_state: false,
 +            input_waiters: Vec::new(),
++            ephemeral: HashMap::new(),
 +        }
++    }
++
++    /// `do_await` reported the ephemeral notification `id`, ahead of anything
++    /// else: keep it for the future waiting on it, and wake the waiters.
++    /// Wake them after releasing the lock.
++    pub(crate) fn keep_ephemeral(
++        &mut self,
++        id: EphemeralCompletionId,
++    ) -> Result<Vec<std::task::Waker>, CoreError> {
++        if let Some(value) = self.vm.take_ephemeral_notification(id)? {
++            self.ephemeral.insert(id, value);
+         }
++        Ok(self.take_input_waiters())
 +    }
 +
 +    /// Wake `waker` when another future reads input.
 +    pub(crate) fn wait_input(&mut self, waker: &std::task::Waker) {
 +        if !self.input_waiters.iter().any(|w| w.will_wake(waker)) {
 +            self.input_waiters.push(waker.clone());
-         }
-     }
- 
++        }
++    }
++
 +    /// The futures to wake once input has been read: wake them after
 +    /// releasing the lock.
 +    pub(crate) fn take_input_waiters(&mut self) -> Vec<std::task::Waker> {
 +        mem::take(&mut self.input_waiters)
+     }
+ 
+     pub(super) fn fail(&mut self, e: Error) {
+@@ -297,6 +334,28 @@ impl ContextInternal {
+         Either::Left(InterceptErrorFuture::new(self.clone(), poll_future))
+     }
+ 
++    /// The value of `key` as stored, read without a journal entry
++    /// (protocol V8's ephemeral get): for a handler that replays nothing.
++    pub fn get_ephemeral(
++        &self,
++        key: &str,
++    ) -> impl Future<Output = Result<Option<bytes::Bytes>, TerminalError>> + Send {
++        let mut inner_lock = must_lock!(self.inner);
++        let id = unwrap_or_trap!(inner_lock, inner_lock.vm.ephemeral_state_get(key.to_owned()));
++        let poll_future =
++            EphemeralGetFuture::new(Arc::clone(&self.inner), id).map(|res| match res {
++                Ok(Value::Void) => Ok(Ok(None)),
++                Ok(Value::Success(s)) => Ok(Ok(Some(s))),
++                Ok(v) => Err(ErrorInner::UnexpectedValueVariantForSyscall {
++                    variant: <&'static str>::from(v),
++                    syscall: "get_state_ephemeral",
++                }
++                .into()),
++                Err(e) => Err(e.into()),
++            });
++        Either::Left(InterceptErrorFuture::new(self.clone(), poll_future))
 +    }
 +
-     pub(super) fn fail(&mut self, e: Error) {
-         self.maybe_flip_span_replaying_field();
-         self.vm.notify_error(
+     pub fn get_keys(&self) -> impl Future<Output = Result<Vec<String>, TerminalError>> + Send {
+         let mut inner_lock = must_lock!(self.inner);
+         let handle = unwrap_or_trap!(inner_lock, inner_lock.vm.sys_state_get_keys());
 diff --git a/src/endpoint/futures/async_result_poll.rs b/src/endpoint/futures/async_result_poll.rs
-index 1aa276a..9e5b50c 100644
+index 1aa276a..21207f2 100644
 --- a/src/endpoint/futures/async_result_poll.rs
 +++ b/src/endpoint/futures/async_result_poll.rs
 @@ -72,10 +72,18 @@ impl Future for VmAsyncResultPollFuture {
@@ -291,19 +355,136 @@ index 1aa276a..9e5b50c 100644
                      self.state = Some(AsyncResultPollState::PollProgress { ctx, handle });
                  }
                  AsyncResultPollState::PollProgress { ctx, handle } => {
-@@ -119,7 +129,9 @@ impl Future for VmAsyncResultPollFuture {
-                             continue;
-                         }
-                         Ok(AwaitResponse::WaitingExternalProgress { .. })
--                        | Ok(AwaitResponse::ExecuteRun(_)) => {
-+                        | Ok(AwaitResponse::ExecuteRun(_))
-+                        // This SDK issues no ephemeral commands.
-+                        | Ok(AwaitResponse::EphemeralNotificationReady(_)) => {
-                             // Waiting only on a run proposal is not expected on this await path.
+@@ -124,6 +134,17 @@ impl Future for VmAsyncResultPollFuture {
                              // These two are used by the shared-core to implement async run, which is not supported by the rust sdk currently.
                              unimplemented!()
+                         }
++                        Ok(AwaitResponse::EphemeralNotificationReady(id)) => {
++                            // For an ephemeral get: keep it, and await again.
++                            let waiters = match inner_lock.keep_ephemeral(id) {
++                                Ok(waiters) => waiters,
++                                Err(e) => return Poll::Ready(Err(e.into())),
++                            };
++                            drop(inner_lock);
++                            waiters.into_iter().for_each(std::task::Waker::wake);
++                            self.state = Some(AsyncResultPollState::PollProgress { ctx, handle });
++                            continue;
++                        }
+                         Ok(AwaitResponse::CancelSignalReceived) => {
+                             return Poll::Ready(Ok(Value::Failure(TerminalFailure {
+                                 code: 409,
+diff --git a/src/endpoint/futures/ephemeral_poll.rs b/src/endpoint/futures/ephemeral_poll.rs
+new file mode 100644
+index 0000000..82b835e
+--- /dev/null
++++ b/src/endpoint/futures/ephemeral_poll.rs
+@@ -0,0 +1,94 @@
++use crate::endpoint::ErrorInner;
++use crate::endpoint::context::ContextInternalInner;
++use restate_sdk_shared_core::{EphemeralCompletionId, Error as CoreError, VM, Value};
++use std::future::Future;
++use std::pin::Pin;
++use std::sync::{Arc, Mutex};
++use std::task::Poll;
++
++/// The value of an ephemeral command: answered by the VM at once (state it
++/// knows), or by a notification the runtime sends, which this future reads
++/// or another one does (keeping it, if its `do_await` reported it).
++pub(crate) struct EphemeralGetFuture {
++    ctx: Arc<Mutex<ContextInternalInner>>,
++    id: EphemeralCompletionId,
++    flushed: bool,
++}
++
++impl EphemeralGetFuture {
++    pub fn new(ctx: Arc<Mutex<ContextInternalInner>>, id: EphemeralCompletionId) -> Self {
++        Self {
++            ctx,
++            id,
++            flushed: false,
++        }
++    }
++}
++
++macro_rules! must_lock {
++    ($mutex:expr) => {
++        $mutex.try_lock().expect("You're trying to await two futures at the same time and/or trying to perform some operation on the restate context while awaiting a future. This is not supported!")
++    };
++}
++
++impl Future for EphemeralGetFuture {
++    type Output = Result<Value, ErrorInner>;
++
++    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
++        let id = self.id;
++        let ctx = Arc::clone(&self.ctx);
++        let mut inner_lock = must_lock!(ctx);
++        if !self.flushed {
++            // The command goes to the runtime before anything waits on it.
++            let b = inner_lock.vm.take_output();
++            if !b.is_empty() && !inner_lock.write.send(b) {
++                return Poll::Ready(Err(ErrorInner::Suspended));
++            }
++            self.flushed = true;
++        }
++        loop {
++            // Kept by another future's await, or ready in the VM: input is
++            // applied to it as it is read.
++            if let Some(value) = inner_lock.ephemeral.remove(&id) {
++                return Poll::Ready(Ok(value));
++            }
++            match inner_lock.vm.take_ephemeral_notification(id) {
++                Ok(Some(value)) => return Poll::Ready(Ok(value)),
++                Ok(None) => {}
++                Err(e) => return Poll::Ready(Err(e.into())),
++            }
++            // Not yet: read input, as the futures awaiting handles do.
++            let read_result = match inner_lock.read.poll_recv(cx) {
++                Poll::Ready(t) => t,
++                Poll::Pending => {
++                    inner_lock.wait_input(cx.waker());
++                    return Poll::Pending;
++                }
++            };
++            match read_result {
++                Some(Ok(b)) => inner_lock.vm.notify_input(b),
++                Some(Err(e)) => inner_lock.vm.notify_error(
++                    CoreError::new(500u16, format!("Error when reading the body {e:?}",)),
++                    None,
++                ),
++                None => {
++                    // The notification can't arrive any more: retry the attempt.
++                    inner_lock.vm.notify_input_closed();
++                    if let Some(value) = inner_lock.ephemeral.remove(&id) {
++                        return Poll::Ready(Ok(value));
++                    }
++                    if let Ok(Some(value)) = inner_lock.vm.take_ephemeral_notification(id) {
++                        return Poll::Ready(Ok(value));
++                    }
++                    return Poll::Ready(Err(CoreError::new(
++                        500u16,
++                        "The input closed while an ephemeral state get was in flight",
++                    )
++                    .into()));
++                }
++            }
++            let waiters = inner_lock.take_input_waiters();
++            waiters.into_iter().for_each(std::task::Waker::wake);
++        }
++    }
++}
+diff --git a/src/endpoint/futures/mod.rs b/src/endpoint/futures/mod.rs
+index a9d7946..3fee835 100644
+--- a/src/endpoint/futures/mod.rs
++++ b/src/endpoint/futures/mod.rs
+@@ -1,4 +1,5 @@
+ pub mod async_result_poll;
++pub mod ephemeral_poll;
+ pub mod durable_future_impl;
+ pub mod handler_state_aware;
+ pub mod intercept_error;
 diff --git a/src/endpoint/futures/select_poll.rs b/src/endpoint/futures/select_poll.rs
-index 493ae59..5aa019d 100644
+index 493ae59..fb7e7e8 100644
 --- a/src/endpoint/futures/select_poll.rs
 +++ b/src/endpoint/futures/select_poll.rs
 @@ -72,10 +72,19 @@ impl Future for VmSelectAsyncResultPollFuture {
@@ -338,19 +519,26 @@ index 493ae59..5aa019d 100644
                      self.state = Some(VmSelectAsyncResultPollState::PollProgress { ctx, handles });
                  }
                  VmSelectAsyncResultPollState::PollProgress { ctx, handles } => {
-@@ -128,7 +139,9 @@ impl Future for VmSelectAsyncResultPollFuture {
-                             continue;
-                         }
-                         Ok(AwaitResponse::WaitingExternalProgress { .. })
--                        | Ok(AwaitResponse::ExecuteRun(_)) => {
-+                        | Ok(AwaitResponse::ExecuteRun(_))
-+                        // This SDK issues no ephemeral commands.
-+                        | Ok(AwaitResponse::EphemeralNotificationReady(_)) => {
-                             // Waiting only on a run proposal is not expected on this await path.
+@@ -133,6 +144,17 @@ impl Future for VmSelectAsyncResultPollFuture {
                              // These two are used by the shared-core to implement async run, which is not supported by the rust sdk currently.
                              unimplemented!()
+                         }
++                        Ok(AwaitResponse::EphemeralNotificationReady(id)) => {
++                            // For an ephemeral get: keep it, and await again.
++                            let waiters = match inner_lock.keep_ephemeral(id) {
++                                Ok(waiters) => waiters,
++                                Err(e) => return Poll::Ready(Err(e.into())),
++                            };
++                            drop(inner_lock);
++                            waiters.into_iter().for_each(std::task::Waker::wake);
++                            self.state = Some(VmSelectAsyncResultPollState::PollProgress { ctx, handles });
++                            continue;
++                        }
+                         Ok(AwaitResponse::CancelSignalReceived) => {
+                             return Poll::Ready(Ok(Err(TerminalFailure {
+                                 code: 409,
 diff --git a/src/endpoint/mod.rs b/src/endpoint/mod.rs
-index 61ef64b..aa25e6a 100644
+index 61ef64b..2dc2a6c 100644
 --- a/src/endpoint/mod.rs
 +++ b/src/endpoint/mod.rs
 @@ -3,6 +3,7 @@ mod context;
@@ -401,6 +589,15 @@ index 61ef64b..aa25e6a 100644
              Ok(vm) => vm,
              Err(e) => return error_response(e),
          };
+@@ -361,7 +377,7 @@ impl Endpoint {
+             Bytes::from(
+                 serde_json::to_string(&crate::discovery::Endpoint {
+                     lambda_compression: None,
+-                    max_protocol_version: std::num::NonZero::new(7).unwrap(),
++                    max_protocol_version: std::num::NonZero::new(8).unwrap(),
+                     min_protocol_version: std::num::NonZero::new(5).unwrap(),
+                     protocol_mode: Some(match protocol_mode {
+                         ProtocolMode::RequestResponse => {
 diff --git a/src/http_server.rs b/src/http_server.rs
 index f737d79..cd72ebd 100644
 --- a/src/http_server.rs

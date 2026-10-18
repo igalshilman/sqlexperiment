@@ -1,8 +1,9 @@
 //! The object's state as the scope's store: a [`Queued`] store, so writes
 //! return at once and a `sync` waits until Restate stored them. It remembers
 //! every key it read or wrote, for the attempt: the handler is the object's
-//! only writer meanwhile, so a key is read from Restate (a round trip) at most
-//! once.
+//! only writer meanwhile, so a key is read from Restate at most once: a round
+//! trip unless the invocation started with it (eager state), and never a
+//! journal entry (protocol v8's unjournaled get).
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use restate_sdk::context::RawState;
