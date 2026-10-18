@@ -401,6 +401,20 @@ index 61ef64b..aa25e6a 100644
              Ok(vm) => vm,
              Err(e) => return error_response(e),
          };
+diff --git a/src/http_server.rs b/src/http_server.rs
+index f737d79..cd72ebd 100644
+--- a/src/http_server.rs
++++ b/src/http_server.rs
+@@ -116,6 +116,9 @@ impl HttpServer {
+             tokio::select! {
+                 Ok((stream, remote)) = listener.accept() => {
+                     let endpoint = endpoint.clone();
++                    // Each message is a small write awaiting an answer: without
++                    // this, Nagle's algorithm holds it for the peer's delayed ACK.
++                    let _ = stream.set_nodelay(true);
+ 
+                     let conn = http2::Builder::new(TokioExecutor::default())
+                         .serve_connection(TokioIo::new(stream), endpoint);
 diff --git a/src/lib.rs b/src/lib.rs
 index 4fe5093..27542ce 100644
 --- a/src/lib.rs

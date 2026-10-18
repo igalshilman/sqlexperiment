@@ -32,6 +32,11 @@ others hang.)
 > patch and have not proposed it to `restatedev/sdk-rust`; drop it once the
 > SDK fixes it on its own.
 
+The HTTP server sets `TCP_NODELAY` on each connection. Without it, each
+small message to Restate waits for the peer's delayed acknowledgement, about
+40 ms: a handler that waits on Restate many times (a state read, a call, a
+timer) loses that much at each. Also an upstream bug, patched here only.
+
 `ObjectContext::raw_state()` is the object's state as bytes, through a handle
 that outlives the context's borrow, for a store that must own its storage,
 such as [a database in the state](../../core/sqlite-kv/README.md).
@@ -56,5 +61,6 @@ patches do not have. `make test-sdk-rs` runs the SDK's unit tests.
 | `ObjectContext::raw_state()` and `RawState`: `get`, `set` and `clear` on bytes, and `sync` (an empty `ctx.run`) | A store that owns its storage (`'static`), such as sqlite-kv's ordered `KvStore`                      | `context/mod.rs`, `lib.rs`                                                       |
 | `ServiceOptions::name`                                                                                          | Bind one type as several services, each with state of its own: one object per program                 | `endpoint/builder.rs`                                                            |
 | Futures waiting for input wake each other once one has read it, and check their result before reading more      | Concurrent awaits, such as sqlite-kv's concurrent reads: the input channel wakes only the last waiter | `endpoint/context.rs`, `endpoint/futures/async_result_poll.rs`, `select_poll.rs` |
+| `TCP_NODELAY` on each connection of the HTTP server                                                             | Nagle's algorithm delays each small message by the peer's delayed ACK (~40 ms)                        | `http_server.rs`                                                                 |
 | `AwaitResponse::EphemeralNotificationReady` is unexpected                                                       | The core's protocol V8 has ephemeral commands, which this SDK does not make                           | `endpoint/futures/select_poll.rs`, `async_result_poll.rs`                        |
 | Build: the core from the clone next to the SDK (`[patch.crates-io]`); no `rust-toolchain.toml`                  | The patched core; the toolchain is the repository's (`flake.nix`), not a second pinned one            | `Cargo.toml`, `rust-toolchain.toml`                                              |
