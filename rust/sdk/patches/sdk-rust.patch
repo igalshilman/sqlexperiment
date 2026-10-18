@@ -203,11 +203,81 @@ index 1995d07..44040bd 100644
 +        assert!(replay.enabled("read"));
 +    }
 +}
+diff --git a/src/endpoint/context.rs b/src/endpoint/context.rs
+index dbe2730..f7816f3 100644
+--- a/src/endpoint/context.rs
++++ b/src/endpoint/context.rs
+@@ -38,6 +38,10 @@ pub struct ContextInternalInner {
+     /// We remember here the state of the span replaying field state, because setting it might be expensive (it's guarded behind locks and other stuff).
+     /// For details, see [ContextInternalInner::maybe_flip_span_replaying_field]
+     pub(super) span_replaying_field_state: bool,
++
++    /// The futures waiting for input. The one that reads it wakes the others,
++    /// whose results it may have completed: the input channel wakes one.
++    input_waiters: Vec<std::task::Waker>,
+ }
+ 
+ impl ContextInternalInner {
+@@ -53,9 +57,23 @@ impl ContextInternalInner {
+             write,
+             handler_state,
+             span_replaying_field_state: false,
++            input_waiters: Vec::new(),
++        }
++    }
++
++    /// Wake `waker` when another future reads input.
++    pub(crate) fn wait_input(&mut self, waker: &std::task::Waker) {
++        if !self.input_waiters.iter().any(|w| w.will_wake(waker)) {
++            self.input_waiters.push(waker.clone());
+         }
+     }
+ 
++    /// The futures to wake once input has been read: wake them after
++    /// releasing the lock.
++    pub(crate) fn take_input_waiters(&mut self) -> Vec<std::task::Waker> {
++        mem::take(&mut self.input_waiters)
++    }
++
+     pub(super) fn fail(&mut self, e: Error) {
+         self.maybe_flip_span_replaying_field();
+         self.vm.notify_error(
 diff --git a/src/endpoint/futures/async_result_poll.rs b/src/endpoint/futures/async_result_poll.rs
-index 1aa276a..9f4c357 100644
+index 1aa276a..9e5b50c 100644
 --- a/src/endpoint/futures/async_result_poll.rs
 +++ b/src/endpoint/futures/async_result_poll.rs
-@@ -119,7 +119,9 @@ impl Future for VmAsyncResultPollFuture {
+@@ -72,10 +72,18 @@ impl Future for VmAsyncResultPollFuture {
+                 AsyncResultPollState::WaitingInput { ctx, handle } => {
+                     let mut inner_lock = must_lock!(ctx);
+ 
++                    // Another future may have read the input that completes this one.
++                    if inner_lock.vm.is_completed(handle) {
++                        drop(inner_lock);
++                        self.state = Some(AsyncResultPollState::PollProgress { ctx, handle });
++                        continue;
++                    }
++
+                     let read_result = match inner_lock.read.poll_recv(cx) {
+                         Poll::Ready(t) => t,
+                         Poll::Pending => {
+                             // Still need to wait for input
++                            inner_lock.wait_input(cx.waker());
+                             drop(inner_lock);
+                             self.state = Some(AsyncResultPollState::WaitingInput { ctx, handle });
+                             return Poll::Pending;
+@@ -92,8 +100,10 @@ impl Future for VmAsyncResultPollFuture {
+                         None => inner_lock.vm.notify_input_closed(),
+                     }
+ 
+-                    // It's time to poll progress again
++                    // It's time to poll progress again, for the others too
++                    let waiters = inner_lock.take_input_waiters();
+                     drop(inner_lock);
++                    waiters.into_iter().for_each(std::task::Waker::wake);
+                     self.state = Some(AsyncResultPollState::PollProgress { ctx, handle });
+                 }
+                 AsyncResultPollState::PollProgress { ctx, handle } => {
+@@ -119,7 +129,9 @@ impl Future for VmAsyncResultPollFuture {
                              continue;
                          }
                          Ok(AwaitResponse::WaitingExternalProgress { .. })
@@ -219,10 +289,42 @@ index 1aa276a..9f4c357 100644
                              // These two are used by the shared-core to implement async run, which is not supported by the rust sdk currently.
                              unimplemented!()
 diff --git a/src/endpoint/futures/select_poll.rs b/src/endpoint/futures/select_poll.rs
-index 493ae59..7c69a9a 100644
+index 493ae59..5aa019d 100644
 --- a/src/endpoint/futures/select_poll.rs
 +++ b/src/endpoint/futures/select_poll.rs
-@@ -128,7 +128,9 @@ impl Future for VmSelectAsyncResultPollFuture {
+@@ -72,10 +72,19 @@ impl Future for VmSelectAsyncResultPollFuture {
+                 VmSelectAsyncResultPollState::WaitingInput { ctx, handles } => {
+                     let mut inner_lock = must_lock!(ctx);
+ 
++                    // Another future may have read the input that completes this one.
++                    if handles.iter().any(|h| inner_lock.vm.is_completed(*h)) {
++                        drop(inner_lock);
++                        self.state =
++                            Some(VmSelectAsyncResultPollState::PollProgress { ctx, handles });
++                        continue;
++                    }
++
+                     let read_result = match inner_lock.read.poll_recv(cx) {
+                         Poll::Ready(t) => t,
+                         Poll::Pending => {
+                             // Still need to wait for input
++                            inner_lock.wait_input(cx.waker());
+                             drop(inner_lock);
+                             self.state =
+                                 Some(VmSelectAsyncResultPollState::WaitingInput { ctx, handles });
+@@ -93,8 +102,10 @@ impl Future for VmSelectAsyncResultPollFuture {
+                         None => inner_lock.vm.notify_input_closed(),
+                     }
+ 
+-                    // It's time to poll progress again
++                    // It's time to poll progress again, for the others too
++                    let waiters = inner_lock.take_input_waiters();
+                     drop(inner_lock);
++                    waiters.into_iter().for_each(std::task::Waker::wake);
+                     self.state = Some(VmSelectAsyncResultPollState::PollProgress { ctx, handles });
+                 }
+                 VmSelectAsyncResultPollState::PollProgress { ctx, handles } => {
+@@ -128,7 +139,9 @@ impl Future for VmSelectAsyncResultPollFuture {
                              continue;
                          }
                          Ok(AwaitResponse::WaitingExternalProgress { .. })
