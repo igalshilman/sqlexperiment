@@ -22,6 +22,9 @@
 //! made before the crash is attached to, not made again. The run ends when
 //! `main` settles: requests still outstanding (a race's loser) are dropped,
 //! and their continuations never run.
+mod claude;
+
+pub use claude::Claude;
 use quickjs_durable::{
     Engine, Operation, Outcome, Programs, Runtime, View, namespace::NamespaceTransaction,
 };
@@ -303,9 +306,11 @@ pub fn bind(
     builder
 }
 
-/// An endpoint serving `programs`, and nothing else.
+/// An endpoint serving `programs`, and [`Claude`] for them to call.
 pub fn endpoint(programs: &Arc<Programs>) -> Endpoint {
-    bind(Endpoint::builder(), programs).build()
+    bind(Endpoint::builder(), programs)
+        .bind(Claude::from_env())
+        .build()
 }
 
 /// Milliseconds since the epoch: a turn's logical time never runs backwards.
