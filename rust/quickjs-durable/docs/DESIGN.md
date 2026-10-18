@@ -7,8 +7,9 @@ self-contained: source links and references are supporting material, not
 substitutes for protocol steps. Last consolidated: 18 October 2026.
 
 The implementation in this crate uses QuickJS compiled to WebAssembly, Wasmtime,
-4 KiB page tracking, and Zstd page batches, each compressed against the
-pages it replaces, over a shared golden image. A turn ends in one commit record per scope (§7), in a Restate object's
+4 KiB page write tracking (by the kernel where it can, else by instrumented
+stores), and Zstd batches of the changed 64-byte blocks, each compressed
+against the blocks it replaces, over a shared golden image. A turn ends in one commit record per scope (§7), in a Restate object's
 state, which the `restate` module drives from each program's `run` handler
 (§9.1). The VM stays live from turn to turn of one attempt.
 
@@ -382,9 +383,49 @@ run, as section 2.1 describes. Wasm memory limits do not bound total host-proces
 Separate discovery of written pages from encoding changes. An allocator hook
 alone cannot see a store into an existing object, QuickJS reference-count updates
 or C globals. A host memory allocator sees allocation/growth, not each Wasm store.
-Use portable instrumentation of final Wasm for this baseline.
+Two mechanisms discover writes; the runtime picks one per process at startup.
 
-Add a second fixed memory, exported as `__durable_dirty_pages`, with one byte per
+**Native, where the kernel has it (Linux 6.7 or later).** Each VM's memory is
+registered with a process-wide `userfaultfd` in asynchronous write-protect mode
+(`UFFD_FEATURE_WP_ASYNC`, with `UFFD_USER_MODE_ONLY`, so no privilege is
+needed): a write to a protected page faults into the kernel, which unprotects
+it and returns, with no signal and no thread to wake. `PAGEMAP_SCAN` on
+`/proc/self/pagemap` lists the pages written since (`PAGE_IS_WRITTEN`), and
+with `PM_SCAN_WP_MATCHING` protects them again in the same walk. The module
+runs as compiled, without barriers.
+
+- Capture scans the memory for written pages; after the commit, and after a
+  restore, a scan protects those pages again. Protecting the whole memory
+  instead costs ~24 µs for 1.3 MiB and ~222 µs for 16 MiB, against ~3 and
+  ~13 µs for scanning and protecting what was written.
+- Host writes into the memory are user-mode writes: the kernel sees them too.
+- Each VM registers its pool slot's first 64 MiB, the most memory can grow
+  to; registering a slot again is harmless. The engine maps memory without
+  copy-on-write data images, which would replace a registered mapping.
+- The startup probe creates a VM and scans it: a kernel or sandbox without
+  either feature (`ENOSYS`, `EPERM`, a seccomp filter) falls back to barriers.
+  `QJS_TRACKING=barriers` forces them.
+
+The cost moves from every store to the first write of each page in a turn: a
+fault of ~1.5 µs. Measured on 18 October 2026, with the block encoding (§5.2)
+in both:
+
+| Workload                                 | Barriers       | Native         |
+| ---------------------------------------- | -------------- | -------------- |
+| 8,000 objects, one synchronous job       | 12.8-13.4 ms   | 11.0 ms        |
+| 800 JSON round trips, one job            | 18.4-18.7 ms   | 16.0 ms        |
+| A turn of a wait loop (~23 pages)        | 205 µs         | 265 µs         |
+| A turn of a KV update                    | 713-738 µs     | 717-740 µs     |
+| A turn building 2,000 objects            | 9.5-9.7 ms     | 9.3 ms         |
+
+Barriers cost compute-bound code 15-20%, and spend fuel: their instructions
+count against a job's budget, so a job reached the cap with less JavaScript
+done. Native tracking costs a light turn ~60 µs in faults and scans, a small
+part of what Restate spends on a turn. It is the default where available.
+Changing the barriers' shape (one 16-bit mark of a page and the next instead
+of two marks) saved ~5%; even one unsound mark kept most of their cost.
+
+**Barriers, everywhere else.** Add a second fixed memory, exported as `__durable_dirty_pages`, with one byte per
 4 KiB application page. For 64 MiB, 16,384 bytes are used inside one 64 KiB Wasm
 page. Original guest pointers still address memory zero. The tracker is transient,
 never serialized and never recursively instrumented.
@@ -411,19 +452,27 @@ cross-page destinations. Newly grown memory is zero-filled: persist the new
 length even if no new page is written. Reject unsupported writing instructions
 rather than silently missing them.
 
-At a safe boundary compare only marked pages with the parent image (the memory
+At a safe boundary compare only written pages (marked, or listed by the
+kernel) with the parent image (the memory
 as of the last commit, which the run keeps beside its live VM, as golden and
 the pages that differ from it), treating pages beyond parent length as zeros. Dirty means written; changed means different at
 capture. A page written and restored to its original value needs no new
 payload. Reset the tracker on restore before rebinding pointers/limits, and
 after each commit is stored. A failed commit ends the attempt with its VM.
 
-Selected encoding: **the changed 4 KiB pages, compressed as one Zstd frame
-(level 2, long-distance matching) with their previous contents as its
-prefix**, in a chain over a base compressed against golden (§5.1). Zstd
-matches each page against what it replaces, wherever the data now sits: a
-page a turn changed by a few pointers costs a few bytes, and so does one whose
-contents moved, which an XOR against the same offsets cannot see. Before
+Selected encoding: **the changed 64-byte blocks of the changed pages,
+compressed as one Zstd frame (level 2, long-distance matching) with the
+blocks they replace as its prefix** (§5.2), in a chain over a base encoded
+against golden (§5.1). Zstd matches each block against what it replaces,
+wherever the data now sits: a block a turn changed by a few pointers costs a
+few bytes, and so does data that moved, which an XOR against the same
+offsets cannot see. Blocks, found by comparing words (eight 8-byte XORs a
+block, which the compiler vectorizes), cut what Zstd reads from ~190 KB a
+typical turn (its 23 pages and their old contents) to a few KB; with one
+compression context per thread, reused, encoding such a turn went from ~370
+to ~55 µs, and a wait-loop turn from ~530 to ~205-265 µs. Batches grew 3-7%
+(the block lists); a page with 16 or more changed blocks goes whole, so
+scattered writes cost no more than whole pages did. Before
 comparing, capture zeroes the dead bytes of the pages it compares (§5.3): the
 stack below its pointer, where between calls no frame is live, and the free
 chunks of the heap. A turn's dead frames, and what it allocated and freed,
@@ -462,7 +511,7 @@ Reasons and alternatives from the experiment's earlier measurements:
 | Replacing changed pages   | Simpler, but wastes space on unchanged bytes inside a dirty page                                                                                                                                        |
 | Zstd patch-from, image    | The whole previous image as prefix: barely smaller than the changed pages' previous contents, and indexes the whole memory each turn (~2 ms per MiB)                                                     |
 | Xdelta/VCDIFF, HDiffPatch | General alternatives; no special knowledge of Wasm heaps. The tested Xdelta Wasm port ran out of memory; its bundled native source was measured separately. HDiffPatch was researched, not measured     |
-| Kernel write tracking     | mprotect/fault handling or Linux userfaultfd/PAGEMAP_SCAN can track writes without per-store barriers, but require owned mappings, runtime trap coordination, growth/reset handling and feature probing |
+| Kernel write tracking     | Selected where available (above): asynchronous userfaultfd write protection and PAGEMAP_SCAN need no trap handling; mprotect with a fault handler or soft-dirty bits would need signal coordination or process-wide resets |
 
 These are workload-dependent historical codec results, not current host-commit
 latencies. Wasm compilation alone does not make a diff algorithm heap-aware.
@@ -544,21 +593,24 @@ commit bytes.
 
 ### 5.2. Binary page batch
 
-| Part            | Encoding                                                                    |
-| --------------- | --------------------------------------------------------------------------- |
-| Magic           | ASCII `QPD2`                                                                |
-| Count           | Page count N, LEB128                                                        |
+| Part            | Encoding                                                                     |
+| --------------- | ---------------------------------------------------------------------------- |
+| Magic           | ASCII `QPD3`                                                                 |
+| Count           | Page count N, LEB128                                                         |
 | N page indexes  | Each as its gap from the previous index plus one (the first: from 0), LEB128 |
-| Pages           | One Zstd frame: the N pages, back to back, `N * 4096` bytes                 |
+| N block lists   | Each page's changed 64-byte blocks: a count byte k; then, if k < 8, the k block numbers in order, one byte each; if 8 <= k < 64, a 64-bit mask, little-endian; if k = 64, nothing |
+| Blocks          | One Zstd frame: the changed blocks, page by page, in order, back to back     |
 
-The **reference** is the N pages the batch replaces, back to back: their
+The **reference** is the blocks the batch replaces, back to back: their
 contents in the memory the batch applies to. The frame is compressed with the
 reference as its prefix (`ZSTD_CCtx_refPrefix`), level 2, long-distance
-matching, and a window covering reference and pages (at most 2^27, for twice
-64 MiB); decoding needs the same reference. Indexes are sorted, unique and
-below `64 MiB / 4096`, and the frame decodes to exactly the reference's
-length. The indexes come first, outside the frame, because decoding needs the
-reference they name.
+matching, and a window covering reference and blocks (at least 2^17, at most
+2^27, for twice 64 MiB); decoding needs the same reference. Indexes are
+sorted, unique and below `64 MiB / 4096`; counts match their masks; and the
+frame decodes to exactly the reference's length. The lists come first,
+outside the frame, because decoding needs the reference they name. The
+encoder lists a block when any of its bytes differ, and every block of a page
+with 16 or more.
 
 ### 5.3. Capture algorithm
 
@@ -572,7 +624,7 @@ capture(G, P, chain, VM):
     read VM metadata first
     require VM.length >= P.length, aligned to 64 KiB, within limit
     batch = []
-    for each marked page i in ascending order:
+    for each written page i in ascending order:
         previous = P.page(i), or zeros beyond P.length
         zero VM's dead bytes in page i: below the stack pointer, and
             free heap chunks past their links (§5.6)
@@ -595,7 +647,8 @@ bytes in the VM itself keeps the VM equal to the image it restores from;
 golden is captured with all its dead bytes zeroed. Dead bytes in pages not
 compared stay as they were, in the VM and in P alike. Updating P with
 each changed page keeps it equal to the VM's memory as of the commit: the
-`verify-dirty` build checks that every page that differs from it was marked.
+`verify-dirty` build checks that every page that differs from it was written
+(marked or listed), in either mechanism.
 A new base bounds restoring to at most 256 batches, and at most three times
 the base's size. The batches it replaces become garbage.
 
