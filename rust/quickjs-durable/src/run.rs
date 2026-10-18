@@ -23,6 +23,7 @@ use crate::{
     vm::{self, Vm},
 };
 use anyhow::{Context, Result, ensure};
+use futures::future;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -31,11 +32,13 @@ use std::{
 
 const COMMIT: &str = "commit";
 const MAX_RECORD: usize = 16 * 1024 * 1024;
-/// Most batches in an image's chain. Restoring reads and applies them all; past
-/// this many, or once the later batches outweigh twice the first, a turn
-/// writes every page that differs from golden into a new first batch, so
-/// restoring stays bounded however long a run lives.
-const MAX_CHAIN: usize = 16;
+/// Most batches in an image's chain. Restoring reads them all at once and
+/// applies them in order; past this many, or once the later batches outweigh
+/// twice the first, a turn writes every page that differs from golden into a
+/// new first batch, so restoring stays bounded however long a run lives. The
+/// size rule keeps rewriting to a third of what a run writes; this one only
+/// bounds the reads, as each new first batch costs a whole image.
+const MAX_CHAIN: usize = 256;
 
 fn batch_key(batch: u64) -> String {
     format!("batch/{batch}")
@@ -254,11 +257,15 @@ impl Run {
         );
         let mut memory = golden.to_vec();
         memory.resize(commit.memory_len, 0);
-        for batch in &commit.chain {
-            let bytes = store
-                .get(&batch_key(*batch))
-                .await?
-                .context("Missing page batch")?;
+        let batches = future::try_join_all(
+            commit
+                .chain
+                .iter()
+                .map(|batch| async move { store.get(&batch_key(*batch)).await }),
+        )
+        .await?;
+        for bytes in batches {
+            let bytes = bytes.context("Missing page batch")?;
             let (indexes, frame) = codec::page_indexes(&bytes)?;
             ensure!(
                 indexes
