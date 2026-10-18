@@ -41,3 +41,7 @@ harness = false
 # The patched shared core, cloned next to the SDK by rust/sdk/setup.sh.
 [patch.crates-io]
 restate-sdk-shared-core = { path = "../sdk/.build/sdk-shared-core" }
+
+[[bench]]
+name = "agent"
+harness = false
