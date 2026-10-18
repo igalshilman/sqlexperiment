@@ -79,6 +79,21 @@ pub const CHECKPOINT_LOG_BYTES: usize = 64 * 1024;
 /// Default [`StorageOptions::inline_log_bytes`].
 pub const INLINE_LOG_BYTES: usize = 4 * 1024;
 
+/// A change to the host's chain, committed with a transaction
+/// ([`crate::Session::commit_turn`]). The chain is the host's: a sequence of
+/// opaque values that each apply over the ones before (a VM's page batches,
+/// say), committed in the record with the SQL, kept by checkpoints, and
+/// restarted when the host chooses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChainUpdate {
+    /// Add a value at the end.
+    Append(Bytes),
+    /// Replace the chain with this value: it no longer needs the ones before.
+    Restart(Bytes),
+    /// Empty the chain.
+    Clear,
+}
+
 /// When a session's SQL changes become durable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Durability {
@@ -201,6 +216,8 @@ pub(crate) struct Snapshot {
     commit: Commit,
     commit_bytes: Option<Bytes>,
     pub(crate) log: Log,
+    /// The host's chain, each value's bytes.
+    chain: Vec<Bytes>,
     /// Nothing changed since this owner last saw the namespace: the cache
     /// saw the same record, at this owner's last commit.
     pub(crate) unchanged: bool,
@@ -295,8 +312,9 @@ impl Snapshot {
         };
         let named = commit.stored_values();
         let held = cache.map_or_else(log::Values::new, |cache| cache.values(&named));
-        let ((log, values), prefetched_pages) =
+        let (replayed, prefetched_pages) =
             futures::try_join!(log::replay(&*store, &commit, held), prefetch)?;
+        let log::Replayed { log, chain, values } = replayed;
         if let Some(cache) = cache {
             cache.keep_values(&named, values);
         }
@@ -322,6 +340,7 @@ impl Snapshot {
             commit,
             commit_bytes,
             log,
+            chain,
             unchanged,
             sealed,
             page: Mutex::default(),
@@ -390,6 +409,11 @@ impl Snapshot {
     /// The commit record's effects (see [`crate::Session::commit_with`]).
     pub fn effects(&self) -> &Bytes {
         &self.commit.effects
+    }
+
+    /// The host's chain, each value's bytes, in order.
+    pub fn chain(&self) -> &[Bytes] {
+        &self.chain
     }
 
     /// Decode a logical page; `None` means a hole. The log's latest image wins,
@@ -498,23 +522,25 @@ impl Snapshot {
     /// cancellation. After an error, reopen; never reuse this snapshot.
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
-        Ok(self.commit(dirty, size, None).await?.0)
+        Ok(self.commit(dirty, size, None, None).await?.0)
     }
 
     /// [`Self::publish`], also returning the committed view afterwards, which a
     /// session may continue on. This snapshot is not used again. With
-    /// `effects`, the record's effects become them, in the same put. Without
-    /// changes nothing is committed, unless the effects change: then an empty
-    /// transaction is. A commit that leaves the log long checkpoints it
-    /// ([`Self::compact`]).
+    /// `effects`, the record's effects become them, and with `chain`, the
+    /// host's chain changes, in the same put. Without SQL changes the log
+    /// gains no transaction; without any change nothing is committed. A commit
+    /// that leaves the log long checkpoints it ([`Self::compact`]).
     pub(crate) async fn commit(
         &self,
         dirty: Changes,
         size: u64,
         effects: Option<Bytes>,
+        chain: Option<ChainUpdate>,
     ) -> io::Result<(SaveReport, Self)> {
         let effects = effects.filter(|effects| *effects != self.commit.effects);
-        if dirty.is_empty() && size == self.size() && effects.is_none() {
+        let changed = !dirty.is_empty() || size != self.size();
+        if !changed && effects.is_none() && chain.is_none() {
             let report = SaveReport {
                 version: self.version(),
                 ..SaveReport::default()
@@ -533,68 +559,105 @@ impl Snapshot {
             ));
         }
         let images: Images = dirty;
-        let segments = log::encode_transaction(&images, &self.log.chain)?;
+        let segments = match changed {
+            true => log::encode_transaction(&images, &self.log.chain)?,
+            false => Vec::new(),
+        };
         let logged_bytes = segments.iter().map(Bytes::len).sum::<usize>();
         let store = &*self.store;
         let mut commit = self.commit.clone();
         // Stored values this record names, durable: for the cache.
         let mut named = log::Values::new();
         // The value the last commit sealed, acknowledged since: this record
-        // names it in place of the inline segments it holds.
+        // names it in place of the inline parts it holds.
         if let Some(sealed) = &self.sealed {
             commit.name(sealed);
             named.insert(sealed.n, sealed.value.clone());
         }
+        // What the record names before this commit changes it: values it
+        // stops naming become garbage.
+        let named_before = commit.stored_values();
         // The record's inline budget. A commit the save then checkpoints may
         // hold up to the checkpoint's: the checkpoint record drops the log, so
         // stored values would only add round trips. Bounded still, as the
         // checkpoint may fail.
-        let checkpoints = self.too_long(1, logged_bytes) && self.checkpoint_limit() == u64::MAX;
+        let checkpoints =
+            changed && self.too_long(1, logged_bytes) && self.checkpoint_limit() == u64::MAX;
         let budget = match checkpoints {
             true => self.options.checkpoint_log_bytes,
             false => self.options.inline_log_bytes,
         };
-        // A transaction past the budget goes to stored values first, a
-        // segment each, durable before the record that names them.
+        // A transaction past the budget, or a chain value, goes to stored
+        // values first, durable before the record that names them.
+        let mut first = Vec::new();
         let large = logged_bytes > budget;
-        let parts = if large {
-            let first = commit.next_segment;
-            commit.next_segment += segments.len() as u64;
-            for (n, segment) in (first..).zip(&segments) {
-                named.insert(n, log::stored_value(std::slice::from_ref(segment)));
+        let parts: Vec<Part> = match large {
+            true => (segments.iter())
+                .map(|segment| {
+                    let n = commit.next_segment;
+                    commit.next_segment += 1;
+                    first.push((n, log::stored_value(std::slice::from_ref(segment))));
+                    Part::Stored(n, 0)
+                })
+                .collect(),
+            false => segments.into_iter().map(Part::Inline).collect(),
+        };
+        let mut values = self.chain.clone();
+        let (restart, value) = match &chain {
+            None => (false, None),
+            Some(ChainUpdate::Append(value)) => (false, Some(value)),
+            Some(ChainUpdate::Restart(value)) => (true, Some(value)),
+            Some(ChainUpdate::Clear) => (true, None),
+        };
+        if restart {
+            commit.chain.clear();
+            values.clear();
+        }
+        if let Some(value) = value {
+            if value.len() > log::MAX_CHAIN_VALUE_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "chain value too large",
+                ));
             }
-            let puts = (named.range(first..))
-                .map(|(&n, value)| Mutation::Put(log_key(n), value.clone()))
+            let part = if value.len() > budget {
+                let n = commit.next_segment;
+                commit.next_segment += 1;
+                first.push((n, log::stored_value(std::slice::from_ref(value))));
+                Part::Stored(n, 0)
+            } else {
+                Part::Inline(value.clone())
+            };
+            commit.chain.push(part);
+            values.push(value.clone());
+        }
+        if !first.is_empty() {
+            let puts = (first.iter())
+                .map(|(n, value)| Mutation::Put(log_key(*n), value.clone()))
                 .collect();
             if let Err(error) = concurrently(store, puts).await {
                 return Err(self.failed(error));
             }
-            (first..commit.next_segment)
-                .map(|n| Part::Stored(n, 0))
-                .collect()
-        } else {
-            segments.into_iter().map(Part::Inline).collect()
-        };
-        // Past its budget, the record's inline log is sealed into a stored
-        // value. With a cache it is put in this commit's round trip: this
-        // record still holds it inline, and lists the value as garbage until
-        // the owner's next commit names it. Without one, nothing would carry
-        // the seal to the next session: it is put first, and named now.
-        let inline: Vec<Bytes> = (commit.log.iter().flat_map(|t| &t.parts))
-            .filter_map(|part| match part {
-                Part::Inline(segment) => Some(segment.clone()),
-                Part::Stored(..) => None,
-            })
-            .collect();
+            named.extend(first);
+        }
+        // Past its budget, the record's inline parts are sealed into a stored
+        // value: the durable log's, and the chain as this record holds it.
+        // With a cache it is put in this commit's round trip: this record
+        // still holds them inline, and lists the value as garbage until the
+        // owner's next commit names it. Without one, nothing would carry the
+        // seal to the next session: it is put first, and named now.
+        let (log_inline, chain_inline) = commit.inline_parts();
         let added = if large { 0 } else { logged_bytes };
-        let mut seal = (!inline.is_empty() && commit.inline_bytes() + added > budget).then(|| {
+        let sealable = !log_inline.is_empty() || !chain_inline.is_empty();
+        let mut seal = (sealable && commit.inline_bytes() + added > budget).then(|| {
             let n = commit.next_segment;
             commit.next_segment += 1;
             commit.garbage.insert(n);
             Sealed {
                 n,
-                value: log::stored_value(&inline),
-                segments: inline.len(),
+                value: log::stored_value(&[&log_inline[..], &chain_inline[..]].concat()),
+                log: log_inline.len(),
+                chain: chain_inline.len(),
             }
         });
         if cache.is_none()
@@ -609,11 +672,16 @@ impl Snapshot {
             named.insert(sealed.n, sealed.value);
         }
         commit.version += 1;
-        commit.size = size;
-        commit.log.push(Logged { size, parts });
+        if changed {
+            commit.size = size;
+            commit.log.push(Logged { size, parts });
+        }
         if let Some(effects) = effects {
             commit.effects = effects;
         }
+        commit
+            .garbage
+            .extend(&named_before - &commit.stored_values());
         let bytes = commit.encode();
         // The previous record's garbage, but the value named now, goes in the
         // commit's round trip; the record after this one forgets it, once
@@ -652,7 +720,10 @@ impl Snapshot {
             cache.keep_collected(deleted.unwrap_or_default());
         }
         let mut after = self.continued(commit, Some(bytes));
-        after.extend(size, images, logged_bytes);
+        after.chain = values;
+        if changed {
+            after.extend(size, images, logged_bytes);
+        }
         if collected.is_ok() {
             for n in &garbage {
                 after.commit.garbage.remove(n);
@@ -721,12 +792,14 @@ impl Snapshot {
             return Ok(unchanged(Some(error)));
         }
         // The record passes the log only now that its pages are acknowledged.
-        let commit = Commit {
+        let mut commit = Commit {
             epoch: self.commit.epoch + 1,
-            garbage: &self.commit.garbage | &self.commit.stored_values(),
             log: Vec::new(),
             ..self.commit.clone()
         };
+        // The log's stored values, but those the chain names too.
+        commit.garbage =
+            &self.commit.garbage | &(&self.commit.stored_values() - &commit.stored_values());
         let bytes = commit.encode();
         if let Err(error) = store.put(COMMIT, bytes.clone()).await {
             // It may have landed: the next open sees which epoch did.
@@ -786,6 +859,7 @@ impl Snapshot {
             commit,
             commit_bytes,
             log,
+            chain: self.chain.clone(),
             unchanged: false,
             sealed: self.sealed.clone(),
             page: Mutex::default(),

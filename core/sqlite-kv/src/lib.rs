@@ -108,7 +108,8 @@
 //! # Limits
 //!
 //! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
-//! A commit's effects are capped at [`MAX_EFFECTS_BYTES`].
+//! A commit's effects are capped at [`MAX_EFFECTS_BYTES`], a chain value at
+//! [`MAX_CHAIN_VALUE_BYTES`].
 //! A session's private changes and a statement's result rows are capped by
 //! [`StorageOptions::max_private_bytes`] and [`StorageOptions::max_result_bytes`].
 //! The backend is assumed to return what was stored; decoding checks structure
@@ -128,11 +129,11 @@ mod snapshot;
 
 pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
-pub use log::{MAX_EFFECTS_BYTES, MAX_SEGMENT_BYTES};
+pub use log::{MAX_CHAIN_VALUE_BYTES, MAX_EFFECTS_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::PageCompression;
 pub use snapshot::{
-    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, Durability, INLINE_LOG_BYTES, MAX_PRIVATE_BYTES,
-    MAX_RESULT_BYTES, SaveReport, StorageOptions,
+    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, ChainUpdate, Durability, INLINE_LOG_BYTES,
+    MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport, StorageOptions,
 };
 /// SQL values, as returned in rows and bound as parameters.
 pub use turso_core::Value;
@@ -184,9 +185,10 @@ pub struct Session {
     durability: Durability,
     /// A [`Self::transaction`] body is running.
     in_body: bool,
-    /// The statement running is a [`Self::commit_with`]: the effects it
-    /// commits.
+    /// The statement running is a [`Self::commit_with`] or
+    /// [`Self::commit_turn`]: the effects it commits, and its chain update.
     effects: Option<Bytes>,
+    chain: Option<ChainUpdate>,
     /// Set when a [`Self::transaction`] future is dropped or unwinds before
     /// finishing, which may leave its SQL transaction open.
     abandoned: Arc<AtomicBool>,
@@ -313,6 +315,7 @@ impl Session {
                 durability,
                 in_body: false,
                 effects: None,
+                chain: None,
                 abandoned: Arc::default(),
                 cleanup_error: None,
                 schema_bytes: Some(warm.schema_bytes),
@@ -336,6 +339,7 @@ impl Session {
             durability,
             in_body: false,
             effects: None,
+            chain: None,
             abandoned: Arc::default(),
             cleanup_error: None,
             schema_bytes: None,
@@ -469,6 +473,18 @@ impl Session {
     /// commits, say), and stay until a later commit replaces them; see
     /// [`Self::effects`]. A `COMMIT` that fails changes nothing.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
+        self.commit_extras(effects, None).await
+    }
+
+    /// [`Self::commit_with`], also changing the host's chain in the same put:
+    /// a host's turn, committing its SQL, its state (`effects`) and what its
+    /// turn changed (a VM's page batch, say) together. See [`ChainUpdate`]
+    /// and [`Self::chain`].
+    pub async fn commit_turn(&mut self, effects: Bytes, chain: ChainUpdate) -> Result<()> {
+        self.commit_extras(effects, Some(chain)).await
+    }
+
+    async fn commit_extras(&mut self, effects: Bytes, chain: Option<ChainUpdate>) -> Result<()> {
         if self.durability != Durability::Commit {
             return Err("effects commit with Durability::Commit".into());
         }
@@ -481,8 +497,10 @@ impl Session {
             .into());
         }
         self.effects = Some(effects);
+        self.chain = chain;
         let result = self.execute("COMMIT").await;
         self.effects = None;
+        self.chain = None;
         result
     }
 
@@ -490,6 +508,12 @@ impl Session {
     /// the database (opened on, or committed itself); empty if none did.
     pub fn effects(&self) -> Bytes {
         self.io.snapshot().effects().clone()
+    }
+
+    /// The host's chain, as this session holds the database: each value, in
+    /// order, from the last restart. Empty if no commit changed it.
+    pub fn chain(&self) -> Vec<Bytes> {
+        self.io.snapshot().chain().to_vec()
     }
 
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
@@ -583,7 +607,9 @@ impl Session {
         // Until the commit is acknowledged the engine may hold uncommitted pages,
         // so a failure must not leave it for reuse.
         self.poisoned = true;
-        let report = self.io.publish_with(self.effects.take()).await?;
+        let report = (self.io)
+            .publish_with(self.effects.take(), self.chain.take())
+            .await?;
         // Resident already, unless the page size grew. The commit is durable
         // either way; a failure here only ends the session.
         if self.io.prepare_engine().await.is_ok() {
@@ -709,7 +735,7 @@ impl Session {
             }
             if idle
                 && self.durability == Durability::Commit
-                && (!self.io.is_clean() || self.effects.is_some())
+                && (!self.io.is_clean() || self.effects.is_some() || self.chain.is_some())
                 && let Some(error) = self.publish().await?.cleanup_error
             {
                 self.cleanup_error = Some(error);

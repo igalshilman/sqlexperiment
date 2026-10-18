@@ -53,7 +53,9 @@ pub const MAX_SEGMENT_PAGES: usize = 240;
 /// Most transactions, and segments of one, a stored record may hold.
 const MAX_TRANSACTIONS: u64 = 1 << 20;
 /// Bytes of a commit record's effects.
-pub const MAX_EFFECTS_BYTES: usize = 1024 * 1024;
+pub const MAX_EFFECTS_BYTES: usize = 16 * 1024 * 1024;
+/// Bytes of a value in the host's chain.
+pub const MAX_CHAIN_VALUE_BYTES: usize = 16 * 1024 * 1024;
 const MAGIC: usize = 4;
 const ZSTD_LEVEL: i32 = 3;
 /// Largest version, epoch or segment number a stored record may name, far
@@ -245,7 +247,8 @@ pub(crate) fn stored_value(segments: &[Bytes]) -> Bytes {
     out.into()
 }
 
-/// The segments of a `log/<n>` value.
+/// The segments of a `log/<n>` value: log segments, or values of the host's
+/// chain.
 pub(crate) fn stored_segments(bytes: &Bytes) -> io::Result<Vec<Bytes>> {
     let value = || invalid("log segment");
     if bytes.len() < MAGIC || &bytes[..MAGIC] != LOG_MAGIC {
@@ -260,7 +263,9 @@ pub(crate) fn stored_segments(bytes: &Bytes) -> io::Result<Vec<Bytes>> {
     for _ in 0..count {
         let len = get_varint(bytes, &mut at).ok_or_else(value)? as usize;
         let end = at.checked_add(len).filter(|&end| end <= bytes.len());
-        let end = end.filter(|_| len <= MAX_SEGMENT_BYTES).ok_or_else(value)?;
+        let end = end
+            .filter(|_| len <= MAX_CHAIN_VALUE_BYTES)
+            .ok_or_else(value)?;
         segments.push(bytes.slice(at..end));
         at = end;
     }
@@ -270,17 +275,20 @@ pub(crate) fn stored_segments(bytes: &Bytes) -> io::Result<Vec<Bytes>> {
     Ok(segments)
 }
 
-/// A stored value holding the first `segments` inline segments of a record's
-/// log, acknowledged, which the record lists as garbage until the next names
-/// it.
+/// A stored value holding a record's first inline parts, acknowledged: `log`
+/// of the log's, then `chain` of the chain's. The record lists it as garbage
+/// until the next names it. Commits append to both, so the parts it holds
+/// keep their places until then.
 #[derive(Clone, Debug)]
 pub(crate) struct Sealed {
     pub n: u64,
     pub value: Bytes,
-    pub segments: usize,
+    pub log: usize,
+    pub chain: usize,
 }
 
-/// Where a segment of a committed transaction is.
+/// Where a segment of a committed transaction, or a value of the host's
+/// chain, is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Part {
     /// In the commit record.
@@ -302,11 +310,10 @@ pub(crate) struct Logged {
 /// Encoding: `SC14`, then LEB128 varints: the version, the epoch, the
 /// database size in 512-byte units, the next segment number, the garbage's
 /// count and its numbers (ascending, each from the one before), the
-/// effects' length and bytes, and the
-/// transaction count; per transaction its
-/// size in 512-byte units and its part count; per part 0 and the segment's
-/// length and bytes (inline), or 1, the stored value's number and the
-/// segment's index in it (stored).
+/// effects' length and bytes, and the transaction count; per transaction its
+/// size in 512-byte units and its part count; then the chain's part count.
+/// Per part 0 and the bytes' length and bytes (inline), or 1, the stored
+/// value's number and the part's index in it (stored).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Commit {
     /// Transactions ever committed: the database's version.
@@ -325,6 +332,9 @@ pub(crate) struct Commit {
     pub effects: Bytes,
     /// The log since the last checkpoint, in order.
     pub log: Vec<Logged>,
+    /// The host's chain: opaque values it appends to, or restarts, with its
+    /// commits (a VM's page batches, say). Checkpoints keep it.
+    pub chain: Vec<Part>,
 }
 
 impl Default for Commit {
@@ -338,6 +348,7 @@ impl Default for Commit {
             garbage: BTreeSet::new(),
             effects: Bytes::new(),
             log: Vec::new(),
+            chain: Vec::new(),
         }
     }
 }
@@ -345,9 +356,7 @@ impl Default for Commit {
 impl Commit {
     pub(crate) fn encode(&self) -> Bytes {
         let inline: usize = self
-            .log
-            .iter()
-            .flat_map(|t| &t.parts)
+            .parts()
             .map(|part| match part {
                 Part::Inline(bytes) => bytes.len() + 4,
                 Part::Stored(..) => 15,
@@ -376,19 +385,12 @@ impl Commit {
             put_varint(&mut out, transaction.size / 512);
             put_varint(&mut out, transaction.parts.len() as u64);
             for part in &transaction.parts {
-                match part {
-                    Part::Inline(bytes) => {
-                        put_varint(&mut out, 0);
-                        put_varint(&mut out, bytes.len() as u64);
-                        out.extend_from_slice(bytes);
-                    }
-                    Part::Stored(n, index) => {
-                        put_varint(&mut out, 1);
-                        put_varint(&mut out, *n);
-                        put_varint(&mut out, u64::from(*index));
-                    }
-                }
+                put_part(&mut out, part);
             }
+        }
+        put_varint(&mut out, self.chain.len() as u64);
+        for part in &self.chain {
+            put_part(&mut out, part);
         }
         out.into()
     }
@@ -435,6 +437,27 @@ impl Commit {
         if !plausible {
             return Err(record());
         }
+        let part = |at: &mut usize, max: usize| -> io::Result<Part> {
+            match varint(at)? {
+                0 => {
+                    let len = varint(at)? as usize;
+                    let end = at.checked_add(len).filter(|&end| end <= bytes.len());
+                    let end = end.filter(|_| len <= max).ok_or_else(record)?;
+                    let part = Part::Inline(bytes.slice(*at..end));
+                    *at = end;
+                    Ok(part)
+                }
+                1 => {
+                    let n = varint(at)?;
+                    let index = u32::try_from(varint(at)?).map_err(|_| record())?;
+                    if n >= next_segment || garbage.contains(&n) {
+                        return Err(record());
+                    }
+                    Ok(Part::Stored(n, index))
+                }
+                _ => Err(record()),
+            }
+        };
         let mut log = Vec::with_capacity(count.min(1024) as usize);
         for _ in 0..count {
             let size = varint(&mut at)?.checked_mul(512).ok_or_else(record)?;
@@ -444,29 +467,17 @@ impl Commit {
             }
             let mut parts = Vec::with_capacity(parts_count.min(1024) as usize);
             for _ in 0..parts_count {
-                parts.push(match varint(&mut at)? {
-                    0 => {
-                        let len = varint(&mut at)? as usize;
-                        let end = at.checked_add(len).filter(|&end| end <= bytes.len());
-                        let end = end
-                            .filter(|_| len <= MAX_SEGMENT_BYTES)
-                            .ok_or_else(record)?;
-                        let part = Part::Inline(bytes.slice(at..end));
-                        at = end;
-                        part
-                    }
-                    1 => {
-                        let n = varint(&mut at)?;
-                        let index = u32::try_from(varint(&mut at)?).map_err(|_| record())?;
-                        if n >= next_segment || garbage.contains(&n) {
-                            return Err(record());
-                        }
-                        Part::Stored(n, index)
-                    }
-                    _ => return Err(record()),
-                });
+                parts.push(part(&mut at, MAX_SEGMENT_BYTES)?);
             }
             log.push(Logged { size, parts });
+        }
+        let chain_count = varint(&mut at)?;
+        if chain_count > MAX_TRANSACTIONS {
+            return Err(record());
+        }
+        let mut chain = Vec::with_capacity(chain_count.min(1024) as usize);
+        for _ in 0..chain_count {
+            chain.push(part(&mut at, MAX_CHAIN_VALUE_BYTES)?);
         }
         if at != bytes.len() || log.last().is_some_and(|last| last.size != size) {
             return Err(record());
@@ -479,14 +490,18 @@ impl Commit {
             garbage,
             effects,
             log,
+            chain,
         })
     }
 
-    /// Bytes of the log's inline segments.
+    /// Every part, the log's then the chain's: the order a seal takes them.
+    pub(crate) fn parts(&self) -> impl Iterator<Item = &Part> {
+        self.log.iter().flat_map(|t| &t.parts).chain(&self.chain)
+    }
+
+    /// Bytes of the inline parts, the log's and the chain's.
     pub(crate) fn inline_bytes(&self) -> usize {
-        self.log
-            .iter()
-            .flat_map(|t| &t.parts)
+        self.parts()
             .map(|part| match part {
                 Part::Inline(bytes) => bytes.len(),
                 Part::Stored(..) => 0,
@@ -509,27 +524,56 @@ impl Commit {
             .collect()
     }
 
-    /// Name `sealed`, acknowledged, in place of the inline segments it holds,
+    /// Name `sealed`, acknowledged, in place of the inline parts it holds,
     /// and take it out of the garbage.
     pub(crate) fn name(&mut self, sealed: &Sealed) {
-        let parts = self.log.iter_mut().flat_map(|t| &mut t.parts);
-        let inline = parts.filter(|part| matches!(part, Part::Inline(_)));
-        for (index, part) in inline.take(sealed.segments).enumerate() {
+        let inline = |part: &&mut Part| matches!(part, Part::Inline(_));
+        let log = self.log.iter_mut().flat_map(|t| &mut t.parts);
+        let log = log.filter(inline).take(sealed.log);
+        let chain = self.chain.iter_mut().filter(inline).take(sealed.chain);
+        for (index, part) in log.chain(chain).enumerate() {
             *part = Part::Stored(sealed.n, index as u32);
         }
         self.garbage.remove(&sealed.n);
     }
 
-    /// The stored values the log names, by number.
+    /// The inline parts, the log's and then the chain's.
+    pub(crate) fn inline_parts(&self) -> (Vec<Bytes>, Vec<Bytes>) {
+        let inline = |part: &Part| match part {
+            Part::Inline(bytes) => Some(bytes.clone()),
+            Part::Stored(..) => None,
+        };
+        let log = self.log.iter().flat_map(|t| &t.parts).filter_map(inline);
+        (
+            log.collect(),
+            self.chain.iter().filter_map(inline).collect(),
+        )
+    }
+
+    /// The stored values the record names, the log's and the chain's, by
+    /// number.
     pub(crate) fn stored_values(&self) -> std::collections::BTreeSet<u64> {
-        self.log
-            .iter()
-            .flat_map(|t| &t.parts)
+        self.parts()
             .filter_map(|part| match part {
                 Part::Stored(n, _) => Some(*n),
                 Part::Inline(_) => None,
             })
             .collect()
+    }
+}
+
+fn put_part(out: &mut Vec<u8>, part: &Part) {
+    match part {
+        Part::Inline(bytes) => {
+            put_varint(out, 0);
+            put_varint(out, bytes.len() as u64);
+            out.extend_from_slice(bytes);
+        }
+        Part::Stored(n, index) => {
+            put_varint(out, 1);
+            put_varint(out, *n);
+            put_varint(out, u64::from(*index));
+        }
     }
 }
 
@@ -582,14 +626,21 @@ impl Log {
 /// Stored values by number, as `log/<n>` holds them.
 pub(crate) type Values = BTreeMap<u64, Bytes>;
 
-/// Replay `commit`'s log: its inline segments, and the stored values it names,
-/// those not in `known` read together. Returns the log, and every stored value
-/// it named.
+/// What a commit record holds, read: the log replayed, the chain's values,
+/// and every stored value the record names.
+pub(crate) struct Replayed {
+    pub log: Log,
+    pub chain: Vec<Bytes>,
+    pub values: Values,
+}
+
+/// Replay `commit`'s log and read its chain: the inline parts, and the stored
+/// values it names, those not in `known` read together.
 pub(crate) async fn replay(
     store: &dyn KvStore,
     commit: &Commit,
     mut known: Values,
-) -> io::Result<(Log, Values)> {
+) -> io::Result<Replayed> {
     let named = commit.stored_values();
     known.retain(|n, _| named.contains(n));
     let missing: Vec<u64> = named
@@ -607,26 +658,36 @@ pub(crate) async fn replay(
     for (&n, value) in &known {
         segments.insert(n, stored_segments(value)?);
     }
+    let resolve = |part: &Part| match part {
+        Part::Inline(bytes) => Ok(bytes.clone()),
+        Part::Stored(n, index) => segments
+            .get(n)
+            .and_then(|value: &Vec<Bytes>| value.get(*index as usize))
+            .cloned()
+            .ok_or_else(|| invalid("log segment")),
+    };
     let mut log = Log::new();
     for transaction in &commit.log {
         let mut images = Images::new();
         let mut bytes = 0;
         for part in &transaction.parts {
-            let segment = match part {
-                Part::Inline(segment) => segment.clone(),
-                Part::Stored(n, index) => segments
-                    .get(n)
-                    .and_then(|value| value.get(*index as usize))
-                    .cloned()
-                    .ok_or_else(|| invalid("log segment"))?,
-            };
+            let segment = resolve(part)?;
             bytes += segment.len();
             // The parts of a transaction decode against the log before it.
             images.extend(decode_segment(&segment, &log.chain)?);
         }
         log.append(transaction.size, images, bytes);
     }
-    Ok((log, known))
+    let chain = commit
+        .chain
+        .iter()
+        .map(resolve)
+        .collect::<io::Result<_>>()?;
+    Ok(Replayed {
+        log,
+        chain,
+        values: known,
+    })
 }
 
 /// The values at `log/<n>` for each of `numbers`, read together.

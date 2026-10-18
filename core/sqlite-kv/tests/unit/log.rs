@@ -103,6 +103,7 @@ fn record() -> io::Result<Commit> {
                 parts: Vec::new(),
             },
         ],
+        chain: vec![Part::Inline(Bytes::from_static(b"vm0")), Part::Stored(8, 0)],
     })
 }
 
@@ -110,15 +111,25 @@ fn record() -> io::Result<Commit> {
 fn commit_records_round_trip() -> io::Result<()> {
     let commit = record()?;
     assert_eq!(Commit::decode(&commit.encode())?, commit);
-    assert_eq!(commit.stored_values().into_iter().collect::<Vec<_>>(), [7]);
+    assert_eq!(
+        commit.stored_values().into_iter().collect::<Vec<_>>(),
+        [7, 8]
+    );
     let empty = Commit::default();
     assert_eq!(Commit::decode(&empty.encode())?, empty);
     // `SC14`, version, epoch, units, next segment, garbage {4, 5, 6} (as
     // deltas), the effects, 3 transactions.
+    let bytes = commit.encode();
     assert_eq!(
-        commit.encode()[..17],
+        bytes[..17],
         *b"SC14\x09\x02\x18\x0c\x03\x04\x01\x01\x03out\x03"
     );
+    // Then the chain: 2 parts, inline `vm0`, and value 8's first.
+    assert!(bytes.ends_with(b"\x02\x00\x03vm0\x01\x08\x00"));
+    // A chain part may not name garbage.
+    let mut named = commit.clone();
+    named.chain[1] = Part::Stored(4, 0);
+    assert!(Commit::decode(&named.encode()).is_err());
     Ok(())
 }
 
@@ -239,11 +250,11 @@ fn replay_reads_stored_values() -> io::Result<()> {
             ],
             ..Commit::default()
         };
-        let (replayed, values) = replay(&store, &commit, Values::new()).await?;
-        assert_eq!(replayed.transactions.len(), 3);
+        let Replayed { log, values, .. } = replay(&store, &commit, Values::new()).await?;
+        assert_eq!(log.transactions.len(), 3);
         let mut latest = second;
         latest.extend(third);
-        assert_eq!(replayed.images, latest);
+        assert_eq!(log.images, latest);
         assert_eq!(values, Values::from([(5, value.clone())]));
 
         // A value held already is not read again.
