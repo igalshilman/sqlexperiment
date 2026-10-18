@@ -1,6 +1,8 @@
 //! The services against a real Restate server (RESTATE_SERVER, or the one
 //! `make restate-server` gets): `make test-qjs-restate`. Ignored by a plain
 //! `cargo test`, which has no server.
+mod fakes;
+
 use quickjs_durable::{Programs, Runtime};
 use restate_sdk::prelude::*;
 use serde_json::{Value, json};
@@ -122,7 +124,8 @@ async fn serve() -> u16 {
     serve_programs(&programs()).await
 }
 
-/// Serve `programs` and `Doubler`, and register them with the server.
+/// Serve `programs`, `Doubler` and a scripted `claude`, and register them
+/// with the server.
 async fn serve_programs(programs: &Arc<Programs>) -> u16 {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
@@ -135,6 +138,7 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .port();
     let endpoint = quickjs_restate::bind(Endpoint::builder(), programs)
         .bind(Doubler)
+        .bind(fakes::Claude)
         .build();
     tokio::spawn(
         HttpServer::new(endpoint).listen_and_serve(format!("127.0.0.1:{port}").parse().unwrap()),
@@ -347,4 +351,44 @@ async fn the_shop_programs_compose() {
             "reason": "Error: Declined: balance 5, charge 10",
         })
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-qjs-restate"]
+async fn the_assistant_shops_with_tools() {
+    let _server = server().await;
+    serve_programs(&quickjs_restate::embedded().unwrap()).await;
+    call("inventory/widget/run", json!({"restock": 5})).await;
+    call("payments/dana/run", json!({"deposit": 100})).await;
+    let ask = |message: &str| json!({"customer": "dana", "message": message});
+
+    let (_, answered) = call("assistant/dana/run", ask("Two widgets, please")).await;
+    assert_eq!(answered, json!({"answer": "Bought 2 widgets."}));
+    assert_eq!(call("inventory/widget/run", json!({})).await.1, json!(3));
+    assert_eq!(call("payments/dana/run", json!({})).await.1, json!(80));
+
+    let requests = fakes::REQUESTS.lock().unwrap().clone();
+    let tools: Vec<&str> = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["catalog", "balance", "buy"]);
+    // Both tools' results, in one message.
+    let results = requests[1]["messages"][2]["content"].as_array().unwrap();
+    let catalog: Value = serde_json::from_str(results[0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        catalog[0],
+        json!({"sku": "widget", "price": 10, "stock": 5})
+    );
+    assert_eq!(results[1]["content"], "100");
+    let bought = &requests[2]["messages"][4]["content"][0]["content"];
+    assert_eq!(bought, r#"{"status":"paid","total":20}"#);
+
+    // The next run continues the conversation.
+    call("assistant/dana/run", ask("Two more")).await;
+    let requests = fakes::REQUESTS.lock().unwrap().clone();
+    assert_eq!(requests[3]["messages"].as_array().unwrap().len(), 7);
+    assert_eq!(call("payments/dana/run", json!({})).await.1, json!(60));
 }

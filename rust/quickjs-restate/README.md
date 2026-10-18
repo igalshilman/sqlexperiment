@@ -25,7 +25,7 @@ curl localhost:8080/counter/alice/run --json 1     # 21
 ```sh
 make restate-server qjs-restate              # from the repository's root
 target/restate/restate-server &
-target/release/quickjs-restate &             # serves programs/, on PORT (9080)
+ANTHROPIC_API_KEY=... target/release/quickjs-restate &   # serves programs/, on PORT (9080)
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
 ```
 
@@ -45,6 +45,7 @@ has its own.
 | [`checkout`](programs/checkout.js)         | A saga over [`inventory`](programs/inventory.js) and [`payments`](programs/payments.js): reserve, charge, and undo in reverse on a failure |
 | [`retry`](programs/retry.js)               | Retries with exponential backoff (durable timers) around a [`flaky`](programs/flaky.js) service                                            |
 | [`subscription`](programs/subscription.js) | A recurring charge, every period, until it is declined                                                                                     |
+| [`assistant`](programs/assistant.js)       | An AI agent: Claude, with the shop's programs as its tools; the conversation lives in the scope                                            |
 
 ## Writing a program
 
@@ -56,7 +57,9 @@ has its own.
 
 - **Values are JSON**: inputs, outputs, KV values and RPC payloads.
 - **I/O goes through `ctx`**: no `fetch`, timers or modules. Call a Restate
-  service for the rest of the world (a model, an API).
+  service for the rest of the world. The binary serves one for models:
+  `claude/messages` takes a [Messages API](https://platform.claude.com/docs/en/api/messages)
+  request and returns its response ([`src/claude.rs`](src/claude.rs)).
 - **`Date.now()` and `Math.random()` are the run's**: time is the host's at
   each turn, and the random generator is seeded per run and saved with it.
 - **The run ends when `main` settles.** Unlike in Node.js, promises still
