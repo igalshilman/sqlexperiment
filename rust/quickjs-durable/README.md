@@ -18,9 +18,9 @@ async function main(input, ctx) {
 ```
 
 ```sh
-make restate-server qjs                               # from the repository's root
-target/restate/restate-server &
-ANTHROPIC_API_KEY=... target/release/quickjs-durable &
+make qjs                                              # from the repository's root
+ANTHROPIC_API_KEY=... target/release/quickjs-durable  # the programs, on port 9080
+npx @restatedev/restate-server                        # Restate, in another terminal
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
 curl localhost:8080/counter/alice/run --json 20       # 20, a second later
 ```

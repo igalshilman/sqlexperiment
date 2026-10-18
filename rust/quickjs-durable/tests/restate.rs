@@ -1,5 +1,5 @@
-//! The services against a real Restate server (RESTATE_SERVER, or the one
-//! `make restate-server` gets): `make test-qjs`. Ignored by a plain
+//! The services against a real Restate server: `make test-qjs`, which
+//! downloads one to RESTATE_SERVER. Ignored by a plain
 //! `cargo test`, which has no server.
 mod fakes;
 
@@ -75,7 +75,7 @@ async fn server() -> Server {
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
-        .unwrap_or_else(|e| panic!("{}: {e} (make restate-server)", binary.display()));
+        .unwrap_or_else(|e| panic!("{}: {e} (make test-qjs gets it)", binary.display()));
     let server = Server { process, _dir: dir };
     let client = reqwest::Client::new();
     wait(|| async {

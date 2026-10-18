@@ -180,7 +180,11 @@ impl Session {
         let mut text = String::new();
         while text.len() < bytes {
             text.push_str(WORDS[(self.next() % 16) as usize]);
-            text.push(if self.next().is_multiple_of(12) { '\n' } else { ' ' });
+            text.push(if self.next().is_multiple_of(12) {
+                '\n'
+            } else {
+                ' '
+            });
         }
         text
     }
