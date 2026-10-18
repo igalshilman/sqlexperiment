@@ -1916,7 +1916,7 @@ packages:
     resolution: {integrity: sha512-KZxRF7eitdb/QgTiPLbFifwLtk0AeqQPzWV8be7rOjaQ8jdXjiaCQIszDh4BuyJb+4KMaDd8/muSWbAY+A3XhA==}
 
   '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz':
-    resolution: {integrity: sha512-MLDRbgDi7wBUBwqrTnGtuYl2HGEXnyGpQYFPha1q6fXufXUat3WDB2EDAumbb92NTQ313xCE5FMBxLXgkWMXdg==, tarball: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz}
+    resolution: {integrity: sha512-zAp7UulZlkabCeagEZgc0xaTdUA9B1twByEiFuS/n+VOGemLmb33mx2vuFpIttsQ8fsiBxSpiN85qsBz9rmT8w==, tarball: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz}
     version: 1.17.3
     peerDependencies:
       sqlite-kv: '*'
