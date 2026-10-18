@@ -1,6 +1,6 @@
 # Page compression experiment — 2026-10-10
 
-Crate **0.11.0**, storage format **v12**, SQLite-compatible engine `turso_core` **0.8.2**.
+Crate **0.11.0**, storage format **v14**, SQLite-compatible engine `turso_core` **0.8.2**.
 
 Adaptive LZ4 materially reduces the bytes in this experiment's repetitive and
 synthetic JSON workloads. It offers little benefit for random row payloads and
@@ -22,16 +22,17 @@ workloads where attempting compression is not useful.
   decoder always gets a fixed 4096-byte destination, never an allocation sized
   from stored metadata. Invalid LZ4 back-references and incorrect expansion sizes
   are rejected. Storage is assumed reliable, so there is no checksum.
-- Encoding happens once per changed page when a save builds its log
-  transaction; checkpoints copy those encoded images to `page/<n>` unchanged.
-  Decoding happens when a segment is replayed and when a page is read. The
+- The policy applies to checkpointed pages: a checkpoint encodes each page it
+  writes to `page/<n>`, and a read decodes it. The log is compressed with zstd
+  against the pages' previous images whatever the policy, so commits write the
+  same bytes under either. The
   private WAL, dirty overlay and cached decoded page remain ordinary logical
   bytes. Commit and checkpoint ordering are unaffected by the policy.
 - `StorageOptions::page_compression` selects new writes only. Raw and compressed
   pages coexist; a different policy on reopen does not require rewriting them.
   Switching policy and performing a read-only save causes no mutations.
-- Namespace keys and magic numbers are v12/`SL12`/`SM12`. Start with a fresh
-  namespace. Only this format is supported; there are no compatibility probes.
+- Namespace keys and magic numbers are v14/`SC14`/`SL14`/`SH14`. Start with a
+  fresh namespace. Only this format is supported; there are no compatibility probes.
 
 ## Paired workload results
 
@@ -49,8 +50,7 @@ random bytes. They are stored as BLOBs so the random case has no hex expansion
 in the database. JSON is a useful compressible case, not a claim to represent
 production event distributions. SQL uses hex literals/results for transport;
 logical read/write denominators count decoded payload bytes. There is no owner
-cache, and the simulated backend is weak, so every open re-puts the log tail it
-did not write; those confirmation bytes are part of each observation.
+cache, and open writes nothing.
 
 Operations: cold PK lookup, ten-row range, full scan, one replacement, ten
 adjacent replacements, ten scattered replacements and read-only save. Each
@@ -58,35 +58,33 @@ observation includes open; updates include SQL, the private checkpoint and the
 save. Correctness checks after measurement reopen with the opposite write
 policy, verify the changed payloads and row count, and run `integrity_check`.
 
-**One-row replacement, total mutation key + value bytes (open's confirmation plus the commit):**
+**One-row replacement, total mutation key + value bytes (the commit record):**
 
-|   Rows | Payload bytes | Payload family |    Raw | Adaptive LZ4 | Reduction |
-| -----: | ------------: | -------------- | -----: | -----------: | --------: |
-|    100 |            64 | Repetitive     | 12,477 |        1,218 |     90.2% |
-|    100 |            64 | JSON           | 12,477 |        2,114 |     83.1% |
-|    100 |            64 | Random         | 12,477 |        4,518 |     63.8% |
-| 10,000 |           256 | Repetitive     | 12,477 |          748 |     94.0% |
-| 10,000 |           256 | JSON           | 12,477 |        2,069 |     83.4% |
-| 10,000 |           256 | Random         | 12,477 |        4,539 |     63.6% |
+|   Rows | Payload bytes | Payload family |   Raw | Adaptive LZ4 | Reduction |
+| -----: | ------------: | -------------- | ----: | -----------: | --------: |
+|    100 |            64 | Repetitive     |   461 |          461 |      0.0% |
+|    100 |            64 | JSON           | 1,083 |        1,083 |      0.0% |
+|    100 |            64 | Random         | 3,936 |        3,936 |      0.0% |
+| 10,000 |           256 | Repetitive     |   323 |          323 |      0.0% |
+| 10,000 |           256 | JSON           |   942 |          942 |      0.0% |
+| 10,000 |           256 | Random         | 4,065 |        4,065 |      0.0% |
 
-These bytes now include the log tail that open re-puts on this weak backend
-(here the baseline's last save, which touched the header and schema pages) in
-addition to the commit. Header and schema pages compress well even when row
-payloads are random, which is why the random case shows a 63% reduction; the
-v11 measurement, which had no confirmation, showed 1–1.5%.
+A commit writes its transaction to the record's log, compressed against the
+pages' previous images: a page costs about what changed in it, under either
+policy. (v12 wrote whole page images to the log, and the policy cut these
+bytes 64–94%.) The policy pays off where pages are stored and read: at
+checkpoints, and on every cold read.
 
-All 84 pairs have identical get/put/delete counts, page counts and `meta` bytes. Encoded reads, mutations and stored values
+All 84 pairs have identical get/put/delete counts, page counts and commit record bytes. Encoded reads, mutations and stored values
 never increase relative to raw pages. Random row payloads can still leave compressible
 SQLite headers and free space, explaining their small improvement. In the codec
-sample for 9000-byte random payloads, **56 of 64 pages used raw fallback**.
+sample for 9000-byte random payloads, **58 of 64 pages used raw fallback**.
 The unit tests separately exercise fully random 4096-byte pages and verify the
 4099-byte fallback bound.
 
 For the 10,000-row JSON cold PK lookup, read key/value traffic fell from
-**20,803 to 9,552 bytes (54.1%)**, and stored value bytes from 5,721,146 to
-2,243,946 (60.8%). Stored bytes include the bulk load's log segments, which wait
-for the next checkpoint to collect them. The workload still performs the same
-dependent KV gets.
+**16,519 to 9,329 bytes (43.5%)**, and stored value bytes from 2,857,016 to
+1,118,355 (60.9%). The workload still performs the same dependent KV gets.
 
 ## Amplification matrix
 

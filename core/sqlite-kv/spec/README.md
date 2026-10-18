@@ -65,7 +65,7 @@ needs Java 11 or later.
 | `MC.cfg`        | both processes cached; 2 pages, 2 processes, 2 transactions, 2 segments, 1 crash | 1,702,483       | No violation |
 | `MCNoCache.cfg` | as `MC.cfg`, no cache                                                         | 95,885          | No violation |
 | `MCMixed.cfg`   | as `MC.cfg`, one process cached and one not                                   | 854,074         | No violation |
-| `MCDeep.cfg`    | as `MCMixed.cfg`, 3 transactions, 3 segments                                  | DEEP            | DEEPRESULT   |
+| `MCDeep.cfg`    | as `MCMixed.cfg`, 3 transactions, 3 segments                                  | 31,607,575      | No violation (10 minutes) |
 
 The two processes of `MC.cfg` and `MCNoCache.cfg` are symmetric, so TLC
 checks one of each pair of mirrored states (`Symmetry`).

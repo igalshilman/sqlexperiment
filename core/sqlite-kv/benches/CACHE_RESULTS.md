@@ -23,23 +23,29 @@ afresh to the parked database, so no connection state carries over. That costs
 about 25% more allocation than reusing the connection (72 → 91 MB at 100%) and
 little CPU.
 
-| Cache   | Memory (of logical DB) | Page gets | Round trips | Allocated MB | CPU ms |
-| ------- | ---------------------- | --------- | ----------- | ------------ | ------ |
-| encoded | 5%                     | 239       | 503         | 102.6        | 182    |
-| decoded | 5%                     | 239       | 503         | 102.4        | 217    |
-| encoded | 10%                    | 239       | 503         | 96.7         | 112    |
-| decoded | 10%                    | 239       | 503         | 91.8         | 133    |
-| encoded | 25%                    | 239       | 503         | 92.8         | 69     |
-| decoded | 25%                    | 239       | 503         | 83.8         | 86     |
-| encoded | 50%                    | 239       | 503         | 91.5         | 79     |
-| decoded | 50%                    | 239       | 503         | 82.2         | 70     |
-| encoded | 100%                   | 239       | 503         | 91.3         | 66     |
-| decoded | 100%                   | 239       | 503         | 81.2         | 66     |
+| Cache   | Memory (of logical DB) | Page gets | Round trips (v13) | Allocated MB | CPU ms (v13, same host) |
+| ------- | ---------------------- | --------- | ----------------- | ------------ | ----------------------- |
+| encoded | 5% | 239 | 515 (527) | 101.5 | 524 (469) |
+| decoded | 5% | 239 | 515 (527) | 99.7 | 449 (529) |
+| encoded | 10% | 239 | 515 (527) | 95.2 | 319 (336) |
+| decoded | 10% | 239 | 515 (527) | 90.1 | 385 (320) |
+| encoded | 25% | 239 | 515 (527) | 91.2 | 219 (234) |
+| decoded | 25% | 239 | 515 (527) | 81.9 | 237 (338) |
+| encoded | 50% | 239 | 515 (527) | 89.7 | 203 (152) |
+| decoded | 50% | 239 | 515 (527) | 80.2 | 216 (299) |
+| encoded | 100% | 239 | 515 (527) | 89.5 | 191 (204) |
+| decoded | 100% | 239 | 515 (527) | 79.3 | 228 (242) |
+
+Measured on format v14 on 2026-10-18, with v13 run the same day on the same
+host in parentheses. This shared host ran 2–3× slower that day than when the
+sections below were measured, and its medians vary by ±30% between runs; v14
+and v13 are within that. Round trips fell from 527 to 515: the commit record
+replaces v13's `meta` read and log probe.
 
 - **No backend misses beyond first touches at any memory size.** The in-memory
   LRU (below) needed 1,120 misses and 1,450 round trips at 5%; the disk tier
   serves them locally. Sequential readahead turns some first touches into
-  pages fetched ahead: 239 gets in 503 round trips. Each avoided round trip is worth milliseconds on a real
+  pages fetched ahead: 239 gets in 515 round trips. Each avoided round trip is worth milliseconds on a real
   backend. At 5% memory a session takes about 0.5 ms of host time, mostly local
   disk reads.
 - **foyer costs about 0.05 ms per session** once the working set fits in memory:
@@ -57,9 +63,9 @@ tier's thread. The in-memory LRU results are in
 
 With a `PageCache`, a session that ends cleanly (a successful save, or a
 read-only session) leaves its idle engine in the cache. The next open reuses it
-when nothing changed since: the cache validated `meta` and the log ends where
-that engine left it. Its parsed schema and engine page cache stay warm. Opening
-still reads `meta` and probes the log, so round trips do not change.
+when nothing changed since: the commit record is the one that engine
+committed. Its parsed schema and engine page cache stay warm. Opening still
+reads the record, so round trips do not change.
 
 | 300 sessions, encoded cache | CPU ms  | Allocations | Allocated MB |
 | --------------------------- | ------- | ----------- | ------------ |
