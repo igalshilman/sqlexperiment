@@ -147,18 +147,26 @@ impl JsObject {
                     }
                 }
             }
-            let (operation, outcome, at) = match now_ready {
-                Some(ready) => ready,
+            let (outcomes, at) = match now_ready {
+                Some((operation, outcome, at)) => (vec![(operation, outcome)], at),
                 None => {
-                    let Some((index, (outcome, at))) = waiting.next().await? else {
+                    let Some((index, (outcome, mut at))) = waiting.next().await? else {
                         return Err(TerminalError::new("The run waits on nothing").into());
                     };
-                    (operations[index].clone(), outcome, at)
+                    // What else has arrived goes in the same turn, and commits
+                    // with it.
+                    let mut outcomes = vec![(operations[index].clone(), outcome)];
+                    while let Some(ready) = futures::FutureExt::now_or_never(waiting.next()) {
+                        let Some((index, (outcome, ready_at))) = ready? else {
+                            break;
+                        };
+                        outcomes.push((operations[index].clone(), outcome));
+                        at = at.max(ready_at);
+                    }
+                    (outcomes, at)
                 }
             };
-            let delivered = run
-                .deliver(&store, &operation, outcome, now().max(at))
-                .await;
+            let delivered = run.deliver_all(&store, outcomes, now().max(at)).await;
             committed(&store, delivered)?;
         }
     }
