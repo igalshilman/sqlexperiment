@@ -65,9 +65,9 @@ pub struct RpcTarget {
     pub key: Option<String>,
 }
 
-/// Guest requests and internal resume wakeups. KV resolves inside the transaction;
-/// deferred operations retain stable IDs in both the VM and host effect state.
-/// Application KV scope is supplied by the host, not selected by guest input.
+/// Guest requests and internal resume wakeups. KV requests are answered in the
+/// turn; the others wait in the run's pending list, under stable IDs, for the
+/// host to deliver their outcome. The KV scope is the host's, not the guest's.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Operation {
@@ -139,33 +139,6 @@ pub struct State {
     pub outcome: Option<Outcome>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(
-    tag = "kind",
-    rename_all = "lowercase",
-    rename_all_fields = "camelCase"
-)]
-/// Transient delivery to the VM, never an operation replay log.
-pub(crate) enum Event {
-    Start {
-        program: String,
-        input: Value,
-        now: u64,
-    },
-    Complete {
-        operation_id: String,
-        outcome: Outcome,
-        now: u64,
-    },
-}
-impl Event {
-    pub fn now(&self) -> u64 {
-        match self {
-            Self::Start { now, .. } | Self::Complete { now, .. } => *now,
-        }
-    }
-}
-
 /// Pointers are offsets into the same pinned Wasm binary's linear memory.
 /// The indirect function table is reconstructed by instantiating that binary;
 /// extensions and mutable reference tables are not supported by this experiment.
@@ -189,10 +162,9 @@ pub(crate) struct Image {
     pub memory: Vec<u8>,
 }
 
-/// One compressed batch holds several XOR pages: a page is in the batch the
-/// run's checkpoint `batch` (its sequence) wrote, at `slot`. Each page is
-/// relative to golden, never to another checkpoint's page. Short names: a
-/// manifest lists every page that differs from golden.
+/// One compressed batch holds several XOR pages: a page is in batch `batch`, at
+/// `slot`. Each page is relative to golden, never to another turn's page.
+/// Short names: a commit lists every page that differs from golden.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(crate) struct PageRef {
     #[serde(rename = "b")]
@@ -201,43 +173,54 @@ pub(crate) struct PageRef {
     pub slot: usize,
 }
 
-/// Complete immutable page index for one committed invocation. Missing entries
-/// inherit golden, or zeros beyond golden length. `previous` is history only:
-/// recovery does not follow it. The host transaction commits the manifest/head
-/// together with application state and effects.
+/// A scope's commit: its current run, as of its last turn. It is the one record
+/// a turn writes last, after the batch of pages it references: the turn
+/// happened once it is stored. What follows it (the turn's KV writes, and the
+/// batches no longer referenced) is applied after it, and again by the next
+/// attempt that reads it, so a crash in between loses nothing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Manifest {
-    pub format: u32,
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Commit {
+    pub run: String,
     /// The program, and the version (of its source) this run started on.
     pub program: String,
     pub version: u64,
     /// The runtime's version: an image restores only on the runtime that made it.
     pub runtime: u64,
-    pub previous: Option<String>,
-    pub sequence: u64,
+    /// Turns committed, this one included.
+    pub turns: u64,
     pub meta: VmMeta,
     pub memory_len: usize,
+    /// Every page that differs from golden, and the batch it is in. Missing
+    /// pages are golden's, or zeros beyond golden's length.
     pub pages: BTreeMap<u32, PageRef>,
+    /// The number of the next batch a turn writes.
+    pub next_batch: u64,
     pub state: State,
-    pub changed_pages: usize,
-    pub examined_pages: usize,
-    pub new_blob_bytes: usize,
+    /// The turn's KV writes and deletes, applied after the commit.
+    pub writes: BTreeMap<String, Value>,
+    pub deletes: Vec<String>,
+    /// Batches no longer referenced, deleted after the commit.
+    pub garbage: Vec<u64>,
 }
 
+/// A run as of its last commit, and what that turn wrote.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct View {
-    pub checkpoint_id: String,
+    pub run: String,
     pub program: String,
-    pub checkpoint_sequence: u64,
+    pub turns: u64,
     pub state: State,
-    pub image_bytes: usize,
+    pub memory_bytes: usize,
+    /// Pages that differ from golden.
+    pub live_pages: usize,
+    /// Pages the last turn changed.
     pub changed_pages: usize,
-    /// Pages whose contents were compared: dirty pages by default, all pages
-    /// in the benchmark-only full-scan build. Reverted writes still count here.
+    /// Pages the last turn compared: those it wrote to by default, all pages
+    /// in the benchmark-only full-scan build.
     pub examined_pages: usize,
-    pub override_pages: usize,
-    pub new_blob_bytes: usize,
-    pub manifest_bytes: usize,
+    pub batch_bytes: usize,
+    pub commit_bytes: usize,
 }
 
 /// FNV-1a: a stable 64-bit fingerprint, to tell versions and runs apart. Not

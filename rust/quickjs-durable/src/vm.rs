@@ -1,9 +1,4 @@
-use crate::model::{
-    Capture, Event, Image, MAX_INPUT, MAX_MEMORY, MAX_TIME, PAGE, State, VmMeta, fingerprint,
-};
-use crate::{Operation, Resolution, Transaction};
-use serde_json::json;
-use std::{collections::HashSet, num::NonZeroUsize};
+use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, State, VmMeta, fingerprint};
 use wasmtime::error::Context;
 use wasmtime::{
     Caller, Config, Engine, Global, Instance, Linker, Memory, Module, Store, StoreLimits,
@@ -94,9 +89,8 @@ fn validate_snapshot_abi(wasm: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// One compiled engine/module shared by many invocations. Each turn deliberately
-/// uses a fresh Store so cold restoration is continuously exercised. This stores
-/// guest promises, never Rust futures or Wasmtime execution stacks.
+/// One compiled engine/module shared by every run of the process. An image
+/// holds guest promises, never Rust futures or Wasmtime execution stacks.
 pub struct Runtime {
     engine: Engine,
     module: Module,
@@ -156,158 +150,6 @@ impl Runtime {
         );
         vm.snapshot()
     }
-
-    /// Restore `image`, deliver `event` and run until the next checkpoint.
-    pub(crate) async fn turn(
-        &self,
-        run: &str,
-        image: &Image,
-        event: &Event,
-        pending: &[Operation],
-        transaction: &mut impl Transaction,
-        checkpoint_interval: Option<NonZeroUsize>,
-    ) -> Result<Turn> {
-        let mut vm = Vm::new(self, run, event.now())?;
-        vm.restore(image)?;
-        let result = self
-            .pump(
-                &mut vm,
-                run,
-                image,
-                event,
-                pending,
-                transaction,
-                checkpoint_interval,
-            )
-            .await;
-        match result {
-            Ok((capture, state)) => Ok(Turn::Captured(capture, state)),
-            Err(error) => match trap(&error) {
-                Some(message) => Ok(Turn::Trapped(message)),
-                None => Err(error),
-            },
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn pump(
-        &self,
-        vm: &mut Vm,
-        run: &str,
-        image: &Image,
-        event: &Event,
-        pending: &[Operation],
-        transaction: &mut impl Transaction,
-        checkpoint_interval: Option<NonZeroUsize>,
-    ) -> Result<(Capture, State)> {
-        match event {
-            Event::Start { input, .. } => {
-                let seed = fingerprint(run.as_bytes()) as u32;
-                vm.invoke(
-                    "init",
-                    &json!({"runId":run,"now":event.now(),"maxTime":MAX_TIME,"seed":seed}),
-                )?;
-                vm.invoke("start", input)?;
-            }
-            Event::Complete { .. } => vm.invoke("deliver", &serde_json::to_value(event)?)?,
-        }
-        // Requests already present in the restored image belong to existing
-        // host effects. Recovery/completion must not emit them again.
-        let mut handled: HashSet<String> = pending.iter().map(|op| op.id().to_owned()).collect();
-        let mut ready_operations = 0_usize;
-        let state = loop {
-            vm.drain()?;
-            let state = vm.inspect()?;
-            let mut ready = false;
-            for operation in &state.pending {
-                if !handled.insert(operation.id().to_owned()) {
-                    continue;
-                }
-                match transaction
-                    .execute(operation)
-                    .await
-                    .map_err(wasmtime::Error::from_anyhow)?
-                {
-                    Resolution::Ready(outcome) => {
-                        ensure!(
-                            !matches!(
-                                operation,
-                                Operation::Resume { .. } | Operation::Sleep { .. }
-                            ),
-                            "Resume wakeups and timers must remain pending until commit"
-                        );
-                        outcome.validate().map_err(wasmtime::Error::from_anyhow)?;
-                        ensure!(
-                            serde_json::to_vec(&outcome)?.len() <= MAX_INPUT,
-                            "Host result exceeds limit"
-                        );
-                        let completion = Event::Complete {
-                            operation_id: operation.id().into(),
-                            outcome,
-                            now: event.now(),
-                        };
-                        vm.invoke("deliver", &serde_json::to_value(completion)?)?;
-                        ready = true;
-                        ready_operations += 1;
-                    }
-                    Resolution::Pending => {
-                        ensure!(
-                            !matches!(
-                                operation,
-                                Operation::KvGet { .. }
-                                    | Operation::KvSet { .. }
-                                    | Operation::KvDelete { .. }
-                            ),
-                            "KV must resolve inside the transaction"
-                        );
-                    }
-                }
-            }
-            if !ready {
-                break state;
-            }
-            let budget_spent =
-                checkpoint_interval.is_some_and(|limit| ready_operations >= limit.get());
-            if budget_spent || vm.store.get_fuel()? < CHECKPOINT_FUEL {
-                // Every operation in this batch has been handled, and ready
-                // outcomes are now in the heap/job queue. No Wasm call or Rust
-                // operation future is live. Persist a local wakeup so recovery
-                // can schedule these queued continuations without replaying I/O.
-                vm.call("pause", None)?;
-                let state = vm.inspect()?;
-                let wakeup = state.pending.last().context("Missing resume wakeup")?;
-                ensure!(
-                    matches!(wakeup, Operation::Resume { .. }),
-                    "Invalid resume wakeup"
-                );
-                ensure!(
-                    matches!(
-                        transaction
-                            .execute(wakeup)
-                            .await
-                            .map_err(wasmtime::Error::from_anyhow)?,
-                        Resolution::Pending
-                    ),
-                    "Resume wakeup must be staged until commit"
-                );
-                break state;
-            }
-        };
-        if let Some(outcome) = &state.outcome {
-            outcome.validate().map_err(wasmtime::Error::from_anyhow)?;
-        }
-        let next = vm.capture(image)?;
-        Ok((next, state))
-    }
-}
-
-/// How a turn ended: at a checkpoint, or in a trap.
-pub(crate) enum Turn {
-    Captured(Capture, State),
-    /// The guest trapped: it ran out of fuel, or QuickJS hit an error that no
-    /// script can catch. The image is mid-mutation, and the same image and
-    /// delivery would trap again.
-    Trapped(String),
 }
 
 /// QuickJS failed a job with an error no script can catch, such as running
@@ -321,8 +163,10 @@ impl std::fmt::Display for Uncatchable {
 }
 impl std::error::Error for Uncatchable {}
 
-/// The guest's own failure, if `error` is one: a host's error is not.
-fn trap(error: &wasmtime::Error) -> Option<String> {
+/// The guest's own failure, if `error` is one: a host's error is not. The
+/// guest ran out of fuel, or QuickJS hit an error no script can catch: its
+/// image is mid-mutation, and the same image and delivery would fail again.
+pub(crate) fn trap(error: &wasmtime::Error) -> Option<String> {
     if let Some(trap) = error.downcast_ref::<wasmtime::Trap>() {
         return Some(match trap {
             wasmtime::Trap::OutOfFuel => {
@@ -334,7 +178,8 @@ fn trap(error: &wasmtime::Error) -> Option<String> {
     error.downcast_ref::<Uncatchable>().map(ToString::to_string)
 }
 
-struct Vm {
+/// A live QuickJS VM: one Wasm instance, for one run, turn after turn.
+pub(crate) struct Vm {
     store: Store<Host>,
     instance: Instance,
     memory: Memory,
@@ -388,7 +233,7 @@ fn mark_host_range(bitmap: &mut [u8], offset: usize, len: usize) -> Result<()> {
 }
 
 impl Vm {
-    fn new(runtime: &Runtime, identity: &str, now: u64) -> Result<Self> {
+    pub(crate) fn new(runtime: &Runtime, identity: &str, now: u64) -> Result<Self> {
         let host = Host {
             now,
             seed: fingerprint(identity.as_bytes()).to_le_bytes(),
@@ -530,6 +375,22 @@ impl Vm {
             dirty,
         })
     }
+    /// Begin a turn at logical time `now`, with a full fuel budget.
+    pub(crate) fn begin_turn(&mut self, now: u64) -> Result<()> {
+        self.store.data_mut().now = now;
+        self.store.set_fuel(FUEL)
+    }
+    /// Whether the turn has spent half its fuel: time to stop at the next safe
+    /// boundary, so a long run of local requests goes on in the next turn
+    /// instead of running out.
+    pub(crate) fn tired(&self) -> Result<bool> {
+        Ok(self.store.get_fuel()? < CHECKPOINT_FUEL)
+    }
+    /// The captured pages are committed: track writes anew.
+    pub(crate) fn committed(&mut self) {
+        #[cfg(not(feature = "full-scan"))]
+        self.dirty.data_mut(&mut self.store).fill(0);
+    }
     fn limits(&mut self) -> Result<()> {
         self.instance
             .get_typed_func::<i32, ()>(&mut self.store, "qjs_set_memory_limit")?
@@ -539,7 +400,7 @@ impl Vm {
             .call(&mut self.store, MAX_STACK)?;
         Ok(())
     }
-    fn restore(&mut self, image: &Image) -> Result<()> {
+    pub(crate) fn restore(&mut self, image: &Image) -> Result<()> {
         ensure!(
             image.memory.len() <= MAX_MEMORY && image.memory.len().is_multiple_of(65536),
             "Invalid image size"
@@ -626,7 +487,7 @@ impl Vm {
     /// source to compile, so it costs a fraction of an eval, and no argument
     /// can inject source. Every handle is freed before returning; after an
     /// error the turn is discarded, so leaks then don't matter.
-    fn call(&mut self, name: &str, argument: Option<&str>) -> Result<String> {
+    pub(crate) fn call(&mut self, name: &str, argument: Option<&str>) -> Result<String> {
         let global = self.global.call(&mut self.store, ())?;
         ensure!(global != 0, "Missing global object");
         let bridge = self.property(global, "__durable")?;
@@ -673,14 +534,14 @@ impl Vm {
         ensure!(value != 0, "Missing property {name}");
         Ok(value)
     }
-    fn invoke(&mut self, name: &str, value: &serde_json::Value) -> Result<()> {
+    pub(crate) fn invoke(&mut self, name: &str, value: &serde_json::Value) -> Result<()> {
         self.call(name, Some(&serde_json::to_string(value)?))?;
         Ok(())
     }
-    fn inspect(&mut self) -> Result<State> {
+    pub(crate) fn inspect(&mut self) -> Result<State> {
         Ok(serde_json::from_str(&self.call("inspect", None)?)?)
     }
-    fn drain(&mut self) -> Result<()> {
+    pub(crate) fn drain(&mut self) -> Result<()> {
         while self.pending.call(&mut self.store, ())? != 0 {
             if self.execute.call(&mut self.store, ())? < 0 {
                 return Err(wasmtime::Error::new(Uncatchable(self.exception()?)));
@@ -701,7 +562,7 @@ impl Vm {
         ensure!(memory.len() <= MAX_MEMORY, "Image exceeds limit");
         Ok(Image { meta, memory })
     }
-    fn capture(&mut self, base: &Image) -> Result<Capture> {
+    pub(crate) fn capture(&mut self, base: &Image) -> Result<Capture> {
         let meta = self.metadata()?;
         let memory = self.memory.data(&self.store);
         ensure!(

@@ -1,15 +1,12 @@
-//! The object's state as sqlite-kv's store: ordered, as Restate stores state
-//! writes in the order they are made. It remembers every key it read or
-//! wrote, for the invocation: each turn opens the database again, and would
-//! otherwise read the same keys from Restate again, each read a round trip
-//! and a journal entry.
+//! The object's state as a [`Store`]. It remembers every key it read or
+//! wrote, for the attempt: the handler is the object's only writer meanwhile,
+//! so a key is read from Restate (a round trip, and a journal entry) at most
+//! once. Writes are ordered, as Restate journals them: a crash loses a suffix.
+use crate::Store;
 use bytes::Bytes;
-use futures::{FutureExt, future::BoxFuture};
 use restate_sdk::context::RawState;
-use sqlite_kv::kv::KvStore;
 use std::{
     collections::HashMap,
-    io,
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -18,7 +15,7 @@ use std::{
 
 pub(crate) struct ObjectStore {
     state: RawState,
-    /// Each key's value as of this invocation's last read or write of it.
+    /// Each key's value as of this attempt's last read or write of it.
     known: Mutex<HashMap<String, Option<Bytes>>>,
     failed: AtomicBool,
 }
@@ -32,59 +29,40 @@ impl ObjectStore {
         }
     }
 
-    /// Whether a read or a sync failed: the turn's error is then the
-    /// invocation's (retried), not the application's.
+    /// Whether a read failed: the turn's error is then the attempt's
+    /// (retried), not the application's.
     pub(crate) fn failed(&self) -> bool {
         self.failed.load(Ordering::Relaxed)
     }
-
-    fn fail(&self, error: restate_sdk::errors::TerminalError) -> io::Error {
-        self.failed.store(true, Ordering::Relaxed);
-        io::Error::other(error.message().to_owned())
-    }
 }
 
-impl KvStore for ObjectStore {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+impl Store for ObjectStore {
+    async fn get(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         if let Some(value) = self.known.lock().unwrap().get(key) {
-            return futures::future::ready(Ok(value.clone())).boxed();
+            return Ok(value.as_ref().map(|bytes| bytes.to_vec()));
         }
-        self.state
-            .get(key)
-            .map(|result| {
-                let value = result.map_err(|e| self.fail(e))?;
-                self.known
-                    .lock()
-                    .unwrap()
-                    .insert(key.to_owned(), value.clone());
-                Ok(value)
-            })
-            .boxed()
+        let value = self.state.get(key).await.map_err(|error| {
+            self.failed.store(true, Ordering::Relaxed);
+            anyhow::anyhow!(error.message().to_owned())
+        })?;
+        let read = value.as_ref().map(|bytes| bytes.to_vec());
+        self.known.lock().unwrap().insert(key.to_owned(), value);
+        Ok(read)
     }
 
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
+    async fn put(&self, key: &str, value: Vec<u8>) -> anyhow::Result<()> {
+        let value = Bytes::from(value);
         self.known
             .lock()
             .unwrap()
             .insert(key.to_owned(), Some(value.clone()));
         self.state.set(key, value);
-        futures::future::ready(Ok(())).boxed()
+        Ok(())
     }
 
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
+    async fn delete(&self, key: &str) -> anyhow::Result<()> {
         self.known.lock().unwrap().insert(key.to_owned(), None);
         self.state.clear(key);
-        futures::future::ready(Ok(())).boxed()
-    }
-
-    fn ordered(&self) -> bool {
-        true
-    }
-
-    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
-        self.state
-            .sync()
-            .map(|result| result.map_err(|e| self.fail(e)))
-            .boxed()
+        Ok(())
     }
 }
