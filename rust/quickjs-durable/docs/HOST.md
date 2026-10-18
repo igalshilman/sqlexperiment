@@ -228,11 +228,11 @@ not change: a record names only durable values, and no value leaks.
 
 On branches, a PR each:
 
-1. **sqlite-kv: the host's page chain in the record** (above), with tests
-   and the spec.
+1. **sqlite-kv: the host's page chain in the record** (above), with tests.
+   Done in #142; the TLA+ spec does not model the chain yet.
 2. **quickjs-durable on sqlite-kv:** a turn commits through
-   `commit_turn`; `batch/<n>` and `commit` go away; KV stays as it is.
-   Measure the agent benchmark's bytes and round trips per turn.
+   `commit_turn`; `batch/<n>`, `commit` and `kv/<key>` go away, and `ctx.kv`
+   is already a table. Done in #143, measured in DESIGN.md §7.
 3. **`ctx.db.sql` and `ctx.db.transaction`**, as Calls over `host_call`
    (§2), sharing the turn's session. `ctx.kv` becomes a table.
 4. **Epochs instead of fuel**, with async Wasm.
