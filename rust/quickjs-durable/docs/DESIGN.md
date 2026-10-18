@@ -7,8 +7,8 @@ self-contained: source links and references are supporting material, not
 substitutes for protocol steps. Last consolidated: 18 October 2026.
 
 The implementation in this crate uses QuickJS compiled to WebAssembly, Wasmtime,
-4 KiB page tracking, and XOR/Zstd page batches relative to a shared golden
-image. A turn ends in one commit record per scope (§7), in a Restate object's
+4 KiB page tracking, and Zstd page batches, each compressed against the
+pages it replaces, over a shared golden image. A turn ends in one commit record per scope (§7), in a Restate object's
 state, which the `restate` module drives from each program's `run` handler
 (§9.1). The VM stays live from turn to turn of one attempt.
 
@@ -391,19 +391,47 @@ capture. A page written and restored to its original value needs no new
 payload. Reset the tracker on restore before rebinding pointers/limits, and
 after each commit is stored. A failed commit ends the attempt with its VM.
 
-Selected encoding: **changed 4 KiB pages XORed against their previous contents,
-batched with Zstd level 3**, in a chain over a golden-relative base (§5.1).
-Against the previous contents, a page a turn changed by a few pointers is
-nearly all zeros: a steady sleep loop's batch is ~1.2 KiB, against ~4.9 KiB
-for the same pages XORed against golden. Reasons and alternatives from the
-experiment's existing measurements:
+Selected encoding: **the changed 4 KiB pages, compressed as one Zstd frame
+(level 2, long-distance matching) with their previous contents as its
+prefix**, in a chain over a base compressed against golden (§5.1). Zstd
+matches each page against what it replaces, wherever the data now sits: a
+page a turn changed by a few pointers costs a few bytes, and so does one whose
+contents moved, which an XOR against the same offsets cannot see. Before
+comparing, capture zeroes the stack below its pointer (§5.3): between calls
+no frame is live there, and the turn's dead frames would otherwise count as
+changes.
+
+Measured on 18 October 2026 over traces of seven workloads (40 turns each, 80
+for the agent; batch KiB summed over the run's turns, and Zstd time over all
+of them):
+
+| Encoding of a turn's changed pages            | steps | kv  | agent | shift | typed | churn | map | Total | Encode |
+| --------------------------------------------- | ----- | --- | ----- | ----- | ----- | ----- | --- | ----- | ------ |
+| XOR with previous, Zstd 3 (before)            | 47    | 161 | 198   | 80    | 234   | 3,543 | 740 | 5,006 | 132 ms |
+| XOR with golden, Zstd 3 (before the chain)    |       |     |       |       |       |       |     | 12,921 | 279 ms |
+| Prefix of previous, Zstd 3                    | 38    | 111 | 138   | 62    | 226   | 2,672 | 862 | 4,111 | 251 ms |
+| Prefix of previous, Zstd 3, long matching     | 37    | 109 | 135   | 41    | 66    | 2,692 | 769 | 3,851 | 443 ms |
+| Same, stack zeroed                            | 32    | 100 | 116   | 35    | 59    | 2,671 | 762 | 3,777 | 422 ms |
+| Same, Zstd 2 (selected)                       | 32    | 102 | 115   | 37    | 62    | 2,762 | 827 | 3,939 | 300 ms |
+| Same, and free heap chunks zeroed (simulated) | 33    | 94  | 109   | 36    | 62    | 2,455 | 524 | 3,315 | 303 ms |
+
+The workloads: a sleep loop (steps), KV reads and writes with an RPC each
+(kv), a growing chat history (agent), arrays and strings shifted at the front
+(shift), scattered writes to a typed array (typed), a fresh array of 2,000
+objects each turn (churn), and a Map of 5,000 entries updated in place (map).
+Zstd 19 on the XORs reached 4,015 KiB in 14.6 s; Zstd 1 with a prefix loses
+most matches without long matching. Encoding a typical 20-page turn takes
+~0.24 ms against ~0.06 ms for the XOR. On a run's bytes in `MemoryStore`, the
+steps, kv, agent and typed runs wrote 28%, 32%, 42% and 54% less.
+
+Reasons and alternatives from the experiment's earlier measurements:
 
 | Candidate                 | Trade-off                                                                                                                                                                                               |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | bsdiff4                   | Smaller heap-churn patches, expensive whole-image matching; historical scalar median ~143 ms, sparse-8-MiB ~1,084 ms among successful samples, with timeouts on larger pairs                            |
-| Page XOR + Zstd           | Exploits stable memory offsets; historical scalar encode ~0.26 ms; ~73 KiB heap-churn patch versus ~25 KiB for bsdiff. Dirty tracking can eliminate most discovery scans                                |
+| Page XOR + Zstd           | Exploits stable memory offsets; historical scalar encode ~0.26 ms; ~73 KiB heap-churn patch versus ~25 KiB for bsdiff. Blind to data that moves within or between pages; replaced, above              |
 | Replacing changed pages   | Simpler, but wastes space on unchanged bytes inside a dirty page                                                                                                                                        |
-| Zstd patch-from           | Credible general matcher; ordinary dictionary compression is not equivalent to its patch-from configuration. Historical CLI timings include process/filesystem overhead                                 |
+| Zstd patch-from, image    | The whole previous image as prefix: barely smaller than the changed pages' previous contents, and indexes the whole memory each turn (~2 ms per MiB)                                                     |
 | Xdelta/VCDIFF, HDiffPatch | General alternatives; no special knowledge of Wasm heaps. The tested Xdelta Wasm port ran out of memory; its bundled native source was measured separately. HDiffPatch was researched, not measured     |
 | Kernel write tracking     | mprotect/fault handling or Linux userfaultfd/PAGEMAP_SCAN can track writes without per-store barriers, but require owned mappings, runtime trap coordination, growth/reset handling and feature probing |
 
@@ -441,10 +469,10 @@ Commit = {
 ```
 
 `chain` is the image, as batches applied in order over golden (zeros beyond
-its length): the first, the **base**, XORs each page against golden; each
-later one, a **delta**, XORs the pages one turn changed against their
-contents before it. Base and deltas apply alike: XOR into the memory as it
-stands. `baseBytes` and `deltaBytes` size the chain, for when to write a new
+its length): the first, the **base**, holds each page that differs from
+golden; each later one, a **delta**, the pages one turn changed. Base and
+deltas apply alike: each batch is compressed against the pages it replaces,
+in the memory as it stands. `baseBytes` and `deltaBytes` size the chain, for when to write a new
 base (§5.3); `livePages` counts pages that differ from golden. A settled run's
 chain is empty. `writes`, `deletes` and `garbage`
 are what follows the commit (§7). `runtime` is the runtime's version, a
@@ -459,21 +487,21 @@ commit bytes.
 
 ### 5.2. Binary page batch
 
-Changed-page payload: Zstd level-3 compression of this uncompressed structure:
+| Part            | Encoding                                                                    |
+| --------------- | --------------------------------------------------------------------------- |
+| Magic           | ASCII `QPD2`                                                                |
+| Count           | Page count N, LEB128                                                        |
+| N page indexes  | Each as its gap from the previous index plus one (the first: from 0), LEB128 |
+| Pages           | One Zstd frame: the N pages, back to back, `N * 4096` bytes                 |
 
-| Offset/entry      | Encoding                                                      |
-| ----------------- | ------------------------------------------------------------- |
-| 0..3              | ASCII `QPD1`                                                  |
-| 4..7              | Entry count N, unsigned 32-bit little-endian                  |
-| Each of N entries | Page index as u32 little-endian, then exactly 4,096 XOR bytes |
-
-Entries are sorted by increasing page index and unique. Decompressed length must
-be exactly `8 + N * 4100`; N and each index are bounded by `64 MiB / 4096`.
-The largest raw page batch is `8 + (64 MiB / 4096) * 4100` bytes. Reject truncated,
-extra-length, unsorted or out-of-range entries. Bound
-decompression output, including reading at most limit+1 bytes to detect overflow.
-The reference also bounds compressed blobs at 64 MiB + 1 MiB. These are format
-and allocation checks, not extra assumptions about unreliable KV.
+The **reference** is the N pages the batch replaces, back to back: their
+contents in the memory the batch applies to. The frame is compressed with the
+reference as its prefix (`ZSTD_CCtx_refPrefix`), level 2, long-distance
+matching, and a window covering reference and pages (at most 2^27, for twice
+64 MiB); decoding needs the same reference. Indexes are sorted, unique and
+below `64 MiB / 4096`, and the frame decodes to exactly the reference's
+length. The indexes come first, outside the frame, because decoding needs the
+reference they name.
 
 ### 5.3. Capture algorithm
 
@@ -488,22 +516,25 @@ capture(G, P, chain, VM):
     require VM.length >= P.length, aligned to 64 KiB, within limit
     batch = []
     for each marked page i in ascending order:
-        current = VM.page(i)
         previous = P.page(i), or zeros beyond P.length
+        if i is below the stack pointer: zero VM's stack bytes in page i
+        current = VM.page(i)
         if current == previous: continue
-        batch.append((i, current XOR previous))
+        batch.append(i, current, against previous)
         P.page(i) = current
     if the run settled: chain = []                  // no image is kept
     else if batch is not empty:
         if chain is empty: the batch is the base     // P was G
         else if chain has 16 batches, or deltaBytes + batch > 2 * baseBytes:
-            batch = every page of P that differs from G, XORed against G
+            batch = every page of P that differs from G, against G
             chain = []                               // a new base
         chain.append(nextBatch)
     return chain, batch
 ```
 
-Count compared pages as examined, actual changes as changed. Updating P with
+Count compared pages as examined, actual changes as changed. Zeroing the
+dead stack in the VM itself keeps the VM equal to the image it restores from;
+golden is captured with its stack zeroed too. Updating P with
 each changed page keeps it equal to the VM's memory as of the commit: the
 `verify-dirty` build checks that every page that differs from it was marked.
 A new base bounds restoring to at most 16 batches, and at most three times the
@@ -517,10 +548,9 @@ reconstruct(commit):
     require golden_length <= memoryLen <= limit, 64-KiB aligned
     memory = golden bytes, extended with zeros to memoryLen
     for each batch in commit.chain, in order:
-        decode and validate it
-        for each entry (page i, xor):
-            require i within memory
-            memory.page(i) XOR= xor
+        indexes = its page indexes; require each within memory
+        pages = its frame, decoded against memory's pages at indexes
+        write pages into memory at indexes
     return Image(memory, commit.meta)
 ```
 
@@ -762,7 +792,9 @@ SDK 1.17.3 on Node 22:
 
 Rows vary by ~10% from run to run. Before the commit record and the live VM,
 the same rows were 220/s, 64 ms, 1.36 s, 40/s, 8.3/s, 1.8 s and 1.1 MiB;
-before the chain of batches, the run of 20 waits wrote 137 KiB. The Rust
+before the chain of batches, the run of 20 waits wrote 137 KiB. These rows
+predate compressing pages against their previous contents (§4), which wrote
+28-54% fewer bytes in `MemoryStore`. The Rust
 SDK's server now sets `TCP_NODELAY`, which saved ~40 ms per round trip. One
 synchronous JavaScript job is still capped at about 10^8 Wasm instructions,
 and the interpreter runs compute-bound code ~10x slower than V8.

@@ -181,8 +181,8 @@ pub(crate) struct Commit {
     pub meta: VmMeta,
     pub memory_len: usize,
     /// The image, as batches to apply in order over golden (zeros beyond its
-    /// length): the first XORed against golden, each next one against the
-    /// image before it. Empty once the run has settled.
+    /// length): the first holds the pages that differ from golden, each next
+    /// one the pages one turn changed. Empty once the run has settled.
     pub chain: Vec<u64>,
     /// Bytes of the chain's first batch, and of the others.
     pub base_bytes: usize,
