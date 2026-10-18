@@ -36,7 +36,7 @@ with backoff ([`retry`](programs/retry.js)), a deadline
 
 `ctx.kv.get/set/delete(key)` for the scope's JSON state,
 `ctx.rpc.call({ service, handler, key? }, input)` for any Restate service, and
-`ctx.sleep(ms)`. Models are a service too: `claude/messages` takes a
+`ctx.sleep(ms)`; `ctx.key` is the object's key. Models are a service too: `claude/messages` takes a
 [Messages API](https://platform.claude.com/docs/en/api/messages) request.
 
 - All I/O goes through `ctx`; values are JSON.

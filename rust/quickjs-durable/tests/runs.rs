@@ -35,6 +35,18 @@ fn a_new_attempt_restores_closures_cycles_and_maps() -> Result<()> {
     Ok(())
 }
 
+/// `ctx.key` is the scope the run started in, and stays it on another attempt.
+#[test]
+fn a_run_knows_its_scope() -> Result<()> {
+    let source = r#"async function main(_,ctx){
+      const before=ctx.key;await ctx.sleep(1);return [before,ctx.key];}"#;
+    let store = MemoryStore::default();
+    start(&store, source, Value::Null, 1)?;
+    let mut run = start(&store, source, Value::Null, 2)?;
+    assert_eq!(value(&finish(&mut run, &store)?), json!(["s", "s"]));
+    Ok(())
+}
+
 /// A live VM, kept from turn to turn, and one restored at every turn end
 /// alike, down to the bytes they store.
 #[test]
@@ -76,7 +88,7 @@ fn every_runtime_evaluates_a_program_alike() -> Result<()> {
     let run = |catalogs: [&Arc<Programs>; 3]| -> Result<MemoryStore> {
         let store = MemoryStore::default();
         for catalog in catalogs {
-            let mut run = block(Run::start(catalog, &store, "r", "v1", Value::Null, 1))?;
+            let mut run = block(Run::start(catalog, &store, "s", "r", "v1", Value::Null, 1))?;
             if run.view().state.outcome.is_none() {
                 step(&mut run, &store)?;
             }
@@ -104,7 +116,7 @@ fn a_run_refuses_another_version_of_its_program_or_runtime() -> Result<()> {
         "{error:#}"
     );
     let renamed = Arc::new(Programs::new(runtime()).compile("v2", source)?);
-    assert!(block(Run::start(&renamed, &store, "r", "v1", Value::Null, 1)).is_err());
+    assert!(block(Run::start(&renamed, &store, "s", "r", "v1", Value::Null, 1)).is_err());
     let rebuilt = MemoryStore::default();
     let mut commit: Value = serde_json::from_slice(&store.values()["commit"])?;
     commit["runtime"] = json!(0);
@@ -484,7 +496,15 @@ fn a_scope_shares_its_kv_between_runs() -> Result<()> {
             .compile("v1", first)?
             .compile("v2", second)?,
     );
-    let next = block(Run::start(&programs, &store, "next", "v2", Value::Null, 2))?;
+    let next = block(Run::start(
+        &programs,
+        &store,
+        "s",
+        "next",
+        "v2",
+        Value::Null,
+        2,
+    ))?;
     assert_eq!(value(&next.view()), json!({"n":1}));
     assert_eq!(stored(&store, "batch/"), 0);
     Ok(())

@@ -39,7 +39,15 @@ pub fn block<F: Future>(future: F) -> F::Output {
 
 /// Run "r" of `source`'s program "v1" in `store`: started, or another attempt.
 pub fn start(store: &MemoryStore, source: &str, input: Value, now: u64) -> Result<Run> {
-    block(Run::start(&programs(source), store, "r", "v1", input, now))
+    block(Run::start(
+        &programs(source),
+        store,
+        "s",
+        "r",
+        "v1",
+        input,
+        now,
+    ))
 }
 
 /// The value the run completed with.
