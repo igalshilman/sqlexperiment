@@ -119,6 +119,11 @@ fn programs() -> Arc<Programs> {
 
 /// Serve the programs and `Doubler`, and register them with the server.
 async fn serve() -> u16 {
+    serve_programs(&programs()).await
+}
+
+/// Serve `programs` and `Doubler`, and register them with the server.
+async fn serve_programs(programs: &Arc<Programs>) -> u16 {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
         .with_test_writer()
@@ -128,7 +133,7 @@ async fn serve() -> u16 {
         .local_addr()
         .unwrap()
         .port();
-    let endpoint = quickjs_restate::bind(Endpoint::builder(), &programs())
+    let endpoint = quickjs_restate::bind(Endpoint::builder(), programs)
         .bind(Doubler)
         .build();
     tokio::spawn(
@@ -269,4 +274,27 @@ async fn a_run_ends_when_main_settles() {
     tokio::time::sleep(Duration::from_millis(700)).await;
     let (_, late) = call("race/dave/run", json!("late")).await;
     assert_eq!(late, Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-qjs-restate"]
+async fn the_shipped_programs_do_what_they_say() {
+    let _server = server().await;
+    serve_programs(&quickjs_restate::embedded().unwrap()).await;
+
+    let (_, counted) = call("counter/alice/run", json!(20)).await;
+    assert_eq!(counted, json!(20));
+    let (_, memory) = call("memory/alice/run", json!(3)).await;
+    assert_eq!(
+        memory,
+        json!({"tally": {"durable": 1, "javascript": 1, "is": 1}, "calls": 3})
+    );
+    let (_, fanned) = call("fanout/alice/run", json!(["bob", "carol", "alice"])).await;
+    assert_eq!(fanned, json!({"bob": 1, "carol": 1, "alice": 21}));
+    let (_, answered) = call("timeout/alice/run", json!(300)).await;
+    assert_eq!(answered, json!("done after 300 ms"));
+    let (_, timed_out) = call("timeout/alice/run", json!(3000)).await;
+    assert_eq!(timed_out, json!("timed out"));
+    let (_, primes) = call("primes/alice/run", json!(20000)).await;
+    assert_eq!(primes, json!(2262));
 }
