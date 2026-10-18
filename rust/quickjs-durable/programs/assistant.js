@@ -80,17 +80,14 @@ async function main({ customer, message }, ctx) {
   const messages = (await ctx.kv.get('messages')) ?? [];
   messages.push({ role: 'user', content: message });
   for (let step = 0; step < 10; step++) {
-    const response = await ctx.rpc.call(
-      { service: 'claude', handler: 'messages' },
-      {
-        model: MODEL,
-        max_tokens: 16000,
-        output_config: { effort: 'low' },
-        system: `You are the shop assistant of ${customer}. Use the tools to answer and to buy.`,
-        tools: TOOLS,
-        messages,
-      },
-    );
+    const response = await ctx.claude.messages({
+      model: MODEL,
+      max_tokens: 16000,
+      output_config: { effort: 'low' },
+      system: `You are the shop assistant of ${customer}. Use the tools to answer and to buy.`,
+      tools: TOOLS,
+      messages,
+    });
     if (response.stop_reason === 'refusal') return { answer: 'Sorry, I cannot help with that.' };
     messages.push({ role: 'assistant', content: response.content });
     if (response.stop_reason !== 'tool_use') {

@@ -13,7 +13,7 @@
 //     '{"task": "Write primes.py, printing the primes below 100, with a test, and run both"}'
 //   ls workspaces/primes
 const MODEL = 'claude-opus-5-5';
-const MAX_STEPS = 200;
+const MAX_STEPS = 500;
 
 const SYSTEM = `You are a coding agent working in a workspace: a directory, with a shell.
 Use the tools to do the task: look around first, make the changes, and run
@@ -88,17 +88,14 @@ async function main({ task }, ctx) {
   const tools = workspace(ctx);
   const messages = [{ role: 'user', content: task }];
   for (let step = 1; step <= MAX_STEPS; step++) {
-    const response = await ctx.rpc.call(
-      { service: 'claude', handler: 'messages' },
-      {
-        model: MODEL,
-        max_tokens: 32000,
-        output_config: { effort: 'medium' },
-        system: SYSTEM,
-        tools: TOOLS,
-        messages: cached(messages),
-      },
-    );
+    const response = await ctx.claude.messages({
+      model: MODEL,
+      max_tokens: 32000,
+      output_config: { effort: 'medium' },
+      system: SYSTEM,
+      tools: TOOLS,
+      messages: cached(messages),
+    });
     if (response.stop_reason === 'refusal') throw new Error('Claude declined the task');
     messages.push({ role: 'assistant', content: response.content });
     if (response.stop_reason !== 'tool_use') {

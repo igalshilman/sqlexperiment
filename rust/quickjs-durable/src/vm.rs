@@ -1,4 +1,4 @@
-use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, Report, VmMeta, fingerprint};
+use crate::model::{Capture, Image, MAX_MEMORY, MAX_STRING, PAGE, Report, VmMeta, fingerprint};
 use crate::{heap, instrument::instrument, tracking::Tracker};
 use std::sync::Arc;
 use wasmtime::error::Context;
@@ -12,6 +12,10 @@ use wasmtime::{Result, bail, ensure};
 const WASM: &[u8] = include_bytes!("../assets/quickjs.wasm");
 const BOOTSTRAP: &str = include_str!("../assets/guest.js");
 const FUEL: u64 = 200_000_000;
+/// Fuel to read a model request out of the heap: its JSON, made in the
+/// guest at ~300 Wasm instructions a byte, for up to 32 MiB (`MAX_STRING`).
+/// Linear in the request, not a program's own work, so not a turn's budget.
+const REQUEST_FUEL: u64 = 50 * FUEL;
 /// Fuel left when a turn stops at its next safe boundary to checkpoint, so a
 /// long run of local requests makes progress across turns instead of trapping
 /// in every one of them. The rest covers that boundary's batch and capture.
@@ -32,7 +36,7 @@ const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
 /// The runtime's version: an image restores only on the runtime that made it.
 /// Bump it with anything an image depends on: the Wasm, the bridge
 /// (`guest.js`), the limits above, the imports' behavior, the VM metadata.
-pub(crate) const VERSION: u64 = 5;
+pub(crate) const VERSION: u64 = 6;
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.
@@ -479,6 +483,10 @@ impl Vm {
         self.store.data_mut().now = now;
         self.store.set_fuel(FUEL)
     }
+    /// Begin reading a request, with fuel for the largest one.
+    pub(crate) fn begin_request(&mut self) -> Result<()> {
+        self.store.set_fuel(REQUEST_FUEL)
+    }
     /// Whether the turn has spent half its fuel: time to stop at the next safe
     /// boundary, so a long run of local requests goes on in the next turn
     /// instead of running out.
@@ -563,7 +571,7 @@ impl Vm {
         self.memory
             .read(&self.store, len_ptr as u32 as usize, &mut len)?;
         let len = u32::from_le_bytes(len) as usize;
-        ensure!(len <= MAX_INPUT, "Host result exceeds limit");
+        ensure!(len <= MAX_STRING, "Host result exceeds limit");
         let mut bytes = vec![0; len];
         self.memory
             .read(&self.store, ptr as u32 as usize, &mut bytes)?;
