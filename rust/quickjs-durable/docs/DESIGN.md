@@ -444,6 +444,34 @@ this run commit protocol. The pinned public engine APIs supplied no
 ready-made dirty-page checkpoint list. Allocator layout cooperation may reduce
 writes to golden pages, but must supplement complete write tracking.
 
+**Garbage collection and the allocator, measured and left as they are.**
+QuickJS frees most objects by reference counting; its cycle collector runs
+once ~256 KiB were allocated since the last run (the threshold then adapts).
+Measured on 18 October 2026 over eight workloads (the seven above with a 100-turn
+agent, plus `cycles`, dropping 300 objects with cycles and closures a turn,
+and `fan`, `Promise.all` of 10 calls), bytes written per run in `MemoryStore`:
+
+| Workload | Default | Collect every turn | Threshold 1 MiB | Threshold 4 MiB or more |
+| -------- | ------- | ------------------ | --------------- | ----------------------- |
+| steps    | 61 KiB  | 66 KiB             | 61 KiB          | 61 KiB                  |
+| kv       | 179 KiB | 194 KiB            | 179 KiB         | 179 KiB                 |
+| agent    | 501 KiB | 498 KiB            | 487 KiB         | 487 KiB                 |
+| map      | 811 KiB | 812 KiB            | 814 KiB         | 809 KiB                 |
+| churn    | 2,473 KiB | 2,475 KiB        | 2,433 KiB       | 2,433 KiB               |
+| cycles   | 653 KiB | 726 KiB            | 822 KiB         | 1,997 KiB (5 MiB heap)  |
+| fan      | 626 KiB | 652 KiB            | 626 KiB         | 626 KiB                 |
+
+Collecting at every turn's end costs CPU (up to ~1 ms a turn on the Map) and
+writes more, not less: the collector relinks the objects it visits, which
+rewrites pointers across the heap. Collecting less often saves at most ~3%,
+and lets cyclic garbage pile up into the image. The default stays.
+
+The allocator's own bytes (chunk heads, free-list links) are 0-14 KiB of what
+these runs changed, against 33 KiB-7.6 MiB of payload; pages changed only by
+them are 0.5-7% of changed pages. Another allocator would need a rebuilt
+QuickJS binary for little: what a turn writes is what it allocates and keeps.
+Zeroing free chunks (§5.6) already makes what it allocates and frees free.
+
 ## 5. Persistent format, capture and reconstruction
 
 ### 5.1. Record identities and layouts
