@@ -118,6 +118,16 @@ index feb0086..94e0475 100644
  
  class ObjectSharedContext(Context):
      """
+diff --git a/python/restate/discovery.py b/python/restate/discovery.py
+index 0bd22dc..7837be7 100644
+--- a/python/restate/discovery.py
++++ b/python/restate/discovery.py
+@@ -433,4 +433,4 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
+         protocol_mode = PROTOCOL_MODES[endpoint.protocol]
+     else:
+         protocol_mode = PROTOCOL_MODES[discovered_as]
+-    return Endpoint(protocolMode=protocol_mode, minProtocolVersion=5, maxProtocolVersion=7, services=services)
++    return Endpoint(protocolMode=protocol_mode, minProtocolVersion=5, maxProtocolVersion=8, services=services)
 diff --git a/python/restate/handler.py b/python/restate/handler.py
 index 91a55a7..60b128e 100644
 --- a/python/restate/handler.py
@@ -220,10 +230,10 @@ index 14d5ef5..3ba219a 100644
              return wrapped
 diff --git a/python/restate/selector.py b/python/restate/selector.py
 new file mode 100644
-index 0000000..96e4a00
+index 0000000..3d51ac5
 --- /dev/null
 +++ b/python/restate/selector.py
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,266 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -243,7 +253,9 @@ index 0000000..96e4a00
 +invocation, though: a suspension, the awaiting-on hint and a cancellation each
 +take one unresolved future. So every wait is registered with the selector,
 +which asks the VM for progress on the first of all of them to complete, and is
-+the only one reading the invocation's input.
++the only one reading the invocation's input. So is an ephemeral command (a
++state get left out of the journal), by its completion id: the VM reports its
++result ahead of any future.
 +"""
 +
 +from __future__ import annotations
@@ -257,6 +269,7 @@ index 0000000..96e4a00
 +    AllCompletedUnresolvedFuture,
 +    DoProgressAnyCompleted,
 +    DoProgressCancelSignalReceived,
++    DoProgressEphemeralNotificationReady,
 +    DoProgressExecuteRun,
 +    DoProgressWaitExternalProgress,
 +    FirstCompletedUnresolvedFuture,
@@ -277,6 +290,10 @@ index 0000000..96e4a00
 +
 +    def is_completed(self, handle: int) -> bool:
 +        """Whether the VM has the result of ``handle``."""
++        ...
++
++    def take_ephemeral(self, completion_id: int) -> Any:
++        """The result of a ready ephemeral command."""
 +        ...
 +
 +    async def flush_output(self) -> None:
@@ -328,13 +345,17 @@ index 0000000..96e4a00
 +    to complete: so a suspension waits for any of them, a pending run starts
 +    whichever wait reaches it first, and a cancellation reaches all of them. A
 +    wait registered while the loop reads the input wakes it, so it is part of
-+    the next check. The loop runs while something is pending.
++    the next check. An ephemeral command is waited for by its completion id,
++    and keeps the loop going with no future pending; a cancellation does not
++    reach it. The loop runs while something is pending.
 +    """
 +
 +    def __init__(self, driver: SelectorDriver, disconnected: Callable[[], BaseException]) -> None:
 +        self._driver = driver
 +        self._disconnected = disconnected
 +        self._waits: Dict[asyncio.Future, UnresolvedFuture] = {}
++        # The ephemeral commands in flight, by completion id.
++        self._ephemeral: Dict[int, asyncio.Future] = {}
 +        self._task: Optional[asyncio.Task] = None
 +        # Between the VM's WaitExternalProgress and the next input.
 +        self._waiting = False
@@ -349,7 +370,7 @@ index 0000000..96e4a00
 +    @property
 +    def size(self) -> int:
 +        """The waits still pending, for tests."""
-+        return len(self._waits)
++        return len(self._waits) + len(self._ephemeral)
 +
 +    async def wait(self, future: UnresolvedFuture) -> None:
 +        """Returns once ``future`` is ready; raises if the attempt ends first, or is cancelled."""
@@ -359,6 +380,25 @@ index 0000000..96e4a00
 +            return
 +        waiter = asyncio.get_running_loop().create_future()
 +        self._waits[waiter] = future
++        self._start()
++        try:
++            await waiter
++        finally:
++            self._waits.pop(waiter, None)
++
++    async def wait_ephemeral(self, completion_id: int) -> Any:
++        """The result of the ephemeral command ``completion_id``; raises if the attempt ends first."""
++        if self._end is not None:
++            raise self._end()
++        waiter = asyncio.get_running_loop().create_future()
++        self._ephemeral[completion_id] = waiter
++        self._start()
++        try:
++            return await waiter
++        finally:
++            self._ephemeral.pop(completion_id, None)
++
++    def _start(self) -> None:
 +        if self._task is None:
 +            self._task = asyncio.create_task(self._loop())
 +            self._driver.track(self._task)
@@ -367,18 +407,17 @@ index 0000000..96e4a00
 +            # up the new wait on its next pass.
 +            self._waiting = False
 +            self._driver.wake()
-+        try:
-+            await waiter
-+        finally:
-+            self._waits.pop(waiter, None)
 +
 +    def _settle(self) -> None:
 +        for waiter, future in self._waits.items():
 +            if not waiter.done() and is_ready(future, self._driver.is_completed):
 +                waiter.set_result(None)
 +
-+    def _fail_all(self, error: Callable[[], BaseException]) -> None:
-+        for waiter in self._waits:
++    def _fail_all(self, error: Callable[[], BaseException], ephemeral: bool = True) -> None:
++        waiters = list(self._waits)
++        if ephemeral:
++            waiters += self._ephemeral.values()
++        for waiter in waiters:
 +            if not waiter.done():
 +                waiter.set_exception(error())
 +
@@ -398,9 +437,12 @@ index 0000000..96e4a00
 +                # registers later wakes the loop anyway.
 +                await asyncio.sleep(0)
 +                pending = [future for waiter, future in self._waits.items() if not waiter.done()]
-+                if not pending:
++                ephemeral = any(not waiter.done() for waiter in self._ephemeral.values())
++                if not pending and not ephemeral:
 +                    return
 +                await driver.flush_output()
++                # With only ephemeral commands in flight, no future: the VM
++                # reports their results, or waits for input.
 +                response = driver.do_progress(
 +                    pending[0] if len(pending) == 1 else FirstCompletedUnresolvedFuture(pending)
 +                )
@@ -413,9 +455,15 @@ index 0000000..96e4a00
 +                    return
 +                if isinstance(response, DoProgressAnyCompleted):
 +                    continue
++                if isinstance(response, DoProgressEphemeralNotificationReady):
++                    waiter = self._ephemeral.get(response.completion_id)
++                    result = driver.take_ephemeral(response.completion_id)
++                    if waiter is not None and not waiter.done():
++                        waiter.set_result(result)
++                    continue
 +                if isinstance(response, DoProgressCancelSignalReceived):
 +                    # Reaches every pending wait; what waits after it is not cancelled.
-+                    self._fail_all(lambda: TerminalError("cancelled", 409))
++                    self._fail_all(lambda: TerminalError("cancelled", 409), ephemeral=False)
 +                    continue
 +                if isinstance(response, DoProgressExecuteRun):
 +                    driver.execute_run(response.handle)
@@ -470,7 +518,7 @@ index c5e233f..66d5478 100644
                      dict(request_headers),
                      receive_channel,
 diff --git a/python/restate/server_context.py b/python/restate/server_context.py
-index 80fbec3..b195422 100644
+index 80fbec3..151c85a 100644
 --- a/python/restate/server_context.py
 +++ b/python/restate/server_context.py
 @@ -56,7 +56,9 @@ from restate.exceptions import (
@@ -649,7 +697,7 @@ index 80fbec3..b195422 100644
          if isinstance(serde, DefaultSerde):
              serde = serde.with_maybe_type(type_hint)
          name, handle = self.vm.sys_awakeable()
-@@ -1258,6 +1322,89 @@ class ServerInvocationContext(ObjectContext):
+@@ -1258,6 +1322,101 @@ class ServerInvocationContext(ObjectContext):
      def key(self) -> str:
          return self.invocation.key
  
@@ -682,8 +730,20 @@ index 80fbec3..b195422 100644
 +        return f"{self.handler.service_tag.name}/{self.invocation.key}"
 +
 +    def sql_get(self, key: str) -> Awaitable[Optional[bytes]]:
-+        """A state read, issued now."""
-+        return self.get(key, serde=BytesSerde())
++        """A state read, issued now and left out of the journal (protocol V8)."""
++        completion_id = self.vm.ephemeral_state_get(key)
++        assert self.selector is not None, "ctx.db runs without journal replay"
++        selector = self.selector
++
++        async def read() -> Optional[bytes]:
++            value = await selector.wait_ephemeral(completion_id)
++            if isinstance(value, Failure):
++                raise TerminalError(value.message, value.code)
++            if isinstance(value, BaseException):
++                raise SdkInternalException() from value
++            return value
++
++        return read()
 +
 +    def sql_set(self, key: str, value: bytes) -> None:
 +        """A state write."""
@@ -739,7 +799,7 @@ index 80fbec3..b195422 100644
      def cancel_invocation(self, invocation_id: str):
          """cancel an existing invocation by id."""
          if invocation_id is None:
-@@ -1283,3 +1430,70 @@ class ServerInvocationContext(ObjectContext):
+@@ -1283,3 +1442,73 @@ class ServerInvocationContext(ObjectContext):
      def set_extension_data(self, key: str, value: Any) -> None:
          """Set extension data by key."""
          self.extension_data[key] = value
@@ -775,6 +835,9 @@ index 80fbec3..b195422 100644
 +
 +    def is_completed(self, handle: int) -> bool:
 +        return self.context.vm.is_completed(handle)
++
++    def take_ephemeral(self, completion_id: int) -> Any:
++        return self.context.vm.take_ephemeral_notification(completion_id)
 +
 +    async def flush_output(self) -> None:
 +        await self.context.take_and_send_output()
@@ -1553,10 +1616,45 @@ index 0000000..9e20a5d
 +    task = asyncio.ensure_future(db.close())
 +    task.add_done_callback(lambda f: f.cancelled() or f.exception())
 diff --git a/python/restate/vm.py b/python/restate/vm.py
-index 7b7b91f..e652181 100644
+index 7b7b91f..17999a6 100644
 --- a/python/restate/vm.py
 +++ b/python/restate/vm.py
-@@ -205,8 +205,13 @@ class VMWrapper:
+@@ -33,6 +33,7 @@ from restate._internal import (
+     PyDoProgressWaitExternalProgress,
+     PyDoProgressExecuteRun,
+     PyDoProgressCancelSignalReceived,
++    PyDoProgressEphemeralNotificationReady,
+     PyUnresolvedFuture,
+     PyRun,
+     CANCEL_NOTIFICATION_HANDLE,
+@@ -147,6 +148,18 @@ class Run:
+     handle: int
+ 
+ 
++class DoProgressEphemeralNotificationReady:
++    """
++    Represents a notification that an ephemeral command's result is ready:
++    it comes ahead of any other progress.
++    """
++
++    completion_id: int
++
++    def __init__(self, completion_id):
++        self.completion_id = completion_id
++
++
+ DO_PROGRESS_ANY_COMPLETED = DoProgressAnyCompleted()
+ DO_PROGRESS_WAIT_EXTERNAL_PROGRESS = DoProgressWaitExternalProgress()
+ DO_PROGRESS_CANCEL_SIGNAL_RECEIVED = DoProgressCancelSignalReceived()
+@@ -156,6 +169,7 @@ DoProgressResult = typing.Union[
+     DoProgressWaitExternalProgress,
+     DoProgressExecuteRun,
+     DoProgressCancelSignalReceived,
++    DoProgressEphemeralNotificationReady,
+ ]
+ 
+ 
+@@ -205,8 +219,13 @@ class VMWrapper:
      It provides a type-friendly interface to our shared vm.
      """
  
@@ -1572,6 +1670,48 @@ index 7b7b91f..e652181 100644
  
      def get_response_head(self) -> typing.Tuple[int, typing.Iterable[typing.Tuple[str, str]]]:
          """
+@@ -261,6 +280,8 @@ class VMWrapper:
+             return DoProgressExecuteRun(result.handle)
+         if isinstance(result, PyDoProgressCancelSignalReceived):
+             return DO_PROGRESS_CANCEL_SIGNAL_RECEIVED
++        if isinstance(result, PyDoProgressEphemeralNotificationReady):
++            return DoProgressEphemeralNotificationReady(result.completion_id)
+         return ValueError(f"Unknown progress type: {result}")
+ 
+     def take_notification(self, handle: int) -> typing.Union[NotificationType, Exception, Suspended]:
+@@ -357,6 +378,32 @@ class VMWrapper:
+         """
+         return self.vm.sys_get_state(name)
+ 
++    def ephemeral_state_get(self, name: str) -> int:
++        """
++        Gets a state value without recording it in the journal (protocol V8).
++
++        Returns:
++            The completion id of the ephemeral command.
++        """
++        return self.vm.ephemeral_state_get(name)
++
++    def take_ephemeral_notification(self, completion_id: int) -> typing.Union[NotificationType, Exception]:
++        """The value of an ephemeral state get: bytes, None (no value), a Failure, or NOT_READY."""
++        try:
++            result = self.vm.take_ephemeral_notification(completion_id)
++        except VMException as e:
++            return e
++        if result is None:
++            return NOT_READY
++        if isinstance(result, PyVoid):
++            return None
++        if isinstance(result, bytes):
++            return result
++        if isinstance(result, PyFailure):
++            metadata = dict(result.metadata) if result.metadata else None
++            return Failure(result.code, result.message, metadata=metadata)
++        return ValueError(f"Unknown result type: {result}")
++
+     def sys_get_state_keys(self) -> int:
+         """
+         Retrieves all keys.
 diff --git a/python/restate/workflow.py b/python/restate/workflow.py
 index b87a996..331153d 100644
 --- a/python/restate/workflow.py
@@ -1681,7 +1821,7 @@ index b87a996..331153d 100644
              self.handlers[handler.name] = handler
              return wrapped
 diff --git a/src/lib.rs b/src/lib.rs
-index 319281a..2058711 100644
+index 319281a..e7fb7f2 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -4,9 +4,9 @@ use pyo3::types::{PyBytes, PyNone, PyString};
@@ -1705,7 +1845,20 @@ index 319281a..2058711 100644
  type PyNotificationHandle = u32;
  
  #[pyclass]
-@@ -371,10 +370,11 @@ struct PyVM {
+@@ -268,6 +267,12 @@ struct PyDoProgressExecuteRun {
+ #[pyclass]
+ struct PyDoProgressCancelSignalReceived;
+ 
++#[pyclass]
++struct PyDoProgressEphemeralNotificationReady {
++    #[pyo3(get)]
++    completion_id: u32,
++}
++
+ #[pyclass]
+ #[derive(Clone)]
+ pub struct PyUnresolvedFuture {
+@@ -371,10 +376,11 @@ struct PyVM {
  #[pymethods]
  impl PyVM {
      #[new]
@@ -1718,7 +1871,7 @@ index 319281a..2058711 100644
      ) -> Result<Self, PyVMError> {
          // When a journal value codec is configured, the serialized payloads written to the journal
          // may legitimately differ between attempts (e.g. encryption with a random nonce), so we
-@@ -385,6 +385,13 @@ impl PyVM {
+@@ -385,6 +391,13 @@ impl PyVM {
              } else {
                  NonDeterministicChecksOption::Enabled
              },
@@ -1732,18 +1885,64 @@ index 319281a..2058711 100644
              ..Default::default()
          };
          Ok(Self {
-@@ -468,6 +475,11 @@ impl PyVM {
+@@ -468,6 +481,13 @@ impl PyVM {
              Ok(AwaitResponse::CancelSignalReceived) => {
                  Ok(Bound::new(py, PyDoProgressCancelSignalReceived)?.into_any())
              }
-+            // Of protocol V8's ephemeral commands, which this SDK does not make.
-+            Ok(AwaitResponse::EphemeralNotificationReady(_)) => Err(PyVMError::from(Error::new(
-+                restate_sdk_shared_core::error::codes::INTERNAL,
-+                "unexpected ephemeral notification: this SDK makes no ephemeral commands",
-+            )))?,
++            Ok(AwaitResponse::EphemeralNotificationReady(id)) => Ok(Bound::new(
++                py,
++                PyDoProgressEphemeralNotificationReady {
++                    completion_id: id.into(),
++                },
++            )?
++            .into_any()),
          }
      }
  
+@@ -521,6 +541,35 @@ impl PyVM {
+             .map_err(Into::into)
+     }
+ 
++    /// A state get left out of the journal (protocol V8): its completion id.
++    fn ephemeral_state_get(mut self_: PyRefMut<'_, Self>, key: String) -> Result<u32, PyVMError> {
++        self_
++            .vm
++            .ephemeral_state_get(key)
++            .map(Into::into)
++            .map_err(Into::into)
++    }
++
++    /// The value of an ephemeral state get: `PyBytes`, `PyVoid`, `PyFailure`,
++    /// or `None` while it is not ready.
++    fn take_ephemeral_notification(
++        mut self_: PyRefMut<'_, Self>,
++        completion_id: u32,
++    ) -> PyResult<Bound<'_, PyAny>> {
++        let res = self_.vm.take_ephemeral_notification(completion_id.into());
++        let py = self_.py();
++        match res.map_err(PyVMError::from)? {
++            None => Ok(PyNone::get(py).to_owned().into_any()),
++            Some(Value::Void) => Ok(Bound::new(py, PyVoid)?.into_any()),
++            Some(Value::Success(b)) => Ok(PyBytes::new(py, &b).into_any()),
++            Some(Value::Failure(f)) => Ok(Bound::new(py, PyFailure::from(f))?.into_any()),
++            Some(other) => Err(PyVMError::from(Error::new(
++                restate_sdk_shared_core::error::codes::INTERNAL,
++                format!("unexpected value of an ephemeral state get: {other:?}"),
++            )))?,
++        }
++    }
++
+     fn sys_get_state_keys(
+         mut self_: PyRefMut<'_, Self>,
+     ) -> Result<PyNotificationHandle, PyVMError> {
+@@ -1018,6 +1067,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+     m.add_class::<PyDoProgressWaitExternalProgress>()?;
+     m.add_class::<PyDoProgressExecuteRun>()?;
+     m.add_class::<PyDoProgressCancelSignalReceived>()?;
++    m.add_class::<PyDoProgressEphemeralNotificationReady>()?;
+     m.add_class::<PyUnresolvedFuture>()?;
+     m.add_class::<PyCallHandle>()?;
+     m.add_class::<PyRun>()?;
 diff --git a/tests/journal_replay.py b/tests/journal_replay.py
 new file mode 100644
 index 0000000..dc02582
@@ -1810,10 +2009,10 @@ index 0000000..dc02582
 +    VMWrapper(headers)
 diff --git a/tests/selector.py b/tests/selector.py
 new file mode 100644
-index 0000000..3a26ae3
+index 0000000..7f2296c
 --- /dev/null
 +++ b/tests/selector.py
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,283 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -1837,6 +2036,7 @@ index 0000000..3a26ae3
 +    AllCompletedUnresolvedFuture,
 +    DoProgressAnyCompleted,
 +    DoProgressCancelSignalReceived,
++    DoProgressEphemeralNotificationReady,
 +    DoProgressExecuteRun,
 +    DoProgressWaitExternalProgress,
 +    FirstCompletedUnresolvedFuture,
@@ -1859,7 +2059,10 @@ index 0000000..3a26ae3
 +
 +
 +class FakeVm:
-+    """A VM whose handles complete as input names them: a body chunk b"3" completes handle 3."""
++    """
++    A VM whose handles complete as input names them: a body chunk b"3" completes
++    handle 3, and b"e3" the ephemeral command 3 (reported ahead of the rest).
++    """
 +
 +    def __init__(self) -> None:
 +        self.completed: Set[int] = set()
@@ -1871,9 +2074,13 @@ index 0000000..3a26ae3
 +        self.wakes = 0
 +        self.ended = 0
 +        self.tasks: List[asyncio.Future] = []
++        self.ephemeral: Dict[int, Any] = {}
++        self.ephemeral_ready: List[int] = []
 +
 +    def do_progress(self, future: UnresolvedFuture) -> Any:
 +        self.checks.append(future)
++        if self.ephemeral_ready:
++            return DoProgressEphemeralNotificationReady(self.ephemeral_ready.pop(0))
 +        if self.script:
 +            return self.script.pop(0)
 +        if is_ready(future, self.is_completed):
@@ -1882,6 +2089,9 @@ index 0000000..3a26ae3
 +
 +    def is_completed(self, handle: int) -> bool:
 +        return handle in self.completed
++
++    def take_ephemeral(self, completion_id: int) -> Any:
++        return self.ephemeral.pop(completion_id)
 +
 +    async def flush_output(self) -> None:
 +        pass
@@ -1899,7 +2109,11 @@ index 0000000..3a26ae3
 +        self.input.put_nowait({"type": "restate.run_completed"})
 +
 +    def notify_input(self, chunk: Dict[str, Any]) -> None:
-+        self.completed.add(int(chunk["body"]))
++        body = chunk["body"]
++        if body.startswith(b"e"):
++            self.ephemeral_ready.append(int(body[1:]))
++        else:
++            self.completed.add(int(body))
 +
 +    def track(self, task: asyncio.Future) -> None:
 +        self.tasks.append(task)
@@ -1909,6 +2123,10 @@ index 0000000..3a26ae3
 +
 +    def complete(self, handle: int) -> None:
 +        self.input.put_nowait({"type": "http.request", "body": str(handle).encode(), "more_body": True})
++
++    def complete_ephemeral(self, completion_id: int, value: Any) -> None:
++        self.ephemeral[completion_id] = value
++        self.input.put_nowait({"type": "http.request", "body": f"e{completion_id}".encode(), "more_body": True})
 +
 +
 +def single(handle: int) -> SingleUnresolvedFuture:
@@ -1926,6 +2144,43 @@ index 0000000..3a26ae3
 +    selector = FutureSelector(vm, Disconnected)
 +    await selector.wait(single(1))
 +    assert vm.checks == []
++
++
++async def test_an_ephemeral_command_keeps_the_loop_going_with_no_future():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    value = asyncio.ensure_future(selector.wait_ephemeral(7))
++    await settle()
++    assert vm.checks == [FirstCompletedUnresolvedFuture([])]
++    vm.complete_ephemeral(7, b"v")
++    assert await value == b"v"
++    await settle()
++    assert selector.size == 0
++    assert vm.tasks[0].done()
++
++
++async def test_an_ephemeral_command_completes_alongside_the_waits():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    wait = asyncio.ensure_future(selector.wait(single(1)))
++    value = asyncio.ensure_future(selector.wait_ephemeral(2))
++    await settle()
++    vm.complete_ephemeral(2, None)
++    assert await value is None
++    assert not wait.done()
++    vm.complete(1)
++    await wait
++    assert selector.size == 0
++
++
++async def test_the_end_of_the_attempt_fails_an_ephemeral_command():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    value = asyncio.ensure_future(selector.wait_ephemeral(1))
++    await settle()
++    vm.input.put_nowait({"type": "http.disconnect"})
++    with pytest.raises(Disconnected):
++        await value
 +
 +
 +async def test_concurrent_waits_share_one_await_point():

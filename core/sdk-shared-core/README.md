@@ -11,10 +11,11 @@ links it natively.
 | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | [`sdk-shared-core.patch`](sdk-shared-core.patch) | [`382649d`](https://github.com/restatedev/sdk-shared-core/commit/382649d0652aa6d971ec16e788d24b4b2c8c8b45), unreleased main (protocol V8) |
 
-| Change                                                     | Why                                                                                                                                                                                        |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `JournalReplay::Disabled`, a `VMOptions` field             | A retried attempt runs the handler again against the state as stored, instead of replaying a journal its reads would not match                                                             |
-| State commands (get, set, clear) are named after their key | Tooling can hide them by name, such as a SQL database's pages and log (`dev.restate.tooling.journal.hidden.name.prefix`); a journal recorded with unnamed state commands no longer replays |
+| Change                                                                                                                                                                                 | Why                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `JournalReplay::Disabled`, a `VMOptions` field                                                                                                                                         | A retried attempt runs the handler again against the state as stored, instead of replaying a journal its reads would not match                                                                               |
+| State commands (get, set, clear) are named after their key                                                                                                                             | Tooling can hide them by name, such as a SQL database's pages and log (`dev.restate.tooling.journal.hidden.name.prefix`); a journal recorded with unnamed state commands no longer replays                   |
+| An await of an empty future (`FirstCompleted([])`) leaves it out of the awaiting-on future (the cancel signal's alone), and sends no awaiting-on message without implicit cancellation | An SDK's single await point with only ephemeral state gets in flight (a database's reads, left out of the journal) awaits nothing but their notifications, which come first; Restate refuses an empty future |
 
 ## Without journal replay
 
@@ -24,5 +25,5 @@ attempts are never reused); awakeables, whose signal ids cannot be made fresh,
 are refused. The change is in `VMOptions`, `SysInput` and
 `Journal::skip_replayed`.
 
-The shared core's tests pass with the patch (280). An SDK's
+The shared core's tests pass with the patch (281). An SDK's
 `patches/regenerate.sh` writes the patch back from its edited clone.
