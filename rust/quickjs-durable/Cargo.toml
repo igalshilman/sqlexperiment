@@ -22,6 +22,7 @@ reqwest = { version = "0.13", features = ["json"] }
 restate-sdk = { path = "../sdk/.build/sdk-rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlite-kv = { path = "../../core/sqlite-kv" }
 tokio = { version = "1", features = ["fs", "macros", "process", "rt-multi-thread", "time"] }
 tracing-subscriber = "0.3"
 wasm-encoder = { version = "=0.258.3", features = ["wasmparser"] }
@@ -37,6 +38,7 @@ zstd = "0.13"
 
 [dev-dependencies]
 futures-executor = "0.3.34"
+sqlite-kv = { path = "../../core/sqlite-kv", features = ["simulation"] }
 tempfile = "3"
 wat = "=1.258.0"
 

@@ -1,76 +1,46 @@
-//! Where a scope's runs and KV live: a key/value store with one writer, the
-//! scope's owner, at a time. A write may be acknowledged before it is durable,
-//! as long as a failure loses only a suffix of the writes, in issue order:
-//! Restate state is such a store. Storage is trusted; nothing is verified.
+//! Where a scope's runs and KV live: a sqlite-kv database in a key/value
+//! store (in Restate, the object's state; in tests, a `MemoryKv`). A turn is
+//! one commit of it: the run's state as the record's effects, the pages the
+//! turn changed as a value of its chain, and the KV writes as SQL, in one put.
+//! Writes may land in any order; a write counts once it is acknowledged.
 use anyhow::Result;
-use std::{collections::BTreeMap, future::Future, sync::Mutex};
+use sqlite_kv::{Durability, NamespaceCache, Session, StorageOptions, kv::KvStore};
+use std::sync::Arc;
 
-pub trait Store {
-    fn get(&self, key: &str) -> impl Future<Output = Result<Option<Vec<u8>>>>;
-    fn put(&self, key: &str, value: Vec<u8>) -> impl Future<Output = Result<()>>;
-    fn delete(&self, key: &str) -> impl Future<Output = Result<()>>;
+/// A scope's storage: the store its database lives in, and, for a process
+/// that keeps owning the scope, its owner cache (a commit then needs no read
+/// of what it wrote, and an open is one get).
+#[derive(Clone)]
+pub struct Scope {
+    store: Arc<dyn KvStore>,
+    cache: Option<NamespaceCache>,
 }
 
-/// A store in memory, for tests and benchmarks. It keeps every write in
-/// order, so a test can lose any suffix of them, as a crash may.
-#[derive(Default)]
-pub struct MemoryStore {
-    writes: Mutex<Vec<(String, Option<Vec<u8>>)>>,
-}
+impl Scope {
+    pub fn new(store: Arc<dyn KvStore>) -> Self {
+        Self { store, cache: None }
+    }
 
-impl MemoryStore {
-    /// The store as a crash would leave it, keeping only the first `kept` writes.
-    pub fn crashed(&self, kept: usize) -> Self {
-        let writes = self.writes.lock().unwrap();
+    /// The same scope, kept in `cache` between attempts.
+    pub fn cached(self, cache: NamespaceCache) -> Self {
         Self {
-            writes: Mutex::new(writes[..kept].to_vec()),
+            cache: Some(cache),
+            ..self
         }
     }
 
-    /// Writes so far: puts and deletes.
-    pub fn writes(&self) -> usize {
-        self.writes.lock().unwrap().len()
-    }
-
-    /// Bytes put so far, keys included.
-    pub fn bytes_written(&self) -> usize {
-        let writes = self.writes.lock().unwrap();
-        writes
-            .iter()
-            .map(|(key, value)| key.len() + value.as_ref().map_or(0, Vec::len))
-            .sum()
-    }
-
-    /// Every key and its value, as of the last write.
-    pub fn values(&self) -> BTreeMap<String, Vec<u8>> {
-        let mut values = BTreeMap::new();
-        for (key, value) in self.writes.lock().unwrap().iter() {
-            match value {
-                Some(value) => values.insert(key.clone(), value.clone()),
-                None => values.remove(key),
-            };
-        }
-        values
-    }
-}
-
-impl Store for MemoryStore {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let writes = self.writes.lock().unwrap();
-        Ok(writes
-            .iter()
-            .rev()
-            .find(|(written, _)| written == key)
-            .and_then(|(_, value)| value.clone()))
-    }
-
-    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        self.writes.lock().unwrap().push((key.into(), Some(value)));
-        Ok(())
-    }
-
-    async fn delete(&self, key: &str) -> Result<()> {
-        self.writes.lock().unwrap().push((key.into(), None));
-        Ok(())
+    /// Open the scope's database: each SQL commit durable when it returns.
+    pub(crate) async fn open(&self) -> Result<Session> {
+        let options = StorageOptions {
+            cache: self.cache.clone(),
+            durability: Durability::Commit,
+            // A turn changes a few pages: a small inline log keeps the record
+            // each turn rewrites small.
+            inline_log_bytes: 1024,
+            ..StorageOptions::default()
+        };
+        Session::open_with_options(self.store.clone(), options)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))
     }
 }

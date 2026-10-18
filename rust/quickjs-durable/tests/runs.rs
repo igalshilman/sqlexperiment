@@ -2,7 +2,7 @@
 //! turn commits, and what a new attempt restores.
 use anyhow::Result;
 use common::*;
-use quickjs_durable::{MemoryStore, Operation, Outcome, Program, Programs, Run, Runtime, Status};
+use quickjs_durable::{Operation, Outcome, Program, Programs, Run, Runtime, Status};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -18,20 +18,20 @@ const PROGRAM: &str = r#"async function main() {
 
 #[test]
 fn a_new_attempt_restores_closures_cycles_and_maps() -> Result<()> {
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, PROGRAM, Value::Null, 1000)?;
     assert_eq!(run.view().state.status, Status::Waiting);
     let first = run.view().state.pending[0].id().to_owned();
-    block(run.deliver(&store, &first, Outcome::success(2), 1001))?;
+    block(run.deliver(&first, Outcome::success(2), 1001))?;
     // Another attempt: the VM is restored from the commit.
     let mut run = start(&store, PROGRAM, Value::Null, 1002)?;
     let second = run.view().state.pending[0].id().to_owned();
-    let done = block(run.deliver(&store, &second, Outcome::success(Value::Null), 1002))?;
+    let done = block(run.deliver(&second, Outcome::success(Value::Null), 1002))?;
     assert_eq!(value(&done), json!({"n":42,"identity":true}));
     // A request delivered before changes nothing; an unknown one is refused.
-    let again = block(run.deliver(&store, &first, Outcome::success(999), 1003))?;
+    let again = block(run.deliver(&first, Outcome::success(999), 1003))?;
     assert_eq!(again.turns, done.turns);
-    assert!(block(run.deliver(&store, "r/999", Outcome::success(1), 1004)).is_err());
+    assert!(block(run.deliver("r/999", Outcome::success(1), 1004)).is_err());
     Ok(())
 }
 
@@ -40,10 +40,10 @@ fn a_new_attempt_restores_closures_cycles_and_maps() -> Result<()> {
 fn a_run_knows_its_scope() -> Result<()> {
     let source = r#"async function main(_,ctx){
       const before=ctx.key;await ctx.sleep(1);return [before,ctx.key];}"#;
-    let store = MemoryStore::default();
+    let store = Store::default();
     start(&store, source, Value::Null, 1)?;
     let mut run = start(&store, source, Value::Null, 2)?;
-    assert_eq!(value(&finish(&mut run, &store)?), json!(["s", "s"]));
+    assert_eq!(value(&finish(&mut run)?), json!(["s", "s"]));
     Ok(())
 }
 
@@ -57,10 +57,10 @@ fn a_live_run_and_a_restored_one_end_alike() -> Result<()> {
       await ctx.sleep(10);
       return log.map(x=>x.input);
     }"#;
-    let live = MemoryStore::default();
+    let live = Store::default();
     let mut run = start(&live, source, Value::Null, 1)?;
-    let expected = finish(&mut run, &live)?;
-    let restored = MemoryStore::default();
+    let expected = finish(&mut run)?;
+    let restored = Store::default();
     start(&restored, source, Value::Null, 1)?;
     loop {
         let mut run = start(&restored, source, Value::Null, 1)?;
@@ -68,7 +68,7 @@ fn a_live_run_and_a_restored_one_end_alike() -> Result<()> {
             assert_eq!(run.view().state, expected.state);
             break;
         }
-        step(&mut run, &restored)?;
+        step(&mut run)?;
     }
     assert_eq!(value(&expected), json!([0, 1, 2, 3, 4]));
     assert_eq!(restored.values(), live.values());
@@ -85,12 +85,20 @@ fn every_runtime_evaluates_a_program_alike() -> Result<()> {
     assert_eq!(again.version(), compiled.version());
     let again = Arc::new(Programs::new(runtime()).with(again)?);
     let compiled = Arc::new(Programs::new(runtime()).with(compiled)?);
-    let run = |catalogs: [&Arc<Programs>; 3]| -> Result<MemoryStore> {
-        let store = MemoryStore::default();
+    let run = |catalogs: [&Arc<Programs>; 3]| -> Result<Store> {
+        let store = Store::default();
         for catalog in catalogs {
-            let mut run = block(Run::start(catalog, &store, "s", "r", "v1", Value::Null, 1))?;
+            let mut run = block(Run::start(
+                catalog,
+                &store.scope(),
+                "s",
+                "r",
+                "v1",
+                Value::Null,
+                1,
+            ))?;
             if run.view().state.outcome.is_none() {
-                step(&mut run, &store)?;
+                step(&mut run)?;
             }
         }
         Ok(store)
@@ -107,7 +115,7 @@ fn every_runtime_evaluates_a_program_alike() -> Result<()> {
 #[test]
 fn a_run_refuses_another_version_of_its_program_or_runtime() -> Result<()> {
     let source = "async function main(){await durable.call('observe');return 1}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     start(&store, source, Value::Null, 1)?;
     let changed = "async function main(){await durable.call('observe');return 2}";
     let error = start(&store, changed, Value::Null, 1).err().unwrap();
@@ -116,19 +124,26 @@ fn a_run_refuses_another_version_of_its_program_or_runtime() -> Result<()> {
         "{error:#}"
     );
     let renamed = Arc::new(Programs::new(runtime()).compile("v2", source)?);
-    assert!(block(Run::start(&renamed, &store, "s", "r", "v1", Value::Null, 1)).is_err());
-    let rebuilt = MemoryStore::default();
-    let mut commit: Value = serde_json::from_slice(&store.values()["commit"])?;
+    assert!(
+        block(Run::start(
+            &renamed,
+            &store.scope(),
+            "s",
+            "r",
+            "v1",
+            Value::Null,
+            1
+        ))
+        .is_err()
+    );
+    let rebuilt = Store::default();
+    let mut commit = store.commit();
     commit["runtime"] = json!(0);
-    block(quickjs_durable::Store::put(
-        &rebuilt,
-        "commit",
-        serde_json::to_vec(&commit)?,
-    ))?;
+    rebuilt.set_commit(&commit);
     assert!(start(&rebuilt, source, Value::Null, 1).is_err());
     // Its own version still completes it.
     let mut run = start(&store, source, Value::Null, 1)?;
-    assert_eq!(value(&finish(&mut run, &store)?), json!(1));
+    assert_eq!(value(&finish(&mut run)?), json!(1));
     Ok(())
 }
 
@@ -142,13 +157,13 @@ fn promise_race_all_any_settled_and_errors() -> Result<()> {
       const any=await Promise.any([Promise.reject('no'),Promise.resolve(9)]);
       return {winner,all,outcomes:outcomes.map(x=>x.status==='rejected'?{status:x.status,message:x.reason.message}:x),any};
     }"#;
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1000)?;
     let pending = run.view().state.pending;
-    block(run.deliver(&store, pending[1].id(), Outcome::success(2), 1001))?;
-    let state = block(run.deliver(&store, pending[0].id(), Outcome::success(1), 1002))?.state;
+    block(run.deliver(pending[1].id(), Outcome::success(2), 1001))?;
+    let state = block(run.deliver(pending[0].id(), Outcome::success(1), 1002))?.state;
     let failure = Outcome::failure("Oops", "failed");
-    let done = block(run.deliver(&store, state.pending[0].id(), failure, 1003))?;
+    let done = block(run.deliver(state.pending[0].id(), failure, 1003))?;
     let result = value(&done);
     assert_eq!(result["winner"], json!(2));
     assert_eq!(result["all"], json!([1, 2]));
@@ -160,16 +175,16 @@ fn promise_race_all_any_settled_and_errors() -> Result<()> {
 #[test]
 fn a_run_ends_when_main_settles() -> Result<()> {
     let source = "async function main(_,ctx){const a=durable.call('a'), b=durable.call('b').catch(()=>ctx.kv.set('late',1));return await Promise.race([a,b]);}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let pending = run.view().state.pending;
     assert_eq!(pending.len(), 2);
-    let done = block(run.deliver(&store, pending[0].id(), Outcome::success(7), 2))?;
+    let done = block(run.deliver(pending[0].id(), Outcome::success(7), 2))?;
     // The loser is dropped: nothing waits on it, and its continuation never runs.
     assert_eq!(done.state.status, Status::Completed);
     assert_eq!(value(&done), 7);
     assert!(done.state.pending.is_empty());
-    let late = block(run.deliver(&store, pending[1].id(), Outcome::failure("E", "x"), 3))?;
+    let late = block(run.deliver(pending[1].id(), Outcome::failure("E", "x"), 3))?;
     assert_eq!(late.turns, done.turns);
     assert_eq!(kv(&store, "late"), None);
     Ok(())
@@ -178,13 +193,13 @@ fn a_run_ends_when_main_settles() -> Result<()> {
 #[test]
 fn logical_time_seeded_random_and_timers() -> Result<()> {
     let source = "async function main(){ const a=[Date.now(),new Date().getTimezoneOffset(),Math.random()]; await durable.sleep(50); return [a,Date.now(),Math.random()]; }";
-    let (a, b) = (MemoryStore::default(), MemoryStore::default());
+    let (a, b) = (Store::default(), Store::default());
     let mut x = start(&a, source, Value::Null, 1000)?;
     let mut y = start(&b, source, Value::Null, 1000)?;
     let timer = x.view().state.pending[0].id().to_owned();
-    assert!(block(x.deliver(&a, &timer, Outcome::success(Value::Null), 1049)).is_err());
-    let x = block(x.deliver(&a, &timer, Outcome::success(Value::Null), 1050))?;
-    let y = block(y.deliver(&b, &timer, Outcome::success(Value::Null), 1050))?;
+    assert!(block(x.deliver(&timer, Outcome::success(Value::Null), 1049)).is_err());
+    let x = block(x.deliver(&timer, Outcome::success(Value::Null), 1050))?;
+    let y = block(y.deliver(&timer, Outcome::success(Value::Null), 1050))?;
     assert_eq!(x.state.outcome, y.state.outcome);
     let result = value(&x);
     assert_eq!(result[0][0], 1000);
@@ -196,15 +211,15 @@ fn logical_time_seeded_random_and_timers() -> Result<()> {
 #[test]
 fn memory_growth_survives_a_restore() -> Result<()> {
     let source = "async function main(){await durable.call('observe'); const b=new Uint8Array(3*1024*1024); b[0]=7;b[b.length-1]=9;await durable.call('observe');b[0]=0;await durable.call('observe');return [b[0],b[b.length-1],b[4096]];}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let initial = run.view().memory_bytes;
-    let grown = step(&mut run, &store)?;
+    let grown = step(&mut run)?;
     assert!(grown.memory_bytes >= initial + 3 * 1024 * 1024);
     assert!(grown.batch_bytes < 100_000);
-    step(&mut run, &store)?;
+    step(&mut run)?;
     let mut run = start(&store, source, Value::Null, 1)?;
-    assert_eq!(value(&finish(&mut run, &store)?), json!([0, 9, 0]));
+    assert_eq!(value(&finish(&mut run)?), json!([0, 9, 0]));
     Ok(())
 }
 
@@ -230,15 +245,10 @@ fn programs_are_checked_and_failures_end_runs() -> Result<()> {
         "async function main(){return ()=>1}",
         "async function main(){await new Promise(()=>{})}",
     ] {
-        let run = start(&MemoryStore::default(), source, Value::Null, 1)?;
+        let run = start(&Store::default(), source, Value::Null, 1)?;
         assert_eq!(run.view().state.status, Status::Failed, "{source}");
     }
-    let run = start(
-        &MemoryStore::default(),
-        "async function main(){}",
-        Value::Null,
-        1,
-    )?;
+    let run = start(&Store::default(), "async function main(){}", Value::Null, 1)?;
     assert_eq!(value(&run.view()), Value::Null);
     Ok(())
 }
@@ -249,11 +259,11 @@ fn programs_are_checked_and_failures_end_runs() -> Result<()> {
 #[test]
 fn a_trap_ends_the_run() -> Result<()> {
     let source = "async function main(_,ctx){await ctx.kv.set('before',1);ctx.rpc.call({service:'S',handler:'h'});await durable.call('observe');await ctx.kv.set('after',1);while(true){}}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let pending = run.view().state.pending;
     assert_eq!(pending.len(), 2);
-    let failed = block(run.deliver(&store, pending[1].id(), Outcome::success(Value::Null), 2))?;
+    let failed = block(run.deliver(pending[1].id(), Outcome::success(Value::Null), 2))?;
     assert_eq!(failed.state.status, Status::Failed);
     assert!(failed.state.pending.is_empty());
     let Some(Outcome::Failure { error, .. }) = &failed.state.outcome else {
@@ -262,11 +272,11 @@ fn a_trap_ends_the_run() -> Result<()> {
     assert_eq!(error.name, "Trap");
     assert!(error.message.contains("fuel"), "{}", error.message);
     assert_eq!(kv(&store, "after"), Some(json!(1)));
-    assert_eq!(stored(&store, "batch/"), 0);
-    let late = block(run.deliver(&store, pending[0].id(), Outcome::success(1), 3))?;
+    assert_eq!(store.batches(), 0);
+    let late = block(run.deliver(pending[0].id(), Outcome::success(1), 3))?;
     assert_eq!(late.turns, failed.turns);
     // A trap in the first turn ends the run too.
-    let store = MemoryStore::default();
+    let store = Store::default();
     let failed = start(
         &store,
         "async function main(){while(true){}}",
@@ -289,10 +299,10 @@ fn the_stack_limit_and_unicode_survive_a_restore() -> Result<()> {
         await durable.call('observe');
         return {before,after:overflow(),nul:text.charCodeAt(4),surrogate:text.charCodeAt(11),snow:text.endsWith('雪')};
     }"#;
-    let store = MemoryStore::default();
+    let store = Store::default();
     start(&store, source, Value::Null, 1000)?;
     let mut run = start(&store, source, Value::Null, 1000)?;
-    let result = value(&finish(&mut run, &store)?);
+    let result = value(&finish(&mut run)?);
     // JSON cannot carry lone surrogates into Rust strings: test them as code
     // units inside the guest instead.
     assert_eq!(
@@ -305,14 +315,14 @@ fn the_stack_limit_and_unicode_survive_a_restore() -> Result<()> {
 #[test]
 fn pages_back_to_golden_leave_the_commit() -> Result<()> {
     let source = "const bytes=new Uint8Array(128*1024).fill(5);async function main(){await durable.call('observe');bytes.fill(0);await durable.call('observe');const wasZero=bytes[65536]===0;bytes.fill(5);await durable.call('observe');return [wasZero,bytes[65536]];}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let a = run.view();
-    let b = step(&mut run, &store)?;
+    let b = step(&mut run)?;
     assert!(b.live_pages > a.live_pages + 20);
-    let c = step(&mut run, &store)?;
+    let c = step(&mut run)?;
     assert!(c.live_pages + 20 < b.live_pages);
-    assert_eq!(value(&finish(&mut run, &store)?), json!([true, 5]));
+    assert_eq!(value(&finish(&mut run)?), json!([true, 5]));
     Ok(())
 }
 
@@ -321,16 +331,16 @@ fn pages_back_to_golden_leave_the_commit() -> Result<()> {
 #[test]
 fn garbage_a_turn_frees_is_not_saved() -> Result<()> {
     let source = "async function main(){let n=0;for(let i=0;i<5;i++){n+=JSON.stringify(Array.from({length:4000},(_,j)=>j*i+Math.random())).length;await durable.call('tick');}return n>0;}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
-    step(&mut run, &store)?;
+    step(&mut run)?;
     for _ in 0..3 {
-        let turn = step(&mut run, &store)?;
+        let turn = step(&mut run)?;
         // ~100 KiB of strings and arrays went through the heap: without
         // zeroing, ~60 pages changed and the batch took ~70 KiB.
         assert!(turn.batch_bytes < 4096, "{} bytes", turn.batch_bytes);
     }
-    assert_eq!(value(&finish(&mut run, &store)?), json!(true));
+    assert_eq!(value(&finish(&mut run)?), json!(true));
     Ok(())
 }
 
@@ -339,7 +349,7 @@ fn garbage_a_turn_frees_is_not_saved() -> Result<()> {
 #[test]
 fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
     let source = "async function main(_,ctx){for(let i=0;i<2000;i++){await ctx.kv.set('k',i);}return await ctx.kv.get('k');}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let mut turns = 1;
     while run.view().state.outcome.is_none() {
@@ -347,7 +357,7 @@ fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
         let [Operation::Resume { .. }] = &pending[..] else {
             panic!("Expected one wakeup: {pending:?}");
         };
-        step(&mut run, &store)?;
+        step(&mut run)?;
         turns += 1;
     }
     assert_eq!(value(&run.view()), json!(1999));
@@ -357,24 +367,22 @@ fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
 
 /// Restoring applies every batch of the commit's chain. Past a limit, a turn
 /// writes every live page into a new first batch, so restoring stays bounded.
-/// Only the commit and its chain are kept.
 #[test]
 fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
     let source = "const log=[];async function main(_,ctx){for(let i=0;i<60;i++){log.push('x'.repeat(5000)+i);await durable.call('tick');}return log.length+':'+log[59].slice(-2);}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let mut most = 0;
     while run.view().state.outcome.is_none() {
-        step(&mut run, &store)?;
-        let commit: Value = serde_json::from_slice(&store.values()["commit"])?;
-        let batches = commit["chain"].as_array().unwrap();
-        most = most.max(batches.len());
-        assert_eq!(stored(&store, "batch/"), batches.len());
+        step(&mut run)?;
+        let batches = store.commit()["batches"].as_u64().unwrap() as usize;
+        most = most.max(batches);
+        assert_eq!(store.batches(), batches);
     }
     assert_eq!(value(&run.view()), json!("60:59"));
     assert!((2..=32).contains(&most), "{most} batches");
     // A settled run keeps its outcome, not its image.
-    assert_eq!(stored(&store, "batch/"), 0);
+    assert_eq!(store.batches(), 0);
     Ok(())
 }
 
@@ -383,18 +391,18 @@ fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
 #[test]
 fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
     let source = "async function main(){const words=new Uint32Array(8*1024);for(let i=0;i<words.length;i++)words[i]=Math.random()*2**32;for(let i=0;i<40;i++){words[i]=i;await durable.call('tick');}return words[39];}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     for _ in 0..39 {
-        step(&mut run, &store)?;
+        step(&mut run)?;
     }
-    assert_eq!(stored(&store, "batch/"), 40);
+    assert_eq!(store.batches(), 40);
     // The first batch holds 32 KiB of noise; the others, a word each. A new
     // first batch every 16 turns took ~155 KiB.
     let written = store.bytes_written();
     assert!(written < 112 * 1024, "{written} bytes");
     let mut run = start(&store, source, Value::Null, 1)?;
-    assert_eq!(value(&finish(&mut run, &store)?), json!(39));
+    assert_eq!(value(&finish(&mut run)?), json!(39));
     Ok(())
 }
 
@@ -402,7 +410,7 @@ fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
 #[test]
 fn outcomes_delivered_together_take_one_turn() -> Result<()> {
     let source = "async function main(_,ctx){const order=[];await Promise.all([1,2,3].map(async n=>{await ctx.rpc.call({service:'S',handler:'h'},n);order.push(n);}));return order;}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let started = run.view();
     let mut outcomes: Vec<_> = started
@@ -413,16 +421,13 @@ fn outcomes_delivered_together_take_one_turn() -> Result<()> {
         .collect();
     outcomes.reverse();
     let duplicate = vec![outcomes[0].clone(), outcomes[0].clone()];
-    assert!(block(run.deliver_all(&store, duplicate, 2)).is_err());
+    assert!(block(run.deliver_all(duplicate, 2)).is_err());
     let mut run = start(&store, source, Value::Null, 2)?;
-    let done = block(run.deliver_all(&store, outcomes.clone(), 2))?;
+    let done = block(run.deliver_all(outcomes.clone(), 2))?;
     assert_eq!(done.turns, started.turns + 1);
     assert_eq!(value(&done), json!([3, 2, 1]));
     // Delivered before: nothing to do.
-    assert_eq!(
-        block(run.deliver_all(&store, outcomes, 3))?.turns,
-        done.turns
-    );
+    assert_eq!(block(run.deliver_all(outcomes, 3))?.turns, done.turns);
     Ok(())
 }
 
@@ -431,7 +436,7 @@ fn outcomes_delivered_together_take_one_turn() -> Result<()> {
 #[test]
 fn a_request_input_is_not_kept_in_the_heap() -> Result<()> {
     let source = "const prompt=()=>JSON.stringify(Array.from({length:8000},(_,i)=>i*7919%10007));async function main(_,ctx){const r=await ctx.rpc.call({service:'S',handler:'h'},{prompt:prompt()});return r.input.prompt.length;}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let issued = run.view();
     // ~39 KiB of JSON went through the heap; the commit holds the request.
@@ -445,7 +450,7 @@ fn a_request_input_is_not_kept_in_the_heap() -> Result<()> {
         "{} bytes",
         issued.commit_bytes
     );
-    assert!(value(&finish(&mut run, &store)?).as_u64() > Some(32_000));
+    assert!(value(&finish(&mut run)?).as_u64() > Some(32_000));
     Ok(())
 }
 
@@ -453,7 +458,7 @@ fn a_request_input_is_not_kept_in_the_heap() -> Result<()> {
 #[test]
 fn a_losing_request_may_fail_later() -> Result<()> {
     let source = "async function main(_,ctx){const call=ctx.rpc.call({service:'S',handler:'h'},1);const won=await Promise.race([call,ctx.sleep(1).then(()=>'timer')]);await ctx.sleep(10);return won;}";
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let pending = run.view().state.pending;
     let [
@@ -466,10 +471,10 @@ fn a_losing_request_may_fail_later() -> Result<()> {
     else {
         panic!("Expected a call and a timer: {pending:?}");
     };
-    block(run.deliver(&store, timer, Outcome::success(Value::Null), *deadline))?;
+    block(run.deliver(timer, Outcome::success(Value::Null), *deadline))?;
     let failed = Outcome::failure("Error", "too late");
-    block(run.deliver(&store, call, failed, deadline + 1))?;
-    assert_eq!(value(&finish(&mut run, &store)?), json!("timer"));
+    block(run.deliver(call, failed, deadline + 1))?;
+    assert_eq!(value(&finish(&mut run)?), json!("timer"));
     Ok(())
 }
 
@@ -483,12 +488,12 @@ fn a_scope_shares_its_kv_between_runs() -> Result<()> {
       await ctx.kv.set('temporary',true);await ctx.kv.delete('temporary');
       await durable.call('forever');
     }"#;
-    let store = MemoryStore::default();
+    let store = Store::default();
     let run = start(&store, first, Value::Null, 1)?;
     assert_eq!(run.view().state.status, Status::Waiting);
     assert_eq!(kv(&store, "x"), Some(json!({"n":1})));
     assert_eq!(kv(&store, "temporary"), None);
-    assert!(stored(&store, "batch/") > 0);
+    assert!(store.batches() > 0);
     // Its attempt is gone (say, cancelled): another run takes the scope.
     let second = "async function main(_,ctx){return await ctx.kv.get('x');}";
     let programs = Arc::new(
@@ -498,7 +503,7 @@ fn a_scope_shares_its_kv_between_runs() -> Result<()> {
     );
     let next = block(Run::start(
         &programs,
-        &store,
+        &store.scope(),
         "s",
         "next",
         "v2",
@@ -506,7 +511,7 @@ fn a_scope_shares_its_kv_between_runs() -> Result<()> {
         2,
     ))?;
     assert_eq!(value(&next.view()), json!({"n":1}));
-    assert_eq!(stored(&store, "batch/"), 0);
+    assert_eq!(store.batches(), 0);
     Ok(())
 }
 
@@ -515,13 +520,13 @@ fn delivering_one_request_leaves_the_others_pending() -> Result<()> {
     let source = r#"async function main(_,ctx){return await Promise.all([
         ctx.rpc.call({service:'Echo',handler:'echo'},1),
         ctx.rpc.call({service:'Echo',handler:'echo'},2)]);}"#;
-    let store = MemoryStore::default();
+    let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     assert_eq!(run.view().state.pending.len(), 2);
-    let waiting = block(run.deliver(&store, "r/1", Outcome::success(2), 2))?;
+    let waiting = block(run.deliver("r/1", Outcome::success(2), 2))?;
     assert_eq!(waiting.state.pending.len(), 1);
     assert_eq!(waiting.state.pending[0].id(), "r/0");
-    let done = block(run.deliver(&store, "r/0", Outcome::success(1), 3))?;
+    let done = block(run.deliver("r/0", Outcome::success(1), 3))?;
     assert_eq!(value(&done), json!([1, 2]));
     Ok(())
 }
@@ -542,17 +547,12 @@ fn invalid_requests_are_refused_in_the_guest() -> Result<()> {
           ()=>ctx.kv.set('bad',value)];
         return bad.map(f=>{try{f();return false;}catch(e){return e instanceof TypeError;}});
     }"#;
-    let run = start(&MemoryStore::default(), source, Value::Null, 1000)?;
+    let run = start(&Store::default(), source, Value::Null, 1000)?;
     assert_eq!(value(&run.view()), json!(vec![true; 15]));
     assert_eq!(run.view().state.next_operation, 0);
     // A timer past the host clock's range.
     let source = "async function main(_,ctx){try{await ctx.sleep(1);return false;}catch(e){return e instanceof RangeError;}}";
-    let run = start(
-        &MemoryStore::default(),
-        source,
-        Value::Null,
-        u64::MAX / 1_000_000,
-    )?;
+    let run = start(&Store::default(), source, Value::Null, u64::MAX / 1_000_000)?;
     assert_eq!(value(&run.view()), true);
     Ok(())
 }
