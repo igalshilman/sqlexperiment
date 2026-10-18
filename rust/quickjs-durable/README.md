@@ -1,12 +1,11 @@
 # Durable JavaScript in Restate objects
 
-JavaScript that waits on Restate (RPCs, timers) for as long as it takes, and
-survives crashes without a journal to replay. At each wait the JavaScript
-VM's memory is saved; a crash or a result restores it, and the program
-carries on where it was.
+JavaScript that waits on Restate for as long as it takes, and survives crashes
+without replaying anything: at each wait the VM's memory is saved, and a crash
+or a result restores it.
 
 ```js
-// programs/counter.js
+// programs/counter.js: served as the virtual object `counter`
 async function main(input, ctx) {
   const n = ((await ctx.kv.get('count')) ?? 0) + input;
   await ctx.kv.set('count', n);
@@ -16,152 +15,56 @@ async function main(input, ctx) {
 ```
 
 ```sh
-curl localhost:8080/counter/alice/run --json 20    # 20, a second later
-curl localhost:8080/counter/alice/run --json 1     # 21
-```
-
-## Run it
-
-```sh
-make restate-server qjs                      # from the repository's root
+make restate-server qjs                               # from the repository's root
 target/restate/restate-server &
-ANTHROPIC_API_KEY=... target/release/quickjs-durable &   # serves programs/, on PORT (9080)
+ANTHROPIC_API_KEY=... target/release/quickjs-durable &
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
+curl localhost:8080/counter/alice/run --json 20       # 20, a second later
 ```
 
-A program is a file in [`programs/`](programs): `<name>.js`, defining
-`async function main(input, ctx)`. `cargo build` ships it in the binary
-(`QJS_PROGRAMS` names another directory), and the binary serves it as the
-virtual object `<name>`. The object's key is a
-**scope**: the runs of `counter/alice` share their `ctx.kv`; `counter/bob`
-has its own.
-
-| Program                                    | Shows                                                                                                                                      |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`counter`](programs/counter.js)           | KV state and a timer                                                                                                                       |
-| [`memory`](programs/memory.js)             | A class instance, a closure and a paused generator surviving waits                                                                         |
-| [`fanout`](programs/fanout.js)             | Programs calling programs, in parallel: `Promise.all` over RPCs                                                                            |
-| [`timeout`](programs/timeout.js)           | A deadline: `Promise.race` of a [`slow`](programs/slow.js) call and a timer                                                                |
-| [`primes`](programs/primes.js)             | A long computation, carried over many turns                                                                                                |
-| [`checkout`](programs/checkout.js)         | A saga over [`inventory`](programs/inventory.js) and [`payments`](programs/payments.js): reserve, charge, and undo in reverse on a failure |
-| [`retry`](programs/retry.js)               | Retries with exponential backoff (durable timers) around a [`flaky`](programs/flaky.js) service                                            |
-| [`subscription`](programs/subscription.js) | A recurring charge, every period, until it is declined                                                                                     |
-| [`assistant`](programs/assistant.js)       | An AI agent: Claude, with the shop's programs as its tools; the conversation lives in the scope                                            |
+Each `programs/<name>.js` is the object `<name>`; its key is a scope, whose
+runs share `ctx.kv`. More in [`programs/`](programs): a saga
+([`checkout`](programs/checkout.js)), retries with backoff
+([`retry`](programs/retry.js)), a deadline ([`timeout`](programs/timeout.js)),
+and an AI agent with the shop as its tools ([`assistant`](programs/assistant.js)).
 
 ## Writing a program
 
-| `ctx`                                                 | What                                        |
-| ----------------------------------------------------- | ------------------------------------------- |
-| `ctx.kv.get(key)`, `.set(key, value)`, `.delete(key)` | The scope's state: JSON values              |
-| `ctx.rpc.call({ service, handler, key? }, input)`     | Call any Restate service, object or program |
-| `ctx.sleep(ms)`                                       | A durable timer                             |
+`ctx.kv.get/set/delete(key)` for the scope's JSON state,
+`ctx.rpc.call({ service, handler, key? }, input)` for any Restate service, and
+`ctx.sleep(ms)`. Models are a service too: `claude/messages` takes a
+[Messages API](https://platform.claude.com/docs/en/api/messages) request.
 
-- **Values are JSON**: inputs, outputs, KV values and RPC payloads.
-- **I/O goes through `ctx`**: no `fetch`, timers or modules. Call a Restate
-  service for the rest of the world. The binary serves one for models:
-  `claude/messages` takes a [Messages API](https://platform.claude.com/docs/en/api/messages)
-  request and returns its response ([`src/claude.rs`](src/claude.rs)).
-- **`Date.now()` and `Math.random()` are the run's**: time is the host's at
-  each turn, and the random generator is seeded per run and saved with it.
-- **The run ends when `main` settles.** Unlike in Node.js, promises still
-  pending then (a race's loser, an RPC nobody awaited) are dropped, and their
-  callbacks never run. Await what must happen.
-- **Runs of one scope run one at a time**, as an object's exclusive handlers
-  do: a run waiting on a timer holds its scope. Runs that must overlap need
-  scopes of their own.
-- **A changed program is a new program.** A run restores only with the source
-  it started on: ship the new version under a new name while old runs finish.
+- All I/O goes through `ctx`; values are JSON.
+- The run ends when `main` settles: unlike Node.js, promises still pending are
+  dropped. Await what must happen.
+- A scope runs one run at a time.
+- A changed program is a new program: runs restore only with their source.
 
 ## How it works
 
-The JavaScript engine is [QuickJS](https://bellard.org/quickjs/), compiled to
-WebAssembly and run by Wasmtime. A WebAssembly instance's whole state is one
-linear memory and a stack pointer, so the VM, heap, closures, pending
-promises and all, is a byte array, and that is what this crate saves.
-
-**A run is one invocation** of `<program>/<scope>/run`, an exclusive handler
-without journal replay. It is a loop of **turns**:
+QuickJS runs as WebAssembly, so the whole VM (heap, closures, pending
+promises) is one byte array. A run is one invocation of `run`, without journal
+replay, looping over turns:
 
 ```
-restore the image ─▶ deliver one result ─▶ run the JavaScript until it waits
-     ▲                                                       │
-     │                                                       ▼
- wait on Restate for the first          commit: the image's changed pages, the KV
- pending request to complete    ◀────── writes and the new requests, in one save
+restore ─▶ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wait on Restate ─┐
+   ▲                                                                                          │
+   └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Within a turn, `ctx.kv` is answered at once from the scope's SQL database;
-an RPC or a timer is a request the handler waits on, on Restate itself: a
-call (with the request's ID as idempotency key) or a sleep until its deadline.
+- **Snapshot only at a wait**, when no frame is on the stack: memory is the
+  whole state.
+- **Relative to a golden image**: each program, evaluated once at startup
+  (deterministically, so every process agrees).
+- **Only the pages that changed**: rewritten Wasm marks each written 4 KiB
+  page; a turn saves those, XORed against golden and compressed together.
+- **One commit**: the pages, the KV writes and the new requests are one save
+  of the object's state ([sqlite-kv](../../core/sqlite-kv/README.md)).
+- **No replay**: a retry restores the last commit and waits again on its
+  requests under the same idempotency keys, attaching to calls already made.
 
-### Snapshots: the key choices
-
-- **Snapshot only at a wait.** A turn ends when the JavaScript has run all it
-  can and waits on a promise: no JavaScript or native frame is on the stack,
-  so memory and the stack pointer are the whole state. There is no
-  mid-function capture, and no OS-level process snapshot.
-- **Every run starts from a golden image.** When the binary starts, it
-  evaluates each program once (QuickJS initialized, the bridge and the program
-  loaded) into its golden image. A run starts from a copy of it, so that work
-  is never repeated, and every snapshot is relative to it. Evaluation is
-  deterministic, so every process computes the same image, byte for byte: a
-  snapshot written by one restores in another.
-- **Save only the pages that changed.** The Wasm is rewritten once, at
-  startup, so that every store also marks its 4 KiB page in a side table. At
-  the end of a turn, only marked pages are compared, and only those that
-  changed are saved: a turn that touches a few objects writes a few pages, not
-  the whole heap.
-- **Pages relative to golden, not to the last turn.** A saved page is XORed
-  against its golden page, and a turn's pages are compressed together (Zstd)
-  into one batch. Each snapshot's manifest maps every page that differs from
-  golden to the batch holding it, so a restore is golden plus one lookup per
-  page, never a chain of diffs. Past 16 referenced batches, a turn rewrites
-  every live page into its own, so restores stay bounded however long a run
-  lives.
-- **The snapshot commits with what it did.** The image, the KV writes and the
-  new requests are one transaction of the scope's database, in the object's
-  state ([sqlite-kv](../../core/sqlite-kv/README.md)): a turn happened
-  entirely or not at all.
-- **Nothing is replayed.** A retried attempt restores the last committed
-  image and waits again on its pending requests, under the same idempotency
-  keys, so Restate attaches it to a call already made instead of making it
-  again, and a timer waits only for what is left.
-- **A turn has a CPU budget.** Execution is metered (Wasmtime fuel); past half
-  the budget, the run is saved at its next wait and continues in a new turn,
-  so a long computation is never cut off. A single job that exceeds the whole
-  budget (an endless loop) ends the run as failed.
-
-Compared with a regular TypeScript virtual object, a run that waits is about
-6x slower, and writes about 50x more to Restate per wait
-([measurements](docs/DESIGN.md#10-measurements)). The whole design, down to the
-byte formats: [docs/DESIGN.md](docs/DESIGN.md).
-
-## The code
-
-| Path                                     | What                                                                       |
-| ---------------------------------------- | -------------------------------------------------------------------------- |
-| [`src/restate.rs`](src/restate.rs)       | Each program as a virtual object: the `run` handler and its turn loop      |
-| [`src/engine.rs`](src/engine.rs)         | Runs: start a run, deliver a result, run turns, recover                    |
-| [`src/vm.rs`](src/vm.rs)                 | The VM under Wasmtime: golden images, restore, capture, fuel               |
-| [`src/instrument.rs`](src/instrument.rs) | The Wasm rewrite that marks each written page                              |
-| [`src/namespace.rs`](src/namespace.rs)   | The storage: SQL tables in the object's state, through sqlite-kv           |
-| [`src/claude.rs`](src/claude.rs)         | The `claude` service                                                       |
-| [`assets/`](assets)                      | The pinned QuickJS reactor (`quickjs.wasm`), the guest bridge and licenses |
-
-## Tests
-
-`make test-qjs` runs the runtime's tests twice: checking that every changed
-page was marked, then capturing by scanning every page instead. Then it runs
-the programs against a real Restate server: RPCs, timers, scopes, a failing
-program, a race whose loser is dropped, an attempt that crashes while its call
-runs (its retry attaches to the call, and the callee runs once), and the
-shipped programs, with a scripted `claude` for the assistant. `make lint-qjs`:
-rustfmt and clippy.
-
-## Not yet
-
-- A re-issued call attaches only within the callee's idempotency retention
-  (24 hours by default): a run waiting longer on a call its attempt lost
-  would make it again.
-- A cancelled run ends where it is.
-- A turn runs on the async runtime's threads: a long one holds a thread.
+The cost: against a regular TypeScript object, a run that waits is ~6x slower
+and writes ~50x more per wait. Details, formats and measurements:
+[docs/DESIGN.md](docs/DESIGN.md). Tests: `make test-qjs` (with a Restate
+server), `make lint-qjs`.
