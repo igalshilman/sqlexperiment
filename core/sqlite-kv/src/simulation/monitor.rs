@@ -150,7 +150,7 @@ impl Known {
             // 2: the known log plus one transaction (or none, for a commit
             // without SQL changes), whether its earlier transactions stay
             // inline or are sealed into a stored value; the known chain, plus
-            // a value, or restarted with one
+            // a value, restarted with one, or cleared
             let sizes = |c: &Commit| c.log.iter().map(|t| t.size).collect::<Vec<_>>();
             let earlier = self.transactions(&commit).map(|mut t| {
                 t.truncate(known.log.len());
@@ -161,7 +161,7 @@ impl Known {
             let chain_follows = match (chain, known_chain) {
                 (Some(chain), Some(known)) => {
                     chain == known
-                        || chain.len() == 1
+                        || chain.len() <= 1
                         || (chain.len() == known.len() + 1 && chain[..known.len()] == known[..])
                 }
                 _ => false,

@@ -90,6 +90,8 @@ pub enum ChainUpdate {
     Append(Bytes),
     /// Replace the chain with this value: it no longer needs the ones before.
     Restart(Bytes),
+    /// Empty the chain.
+    Clear,
 }
 
 /// When a session's SQL changes become durable.
@@ -601,11 +603,17 @@ impl Snapshot {
             false => segments.into_iter().map(Part::Inline).collect(),
         };
         let mut values = self.chain.clone();
-        if let Some(update) = &chain {
-            let (restart, value) = match update {
-                ChainUpdate::Append(value) => (false, value),
-                ChainUpdate::Restart(value) => (true, value),
-            };
+        let (restart, value) = match &chain {
+            None => (false, None),
+            Some(ChainUpdate::Append(value)) => (false, Some(value)),
+            Some(ChainUpdate::Restart(value)) => (true, Some(value)),
+            Some(ChainUpdate::Clear) => (true, None),
+        };
+        if restart {
+            commit.chain.clear();
+            values.clear();
+        }
+        if let Some(value) = value {
             if value.len() > log::MAX_CHAIN_VALUE_BYTES {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -620,10 +628,6 @@ impl Snapshot {
             } else {
                 Part::Inline(value.clone())
             };
-            if restart {
-                commit.chain.clear();
-                values.clear();
-            }
             commit.chain.push(part);
             values.push(value.clone());
         }

@@ -22,10 +22,12 @@ fn value(i: usize) -> Bytes {
     Bytes::from((0..len).map(|n| (n * 31 + i) as u8).collect::<Vec<_>>())
 }
 
-/// Turn `i`'s update: every fifth restarts the chain.
+/// Turn `i`'s update: every fifth restarts the chain, every eleventh clears
+/// it.
 fn update(i: usize) -> ChainUpdate {
-    match i % 5 {
-        4 => ChainUpdate::Restart(value(i)),
+    match (i % 11, i % 5) {
+        (10, _) => ChainUpdate::Clear,
+        (_, 4) => ChainUpdate::Restart(value(i)),
         _ => ChainUpdate::Append(value(i)),
     }
 }
@@ -37,6 +39,7 @@ fn expected(turns: usize) -> Vec<Bytes> {
         match update(i) {
             ChainUpdate::Append(value) => chain.push(value),
             ChainUpdate::Restart(value) => chain = vec![value],
+            ChainUpdate::Clear => chain.clear(),
         }
     }
     chain
