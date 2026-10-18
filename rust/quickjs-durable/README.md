@@ -60,9 +60,10 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
 - **Relative to a golden image**: each program, evaluated once at startup
   (deterministically, so every process agrees).
 - **Only the pages that changed**: rewritten Wasm marks each written 4 KiB
-  page; a turn saves those, XORed against golden and compressed together.
+  page; a turn saves those, XORed against their contents before it and
+  compressed together, in a chain over a base relative to golden.
 - **One commit**: a turn puts its batch of pages, then one `commit` record
-  (the image's page map, the pending requests, the KV writes), then applies
+  (the image's chain of batches, the pending requests, the KV writes), then applies
   the KV writes. Restate loses only a suffix of writes on a crash, so the
   commit is the atomic step; the next attempt re-applies what follows it.
 - **No replay**: a retry restores the VM from the last commit and waits
@@ -76,13 +77,13 @@ Node 22), one restate-server 1.7.13 on 4 vCPUs:
 
 | Workload                                      | TypeScript       | QuickJS          |
 | --------------------------------------------- | ---------------- | ---------------- |
-| KV read and write, a new key each, 32 at once | 510/s, p50 57 ms | 339/s, p50 91 ms |
-| KV read and write, one key, one at a time     | p50 7.8 ms       | p50 12 ms        |
-| 20 waits on a 1 ms timer, one run             | 69 ms            | 78 ms            |
-| 5 waits, 32 runs at once                      | 228/s            | 137/s            |
-| `Promise.all` of 10 calls, 8 at once          | 45/s             | 26/s             |
-| Primes below 100,000                          | 46 ms            | 480 ms           |
-| Written to Restate by a run of 20 waits       | ~20 KiB          | ~137 KiB         |
+| KV read and write, a new key each, 32 at once | 484/s, p50 60 ms | 307/s, p50 98 ms |
+| KV read and write, one key, one at a time     | p50 8 ms         | p50 14 ms        |
+| 20 waits on a 1 ms timer, one run             | 82 ms            | 93 ms            |
+| 5 waits, 32 runs at once                      | 220/s            | 155/s            |
+| `Promise.all` of 10 calls, 8 at once          | 47/s             | 27/s             |
+| Primes below 100,000                          | 53 ms            | 488 ms           |
+| Written to Restate by a run of 20 waits       | ~21 KiB          | ~70 KiB          |
 
 Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md). Tests:
 `make test-qjs` (with a Restate server), `make lint-qjs`.

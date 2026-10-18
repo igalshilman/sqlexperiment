@@ -4,7 +4,7 @@ use anyhow::Result;
 use common::*;
 use quickjs_durable::{MemoryStore, Operation, Outcome, Program, Programs, Run, Runtime, Status};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 mod common;
 
@@ -325,9 +325,9 @@ fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
     Ok(())
 }
 
-/// Restoring reads every batch the commit references. Past a limit, a turn
-/// writes every live page into its own batch, so restoring stays bounded.
-/// Only the commit and the batches it references are kept.
+/// Restoring applies every batch of the commit's chain. Past a limit, a turn
+/// writes every live page into a new first batch, so restoring stays bounded.
+/// Only the commit and its chain are kept.
 #[test]
 fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
     let source = "const log=[];async function main(_,ctx){for(let i=0;i<60;i++){log.push('x'.repeat(5000)+i);await durable.call('tick');}return log.length+':'+log[59].slice(-2);}";
@@ -337,12 +337,7 @@ fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
     while run.view().state.outcome.is_none() {
         step(&mut run, &store)?;
         let commit: Value = serde_json::from_slice(&store.values()["commit"])?;
-        let batches: BTreeSet<u64> = commit["pages"]
-            .as_object()
-            .unwrap()
-            .values()
-            .map(|reference| reference["b"].as_u64().unwrap())
-            .collect();
+        let batches = commit["chain"].as_array().unwrap();
         most = most.max(batches.len());
         assert_eq!(stored(&store, "batch/"), batches.len());
     }

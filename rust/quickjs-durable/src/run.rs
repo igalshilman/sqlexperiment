@@ -2,9 +2,11 @@
 //! one event to the VM, runs the JavaScript until it waits, and commits.
 //!
 //! A scope's storage is three kinds of key: `commit`, its current run as of
-//! its last turn ([`Commit`]); `batch/<n>`, immutable batches of pages, each
-//! XORed against the program's golden image; and `kv/<key>`, the scope's KV. A
-//! turn puts its batch, then `commit`: the turn happened once `commit` is
+//! its last turn ([`Commit`]); `batch/<n>`, immutable batches of changed
+//! pages; and `kv/<key>`, the scope's KV. The image is a chain of batches over
+//! the program's golden image: the first XORed against golden, each next one
+//! against the image before it, so a turn writes only what it changed. A turn
+//! puts its batch, then `commit`: the turn happened once `commit` is
 //! stored, and a crash that loses a suffix of the writes never keeps a commit
 //! without its batch. Then it applies what the commit lists: the turn's KV
 //! writes, and deleting the batches no longer referenced. The next attempt
@@ -22,27 +24,23 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, HashSet},
     sync::Arc,
 };
 
 const COMMIT: &str = "commit";
 const MAX_RECORD: usize = 16 * 1024 * 1024;
-/// Most page batches a commit may reference. Restoring reads each referenced
-/// batch whole, superseded pages and all; past this many, a turn writes every
-/// live page into its own batch, so restoring stays bounded however long a
-/// run lives.
-const MAX_BATCHES: usize = 16;
+/// Most batches in an image's chain. Restoring reads and applies them all; past
+/// this many, or once the later batches outweigh twice the first, a turn
+/// writes every page that differs from golden into a new first batch, so
+/// restoring stays bounded however long a run lives.
+const MAX_CHAIN: usize = 16;
 
 fn batch_key(batch: u64) -> String {
     format!("batch/{batch}")
 }
 fn kv_key(key: &str) -> String {
     format!("kv/{key}")
-}
-/// The batches `pages` are in.
-fn batches(pages: &BTreeMap<u32, PageRef>) -> BTreeSet<u64> {
-    pages.values().map(|reference| reference.batch).collect()
 }
 fn page(memory: &[u8], index: usize) -> &[u8] {
     static ZERO: [u8; PAGE] = [0; PAGE];
@@ -64,7 +62,7 @@ pub struct Run {
     programs: Arc<Programs>,
     commit: Commit,
     /// Batches of the scope's previous run, for the first commit to collect.
-    inherited: BTreeSet<u64>,
+    inherited: Vec<u64>,
     /// The VM, and its memory as of the last commit: restored when a delivery
     /// needs it, and dropped once the run has settled.
     live: Option<Live>,
@@ -124,7 +122,7 @@ impl Run {
             return Ok(Self {
                 programs: programs.clone(),
                 commit: previous.unwrap(),
-                inherited: BTreeSet::new(),
+                inherited: Vec::new(),
                 live: None,
                 last: Written::default(),
                 usable: true,
@@ -141,7 +139,10 @@ impl Run {
             turns: 0,
             meta: golden.meta.clone(),
             memory_len: golden.memory.len(),
-            pages: BTreeMap::new(),
+            chain: Vec::new(),
+            base_bytes: 0,
+            delta_bytes: 0,
+            live_pages: 0,
             next_batch: previous.as_ref().map_or(0, |commit| commit.next_batch),
             state: State {
                 pending: Vec::new(),
@@ -157,7 +158,7 @@ impl Run {
         let mut this = Self {
             programs: programs.clone(),
             commit,
-            inherited: previous.map_or_else(BTreeSet::new, |commit| batches(&commit.pages)),
+            inherited: previous.map_or_else(Vec::new, |commit| commit.chain),
             live: Some(Live { vm, base: golden }),
             last: Written::default(),
             usable: false,
@@ -219,7 +220,7 @@ impl Run {
             turns: commit.turns,
             state: commit.state.clone(),
             memory_bytes: commit.memory_len,
-            live_pages: commit.pages.len(),
+            live_pages: commit.live_pages,
             changed_pages: self.last.changed_pages,
             examined_pages: self.last.examined_pages,
             batch_bytes: self.last.batch_bytes,
@@ -239,30 +240,17 @@ impl Run {
         );
         let mut memory = golden.to_vec();
         memory.resize(commit.memory_len, 0);
-        // One batch at a time: all of a long run's batches together can far
-        // exceed its memory.
-        let mut by_batch: BTreeMap<u64, Vec<(u32, usize)>> = BTreeMap::new();
-        for (index, reference) in &commit.pages {
-            ensure!(
-                (*index as usize) < memory.len() / PAGE,
-                "Page beyond memory"
-            );
-            by_batch
-                .entry(reference.batch)
-                .or_default()
-                .push((*index, reference.slot));
-        }
-        for (batch, references) in by_batch {
+        for batch in &commit.chain {
             let bytes = store
-                .get(&batch_key(batch))
+                .get(&batch_key(*batch))
                 .await?
                 .context("Missing page batch")?;
-            let decoded = codec::decode_pages(&bytes)?;
-            for (index, slot) in references {
-                let (stored, delta) = decoded.get(slot).context("Invalid page slot")?;
-                ensure!(*stored == index, "Page reference mismatch");
-                let target = &mut memory[index as usize * PAGE..(index as usize + 1) * PAGE];
-                target.copy_from_slice(&xor(target, delta));
+            for (index, delta) in codec::decode_pages(&bytes)? {
+                let at = index as usize * PAGE;
+                let target = memory
+                    .get_mut(at..at + PAGE)
+                    .context("Page beyond memory")?;
+                target.copy_from_slice(&xor(target, &delta));
             }
         }
         let base = Image {
@@ -288,9 +276,9 @@ impl Run {
             &mut writes,
         )
         .await;
-        let mut pages = self.commit.pages.clone();
         let mut written = Written::default();
-        let (state, meta, memory_len, mut deltas) = match ran {
+        let mut live_pages = self.commit.live_pages;
+        let (state, meta, memory_len, deltas) = match ran {
             Ok(state) => {
                 let capture = live.vm.capture(&live.base)?;
                 written.changed_pages = capture.pages.len();
@@ -300,14 +288,13 @@ impl Run {
                 base.memory.resize(capture.memory_len, 0);
                 let mut deltas = Vec::new();
                 for (index, new) in capture.pages {
-                    let original = page(&golden, index as usize);
                     let at = index as usize * PAGE;
+                    let original = page(&golden, index as usize);
+                    let old = &base.memory[at..at + PAGE];
+                    live_pages =
+                        live_pages + usize::from(new != original) - usize::from(old != original);
+                    deltas.push((index, xor(&new, old)));
                     base.memory[at..at + PAGE].copy_from_slice(&new);
-                    if original == new {
-                        pages.remove(&index);
-                    } else {
-                        deltas.push((index, xor(&new, original)));
-                    }
                 }
                 (state, capture.meta, capture.memory_len, deltas)
             }
@@ -330,56 +317,44 @@ impl Run {
                 None => return Err(error.into()),
             },
         };
+        let previous = &self.commit;
+        let mut chain = previous.chain.clone();
+        let (mut base_bytes, mut delta_bytes) = (previous.base_bytes, previous.delta_bytes);
+        let mut next_batch = previous.next_batch;
         let settled = state.status != Status::Waiting;
         if settled {
             // A settled run never restores again: it keeps its outcome, not
             // its image.
-            pages.clear();
-            deltas.clear();
-        }
-        let changed: BTreeSet<u32> = deltas.iter().map(|(index, _)| *index).collect();
-        let mut referenced: BTreeSet<u64> = pages
-            .iter()
-            .filter(|(index, _)| !changed.contains(index))
-            .map(|(_, reference)| reference.batch)
-            .collect();
-        if !deltas.is_empty() {
-            referenced.insert(self.commit.next_batch);
-        }
-        if referenced.len() > MAX_BATCHES {
-            let memory = &self.live.as_ref().context("No live VM")?.base.memory;
-            deltas = pages
-                .keys()
-                .chain(&changed)
-                .copied()
-                .collect::<BTreeSet<u32>>()
-                .into_iter()
-                .map(|index| {
-                    let current = page(memory, index as usize);
-                    (index, xor(current, page(&golden, index as usize)))
-                })
-                .collect();
-        }
-        let mut next_batch = self.commit.next_batch;
-        if !deltas.is_empty() {
-            let bytes = codec::encode_pages(&deltas)?;
-            written.batch_bytes = bytes.len();
-            for (slot, (index, _)) in deltas.iter().enumerate() {
-                pages.insert(
-                    *index,
-                    PageRef {
-                        batch: next_batch,
-                        slot,
-                    },
-                );
+            chain.clear();
+            live_pages = 0;
+        } else if !deltas.is_empty() {
+            let mut bytes = codec::encode_pages(&deltas)?;
+            if chain.is_empty() {
+                base_bytes = bytes.len();
+            } else if chain.len() >= MAX_CHAIN || delta_bytes + bytes.len() > 2 * base_bytes {
+                // A new first batch: every page that differs from golden.
+                let memory = &self.live.as_ref().context("No live VM")?.base.memory;
+                let pages = memory.len() / PAGE;
+                let live: Vec<(u32, Vec<u8>)> = (0..pages)
+                    .filter(|&index| page(memory, index) != page(&golden, index))
+                    .map(|index| (index as u32, xor(page(memory, index), page(&golden, index))))
+                    .collect();
+                bytes = codec::encode_pages(&live)?;
+                chain.clear();
+                (base_bytes, delta_bytes) = (bytes.len(), 0);
+            } else {
+                delta_bytes += bytes.len();
             }
+            written.batch_bytes = bytes.len();
             store.put(&batch_key(next_batch), bytes).await?;
+            chain.push(next_batch);
             next_batch += 1;
         }
-        let referenced = batches(&pages);
-        let garbage = batches(&self.commit.pages)
-            .union(&self.inherited)
-            .filter(|batch| !referenced.contains(batch))
+        let garbage = previous
+            .chain
+            .iter()
+            .chain(&self.inherited)
+            .filter(|batch| !chain.contains(batch))
             .copied()
             .collect();
         let mut kv_writes = BTreeMap::new();
@@ -392,7 +367,6 @@ impl Run {
                 None => deletes.push(key),
             }
         }
-        let previous = &self.commit;
         let commit = Commit {
             run: previous.run.clone(),
             program: previous.program.clone(),
@@ -401,7 +375,10 @@ impl Run {
             turns: previous.turns + 1,
             meta,
             memory_len,
-            pages,
+            chain,
+            base_bytes,
+            delta_bytes,
+            live_pages,
             next_batch,
             state,
             writes: kv_writes,
