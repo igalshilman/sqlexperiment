@@ -972,6 +972,28 @@ SDK's server now sets `TCP_NODELAY`, which saved ~40 ms per round trip. One
 synchronous JavaScript job is still capped at about 10^8 Wasm instructions,
 and the interpreter runs compute-bound code ~10x slower than V8.
 
+### 10.1. A long coding session
+
+`cargo bench --bench agent` runs the shipped `coder` program through a
+scripted session of up to 300 steps over `MemoryStore`. Each step is a few
+hundred bytes of model text and one tool call: a file read (~6 KiB), a
+command (~1.5 KiB of output), an edit, or a written file (~3 KiB). On
+18 October 2026:
+
+| Step | Request to the model | Stored by the step | Of it, the commit | Tool turn |
+| ---: | -------------------: | -----------------: | ----------------: | --------: |
+|    1 |              1.7 KiB |              12 KB |            4.4 KB |    2.7 ms |
+|   10 |               31 KiB |              44 KB |             33 KB |    8.8 ms |
+|   20 |               62 KiB |              85 KB |             71 KB |     18 ms |
+|   40 |              130 KiB |             153 KB |            140 KB |     35 ms |
+
+At step 45 (a request of ~145 KiB) the run fails: copying the request out
+of the VM runs out of fuel. Each request is the whole conversation so far,
+and it is copied, checked and serialized in the guest, then kept in the
+commit record as a pending request. Every step therefore costs time and
+storage in proportion to the conversation, quadratic in total. The page
+batches stay at 4–11 KB a step.
+
 ## 11. Scope limits, provenance and references
 
 There is no heap migration, no concurrent writers in a scope, no generic Wasm
