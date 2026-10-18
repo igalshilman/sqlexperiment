@@ -5,6 +5,10 @@ Reads benches/results/log-shipping.csv (v14) and log-shipping-v13.csv (v13, its
 strong-backend rows), checks that repeats agree, writes log-shipping-summary.csv
 and prints Markdown tables of critical-path round trips, mutations, bytes and
 storage per database case.
+
+With `--sweep FILE`, prints instead a table of one policy sweep (a
+log_shipping run with `POLICIES` set): per session with a cache, averaged over
+the four workloads, bytes by key kind.
 """
 import csv
 import statistics
@@ -23,8 +27,12 @@ def label(version, row):
     """A checkpoint policy's label: each version's bindings cadence says so."""
     after = row["checkpoint_after"]
     size = int(row.get("checkpoint_log_bytes", 256 * 1024))
-    bindings = (version, after, size) in [("v13", "60", 256 * 1024), ("v14", "16", 16 * 1024)]
-    return f"{version}: {after} tx or {size // 1024} KiB" + (" (bindings)" if bindings else "")
+    inline = int(row.get("inline_log_bytes", size))
+    sealed = f", sealed past {inline // 1024} KiB" if inline < size else ""
+    bindings = (version, after, size, inline) in [
+        ("v13", "60", 256 * 1024, 256 * 1024), ("v14", "32", 64 * 1024, 4 * 1024)]
+    return (f"{version}: {after} tx or {size // 1024} KiB{sealed}"
+            + (" (bindings)" if bindings else ""))
 
 
 def configurations():
@@ -85,7 +93,34 @@ def summarize(rows):
     }
 
 
+def sweep(path):
+    totals, sessions_of = defaultdict(lambda: defaultdict(int)), defaultdict(set)
+    columns = ["round_trips", "bytes_written", "commit_written", "page_written", "log_written",
+               "bytes_read", "puts", "deletes"]
+    for row in csv.DictReader(Path(path).open()):
+        if row["run"] != "0" or row["cache"] != "true":
+            continue
+        key = tuple(int(row[c]) for c in
+                    ["rows", "checkpoint_after", "checkpoint_log_bytes", "inline_log_bytes"])
+        sessions_of[key].add((row["iteration"], row["workload"]))
+        for c in columns:
+            totals[key][c] += int(row[c])
+    print("| DB rows | Checkpoint after | Sealed past | Round trips | Bytes written | Record "
+          "| Pages | Stored values | Bytes read | Read + written | Puts + deletes |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for key in sorted(totals):
+        rows, after, log_bytes, inline = key
+        v = {c: n / len(sessions_of[key]) for c, n in totals[key].items()}
+        sealed = f"{inline // 1024} KiB" if inline < log_bytes else "never"
+        print(f"| {rows:,} | {after} tx or {log_bytes // 1024} KiB | {sealed} "
+              f"| {v['round_trips']:.2f} | {v['bytes_written']:,.0f} | {v['commit_written']:,.0f} "
+              f"| {v['page_written']:,.0f} | {v['log_written']:,.0f} | {v['bytes_read']:,.0f} "
+              f"| {v['bytes_written'] + v['bytes_read']:,.0f} | {v['puts'] + v['deletes']:.2f} |")
+
+
 def main():
+    if sys.argv[1:2] == ["--sweep"]:
+        return sweep(sys.argv[2])
     results, repeats = {}, set()
     for case, design, cache, rows, n in configurations():
         results[(case, design, cache)] = summarize(rows)
