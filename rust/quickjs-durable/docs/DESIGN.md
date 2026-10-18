@@ -894,15 +894,19 @@ SDK 1.17.3 on Node 22:
 
 | Workload                                      | TypeScript       | QuickJS          |
 | --------------------------------------------- | ---------------- | ---------------- |
-| KV read and write, a new key each, 32 at once | 484/s, p50 60 ms | 307/s, p50 98 ms |
-| KV read and write, one key, one at a time     | p50 8 ms         | p50 14 ms        |
-| 20 waits on a 1 ms timer, one run             | 82 ms            | 93 ms            |
-| 5 waits, 32 runs at once                      | 220/s            | 155/s            |
-| `Promise.all` of 10 calls, 8 at once          | 47/s             | 27/s             |
-| Primes below 100,000                          | 53 ms            | 488 ms           |
-| Written to Restate by a run of 20 waits       | ~21 KiB          | ~56 KiB          |
+| KV read and write, a new key each, 32 at once | 473/s, p50 62 ms | 362/s, p50 83 ms |
+| KV read and write, one key, one at a time     | p50 10 ms        | p50 13 ms        |
+| 20 waits on a 1 ms timer, one run             | 115 ms           | 95 ms            |
+| 5 waits, 32 runs at once                      | 175/s            | 134/s            |
+| `Promise.all` of 10 calls, 8 at once          | 38/s             | 28/s             |
+| Primes below 100,000                          | 47 ms            | 519 ms           |
+| Written to Restate by a run of 20 waits       | ~20 KiB          | ~53 KiB          |
 
-Rows vary by ~10% from run to run. Before the commit record and the live VM,
+Rows vary by ~10% from run to run, and both columns from day to day: these
+were re-measured after delivering what arrives together in one turn,
+starting VMs from a pool (§3.2) and the leaner bridge (§2.2), when the same
+rows had read 484/s and 307/s, 8 and 14 ms, 82 and 93 ms, 220/s and 155/s,
+47/s and 27/s, 53 and 488 ms, ~21 and ~70 KiB. Before the commit record and the live VM,
 the same rows were 220/s, 64 ms, 1.36 s, 40/s, 8.3/s, 1.8 s and 1.1 MiB;
 before the chain of batches, the run of 20 waits wrote 137 KiB, and ~70
 KiB before compressing pages against their previous contents (§4) and
