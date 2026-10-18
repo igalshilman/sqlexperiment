@@ -471,7 +471,8 @@ impl Session {
     /// transaction is, in the same put, even if it changed nothing. They are
     /// the host's bytes, opaque here (the sends a transaction makes once it
     /// commits, say), and stay until a later commit replaces them; see
-    /// [`Self::effects`]. A `COMMIT` that fails changes nothing.
+    /// [`Self::effects`]. A `COMMIT` that fails changes nothing. With no
+    /// transaction open, the effects commit alone, without the SQL engine.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
         self.commit_extras(effects, None).await
     }
@@ -495,6 +496,22 @@ impl Session {
                 log::MAX_EFFECTS_BYTES
             )
             .into());
+        }
+        let open =
+            (self.connection.as_ref()).is_some_and(|connection| !connection.get_auto_commit());
+        if !open && self.io.is_clean() {
+            // No SQL to commit: the record alone.
+            if self.is_poisoned() {
+                return Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into());
+            }
+            // Until the commit is acknowledged its outcome is unknown.
+            self.poisoned = true;
+            let report = self.io.publish_with(Some(effects), chain).await?;
+            self.poisoned = false;
+            if let Some(error) = report.cleanup_error {
+                self.cleanup_error = Some(error);
+            }
+            return Ok(());
         }
         self.effects = Some(effects);
         self.chain = chain;

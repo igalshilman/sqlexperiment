@@ -45,10 +45,11 @@ fn expected(turns: usize) -> Vec<Bytes> {
     chain
 }
 
-/// A turn: a row (every other turn), its state as the effects, its update.
+/// A turn: a row (every other turn, in a transaction; the others open none),
+/// its state as the effects, its update.
 async fn turn(db: &mut Session, i: usize) -> Result<()> {
-    db.execute("BEGIN").await?;
     if i.is_multiple_of(2) {
+        db.execute("BEGIN").await?;
         db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     }
     db.commit_turn(Bytes::from(format!("turn {i}")), update(i))
@@ -103,8 +104,8 @@ fn a_turn_commits_its_chain_with_its_sql_and_effects() -> Result<()> {
     })
 }
 
-/// A chain value past the inline budget is stored first; a turn of no SQL
-/// is one commit, and adds nothing to the log.
+/// A turn of no SQL, in a transaction or without one, is one commit, and adds
+/// nothing to the log.
 #[test]
 fn turns_without_sql_leave_the_log_alone() -> Result<()> {
     futures::executor::block_on(async {
@@ -114,7 +115,9 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
         db.execute("CREATE TABLE t(n INTEGER)").await?;
         let version = db.version();
         for i in 0..100 {
-            db.execute("BEGIN").await?;
+            if i % 3 == 0 {
+                db.execute("BEGIN").await?;
+            }
             db.commit_turn(
                 Bytes::new(),
                 ChainUpdate::Append(Bytes::from(vec![i as u8; 64])),

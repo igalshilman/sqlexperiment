@@ -602,6 +602,8 @@ impl Snapshot {
                 .collect(),
             false => segments.into_iter().map(Part::Inline).collect(),
         };
+        // The durable record's inline parts, which a seal may hold.
+        let (log_inline, mut chain_inline) = commit.inline_parts();
         let mut values = self.chain.clone();
         let (restart, value) = match &chain {
             None => (false, None),
@@ -612,6 +614,7 @@ impl Snapshot {
         if restart {
             commit.chain.clear();
             values.clear();
+            chain_inline.clear();
         }
         if let Some(value) = value {
             if value.len() > log::MAX_CHAIN_VALUE_BYTES {
@@ -640,13 +643,12 @@ impl Snapshot {
             }
             named.extend(first);
         }
-        // Past its budget, the record's inline parts are sealed into a stored
-        // value: the durable log's, and the chain as this record holds it.
-        // With a cache it is put in this commit's round trip: this record
-        // still holds them inline, and lists the value as garbage until the
-        // owner's next commit names it. Without one, nothing would carry the
-        // seal to the next session: it is put first, and named now.
-        let (log_inline, chain_inline) = commit.inline_parts();
+        // Past its budget, the durable record's inline parts are sealed into a
+        // stored value (those of the chain kept: a value this commit adds goes
+        // after them). With a cache it is put in this commit's round trip:
+        // this record still holds them inline, and lists the value as garbage
+        // until the owner's next commit names it. Without one, nothing would
+        // carry the seal to the next session: it is put first, and named now.
         let added = if large { 0 } else { logged_bytes };
         let sealable = !log_inline.is_empty() || !chain_inline.is_empty();
         let mut seal = (sealable && commit.inline_bytes() + added > budget).then(|| {
