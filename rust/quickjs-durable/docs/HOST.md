@@ -5,7 +5,8 @@ A proposal, not yet built. It covers four things:
 - how a turn's time is bounded, instead of fuel;
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
-- one record that commits a turn's SQL, pages and effects together.
+- one record that commits a turn's SQL, pages and effects together:
+  sqlite-kv v14's commit record, with the VM's chain beside the SQL log.
 
 ## 1. Fuel, and what replaces it
 
@@ -79,10 +80,10 @@ object in the heap holds only its name. A VM restored from a snapshot
 therefore works as soon as the host registers the same names again, which
 it does for every VM.
 
-| Kind                | Examples                                     | When it runs              | What it costs a turn                          |
-| ------------------- | -------------------------------------------- | ------------------------- | --------------------------------------------- |
-| **Call** (in turn)  | `ctx.db.sql`, `ctx.kv.*`, randomness, clock  | Synchronously, in the job | Its effects join the turn's commit            |
-| **Wait** (durable)  | `ctx.rpc.call`, `ctx.sleep`, signals         | After the commit          | A pending entry in the commit (the outbox)    |
+| Kind               | Examples                                    | When it runs              | What it costs a turn                       |
+| ------------------ | ------------------------------------------- | ------------------------- | ------------------------------------------ |
+| **Call** (in turn) | `ctx.db.sql`, `ctx.kv.*`, randomness, clock | Synchronously, in the job | Its effects join the turn's commit         |
+| **Wait** (durable) | `ctx.rpc.call`, `ctx.sleep`, signals        | After the commit          | A pending entry in the commit (the outbox) |
 
 - **Calls** go through `host_call`, dispatched by name to a registry in
   the host:
@@ -102,6 +103,7 @@ it does for every VM.
   is suspended on its fiber meanwhile, and JavaScript sees a plain function
   call. Arguments and results cross as one JSON string each way, serialized
   and parsed in C.
+
 - **Waits** keep today's protocol: a request, a promise, an entry in the
   commit, a durable future after it. A registry replaces the hard-coded
   `match`:
@@ -164,115 +166,77 @@ async function main({ sku, qty }, ctx) {
 
 ## 4. One record commits a turn
 
-Today a turn writes:
+Today a turn puts `batch/<n>` (the pages it changed), then `commit` (the
+run's state, with the chain of batches), then applies the KV writes the
+commit lists. That relies on Restate losing only a suffix of the writes. With
+the journal off, writes land in any order: a `commit` can be durable while
+its batch is lost. And SQL would be a second commit point.
 
-- `batch/<n>`, the pages it changed;
-- `commit`, the run's state, with the chain of batches and the pending
-  effects;
-- then the KV writes, applied after the commit.
+sqlite-kv v14 already has the one commit point this needs: a record that
+every commit rewrites in one put, holding the log since the last checkpoint,
+with stored values for what outgrows it, and the host's **effects** in the
+same put (the SDKs keep their outbox there). A turn becomes one sqlite-kv
+commit, and the record gains one section for the VM.
 
-sqlite-kv commits on its own, through a log segment with a commit flag.
-Two commit points cannot be atomic together. So there is one: a log of
-turns, in the shape sqlite-kv already proves out (its log, `meta`,
-checkpoint invariants, and TLA+ spec).
-
-### Keys
-
-| Key           | Holds                                                                                                                            |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `turn/<seq>`  | **The turn record**, written once. Its presence commits turn `seq`.                                                              |
-| `meta`        | `log_start`: the first turn record still needed. The run's identity. The base below.                                            |
-| `base/vm/<k>` | The VM pages that differ from golden, as of `log_start`, in QPD3 (as a first batch is today).                                    |
-| `db/page/<n>` | SQL pages as of `log_start` (sqlite-kv's `page/<n>`).                                                                            |
-| `turn/<seq>/<part>` | A large turn's sections, written before its record (as sqlite-kv's non-final segments).                                     |
-
-### The turn record
+### The record
 
 ```text
-TurnRecord = "QTR1"
-  state: JSON {                       // what today's commit holds, less the chain
-      run, program, version, runtime, turn: seq,
-      meta: {stack, runtime, context}, memoryLen,
-      pending: Operation[],           // the outbox: Waits to make after the commit
-      nextOperation, now, status, outcome?
-  }
-  vm:  QPD3 batch | part reference    // the pages the turn changed, against their previous contents
-  sql: sqlite-kv transaction | part reference | none
-                                      // the changed SQL pages, against their previous images
+v14/commit = SC14
+  version, epoch, size, next_segment, garbage   // as now
+  effects: the run's state as JSON             // today's `commit`, less the chain:
+                                                // run, program, meta, memoryLen,
+                                                // pending (the outbox), status, outcome
+  log:   the SQL transactions since the checkpoint, inline or stored
+  pages: the VM's chain of QPD3 batches,         // new: the host's, opaque to sqlite-kv
+         each inline or stored
 ```
 
-Each section is length-prefixed and binary, so nothing is base64 inside
-JSON. A typical turn is a few KB of VM pages plus a few KB of SQL pages:
-**one put commits it all.** Today that is one put for the batch, one for
-the commit, and one per KV write. A large turn puts its sections as parts
-first, then the record, which names them.
+- **A turn is one put.** Its SQL transaction joins `log`, its batch joins
+  `pages`, its state replaces `effects`. A few KB of each, inline.
+- **Sealing covers both.** Past `inline_log_bytes`, the inline SQL segments
+  and VM batches are sealed together into one stored value, as now; the
+  owner's next commit names it.
+- **Each chain keeps its own checkpoint.** A SQL checkpoint writes pages and
+  empties `log`; `pages` is untouched. The VM's chain restarts when the host
+  says so (today's rule: 256 batches, or more than twice the first): the
+  commit's batch is then a new first batch (every page that differs from
+  golden), and the old chain's stored values become garbage.
+- **KV moves into SQL** (a table), so its writes commit with the turn too,
+  instead of being applied after.
 
-### Commit, recover, checkpoint
+### Commit, recover
 
-- **Commit.** Put the record, then issue the outbox. Restate journals a
-  handler's writes in order and a crash loses only a suffix. So a call
-  issued after the record exists only if the record does, and nothing waits
-  for an acknowledgement in between.
-- **Recover** (another attempt):
-  1. Read `meta`.
-  2. Read `turn/<log_start..>` concurrently, probing until the first
-     missing one.
-  3. Apply each record's VM and SQL sections in order, over `base/` and
-     `db/page/`.
-  4. Take the last record's `state`.
-
-  Its pending Waits are made again, under their IDs. A record past the
-  first gap is a failed turn's leftover; the next turn overwrites it.
-- **Checkpoint** (when the log passes a count or twice the base's bytes,
-  as the chain policy does now). Steps, in order, each one after the
-  previous step is acknowledged:
-  1. Write the new `base/vm/<k+1>` and the SQL pages to `db/page/<n>`.
-  2. Move `meta.log_start` past the folded turns.
-  3. Delete what `meta` no longer names.
-
-  These are sqlite-kv's invariants 3–5 applied to both page spaces. Any
-  prefix of a checkpoint is a valid state.
-
-### What a crash leaves
-
-| Interrupted          | Result                                                                   |
-| -------------------- | ------------------------------------------------------------------------ |
-| A turn, before its record | The turn did not happen: the attempt reruns it from the last record. |
-| A turn, after its record  | It happened. Its Waits are made again, under the same IDs (attached). |
-| A checkpoint         | `meta` names the old or the new base. The log covers both.               |
-| A deletion           | Repeated by the next checkpoint.                                         |
+- **Commit.** One put of the record (plus a seal, or garbage deletes, in the
+  same round trip). Then the outbox: its Waits are made after the commit,
+  and the next commit drops the ones that are durable, as the SDKs do.
+- **Recover.** Open reads the record and the stored values it names: the
+  SQL log replays over `db/page/<n>`, and the VM is the golden image with the
+  chain applied in order. The record's pending Waits are made again, under
+  their IDs.
 
 ### What sqlite-kv needs
 
-An external-commit mode, beside `Durability::Save` and `Durability::Commit`:
+- `Commit.pages: Vec<Part>` in the record, sealed and named like the log.
+- `Session::commit_turn(effects, pages)`, with `pages` one of: unchanged,
+  append a batch, or restart the chain with a batch. SQL changes may be empty.
+- `Session::pages()`: the chain as opened, each batch's bytes.
 
-- `Session::prepare()`: the changed pages, encoded as one transaction (the
-  bytes a commit segment would hold), with no put. The host puts them
-  inside its turn record.
-- `Session::committed(seq)`: the host's record is durable. The view moves
-  forward, as after a save.
-- `open_with_log(records)`: open over pages, with the log's transactions
-  supplied by the host from the turn records, not read from `log/<n>`.
-- `checkpoint_pages()`: the latest images to write at `db/page/<n>`, for
-  the host's checkpoint.
-
-The page codec, the replay and the checkpoint rules stay sqlite-kv's. Only
-the commit point moves to the host.
+The spec gains the chain as a second sequence of parts; its invariants do
+not change: a record names only durable values, and no value leaks.
 
 ## 5. Plan
 
-On a branch, in this order. Each step can be measured on its own:
+On branches, a PR each:
 
-1. **Epochs instead of fuel**, with async Wasm. Measure primes and the
-   agent benchmark.
-2. **A registry of Calls over `host_call`**, with `ctx.kv` ported to it.
-   Measure the KV benchmark, where each read stops round-tripping through
-   the job queue.
-3. **sqlite-kv's external-commit mode**, with its simulation tests.
-4. **`ctx.db.sql` and `ctx.db.transaction`**, at first committed beside
-   today's records.
-5. **The turn record:** `turn/<seq>`, `meta`, `base/`, and checkpoints over
-   both page spaces. `ctx.kv` moves into SQL.
+1. **sqlite-kv: the host's page chain in the record** (above), with tests
+   and the spec.
+2. **quickjs-durable on sqlite-kv:** a turn commits through
+   `commit_turn`; `batch/<n>` and `commit` go away; KV stays as it is.
+   Measure the agent benchmark's bytes and round trips per turn.
+3. **`ctx.db.sql` and `ctx.db.transaction`**, as Calls over `host_call`
+   (§2), sharing the turn's session. `ctx.kv` becomes a table.
+4. **Epochs instead of fuel**, with async Wasm.
+5. **A registry of Calls and Waits**, for the remaining bindings.
 
 ## Open questions
 
@@ -283,5 +247,5 @@ On a branch, in this order. Each step can be measured on its own:
   a Wait whose request is read from the heap when it is made. That was the
   experiment on `quickjs-host-model`, but here it would be a registered
   binding, not a special case.
-- **Size of a turn record.** How large a state value Restate handles well
-  is to be measured. Past that size, a record's sections go to parts.
+- **Size of a turn record.** Sealing bounds the inline part at 4 KiB of
+  log; how large a stored value Restate handles well is to be measured.
