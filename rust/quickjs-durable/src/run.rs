@@ -46,17 +46,11 @@ fn batch_key(batch: u64) -> String {
 fn kv_key(key: &str) -> String {
     format!("kv/{key}")
 }
-fn page(memory: &[u8], index: usize) -> &[u8] {
-    static ZERO: [u8; PAGE] = [0; PAGE];
-    memory
-        .get(index * PAGE..(index + 1) * PAGE)
-        .unwrap_or(&ZERO)
-}
-/// The pages of `memory` at `indexes`, back to back.
-fn pages(memory: &[u8], indexes: &[u32]) -> Vec<u8> {
+/// The pages at `indexes`, back to back.
+fn pages<'a>(page: impl Fn(u32) -> &'a [u8], indexes: &[u32]) -> Vec<u8> {
     let mut pages = Vec::with_capacity(indexes.len() * PAGE);
     for &index in indexes {
-        pages.extend_from_slice(page(memory, index as usize));
+        pages.extend_from_slice(page(index));
     }
     pages
 }
@@ -156,7 +150,7 @@ impl Run {
             runtime: vm::VERSION,
             turns: 0,
             meta: golden.meta.clone(),
-            memory_len: golden.memory.len(),
+            memory_len: golden.len(),
             chain: Vec::new(),
             base_bytes: 0,
             delta_bytes: 0,
@@ -269,15 +263,15 @@ impl Run {
     /// The committed image, from golden and the batches, in a new VM.
     async fn restore(&self, store: &impl Store, now: u64) -> Result<Live> {
         let commit = &self.commit;
-        let golden = check(&self.programs, commit)?.memory();
+        let mut base = check(&self.programs, commit)?.image();
         ensure!(
-            commit.memory_len >= golden.len()
+            commit.memory_len >= base.len()
                 && commit.memory_len <= MAX_MEMORY
                 && commit.memory_len.is_multiple_of(65536),
             "Invalid committed memory size"
         );
-        let mut memory = golden.to_vec();
-        memory.resize(commit.memory_len, 0);
+        base.meta = commit.meta.clone();
+        base.grow(commit.memory_len);
         let batches = future::try_join_all(
             commit
                 .chain
@@ -291,19 +285,14 @@ impl Run {
             ensure!(
                 indexes
                     .last()
-                    .is_none_or(|&last| (last as usize + 1) * PAGE <= memory.len()),
+                    .is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
                 "Page beyond memory"
             );
-            let decoded = codec::decode_pages(frame, &pages(&memory, &indexes))?;
+            let decoded = codec::decode_pages(frame, &pages(|i| base.page(i), &indexes))?;
             for (index, page) in indexes.iter().zip(decoded.chunks_exact(PAGE)) {
-                let at = *index as usize * PAGE;
-                memory[at..at + PAGE].copy_from_slice(page);
+                base.set(*index, page);
             }
         }
-        let base = Image {
-            meta: commit.meta.clone(),
-            memory,
-        };
         let mut vm = Vm::new(self.programs.runtime(), &commit.run, now)?;
         vm.restore(&base)?;
         Ok(Live { vm, base })
@@ -311,7 +300,6 @@ impl Run {
 
     /// Run the JavaScript on `delivery`, capture what changed, and commit.
     async fn turn(&mut self, store: &impl Store, delivery: Delivery, now: u64) -> Result<()> {
-        let golden = check(&self.programs, &self.commit)?.memory().clone();
         let live = self.live.as_mut().context("No live VM")?;
         let mut writes = BTreeMap::new();
         let ran = run(
@@ -332,19 +320,15 @@ impl Run {
                 written.examined_pages = capture.examined_pages;
                 let base = &mut live.base;
                 base.meta = capture.meta.clone();
-                base.memory.resize(capture.memory_len, 0);
+                base.grow(capture.memory_len);
                 let mut changed = Changed::default();
                 for (index, new) in capture.pages {
-                    let at = index as usize * PAGE;
-                    let original = page(&golden, index as usize);
-                    let old = &base.memory[at..at + PAGE];
-                    live_pages =
-                        live_pages + usize::from(new != original) - usize::from(old != original);
                     changed.indexes.push(index);
-                    changed.old.extend_from_slice(old);
+                    changed.old.extend_from_slice(base.page(index));
                     changed.new.extend_from_slice(&new);
-                    base.memory[at..at + PAGE].copy_from_slice(&new);
+                    base.set(index, &new);
                 }
+                live_pages = base.changed().count();
                 (state, capture.meta, capture.memory_len, changed)
             }
             // The guest trapped: its image is unusable, and the same delivery
@@ -387,11 +371,13 @@ impl Run {
                 base_bytes = bytes.len();
             } else if chain.len() >= MAX_CHAIN || delta_bytes + bytes.len() > 2 * base_bytes {
                 // A new first batch: every page that differs from golden.
-                let memory = &self.live.as_ref().context("No live VM")?.base.memory;
-                let live: Vec<u32> = (0..(memory.len() / PAGE) as u32)
-                    .filter(|&index| page(memory, index as usize) != page(&golden, index as usize))
-                    .collect();
-                bytes = codec::encode_pages(&live, &pages(memory, &live), &pages(&golden, &live))?;
+                let base = &self.live.as_ref().context("No live VM")?.base;
+                let live: Vec<u32> = base.changed().collect();
+                bytes = codec::encode_pages(
+                    &live,
+                    &pages(|i| base.page(i), &live),
+                    &pages(|i| base.original(i), &live),
+                )?;
                 chain.clear();
                 (base_bytes, delta_bytes) = (bytes.len(), 0);
             } else {

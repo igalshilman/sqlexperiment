@@ -21,7 +21,7 @@
 //! made before the crash is attached to, not made again. The run ends when
 //! `main` settles: requests still outstanding (a race's loser) are dropped,
 //! and their continuations never run.
-use crate::{Operation, Outcome, Programs, Run, Runtime};
+use crate::{Operation, Outcome, Programs, Run, Runtime, vm};
 use restate_sdk::{
     context::{DurableFuture, RequestTarget},
     prelude::*,
@@ -181,7 +181,7 @@ fn committed<T>(store: &ObjectStore, result: anyhow::Result<T>) -> HandlerResult
             faults::after_commit()?;
             Ok(value)
         }
-        Err(error) if store.failed() => Err(error.into()),
+        Err(error) if store.failed() || vm::exhausted(&error) => Err(error.into()),
         Err(error) => Err(TerminalError::new(format!("{error:#}")).into()),
     }
 }

@@ -294,6 +294,27 @@ Restore in this order:
 5. Reapply allocator/stack limits. These rebinding writes belong to the new dirty
    epoch. Do not call `_initialize`, `qjs_init2`, bridge initialization or top-level
    application evaluation over the restored heap.
+
+Starting a VM is most of what a short run costs, so the runtime keeps it cheap:
+
+- **Imports resolved once.** The runtime links the module's imports once
+  (`InstancePre`); each VM only instantiates it.
+- **A pool of instance slots.** Wasmtime's pooling allocator reuses memory
+  slots from VM to VM and keeps each slot's first 2 MiB mapped, so copying
+  golden in writes memory already resident instead of faulting in every page.
+  The pool holds 1,000 VMs at once; past that, starting one fails, and the
+  binding retries the attempt, as for a storage failure. Its 2,000 memory
+  slots reserve ~8 TiB of address space (4 GiB each, so that Wasm needs no
+  bounds checks), not memory: the process ran at ~150 MiB resident under load.
+- **Golden shared.** An image is the program's golden memory, shared, and the
+  pages that differ from it; a new run copies nothing but into the VM.
+
+Measured on 18 October 2026, a run that settles in its first turn (a KV read
+and write) took 1,755 µs in `MemoryStore`, of which 1,112 µs restoring golden
+(mostly page faults) and 253 µs copying it; the pool made it 1,073 µs, the
+linked imports 924 µs, the shared golden 771 µs. Against a server, one-turn
+runs went from ~298/s to ~340/s and `Promise.all` of 10 calls from ~24/s to
+~28/s; runs of 5 waits stayed at ~130/s.
 6. Bind run state on first start, or deliver one completion, then run jobs.
    Each later turn reuses the instance: it resets fuel and logical time,
    delivers, runs, captures, and clears the tracker once the commit is stored.
@@ -387,8 +408,8 @@ length even if no new page is written. Reject unsupported writing instructions
 rather than silently missing them.
 
 At a safe boundary compare only marked pages with the parent image (the memory
-as of the last commit, which the run keeps beside its live VM), treating pages
-beyond parent length as zeros. Dirty means written; changed means different at
+as of the last commit, which the run keeps beside its live VM, as golden and
+the pages that differ from it), treating pages beyond parent length as zeros. Dirty means written; changed means different at
 capture. A page written and restored to its original value needs no new
 payload. Reset the tracker on restore before rebinding pointers/limits, and
 after each commit is stored. A failed commit ends the attempt with its VM.
@@ -538,7 +559,7 @@ reference they name.
 ### 5.3. Capture algorithm
 
 Inputs are golden image G, the parent P (the memory as of the last commit, kept
-beside the live VM), the commit's chain, the live VM and its tracker. A new run
+beside the live VM as G and the pages that differ from it), the commit's chain, the live VM and its tracker. A new run
 has P=G and an empty chain.
 
 ```text
@@ -606,7 +627,8 @@ reconstruct(commit):
     return Image(memory, commit.meta)
 ```
 
-The process keeps each golden image decompressed in its catalog. An attempt
+The process keeps each golden image decompressed in its catalog, shared by
+every image made from it: an image holds only the pages that differ. An attempt
 reconstructs once, when its first delivery needs the VM; reading a settled
 run's commit needs no image.
 

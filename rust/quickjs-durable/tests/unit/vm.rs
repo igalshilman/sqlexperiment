@@ -34,7 +34,7 @@ fn host_ranges_and_epoch_reset() -> Result<()> {
     // but unrelated pages from the discarded turn must not survive.
     vm.restore(&image)?;
     assert_eq!(vm.dirty.data(&vm.store)[2], 0);
-    assert_eq!(vm.memory.data(&vm.store)[8192], image.memory[8192]);
+    assert_eq!(vm.memory.data(&vm.store)[8192], image.page(2)[0]);
     Ok(())
 }
 
@@ -46,9 +46,9 @@ fn verification_oracle_detects_an_unmarked_host_write() -> Result<()> {
     let mut vm = Vm::new(&runtime, "oracle", 1)?;
     vm.restore(&image)?;
     // Deliberately bypass the sole host write helper to prove the oracle works.
-    let offset = image.memory.len() - 1;
-    vm.memory
-        .write(&mut vm.store, offset, &[image.memory[offset] ^ 1])?;
+    let offset = image.len() - 1;
+    let byte = image.page((offset / PAGE) as u32)[PAGE - 1];
+    vm.memory.write(&mut vm.store, offset, &[byte ^ 1])?;
     vm.dirty.data_mut(&mut vm.store)[offset / PAGE] = 0;
     let error = vm.capture(&image).err().expect("missed write must fail");
     assert!(error.to_string().contains("missed page"));

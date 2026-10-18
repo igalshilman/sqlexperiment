@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 pub(crate) const PAGE: usize = 4096;
 pub(crate) const MAX_MEMORY: usize = 64 * 1024 * 1024;
@@ -157,9 +157,70 @@ pub(crate) struct Capture {
     pub examined_pages: usize,
 }
 
+/// A memory image: a program's golden memory, shared, and the pages that
+/// differ from it. Beyond golden's length, golden reads as zeros.
+#[derive(Clone)]
 pub(crate) struct Image {
     pub meta: VmMeta,
-    pub memory: Vec<u8>,
+    golden: Arc<Vec<u8>>,
+    len: usize,
+    changed: BTreeMap<u32, Box<[u8]>>,
+}
+
+impl Image {
+    pub fn golden(meta: VmMeta, memory: Arc<Vec<u8>>) -> Self {
+        let len = memory.len();
+        Self {
+            meta,
+            golden: memory,
+            len,
+            changed: BTreeMap::new(),
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    /// Grow to `len` bytes, of zeros.
+    pub fn grow(&mut self, len: usize) {
+        debug_assert!(len >= self.len);
+        self.len = len;
+    }
+    pub fn page(&self, index: u32) -> &[u8] {
+        static ZERO: [u8; PAGE] = [0; PAGE];
+        match self.changed.get(&index) {
+            Some(page) => page,
+            None => {
+                let at = index as usize * PAGE;
+                self.golden.get(at..at + PAGE).unwrap_or(&ZERO)
+            }
+        }
+    }
+    /// Golden's page `index`, or zeros beyond it.
+    pub fn original(&self, index: u32) -> &[u8] {
+        static ZERO: [u8; PAGE] = [0; PAGE];
+        let at = index as usize * PAGE;
+        self.golden.get(at..at + PAGE).unwrap_or(&ZERO)
+    }
+    pub fn set(&mut self, index: u32, page: &[u8]) {
+        if page == self.original(index) {
+            self.changed.remove(&index);
+        } else {
+            self.changed.insert(index, page.into());
+        }
+    }
+    /// The pages that differ from golden, in order.
+    pub fn changed(&self) -> impl Iterator<Item = u32> + '_ {
+        self.changed.keys().copied()
+    }
+    /// Write the image over `memory`, of its length.
+    pub fn write(&self, memory: &mut [u8]) {
+        memory[..self.golden.len()].copy_from_slice(&self.golden);
+        memory[self.golden.len()..].fill(0);
+        for (index, page) in &self.changed {
+            let at = *index as usize * PAGE;
+            memory[at..at + PAGE].copy_from_slice(page);
+        }
+    }
 }
 
 /// A scope's commit: its current run, as of its last turn. It is the one record
