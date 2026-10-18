@@ -171,9 +171,9 @@ fn promise_race_all_any_settled_and_errors() -> Result<()> {
 }
 
 #[test]
-fn losing_race_is_drained_before_terminal() -> Result<()> {
+fn a_race_answers_early_and_drains_its_loser() -> Result<()> {
     let mut e = engine(
-        "async function main(){return await Promise.race([durable.call('a'),durable.call('b')]);}",
+        "async function main(){const a=durable.call('a'), b=durable.call('b').catch(()=>durable.call('after'));return await Promise.race([a,b]);}",
     );
     let start = futures_executor::block_on(e.start("r", "v1", Value::Null, 1))?;
     let waiting = futures_executor::block_on(e.complete(
@@ -184,12 +184,17 @@ fn losing_race_is_drained_before_terminal() -> Result<()> {
     ))?;
     assert_eq!(waiting.state.status, Status::Waiting);
     assert_eq!(value(&waiting.state.outcome), 7);
-    let done = futures_executor::block_on(e.complete(
+    let lost = futures_executor::block_on(e.complete(
         "r",
         start.state.pending[1].id(),
         Outcome::failure("Error", "loser"),
         3,
     ))?;
+    // The loser's continuation is application code: it runs, and its request too.
+    assert_eq!(lost.state.status, Status::Waiting);
+    assert_eq!(value(&lost.state.outcome), 7);
+    let after = lost.state.pending[0].id().to_owned();
+    let done = futures_executor::block_on(e.complete("r", &after, Outcome::success(0), 4))?;
     assert_eq!(done.state.status, Status::Completed);
     assert_eq!(value(&done.state.outcome), 7);
     Ok(())

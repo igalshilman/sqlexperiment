@@ -182,8 +182,11 @@ State = {
 After draining jobs, a root still unsettled with no pending request is a failed
 "Execution stalled: no durable wakeup" outcome. With any pending request, status
 is waiting even if the root has settled. Otherwise status follows root success
-or failure. Thus losing `Promise.race` branches and ignored promises must drain
-before terminal publication. No cancellation or detached-effect lifetime exists.
+or failure. Thus losing `Promise.race` branches and ignored promises drain
+with full JavaScript semantics before the run is terminal: their continuations
+are application code. The answer is known earlier: `outcome` is present from
+the turn the root settles, while status is still waiting, and an embedding
+replies to its caller then. No cancellation or detached-effect lifetime exists.
 When pausing with queued jobs, create the resume request **before** inspecting
 state so the queued continuation is not misclassified as stalled.
 
@@ -1044,8 +1047,9 @@ checkpoint to drain the last continuation and record the terminal outcome.
 For `Promise.all([rpcA(), rpcB()])`, the first checkpoint registers both requests
 atomically. Completing B removes/consumes only B; `handled` prevents re-emitting A.
 The next image retains B's resolved value while waiting for A. Completing A then
-returns values in application array order. For Promise.race, the root winner may
-be known earlier, but this prototype still waits for the losing effect to drain.
+returns values in application array order. For Promise.race, the winner's
+outcome is published in the turn it settles; the losing effect still drains, and
+its continuation runs, before the run is completed.
 
 ## 10. Restate binding and implementation acceptance
 
