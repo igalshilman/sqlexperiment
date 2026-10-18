@@ -77,8 +77,7 @@ its examples in `examples-<part>/`.
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13
 ```
 
-Or run `restate-server` directly: `make restate-server` downloads the release
-binary for this platform to `target/restate/restate-server`.
+Or `npx @restatedev/restate-server`.
 
 ## Build and test
 

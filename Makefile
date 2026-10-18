@@ -53,7 +53,7 @@ endif
 
 .PHONY: all help core qjs addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
 	test-sdk-py test-sdk-rs test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs format crash-test concurrency-test tools-test \
-	crash-test-py concurrency-test-py restate-server wheels clean
+	crash-test-py concurrency-test-py wheels clean
 
 # --- Build
 
@@ -197,9 +197,6 @@ test-qjs: $(SDK_RS) $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: 
 	cd $(QJS) && QJS_TRACKING=barriers $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes
 	cd $(QJS) && $(CARGO) test --locked --release --features full-scan --lib --test runs --test crashes
 	cd $(QJS) && $(CARGO) test --locked --release --test restate -- --include-ignored --test-threads 1
-
-restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
-	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
 
 # Into a temporary file, moved into place once it runs: a failed download or
 # copy leaves no binary that make would take as up to date.
