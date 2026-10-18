@@ -95,7 +95,7 @@ fn record() -> io::Result<Commit> {
             },
             Logged {
                 size: 2 * 4096,
-                parts: vec![Part::Stored(7), Part::Stored(8)],
+                parts: vec![Part::Stored(7, 0), Part::Stored(7, 1)],
             },
             Logged {
                 size: 3 * 4096,
@@ -109,7 +109,7 @@ fn record() -> io::Result<Commit> {
 fn commit_records_round_trip() -> io::Result<()> {
     let commit = record()?;
     assert_eq!(Commit::decode(&commit.encode())?, commit);
-    assert_eq!(commit.stored_segments().collect::<Vec<_>>(), [7, 8]);
+    assert_eq!(commit.stored_values().into_iter().collect::<Vec<_>>(), [7]);
     let empty = Commit::default();
     assert_eq!(Commit::decode(&empty.encode())?, empty);
     // `SC14`, version, epoch, units, next segment, garbage 4..7, the effects,
@@ -186,10 +186,10 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
     large.effects = Bytes::from(vec![0; MAX_EFFECTS_BYTES + 1]);
     invalid.push(large.encode().to_vec());
     let mut named = record()?;
-    named.log[1].parts[0] = Part::Stored(12); // not allocated
+    named.log[1].parts[0] = Part::Stored(12, 0); // not allocated
     invalid.push(named.encode().to_vec());
     let mut named = record()?;
-    named.log[1].parts[0] = Part::Stored(5); // garbage
+    named.log[1].parts[0] = Part::Stored(5, 0); // garbage
     invalid.push(named.encode().to_vec());
     for bytes in invalid {
         assert!(Commit::decode(&Bytes::from(bytes)).is_err());
@@ -197,23 +197,29 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
     Ok(())
 }
 
-/// Replay reads the stored segments a record names, together, and decodes
-/// every segment in order against the ones before it; a missing one fails.
+/// Replay reads the stored values a record names that it does not hold
+/// already, together, and decodes every segment in order against the ones
+/// before it; a missing value or segment fails.
 #[cfg(feature = "simulation")]
 #[test]
-fn replay_reads_stored_segments() -> io::Result<()> {
+fn replay_reads_stored_values() -> io::Result<()> {
     use crate::{format::log_key, simulation::MemoryKv};
     futures::executor::block_on(async {
         let store = MemoryKv::default();
         let first = Images::from([(0, Some(varied(3, 0)))]);
         let second = Images::from([(0, Some(varied(3, 30))), (1, Some(image(4)))]);
+        let third = Images::from([(1, Some(varied(4, 9)))]);
         let mut log = Log::new();
         let inline = encode_transaction(&first, &log.chain)?;
         log.append(4096, first, 0);
-        let stored = encode_transaction(&second, &log.chain)?;
-        store.put(&log_key(5), stored_segment(&stored[0])).await?;
+        let sealed = encode_transaction(&second, &log.chain)?;
+        log.append(2 * 4096, second.clone(), 0);
+        let last = encode_transaction(&third, &log.chain)?;
+        // The second transaction sealed with the third, into one value.
+        let value = stored_value(&[sealed[0].clone(), last[0].clone()]);
+        store.put(&log_key(5), value.clone()).await?;
         let commit = Commit {
-            version: 2,
+            version: 3,
             size: 2 * 4096,
             next_segment: 6,
             log: vec![
@@ -223,18 +229,30 @@ fn replay_reads_stored_segments() -> io::Result<()> {
                 },
                 Logged {
                     size: 2 * 4096,
-                    parts: vec![Part::Stored(5)],
+                    parts: vec![Part::Stored(5, 0)],
+                },
+                Logged {
+                    size: 2 * 4096,
+                    parts: vec![Part::Stored(5, 1)],
                 },
             ],
             ..Commit::default()
         };
-        let replayed = replay(&store, &commit).await?;
-        assert_eq!(replayed.transactions.len(), 2);
-        assert_eq!(replayed.images, second);
-        assert_eq!(replayed.chain.images, second);
+        let (replayed, values) = replay(&store, &commit, Values::new()).await?;
+        assert_eq!(replayed.transactions.len(), 3);
+        let mut latest = second;
+        latest.extend(third);
+        assert_eq!(replayed.images, latest);
+        assert_eq!(values, Values::from([(5, value.clone())]));
 
+        // A value held already is not read again.
         store.delete(&log_key(5)).await?;
-        assert!(replay(&store, &commit).await.is_err());
+        replay(&store, &commit, values).await?;
+        assert!(replay(&store, &commit, Values::new()).await.is_err());
+        let mut beyond = commit.clone();
+        beyond.log[2].parts[0] = Part::Stored(5, 2);
+        let held = Values::from([(5, value)]);
+        assert!(replay(&store, &beyond, held).await.is_err());
         Ok(())
     })
 }

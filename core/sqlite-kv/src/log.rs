@@ -5,7 +5,11 @@
 //! since the last checkpoint: each committed transaction's changed pages, as
 //! segments. A small transaction's segments are inline in the record, so a
 //! save is one put. A large one's are put first at `log/<n>`, immutable keys,
-//! and the record names them once they are durable.
+//! and the record names them once they are durable. So are the inline ones
+//! once they outgrow [`crate::StorageOptions::inline_log_bytes`]: a commit
+//! seals them, with its own, into one stored value, and the record keeps
+//! only their names. Every commit rewrites the record, so this keeps commits
+//! small while the log grows long between checkpoints.
 //!
 //! Nothing here relies on the order in which the store applies writes. A
 //! write is relied on only once it is acknowledged: the segments a record
@@ -25,7 +29,8 @@
 //! ascending page order the gap from the previous entry's page (the page itself
 //! for the first) shifted left once, its low bit the kind (0: a hole, 1: an
 //! image); then one zstd frame, with a checksum, of the images in entry order
-//! (none when every entry is a hole). At `log/<n>` it starts with `SL14`.
+//! (none when every entry is a hole). A value at `log/<n>` is `SL14`, then the
+//! segment count and each segment's length and bytes.
 use crate::{
     format::{COMMIT_MAGIC, LOG_MAGIC, log_key},
     io::BLOCK_SIZE,
@@ -223,20 +228,43 @@ pub(crate) fn decode_segment(bytes: &[u8], chain: &Chain) -> io::Result<Images> 
     Ok(images)
 }
 
-/// A segment as a `log/<n>` value: the magic, then the segment.
-pub(crate) fn stored_segment(segment: &[u8]) -> Bytes {
-    let mut out = Vec::with_capacity(MAGIC + segment.len());
+/// Segments as a `log/<n>` value: the magic, the count, then each one's
+/// length and bytes.
+pub(crate) fn stored_value(segments: &[Bytes]) -> Bytes {
+    let len = segments.iter().map(|s| s.len() + 4).sum::<usize>();
+    let mut out = Vec::with_capacity(MAGIC + 4 + len);
     out.extend_from_slice(LOG_MAGIC);
-    out.extend_from_slice(segment);
+    put_varint(&mut out, segments.len() as u64);
+    for segment in segments {
+        put_varint(&mut out, segment.len() as u64);
+        out.extend_from_slice(segment);
+    }
     out.into()
 }
 
-/// The segment in a `log/<n>` value.
-fn unstored_segment(bytes: &Bytes) -> io::Result<Bytes> {
+/// The segments of a `log/<n>` value.
+pub(crate) fn stored_segments(bytes: &Bytes) -> io::Result<Vec<Bytes>> {
+    let value = || invalid("log segment");
     if bytes.len() < MAGIC || &bytes[..MAGIC] != LOG_MAGIC {
-        return Err(invalid("log segment"));
+        return Err(value());
     }
-    Ok(bytes.slice(MAGIC..))
+    let mut at = MAGIC;
+    let count = get_varint(bytes, &mut at).ok_or_else(value)?;
+    if count > MAX_TRANSACTIONS {
+        return Err(value());
+    }
+    let mut segments = Vec::with_capacity(count.min(1024) as usize);
+    for _ in 0..count {
+        let len = get_varint(bytes, &mut at).ok_or_else(value)? as usize;
+        let end = at.checked_add(len).filter(|&end| end <= bytes.len());
+        let end = end.filter(|_| len <= MAX_SEGMENT_BYTES).ok_or_else(value)?;
+        segments.push(bytes.slice(at..end));
+        at = end;
+    }
+    if at != bytes.len() {
+        return Err(value());
+    }
+    Ok(segments)
 }
 
 /// Where a segment of a committed transaction is.
@@ -244,8 +272,8 @@ fn unstored_segment(bytes: &Bytes) -> io::Result<Bytes> {
 pub(crate) enum Part {
     /// In the commit record.
     Inline(Bytes),
-    /// At `log/<n>`.
-    Stored(u64),
+    /// At `log/<n>`, at this index among the value's segments.
+    Stored(u64, u32),
 }
 
 /// A committed transaction, as the commit record holds it.
@@ -263,7 +291,8 @@ pub(crate) struct Logged {
 /// range's start and end, the effects' length and bytes, and the
 /// transaction count; per transaction its
 /// size in 512-byte units and its part count; per part 0 and the segment's
-/// length and bytes (inline), or 1 and its segment number (stored).
+/// length and bytes (inline), or 1, the stored value's number and the
+/// segment's index in it (stored).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Commit {
     /// Transactions ever committed: the database's version.
@@ -306,7 +335,7 @@ impl Commit {
             .flat_map(|t| &t.parts)
             .map(|part| match part {
                 Part::Inline(bytes) => bytes.len() + 4,
-                Part::Stored(_) => 10,
+                Part::Stored(..) => 15,
             })
             .sum();
         let mut out = Vec::with_capacity(64 + self.effects.len() + 4 * self.log.len() + inline);
@@ -334,9 +363,10 @@ impl Commit {
                         put_varint(&mut out, bytes.len() as u64);
                         out.extend_from_slice(bytes);
                     }
-                    Part::Stored(n) => {
+                    Part::Stored(n, index) => {
                         put_varint(&mut out, 1);
                         put_varint(&mut out, *n);
+                        put_varint(&mut out, u64::from(*index));
                     }
                 }
             }
@@ -397,10 +427,11 @@ impl Commit {
                     }
                     1 => {
                         let n = varint(&mut at)?;
+                        let index = u32::try_from(varint(&mut at)?).map_err(|_| record())?;
                         if n >= next_segment || garbage.contains(&n) {
                             return Err(record());
                         }
-                        Part::Stored(n)
+                        Part::Stored(n, index)
                     }
                     _ => return Err(record()),
                 });
@@ -428,7 +459,7 @@ impl Commit {
             .flat_map(|t| &t.parts)
             .map(|part| match part {
                 Part::Inline(bytes) => bytes.len(),
-                Part::Stored(_) => 0,
+                Part::Stored(..) => 0,
             })
             .sum()
     }
@@ -442,21 +473,22 @@ impl Commit {
             .flat_map(|t| &t.parts)
             .filter_map(|part| match part {
                 Part::Inline(bytes) => entries(bytes).ok(),
-                Part::Stored(_) => None,
+                Part::Stored(..) => None,
             })
             .flat_map(|(pages, _)| pages.into_iter().map(|(index, _)| index))
             .collect()
     }
 
-    /// The stored segments the log names.
-    pub(crate) fn stored_segments(&self) -> impl Iterator<Item = u64> + '_ {
+    /// The stored values the log names, by number.
+    pub(crate) fn stored_values(&self) -> std::collections::BTreeSet<u64> {
         self.log
             .iter()
             .flat_map(|t| &t.parts)
             .filter_map(|part| match part {
-                Part::Stored(n) => Some(*n),
+                Part::Stored(n, _) => Some(*n),
                 Part::Inline(_) => None,
             })
+            .collect()
     }
 }
 
@@ -506,10 +538,34 @@ impl Log {
 
 /// Replay the log a commit record holds: its stored segments are read
 /// together, then every segment decodes in order against the ones before it.
-pub(crate) async fn replay(store: &dyn KvStore, commit: &Commit) -> io::Result<Log> {
-    let stored: Vec<u64> = commit.stored_segments().collect();
-    let values = read_segments(store, &stored).await?;
-    let mut values = stored.into_iter().zip(values).collect::<BTreeMap<_, _>>();
+/// Stored values by number, as `log/<n>` holds them.
+pub(crate) type Values = BTreeMap<u64, Bytes>;
+
+/// Replay `commit`'s log: its inline segments, and the stored values it names,
+/// those not in `known` read together. Returns the log, and every stored value
+/// it named.
+pub(crate) async fn replay(
+    store: &dyn KvStore,
+    commit: &Commit,
+    mut known: Values,
+) -> io::Result<(Log, Values)> {
+    let named = commit.stored_values();
+    known.retain(|n, _| named.contains(n));
+    let missing: Vec<u64> = named
+        .iter()
+        .filter(|n| !known.contains_key(n))
+        .copied()
+        .collect();
+    known.extend(
+        missing
+            .iter()
+            .copied()
+            .zip(read_values(store, &missing).await?),
+    );
+    let mut segments = BTreeMap::new();
+    for (&n, value) in &known {
+        segments.insert(n, stored_segments(value)?);
+    }
     let mut log = Log::new();
     for transaction in &commit.log {
         let mut images = Images::new();
@@ -517,7 +573,11 @@ pub(crate) async fn replay(store: &dyn KvStore, commit: &Commit) -> io::Result<L
         for part in &transaction.parts {
             let segment = match part {
                 Part::Inline(segment) => segment.clone(),
-                Part::Stored(n) => values.remove(n).ok_or_else(|| invalid("log segment"))?,
+                Part::Stored(n, index) => segments
+                    .get(n)
+                    .and_then(|value| value.get(*index as usize))
+                    .cloned()
+                    .ok_or_else(|| invalid("log segment"))?,
             };
             bytes += segment.len();
             // The parts of a transaction decode against the log before it.
@@ -525,16 +585,16 @@ pub(crate) async fn replay(store: &dyn KvStore, commit: &Commit) -> io::Result<L
         }
         log.append(transaction.size, images, bytes);
     }
-    Ok(log)
+    Ok((log, known))
 }
 
-/// The segments at `log/<n>` for each of `numbers`, read together.
-pub(crate) async fn read_segments(store: &dyn KvStore, numbers: &[u64]) -> io::Result<Vec<Bytes>> {
+/// The values at `log/<n>` for each of `numbers`, read together.
+pub(crate) async fn read_values(store: &dyn KvStore, numbers: &[u64]) -> io::Result<Vec<Bytes>> {
     let keys: Vec<_> = numbers.iter().map(|&n| log_key(n)).collect();
     let values = try_join_all(keys.iter().map(|key| store.get(key))).await?;
     values
         .into_iter()
-        .map(|value| unstored_segment(&value.ok_or_else(|| invalid("missing log segment"))?))
+        .map(|value| value.ok_or_else(|| invalid("missing log segment")))
         .collect()
 }
 

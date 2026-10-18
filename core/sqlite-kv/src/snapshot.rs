@@ -74,6 +74,8 @@ const MAX_READAHEAD: u64 = 64;
 pub const CHECKPOINT_LOG_BYTES: usize = 256 * 1024;
 /// Default [`StorageOptions::max_inline_bytes`].
 pub const MAX_INLINE_BYTES: usize = 64 * 1024;
+/// Default [`StorageOptions::inline_log_bytes`].
+pub const INLINE_LOG_BYTES: usize = 8 * 1024;
 
 /// When a session's SQL changes become durable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -104,10 +106,13 @@ pub struct StorageOptions {
     pub checkpoint_log_bytes: usize,
     /// A transaction whose segments take more is put at stored segments, which
     /// the commit record names, rather than inline in it: a save then costs a
-    /// round trip more, and the log's later saves do not rewrite it. So is any
-    /// that would take the record's inline log past
-    /// [`Self::checkpoint_log_bytes`].
+    /// round trip more, and the log's later saves do not rewrite it.
     pub max_inline_bytes: usize,
+    /// Bytes of log the record holds inline. A commit that would take it past
+    /// this seals the inline segments, with its own, into one stored value,
+    /// which the record names: a round trip more for that commit, and every
+    /// later one rewrites a smaller record.
+    pub inline_log_bytes: usize,
     /// A cold open (no warm cache pages) fetches every page of a database of
     /// at most this many pages, alongside replay.
     pub prefetch_pages: u64,
@@ -133,6 +138,7 @@ impl Default for StorageOptions {
             checkpoint_after: 4,
             checkpoint_log_bytes: CHECKPOINT_LOG_BYTES,
             max_inline_bytes: MAX_INLINE_BYTES,
+            inline_log_bytes: INLINE_LOG_BYTES,
             prefetch_pages: PREFETCH_PAGES,
             hint_pages: HINT_PAGES,
             durability: Durability::Save,
@@ -285,7 +291,13 @@ impl Snapshot {
             let fetched = tokens.into_iter().zip(values);
             Ok::<_, io::Error>(wanted.iter().copied().zip(fetched).collect::<Vec<_>>())
         };
-        let (log, prefetched_pages) = futures::try_join!(log::replay(&*store, &commit), prefetch)?;
+        let named = commit.stored_values();
+        let held = cache.map_or_else(log::Values::new, |cache| cache.values(&named));
+        let ((log, values), prefetched_pages) =
+            futures::try_join!(log::replay(&*store, &commit, held), prefetch)?;
+        if let Some(cache) = cache {
+            cache.keep_values(&named, values);
+        }
         let unchanged = known && cache.and_then(NamespaceCache::committed) == Some(commit.version);
         if let Some(cache) = cache {
             let committed = (!known).then_some(commit.version);
@@ -507,30 +519,44 @@ impl Snapshot {
         let logged_bytes = segments.iter().map(Bytes::len).sum::<usize>();
         let store = &*self.store;
         let mut commit = self.commit.clone();
-        // A large transaction goes to stored segments, durable before the
-        // record that names them; so does any once the record holds a log's
-        // worth inline (its checkpoints failing), which keeps it bounded.
-        let inline = commit.inline_bytes() + logged_bytes;
-        let budget = self
-            .options
-            .checkpoint_log_bytes
-            .max(self.options.max_inline_bytes);
-        let parts = if logged_bytes > self.options.max_inline_bytes || inline > budget {
+        // A large transaction goes to stored values, a segment each; and once
+        // the record's inline log would outgrow its budget, the commit seals
+        // it, with its own segments, into one. Either is durable before the
+        // record that names it.
+        let mut stored = log::Values::new();
+        let parts = if logged_bytes > self.options.max_inline_bytes {
             let first = commit.next_segment;
             commit.next_segment += segments.len() as u64;
-            let puts = (segments.iter().enumerate())
-                .map(|(n, segment)| {
-                    let key = log_key(first + n as u64);
-                    Mutation::Put(key, log::stored_segment(segment))
-                })
-                .collect();
-            if let Err(error) = concurrently(store, puts).await {
-                return Err(self.failed(error));
+            for (n, segment) in (first..).zip(&segments) {
+                stored.insert(n, log::stored_value(std::slice::from_ref(segment)));
             }
-            (first..commit.next_segment).map(Part::Stored).collect()
+            (first..commit.next_segment)
+                .map(|n| Part::Stored(n, 0))
+                .collect()
+        } else if commit.inline_bytes() + logged_bytes > self.options.inline_log_bytes {
+            let n = commit.next_segment;
+            commit.next_segment += 1;
+            let mut sealed = Vec::new();
+            for part in commit.log.iter_mut().flat_map(|t| &mut t.parts) {
+                if let Part::Inline(segment) = part {
+                    sealed.push(std::mem::take(segment));
+                    *part = Part::Stored(n, sealed.len() as u32 - 1);
+                }
+            }
+            let first = sealed.len() as u32;
+            sealed.extend(segments);
+            let last = sealed.len() as u32;
+            stored.insert(n, log::stored_value(&sealed));
+            (first..last).map(|index| Part::Stored(n, index)).collect()
         } else {
             segments.into_iter().map(Part::Inline).collect()
         };
+        let puts = (stored.iter())
+            .map(|(&n, value)| Mutation::Put(log_key(n), value.clone()))
+            .collect();
+        if let Err(error) = concurrently(store, puts).await {
+            return Err(self.failed(error));
+        }
         commit.version += 1;
         commit.size = size;
         commit.log.push(Logged { size, parts });
@@ -555,6 +581,7 @@ impl Snapshot {
         let version = commit.version;
         if let Some(cache) = cache {
             cache.record(Some(bytes.clone()), commit.epoch, Some(version));
+            cache.keep_values(&commit.stored_values(), stored);
         }
         let mut after = self.continued(commit, Some(bytes));
         after.extend(size, images, logged_bytes);

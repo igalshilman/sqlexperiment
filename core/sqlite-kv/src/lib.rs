@@ -131,8 +131,8 @@ pub use hint::MAX_HINT_PAGES;
 pub use log::{MAX_EFFECTS_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::PageCompression;
 pub use snapshot::{
-    CHECKPOINT_LOG_BYTES, Durability, MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport,
-    StorageOptions,
+    CHECKPOINT_LOG_BYTES, Durability, INLINE_LOG_BYTES, MAX_PRIVATE_BYTES, MAX_RESULT_BYTES,
+    SaveReport, StorageOptions,
 };
 /// SQL values, as returned in rows and bound as parameters.
 pub use turso_core::Value;

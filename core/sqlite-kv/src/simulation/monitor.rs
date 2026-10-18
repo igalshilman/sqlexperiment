@@ -9,7 +9,8 @@
 //! 1. **Name only the durable**: a commit record names only stored segments
 //!    known to hold their segment.
 //! 2. **Build on durable**: a commit record holds the known record's log plus
-//!    one transaction, at the next version; or is that record again.
+//!    one transaction, at the next version (its earlier transactions decode to
+//!    the same images, inline or sealed); or is that record again.
 //! 3. **Checkpoint before recording**: a record that empties the log (the next
 //!    epoch) comes only when every page the known log changed is known at its
 //!    page key, with the log's latest image of it.
@@ -75,7 +76,10 @@ impl Known {
             for part in &transaction.parts {
                 let segment = match part {
                     Part::Inline(bytes) => bytes.clone(),
-                    Part::Stored(n) => self.segments.get(n)?.slice(4..),
+                    Part::Stored(n, index) => log::stored_segments(self.segments.get(n)?)
+                        .ok()?
+                        .get(*index as usize)?
+                        .clone(),
                 };
                 images.extend(log::decode_segment(&segment, &chain).ok()?);
             }
@@ -131,10 +135,18 @@ impl Known {
             (a.size, a.next_segment, &a.effects) == (b.size, b.next_segment, &b.effects)
         };
         if commit.version == known.version + 1 {
-            // 2: the known log plus one transaction
+            // 2: the known log plus one transaction, whether its earlier
+            // transactions stay inline or are sealed into a stored value
+            let sizes = |c: &Commit| c.log.iter().map(|t| t.size).collect::<Vec<_>>();
+            let earlier = self.transactions(&commit).map(|mut t| {
+                t.truncate(known.log.len());
+                t
+            });
             let extends = commit.epoch == known.epoch
                 && commit.log.len() == known.log.len() + 1
-                && commit.log[..known.log.len()] == known.log[..]
+                && sizes(&commit)[..known.log.len()] == sizes(&known)[..]
+                && earlier.is_some()
+                && earlier == self.transactions(&known)
                 && commit.garbage.end <= known.next_segment;
             if !extends {
                 self.violation(format!(
@@ -197,7 +209,7 @@ impl Known {
         self.checked += 1;
         if let Some(n) = parse(key, LOG_PREFIX) {
             // 5: only a segment the known record does not name
-            if self.commit().stored_segments().any(|named| named == n) {
+            if self.commit().stored_values().contains(&n) {
                 self.violation(format!("{key}: deleted while the known record names it"));
             }
         } else if let Some(page) = parse(key, PAGE_PREFIX) {

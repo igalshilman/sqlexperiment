@@ -32,27 +32,31 @@ const CASES: [Case; 2] = [
     },
 ];
 /// When saves checkpoint: once the log holds more than `after` transactions or
-/// `log_bytes` bytes.
+/// `log_bytes` bytes; and how much of it the record holds inline.
 #[derive(Clone, Copy)]
 struct Policy {
     after: u32,
     log_bytes: usize,
+    inline_bytes: usize,
 }
 /// The default (4 transactions), 16 transactions, and the bindings' cadence:
-/// 16 transactions or 16 KiB. `POLICIES`
-/// overrides them: `after:log_bytes`, comma-separated.
+/// 16 transactions or 16 KiB. `POLICIES` overrides them:
+/// `after:log_bytes[:inline_bytes]`, comma-separated.
 const POLICIES: [Policy; 3] = [
     Policy {
         after: 4,
         log_bytes: sqlite_kv::CHECKPOINT_LOG_BYTES,
+        inline_bytes: sqlite_kv::INLINE_LOG_BYTES,
     },
     Policy {
         after: 16,
         log_bytes: sqlite_kv::CHECKPOINT_LOG_BYTES,
+        inline_bytes: sqlite_kv::INLINE_LOG_BYTES,
     },
     Policy {
         after: 16,
         log_bytes: 16 * 1024,
+        inline_bytes: sqlite_kv::INLINE_LOG_BYTES,
     },
 ];
 
@@ -62,10 +66,15 @@ fn policies() -> Vec<Policy> {
     };
     list.split(',')
         .map(|policy| {
-            let (after, log_bytes) = policy.split_once(':').expect("after:log_bytes");
+            let mut fields = policy
+                .split(':')
+                .map(|field| field.parse().expect("a number"));
+            let after = fields.next().expect("after") as u32;
+            let log_bytes = fields.next().expect("log bytes");
             Policy {
-                after: after.parse().expect("transactions"),
-                log_bytes: log_bytes.parse().expect("bytes"),
+                after,
+                log_bytes,
+                inline_bytes: fields.next().unwrap_or(sqlite_kv::INLINE_LOG_BYTES),
             }
         })
         .collect()
@@ -79,6 +88,7 @@ fn options(policy: Policy, cache: &Option<NamespaceCache>) -> StorageOptions {
     StorageOptions {
         checkpoint_after: policy.after,
         checkpoint_log_bytes: policy.log_bytes,
+        inline_log_bytes: policy.inline_bytes,
         cache: cache.clone(),
         ..StorageOptions::default()
     }
@@ -107,6 +117,7 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
             Policy {
                 after: 0,
                 log_bytes: 0,
+                inline_bytes: 0,
             },
             &None,
         ),
@@ -141,12 +152,13 @@ impl Phase<'_> {
             .filter(|k| k.contains("/log/"))
             .count();
         println!(
-            "{},{},{},{},{},{},{},{},{},{},{phase},{},{},{},{},{},{},{segments},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{phase},{},{},{},{},{},{},{segments},{},{},{},{}",
             self.case.rows,
             self.case.payload,
             self.case.indexes,
             self.policy.after,
             self.policy.log_bytes,
+            self.policy.inline_bytes,
             if self.strong { "strong" } else { "weak" },
             self.cache.is_some(),
             self.run,
@@ -159,6 +171,9 @@ impl Phase<'_> {
             s.bytes_read,
             s.bytes_written,
             store.inner.stored_bytes(),
+            s.kind("commit").bytes_written,
+            s.kind("page").bytes_written,
+            s.kind("log").bytes_written,
         );
     }
 }
@@ -251,7 +266,7 @@ fn main() -> Result<()> {
         .find(|arg| !arg.starts_with('-'))
         .map_or(Ok(1), |arg| arg.parse())?;
     println!(
-        "rows,payload_bytes,indexes,checkpoint_after,checkpoint_log_bytes,backend,cache,run,iteration,workload,phase,round_trips,gets,puts,deletes,bytes_read,bytes_written,log_segments,stored_bytes"
+        "rows,payload_bytes,indexes,checkpoint_after,checkpoint_log_bytes,inline_log_bytes,backend,cache,run,iteration,workload,phase,round_trips,gets,puts,deletes,bytes_read,bytes_written,log_segments,stored_bytes,commit_written,page_written,log_written"
     );
     futures::executor::block_on(async {
         for case in CASES {

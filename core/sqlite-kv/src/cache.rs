@@ -229,6 +229,9 @@ struct Owner {
     /// log from the page keys and this cache, so a checkpoint may not write
     /// images of transactions after the oldest of them.
     readers: BTreeMap<u64, usize>,
+    /// Stored log values a durable record named, by number: a number is never
+    /// reused once named, so they stay valid while a record names them.
+    values: crate::log::Values,
 }
 
 impl NamespaceCache {
@@ -301,6 +304,29 @@ impl NamespaceCache {
     /// which the next open sees.
     pub(crate) fn forget(&self) {
         self.forget_locked(&mut self.owner());
+    }
+
+    /// The stored log values this owner holds, of those in `named`.
+    pub(crate) fn values(&self, named: &std::collections::BTreeSet<u64>) -> crate::log::Values {
+        let owner = self.owner();
+        (owner.values.iter())
+            .filter(|(n, _)| named.contains(n))
+            .map(|(&n, value)| (n, value.clone()))
+            .collect()
+    }
+
+    /// Keep the stored log values a durable record names, `named`: those held
+    /// already, and `values`.
+    pub(crate) fn keep_values(
+        &self,
+        named: &std::collections::BTreeSet<u64>,
+        values: crate::log::Values,
+    ) {
+        let mut owner = self.owner();
+        owner.values.retain(|n, _| named.contains(n));
+        owner
+            .values
+            .extend(values.into_iter().filter(|(n, _)| named.contains(n)));
     }
 
     /// Register an open session at version `next`; see [`Reader`].
@@ -452,6 +478,7 @@ impl Owner {
             usage: Usage::default(),
             hint: None,
             readers: BTreeMap::new(),
+            values: crate::log::Values::new(),
         }
     }
 
