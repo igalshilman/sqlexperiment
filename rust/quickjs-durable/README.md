@@ -55,6 +55,8 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
 
 - **Snapshot only at a wait**, when no frame is on the stack: memory is the
   whole state.
+- **A live VM**: the VM stays in memory from turn to turn of an attempt; only
+  a new attempt (after a crash) restores it, once.
 - **Relative to a golden image**: each program, evaluated once at startup
   (deterministically, so every process agrees).
 - **Only the pages that changed**: rewritten Wasm marks each written 4 KiB
@@ -63,9 +65,9 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   (the image's page map, the pending requests, the KV writes), then applies
   the KV writes. Restate loses only a suffix of writes on a crash, so the
   commit is the atomic step; the next attempt re-applies what follows it.
-- **No replay**: a retry restores the VM from the last commit, once, and
-  waits again on its requests under the same idempotency keys, attaching to
-  calls already made.
+- **No replay**: a retry restores the VM from the last commit and waits
+  again on its requests under the same idempotency keys, attaching to calls
+  already made.
 
 ## What it costs
 
@@ -81,6 +83,17 @@ Node 22), one restate-server 1.7.13 on 4 vCPUs:
 | `Promise.all` of 10 calls, 8 at once          | 45/s             | 26/s             |
 | Primes below 100,000                          | 46 ms            | 480 ms           |
 | Written to Restate by a run of 20 waits       | ~20 KiB          | ~137 KiB         |
+
+## Limits
+
+- **One synchronous job runs at most ~10^8 Wasm instructions** (fuel): a loop
+  that never awaits fails the run. Awaiting anything, even `ctx.kv.get`,
+  splits the work; past half a turn's fuel, the run commits and goes on.
+- **CPU-bound code is ~10x slower than V8**: QuickJS is an interpreter.
+- **A run's journal grows with its turns**: each turn's state writes stay in
+  the invocation's journal until the run ends.
+- **A re-issued call attaches only within the callee's idempotency retention**
+  (24 hours by default).
 
 Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md). Tests:
 `make test-qjs` (with a Restate server), `make lint-qjs`.
