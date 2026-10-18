@@ -68,7 +68,7 @@ fn main() -> Result<()> {
         let written = store.bytes_written() - stored;
         stored = store.bytes_written();
         let mut restore_ms = None;
-        if step % RESTORE_EVERY == 0 {
+        if step.is_multiple_of(RESTORE_EVERY) {
             let started = Instant::now();
             run = start(run.view().state.now)?;
             restore_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
             "live_pages": view.live_pages, "batch_bytes": view.batch_bytes,
             "commit_bytes": view.commit_bytes}),
         );
-        if step % 10 == 0 || step == 1 {
+        if step.is_multiple_of(10) || step == 1 {
             println!(
                 "{step:>4}  {:>11.0}  {:>8.2}  {:>7.2}  {:>13}  {:>13.1}  {:>10.1}",
                 request as f64 / 1024.0,
@@ -180,7 +180,7 @@ impl Session {
         let mut text = String::new();
         while text.len() < bytes {
             text.push_str(WORDS[(self.next() % 16) as usize]);
-            text.push(if self.next() % 12 == 0 { '\n' } else { ' ' });
+            text.push(if self.next().is_multiple_of(12) { '\n' } else { ' ' });
         }
         text
     }
