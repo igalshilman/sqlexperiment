@@ -21,56 +21,59 @@ covers differs.
 ## Constraints
 
 - **The backend is plain KV.** Whole-value `get`, and atomic, durable
-  single-key `put` and `delete`. No multi-key transactions, compare-and-swap,
-  listing or sync.
-- **Outcomes can be uncertain.** A failed or cancelled mutation may have no
-  effect, a visible but not durable effect, or a durable effect. Values are
-  never torn.
+  single-key `put` and `delete`. No multi-key transactions, compare-and-swap
+  or listing.
+- **No order.** Writes are not ordered: an acknowledged write is durable, and
+  of the writes not yet acknowledged a failure may keep any subset. Restate
+  state is such a store once each write is followed by a sync
+  ([`kv::Synced`](../src/kv.rs)): a write is acknowledged once a sync issued
+  after it completes.
+- **Outcomes can be uncertain.** A failed or cancelled mutation may or may
+  not have taken effect. Values are never torn, and reads return durable
+  values.
 - **One owner at a time.** The host guarantees exclusive ownership of a
   namespace and settles every outstanding request before ownership moves. This
   crate does not fence.
-- **Round trips dominate.** A save or open should cost one round trip in the
-  steady state.
+- **Round trips dominate.** A commit or open should cost one round trip in
+  the steady state.
 
 ## The model
 
-A namespace holds three kinds of keys:
+A namespace holds four kinds of keys:
 
-| Key             | Holds                                                                                                                                                        |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `v13/meta`      | Where the log starts (`log_start`), which segments are already deleted (`deleted_below`), and the database size at `log_start`. Absent means start 1, empty. |
-| `v13/log/<seq>` | Log segments. A save is one transaction of page images, in consecutive segments; only the last has the commit flag.                                          |
-| `v13/page/<n>`  | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                    |
-| `v13/hint`      | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                      |
+| Key            | Holds                                                                                                                         |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `v14/commit`   | The commit record: the version, the epoch, the size, the log since the last checkpoint (inline, or naming stored segments), the host's effects. |
+| `v14/log/<n>`  | A stored segment of a large transaction's log. Immutable: written once, before a record names it, deleted once none does.     |
+| `v14/page/<n>` | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                     |
+| `v14/hint`     | Advisory: pages a cold open should fetch. Never needed for correctness.                                                       |
 
-**Read rule.** Page _n_ is its latest image in the committed log from
-`meta.log_start`, else `page/<n>`, else zeros.
+**Read rule.** Page _n_ is its latest image in the record's log, else
+`page/<n>`, else zeros.
 
-Everything else follows from six invariants:
+**The record is the commit point.** A transaction is committed once a record
+that holds it is durable. Each put of the record is one transaction more
+than the last (the next version) or a checkpoint (the next epoch, with an
+empty log). Everything else follows from five invariants:
 
-1. **Commit.** A transaction is committed once its commit segment is durable.
-   That segment is written only after the transaction's other segments are
-   acknowledged.
-2. **Build on durable.** A transaction is appended only after its predecessor's
-   commit is durable: acknowledged to this owner, or confirmed by open.
-3. **Checkpoint before recording.** `meta.log_start` moves past a transaction
-   only after every page it changed is acknowledged at its page key, with that
-   image or a newer committed one.
-4. **Delete behind a durable `meta`.** A segment is deleted only after a durable
-   `meta` has moved past it.
-5. **Overwrite only what the log covers.** A checkpoint writes only images of
-   committed transactions that are still in the replayed log.
-6. **Chain from the log start.** A segment is compressed against the previous
-   images of its pages since its chain's base, which it records; the base is
-   at or after every log start `meta` may hold. A checkpoint restarts the
-   chain at the log's end once its pages are acknowledged, before it writes
-   `meta`, so even a `meta` write whose outcome is unknown leaves later
-   segments decodable from either log start.
+1. **Name only the durable.** A record names a stored segment only once its
+   put is acknowledged.
+2. **Build on durable.** A record holds the log of the durable record it
+   replaces, plus one transaction: this owner's last acknowledged record, or
+   the one open read.
+3. **Checkpoint before recording.** A record that empties the log comes only
+   once every page the log changed is acknowledged at its page key, with the
+   log's latest image of it.
+4. **Overwrite only what the log covers.** A checkpoint writes only images of
+   transactions in the durable record's log, so whatever subset of its page
+   puts lands, the log still replays over them.
+5. **Fresh segments, deleted unnamed.** A stored segment is put only at a
+   number the durable record has not yet allocated, and deleted only once a
+   durable record no longer names it.
 
-So a page key may hold a newer image than `meta` says, which is harmless: the
-log still holds that transaction and replays over it (5). It can never hold an
-image the log does not cover once `meta` has moved (3). Replay never starts at a
-deleted segment (4).
+So no write needs another to land first except by waiting for its
+acknowledgement, and a crash at any point leaves a durable record whose log
+replays over whatever pages and segments survived.
 
 Exact encodings are in [FORMAT.md](FORMAT.md).
 
@@ -80,34 +83,44 @@ A session writes SQL into a private view (dirty pages and a private engine WAL).
 A save checkpoints that private WAL inside the engine, takes the changed pages,
 and commits them:
 
-1. **Commit.** Encode the changed pages as one transaction at the log's next
-   sequence. Put all segments but the last concurrently, then the last. Up to
-   1 MiB of images is one segment, so usually one put.
-2. **Compression.** The segment's images are one zstd frame whose dictionary
-   is the previous image of each of its pages in the log (invariant 6): a
-   commit rewrites the same few pages, a little changed, so a page costs
-   about what changed in it. Replay rebuilds those images as it goes.
-3. **Garbage, in the same round trip** (with a cache). Delete segments in
-   `[deleted_below, log_start)` of the durable `meta`, left by a checkpoint
-   whose deletes failed; the next save records it in `meta`.
-4. **Checkpoint the whole log, rarely.** When the log then holds more than
-   `checkpoint_after` transactions (default 4) or `checkpoint_log_bytes`
-   (default 256 KiB), the save checkpoints it after committing: each page's
-   latest image to its page key (holes become deletes), then `meta` past the
-   log, then the segments below it, then `meta` past those. Each round only
-   puts or deletes after the one before is acknowledged, so it needs no
-   read, and every prefix is a valid state. Such a save costs five round
-   trips; on an ordered store, none waits.
+1. **Encode.** The changed pages as one transaction of segments (up to 240
+   pages each), compressed against the log (below).
+2. **Inline or stored.** A transaction whose segments total at most
+   `max_inline_bytes` (64 KiB) goes inline in the record, while the record's
+   inline log stays within `max(checkpoint_log_bytes, max_inline_bytes)`.
+   A larger one is put first at fresh `log/<n>` keys, concurrently, and the
+   record names them once acknowledged (invariant 1).
+3. **Commit.** Put the record: the previous record's log plus this
+   transaction, at the next version, with the host's effects if it set them.
+   One put, one round trip, for a small transaction.
+4. **Garbage, in the same round trip.** Delete the stored segments in the
+   record's garbage range, left by a checkpoint; once acknowledged, the next
+   record forgets them.
+5. **Checkpoint the whole log, now and then.** When the log then holds more
+   than `checkpoint_after` transactions (default 4; the bindings use 60) or
+   `checkpoint_log_bytes` (default 256 KiB; the bindings use 64 KiB), the save
+   checkpoints it after committing: each page's latest image to its page key
+   (holes become deletes) and the hint, then, once all are acknowledged, a
+   record with an empty log at the next epoch, whose garbage range takes the
+   stored segments the log named. Two more round trips.
 
-At most 64 mutations of distinct keys are in flight per group. `Ok(SaveReport)`
-means committed. `cleanup_error` means committed but checkpoint work failed; a
-later save retries it. Any other error leaves the commit outcome unknown.
+**Compression.** A commit rewrites the same few pages as the ones before it,
+each a little changed. A segment's images are one zstd frame whose
+dictionary is the previous image of each of its pages in the log: so a page
+costs about what changed in it. Replay rebuilds those images as it goes, from
+the last checkpoint, where the chain restarts.
 
-**Bytes.** The Node addon keeps 60 transactions or 256 KiB of log, so that a
-cold open reads at most 64 keys. For the tool gateway's agent that is about
-6.5 KB of log per prompt, and a checkpoint of each changed page every 3 or so
-prompts: about 26 KB per prompt in all, against about 100 KB with uncompressed
-page images and frequent checkpoints (about 9 KB with 512 transactions).
+**Bytes.** The record is rewritten whole by each commit, so its inline log is
+the cost of a commit: the checkpoint thresholds bound it. At most 64
+mutations of distinct keys are in flight per group. `Ok(SaveReport)` means
+committed. `cleanup_error` means committed but checkpoint work failed; a later
+save retries it. Any other error leaves the commit outcome unknown.
+
+**Effects.** A host may commit bytes of its own with a transaction
+(`Session::commit_with`): they ride in the same record put, so they are
+durable exactly when the transaction is, and stay, through checkpoints, until
+a later commit replaces them. The Restate SDKs keep a transaction's sends
+there, as its outbox, and make them once it commits.
 
 ## When a save happens
 
@@ -126,10 +139,8 @@ page images and frequent checkpoints (about 9 KB with 512 transactions).
   `BEGIN`/`COMMIT`, and rolls back when the closure returns `Err`.
 
 A continuing session moves its view forward locally instead of reopening: the
-new transaction joins its replayed log, and transactions a checkpoint covered
-leave it once a checkpoint's recorded log start passes them. After a cleanup
-error it keeps them, so reads still come from the log. Each SQL commit costs
-one round trip, or five when it checkpoints. Commits are
+new transaction joins its replayed log, and a checkpoint empties it. Each SQL
+commit costs one round trip, or three when it checkpoints. Commits are
 sequential: invariant 2 forbids starting the next before the previous one is
 acknowledged.
 
@@ -143,8 +154,9 @@ fails after a commit runs again on top of it. Two patterns keep that correct:
   returns no row for one. The dedupe record and the effects commit atomically,
   because they are one log transaction.
 - **Outbox for calls.** Commit the intent to call another object or service
-  as a row, then send it, and delete the row once the call is acknowledged. A
-  retry finds the row and resends, so the callee must deduplicate too.
+  with the transaction, as effects, then make the call, and drop it from a
+  later commit once the call is stored. A retry finds it and calls again, so
+  the callee must deduplicate too.
 
 A commit whose statement returned an error has an unknown outcome: reopen and
 look (the dedupe row says whether it landed) rather than retrying blindly.
@@ -158,65 +170,57 @@ acknowledged work when a later step fails.
 
 ## Open
 
-1. Read `meta`. With a cache, also read the log keys at the expected start in
-   the same round trip: exactly to where this owner left the log, plus one.
-2. Replay from `log_start` (or the cache's claim) in concurrent batches of
-   two keys, doubling each round up to 64. Apply a transaction at its commit
-   segment. Stop at the first absent key, or at a segment that does not continue
-   the current transaction: that is debris from a failed save, which the next
-   commit overwrites.
-3. **Confirm** (weak backends only). Re-put the last commit segment and the
-   `meta` that was read, so that nothing exposed can later vanish (invariant 2).
-   This is skipped when the backend reports `durable_when_visible()`, or when the
-   cache shows this owner wrote and had them acknowledged.
+1. Read the record. An owner that knows no pages of the namespace also reads
+   `v14/hint`, in the same round trip.
+2. Replay its log: inline segments are in hand, and stored ones are read
+   together, in one more round trip.
+3. **Cold opens prefetch.** The engine reads one dependent page at a time, so
+   without warm cache pages each B-tree level of a query would cost a round
+   trip. An owner whose cache holds no pages of the record's epoch fetches,
+   alongside replay, a database of at most `prefetch_pages` pages (default
+   16) whole, or else the pages the hint lists. Pages the log holds are
+   dropped from the prefetch; the log wins as always.
 
-**Cold opens prefetch.** The engine reads one dependent page at a time, so
-without warm cache pages each B-tree level of a query would cost a round trip.
-An owner that knows nothing about the namespace therefore reads `v13/hint`
-together with `meta`, and fetches pages alongside replay:
-
-- a database of at most `prefetch_pages` pages (default 16) whole;
-- otherwise, the pages the working-set hint lists.
-
-Pages the log holds are dropped from the prefetch; the log wins as always.
+There is nothing to confirm or repair: the record read is durable, and
+whatever a crashed save left (stored segments no record names, pages a
+checkpoint wrote) is either covered by the log or unreachable. Unnamed
+segments are numbered at or past the record's next segment, so the next save
+overwrites them.
 
 **The working-set hint.** An owner (or, without a cache, a session) records the
 pages its sessions read. A save that checkpoints writes the most useful of
 them, if the list changed, in the same round trip: page 0, then interior B-tree
 pages, then the most recently read leaves, at most `hint_pages` (default 32,
 at most 256), as ascending LEB128 deltas (about 1–4 bytes per page). The hint
-is advisory and outside the invariants: it is never confirmed or ordered
+is advisory and outside the invariants: it is never waited for or ordered
 against other writes, and a stale, missing or malformed hint only wastes or
-saves gets. It stays out of `meta`, which is on the correctness path.
+saves gets. It stays out of the record, which is on the correctness path.
 
 ## Readers
 
 A reader (`Session::open_reader`) reads a namespace that another owns,
 alongside it, such as a virtual object's shared handler beside the exclusive
-one. It writes nothing to the store: no confirm at open (it needs a store
-whose visible values are durable), no cache, and its SQL changes stay in the
-session ([`Durability::Save`], never saved). It opens like anyone, and reads
-pages lazily, so a checkpoint by the owner meanwhile could give it a page
-newer than its log. `Session::is_current` tells, once it has read: `meta`
-unchanged, and no segment at its log's end. A checkpoint logs its
-transaction before it overwrites a page, and moves `meta` before it deletes
-the log, so a reader that read an overwritten page finds one or the other
-changed. It is conservative: any commit since open makes the reader stale,
-since a checkpoint in progress leaves no other trace. A stale reader reads
-again, in a new session.
+one. It writes nothing to the store: no cache, and its SQL changes stay in
+the session ([`Durability::Save`], never saved). It opens like anyone, and
+reads pages lazily, so a checkpoint by the owner meanwhile could give it a
+page newer than its log. `Session::is_current` tells, once it has read: the
+record unchanged. A checkpoint writes only pages its record's log covers, and
+moves the record after, so a reader that read an overwritten page finds the
+record changed. It is conservative: any commit since open makes the reader
+stale. A stale reader reads again, in a new session.
 
 ## Failures
 
-Every step is idempotent, and a crash anywhere leaves state that replay reads
-correctly.
+A crash anywhere leaves a durable record, and replay of its log reads
+correctly whatever else survived.
 
-| Interrupted step    | State afterwards                                | Recovery                                          |
-| ------------------- | ----------------------------------------------- | ------------------------------------------------- |
-| Non-commit segment  | Debris; transaction uncommitted                 | Ignored by replay; overwritten by the next commit |
-| Commit segment      | Absent, or present and therefore committed      | Replay decides; open confirms a present tail      |
-| Checkpoint page put | Old or new committed image                      | The log still replays over it                     |
-| `meta` put          | Old or new record; both valid                   | Open confirms what it read                        |
-| Garbage delete      | Segment present or absent below a durable start | Deleted again later                               |
+| Interrupted step           | State afterwards                                | Recovery                                                 |
+| -------------------------- | ----------------------------------------------- | -------------------------------------------------------- |
+| Stored segment put         | Present or absent; no record names it           | Ignored; the next save reuses its number                 |
+| Record put                 | Old or new record; both valid                   | Open reads whichever is durable                          |
+| Checkpoint page or hint put | Old or new image, under a record whose log covers it | The log replays over it; the next save checkpoints again |
+| Checkpoint record put      | Old record (log still covers the pages) or new  | Either is valid                                          |
+| Garbage delete             | Segment present or absent; no record names it   | Deleted again by the next save                           |
 
 ## Engine integration
 
@@ -268,29 +272,19 @@ namespaces. Values are stored encoded (LZ4) by default, or decoded with
 
 **Per-namespace state:**
 
-- the exact `meta` bytes this owner last read or wrote;
-- the _base_: the log start of that `meta`;
-- a claim (acknowledged deletes of garbage not yet in `meta`);
-- the last acknowledged commit;
+- the exact record bytes this owner last read or wrote, and its epoch: the
+  cached pages are those of that epoch;
+- the version of this owner's last acknowledged commit;
 - a parked engine.
 
-The last commit and the `meta` bytes skip confirmation, and the claim lets
-`meta` ride with the next commit. Together these make the steady state one
-round trip per open and per save that does not checkpoint.
-
-**Correctness rule.** A cached page is current unless a committed transaction
-at or after the base changed it. While that transaction is in the replayed log,
-the log overrides the cache, so only a checkpoint that moves `meta` past it can
-expose a stale value. This owner's checkpoints write through the cache, so only
-another writer (or this owner's failed save) can do that.
-
-**After another writer.** If open reads a `meta` other than the one remembered,
-it reads the segments from the base to the new log start, alongside replay, and
-replaces the cached pages they changed. Segments below a durable log start are
-committed and never rewritten, only deleted, so a present segment is trustworthy.
-If any is gone, or there are more than 64, the namespace drops all its pages.
-Garbage collection deletes them one save after `meta` moves, so a brief other
-owner (around 7 saves with default settings) leaves the cache warm.
+**Correctness rule.** Page keys change only under a checkpoint, and a
+checkpoint writes only pages its record's log covers before it moves to the
+next epoch. So a cached page of the record's epoch is current unless the log
+overrides it, and the log always does when it holds the page. Open compares
+the record it reads with the one it remembers: the same bytes, and this owner
+continues as it left; another record of the same epoch keeps the pages (the
+log covers whatever changed); another epoch drops them all. A save whose
+outcome is unknown forgets the record, so the next open reads afresh.
 
 **Keys are never reused.** The disk tier writes in the background, and a delete
 does not stop a write already queued. So a cache key is (generation, page,
@@ -307,13 +301,12 @@ for a virtual object's shared handlers, if they share the namespace's handle;
 one namespace keeps one state while any handle holds it.
 
 - _One writer._ A commit is refused when another session committed since this
-  one opened, rather than writing the log position that session used.
+  one opened, rather than replacing the record that session wrote.
 - _Isolation._ A session reads the state it opened at: pages outside its log
   come from page keys and the cache, which checkpoints overwrite. So each open
-  session registers its log position, and a checkpoint writes no image of a
-  transaction after the oldest other session's position (like SQLite's WAL read
-  marks). A parked engine releases its position. Checkpoints resume when the
-  reader ends.
+  session registers its version, and a checkpoint waits while another session
+  holds an older one (like SQLite's WAL read marks). A parked engine releases
+  its version. Checkpoints resume when the reader ends.
 - Without a cache there is no shared state, so sessions must not overlap.
 
 **Engine reuse.** A session that ends cleanly (a successful save, or read-only)
@@ -322,8 +315,8 @@ acknowledged commit (an overlapping session's engine may be older) and its SQL
 changed no per-connection state (`PRAGMA`, `ATTACH`, `DETACH`, the temp schema).
 Only the database is kept: the next session connects afresh, so connection
 counters (`last_insert_rowid()`, `changes()`) and settings never carry over.
-The next open reuses it if `meta` matches, the log ends where that engine left
-it, and its I/O is clean. This keeps the parsed schema warm, which cuts CPU per
+The next open reuses it if the record is the one it committed, and its I/O
+is clean. This keeps the parsed schema warm, which cuts CPU per
 session several-fold ([cache results](../benches/CACHE_RESULTS.md)). A parked
 engine releases its view of the log (the next open replaces it), so what it
 holds is its parsed schema: measured at 40–110 KiB from one to 50 tables. Parked
@@ -333,54 +326,33 @@ opens and after a commit that may have changed the schema. Namespace states are
 capped by count. Least recently used go first; dropping either only makes a
 namespace cold.
 
-**Ordered stores.** All of the above trusts what the backend acknowledged. An
-ordered store (`KvStore::ordered`) instead acknowledges writes once ordered: it
-stores them in order, and a failure loses a tail of unconfirmed writes while
-the process, and this cache, live on. Restate state writes are such a store.
-The cache would then describe writes that do not exist, and a later session
-would build on them. (A checkpoint is recorded by the save that wrote its
-pages, so a lost checkpoint is lost whole; but a lost commit would still be
-believed.) So with an ordered store:
-
-- a session that writes is counted as unconfirmed until `Session::save`
-  confirms its writes (`KvStore::sync`);
-- a session that ends otherwise marks the namespace doubtful;
-- opening while the namespace is doubtful, or another session's writes are
-  unconfirmed, first drops what the owner knows: `meta`, claim, last commit,
-  pages and the parked engine.
-
-Within a session nothing changes: a lost write takes every later one with it,
-so the protocol's ordering rules hold by order
-([`tests/integration/ordered.rs`](../tests/integration/ordered.rs)).
-
 **Threads.** foyer's disk I/O runs on the host's tokio runtime, or on a
 one-thread runtime of its own. It is the only background work.
 
 ## Costs
 
-| Operation                            | Round trips                                                               | Mutations                                                                                                             |
-| ------------------------------------ | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Save                                 | 1, or 5 when it checkpoints                                               | 1 commit put (more for over 240 pages); when the log is long, every logged page, `meta`, the log's deletes and `meta` |
-| SQL commit with `Durability::Commit` | Same as a save                                                            | Same as a save                                                                                                        |
-| Open, with cache                     | 1                                                                         | None                                                                                                                  |
-| Open, fresh owner, weak backend      | 2 to 3                                                                    | Re-put of the last commit and `meta`                                                                                  |
-| Cold open                            | Same as open; hinted pages (or a small database whole) arrive with replay | None, plus the hint put in checkpointing saves                                                                        |
-| Cold page read                       | 1 get; sequential reads fetch up to 64 ahead                              | None                                                                                                                  |
+| Operation                            | Round trips                                                  | Mutations                                                                                 |
+| ------------------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| Save                                 | 1; 2 for a large transaction; 2 more when it checkpoints     | The record (its inline log rewritten); a large transaction's segments; when the log is long, every logged page, the hint and the record |
+| SQL commit with `Durability::Commit` | Same as a save                                               | Same as a save                                                                            |
+| Open, with cache                     | 1, plus 1 if the log names stored segments                   | None                                                                                      |
+| Cold open                            | 1, then the hinted pages (or a small database whole) and stored segments together | None                                                                     |
+| Cold page read                       | 1 get; sequential reads fetch up to 64 ahead                 | None                                                                                      |
 
 Each page is written twice, once to the log (compressed against its previous
-image) and once at checkpoint, and opens replay the log since the last
+image, and rewritten with the record until a checkpoint) and once at
 checkpoint. Measurements: [log shipping](../benches/LOG_RESULTS.md),
 [cache](../benches/CACHE_RESULTS.md).
 
 ## Limits and open questions
 
-- **Backend choice.** If the backend commits several writes atomically (for
-  example, a store whose writes within one invocation commit together), a save
-  is atomic without the log, and most of this protocol is unnecessary. The
-  design assumes it is not.
+- **The record's size.** Every commit rewrites the inline log since the last
+  checkpoint. The checkpoint thresholds trade that against checkpoints, which
+  write each changed page; a large transaction's segments are stored once
+  instead.
 - **Fencing.** Exclusive ownership is assumed. A delayed write from a former
-  owner could overwrite newer data. A conditional put or an ownership epoch on
-  commit and `meta` writes would close that gap.
+  owner could overwrite newer data. A conditional put of the record would
+  close that gap.
 - **Memory.** A session's private changes (`max_private_bytes`, 256 MiB) and a
   statement's result rows (`max_result_bytes`, 64 MiB) are capped; exceeding
   either fails the statement. A log grown by failed checkpoints is
@@ -388,15 +360,15 @@ checkpoint. Measurements: [log shipping](../benches/LOG_RESULTS.md),
   logged page's latest image. Parked engines share a byte budget, by a
   measured estimate.
 - **Integrity.** Storage is assumed reliable: a value reads back as written.
-  Decoding checks structure and bounds sequence numbers, sizes and page
+  Decoding checks structure and bounds versions, segment numbers, sizes and page
   numbers, so a bug cannot overflow arithmetic or size a huge view. A log
   segment's zstd frame has a checksum, which also catches a segment decoded
   against the wrong previous images; pages have none.
-- **Format.** Only v13, with no migration.
-- **Compression chain.** Invariant 6 is checked by the simulator's monitor;
-  the TLA+ specification does not model compression.
-- **Validation.** The protocol is specified in TLA+ and model-checked within
-  small bounds, and a monitor checks every request of the simulator's crash,
-  interruption and handover campaigns against it
-  ([spec/README.md](../spec/README.md)). There are no process-kill or
-  power-loss tests, and no real backend yet. See [REVIEW.md](REVIEW.md).
+- **Format.** Only v14, with no migration.
+- **Compression chain.** The simulator's monitor decodes every record it
+  sees; the TLA+ specification does not model compression.
+- **Validation.** A monitor checks every request of the simulator's crash,
+  interruption and handover campaigns against the invariants above. The TLA+
+  specification ([spec/README.md](../spec/README.md)) still models the
+  previous format's log and `meta`. The Restate crash tests kill processes;
+  there are no power-loss tests. See [REVIEW.md](REVIEW.md).

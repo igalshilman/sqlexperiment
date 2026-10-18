@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Model-check the protocol spec with TLC.
 # Usage: spec/check.sh [config ...]; by default the quick configurations.
-# MCDeep.cfg (three transactions) takes about half an hour on four cores.
+# MCDeep.cfg: three transactions, one process with a cache and one without.
 set -euo pipefail
 cd "$(dirname "$0")"
 JAR="${TLA2TOOLS:-$HOME/.cache/tla2tools-1.8.0.jar}"
@@ -14,7 +14,7 @@ fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 configs=("$@")
-[ ${#configs[@]} -gt 0 ] || configs=(MC.cfg MCNoCache.cfg MCStrong.cfg)
+[ ${#configs[@]} -gt 0 ] || configs=(MC.cfg MCNoCache.cfg MCMixed.cfg)
 for config in "${configs[@]}"; do
     echo "== $config"
     status=0

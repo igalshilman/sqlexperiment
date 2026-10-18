@@ -178,8 +178,8 @@ pub struct KvIo {
 }
 
 impl KvIo {
-    /// Open the snapshot (`meta`, then the log's replay), then fetch pages on
-    /// demand.
+    /// Open the snapshot (the commit record, and its log's replay), then
+    /// fetch pages on demand.
     pub async fn mount(store: Arc<dyn KvStore>) -> io::Result<Arc<Self>> {
         Self::mount_with_options(store, StorageOptions::default()).await
     }

@@ -33,8 +33,9 @@ const CASES: [Case; 2] = [
         indexes: 1,
     },
 ];
-/// Transactions kept in the log before saves checkpoint.
-const POLICIES: [u32; 2] = [4, 16];
+/// Transactions kept in the log before saves checkpoint; 60 is the bindings'
+/// cadence, with 64 KiB of log.
+const POLICIES: [u32; 3] = [4, 16, 60];
 const ITERATIONS: u64 = 32;
 const WORKLOADS: [&str; 4] = ["read_pk", "update_1", "update_10", "insert_1"];
 
@@ -43,6 +44,11 @@ type Store = Arc<LatencyKv<MemoryKv>>;
 fn options(policy: u32, cache: &Option<NamespaceCache>) -> StorageOptions {
     StorageOptions {
         checkpoint_after: policy,
+        checkpoint_log_bytes: if policy == 60 {
+            64 * 1024
+        } else {
+            sqlite_kv::CHECKPOINT_LOG_BYTES
+        },
         cache: cache.clone(),
         ..StorageOptions::default()
     }

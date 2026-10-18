@@ -568,3 +568,44 @@ fn effects_commit_with_their_transaction() -> Result<()> {
         Ok(())
     })
 }
+
+/// A checkpoint whose record put failed may have landed or not: the session
+/// commits no more, and a new one reads whichever record did.
+#[test]
+fn a_session_commits_no_more_after_a_checkpoint_of_unknown_outcome() -> Result<()> {
+    futures::executor::block_on(async {
+        for effect in [Effect::None, Effect::After] {
+            let store = Arc::new(MonitorKv::new(FaultKv::new(MemoryKv::default(), 1)));
+            let options = StorageOptions {
+                checkpoint_after: 1,
+                ..options(None)
+            };
+            let mut db = Session::open_with_options(store.clone(), options.clone()).await?;
+            db.execute("CREATE TABLE t(n INTEGER)").await?;
+            // The next commit checkpoints: its record is the second put.
+            let _signal = store.arm(Failpoint {
+                operation: Operation::Put,
+                key_prefix: "v14/commit".into(),
+                nth: 2,
+                effect,
+                cancel: false,
+            });
+            db.execute("INSERT INTO t VALUES(1)").await?;
+            assert!(db.take_cleanup_error().is_some(), "{effect:?}");
+            let refused = db.execute("INSERT INTO t VALUES(2)").await.unwrap_err();
+            assert!(refused.to_string().contains("checkpoint"), "{refused}");
+            drop(db);
+            store.disarm();
+
+            let mut db = Session::open_with_options(store.clone(), options).await?;
+            assert_eq!(db.query("SELECT n FROM t").await?, [[1.into()]]);
+            db.execute("INSERT INTO t VALUES(3)").await?;
+            assert_eq!(
+                db.query("PRAGMA integrity_check").await?[0][0].to_string(),
+                "ok"
+            );
+            assert_eq!(store.violations(), Vec::<String>::new());
+        }
+        Ok(())
+    })
+}

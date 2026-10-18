@@ -42,7 +42,7 @@ for key, copies in groups.items():
     metrics = set(row) - set(DIMS)
     for field in metrics:
         row[field] = int(row[field])
-    assert row["put_value_bytes"] == sum(row[f"{kind}_write_bytes"] for kind in ["page", "log", "meta"]), key
+    assert row["put_value_bytes"] == sum(row[f"{kind}_write_bytes"] for kind in ["page", "log", "commit"]), key
     if row["codec"] == "Raw":
         assert row["page_write_bytes"] == row["page_puts"] * 4099, key
         assert row["page_read_bytes"] == row["page_gets"] * 4099, key
@@ -50,7 +50,7 @@ for key, copies in groups.items():
         assert 3 * row["page_puts"] <= row["page_write_bytes"] <= 4099 * row["page_puts"], key
         assert 3 * row["page_gets"] <= row["page_read_bytes"] <= 4099 * row["page_gets"], key
     if row["app_write_bytes"] == 0:
-        # Reads write nothing except open's confirmation of the log tail and meta.
+        # Reads write nothing.
         assert row["deletes"] == row["page_puts"] == 0 and row["puts"] <= 2, key
     times = [int(r["elapsed_ns"]) / 1000 for r in copies]
     row.update(elapsed_us_min=min(times), elapsed_us_median=statistics.median(times), elapsed_us_max=max(times))
@@ -58,7 +58,7 @@ for key, copies in groups.items():
 write("page-compression-summary.csv", list(summaries.values()))
 
 comparisons = []
-equal = ["gets", "puts", "deletes", "page_gets", "page_puts", "db_pages", "meta_write_bytes"]
+equal = ["gets", "puts", "deletes", "page_gets", "page_puts", "db_pages", "commit_write_bytes"]
 traffic = ["read_key_value_bytes", "mutation_key_value_bytes", "page_write_bytes", "log_write_bytes", "stored_value_bytes"]
 for key, raw in summaries.items():
     if raw["codec"] != "Raw":
@@ -95,7 +95,7 @@ for key, copies in cpu_groups.items():
 write("page-codec-summary.csv", cpu)
 print(f"Validated {len(rows)} SQL observations, {len(summaries)} configurations, {len(comparisons)} raw/LZ4 pairs; all three traffic repeats match.")
 print(f"Validated {len(cpu_groups) * 3} CPU samples; identical page selections and sizes across repeats.")
-print("Raw/LZ4 pairs have identical operation counts, meta bytes and logical page counts; no encoded-traffic regressions.")
+print("Raw/LZ4 pairs have identical operation counts, commit record bytes and logical page counts; no encoded-traffic regressions.")
 for row in comparisons:
     if row["operation"] == "replace_payload" and (row["rows"], row["payload_bytes"]) in [("100", "64"), ("10000", "256")]:
         print({k: row[k] for k in ["rows", "payload_bytes", "payload", "mutation_key_value_bytes_raw", "mutation_key_value_bytes_lz4", "mutation_key_value_bytes_reduction_pct"]})

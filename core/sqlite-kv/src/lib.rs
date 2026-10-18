@@ -19,23 +19,23 @@
 //! | Layer | Representation | Survives dropping the session? |
 //! |---|---|---|
 //! | SQL working state | Dirty 4096-byte pages and private engine WAL | No |
-//! | Log | Segments of committed page images, compressed against their previous images, one transaction per save | Yes, after acknowledged save |
+//! | Commit record | `commit`: the log since the last checkpoint, one transaction per save, compressed against the previous images; a large one's segments at `log/<n>` | Yes, after an acknowledged save |
 //! | Pages | `page/<n>`, overwritten in place by checkpoints | Yes |
-//! | Checkpoint record | `meta`: where replay starts and garbage ends | Yes |
 //!
-//! A save commits by appending one log transaction, usually a single put. An
-//! unchanged save performs no mutations. If [`SaveReport::cleanup_error`] is set,
+//! A save commits by putting the record with one more transaction, usually a
+//! single put. An unchanged save performs no mutations. If [`SaveReport::cleanup_error`] is set,
 //! the SQL changes **are committed**; only checkpoint work failed. An error or
 //! cancellation can have an unknown commit outcome. Settle outstanding backend
 //! requests and reopen before deciding whether to retry application work.
 //!
 //! # Why a log and pages in place?
 //!
-//! One put is the only atomic operation the backend offers. A durable log turns
-//! it into a multi-page commit: a transaction is visible once its commit segment
-//! is. Because the log holds every page a checkpoint has not yet recorded in
-//! `meta`, checkpoints may overwrite `page/<n>` in place: replay applies the log
-//! over whatever they left. This is SQLite's own WAL design, applied to KV keys.
+//! One put is the only atomic operation the backend offers, and writes are not
+//! ordered: only an acknowledged one is known durable. The record turns one put
+//! into a multi-page commit: a transaction is visible once a record holding it
+//! is. Because the log holds every page a checkpoint has not yet recorded,
+//! checkpoints may overwrite `page/<n>` in place: replay applies the log over
+//! whatever they left. This is SQLite's own WAL design, applied to KV keys.
 //! There is no page map, no object allocation, no intent and no orphan collection.
 //! See `docs/DESIGN.md` and the private `snapshot` and `log` modules.
 //!
@@ -50,22 +50,22 @@
 //! of cancelled requests before reopening or handing ownership to another session.
 //! There is no distributed lock or fence here. A save issues its commit, then,
 //! when the log is long, checkpoints it: at most 64 mutations of distinct keys
-//! at a time per group. Open reads `meta` and probes the log, together when a
-//! [`PageCache`] knows where the log starts. The I/O pump batches adjacent file
+//! at a time per group. Open reads the record, and the stored segments its log
+//! names, if any. The I/O pump batches adjacent file
 //! reads without crossing write, truncate or sync barriers.
 //!
 //! Sessions of one owner may overlap when they share a [`NamespaceCache`]:
-//! each reads the state it opened at (checkpoints write no image past the
-//! oldest open session's log position), and a commit is refused if another
+//! each reads the state it opened at (a checkpoint waits while another session
+//! holds an older version), and a commit is refused if another
 //! session committed since this one opened. Without a cache they must not
 //! overlap.
 //!
 //! [`StorageOptions::cache`] can hold a [`NamespaceCache`]: one namespace's handle
 //! on the process-wide [`PageCache`], which keeps pages in memory and on a local
-//! disk tier under one budget for every namespace. It refreshes pages another
-//! writer's checkpoint rewrote (or drops them all when it cannot tell which), and
-//! remembers what this owner has made durable, so a steady-state open and save
-//! are each one round trip. A session that ends cleanly leaves its idle engine
+//! disk tier under one budget for every namespace. It keeps them while the
+//! record's epoch (its checkpoint count) is the one they belong to, and
+//! remembers the record this owner made durable, so a steady-state open and
+//! save are each one round trip. A session that ends cleanly leaves its idle engine
 //! there; the next open reuses it when nothing changed, keeping the parsed
 //! schema and engine page cache. The disk tier's I/O runs on tokio.
 //!
@@ -108,6 +108,7 @@
 //! # Limits
 //!
 //! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
+//! A commit's effects are capped at [`MAX_EFFECTS_BYTES`].
 //! A session's private changes and a statement's result rows are capped by
 //! [`StorageOptions::max_private_bytes`] and [`StorageOptions::max_result_bytes`].
 //! The backend is assumed to return what was stored; decoding checks structure
@@ -284,9 +285,8 @@ impl Session {
     /// format: existing page tags determine decoding.
     ///
     /// With a [`PageCache`], an engine left idle by this owner's previous session
-    /// is reused when nothing changed since: the cache validated `meta` and the
-    /// log ends where that engine left it. Its page cache and parsed schema stay
-    /// warm.
+    /// is reused when nothing changed since: the record is the one that engine
+    /// committed. Its page cache and parsed schema stay warm.
     pub async fn open_with_options(
         store: Arc<dyn KvStore>,
         options: StorageOptions,
