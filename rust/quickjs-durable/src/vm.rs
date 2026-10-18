@@ -1,9 +1,8 @@
 use crate::model::{
-    Capture, Event, Image, MAX_INPUT, MAX_MEMORY, MAX_TIME, PAGE, State, VmMeta, hash,
+    Capture, Event, Image, MAX_INPUT, MAX_MEMORY, MAX_TIME, PAGE, State, VmMeta, fingerprint,
 };
 use crate::{Operation, Resolution, Transaction};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::{collections::HashSet, num::NonZeroUsize};
 use wasmtime::error::Context;
 use wasmtime::{
@@ -26,11 +25,10 @@ const MAX_HEAP: i32 = 32 * 1024 * 1024;
 // qjs_init2 flags: every intrinsic but weak references/finalization (bit 9)
 // and performance (bit 10).
 const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
-/// What a restored image depends on besides the Wasm and the bridge source.
-/// Bump the version when the restore contract changes in a way these inputs
-/// don't show: the imports' behavior, the bridge protocol, the VM metadata.
-/// Editing the host's code otherwise keeps every stored run restorable.
-const ABI: &str = "abi=1;wasmtime=49.0.3";
+/// The runtime's version: an image restores only on the runtime that made it.
+/// Bump it with anything an image depends on: the Wasm, the bridge
+/// (`guest.js`), the limits above, the imports' behavior, the VM metadata.
+pub(crate) const VERSION: u64 = 1;
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.
@@ -102,11 +100,10 @@ fn validate_snapshot_abi(wasm: &[u8]) -> Result<()> {
 pub struct Runtime {
     engine: Engine,
     module: Module,
-    pub(crate) build: String,
 }
 struct Host {
     now: u64,
-    seed: [u8; 32],
+    seed: [u8; 8],
     limits: StoreLimits,
 }
 
@@ -134,18 +131,7 @@ impl Runtime {
                 );
             }
         }
-        // The instrumented Wasm already covers the tracking transform.
-        let limits = format!("{ABI};stack={MAX_STACK};heap={MAX_HEAP};intrinsics={INTRINSICS}");
-        let build = hash(&[wasm, BOOTSTRAP.as_bytes(), limits.as_bytes()].concat());
-        Ok(Self {
-            engine,
-            module,
-            build,
-        })
-    }
-
-    pub fn build_id(&self) -> &str {
-        &self.build
+        Ok(Self { engine, module })
     }
 
     pub(crate) fn golden(&self, name: &str, source: &str) -> Result<Image> {
@@ -216,7 +202,7 @@ impl Runtime {
     ) -> Result<(Capture, State)> {
         match event {
             Event::Start { input, .. } => {
-                let seed = u32::from_be_bytes(Sha256::digest(run.as_bytes())[..4].try_into()?);
+                let seed = fingerprint(run.as_bytes()) as u32;
                 vm.invoke(
                     "init",
                     &json!({"runId":run,"now":event.now(),"maxTime":MAX_TIME,"seed":seed}),
@@ -405,7 +391,7 @@ impl Vm {
     fn new(runtime: &Runtime, identity: &str, now: u64) -> Result<Self> {
         let host = Host {
             now,
-            seed: Sha256::digest(identity.as_bytes()).into(),
+            seed: fingerprint(identity.as_bytes()).to_le_bytes(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(MAX_MEMORY)
                 .instances(1)
@@ -458,7 +444,7 @@ impl Vm {
                 let len = len as u32 as usize;
                 ensure!(len <= MAX_MEMORY, "Random request too large");
                 let seed = c.data().seed;
-                let bytes: Vec<u8> = (0..len).map(|i| seed[i % 32]).collect();
+                let bytes: Vec<u8> = (0..len).map(|i| seed[i % 8]).collect();
                 caller_write(&mut c, ptr as u32 as usize, &bytes)?;
                 Ok(0)
             },

@@ -38,7 +38,7 @@ struct Loaded {
     manifest_bytes: usize,
 }
 fn run_prefix(run: &str) -> String {
-    format!("run/{}/", hash(run.as_bytes()))
+    format!("run/{run}/")
 }
 fn blob_key(run: &str, batch: u64) -> String {
     format!("blob/{}{batch}", run_prefix(run))
@@ -136,7 +136,7 @@ impl<K: Transaction> Engine<K> {
         now: u64,
     ) -> Result<View> {
         identifier(run)?;
-        let source = self.programs.get(program)?.source_hash().to_owned();
+        let version = self.programs.get(program)?.version();
         self.kv.check_run(run)?;
         validate_time(now)?;
         input_size(&input)?;
@@ -151,7 +151,7 @@ impl<K: Transaction> Engine<K> {
             )?;
             ensure!(
                 current.manifest.program == program
-                    && current.manifest.source == source
+                    && current.manifest.version == version
                     && original == input,
                 "Run already belongs to another program/input"
             );
@@ -276,7 +276,7 @@ impl<K: Transaction> Engine<K> {
     fn program(&self, manifest: &Manifest) -> Result<&Program> {
         let program = self.programs.get(&manifest.program)?;
         ensure!(
-            program.source_hash() == manifest.source,
+            program.version() == manifest.version,
             "The run started on another version of program {}",
             manifest.program
         );
@@ -294,8 +294,8 @@ impl<K: Transaction> Engine<K> {
             .context("Missing checkpoint")?;
         let manifest: Manifest = decode(&bytes)?;
         ensure!(
-            manifest.format == FORMAT && manifest.build == self.programs.runtime().build,
-            "Incompatible checkpoint build/format"
+            manifest.format == FORMAT && manifest.runtime == crate::vm::VERSION,
+            "Incompatible checkpoint runtime/format"
         );
         let golden = self.program(&manifest)?.memory().clone();
         ensure!(
@@ -352,7 +352,7 @@ impl<K: Transaction> Engine<K> {
         run: &str,
         id: String,
         sequence: u64,
-        program: (String, String),
+        program: (String, u64),
         previous: Option<(String, BTreeSet<u64>)>,
         image: Image,
         event: &Event,
@@ -370,8 +370,8 @@ impl<K: Transaction> Engine<K> {
         let manifest = Manifest {
             format: FORMAT,
             program: program.0,
-            source: program.1,
-            build: self.programs.runtime().build.clone(),
+            version: program.1,
+            runtime: crate::vm::VERSION,
             previous: previous.as_ref().map(|(id, _)| id.clone()),
             sequence,
             meta: image.meta.clone(),
@@ -432,7 +432,7 @@ impl<K: Transaction> Engine<K> {
         };
         let golden = program.memory().clone();
         let first = current.is_none().then(|| program.image());
-        let program = (program.name().to_owned(), program.source_hash().to_owned());
+        let program = (program.name().to_owned(), program.version());
         let base = current
             .as_ref()
             .map_or_else(|| first.as_ref().unwrap(), |c| &c.image);
@@ -561,8 +561,8 @@ impl<K: Transaction> Engine<K> {
         let manifest = Manifest {
             format: FORMAT,
             program: program.0,
-            source: program.1,
-            build: self.programs.runtime().build.clone(),
+            version: program.1,
+            runtime: crate::vm::VERSION,
             previous: current.as_ref().map(|c| c.id.clone()),
             sequence,
             meta: next.meta.clone(),

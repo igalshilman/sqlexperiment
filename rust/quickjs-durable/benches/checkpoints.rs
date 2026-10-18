@@ -147,7 +147,7 @@ fn main() -> Result<()> {
         .arg("--version")
         .output()?;
     let output = json!({"rustc":String::from_utf8_lossy(&rust.stdout).trim(),"arch":std::env::consts::ARCH,
-        "os":std::env::consts::OS,"wasmtime":"49.0.3","build":runtime.build_id(),
+        "os":std::env::consts::OS,"wasmtime":"49.0.3",
         "compile_ms":compile_ms,"capture_mode":mode,"native_tracking_probe":quickjs_durable::tracking::probe(),
         "notes":["Optimized Rust; one warm-up and three repetitions; MemoryTransaction, not fsync or network storage.",
         "Turn includes cold load, fresh Wasmtime instance, guest execution, capture, compression and staged checkpoint KV writes; host transaction commit is excluded. Reliable KV; no integrity hashes.",

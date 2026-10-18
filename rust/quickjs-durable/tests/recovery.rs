@@ -155,7 +155,7 @@ fn a_run_refuses_another_version_of_its_program() -> Result<()> {
 fn every_runtime_evaluates_a_program_alike() -> Result<()> {
     let compiled = Program::compile(&runtime(), "v1", PROGRAM)?;
     let again = Program::compile(&Arc::new(Runtime::new()?), "v1", PROGRAM)?;
-    assert_eq!(again.source_hash(), compiled.source_hash());
+    assert_eq!(again.version(), compiled.version());
     let again = Arc::new(Programs::new(runtime()).with(again)?);
     let compiled = Arc::new(Programs::new(runtime()).with(compiled)?);
     let run = |catalogs: [&Arc<Programs>; 3]| -> Result<(Value, MemoryTransaction)> {
@@ -357,7 +357,7 @@ fn a_missing_program_and_another_build_are_rejected() -> Result<()> {
     for (key, manifest) in &mut rebuilt.values {
         if key.starts_with("checkpoint/") {
             let mut json: Value = serde_json::from_slice(manifest)?;
-            json["build"] = json!("wrong");
+            json["runtime"] = json!(0);
             *manifest = serde_json::to_vec(&json)?;
         }
     }

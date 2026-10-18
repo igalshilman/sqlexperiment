@@ -5,7 +5,7 @@
 //! source on the same runtime gives the same image, byte for byte, on every
 //! start of every process, so checkpoints written by one restore in another.
 use crate::{
-    model::{Image, MAX_INPUT, VmMeta, hash},
+    model::{Image, MAX_INPUT, VmMeta, fingerprint},
     vm::Runtime,
 };
 use anyhow::{Context, Result, ensure};
@@ -14,7 +14,7 @@ use std::{collections::HashMap, sync::Arc};
 /// A program: its name, and the golden image of its evaluated source.
 pub struct Program {
     name: String,
-    source_hash: String,
+    version: u64,
     meta: VmMeta,
     memory: Arc<Vec<u8>>,
 }
@@ -27,7 +27,7 @@ impl Program {
         let image = runtime.golden(name, source)?;
         Ok(Self {
             name: name.into(),
-            source_hash: hash(source.as_bytes()),
+            version: fingerprint(source.as_bytes()),
             meta: image.meta,
             memory: Arc::new(image.memory),
         })
@@ -37,10 +37,10 @@ impl Program {
         &self.name
     }
 
-    /// The hash of the program's source: a run's checkpoints are relative to
-    /// this version's image, and restore only with it.
-    pub fn source_hash(&self) -> &str {
-        &self.source_hash
+    /// The version of the program: its source's fingerprint. A run's
+    /// checkpoints are relative to this version's image, and restore only with it.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub(crate) fn memory(&self) -> &Arc<Vec<u8>> {

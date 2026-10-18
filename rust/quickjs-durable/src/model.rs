@@ -208,10 +208,11 @@ pub(crate) struct PageRef {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Manifest {
     pub format: u32,
-    /// The program, and the hash of the source this run started on.
+    /// The program, and the version (of its source) this run started on.
     pub program: String,
-    pub source: String,
-    pub build: String,
+    pub version: u64,
+    /// The runtime's version: an image restores only on the runtime that made it.
+    pub runtime: u64,
     pub previous: Option<String>,
     pub sequence: u64,
     pub meta: VmMeta,
@@ -239,9 +240,12 @@ pub struct View {
     pub manifest_bytes: usize,
 }
 
-pub(crate) fn hash(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
+/// FNV-1a: a stable 64-bit fingerprint, to tell versions and runs apart. Not
+/// a defense against tampering: storage is trusted.
+pub(crate) fn fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 pub(crate) fn json_bytes<T: Serialize>(value: &T) -> anyhow::Result<Vec<u8>> {
