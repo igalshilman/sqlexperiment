@@ -4,5 +4,4 @@ node_modules/
 .venv/
 __pycache__/
 /dist/
-/core/quickjs-durable/bench-*.json
-/core/quickjs-durable/sqlite-bench.json
+/rust/quickjs-durable/bench-*.json

@@ -1,6 +1,5 @@
-//! The SQLite host's tables in a sqlite-kv namespace: each turn is one session,
+//! The storage's tables in a sqlite-kv namespace: each turn is one session,
 //! committed by one save, or dropped.
-#![cfg(feature = "sqlite-kv-host")]
 use anyhow::Result;
 use bytes::Bytes;
 use common::programs;

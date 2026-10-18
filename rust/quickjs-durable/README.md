@@ -23,15 +23,16 @@ curl localhost:8080/counter/alice/run --json 1     # 21
 ## Run it
 
 ```sh
-make restate-server qjs-restate              # from the repository's root
+make restate-server qjs                      # from the repository's root
 target/restate/restate-server &
-ANTHROPIC_API_KEY=... target/release/quickjs-restate &   # serves programs/, on PORT (9080)
+ANTHROPIC_API_KEY=... target/release/quickjs-durable &   # serves programs/, on PORT (9080)
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
 ```
 
 A program is a file in [`programs/`](programs): `<name>.js`, defining
-`async function main(input, ctx)`. `cargo build` ships it in the binary, and
-the binary serves it as the virtual object `<name>`. The object's key is a
+`async function main(input, ctx)`. `cargo build` ships it in the binary
+(`QJS_PROGRAMS` names another directory), and the binary serves it as the
+virtual object `<name>`. The object's key is a
 **scope**: the runs of `counter/alice` share their `ctx.kv`; `counter/bob`
 has its own.
 
@@ -76,9 +77,7 @@ has its own.
 The JavaScript engine is [QuickJS](https://bellard.org/quickjs/), compiled to
 WebAssembly and run by Wasmtime. A WebAssembly instance's whole state is one
 linear memory and a stack pointer, so the VM, heap, closures, pending
-promises and all, is a byte array. [The durable QuickJS
-runtime](../../core/quickjs-durable/README.md) saves that array; this crate
-binds it to Restate.
+promises and all, is a byte array, and that is what this crate saves.
 
 **A run is one invocation** of `<program>/<scope>/run`, an exclusive handler
 without journal replay. It is a loop of **turns**:
@@ -101,10 +100,12 @@ call (with the request's ID as idempotency key) or a sleep until its deadline.
   can and waits on a promise: no JavaScript or native frame is on the stack,
   so memory and the stack pointer are the whole state. There is no
   mid-function capture, and no OS-level process snapshot.
-- **Every run starts from a golden image.** At build time, each program is
-  evaluated once (QuickJS initialized, the bridge and the program loaded) and
-  its memory dumped into the binary. A run starts from a copy of it, so the
-  startup work is never repeated, and every snapshot is relative to it.
+- **Every run starts from a golden image.** When the binary starts, it
+  evaluates each program once (QuickJS initialized, the bridge and the program
+  loaded) into its golden image. A run starts from a copy of it, so that work
+  is never repeated, and every snapshot is relative to it. Evaluation is
+  deterministic, so every process computes the same image, byte for byte: a
+  snapshot written by one restores in another.
 - **Save only the pages that changed.** The Wasm is rewritten once, at
   startup, so that every store also marks its 4 KiB page in a side table. At
   the end of a turn, only marked pages are compared, and only those that
@@ -130,16 +131,32 @@ call (with the request's ID as idempotency key) or a sleep until its deadline.
   so a long computation is never cut off. A single job that exceeds the whole
   budget (an endless loop) ends the run as failed.
 
-With the runtime's SQLite host, a turn (cold restore, execution, capture and
-commit) takes about 3 ms for a program of a 1.3 MiB image, and about 18 ms
-for one of 9 MiB ([measurements](../../core/quickjs-durable/docs/DESIGN.md#11-measurements-and-reproduction)).
+Compared with a regular TypeScript virtual object, a run that waits is about
+6x slower, and writes about 50x more to Restate per wait
+([measurements](docs/DESIGN.md#10-measurements)). The whole design, down to the
+byte formats: [docs/DESIGN.md](docs/DESIGN.md).
+
+## The code
+
+| Path                                     | What                                                                       |
+| ---------------------------------------- | -------------------------------------------------------------------------- |
+| [`src/restate.rs`](src/restate.rs)       | Each program as a virtual object: the `run` handler and its turn loop      |
+| [`src/engine.rs`](src/engine.rs)         | Runs: start a run, deliver a result, run turns, recover                    |
+| [`src/vm.rs`](src/vm.rs)                 | The VM under Wasmtime: golden images, restore, capture, fuel               |
+| [`src/instrument.rs`](src/instrument.rs) | The Wasm rewrite that marks each written page                              |
+| [`src/namespace.rs`](src/namespace.rs)   | The storage: SQL tables in the object's state, through sqlite-kv           |
+| [`src/claude.rs`](src/claude.rs)         | The `claude` service                                                       |
+| [`assets/`](assets)                      | The pinned QuickJS reactor (`quickjs.wasm`), the guest bridge and licenses |
 
 ## Tests
 
-`make test-qjs-restate` runs the binding against a real Restate server: RPCs,
-timers, scopes, a failing program, a race whose loser is dropped, an attempt
-that crashes while its call runs (its retry attaches to the call, and the
-callee runs once), and the shipped programs.
+`make test-qjs` runs the runtime's tests twice: checking that every changed
+page was marked, then capturing by scanning every page instead. Then it runs
+the programs against a real Restate server: RPCs, timers, scopes, a failing
+program, a race whose loser is dropped, an attempt that crashes while its call
+runs (its retry attaches to the call, and the callee runs once), and the
+shipped programs, with a scripted `claude` for the assistant. `make lint-qjs`:
+rustfmt and clippy.
 
 ## Not yet
 

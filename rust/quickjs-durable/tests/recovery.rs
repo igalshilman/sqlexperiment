@@ -1,6 +1,8 @@
 use anyhow::Result;
 use common::{programs, runtime};
-use quickjs_durable::{Engine, MemoryTransaction, Operation, Outcome, Program, Programs, Status};
+use quickjs_durable::{
+    Engine, MemoryTransaction, Operation, Outcome, Program, Programs, Runtime, Status,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -146,18 +148,15 @@ fn a_run_refuses_another_version_of_its_program() -> Result<()> {
     Ok(())
 }
 
-/// A program loaded from its dump is the compiled one: a run moves between the
-/// two and ends exactly as on the compiled one alone. A dump of another source
-/// is refused.
+/// A program evaluates to the same golden image on every runtime: a process
+/// that starts later (here, a second runtime) continues another's runs, and
+/// they end exactly as in one process alone.
 #[test]
-fn a_program_round_trips_through_its_dump() -> Result<()> {
+fn every_runtime_evaluates_a_program_alike() -> Result<()> {
     let compiled = Program::compile(&runtime(), "v1", PROGRAM)?;
-    let dump = compiled.dump()?;
-    let loaded = Program::load(&runtime(), "v1", PROGRAM, &dump)?;
-    assert_eq!(loaded.name(), "v1");
-    assert_eq!(loaded.source_hash(), compiled.source_hash());
-    assert!(Program::load(&runtime(), "v1", "async function main(){}", &dump).is_err());
-    let loaded = Arc::new(Programs::new(runtime()).with(loaded)?);
+    let again = Program::compile(&Arc::new(Runtime::new()?), "v1", PROGRAM)?;
+    assert_eq!(again.source_hash(), compiled.source_hash());
+    let again = Arc::new(Programs::new(runtime()).with(again)?);
     let compiled = Arc::new(Programs::new(runtime()).with(compiled)?);
     let run = |catalogs: [&Arc<Programs>; 3]| -> Result<(Value, MemoryTransaction)> {
         let mut e = Engine::new(MemoryTransaction::default(), catalogs[0].clone());
@@ -180,7 +179,7 @@ fn a_program_round_trips_through_its_dump() -> Result<()> {
     };
     let (expected, expected_storage) = run([&compiled; 3])?;
     assert_eq!(expected, json!({"n":42,"identity":true}));
-    for catalogs in [[&loaded; 3], [&compiled, &loaded, &compiled]] {
+    for catalogs in [[&again; 3], [&compiled, &again, &compiled]] {
         let (result, storage) = run(catalogs)?;
         assert_eq!(result, expected);
         assert_eq!(storage.values, expected_storage.values);

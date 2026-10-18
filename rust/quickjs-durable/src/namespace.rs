@@ -1,12 +1,13 @@
-//! The SQLite host's tables in one namespace of a key/value store, through
-//! sqlite-kv: the storage a Restate virtual object gives each key. One turn is
+//! The runtime's storage: SQL tables (checkpoints, state, effects) in one
+//! namespace of a key/value store, through sqlite-kv: the storage a Restate
+//! virtual object gives each key. One turn is
 //! one sqlite-kv session; its changes stay private until [`NamespaceTransaction::commit`]
 //! saves them, as one log transaction (usually a single put).
 //!
 //! The namespace is one application KV scope: every run in it shares `state`.
 //! Its owner (the object's exclusive handler) runs one turn at a time.
 //!
-//! Unlike [`crate::sqlite`], this host keeps no results: the embedding waits
+//! The host keeps no results: the embedding waits
 //! for each request itself, under its stable ID, once the turn that issued it
 //! has committed, and again after a crash. `effects` lists the run's requests
 //! still pending, and a delivery must name one of them.

@@ -8,20 +8,19 @@ substitutes for protocol steps. Last consolidated: 17 October 2026.
 
 The implementation in this crate uses QuickJS compiled to WebAssembly, Wasmtime,
 4 KiB page tracking, and XOR/Zstd checkpoint payloads relative to a shared golden
-image. The SQLite host and the sqlite-kv host (§7.1) implement the transaction
-contract; `rust/quickjs-restate` binds the latter to Restate (§10.1). The atomic-KV
-WAL of §8 is not implemented: sqlite-kv's atomic save replaces it.
+image. Its storage is SQL tables on sqlite-kv in a Restate object's state (§7),
+which the `restate` module drives from each program's `run` handler (§9.1).
 
 Reading map: [ownership](#1-model-ownership-and-durability),
 [interfaces](#2-guest-and-host-interfaces), [VM ABI](#3-quickjswasm-snapshot-abi),
 [write tracking](#4-discovering-writes-and-choosing-a-diff),
 [persistent format](#5-persistent-format-capture-and-reconstruction),
 [engine algorithms](#6-engine-algorithms-and-checkpoint-boundaries),
-[SQLite](#7-sqlite-validation-host), [KV WAL](#8-atomic-kv-host-proposed-redo-wal),
-[examples](#9-worked-execution-and-failure-examples),
-[acceptance](#10-restate-binding-and-implementation-acceptance),
-[measurements](#11-measurements-and-reproduction),
-[limits and provenance](#12-scope-limits-provenance-and-references).
+[storage](#7-storage-sqlite-kv-in-the-objects-state),
+[examples](#8-worked-execution-and-failure-examples),
+[acceptance](#9-restate-binding-and-implementation-acceptance),
+[measurements](#10-measurements),
+[limits and provenance](#11-scope-limits-provenance-and-references).
 
 ## 1. Model, ownership and durability
 
@@ -211,8 +210,7 @@ trait Transaction: Kv {
 }
 
 Program::compile(runtime, name, source) -> Result<Program>   // golden creation
-Program::dump() -> Result<bytes>; Program::load(runtime, name, source, dump)
-Programs::new(shared_runtime).compile(name, source)? / .load(name, source, dump)?
+Programs::new(shared_runtime).compile(name, source)?
 Engine::new(transaction, shared_programs)
 Engine::with_checkpoint_interval(NonZeroUsize) // optional host request budget
 Engine::start(run, program, input, now).await -> Result<View>
@@ -233,14 +231,15 @@ that effective delivery time is no earlier than result availability, before
 staging consumption. It must not durably remove the result independently of the
 next VM checkpoint. A host with an external durable inbox may implement that
 contract without a separate result table. The memory test adapter assumes its
-embedding supplies that result; SQLite verifies its stored result directly.
+embedding supplies that result; the sqlite-kv host checks it is still pending.
 
 Set an engine usability flag false before registration/turn execution and restore
 it only after success. If a polled future is dropped, an error occurs, or an
 unwind interrupts execution, leave it false. Reject reuse, recovery and storage
 extraction from that engine. Failed extraction consumes/drops the transaction;
-SQLite rolls back on drop. A fresh attempt starts from committed state. This is
-an API guard, not permission for adapters to publish staged data independently.
+the sqlite-kv host discards staged changes on drop. A fresh attempt starts from
+committed state. This is an API guard, not permission for adapters to publish
+staged data independently.
 
 Commit is explicitly host-owned:
 
@@ -262,7 +261,7 @@ protocol.
 ### 3.1. Pinned runtime and supported state
 
 The reference build uses Wasmtime **49.0.3** and the extension-free WASI reactor
-from npm **quickjs-wasi@3.6.2**, copied unchanged to `rust/assets/quickjs.wasm`.
+from npm **quickjs-wasi@3.6.2**, copied unchanged to `assets/quickjs.wasm`.
 WASI is the WebAssembly System Interface: imported host functions for facilities
 such as clocks and random bytes. It is not a durability service or an OS image.
 This host supplies the reactor's small import surface directly, without adopting
@@ -613,24 +612,16 @@ manifest then references that one alone. A long run's restore reads at most that
 many batches instead of one per turn. Retain golden and every referenced blob. No
 record GC is implemented.
 
-### 5.5. Programs and their dumps
+### 5.5. Programs
 
-A program is static: a source file, named, and its golden image, computed
-ahead of time and shipped with it (`rust/quickjs-restate` computes it in its
-build script, and embeds both). A host loads its programs at startup into a catalog
-(`Programs`), which every engine of the process shares; golden memory is
-decompressed once. A dump is:
-
-| Offset/entry | Encoding                                                               |
-| ------------ | ---------------------------------------------------------------------- |
-| 0..7         | ASCII `QJSDUMP1`                                                       |
-| 8..11        | Header length L, unsigned 32-bit little-endian                         |
-| 12..12+L     | Header JSON: `{sourceHash: H(source), build, memoryLen, meta: VmMeta}` |
-| Rest         | Zstd level-3 compression of exactly `memoryLen` bytes of golden memory |
-
-Loading requires the runtime's build and the source's hash: a dump of another
-build or source is refused, so it is computed again rather than restored
-wrongly.
+A program is static: a named source file, shipped in the binary. At startup the
+process evaluates each into its golden image (§3.2) and keeps them in a catalog
+(`Programs`) that every engine of the process shares. Evaluation is
+deterministic: a fixed identity, clock and seed, and no other input, so the
+same source on the same runtime build gives the same image, byte for byte, in
+every process. A checkpoint written by one process therefore restores in
+another, and nothing but the source needs shipping. A manifest records its
+program's source hash and the runtime build; a run restores only with both.
 
 ## 6. Engine algorithms and checkpoint boundaries
 
@@ -730,263 +721,38 @@ before Resume, its turn also drains already queued jobs. More than one Resume
 can coexist; each remains a pending effect until consumed, and none replays an
 old host operation. Once the root settles, the run is final, whatever is pending.
 
-## 7. SQLite validation host
+## 7. Storage: sqlite-kv in the object's state
 
-Use a file-backed SQLite database with one writer connection, `journal_mode=WAL`,
-`synchronous=FULL`, `wal_autocheckpoint=1000`, and zero busy timeout. Reserve the
-writer with `BEGIN IMMEDIATE` before executing JS. A conflicting writer fails;
-there is no retry thread or worker pool. SQLite's WAL checkpoint is database
-maintenance, distinct from a VM checkpoint; no WAL truncation is required per turn.
-
-Schema:
+`namespace::NamespaceTransaction` keeps a scope's records in SQL tables in one
+namespace of a key/value store, through sqlite-kv: in Restate, a virtual
+object's state, one namespace per object key. sqlite-kv turns a session's page
+writes into one atomic commit (a log transaction, usually a single put), so the
+runtime needs no write-ahead log of its own.
 
 ```sql
-CREATE TABLE checkpoints (key TEXT PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID;
-CREATE TABLE state (
-  scope TEXT NOT NULL, key TEXT NOT NULL, value BLOB NOT NULL,
-  PRIMARY KEY(scope, key)
-) WITHOUT ROWID;
-CREATE TABLE runs (run TEXT PRIMARY KEY, scope TEXT NOT NULL) WITHOUT ROWID;
-CREATE TABLE effects (
-  id TEXT PRIMARY KEY, run TEXT NOT NULL, operation BLOB NOT NULL,
-  outcome BLOB, completed_at INTEGER,
-  CHECK((outcome IS NULL) = (completed_at IS NULL))
-);
-CREATE INDEX effects_run ON effects(run);
+CREATE TABLE checkpoints (key TEXT PRIMARY KEY, value BLOB NOT NULL);
+CREATE TABLE state (key TEXT PRIMARY KEY, value BLOB NOT NULL);
+CREATE TABLE effects (id TEXT PRIMARY KEY, run TEXT NOT NULL, operation BLOB NOT NULL);
 ```
-
-JSON state, operations and outcomes are stored as UTF-8 bytes. SQL NULL outcome
-means result unavailable; successful JSON null is an encoded Outcome, not SQL NULL.
-
-`begin(run, scope)` starts the transaction, inserts the binding if absent, then
-requires the stored scope to match. The binding commits with that transaction
-and cannot change on reopening. `check_run` requires the engine's run to equal
-the transaction's run, including turns that issue no guest requests.
-
-The transaction's checkpoint get/put use `checkpoints`. Its `execute` validates
-operation ownership, then:
-
-- KV get selects `(scope,key)` or returns JSON null; set upserts serialized JSON;
-  delete removes the row. Return Ready(success(value/null)).
-- RPC/custom/sleep inserts an effect with no outcome and returns Pending.
-- Resume inserts an effect with successful null and `completed_at=0`, returning
-  Pending. Effective delivery time is clamped to the VM's current logical time.
-
-`effects(run)` reads committed rows. Dispatch only uncompleted external requests,
-using the stable operation ID. Deliver completed rows to `Engine::complete`.
-Read-only consumers spanning several SQL queries use one read transaction if
-they need one consistent multi-table view.
-
-`record_result(id, outcome, now)` is a separate short `BEGIN IMMEDIATE` transaction:
-validate discriminator, size and time; find an effect without an outcome. If none
-exists, return false. For a timer require now at least its deadline. Store outcome
-and time and commit. First recorded result wins. It advances no guest state.
-Reject unusable timestamps before recording: otherwise first-result-wins can
-retain a result that the VM will never accept.
-
-During completion, `acknowledge` selects the row for `(id, transaction.run)` with
-an available result, requires equal outcome and effective delivery time >= stored
-completion time, then deletes exactly one row. A mismatch fails without losing
-the committed result. Consumption, subsequent KV mutations, new effects and the
-new VM checkpoint all commit together. Dropping the transaction rolls them all
-back. `into_storage()?.commit()` performs the host commit after successful execution.
-
-A crash between recording and consuming a result leaves it available. A crash
-after consuming it but before the VM commit restores both the old VM and result.
-A crash after commit restores the new VM without that pending ID. If COMMIT's
-outcome is uncertain, let database recovery establish committed state before retry.
-Actual power-loss durability depends on filesystem/device sync semantics; the
-implemented crash tests exercise process termination.
-
-### 7.1. The same tables on sqlite-kv
-
-`namespace::NamespaceTransaction` (feature `sqlite-kv-host`) keeps these tables in
-one namespace of a key/value store through sqlite-kv: a Restate virtual object's
-state, one namespace per object key. sqlite-kv already turns single-key puts into
-an atomic multi-key commit (a log transaction, usually one put), so the atomic-KV
-WAL of section 8 is not needed for this host.
 
 - A turn is one sqlite-kv session; `commit` is one `save()`. Dropping the
   transaction discards every staged change. The namespace's owner (the object's
   exclusive handler) runs one turn at a time.
-- The namespace is one application KV scope: `state` has no scope column, and
-  there is no `runs` table. Every run in the namespace shares `state`.
-- `effects` is an outbox, `(id, run, operation)`, with no outcome columns. The
-  embedding's inbox holds each result until a turn consumes it: a Restate
-  invocation of the object, retried until its turn commits. `acknowledge` checks
-  that the run's request is still outstanding and deletes it with the turn.
-- After a commit, and again on recovery, the host dispatches every row of
-  `effects` under its stable ID, which the receiver deduplicates. Resume is a
-  row like the others: the host sends it back to the object.
+- The namespace is one application KV scope: every run in it shares `state`.
+  KV requests resolve Ready in the turn, against `state`.
+- `effects` is an outbox, `(id, run, operation)`, with no results: RPCs,
+  timers and Resume are staged there and resolve Pending. The embedding waits
+  for each itself, under its stable ID, once the turn that staged it has
+  committed, and again after a crash. `acknowledge` checks that a delivered ID
+  is still the run's outstanding request, and deletes it with the turn.
+- When a run settles, `abandon` deletes its remaining requests in the same turn.
 
-## 8. Atomic-KV host: proposed redo WAL
+For tests and the benchmark, `MemoryTransaction` implements the same contract
+over an in-memory map that the test publishes or discards as a whole.
 
-This section completely specifies a minimal replacement for SQLite's multi-key
-transaction. It requires only atomic durable get/put, a strict single writer and
-a host visibility gate. It is storage redo of already-computed bytes, not a guest
-operation journal. The implementation and fault tests remain outstanding.
+## 8. Worked execution and failure examples
 
-### 8.1. Namespace, encoding and discovery
-
-Reserve physical `host/transaction` for control. All ordinary logical keys map to
-physical `data/` followed by the logical key. The guest cannot access either raw
-namespace. The staging API exposes only logical keys; it cannot stage a write to
-the control key. Prefixes for checkpoints, state, effects and bindings are disjoint.
-
-For a concrete put-only encoding, represent base values as one leading byte:
-`0x01 || value_bytes` is a present value; exactly `0x00` is a tombstone. Missing
-and tombstoned keys read absent. JSON null remains ordinary present value data.
-The overlay is a map of logical key to final present value or deletion, with
-reads consulting the overlay first. Repeated writes coalesce to the last value.
-
-Suggested additional logical keys for this adapter:
-
-| Key                      | Logical value before base-value encoding                                               |
-| ------------------------ | -------------------------------------------------------------------------------------- |
-| `binding/R`              | JSON `{run, scope}`; immutable binding                                                 |
-| `state/H(scope)/H(key)`  | Application JSON value                                                                 |
-| `effect/H(operation_id)` | JSON `{run, operation, outcome, completed_at}`; last two fields null or both populated |
-| `active_runs`            | JSON array of run IDs whose committed State is waiting                                 |
-
-The hash function is the naming function from section 5. On first invocation
-commit add the run to active_runs; on terminal commit remove it. A scheduler can
-read that one index, load each manifest, and follow pending IDs to effect rows
-without a listing API. A result-arrival transaction updates the effect row using
-the same WAL wrapper; scanning active runs finds it afterward. No wakeup may rely
-solely on the reusable WAL record, which is cleared before dispatch.
-
-Treat active_runs as a set, encoded as a sorted unique array. Use the same logical
-execute, first-result-wins recording and checked acknowledgement rules as section
-7, replacing SQL reads/writes/deletes with overlay operations. Bind scope before
-or with first invocation commit and check the run on every engine entry point.
-
-Initial admission is retained/redelivered by the embedding until first commit.
-For a completely standalone service, durable admission and its discovery index
-would be another host transaction before starting the VM. Terminal results remain
-addressable by run ID for caller retries after active_runs removal. A push-reply
-transport needing autonomous resend must retain a durable reply outbox through
-its acknowledgement; that transport is outside the minimal validation host.
-
-Use UTF-8 JSON for the control record, independently of the base-value envelope:
-
-```json
-{ "format": 1, "state": "idle", "applied": 41 }
-```
-
-```json
-{ "format": 1, "state": "redo", "tx": 42, "writes": [{ "key": "data/example", "value": "AQ==" }] }
-```
-
-Each redo value is standard base64 of the **complete encoded base value**, including
-its leading tag. In the example `AQ==` means a present empty byte string; `AA==`
-would mean a tombstone. Keys are unique physical data keys, sorted for repeatable
-application. `tx` is the previous applied counter + 1, independent of run/checkpoint
-counters. Absent control means idle/applied=0 on first use. Reject counter overflow,
-invalid control formats and oversized serialized records before publication.
-
-The complete redo must fit one store value. The first implementation rejects
-larger transactions before deciding them. A later chunked protocol would need
-durable immutable chunks before atomically publishing their complete descriptor;
-it must not be silently substituted for this baseline.
-
-### 8.2. Writer ownership and visibility gate
-
-Hold writer ownership from the beginning of staging through commit/application.
-Finish old storage recovery before loading a VM or reading base state for staging.
-Readers may inspect the previous committed base state while the writer builds its
-in-memory overlay. Each logical multi-key reader holds a shared gate for its whole
-read. Before publishing redo, acquire the exclusive gate and drain prior readers.
-
-Hold the exclusive gate through redo publication, all base assignments and idle
-publication. It covers restoration, effect dispatch, delivery and maintenance as
-well as ordinary reads. Raw KV clients bypassing it can see partial application;
-individual atomic puts cannot hide a multi-key transition from those clients.
-On process startup the gate starts closed until recovery finishes.
-
-Ownership means more than a single live writer task: an old timed-out put must
-not complete after a successor reuses its keys/WAL slot. Settle or order in-flight
-writes before interpreting a failed acknowledgement or transferring ownership.
-If the environment cannot ensure this, it needs fencing beyond this design.
-
-### 8.3. Commit and recovery algorithms
-
-Perform all fallible VM execution, page compression and encoding before publishing
-the redo record. Stage checkpoint records, KV updates, effects, consumption,
-bindings and index changes in the same overlay. Do not modify any base key yet.
-
-```text
-recover_storage():                         // ownership + exclusive gate held
-    c = get(host/transaction), or Idle(0)
-    validate c
-    if c is Idle(N): return N
-    for write in c.writes:
-        await durable_put(write.key, decode_base64(write.value))
-    await durable_put(host/transaction, encode Idle(c.tx))
-    return c.tx
-
-begin_transaction():                       // sole writer ownership acquired
-    base_tx = recover_storage() behind exclusive gate
-    allow shared readers; retain sole writer ownership
-    overlay = empty                        // base is fully committed
-    return Transaction { base_tx, overlay } // reads consult overlay first
-
-commit(transaction):
-    N = transaction.base_tx
-    freeze transaction.overlay and serialize complete Redo(N+1)
-    acquire exclusive gate; wait for logical readers to finish
-    require control is Idle(N)             // ownership held since begin
-    await durable_put(host/transaction, Redo(N+1))
-    // DURABLE DECISION: must finish this transaction from here onward
-    recover_storage()                      // applies values, then Idle(N+1)
-    release gate and writer ownership
-    return committed
-```
-
-A durable Redo means **committed and needing application**, not prepared. Base
-writes can be applied sequentially; await durable acknowledgement of every write
-before storing Idle. Applying an assignment sets exact bytes. Never redo an
-increment, execute a callback, send an RPC, or XOR into an existing stored value.
-Snapshot XOR payloads are stored as final encoded blobs; image reconstruction
-later interprets them against golden.
-
-On an apply error retain the redo and closed gate. Retry recovery; do not discard
-the decision, expose partial base state or start another transaction. Repeated
-recovery crashes are safe because absolute assignments/tombstones are idempotent.
-Only after durable Idle may dispatch/new work/replies proceed. Head-last ordering
-can aid inspection but is neither the commit point nor a substitute for the gate.
-
-A lost acknowledgement is not evidence of abort. After settling/ordering the
-uncertain operation, read control: Redo(N) must finish; Idle(N) is finished. An
-older Idle proves no decision for N only if no delayed put can still publish it.
-Keep ownership/gate closed until resolved. The applied counter helps resolve that
-one transaction; it is not a general client-request deduplication journal.
-
-### 8.4. Crash states and cost
-
-| Failure point                         | Durable state                 | Recovery                                            |
-| ------------------------------------- | ----------------------------- | --------------------------------------------------- |
-| During execution/overlay construction | Old Idle, base untouched      | Abort provisional work                              |
-| Atomic redo publication               | Old Idle or complete new Redo | Resolve uncertain write, then abort or roll forward |
-| After redo, before any base writes    | Redo(N)                       | Apply all assignments                               |
-| After some or all base writes         | Redo(N)                       | Reapply all assignments, then Idle(N)               |
-| Atomic idle publication               | Redo(N) or Idle(N)            | Finish redo or proceed                              |
-| After idle, before reply/dispatch     | Idle(N)                       | Read committed head and persistent work index       |
-
-Before Redo there are no base mutations. After Redo, all bytes needed to finish
-are durable, and the record survives until every assignment is durable. The gate
-hides intermediate mixtures. These facts establish an all-or-nothing host-visible
-transition under the stated assumptions, even though base writes are individually
-atomic. They do not make arbitrary remote side effects atomic with local storage.
-
-For N final keys, cost is N+2 durable puts: Redo, N assignments, Idle. Payloads are
-written in both redo and base, plus JSON/base64 overhead. There are no per-key
-progress records, CAS, undo records or content-integrity hashes. Acknowledge only
-after Idle; background apply or concurrent decided transactions would require a
-new visibility/ordering protocol and are outside this baseline.
-
-## 9. Worked execution and failure examples
-
-### 9.1. KV mutation, RPC and completion
+### 8.1. KV mutation, RPC and completion
 
 ```js
 async function main(input, ctx) {
@@ -1035,7 +801,7 @@ removal but before head replacement, the physical base is mixed. Redo recovery
 reinstalls the complete frozen transaction before anything reads it. It does not
 rerun the continuation to recreate C1.
 
-### 9.2. A KV read that fetches remotely
+### 8.2. A KV read that fetches remotely
 
 For `const n = await ctx.kv.get("n"); await ctx.kv.set("n", n+1)`, a host read may
 return Poll::Pending while doing transactional I/O. Keep the transaction, VM and
@@ -1048,7 +814,7 @@ is no committed read-result receipt to replay. The remote read must nevertheless
 participate in the host's isolation/ownership contract. An arbitrary unrelated
 HTTP read is not automatically transactional KV.
 
-### 9.3. Host-scheduled capture and fan-out
+### 8.3. Host-scheduled capture and fan-out
 
 With a Ready budget of two, a loop performing get then set checkpoints after each
 pair. The set's success has resolved its promise, but its continuation may still
@@ -1062,7 +828,7 @@ The next image retains B's resolved value while waiting for A. Completing A then
 returns values in application array order. For Promise.race, the run completes in
 the turn the winner settles it; the losing effect is abandoned.
 
-## 10. Restate binding and implementation acceptance
+## 9. Restate binding and implementation acceptance
 
 The Rust core requires an embedding, not an SDK journal. Map host invocation
 identity and object/workflow scope to start/check_run, application state access
@@ -1070,19 +836,19 @@ to KV requests, target service/handler/key to RPC routing, sleep to the host tim
 service, and Resume to local scheduling. The host chooses an available completion
 and uses its explicit durable recovery path to call complete.
 
-Ship programs with their golden dumps, retain initial admission until first commit,
+Ship programs' sources, retain initial admission until first commit,
 and include checkpoint storage, KV changes, effect registration and consumption
 in the same host transaction. Scope selection and RPC authorization belong to
 the host. Publish only committed terminal status. Choose an explicit concurrency policy for different invocations sharing
 a scope.
 
-### 10.1. The Restate binding
+### 9.1. The Restate binding
 
-`rust/quickjs-restate` binds §7.1's host to a live Restate server, on the
+The `restate` module binds §7's storage to a live Restate server, on the
 Rust SDK with journal replay off:
 
 - Each program is a virtual object of its name, with no registration: the
-  binary embeds its programs and their dumps (§5.5). An object key is a
+  binary embeds its programs and evaluates them when it starts (§5.5). An object key is a
   scope; its exclusive handlers serialize its runs, one writer at a time.
 - A run is one invocation of the object's `run` handler, which drives its
   turns itself. After each turn commits, the handler waits on Restate for the
@@ -1112,90 +878,49 @@ An implementation can be built and accepted in this order:
    verification oracle: every actually changed page must have been marked.
 5. Bind a real atomic transaction, then add effects/results and result consumption.
    Verify before/after commit crash behavior and mismatch rejection.
-6. Implement the KV WAL and visibility gate; only then claim KV-only durability.
 
 Required acceptance cases:
 
-| Area               | Cases                                                                                                                                                                                                                   |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Snapshot ABI       | Hidden mutable globals/table mutation/passive lifecycle rejected; stack limit catches recursive overflow before/after restore                                                                                           |
-| Tracking           | Every scalar store width, offsets and cross-page writes; overlapping bulk writes; zero lengths; traps; growth; host writes; epoch reset; deliberate missed-write detection                                              |
-| Images             | Golden isolation; sparse writes; zero growth; zero over nonzero golden; return-to-golden removes override; multiple referenced old blobs; bounded decoding                                                              |
-| Promises           | all/race/any/allSettled, rejection, fan-out delivery order, captured queued KV result, RPC before Resume and multiple Resume delivery orders                                                                            |
-| Transactions       | Read-your-writes; true pending host read; cancel before/after mutations; trap; failure before/after each staging action; no extraction/reuse after failure                                                              |
-| Identities         | Changed source/build/input rejected; immutable scope across reopen; wrong-run transaction rejected even without requests; canonical duplicate IDs are no-ops                                                            |
-| Completions        | Exact stored result and time checked; early/out-of-range timer result rejected; aborted consumption leaves result; duplicate after committed consumption does not execute guest                                         |
-| WAL, still pending | Crash before/after every put, including redo/idle; repeated recovery crashes; lost acknowledgements with settled writes; overwrites/tombstones; no reader/dispatcher passes partial apply; indexes survive WAL clearing |
+| Area         | Cases                                                                                                                                                                           |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Snapshot ABI | Hidden mutable globals/table mutation/passive lifecycle rejected; stack limit catches recursive overflow before/after restore                                                   |
+| Tracking     | Every scalar store width, offsets and cross-page writes; overlapping bulk writes; zero lengths; traps; growth; host writes; epoch reset; deliberate missed-write detection      |
+| Images       | Golden isolation; sparse writes; zero growth; zero over nonzero golden; return-to-golden removes override; multiple referenced old blobs; bounded decoding                      |
+| Promises     | all/race/any/allSettled, rejection, fan-out delivery order, captured queued KV result, RPC before Resume and multiple Resume delivery orders                                    |
+| Transactions | Read-your-writes; true pending host read; cancel before/after mutations; trap; failure before/after each staging action; no extraction/reuse after failure                      |
+| Identities   | Changed source/build/input rejected; immutable scope across reopen; wrong-run transaction rejected even without requests; canonical duplicate IDs are no-ops                    |
+| Completions  | Exact stored result and time checked; early/out-of-range timer result rejected; aborted consumption leaves result; duplicate after committed consumption does not execute guest |
 
-The current Rust revision passed 46 tests with `sqlite-host,verify-dirty` (including
-two child helpers), and 39 overlapping full-scan control tests. Both passed Clippy
-with warnings denied. Tests include 24 injected staging failures, two file-host
-SIGKILL cases and four SQLite SIGKILL cases around start/completion commits.
-These results validate the implemented hosts, not the proposed WAL or power loss.
+`make test-qjs` runs the runtime's tests with `verify-dirty` (every changed page
+must have been marked) and again with `full-scan`, then the programs against a
+Restate server, including a crash between a call's commit and its answer.
 
-## 11. Measurements and reproduction
+## 10. Measurements
 
-Recorded locally on 17 October 2026: Rust 1.99.1, Wasmtime 49.0.3, SQLite 3.53.2,
-Linux/x86_64 container filesystem. One warm-up plus three measured runs per case,
-100 updates per run; 942 measured VM commits total. No network delay, warm VM
-cache or dirty verification scan in timing runs. Small samples; no confidence
-intervals or controlled before/after performance claim.
+`cargo bench --bench checkpoints` (and `--features full-scan`, the control)
+measures capture and restore over `MemoryTransaction`, and writes its results
+beside it as JSON.
 
-| Workload                   | VM commits/run | Turn p50 ms | Turn p95 ms | COMMIT p50 ms | Run p50 ms |
-| -------------------------- | -------------: | ----------: | ----------: | ------------: | ---------: |
-| KV, every update           |            101 |       2.932 |       3.653 |         0.530 |      308.2 |
-| KV, every ten updates      |             11 |       3.623 |       5.951 |         0.501 |       40.3 |
-| Sparse 8 MiB, every update |            101 |      18.359 |      22.601 |         0.708 |     1857.0 |
-| RPC, every update          |            101 |       2.806 |       3.381 |         0.449 |      332.6 |
+Against Restate, measured on 18 October 2026 (4 vCPUs, one restate-server
+1.7.13), compared with the same workloads as regular virtual objects of the
+TypeScript SDK 1.17.3 on Node 22:
 
-Turn includes BEGIN, cold restore, execution, capture, SQL staging and COMMIT,
-including automatic SQLite WAL checkpoint work when triggered. Run also includes
-effect lookups and RPC result commits; the RPC case adds 100 result transactions.
-Compilation and golden registration are excluded. Small images are ~1.31 MiB;
-the sparse case is ~9.31 MiB and emits ~6.67 KiB of new payload at its median turn.
-Its median turn grows from ~16.1 ms over the first ten turns to ~20.6 ms over the
-last ten because more old batches must be read/decompressed. Small diffs do not
-make cold-restore cost proportional to changed bytes.
+| Workload                                          | TypeScript       | QuickJS           |
+| ------------------------------------------------- | ---------------- | ----------------- |
+| Read and write the KV, a new key each, 32 at once | 520/s, p50 57 ms | 220/s, p50 140 ms |
+| One wait, one run at a time                       | 4 ms             | 68 ms             |
+| 5 waits, 32 runs at once                          | 243/s            | 40/s              |
+| Journal entries and bytes written per wait        | 1, ~1 KiB        | ~30, ~55 KiB      |
+| CPU per turn (SDK process + Restate)              | 0.6 + 1.2 ms     | 7 + 5 ms          |
 
-Raw current host measurements: `rust/sqlite-bench.json`, including runtime build
-identity. Historical codec results are in `bench/codec-results.json`; old Rust
-tracking/full-scan and integrity-hash comparison JSON files retain their own build
-IDs/notes and are not current host measurements. Report scripts only print their
-summaries; they do not regenerate separate Markdown documentation.
+A turn reads and writes the scope's database pages as state commands, which
+the invocation's journal keeps until the run ends: a long run's journal grows
+with every turn. The Rust SDK's server does not set `TCP_NODELAY`, which adds
+~40 ms to each round trip (19 ms per wait with it). One synchronous JavaScript
+job is capped at about 10^8 Wasm instructions, and the interpreter runs
+compute-bound code ~30x slower than V8.
 
-From the repository root:
-
-```sh
-cd rust
-cargo test --release --features sqlite-host,verify-dirty --lib --tests
-cargo test --release --features sqlite-host,full-scan --lib --test recovery --test host --test sqlite
-cargo clippy --release --features sqlite-host,verify-dirty --all-targets -- -D warnings
-cargo clippy --release --features sqlite-host,full-scan --all-targets -- -D warnings
-cargo run --release --features sqlite-host --example sqlite -- /tmp/quickjs.sqlite
-# Run the same example/path again: recover without incrementing again.
-cargo bench --features sqlite-host --bench sqlite
-python3 benches/sqlite_report.py
-cargo bench --bench checkpoints
-cargo bench --features full-scan --bench checkpoints
-python3 benches/compare.py
-```
-
-`verify-dirty` is the expensive all-page correctness oracle; `full-scan` is the
-uninstrumented benchmark/control build. They have distinct runtime build IDs.
-Memory/file examples are `cargo run --release --example host -- /tmp/qjs-host`
-and `cargo run --release --example recovery`. The file host publishes its entire
-memory transaction domain as one fsync/rename/directory-fsync value; it is not
-an implementation of the multi-key WAL. Tests live under `rust/tests`; benchmarks
-under `rust/benches`. The library creates no executor or background thread.
-
-For historical codec reproduction, Node 24+ and Python are required: `npm ci`,
-create `.venv`, install `bench/requirements.txt`, then run `node bench/corpus.ts`
-and `.venv/bin/python bench/compare.py`. Optional Xdelta preparation uses
-`node bench/xdelta.ts`, `bash bench/build-xdelta.sh` and `XDELTA_LIB=/tmp/qjs-libxdelta.so`.
-A zstd CLI enables patch-from rows; historical CLI/process and library versions
-are recorded with the raw results. The Rust runtime has no Node/Python dependency.
-
-## 12. Scope limits, provenance and references
+## 11. Scope limits, provenance and references
 
 The baseline deliberately has no warm-VM cache, GC, heap migration,
 background WAL apply, concurrent writers, generic Wasm snapshots or dynamic native
@@ -1215,8 +940,8 @@ The shipped binary's provenance fingerprint is SHA-256
 This identifies the pinned dependency, not a snapshot integrity scheme. It comes
 from the published quickjs-wasi 3.6.2 package, not a claimed reproducible source
 build; the package does not supply a complete toolchain/submodule manifest.
-Retain `rust/assets/quickjs-wasi-LICENSE`, `quickjs-ng-LICENSE`, `wasi-libc-LICENSE`
-and component notices in `rust/assets/licenses/`. Replacing the binary requires
+Retain `assets/quickjs-wasi-LICENSE`, `quickjs-ng-LICENSE`, `wasi-libc-LICENSE`
+and component notices in `assets/licenses/`. Replacing the binary requires
 ABI review and new cold-restore validation/goldens.
 
 Supporting sources for the already selected mechanisms:
@@ -1226,4 +951,3 @@ Supporting sources for the already selected mechanisms:
 - [Wasmtime COW initialization](https://docs.wasmtime.dev/examples-fast-instantiation.html), [LinearMemory allocator](https://docs.wasmtime.dev/api/wasmtime/trait.LinearMemory.html), [Wizer](https://github.com/bytecodealliance/wizer).
 - [Linux pagemap/PAGEMAP_SCAN](https://docs.kernel.org/admin-guide/mm/pagemap.html), [userfaultfd](https://docs.kernel.org/admin-guide/mm/userfaultfd.html), [soft-dirty](https://docs.kernel.org/admin-guide/mm/soft-dirty.html).
 - [DFINITY memory tracker precedent](https://github.com/dfinity/ic/blob/3633026472367a413912bf797490c9336ba762f5/rs/memory_tracker/src/lib.rs).
-- [SQLite transactions](https://www.sqlite.org/lang_transaction.html), [WAL](https://www.sqlite.org/wal.html), [synchronous settings](https://www.sqlite.org/pragma.html#pragma_synchronous).

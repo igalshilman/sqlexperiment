@@ -90,7 +90,6 @@ fn main() -> Result<()> {
             let before = Instant::now();
             let program = Program::compile(&runtime, name, source)?;
             let program_ms = before.elapsed().as_secs_f64() * 1000.0;
-            let golden_dump_bytes = program.dump()?.len();
             let programs = Arc::new(Programs::new(runtime.clone()).with(program)?);
             let mut engine = Engine::new(MeasuredKv::default(), programs);
             let mut previous_bytes = 0;
@@ -115,7 +114,7 @@ fn main() -> Result<()> {
                     rows.push(
                         json!({"workload":name,"repeat":repeat,"turn":view.checkpoint_sequence,
                         "turn_ms":turn_ms,"restore_ms":restore_ms,"program_ms":program_ms,
-                        "golden_dump_bytes":golden_dump_bytes,"image_bytes":view.image_bytes,
+                        "image_bytes":view.image_bytes,
                         "changed_pages":view.changed_pages,"override_pages":view.override_pages,
                         "examined_pages":view.examined_pages,"captured_bytes":view.changed_pages*4096,
                         "new_blob_bytes":view.new_blob_bytes,"manifest_bytes":view.manifest_bytes,

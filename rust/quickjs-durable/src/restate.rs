@@ -22,12 +22,7 @@
 //! made before the crash is attached to, not made again. The run ends when
 //! `main` settles: requests still outstanding (a race's loser) are dropped,
 //! and their continuations never run.
-mod claude;
-
-pub use claude::Claude;
-use quickjs_durable::{
-    Engine, Operation, Outcome, Programs, Runtime, View, namespace::NamespaceTransaction,
-};
+use crate::{Engine, Operation, Outcome, Programs, Runtime, View, namespace::NamespaceTransaction};
 use restate_sdk::{
     context::{DurableFuture, RequestTarget},
     prelude::*,
@@ -266,17 +261,19 @@ fn wait<'ctx>(ctx: &'ctx ObjectContext<'ctx>, operation: &Operation) -> Option<W
     }
 }
 
-/// The programs built into this binary, from `QJS_PROGRAMS` (by default
-/// `programs/`) at build time, each with the golden image the build computed.
+/// The programs built into this binary (`programs/`, or `QJS_PROGRAMS` at
+/// build time), each evaluated now into its golden image: in milliseconds,
+/// and the same bytes on every start, as a golden image depends on nothing
+/// but the program and the runtime.
 pub fn embedded() -> anyhow::Result<Arc<Programs>> {
     let mut programs = Programs::new(Arc::new(Runtime::new()?));
-    for (name, source, dump) in built::PROGRAMS {
-        programs = programs.load(name, source, dump)?;
+    for (name, source) in shipped::PROGRAMS {
+        programs = programs.compile(name, source)?;
     }
     Ok(Arc::new(programs))
 }
 
-mod built {
+mod shipped {
     include!(concat!(env!("OUT_DIR"), "/programs.rs"));
 }
 
@@ -306,10 +303,10 @@ pub fn bind(
     builder
 }
 
-/// An endpoint serving `programs`, and [`Claude`] for them to call.
+/// An endpoint serving `programs`, and [`crate::Claude`] for them to call.
 pub fn endpoint(programs: &Arc<Programs>) -> Endpoint {
     bind(Endpoint::builder(), programs)
-        .bind(Claude::from_env())
+        .bind(crate::Claude::from_env())
         .build()
 }
 

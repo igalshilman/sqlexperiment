@@ -1,5 +1,5 @@
 //! The services against a real Restate server (RESTATE_SERVER, or the one
-//! `make restate-server` gets): `make test-qjs-restate`. Ignored by a plain
+//! `make restate-server` gets): `make test-qjs`. Ignored by a plain
 //! `cargo test`, which has no server.
 mod fakes;
 
@@ -136,7 +136,7 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .local_addr()
         .unwrap()
         .port();
-    let endpoint = quickjs_restate::bind(Endpoint::builder(), programs)
+    let endpoint = quickjs_durable::bind(Endpoint::builder(), programs)
         .bind(Doubler)
         .bind(fakes::Claude)
         .build();
@@ -218,7 +218,7 @@ const RACE: &str = r#"async function main(input, ctx) {
 }"#;
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs-restate"]
+#[ignore = "needs restate-server: make test-qjs"]
 async fn runs_wait_on_rpcs_and_timers_and_share_their_scope() {
     let _server = server().await;
     serve().await;
@@ -246,7 +246,7 @@ async fn runs_wait_on_rpcs_and_timers_and_share_their_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs-restate"]
+#[ignore = "needs restate-server: make test-qjs"]
 async fn a_retried_attempt_attaches_to_its_calls() {
     let _server = server().await;
     serve().await;
@@ -255,10 +255,10 @@ async fn a_retried_attempt_attaches_to_its_calls() {
     // its attempt crashes while the call is still running. The retry restores
     // the timer's image and calls again, under the same idempotency key.
     let before = SLOW_RUNS.load(Ordering::SeqCst);
-    quickjs_restate::faults::crash_after_commit(1, 1);
+    quickjs_durable::faults::crash_after_commit(1, 1);
     let (status, doubled) = call("attach/carol/run", json!(5)).await;
     assert_eq!((status, doubled), (200, json!(10)));
-    assert_eq!(quickjs_restate::faults::pending(), 0);
+    assert_eq!(quickjs_durable::faults::pending(), 0);
     assert_eq!(
         SLOW_RUNS.load(Ordering::SeqCst) - before,
         1,
@@ -267,7 +267,7 @@ async fn a_retried_attempt_attaches_to_its_calls() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs-restate"]
+#[ignore = "needs restate-server: make test-qjs"]
 async fn a_run_ends_when_main_settles() {
     let _server = server().await;
     serve().await;
@@ -281,10 +281,10 @@ async fn a_run_ends_when_main_settles() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs-restate"]
+#[ignore = "needs restate-server: make test-qjs"]
 async fn the_shipped_programs_do_what_they_say() {
     let _server = server().await;
-    serve_programs(&quickjs_restate::embedded().unwrap()).await;
+    serve_programs(&quickjs_durable::embedded().unwrap()).await;
 
     let (_, counted) = call("counter/alice/run", json!(20)).await;
     assert_eq!(counted, json!(20));
@@ -304,10 +304,10 @@ async fn the_shipped_programs_do_what_they_say() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs-restate"]
+#[ignore = "needs restate-server: make test-qjs"]
 async fn the_shop_programs_compose() {
     let _server = server().await;
-    serve_programs(&quickjs_restate::embedded().unwrap()).await;
+    serve_programs(&quickjs_durable::embedded().unwrap()).await;
     let order = |customer: &str, items: Value| json!({"customer": customer, "items": items});
     call("inventory/widget/run", json!({"restock": 5})).await;
     call("inventory/gadget/run", json!({"restock": 1})).await;
@@ -354,10 +354,10 @@ async fn the_shop_programs_compose() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs-restate"]
+#[ignore = "needs restate-server: make test-qjs"]
 async fn the_assistant_shops_with_tools() {
     let _server = server().await;
-    serve_programs(&quickjs_restate::embedded().unwrap()).await;
+    serve_programs(&quickjs_durable::embedded().unwrap()).await;
     call("inventory/widget/run", json!({"restock": 5})).await;
     call("payments/dana/run", json!({"deposit": 100})).await;
     let ask = |message: &str| json!({"customer": "dana", "message": message});

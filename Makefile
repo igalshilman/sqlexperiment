@@ -1,9 +1,7 @@
 # Build and test everything, part by part:
 #
-#   core/        the sqlite-kv crate, the patch to the SDKs' shared core
-#                (core/sdk-shared-core) that both SDKs build on, and the
-#                durable QuickJS runtime (core/quickjs-durable; its own
-#                targets: qjs, test-qjs, lint-qjs)
+#   core/        the sqlite-kv crate, and the patch to the SDKs' shared core
+#                (core/sdk-shared-core) that the SDKs build on
 #   typescript/  the pnpm workspace: the patched TypeScript SDK, the Node.js
 #                addon, the integrations and their tests; with the examples
 #                (examples-typescript/, a member of the workspace)
@@ -11,8 +9,8 @@
 #                extension, the agent integrations and their tests; and the
 #                examples (examples-python/, a project of their own)
 #   rust/        the patched Rust SDK (rust/sdk), and durable JavaScript in
-#                Restate objects on it (rust/quickjs-restate; its own
-#                targets: qjs-restate, test-qjs-restate, lint-qjs-restate)
+#                Restate objects on it (rust/quickjs-durable; its own
+#                targets: qjs, test-qjs, lint-qjs)
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -27,8 +25,7 @@ export CARGO_TARGET_DIR ?= $(CURDIR)/target
 CARGO ?= cargo
 SDK_TARBALL := typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 CORE := core/sqlite-kv
-QJS := core/quickjs-durable
-QJS_RESTATE := rust/quickjs-restate
+QJS := rust/quickjs-durable
 ADDON := typescript/packages/sql-node/sqlite_kv.node
 CORE_PATCH := core/sdk-shared-core/sdk-shared-core.patch
 SDK_PY := python/sdk/.build/sdk-python/.patched
@@ -54,9 +51,9 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core qjs qjs-restate addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
-	test-sdk-py test-sdk-rs test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs lint-qjs-restate format crash-test concurrency-test tools-test \
-	crash-test-py concurrency-test-py test-qjs-restate restate-server wheels clean
+.PHONY: all help core qjs addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
+	test-sdk-py test-sdk-rs test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs format crash-test concurrency-test tools-test \
+	crash-test-py concurrency-test-py restate-server wheels clean
 
 # --- Build
 
@@ -68,8 +65,8 @@ help: ## List the targets
 core: ## The sqlite-kv crate
 	cd $(CORE) && $(CARGO) build --locked --release
 
-qjs: ## The durable QuickJS runtime (core/quickjs-durable), with its hosts (SQLite, and sqlite-kv)
-	cd $(QJS) && $(CARGO) build --locked --release --features sqlite-host,sqlite-kv-host
+qjs: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/quickjs-durable): a binary serving its programs (programs/, or QJS_PROGRAMS)
+	cd $(QJS) && $(CARGO) build --locked --release
 
 addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)
 
@@ -90,9 +87,6 @@ $(SDK_PY): $(wildcard python/sdk/patches/*.patch) $(CORE_PATCH) python/sdk/setup
 	python/sdk/setup.sh
 
 sdk-rs: $(SDK_RS) ## The patched Rust SDK's sources (rust/sdk)
-
-qjs-restate: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/quickjs-restate): a binary serving its programs (QJS_PROGRAMS, by default programs/)
-	cd $(QJS_RESTATE) && $(CARGO) build --locked --release
 
 $(SDK_RS): $(wildcard rust/sdk/patches/*.patch) $(CORE_PATCH) rust/sdk/setup.sh
 	rust/sdk/setup.sh
@@ -125,9 +119,6 @@ test-core: ## The core crate, with the simulation campaigns
 # Release builds: the guest interpreter is slow unoptimized. verify-dirty
 # checks after every turn that the write barriers marked each changed page;
 # full-scan is the uninstrumented build, which compares every page.
-test-qjs: ## The durable QuickJS runtime: with dirty-page tracking (verified), then with full scans
-	cd $(QJS) && $(CARGO) test --locked --release --features sqlite-host,sqlite-kv-host,verify-dirty --lib --tests
-	cd $(QJS) && $(CARGO) test --locked --release --features sqlite-host,sqlite-kv-host,full-scan --lib --test recovery --test host --test sqlite --test namespace
 
 test-addon: $(ADDON) ## The Node.js addon
 	cd typescript/packages/sql-node && npm test
@@ -161,13 +152,10 @@ lint-core: ## The Rust crates (the core, the addon and the Python extension): ru
 	cd typescript/packages/sql-node && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 	cd python/sqlite-kv && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
-lint-qjs: ## The durable QuickJS runtime: rustfmt --check and clippy, in both capture modes
+lint-qjs: $(SDK_RS) ## Durable JavaScript in Restate objects: rustfmt --check and clippy, in both capture modes
 	cd $(QJS) && $(CARGO) fmt --check
-	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,sqlite-kv-host,verify-dirty --all-targets -- -D warnings
-	cd $(QJS) && $(CARGO) clippy --locked --release --features sqlite-host,sqlite-kv-host,full-scan --all-targets -- -D warnings
-
-lint-qjs-restate: $(SDK_RS) ## Durable JavaScript in Restate objects: rustfmt --check and clippy
-	cd $(QJS_RESTATE) && $(CARGO) fmt --check && $(CARGO) clippy --locked --release --all-targets -- -D warnings
+	cd $(QJS) && $(CARGO) clippy --locked --release --features verify-dirty --all-targets -- -D warnings
+	cd $(QJS) && $(CARGO) clippy --locked --release --features full-scan --all-targets -- -D warnings
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	cd typescript && pnpm typecheck
@@ -183,7 +171,6 @@ lint-py: py ## The Python (python/, examples-python/): ruff format --check and r
 format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Markdown) and ruff (Python)
 	cd $(CORE) && $(CARGO) fmt
 	cd $(QJS) && $(CARGO) fmt
-	cd $(QJS_RESTATE) && $(CARGO) fmt
 	cd typescript/packages/sql-node && $(CARGO) fmt
 	cd python/sqlite-kv && $(CARGO) fmt
 	$(OXFMT)
@@ -205,8 +192,10 @@ tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, wor
 	cd typescript/tests && node restate-tools.ts
 
 # One server at a time, on the default ports.
-test-qjs-restate: $(SDK_RS) $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: runs, scopes, races and a crash during a call, against a Restate server
-	cd $(QJS_RESTATE) && $(CARGO) test --locked --release -- --include-ignored --test-threads 1
+test-qjs: $(SDK_RS) $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: the runtime with dirty-page tracking (verified) and with full scans, then the programs against a Restate server
+	cd $(QJS) && $(CARGO) test --locked --release --features verify-dirty --lib --test host --test recovery --test namespace
+	cd $(QJS) && $(CARGO) test --locked --release --features full-scan --lib --test host --test recovery --test namespace
+	cd $(QJS) && $(CARGO) test --locked --release --test restate -- --include-ignored --test-threads 1
 
 restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
 	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
