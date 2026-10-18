@@ -13,17 +13,17 @@ a day, changes nothing ([`examples-typescript/support.ts`](examples-typescript/s
 
 ```ts
 const support = pi.agent({
-  name: "support",
+  name: 'support',
   tools: [
-    call(orders, "status", {
-      description: "The status of an order.",
+    call(orders, 'status', {
+      description: 'The status of an order.',
       input: z.object({ order: z.string() }),
     }),
-    signal("approval", {
+    signal('approval', {
       description: "Wait for a manager's decision on a refund.",
     }),
     workflow(refund, {
-      description: "Refund an order.",
+      description: 'Refund an order.',
       input: z.object({ order: z.string(), amount: z.number() }),
     }),
   ],

@@ -136,8 +136,8 @@ fn a_save_is_one_put_and_a_checkpointed_page_one_get() -> io::Result<()> {
     })
 }
 
-/// Without a cache, saves cost one round trip, or three when they checkpoint:
-/// the record, the pages, and the record again.
+/// Without a cache, every save is one round trip, the ones that checkpoint
+/// too: the record, the pages and the record again share one sync.
 #[test]
 fn checkpoints_follow_the_log_without_a_cache() -> io::Result<()> {
     futures::executor::block_on(async {
@@ -152,25 +152,27 @@ fn checkpoints_follow_the_log_without_a_cache() -> io::Result<()> {
             store.reset();
             store.inner.reset_stats();
             let report = snapshot.publish(changes.clone(), size).await?;
-            assert!(report.cleanup_error.is_none());
-            round_trips.push(store.round_trips());
+            round_trips.push((store.round_trips(), report.checkpointed_pages > 0));
             model.apply(&changes, size);
             // Small transactions are inline: no stored segment.
             assert!(keys(&store.inner, LOG_PREFIX).is_empty());
         }
         assert!(
-            round_trips.iter().all(|&rt| rt == 1 || rt == 3),
+            round_trips.iter().all(|&(rt, _)| rt == 1),
             "{round_trips:?}"
         );
-        let checkpoints = round_trips.iter().filter(|&&rt| rt == 3).count();
+        let checkpoints = round_trips
+            .iter()
+            .filter(|&&(_, checkpointed)| checkpointed)
+            .count();
         assert!((3..=6).contains(&checkpoints), "{round_trips:?}");
         assert!(model.check(&open(&store, &opts).await?).await?);
         Ok(())
     })
 }
 
-/// With an owner cache, every steady-state open and save is one round trip (or
-/// three, when the save checkpoints), and a restarted owner still recovers.
+/// With an owner cache, every steady-state open and save is one round trip,
+/// and a restarted owner still recovers.
 #[test]
 fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
     futures::executor::block_on(async {
@@ -189,9 +191,8 @@ fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
             assert!(model.check(&snapshot).await?, "round {round}");
             let (changes, size) = dirty(round);
             store.reset();
-            let report = snapshot.publish(changes.clone(), size).await?;
-            let expected = if report.checkpointed_pages > 0 { 3 } else { 1 };
-            assert_eq!(store.round_trips(), expected, "save {round}");
+            snapshot.publish(changes.clone(), size).await?;
+            assert_eq!(store.round_trips(), 1, "save {round}");
             model.apply(&changes, size);
             assert_collected(&store.inner).await?;
         }
@@ -234,24 +235,27 @@ fn another_writer_is_refreshed_or_overridden_in_the_cache() -> io::Result<()> {
         }
         assert!(model.check(&open(&store, &owner).await?).await?);
 
-        // It rewrites pages in place but fails to record the checkpoint: the
-        // cache keeps stale pages, and the log still overrides every one.
+        // It rewrites pages in place, but a crash loses the checkpoint's
+        // record: the cache keeps stale pages, and the log still overrides
+        // every one.
         let snapshot = open(&store, &owner).await?;
         assert!(model.check(&snapshot).await?);
         for round in 20..22 {
             let (changes, size) = dirty(round);
             let snapshot = open(&store, &other).await?;
-            // The second record put is the checkpoint's.
             let _gate = store.arm(Failpoint {
-                operation: Operation::Put,
-                key_prefix: COMMIT.into(),
-                nth: 2,
+                operation: Operation::Sync,
+                key_prefix: String::new(),
+                nth: 1,
                 effect: Effect::None,
                 cancel: false,
             });
-            let report = snapshot.publish(changes.clone(), size).await?;
+            assert!(snapshot.publish(changes.clone(), size).await.is_err());
             store.disarm();
-            assert!(report.cleanup_error.is_some() || round == 20);
+            // Every write but the last, the checkpoint's record.
+            let writes = store.inner.unsynced();
+            assert_eq!(writes.last().map(|(key, _)| key.as_str()), Some(COMMIT));
+            store.inner.crash_keeping(writes.len() - 1);
             model.apply(&changes, size);
         }
         assert!(model.check(&open(&store, &owner).await?).await?);
@@ -275,11 +279,12 @@ fn large_transactions_are_stored_and_failed_ones_leave_only_debris() -> io::Resu
         let snapshot = open(&store, &large).await?;
         store.reset();
         snapshot.publish(big(0), 300 * 4096).await?;
-        assert_eq!(store.round_trips(), 2, "the segments, then the record");
+        assert_eq!(store.round_trips(), 1, "the segments, then the record");
         assert_eq!(keys(&memory(), LOG_PREFIX), [log_key(0), log_key(1)]);
         assert_eq!(record(&memory()).await?.next_segment, 2);
 
-        // The record of the next one fails: its segments are debris.
+        // The next one's record fails, and a crash keeps its segments: they
+        // are debris.
         let snapshot = open(&store, &large).await?;
         let _gate = store.inner.arm(Failpoint {
             operation: Operation::Put,
@@ -290,6 +295,7 @@ fn large_transactions_are_stored_and_failed_ones_leave_only_debris() -> io::Resu
         });
         assert!(snapshot.publish(big(1), 300 * 4096).await.is_err());
         store.inner.disarm();
+        memory().crash_keeping(2);
         assert_eq!(keys(&memory(), LOG_PREFIX).len(), 4);
         let snapshot = open(&store, &large).await?;
         assert_eq!(number(snapshot.block(299).await?), Some(299));
@@ -321,14 +327,15 @@ async fn prepared(cache: Option<&NamespaceCache>, saves: u64) -> io::Result<(Mem
     Ok((store, model))
 }
 
-/// Fail every mutation of a save in every outcome, with and without a crash
-/// (a crash also restarts the owner and loses its cache). The save is atomic,
-/// later saves work, nothing below the collected log survives.
+/// Crash a save, keeping each prefix of its writes, with the owner cache
+/// kept or lost: the save is atomic, later saves work, and every stored value
+/// is named, garbage or above the allocated numbers.
 #[test]
-fn every_save_mutation_is_crash_safe() -> io::Result<()> {
+fn a_save_is_crash_safe_at_every_write() -> io::Result<()> {
     futures::executor::block_on(async {
         let (mut cases, mut checked) = (0, 0);
-        // (cache, prepared saves, large faulted save: stored segments)
+        // (cache, prepared saves, large save: stored segments). After an odd
+        // number of saves the next checkpoints.
         let scenarios = [
             (false, 3, false),
             (false, 4, false),
@@ -338,73 +345,74 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
             (true, 4, true),
         ];
         for (cached, saves, large) in scenarios {
-            for operation in [Operation::Put, Operation::Delete] {
-                'ordinal: for nth in 1.. {
-                    // A write is lost, or lands with its acknowledgement lost.
-                    for effect in [Effect::None, Effect::After] {
-                        for crash in [false, true] {
-                            let cache = cached.then(fresh_namespace);
-                            let (base, old) = prepared(cache.as_ref(), saves).await?;
-                            let seed = base.durable_values();
-                            let store = Arc::new(MonitorKv::seeded(FaultKv::new(base, 0), seed));
-                            let opts = StorageOptions {
-                                page_compression: PageCompression::Raw,
-                                inline_log_bytes: if large { 0 } else { usize::MAX },
-                                ..options(1, cache.as_ref())
-                            };
-                            let snapshot = open(&store, &opts).await?;
-                            let _gate = store.arm(Failpoint {
-                                operation,
-                                key_prefix: String::new(),
-                                nth,
-                                effect,
-                                cancel: false,
-                            });
-                            // A large save checkpoints itself after committing.
-                            let (changes, size) = if large {
-                                let pages = (0..70).map(|i| (i, Some(page(500 + i))));
-                                (pages.collect(), 70 * 4096)
-                            } else {
-                                dirty(50)
-                            };
-                            let result = snapshot.publish(changes.clone(), size).await;
-                            let faulted = store.events().iter().any(|e| e.faulted);
-                            store.disarm();
-                            if !faulted {
-                                result?;
-                                break 'ordinal;
-                            }
-                            cases += 1;
-                            let mut new = old.clone();
-                            new.apply(&changes, size);
-                            let mut opts = opts.clone();
-                            if crash {
-                                store.inner.inner.crash(&[]);
-                                opts.cache = cached.then(fresh_namespace);
-                            }
-                            let reopened = open(&store, &opts).await?;
-                            let committed = new.check(&reopened).await?;
-                            assert!(committed || old.check(&reopened).await?);
-                            if result.is_ok() {
-                                assert!(committed, "acknowledged commit was lost");
-                            }
-                            let mut model = if committed { new } else { old };
-                            let (changes, size) = dirty(51);
-                            reopened.publish(changes.clone(), size).await?;
-                            model.apply(&changes, size);
-                            // The follow-up commit survives a crash.
-                            store.inner.inner.crash(&[]);
-                            opts.cache = cached.then(fresh_namespace);
-                            assert!(model.check(&open(&store, &opts).await?).await?);
-                            assert_collected(&store.inner.inner).await?;
-                            assert_eq!(store.violations(), Vec::<String>::new());
-                            checked += store.checked();
-                        }
-                    }
+            let cache = cached.then(fresh_namespace);
+            let (base, old) = prepared(cache.as_ref(), saves).await?;
+            let store = Arc::new(FaultKv::new(base.fork(), 0));
+            let opts = StorageOptions {
+                page_compression: PageCompression::Raw,
+                inline_log_bytes: if large { 0 } else { usize::MAX },
+                ..options(1, cache.as_ref())
+            };
+            let snapshot = open(&store, &opts).await?;
+            let _gate = store.arm(Failpoint {
+                operation: Operation::Sync,
+                key_prefix: String::new(),
+                nth: 1,
+                effect: Effect::None,
+                cancel: false,
+            });
+            let (changes, size) = if large {
+                let pages = (0..70).map(|i| (i, Some(page(500 + i))));
+                (pages.collect(), 70 * 4096)
+            } else {
+                dirty(50)
+            };
+            assert!(snapshot.publish(changes.clone(), size).await.is_err());
+            store.disarm();
+            let mut new = old.clone();
+            new.apply(&changes, size);
+            let writes = store.inner.unsynced().len();
+            for kept in 0..=writes {
+                for restarted in [false, true] {
+                    cases += 1;
+                    let memory = store.inner.fork();
+                    memory.crash_keeping(kept);
+                    let store = Arc::new(MonitorKv::seeded(memory.clone(), memory.values()));
+                    let mut opts = opts.clone();
+                    // The owner continues with its cache only to read: the
+                    // cache follows one history, and the forks are each
+                    // another.
+                    opts.cache = match restarted {
+                        true => cached.then(fresh_namespace),
+                        false => cache.clone(),
+                    };
+                    let reopened = open(&store, &opts).await?;
+                    let committed = new.check(&reopened).await?;
+                    assert!(
+                        committed || old.check(&reopened).await?,
+                        "{kept} of {writes}"
+                    );
+                    assert!(committed || kept < writes, "a stored commit was lost");
+                    let mut model = if committed { new.clone() } else { old.clone() };
+                    drop(reopened);
+                    opts.cache = cached.then(fresh_namespace);
+                    let (changes, size) = dirty(51);
+                    open(&store, &opts)
+                        .await?
+                        .publish(changes.clone(), size)
+                        .await?;
+                    model.apply(&changes, size);
+                    // The follow-up commit survives a crash.
+                    memory.crash();
+                    opts.cache = cached.then(fresh_namespace);
+                    assert!(model.check(&open(&store, &opts).await?).await?);
+                    assert_collected(&memory).await?;
+                    assert_eq!(store.violations(), Vec::<String>::new());
+                    checked += store.checked();
                 }
             }
         }
-        assert!(cases > 100, "{cases}");
+        assert!(cases > 40, "{cases}");
         println!("interrupted saves: {cases} cases, {checked} requests checked by the monitor");
         Ok(())
     })
@@ -412,7 +420,8 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
 
 /// Two owner processes, each with its own cache, hand the namespace back and
 /// forth after random tenures. Saves fail in random places and outcomes, the
-/// backend sometimes loses unconfirmed values, and owners sometimes restart.
+/// backend sometimes loses a suffix of the unsynced writes, and owners
+/// sometimes restart.
 /// Every open must read the model exactly, from whatever its cache kept.
 #[test]
 fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
@@ -451,8 +460,9 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
                     model.apply(&changes, size);
                     continue;
                 }
+                let operation = [Operation::Put, Operation::Delete, Operation::Sync];
                 let _gate = store.arm(Failpoint {
-                    operation: [Operation::Put, Operation::Delete][random(2) as usize],
+                    operation: operation[random(3) as usize],
                     key_prefix: String::new(),
                     nth: 1 + random(4) as usize,
                     effect: [Effect::None, Effect::After][random(2) as usize],
@@ -461,7 +471,9 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
                 let result = snapshot.publish(changes.clone(), size).await;
                 store.disarm();
                 if random(3) == 0 {
-                    store.inner.inner.crash(&[]);
+                    // A crash keeps a prefix of the writes since the last sync.
+                    let writes = store.inner.inner.unsynced().len() as u64;
+                    store.inner.inner.crash_keeping(random(writes + 1) as usize);
                 }
                 if random(4) == 0 {
                     caches[owner] = fresh_namespace();
@@ -596,8 +608,7 @@ fn a_cold_open_fetches_the_working_set_hint() -> io::Result<()> {
         assert_eq!(cold_gets(open(&store, &off).await?, vec![5]).await?, 1);
         store
             .inner
-            .put(HINT, Bytes::from_static(b"SH14\x09\x00garbage"))
-            .await?;
+            .put(HINT, Bytes::from_static(b"SH14\x09\x00garbage"))?;
         assert_eq!(
             cold_gets(open(&store, &options(4, None)).await?, vec![5]).await?,
             1
@@ -633,7 +644,7 @@ fn sequential_reads_fetch_ahead() -> io::Result<()> {
 }
 
 /// With a cache, open reads the record alone, and every save is one round
-/// trip, or three when it checkpoints (with a log the record holds inline).
+/// trip, the ones that checkpoint too (with a log the record holds inline).
 #[test]
 fn an_owner_opens_and_saves_in_one_round_trip() -> io::Result<()> {
     futures::executor::block_on(async {
@@ -654,17 +665,15 @@ fn an_owner_opens_and_saves_in_one_round_trip() -> io::Result<()> {
             // Transactions of 20 pages: a checkpoint spans more than 16 puts.
             let changes: Changes = (0..20).map(|i| (i, Some(page(round * 100 + i)))).collect();
             store.reset();
-            let report = snapshot.publish(changes, 20 * 4096).await?;
-            let expected = if report.checkpointed_pages > 0 { 3 } else { 1 };
-            assert_eq!(store.round_trips(), expected, "save {round}");
+            snapshot.publish(changes, 20 * 4096).await?;
+            assert_eq!(store.round_trips(), 1, "save {round}");
         }
         Ok(())
     })
 }
 
 /// A commit that would take the inline log past its budget seals it into a
-/// stored value, put with its record, which lists it as garbage; the next
-/// commit, of this session or the owner's next, names it. Every commit is one
+/// stored value, put before its record, which names it. Every commit is one
 /// round trip, an owner whose cache holds the values opens on the record
 /// alone, and one without reads them too.
 #[test]
@@ -754,10 +763,10 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
     })
 }
 
-/// Below the thresholds commits only append to the record, and compacting
-/// writes each changed page once and empties the record's log.
+/// Below the thresholds commits only append to the record, and the commit that
+/// checkpoints writes each changed page once and empties the record's log.
 #[test]
-fn compacting_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
+fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
     futures::executor::block_on(async {
         for cached in [false, true] {
             let cache = cached.then(fresh_namespace);
@@ -778,17 +787,27 @@ fn compacting_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             assert!(keys(&store, PAGE_PREFIX).is_empty(), "commits only append");
             assert_eq!(record(&store).await?.log.len(), 12);
 
+            // The next commit checkpoints.
+            let checkpointing = StorageOptions {
+                checkpoint_after: 0,
+                ..opts.clone()
+            };
+            drop(snapshot);
+            let snapshot = open(&store, &checkpointing).await?;
             store.reset_stats();
-            let (report, after) = snapshot.compact().await?;
-            assert!(report.cleanup_error.is_none());
+            let (changes, size) = dirty(12);
+            let (report, after) = snapshot.commit(changes.clone(), size, None, None).await?;
+            model.apply(&changes, size);
             let distinct = model.pages.len();
             assert_eq!(report.checkpointed_pages, distinct);
-            // Each page once, the record, and the hint if it changed.
+            // The record, each page once, the hint if it changed, and the
+            // record again, in one sync.
             let hinted = store.stats().write_keys.contains(HINT) as u64;
-            assert_eq!(store.stats().puts, distinct as u64 + 1 + hinted);
+            assert_eq!(store.stats().puts, 2 + distinct as u64 + hinted);
+            assert_eq!(store.stats().syncs, 1);
             assert_eq!(keys(&store, PAGE_PREFIX).len(), distinct);
             let commit = record(&store).await?;
-            assert_eq!((commit.version, commit.epoch), (12, 1));
+            assert_eq!((commit.version, commit.epoch), (13, 1));
             assert!(commit.log.is_empty());
             assert!(model.check(&after).await?);
             let cold = StorageOptions {
@@ -797,103 +816,17 @@ fn compacting_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             };
             assert!(model.check(&open(&store, &cold).await?).await?);
 
-            // Nothing left to do.
-            store.reset_stats();
-            let (report, after) = after.compact().await?;
-            assert_eq!((report.checkpointed_pages, store.stats().puts), (0, 0u64));
             // The next commit appends to the empty log.
-            let (changes, size) = dirty(12);
-            after.publish(changes.clone(), size).await?;
+            drop(after);
+            let (changes, size) = dirty(13);
+            open(&store, &opts)
+                .await?
+                .publish(changes.clone(), size)
+                .await?;
             model.apply(&changes, size);
             assert_eq!(record(&store).await?.log.len(), 1);
             assert!(model.check(&open(&store, &cold).await?).await?);
         }
-        Ok(())
-    })
-}
-
-/// Fail every mutation of a compaction in every outcome, with and without a
-/// crash: the database reads the same, a later commit works, and nothing
-/// below the collected log survives.
-#[test]
-fn every_compact_mutation_is_crash_safe() -> io::Result<()> {
-    futures::executor::block_on(async {
-        let mut cases = 0;
-        for cached in [false, true] {
-            for operation in [Operation::Put, Operation::Delete] {
-                'ordinal: for nth in 1.. {
-                    for effect in [Effect::None, Effect::After] {
-                        for crash in [false, true] {
-                            let cache = cached.then(fresh_namespace);
-                            let store = Arc::new(MonitorKv::seeded(
-                                FaultKv::new(MemoryKv::default(), 0),
-                                Vec::new(),
-                            ));
-                            let mut opts = StorageOptions {
-                                page_compression: PageCompression::Raw,
-                                checkpoint_log_bytes: usize::MAX,
-                                ..options(64, cache.as_ref())
-                            };
-                            let mut model = Model::default();
-                            let mut snapshot = open(&store, &opts).await?;
-                            for round in 0..6 {
-                                let (changes, size) = dirty(round);
-                                snapshot =
-                                    snapshot.commit(changes.clone(), size, None, None).await?.1;
-                                model.apply(&changes, size);
-                            }
-                            let _gate = store.arm(Failpoint {
-                                operation,
-                                key_prefix: String::new(),
-                                nth,
-                                effect,
-                                cancel: false,
-                            });
-                            let result = snapshot.compact().await;
-                            let faulted = store.events().iter().any(|e| e.faulted);
-                            store.disarm();
-                            if !faulted {
-                                assert!(result?.0.cleanup_error.is_none());
-                                break 'ordinal;
-                            }
-                            cases += 1;
-                            // A compaction that reported its failure continues:
-                            // what it commits next decodes from any log start.
-                            if let Ok((_, after)) = result {
-                                let (changes, size) = dirty(40);
-                                if after.publish(changes.clone(), size).await.is_ok() {
-                                    model.apply(&changes, size);
-                                }
-                            }
-                            if crash {
-                                store.inner.inner.crash(&[]);
-                                opts.cache = cached.then(fresh_namespace);
-                            }
-                            let reopened = open(&store, &opts).await?;
-                            assert!(
-                                model.check(&reopened).await?,
-                                "{operation:?} {nth} {effect:?} {crash}"
-                            );
-                            let (changes, size) = dirty(51);
-                            reopened.publish(changes.clone(), size).await?;
-                            model.apply(&changes, size);
-                            // The follow-up commit survives a crash, and a
-                            // compaction after it completes.
-                            store.inner.inner.crash(&[]);
-                            opts.cache = cached.then(fresh_namespace);
-                            let (report, after) = open(&store, &opts).await?.compact().await?;
-                            assert!(report.cleanup_error.is_none());
-                            assert!(model.check(&after).await?);
-                            assert!(model.check(&open(&store, &opts).await?).await?);
-                            assert_collected(&store.inner.inner).await?;
-                            assert_eq!(store.violations(), Vec::<String>::new());
-                        }
-                    }
-                }
-            }
-        }
-        assert!(cases > 40, "{cases}");
-        println!("interrupted compactions: {cases} cases");
         Ok(())
     })
 }

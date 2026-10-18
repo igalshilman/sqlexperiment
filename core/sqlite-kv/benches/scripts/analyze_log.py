@@ -30,7 +30,7 @@ def label(version, row):
     inline = int(row.get("inline_log_bytes", size))
     sealed = f", sealed past {inline // 1024} KiB" if inline < size else ""
     bindings = (version, after, size, inline) in [
-        ("v13", "60", 256 * 1024, 256 * 1024), ("v14", "32", 64 * 1024, 4 * 1024)]
+        ("v13", "60", 256 * 1024, 256 * 1024), ("v14", "32", 64 * 1024, 1024)]
     return (f"{version}: {after} tx or {size // 1024} KiB{sealed}"
             + (" (bindings)" if bindings else ""))
 

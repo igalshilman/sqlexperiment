@@ -109,7 +109,7 @@ async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
         db.execute(&sql).await?;
     }
     db.execute("COMMIT").await?;
-    assert!(db.save().await?.cleanup_error.is_none());
+    db.save().await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
     let all = StorageOptions {
         checkpoint_after: 0,
@@ -117,8 +117,8 @@ async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     };
     let mut db = Session::open_with_options(Arc::new(store.clone()), all).await?;
     db.execute("CREATE TABLE other(x)").await?;
-    assert!(db.save().await?.cleanup_error.is_none());
-    store.crash(&[]);
+    db.save().await?;
+    store.crash();
     Ok(store)
 }
 
@@ -227,7 +227,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
             }
             db.execute("COMMIT").await?;
         }
-        assert!(db.save().await?.cleanup_error.is_none());
+        db.save().await?;
         let elapsed = start.elapsed().as_nanos();
         sample.emit(
             &store.stats(),
@@ -236,7 +236,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
             changed.len() * case.bytes,
             elapsed,
         );
-        store.crash(&[]);
+        store.crash();
         // Read with the opposite write policy: stored codec tags must decide.
         let other = if sample.codec == PageCompression::Raw {
             COMPRESSED

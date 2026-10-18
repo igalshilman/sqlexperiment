@@ -14,7 +14,7 @@ fn main() -> Result<()> {
         // A large save: commit to the log, then checkpoint into page keys and meta.
         db.save().await?;
         let saved = store.stats();
-        store.crash(&[]);
+        store.crash();
         println!(
             "Private WAL bytes written locally: {}",
             local.private_wal_bytes_written

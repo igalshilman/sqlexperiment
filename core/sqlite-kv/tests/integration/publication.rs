@@ -82,7 +82,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                             cases += 1;
                             let mut cache = cache;
                             if crash {
-                                store.inner.crash(&[]);
+                                store.inner.crash();
                                 cache = cached.then(fresh_namespace);
                             }
                             let committed = changed(store.clone(), options(cache.as_ref())).await?;
@@ -95,7 +95,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                                     .await?;
                             db.execute("UPDATE t SET n = 7000").await?;
                             db.save().await?;
-                            store.inner.crash(&[]);
+                            store.inner.crash();
                             assert!(changed(store.clone(), options(None)).await?);
                         }
                     }

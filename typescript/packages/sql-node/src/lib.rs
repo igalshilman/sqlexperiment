@@ -5,17 +5,17 @@
 //! through it in the order it was issued, so a read sees the writes before it.
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
-//! is stored. Writes are stored in no particular order: a write counts as
-//! done once a `sync` after it resolved, and writes queued together share one
-//! ([`Synced`]), so a statement that commits resolves once its writes are
-//! stored. A process-wide page cache is built in.
+//! is stored. The object's state keeps writes in issue order, so a crash
+//! loses only a suffix of them (see [`sqlite_kv::kv`]): a statement that
+//! commits queues its writes, then resolves at one `sync`. A process-wide
+//! page cache is built in.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use sqlite_kv::kv::{Queued, Synced};
+use sqlite_kv::kv::KvStore;
 use sqlite_kv::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use std::io;
 use std::path::PathBuf;
@@ -53,11 +53,7 @@ impl JsQueue {
     }
 }
 
-impl Queued for JsQueue {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
-        Box::pin(self.request(GET, key))
-    }
-
+impl JsQueue {
     fn queue(&self, key: &str, value: Option<Bytes>) -> io::Result<()> {
         let (op, value) = match value {
             Some(value) => (SET, Some(Buffer::from(value.to_vec()))),
@@ -70,6 +66,20 @@ impl Queued for JsQueue {
             Status::Ok => Ok(()),
             status => Err(failed(format!("store call failed: {status}"))),
         }
+    }
+}
+
+impl KvStore for JsQueue {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+        Box::pin(self.request(GET, key))
+    }
+
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.queue(key, Some(value))
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.queue(key, None)
     }
 
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
@@ -134,7 +144,7 @@ pub fn open<'env>(
         .callee_handled::<false>()
         .weak::<true>()
         .build()?;
-    let store = Arc::new(Synced::new(JsQueue { dispatch }));
+    let store = Arc::new(JsQueue { dispatch });
     env.spawn_future(async move {
         let cache = match reader.unwrap_or(false) {
             true => None,

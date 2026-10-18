@@ -1,9 +1,10 @@
 //! Critical-path latency in round trips, measured on a virtual clock.
 //!
-//! Every request takes exactly one round trip. A request issued at virtual time
-//! `t` completes at `t + 1`, and the clock advances to the latest completion
-//! observed. Requests issued together overlap: a batch of reads costs one round
-//! trip, while dependent requests cost one each. Multiply by a backend's RTT to
+//! A get or a sync takes exactly one round trip; a write is queued, and costs
+//! none. A request issued at virtual time `t` completes at `t + 1`, and the
+//! clock advances to the latest completion observed. Requests issued together
+//! overlap: a batch of reads costs one round trip, while dependent requests
+//! cost one each. Multiply by a backend's RTT to
 //! estimate wall time; CPU time, bandwidth and queueing are not modeled.
 use crate::kv::KvStore;
 use bytes::Bytes;
@@ -50,11 +51,14 @@ impl<S: KvStore> KvStore for LatencyKv<S> {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         self.timed(self.inner.get(key))
     }
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        self.timed(self.inner.put(key, value))
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.inner.put(key, value)
     }
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        self.timed(self.inner.delete(key))
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.inner.delete(key)
+    }
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        self.timed(self.inner.sync())
     }
 }
 

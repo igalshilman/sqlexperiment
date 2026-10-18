@@ -4,17 +4,15 @@
 //! once a commit record that holds it is durable. The record holds the log
 //! since the last checkpoint: each committed transaction's changed pages, as
 //! segments. A small transaction's segments are inline in the record, so a
-//! save is one put. A large one's are put first at `log/<n>`, immutable keys,
-//! and the record names them once they are durable. So are the inline ones
-//! once they outgrow [`crate::StorageOptions::inline_log_bytes`]: a commit
-//! seals them, with its own, into one stored value, and the record keeps
-//! only their names. Every commit rewrites the record, so this keeps commits
-//! small while the log grows long between checkpoints.
+//! save is one put. A large one's are put at `log/<n>`, immutable keys, before
+//! the record that names them. So are the inline ones once they outgrow
+//! [`crate::StorageOptions::inline_log_bytes`]: a commit seals them into one
+//! stored value, and the record keeps only their names. Every commit rewrites
+//! the record, so this keeps commits small while the log grows long between
+//! checkpoints.
 //!
-//! Nothing here relies on the order in which the store applies writes. A
-//! write is relied on only once it is acknowledged: the segments a record
-//! names before the record, the pages a checkpoint writes before the record
-//! that moves past them.
+//! The store keeps writes in issue order (see [`crate::kv`]), so a value
+//! written before the record that names it is there whenever the record is.
 //!
 //! # Compression against the previous images
 //!
@@ -275,14 +273,11 @@ pub(crate) fn stored_segments(bytes: &Bytes) -> io::Result<Vec<Bytes>> {
     Ok(segments)
 }
 
-/// A stored value holding a record's first inline parts, acknowledged: `log`
-/// of the log's, then `chain` of the chain's. The record lists it as garbage
-/// until the next names it. Commits append to both, so the parts it holds
-/// keep their places until then.
+/// A stored value holding a record's first inline parts: `log` of the log's,
+/// then `chain` of the chain's.
 #[derive(Clone, Debug)]
 pub(crate) struct Sealed {
     pub n: u64,
-    pub value: Bytes,
     pub log: usize,
     pub chain: usize,
 }
@@ -524,8 +519,7 @@ impl Commit {
             .collect()
     }
 
-    /// Name `sealed`, acknowledged, in place of the inline parts it holds,
-    /// and take it out of the garbage.
+    /// Name `sealed` in place of the inline parts it holds.
     pub(crate) fn name(&mut self, sealed: &Sealed) {
         let inline = |part: &&mut Part| matches!(part, Part::Inline(_));
         let log = self.log.iter_mut().flat_map(|t| &mut t.parts);
@@ -534,7 +528,6 @@ impl Commit {
         for (index, part) in log.chain(chain).enumerate() {
             *part = Part::Stored(sealed.n, index as u32);
         }
-        self.garbage.remove(&sealed.n);
     }
 
     /// The inline parts, the log's and then the chain's.

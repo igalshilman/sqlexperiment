@@ -1,5 +1,11 @@
 # Protocol specification
 
+> **Out of date.** This models the earlier protocol, for a store that keeps
+> any subset of the writes not yet acknowledged (seals named one commit
+> late, checkpoints waiting for their pages). The protocol now relies on
+> Restate keeping writes in issue order ([DESIGN.md](../docs/DESIGN.md)); the
+> simulator's campaigns and monitor check that one.
+
 `Protocol.tla` is the storage protocol of [DESIGN.md](../docs/DESIGN.md) as a
 TLA+ state machine, and TLC checks every reachable state within small bounds.
 It is the mathematical counterpart of the simulator campaigns: those sample

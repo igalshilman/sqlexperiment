@@ -137,23 +137,19 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
     })
 }
 
-/// Fail every mutation of a run of turns in turn. After a crash, the chain,
-/// the effects and the rows are those of the last acknowledged turn, or of the
-/// failed one, together.
+/// Crash a run of turns at every sync, keeping each prefix of the writes the
+/// sync would have stored. The chain, the effects and the rows are those of
+/// the last acknowledged turn, or of the interrupted one, together.
 #[test]
-fn every_acknowledged_turn_survives_any_single_failure() -> Result<()> {
+fn every_acknowledged_turn_survives_a_crash_at_any_write() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         for cached in [false, true] {
-            for effect in [Effect::None, Effect::After] {
-                for operation in [Operation::Put, Operation::Delete] {
-                    for nth in 1.. {
-                        if !run_case(cached, effect, operation, nth).await? {
-                            break;
-                        }
-                        cases += 1;
-                    }
-                }
+            for nth in 1.. {
+                let Some(prefixes) = run_case(cached, nth).await? else {
+                    break;
+                };
+                cases += prefixes;
             }
         }
         println!("turn campaign: {cases} cases");
@@ -162,9 +158,15 @@ fn every_acknowledged_turn_survives_any_single_failure() -> Result<()> {
     })
 }
 
-/// Returns whether the failpoint was reached.
-async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize) -> Result<bool> {
+/// Crash at the `nth` sync, keeping each prefix of its writes in turn: the
+/// number of prefixes, or `None` if the run made fewer syncs.
+async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
     let cache = cached.then(fresh_namespace);
+    // Checkpoints happen within the run.
+    let options = |cache| StorageOptions {
+        checkpoint_after: 4,
+        ..options(cache)
+    };
     let store = Arc::new(MonitorKv::new(FaultKv::new(
         MemoryKv::default(),
         nth as u64,
@@ -172,51 +174,58 @@ async fn run_case(cached: bool, effect: Effect, operation: Operation, nth: usize
     let mut db = Session::open_with_options(store.clone(), options(cache.clone())).await?;
     db.execute("CREATE TABLE t(n INTEGER)").await?;
     let _signal = store.arm(Failpoint {
-        operation,
-        key_prefix: "v14/".into(),
+        operation: Operation::Sync,
+        key_prefix: String::new(),
         nth,
-        effect,
+        effect: Effect::None,
         cancel: false,
     });
     let mut acknowledged = 0;
-    let mut failed = false;
     for i in 0..40 {
         match turn(&mut db, i).await {
             Ok(()) => acknowledged = i + 1,
-            Err(_) => {
-                failed = true;
-                break;
-            }
+            Err(_) => break,
         }
     }
-    let reached = store.events().iter().any(|event| event.faulted);
     drop(db);
     store.disarm();
-    store.inner.inner.crash(&[]);
-
-    let case = format!("{effect:?} {operation:?} #{nth} cached={cached}");
-    let mut db = Session::open_with_options(store.clone(), options(cache)).await?;
-    let turns = match db.chain() == expected(acknowledged) {
-        true => acknowledged,
-        false => {
-            assert!(failed, "{case}: the chain of no turn");
-            assert_eq!(db.chain(), expected(acknowledged + 1), "{case}");
-            acknowledged + 1
-        }
-    };
-    if turns > 0 {
-        assert_eq!(
-            db.effects(),
-            format!("turn {}", turns - 1).as_bytes(),
-            "{case}"
-        );
+    if !store.events().iter().any(|event| event.faulted) {
+        return Ok(None);
     }
-    assert_eq!(rows(&mut db).await?, turns.div_ceil(2) as i64, "{case}");
-    // The namespace takes turns again.
-    turn(&mut db, turns).await?;
-    drop(db);
-    let db = Session::open_with_options(store.clone(), options(None)).await?;
-    assert_eq!(db.chain(), expected(turns + 1), "{case}");
-    assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
-    Ok(reached)
+    assert_eq!(store.violations(), Vec::<String>::new(), "sync #{nth}");
+    let writes = store.inner.inner.unsynced().len();
+    for kept in 0..=writes {
+        let memory = store.inner.inner.fork();
+        memory.crash_keeping(kept);
+        let store = Arc::new(MonitorKv::seeded(memory.clone(), memory.values()));
+        let case = format!("sync #{nth}, {kept} of {writes} writes kept, cached={cached}");
+        // Reopen through the same owner cache, as a restarted handler would:
+        // only to read, as the cache follows one history, and the forks are
+        // each another.
+        let db = Session::open_with_options(store.clone(), options(cache.clone())).await?;
+        let turns = match db.chain() == expected(acknowledged) {
+            true => acknowledged,
+            false => {
+                assert_eq!(db.chain(), expected(acknowledged + 1), "{case}");
+                acknowledged + 1
+            }
+        };
+        drop(db);
+        let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+        if turns > 0 {
+            assert_eq!(
+                db.effects(),
+                format!("turn {}", turns - 1).as_bytes(),
+                "{case}"
+            );
+        }
+        assert_eq!(rows(&mut db).await?, turns.div_ceil(2) as i64, "{case}");
+        // The namespace takes turns again.
+        turn(&mut db, turns).await?;
+        drop(db);
+        let db = Session::open_with_options(store.clone(), options(None)).await?;
+        assert_eq!(db.chain(), expected(turns + 1), "{case}");
+        assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
+    }
+    Ok(Some(writes + 1))
 }

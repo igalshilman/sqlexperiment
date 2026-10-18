@@ -102,12 +102,12 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
         .await?;
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x%10, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
-    assert!(db.save().await?.cleanup_error.is_none());
+    db.save().await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
     let mut db = Session::open_with_options(Arc::new(store.clone()), checkpoint_all()).await?;
     db.execute("CREATE TABLE other(x)").await?;
-    assert!(db.save().await?.cleanup_error.is_none());
-    store.crash(&[]);
+    db.save().await?;
+    store.crash();
     Ok(store)
 }
 fn checkpoint_all() -> StorageOptions {
@@ -294,9 +294,9 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             checkpoint.database_bytes_written - after.database_bytes_written,
             checkpoint.private_wal_bytes_written - after.private_wal_bytes_written,
         );
-        assert!(db.save().await?.cleanup_error.is_none());
+        db.save().await?;
         sample.emit("save", &store, 0, 0);
-        store.crash(&[]);
+        store.crash();
         let mut db = Session::open(store.clone()).await?;
         let count = db.query("SELECT count(*) FROM t").await?[0][0]
             .as_int()
@@ -341,44 +341,18 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     Ok(())
 }
 
-/// Interrupt a save at its commit or its checkpoint, crash, then measure the
-/// open that follows. A save opened with `checkpoint_after = 0` checkpoints the
-/// logged transaction after committing, then puts the record again.
+/// Crash a save, then measure the open that follows. A save opened with
+/// `checkpoint_after = 0` checkpoints the logged transaction with its commit:
+/// the record, the pages, and the record again, in one sync.
 async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
-    for (op, operation, prefix, nth, effect, committed) in [
-        (
-            "commit_lost",
-            Operation::Put,
-            "v14/commit",
-            1,
-            Effect::None,
-            false,
-        ),
-        (
-            "commit_ack_lost",
-            Operation::Put,
-            "v14/commit",
-            1,
-            Effect::After,
-            true,
-        ),
-        (
-            "checkpoint_error",
-            Operation::Put,
-            "v14/page/",
-            1,
-            Effect::None,
-            true,
-        ),
-        // The checkpoint's own record: the second record a save puts.
-        (
-            "checkpoint_record_error",
-            Operation::Put,
-            "v14/commit",
-            2,
-            Effect::None,
-            true,
-        ),
+    // (operation, effect of the failed sync, writes lost, committed)
+    for (op, effect, lost, committed) in [
+        // Every write of the save.
+        ("commit_lost", Effect::None, usize::MAX, false),
+        // The checkpoint's record: the commit and the pages are stored.
+        ("checkpoint_record_lost", Effect::None, 1, true),
+        // Nothing: stored, then the sync failed.
+        ("sync_ack_lost", Effect::After, 0, true),
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
         let mut db = Session::open_with_options(store.clone(), checkpoint_all()).await?;
@@ -389,22 +363,20 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
         ))
         .await?;
         let _gate = store.arm(Failpoint {
-            operation,
-            key_prefix: prefix.into(),
-            nth,
+            operation: Operation::Sync,
+            key_prefix: String::new(),
+            nth: 1,
             effect,
             cancel: false,
         });
-        let result = db.save().await;
-        let hit = store.events().iter().any(|e| e.faulted);
-        assert!(hit, "recovery failpoint was not reached");
-        if op.starts_with("commit") {
-            assert!(result.is_err());
-        } else {
-            assert!(result?.cleanup_error.is_some());
-        }
+        assert!(db.save().await.is_err());
+        assert!(
+            store.events().iter().any(|e| e.faulted),
+            "the sync failpoint was not reached"
+        );
         store.disarm();
-        store.inner.crash(&[]);
+        let writes = store.inner.unsynced().len();
+        store.inner.crash_keeping(writes.saturating_sub(lost));
         store.inner.reset_stats();
         let sample = Sample {
             case,

@@ -1,102 +1,33 @@
-//! Backend contract: whole-value reads and atomic, durable single-key mutations.
+//! Backend contract: a Restate object's state, as a handler without a journal
+//! sees it.
 //!
-//! The adapter issues concurrent gets, and concurrent puts or deletes of distinct
-//! keys within one save. It never has two requests of one attempt outstanding
-//! against the same key. There is no multi-key atomicity, and no order between
-//! writes: the protocol relies on a write only once it is acknowledged.
+//! - **Writes are queued, in order.** [`KvStore::put`] and [`KvStore::delete`]
+//!   return at once. The store keeps them in issue order: a crash loses a
+//!   suffix of the writes not yet synced, never a write without the ones
+//!   before it.
+//! - **A sync makes them durable.** [`KvStore::sync`] completes once every
+//!   write issued before it is stored. Its failure, or a crash, leaves an
+//!   unknown prefix of them stored.
+//! - **Reads see the writes.** [`KvStore::get`] returns the latest value,
+//!   stored or written by this owner since.
 //!
-//! Success acknowledges durability of that key. No partial value may ever
-//! become visible, and every value a get returns is durable. An error or
-//! cancellation has an unknown outcome: the mutation may be absent or durable.
-//! Dropping a future does not cancel a remote request; the host must settle it
-//! before recovery or before handing the namespace to another owner.
-//!
-//! Restate state, with no journal, is such a store when its host acknowledges
-//! a write once the server stored it.
+//! So a write needs no acknowledgement for a later one to rely on it: if the
+//! later one survives, so does it. A value is atomic: no partial value is ever
+//! visible.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::io;
 
 /// A single-namespace key/value store; see the module documentation.
 pub trait KvStore: Send + Sync {
-    /// Return the latest durable complete value, or `None` for an absent key.
+    /// The latest value of `key`: stored, or written since; `None` if absent.
     /// `Bytes` lets a network client hand over its receive buffer without copying.
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>>;
-    /// Atomically replace a whole value; `Ok(())` means durable.
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>>;
-    /// Durably remove a key. Deleting a missing key must succeed.
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>>;
-}
-
-/// A store that queues writes and stores them, in order, at a `sync`: what
-/// the Restate SDKs offer a handler. [`Synced`] makes it a [`KvStore`].
-pub trait Queued: Send + Sync {
-    /// The latest value: stored, or written by this attempt.
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>>;
-    /// Queue a write: a put, or with `None` a delete.
-    fn queue(&self, key: &str, value: Option<Bytes>) -> io::Result<()>;
-    /// Wait until every write queued so far is stored.
+    /// Queue the replacement of a whole value, after every write issued before.
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()>;
+    /// Queue the removal of a key, after every write issued before. Deleting
+    /// a missing key succeeds.
+    fn delete(&self, key: &str) -> io::Result<()>;
+    /// Wait until every write issued so far is durable.
     fn sync(&self) -> BoxFuture<'_, io::Result<()>>;
 }
-
-/// A [`Queued`] store as a [`KvStore`]: a write is acknowledged once a `sync`
-/// issued after it has completed. Writes queued together share one `sync`.
-pub struct Synced<Q> {
-    queue: Q,
-    /// Writes queued so far.
-    queued: std::sync::atomic::AtomicU64,
-    /// Writes a completed `sync` stored, behind the lock a `sync` holds.
-    stored: futures::lock::Mutex<u64>,
-}
-
-impl<Q: Queued> Synced<Q> {
-    pub fn new(queue: Q) -> Self {
-        Self {
-            queue,
-            queued: Default::default(),
-            stored: futures::lock::Mutex::new(0),
-        }
-    }
-
-    pub fn queue(&self) -> &Q {
-        &self.queue
-    }
-
-    /// Queue a write now, then wait until a `sync` stored it: the writes of
-    /// one save are queued before the first `sync` starts, and share it.
-    fn write<'a>(&'a self, key: &str, value: Option<Bytes>) -> BoxFuture<'a, io::Result<()>> {
-        use std::sync::atomic::Ordering::SeqCst;
-        if let Err(error) = self.queue.queue(key, value) {
-            return Box::pin(std::future::ready(Err(error)));
-        }
-        let ticket = self.queued.fetch_add(1, SeqCst) + 1;
-        Box::pin(async move {
-            let mut stored = self.stored.lock().await;
-            if *stored < ticket {
-                // Covers every write queued until now, not only this one.
-                let target = self.queued.load(SeqCst);
-                self.queue.sync().await?;
-                *stored = target;
-            }
-            Ok(())
-        })
-    }
-}
-
-impl<Q: Queued> KvStore for Synced<Q> {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
-        self.queue.get(key)
-    }
-
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        self.write(key, Some(value))
-    }
-
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        self.write(key, None)
-    }
-}
-
-#[cfg(test)]
-#[path = "../tests/unit/kv.rs"]
-mod tests;

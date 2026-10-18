@@ -56,17 +56,18 @@ db.transaction(async |db| {                    // durable as a whole, or rolled 
 
 ## How durability and recovery work
 
-The backend only offers single-key puts, in no particular order: a write is
-durable once acknowledged, and a crash may keep any of the others. A database
-change touches many pages, so it can't be written atomically as pages. Like
-SQLite's WAL, this crate commits through a log instead, and copies pages into
-place later; here the log lives in one key.
+The backend is a Restate object's state: single-key puts and deletes, queued
+in issue order, and a sync that returns once they are stored. A crash keeps a
+prefix of the writes since the last sync. A database change touches many
+pages, so it can't be written atomically as pages. Like SQLite's WAL, this
+crate commits through a log instead, and copies pages into place later; here
+the log lives in one key.
 
 A namespace holds:
 
 - **The commit record** (`commit`): the database's version and size, and the
   log since the last checkpoint: each transaction's changed pages, compressed
-  against their previous images. The record holds the log's last few KiB
+  against their previous images. The record holds the log's last KiB or so
   inline; older parts, and large transactions, are stored at `log/<n>` keys,
   which the record names.
 - **Pages** (`page/<n>`): each page as of the last checkpoint, overwritten in
@@ -76,17 +77,18 @@ A page's current value is its latest image in the record's log, or else its
 page key.
 
 **Commit.** A transaction is one put: the record, with the log so far plus
-this transaction. When that put is acknowledged, the transaction is durable;
-before it, it doesn't exist. A large transaction's segments are put first,
-and the record names them only once they are acknowledged. Once the inline
-log outgrows a few KiB, a commit also puts it, sealed, into a stored value,
-which the next commit names: so every commit rewrites a small record.
+this transaction. Once it is stored, the transaction is durable; before, it
+doesn't exist. A large transaction's segments are put before the record that
+names them. Once the inline log outgrows a KiB, a commit puts it, sealed,
+into a stored value, which the record names: so every commit rewrites a
+small record.
 
 **Checkpoint.** Once the log holds more than a few transactions, a save also
-copies the latest image of each page in it to its page key. Only once those
-copies are acknowledged does it put a record with an empty log. A
-half-finished checkpoint is harmless, because the log still holds every image
-it was copying and replays over whatever landed.
+copies the latest image of each page in it to its page key, after the record,
+then puts a record with an empty log. A half-finished checkpoint is harmless,
+because the record before it still holds every image it was copying, and
+replays over whatever landed. The commit and its checkpoint share one sync:
+a save is one round trip.
 
 **Recovery.** There's no separate recovery step; every open reads the record
 and replays its log. Whatever a failed save left (segments no record names,
@@ -103,9 +105,10 @@ reads correctly:
 
 **What it relies on.**
 
-- **One owner at a time.** The host must guarantee it, and settle every
-  outstanding request before another owner opens.
-- **Acknowledged means durable.** No order between writes is assumed.
+- **One owner at a time.** Restate runs one exclusive handler per key, and
+  fences a former attempt's writes.
+- **Writes in issue order.** A crash keeps a prefix of the writes since the
+  last sync, never a write without the ones before it.
 - **Reliable storage.** The backend returns what was stored. Values are
   checked for structure and bounds, not checksummed.
 

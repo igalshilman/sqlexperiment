@@ -1,5 +1,6 @@
-//! The object's state as the scope's store: a [`Queued`] store, so writes
-//! return at once and a `sync` waits until Restate stored them. It remembers
+//! The object's state as the scope's store (a [`KvStore`]): writes return at
+//! once, Restate keeps them in issue order, and a `sync` waits until it stored
+//! them. It remembers
 //! every key it read or wrote, for the attempt: the handler is the object's
 //! only writer meanwhile, so a key is read from Restate at most once: a round
 //! trip unless the invocation started with it (eager state), and never a
@@ -7,7 +8,7 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use restate_sdk::context::RawState;
-use sqlite_kv::kv::Queued;
+use sqlite_kv::kv::KvStore;
 use std::{
     collections::HashMap,
     io,
@@ -45,7 +46,7 @@ impl StateQueue {
     }
 }
 
-impl Queued for StateQueue {
+impl KvStore for StateQueue {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             if let Some(value) = self.known.lock().unwrap().get(key) {
@@ -60,12 +61,18 @@ impl Queued for StateQueue {
         })
     }
 
-    fn queue(&self, key: &str, value: Option<Bytes>) -> io::Result<()> {
-        match &value {
-            Some(value) => self.state.set(key, value.clone()),
-            None => self.state.clear(key),
-        }
-        self.known.lock().unwrap().insert(key.to_owned(), value);
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.state.set(key, value.clone());
+        self.known
+            .lock()
+            .unwrap()
+            .insert(key.to_owned(), Some(value));
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.state.clear(key);
+        self.known.lock().unwrap().insert(key.to_owned(), None);
         Ok(())
     }
 
