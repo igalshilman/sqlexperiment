@@ -5,7 +5,7 @@
 //! source on the same runtime gives the same image, byte for byte, on every
 //! start of every process, so checkpoints written by one restore in another.
 use crate::{
-    model::{Image, MAX_INPUT, VmMeta, fingerprint},
+    model::{Image, MAX_INPUT, fingerprint},
     vm::Runtime,
 };
 use anyhow::{Context, Result, ensure};
@@ -15,8 +15,7 @@ use std::{collections::HashMap, sync::Arc};
 pub struct Program {
     name: String,
     version: u64,
-    meta: VmMeta,
-    memory: Arc<Vec<u8>>,
+    image: Image,
 }
 
 impl Program {
@@ -24,12 +23,10 @@ impl Program {
     pub fn compile(runtime: &Runtime, name: &str, source: &str) -> Result<Self> {
         identifier(name)?;
         ensure!(source.len() <= MAX_INPUT, "Program source exceeds limit");
-        let image = runtime.golden(name, source)?;
         Ok(Self {
             name: name.into(),
             version: fingerprint(source.as_bytes()),
-            meta: image.meta,
-            memory: Arc::new(image.memory),
+            image: runtime.golden(name, source)?,
         })
     }
 
@@ -43,15 +40,9 @@ impl Program {
         self.version
     }
 
-    pub(crate) fn memory(&self) -> &Arc<Vec<u8>> {
-        &self.memory
-    }
-
+    /// The golden image: shared, not copied.
     pub(crate) fn image(&self) -> Image {
-        Image {
-            meta: self.meta.clone(),
-            memory: self.memory.to_vec(),
-        }
+        self.image.clone()
     }
 }
 

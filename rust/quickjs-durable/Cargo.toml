@@ -26,7 +26,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "0.3"
 wasm-encoder = { version = "=0.258.3", features = ["wasmparser"] }
 wasmparser = "=0.258.3"
-wasmtime = { version = "=49.0.3", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
+wasmtime = { version = "=49.0.3", default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "pooling-allocator"] }
 zstd = "0.13"
 
 [dev-dependencies]

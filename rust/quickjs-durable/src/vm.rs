@@ -2,7 +2,8 @@ use crate::heap;
 use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, State, VmMeta, fingerprint};
 use wasmtime::error::Context;
 use wasmtime::{
-    Caller, Config, Engine, Global, Instance, Linker, Memory, Module, Store, StoreLimits,
+    Caller, Config, Engine, Global, Instance, InstanceAllocationStrategy, InstancePre, Linker,
+    Memory, Module, PoolConcurrencyLimitError, PoolingAllocationConfig, Store, StoreLimits,
     StoreLimitsBuilder, TypedFunc, Val,
 };
 use wasmtime::{Result, bail, ensure};
@@ -18,6 +19,12 @@ const CHECKPOINT_FUEL: u64 = FUEL / 2;
 // headroom, especially in the instrumented interpreter. Reapply after restore.
 const MAX_STACK: i32 = 32 * 1024;
 const MAX_HEAP: i32 = 32 * 1024 * 1024;
+/// Most VMs at once, live or starting, in a process. Past it, starting one
+/// fails as [`exhausted`], and the attempt is retried.
+const POOL: u32 = 1000;
+/// Bytes of each VM's memory kept mapped from one VM to the next: golden's
+/// and a little more.
+const RESIDENT: usize = 2 * 1024 * 1024;
 // qjs_init2 flags: every intrinsic but weak references/finalization (bit 9)
 // and performance (bit 10).
 const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
@@ -94,7 +101,8 @@ fn validate_snapshot_abi(wasm: &[u8]) -> Result<()> {
 /// holds guest promises, never Rust futures or Wasmtime execution stacks.
 pub struct Runtime {
     engine: Engine,
-    module: Module,
+    /// The module, its imports resolved once for every VM.
+    instance: InstancePre<Host>,
 }
 struct Host {
     now: u64,
@@ -107,6 +115,17 @@ impl Runtime {
         validate_snapshot_abi(WASM)?;
         let mut config = Config::new();
         config.consume_fuel(true);
+        // A pool of instance slots, reused from VM to VM, with the first
+        // pages of each memory kept resident: a new VM writes golden over
+        // memory already mapped, instead of faulting in every page.
+        let mut pool = PoolingAllocationConfig::default();
+        pool.total_core_instances(POOL)
+            .total_memories(2 * POOL)
+            .total_tables(POOL)
+            .max_memories_per_module(2)
+            .max_memory_size(MAX_MEMORY)
+            .linear_memory_keep_resident(RESIDENT);
+        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
         let engine = Engine::new(&config)?;
         #[cfg(not(feature = "full-scan"))]
         let instrumented =
@@ -126,7 +145,8 @@ impl Runtime {
                 );
             }
         }
-        Ok(Self { engine, module })
+        let instance = linker(&engine)?.instantiate_pre(&module)?;
+        Ok(Self { engine, instance })
     }
 
     pub(crate) fn golden(&self, name: &str, source: &str) -> Result<Image> {
@@ -151,6 +171,14 @@ impl Runtime {
         );
         vm.snapshot()
     }
+}
+
+/// Whether `error` is the process running out of VM slots: the attempt is
+/// retried later, as for a storage failure.
+pub(crate) fn exhausted(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<PoolConcurrencyLimitError>())
 }
 
 /// QuickJS failed a job with an error no script can catch, such as running
@@ -233,6 +261,108 @@ fn mark_host_range(bitmap: &mut [u8], offset: usize, len: usize) -> Result<()> {
     Ok(())
 }
 
+/// The host functions the module imports: a clock, randomness and logs, all
+/// fixed by the VM's identity and logical time; nothing else.
+fn linker(engine: &Engine) -> Result<Linker<Host>> {
+    let mut linker = Linker::new(engine);
+    linker.func_wrap("env", "host_get_timezone_offset", |_hi: i32, _lo: i32| {
+        0_i32
+    })?;
+    linker.func_wrap("env", "host_interrupt", || 0_i32)?;
+    linker.func_wrap("env", "host_module_normalize", |_base: i32, _name: i32| {
+        0_i32
+    })?;
+    linker.func_wrap("env", "host_module_load", |_name: i32, _len: i32| 0_i32)?;
+    linker.func_wrap(
+        "env",
+        "host_call",
+        |_: i32, _: i32, _: i32, _: i32, _: i32| -> Result<i32> {
+            bail!("Host callbacks are not enabled")
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "host_promise_rejection",
+        |_: i32, _: i32, _: i32| -> Result<()> { bail!("Unexpected rejection callback") },
+    )?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "clock_time_get",
+        |mut c: Caller<'_, Host>, clock: i32, _precision: i64, ptr: i32| -> Result<i32> {
+            if clock != 0 && clock != 1 {
+                return Ok(52);
+            }
+            let ns = c
+                .data()
+                .now
+                .checked_mul(1_000_000)
+                .context("Clock overflow")?;
+            caller_write(&mut c, ptr as u32 as usize, &ns.to_le_bytes())?;
+            Ok(0)
+        },
+    )?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "random_get",
+        |mut c: Caller<'_, Host>, ptr: i32, len: i32| -> Result<i32> {
+            let len = len as u32 as usize;
+            ensure!(len <= MAX_MEMORY, "Random request too large");
+            let seed = c.data().seed;
+            let bytes: Vec<u8> = (0..len).map(|i| seed[i % 8]).collect();
+            caller_write(&mut c, ptr as u32 as usize, &bytes)?;
+            Ok(0)
+        },
+    )?;
+    linker.func_wrap("wasi_snapshot_preview1", "fd_close", |_: i32| 52_i32)?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_seek",
+        |_: i32, _: i64, _: i32, _: i32| 52_i32,
+    )?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_fdstat_get",
+        |mut c: Caller<'_, Host>, fd: i32, ptr: i32| -> Result<i32> {
+            if fd != 1 && fd != 2 {
+                return Ok(8);
+            }
+            let mut bytes = [0_u8; 24];
+            bytes[0] = 2;
+            caller_write(&mut c, ptr as u32 as usize, &bytes)?;
+            Ok(0)
+        },
+    )?;
+    // Internal runtime logs are discarded. Guest code gets no external I/O.
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_write",
+        |mut c: Caller<'_, Host>, fd: i32, ptr: i32, count: i32, written: i32| -> Result<i32> {
+            if fd != 1 && fd != 2 {
+                return Ok(8);
+            }
+            let count = count as u32 as usize;
+            ensure!(count <= 1024, "Too many I/O vectors");
+            let memory = caller_memory(&mut c)?;
+            let mut total = 0_u32;
+            for i in 0..count {
+                let mut pair = [0_u8; 8];
+                memory.read(&c, ptr as u32 as usize + i * 8, &mut pair)?;
+                let at = u32::from_le_bytes(pair[..4].try_into()?) as usize;
+                let len = u32::from_le_bytes(pair[4..].try_into()?);
+                ensure!(
+                    at.checked_add(len as usize)
+                        .is_some_and(|end| end <= memory.data_size(&c)),
+                    "Invalid I/O vector"
+                );
+                total = total.checked_add(len).context("I/O length overflow")?;
+            }
+            caller_write(&mut c, written as u32 as usize, &total.to_le_bytes())?;
+            Ok(0)
+        },
+    )?;
+    Ok(linker)
+}
+
 impl Vm {
     pub(crate) fn new(runtime: &Runtime, identity: &str, now: u64) -> Result<Self> {
         let host = Host {
@@ -246,103 +376,7 @@ impl Vm {
         let mut store = Store::new(&runtime.engine, host);
         store.limiter(|h| &mut h.limits);
         store.set_fuel(FUEL)?;
-        let mut linker = Linker::new(&runtime.engine);
-        linker.func_wrap("env", "host_get_timezone_offset", |_hi: i32, _lo: i32| {
-            0_i32
-        })?;
-        linker.func_wrap("env", "host_interrupt", || 0_i32)?;
-        linker.func_wrap("env", "host_module_normalize", |_base: i32, _name: i32| {
-            0_i32
-        })?;
-        linker.func_wrap("env", "host_module_load", |_name: i32, _len: i32| 0_i32)?;
-        linker.func_wrap(
-            "env",
-            "host_call",
-            |_: i32, _: i32, _: i32, _: i32, _: i32| -> Result<i32> {
-                bail!("Host callbacks are not enabled")
-            },
-        )?;
-        linker.func_wrap(
-            "env",
-            "host_promise_rejection",
-            |_: i32, _: i32, _: i32| -> Result<()> { bail!("Unexpected rejection callback") },
-        )?;
-        linker.func_wrap(
-            "wasi_snapshot_preview1",
-            "clock_time_get",
-            |mut c: Caller<'_, Host>, clock: i32, _precision: i64, ptr: i32| -> Result<i32> {
-                if clock != 0 && clock != 1 {
-                    return Ok(52);
-                }
-                let ns = c
-                    .data()
-                    .now
-                    .checked_mul(1_000_000)
-                    .context("Clock overflow")?;
-                caller_write(&mut c, ptr as u32 as usize, &ns.to_le_bytes())?;
-                Ok(0)
-            },
-        )?;
-        linker.func_wrap(
-            "wasi_snapshot_preview1",
-            "random_get",
-            |mut c: Caller<'_, Host>, ptr: i32, len: i32| -> Result<i32> {
-                let len = len as u32 as usize;
-                ensure!(len <= MAX_MEMORY, "Random request too large");
-                let seed = c.data().seed;
-                let bytes: Vec<u8> = (0..len).map(|i| seed[i % 8]).collect();
-                caller_write(&mut c, ptr as u32 as usize, &bytes)?;
-                Ok(0)
-            },
-        )?;
-        linker.func_wrap("wasi_snapshot_preview1", "fd_close", |_: i32| 52_i32)?;
-        linker.func_wrap(
-            "wasi_snapshot_preview1",
-            "fd_seek",
-            |_: i32, _: i64, _: i32, _: i32| 52_i32,
-        )?;
-        linker.func_wrap(
-            "wasi_snapshot_preview1",
-            "fd_fdstat_get",
-            |mut c: Caller<'_, Host>, fd: i32, ptr: i32| -> Result<i32> {
-                if fd != 1 && fd != 2 {
-                    return Ok(8);
-                }
-                let mut bytes = [0_u8; 24];
-                bytes[0] = 2;
-                caller_write(&mut c, ptr as u32 as usize, &bytes)?;
-                Ok(0)
-            },
-        )?;
-        // Internal runtime logs are discarded. Guest code gets no external I/O.
-        linker.func_wrap(
-            "wasi_snapshot_preview1",
-            "fd_write",
-            |mut c: Caller<'_, Host>, fd: i32, ptr: i32, count: i32, written: i32| -> Result<i32> {
-                if fd != 1 && fd != 2 {
-                    return Ok(8);
-                }
-                let count = count as u32 as usize;
-                ensure!(count <= 1024, "Too many I/O vectors");
-                let memory = caller_memory(&mut c)?;
-                let mut total = 0_u32;
-                for i in 0..count {
-                    let mut pair = [0_u8; 8];
-                    memory.read(&c, ptr as u32 as usize + i * 8, &mut pair)?;
-                    let at = u32::from_le_bytes(pair[..4].try_into()?) as usize;
-                    let len = u32::from_le_bytes(pair[4..].try_into()?);
-                    ensure!(
-                        at.checked_add(len as usize)
-                            .is_some_and(|end| end <= memory.data_size(&c)),
-                        "Invalid I/O vector"
-                    );
-                    total = total.checked_add(len).context("I/O length overflow")?;
-                }
-                caller_write(&mut c, written as u32 as usize, &total.to_le_bytes())?;
-                Ok(0)
-            },
-        )?;
-        let instance = linker.instantiate(&mut store, &runtime.module)?;
+        let instance = runtime.instance.instantiate(&mut store)?;
         let memory = instance
             .get_memory(&mut store, "memory")
             .context("Missing memory export")?;
@@ -403,21 +437,19 @@ impl Vm {
     }
     pub(crate) fn restore(&mut self, image: &Image) -> Result<()> {
         ensure!(
-            image.memory.len() <= MAX_MEMORY && image.memory.len().is_multiple_of(65536),
+            image.len() <= MAX_MEMORY && image.len().is_multiple_of(65536),
             "Invalid image size"
         );
         let current = self.memory.data_size(&self.store);
         ensure!(
-            image.memory.len() >= current,
+            image.len() >= current,
             "Image smaller than module's initial memory"
         );
-        if image.memory.len() > current {
-            self.memory.grow(
-                &mut self.store,
-                ((image.memory.len() - current) / 65536) as u64,
-            )?;
+        if image.len() > current {
+            self.memory
+                .grow(&mut self.store, ((image.len() - current) / 65536) as u64)?;
         }
-        self.memory.write(&mut self.store, 0, &image.memory)?;
+        image.write(self.memory.data_mut(&mut self.store));
         // Committed restore bytes are not new writes. Begin tracking before
         // re-binding runtime pointers and limits, which may modify memory.
         #[cfg(not(feature = "full-scan"))]
@@ -566,7 +598,7 @@ impl Vm {
         }
         let memory = memory.to_vec();
         ensure!(memory.len() <= MAX_MEMORY, "Image exceeds limit");
-        Ok(Image { meta, memory })
+        Ok(Image::golden(meta, std::sync::Arc::new(memory)))
     }
     /// What changed since `base`, with the dead bytes of the pages it compares
     /// zeroed first: the stack below its pointer (between calls no frame is
@@ -577,7 +609,7 @@ impl Vm {
         let stack = meta.stack as u32 as usize;
         let memory_len = self.memory.data_size(&self.store);
         ensure!(
-            memory_len <= MAX_MEMORY && memory_len >= base.memory.len() && stack <= memory_len,
+            memory_len <= MAX_MEMORY && memory_len >= base.len() && stack <= memory_len,
             "Invalid captured memory size"
         );
         #[cfg(not(feature = "full-scan"))]
@@ -611,19 +643,16 @@ impl Vm {
         let mut examined_pages = 0;
         for index in candidates {
             examined_pages += 1;
-            let range = index * PAGE..(index + 1) * PAGE;
-            let previous = base.memory.get(range.clone()).unwrap_or(&[0; PAGE]);
-            let next = &memory[range];
+            let previous = base.page(index as u32);
+            let next = &memory[index * PAGE..(index + 1) * PAGE];
             if next != previous {
                 pages.push((index as u32, next.to_vec()));
             }
         }
         #[cfg(all(feature = "verify-dirty", not(feature = "full-scan")))]
         for (index, next) in memory.as_chunks::<PAGE>().0.iter().enumerate() {
-            let range = index * PAGE..(index + 1) * PAGE;
-            let previous = base.memory.get(range).unwrap_or(&[0; PAGE]);
             ensure!(
-                next == previous || dirty[index] != 0,
+                next == base.page(index as u32) || dirty[index] != 0,
                 "Dirty tracker missed page {index}"
             );
         }
