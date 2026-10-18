@@ -72,17 +72,21 @@ delivers it in the next turn. `ctx.kv` is answered within the turn.
 A retried attempt replays nothing: it restores the last committed image and
 waits again on its requests, under the same idempotency keys, so Restate
 attaches it to a call made before the crash instead of making it again, and a
-timer waits only for what is left. Once `main` settles, `run` returns; if
-requests are still outstanding then (a race's loser), the private `drain`
-handler finishes the run, so their continuations run too.
+timer waits only for what is left.
+
+The run ends when `main` settles, and `run` returns. Unlike a Node.js process,
+it does not wait for its other promises: requests still outstanding (a race's
+loser, a promise nobody awaited) are dropped, and their continuations never
+run. A call already made finishes at its callee, unobserved. Await what must
+happen.
 
 Runs of one scope run one after the other, as invocations of an object's
 exclusive handlers do: a run waiting on a timer holds its scope. Give runs
 that must overlap keys of their own.
 
 `make test-qjs-restate` runs it against a real Restate server: RPCs, timers,
-KV shared by the runs of a scope, a failing program, a race that answers
-before its loser, and an attempt that crashes while its call runs, whose
+KV shared by the runs of a scope, a failing program, a race whose loser is
+dropped, and an attempt that crashes while its call runs, whose
 retry attaches to the call (`quickjs_restate::faults`).
 
 ## Not yet

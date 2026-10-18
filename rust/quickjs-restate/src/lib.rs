@@ -19,11 +19,11 @@
 //!
 //! A retried attempt replays nothing: it restores the last committed image and
 //! waits again on its requests, under the same idempotency keys, so a call
-//! made before the crash is attached to, not made again. Once `main` settles,
-//! `run` returns; if requests are still outstanding (a race's loser),
-//! `<program>/<key>/drain` finishes the run, so their continuations run too.
+//! made before the crash is attached to, not made again. The run ends when
+//! `main` settles: requests still outstanding (a race's loser) are dropped,
+//! and their continuations never run.
 use quickjs_durable::{
-    Engine, Operation, Outcome, Programs, Runtime, Status, View, namespace::NamespaceTransaction,
+    Engine, Operation, Outcome, Programs, Runtime, View, namespace::NamespaceTransaction,
 };
 use restate_sdk::{
     context::{DurableFuture, RequestTarget},
@@ -83,8 +83,6 @@ pub struct JsObject {
 /// What a turn delivers to the run.
 enum Event {
     Start(Value),
-    /// Nothing: the run as committed.
-    Recover,
     Complete {
         operation: String,
         outcome: Outcome,
@@ -103,58 +101,32 @@ impl JsObject {
     #[handler]
     async fn run(&self, ctx: ObjectContext<'_>, input: Json<Value>) -> HandlerResult<Json<Value>> {
         let run = ctx.invocation_id().to_owned();
-        match self
-            .drive(&ctx, &run, Event::Start(input.into_inner()), false)
-            .await?
-        {
+        match self.drive(&ctx, &run, input.into_inner()).await? {
             Outcome::Success { value, .. } => Ok(Json(value)),
             Outcome::Failure { error, .. } => {
                 Err(TerminalError::new(format!("{}: {}", error.name, error.message)).into())
             }
         }
     }
-
-    /// Finish a run whose `run` has returned: its requests still outstanding
-    /// complete, and their continuations run.
-    #[handler]
-    async fn drain(&self, ctx: ObjectContext<'_>, run: Json<String>) -> HandlerResult<()> {
-        self.drive(&ctx, &run.into_inner(), Event::Recover, true)
-            .await?;
-        Ok(())
-    }
 }
 
 impl JsObject {
-    /// Deliver `event`, then run turns until the run has its outcome, each
-    /// waiting for the first of the run's requests to complete; when
-    /// `draining`, until the run has ended. A run with its outcome but
-    /// requests outstanding is left to `drain`.
+    /// Start the run with `input`, then run turns until `main` settles, each
+    /// waiting for the first of the run's requests to complete.
     async fn drive<'ctx>(
         &self,
         ctx: &'ctx ObjectContext<'ctx>,
         run: &str,
-        event: Event,
-        draining: bool,
+        input: Value,
     ) -> HandlerResult<Outcome> {
         let mut waiting = DurableFuturesUnordered::<Waiting<'ctx>>::new();
         let mut operations: Vec<String> = Vec::new();
         let mut awaited: HashSet<String> = HashSet::new();
-        let mut event = event;
+        let mut event = Event::Start(input);
         loop {
             let state = self.turn(ctx, run, event).await?.state;
             if let Some(outcome) = state.outcome {
-                if state.status != Status::Waiting {
-                    return Ok(outcome);
-                }
-                if !draining {
-                    ctx.request::<_, ()>(
-                        RequestTarget::object(&self.program, ctx.key(), "drain"),
-                        Json(run.to_owned()),
-                    )
-                    .idempotency_key(format!("{run}/drain"))
-                    .send();
-                    return Ok(outcome);
-                }
+                return Ok(outcome);
             }
             // Answer the requests the host can answer now, one per turn; wait
             // on the others.
@@ -230,8 +202,6 @@ impl JsObject {
         let view = match event {
             // On a retried attempt, the run as it is.
             Event::Start(input) => engine.start(run, &self.program, input, now()).await?,
-            // Read only: nothing to save.
-            Event::Recover => return engine.recover(run).await,
             Event::Complete {
                 operation,
                 outcome,
@@ -307,8 +277,8 @@ mod built {
     include!(concat!(env!("OUT_DIR"), "/programs.rs"));
 }
 
-/// Bind each program as a virtual object of its name: `run` and `drain`
-/// without journal replay (a retried attempt restores the last image instead),
+/// Bind each program as a virtual object of its name: `run` without journal
+/// replay (a retried attempt restores the last image instead),
 /// its state loaded lazily (a turn reads only the pages it needs), and no
 /// journal kept once an invocation is done (it holds every page it read).
 pub fn bind(
@@ -326,8 +296,7 @@ pub fn bind(
                     .name(name)
                     .journal_replay(false)
                     .enable_lazy_state(true)
-                    .journal_retention(Duration::ZERO)
-                    .handler("drain", HandlerOptions::new().ingress_private(true)),
+                    .journal_retention(Duration::ZERO),
             ),
         );
     }

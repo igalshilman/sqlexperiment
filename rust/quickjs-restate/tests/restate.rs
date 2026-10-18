@@ -100,7 +100,7 @@ where
 }
 
 /// The test programs: `counter` calls `Doubler`, `failing` throws, `attach`
-/// waits on a slow call and a timer, `race` answers before its loser.
+/// waits on a slow call and a timer, `race` settles before its loser.
 fn programs() -> Arc<Programs> {
     static PROGRAMS: OnceLock<Arc<Programs>> = OnceLock::new();
     PROGRAMS
@@ -259,19 +259,14 @@ async fn a_retried_attempt_attaches_to_its_calls() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs restate-server: make test-qjs-restate"]
-async fn a_race_answers_first_and_drains_its_loser() {
+async fn a_run_ends_when_main_settles() {
     let _server = server().await;
     serve().await;
 
-    let started = Instant::now();
     let (_, winner) = call("race/dave/run", json!("go")).await;
     assert_eq!(winner, json!("timer"));
-    assert!(
-        started.elapsed() < Duration::from_millis(450),
-        "{:?}",
-        started.elapsed()
-    );
-    // The next run of the scope waits for the drain: the loser's continuation ran.
+    // The loser was dropped: its continuation never ran, even once it is done.
+    tokio::time::sleep(Duration::from_millis(700)).await;
     let (_, late) = call("race/dave/run", json!("late")).await;
-    assert_eq!(late, json!(42));
+    assert_eq!(late, Value::Null);
 }
