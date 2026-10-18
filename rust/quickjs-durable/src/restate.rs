@@ -121,8 +121,11 @@ impl JsObject {
         let mut operations: Vec<String> = Vec::new();
         let mut awaited: HashSet<String> = HashSet::new();
         let mut event = Event::Start(input);
+        // One store for the whole invocation: its handler is the object's
+        // only writer meanwhile, so what a turn read or wrote stays true.
+        let store = Arc::new(ObjectStore::new(ctx.raw_state()));
         loop {
-            let state = self.turn(ctx, run, event).await?.state;
+            let state = self.turn(&store, run, event).await?.state;
             if let Some(outcome) = state.outcome {
                 return Ok(outcome);
             }
@@ -172,8 +175,7 @@ impl JsObject {
         }
     }
 
-    async fn turn(&self, ctx: &ObjectContext<'_>, run: &str, event: Event) -> HandlerResult<View> {
-        let store = Arc::new(ObjectStore::new(ctx.raw_state()));
+    async fn turn(&self, store: &Arc<ObjectStore>, run: &str, event: Event) -> HandlerResult<View> {
         match self.commit(store.clone(), run, event).await {
             Ok(view) => {
                 faults::after_commit()?;
