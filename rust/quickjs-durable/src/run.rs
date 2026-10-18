@@ -452,6 +452,9 @@ async fn run(
     writes: &mut BTreeMap<String, Option<Value>>,
 ) -> wasmtime::Result<State> {
     vm.begin_turn(now)?;
+    // The host keeps the requests pending: those of earlier turns, less the
+    // ones delivered, then those the guest issues, as it reports them.
+    let mut pending = commit.state.pending.clone();
     match delivery {
         Delivery::Start(input) => {
             let seed = fingerprint(commit.run.as_bytes()) as u32;
@@ -461,26 +464,17 @@ async fn run(
         }
         Delivery::Complete(outcomes) => {
             for (operation, outcome) in outcomes {
+                pending.retain(|pending| pending.id() != operation);
                 vm.invoke("deliver", &completion(&operation, outcome, now))?;
             }
         }
     }
-    // The requests already pending are the host's, issued in earlier turns.
-    let mut seen: HashSet<String> = commit
-        .state
-        .pending
-        .iter()
-        .map(|op| op.id().into())
-        .collect();
-    let state = loop {
+    let report = loop {
         vm.drain()?;
-        let state = vm.inspect()?;
+        let report = vm.inspect()?;
         let mut answered = false;
-        for operation in &state.pending {
-            if !seen.insert(operation.id().into()) {
-                continue;
-            }
-            let value = match operation {
+        for operation in report.issued.iter().cloned() {
+            let value = match &operation {
                 Operation::KvGet { key, .. } => match writes.get(key) {
                     Some(value) => value.clone().unwrap_or(Value::Null),
                     None => read(store, key)
@@ -495,27 +489,42 @@ async fn run(
                     writes.insert(key.clone(), None);
                     Value::Null
                 }
-                _ => continue,
+                _ => {
+                    pending.push(operation);
+                    continue;
+                }
             };
             let outcome = Outcome::success(value);
             vm.invoke("deliver", &completion(operation.id(), outcome, now))?;
             answered = true;
         }
         if !answered {
-            break state;
+            break report;
         }
         if vm.tired()? {
             // Every request so far is answered, and the answers are in the
             // heap and the job queue; no Wasm call is live. A wakeup, which
             // the host delivers in the next turn, runs the queued jobs then.
             vm.call("pause", None)?;
-            let state = vm.inspect()?;
+            let report = vm.inspect()?;
             wasmtime::ensure!(
-                matches!(state.pending.last(), Some(Operation::Resume { .. })),
+                matches!(&report.issued[..], [Operation::Resume { .. }]),
                 "Missing resume wakeup"
             );
-            break state;
+            pending.extend(report.issued.iter().cloned());
+            break report;
         }
+    };
+    // A settled run drops its requests: their continuations never run.
+    if report.status != Status::Waiting {
+        pending.clear();
+    }
+    let state = State {
+        pending,
+        next_operation: report.next_operation,
+        now: report.now,
+        status: report.status,
+        outcome: report.outcome,
     };
     if let Some(outcome) = &state.outcome {
         outcome.validate().map_err(wasmtime::Error::from_anyhow)?;

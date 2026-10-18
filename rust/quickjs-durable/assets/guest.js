@@ -5,7 +5,10 @@
     maxTime = 0,
     random = 1,
     rootOutcome;
+  // Each request's promise, by ID, until delivered. The request itself goes
+  // to the host at the next report, and is forgotten here.
   const pending = new Map();
+  let issued = [];
   // Rust JSON strings are Unicode scalar values. Arbitrary UTF-16 remains valid
   // inside the VM, but cannot be sent through this JSON-only host interface.
   const errorText = (value) => String(value).replace(/[\uD800-\uDFFF]/gu, '\uFFFD');
@@ -51,12 +54,10 @@
   function request(operation) {
     if (runId === undefined) throw new Error('Durable operations are unavailable during application initialization');
     const id = runId + '/' + nextOperation++;
-    const promise = new Promise((resolve, reject) =>
-      pending.set(id, { operation: { id, ...operation }, resolve, reject }),
-    );
-    // A losing race may reject later; the host still tracks its operation.
-    promise.catch(() => {});
-    return promise;
+    issued.push({ id, ...operation });
+    // A losing race may reject later, unobserved: no rejection tracker is
+    // installed, so that is not an error.
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
   }
   globalThis.durable = Object.freeze({
     kv: Object.freeze({
@@ -154,15 +155,20 @@
       if (!rootOutcome && pending.size === 0) rootOutcome = failure(new Error('Execution stalled: no durable wakeup'));
       // The run ends when main settles: requests still pending are dropped,
       // and their continuations never run.
-      if (rootOutcome) pending.clear();
+      if (rootOutcome) {
+        pending.clear();
+        issued = [];
+      }
       const status = !rootOutcome ? 'waiting' : rootOutcome.ok ? 'completed' : 'failed';
-      return JSON.stringify({
-        pending: [...pending.values()].map((x) => x.operation),
+      const report = JSON.stringify({
+        issued,
         nextOperation,
         now,
         status,
         ...(rootOutcome === undefined ? {} : { outcome: rootOutcome }),
       });
+      issued = [];
+      return report;
     },
   };
 })();

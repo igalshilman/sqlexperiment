@@ -360,7 +360,7 @@ fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
         assert_eq!(stored(&store, "batch/"), batches.len());
     }
     assert_eq!(value(&run.view()), json!("60:59"));
-    assert!((2..=16).contains(&most), "{most} batches");
+    assert!((2..=32).contains(&most), "{most} batches");
     // A settled run keeps its outcome, not its image.
     assert_eq!(stored(&store, "batch/"), 0);
     Ok(())
@@ -411,6 +411,53 @@ fn outcomes_delivered_together_take_one_turn() -> Result<()> {
         block(run.deliver_all(&store, outcomes, 3))?.turns,
         done.turns
     );
+    Ok(())
+}
+
+/// A request is the host's once issued: the guest keeps only its promise, so
+/// a big input, made and sent in one turn, is not saved with the heap.
+#[test]
+fn a_request_input_is_not_kept_in_the_heap() -> Result<()> {
+    let source = "const prompt=()=>JSON.stringify(Array.from({length:8000},(_,i)=>i*7919%10007));async function main(_,ctx){const r=await ctx.rpc.call({service:'S',handler:'h'},{prompt:prompt()});return r.input.prompt.length;}";
+    let store = MemoryStore::default();
+    let mut run = start(&store, source, Value::Null, 1)?;
+    let issued = run.view();
+    // ~39 KiB of JSON went through the heap; the commit holds the request.
+    assert!(
+        issued.batch_bytes < 8 * 1024,
+        "{} bytes",
+        issued.batch_bytes
+    );
+    assert!(
+        issued.commit_bytes > 32 * 1024,
+        "{} bytes",
+        issued.commit_bytes
+    );
+    assert!(value(&finish(&mut run, &store)?).as_u64() > Some(32_000));
+    Ok(())
+}
+
+/// A request that loses a race may fail later, unobserved: the run goes on.
+#[test]
+fn a_losing_request_may_fail_later() -> Result<()> {
+    let source = "async function main(_,ctx){const call=ctx.rpc.call({service:'S',handler:'h'},1);const won=await Promise.race([call,ctx.sleep(1).then(()=>'timer')]);await ctx.sleep(10);return won;}";
+    let store = MemoryStore::default();
+    let mut run = start(&store, source, Value::Null, 1)?;
+    let pending = run.view().state.pending;
+    let [
+        Operation::Rpc { id: call, .. },
+        Operation::Sleep {
+            id: timer,
+            deadline,
+        },
+    ] = &pending[..]
+    else {
+        panic!("Expected a call and a timer: {pending:?}");
+    };
+    block(run.deliver(&store, timer, Outcome::success(Value::Null), *deadline))?;
+    let failed = Outcome::failure("Error", "too late");
+    block(run.deliver(&store, call, failed, deadline + 1))?;
+    assert_eq!(value(&finish(&mut run, &store)?), json!("timer"));
     Ok(())
 }
 

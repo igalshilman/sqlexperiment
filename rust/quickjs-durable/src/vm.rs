@@ -1,5 +1,5 @@
 use crate::heap;
-use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, State, VmMeta, fingerprint};
+use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, Report, VmMeta, fingerprint};
 use wasmtime::error::Context;
 use wasmtime::{
     Caller, Config, Engine, Global, Instance, InstanceAllocationStrategy, InstancePre, Linker,
@@ -31,7 +31,7 @@ const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
 /// The runtime's version: an image restores only on the runtime that made it.
 /// Bump it with anything an image depends on: the Wasm, the bridge
 /// (`guest.js`), the limits above, the imports' behavior, the VM metadata.
-pub(crate) const VERSION: u64 = 2;
+pub(crate) const VERSION: u64 = 3;
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.
@@ -571,7 +571,8 @@ impl Vm {
         self.call(name, Some(&serde_json::to_string(value)?))?;
         Ok(())
     }
-    pub(crate) fn inspect(&mut self) -> Result<State> {
+    /// What the guest issued since it last reported, and where it stands.
+    pub(crate) fn inspect(&mut self) -> Result<Report> {
         Ok(serde_json::from_str(&self.call("inspect", None)?)?)
     }
     pub(crate) fn drain(&mut self) -> Result<()> {

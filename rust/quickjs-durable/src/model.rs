@@ -139,6 +139,19 @@ pub struct State {
     pub outcome: Option<Outcome>,
 }
 
+/// The guest's report at the end of a step: the requests it issued since its
+/// last report, which it then forgets (the host keeps them pending), and
+/// where the run stands.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Report {
+    pub issued: Vec<Operation>,
+    pub next_operation: u64,
+    pub now: u64,
+    pub status: Status,
+    pub outcome: Option<Outcome>,
+}
+
 /// Pointers are offsets into the same pinned Wasm binary's linear memory.
 /// The indirect function table is reconstructed by instantiating that binary;
 /// extensions and mutable reference tables are not supported by this experiment.
