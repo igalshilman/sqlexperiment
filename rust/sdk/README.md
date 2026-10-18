@@ -26,6 +26,12 @@ reads the runtime's next message wakes the others, whose results it may
 carry. (Without the patch, only the last future to wait is woken, and the
 others hang.)
 
+> **Upstream bug, patched here only.** This one is a bug in the released SDK
+> (0.12.1), not a change for SQL: any handler that awaits two futures at once
+> can hang (`futures::join!` on two state reads, say). We keep the fix in this
+> patch and have not proposed it to `restatedev/sdk-rust`; drop it once the
+> SDK fixes it on its own.
+
 `ObjectContext::raw_state()` is the object's state as bytes, through a handle
 that outlives the context's borrow, for a store that must own its storage,
 such as [a database in the state](../../core/sqlite-kv/README.md).
