@@ -59,37 +59,38 @@ compile or load.
 
 ## How it works
 
-| Handler of `<program>/<scope>`      | What                                                                       |
-| ----------------------------------- | -------------------------------------------------------------------------- |
-| `run(input)`, shared                | Start a run, its ID this invocation's, and wait for its outcome, a signal  |
-| `start({run, input})`               | A turn: start a run                                                        |
-| `complete({run, operation, …})`     | A turn: deliver a request's result (private)                               |
-| `call({run, operation, …})`, shared | A run's RPC: call the target, and send its outcome to `complete` (private) |
+`<program>/<scope>/run` is an exclusive handler without journal replay, and
+it runs the program itself. The JavaScript runs until it waits on a request
+the handler cannot answer at once; the handler commits the run's image, its
+KV writes and its requests in one save of the scope's database
+([sqlite-kv](../../core/sqlite-kv/README.md), in the object's state): a
+**turn**. Then it waits on Restate for the first of those requests to
+complete, an RPC (`ctx.rpc.call`, a call with the operation's ID as
+idempotency key) or a timer (`ctx.sleep`, until the request's deadline), and
+delivers it in the next turn. `ctx.kv` is answered within the turn.
 
-A scope's runs' images and their `ctx.kv` are one SQL database
-([sqlite-kv](../../core/sqlite-kv/README.md)) in the object's state. A
-**turn** is one invocation of `start` or `complete`, without journal replay:
-it restores the run's image, delivers the event, runs the JavaScript until it
-waits, and commits the next image, the KV writes and the new requests in one
-save. A retried attempt runs the turn again against the state as stored, and
-a result already delivered does nothing more.
+A retried attempt replays nothing: it restores the last committed image and
+waits again on its requests, under the same idempotency keys, so Restate
+attaches it to a call made before the crash instead of making it again, and a
+timer waits only for what is left. Once `main` settles, `run` returns; if
+requests are still outstanding then (a race's loser), the private `drain`
+handler finishes the run, so their continuations run too.
 
-After the commit, the turn dispatches the run's new requests, the **outbox**,
-each with its operation ID as idempotency key: an RPC through `call`, a timer
-as a delayed send to `complete`. It then records what it dispatched, in the
-object's state; Restate stores state writes in order, so once the record is
-stored, so are the sends. A turn whose attempt crashed between its commit and
-that record dispatches the rest on the retry. Once `main` settles, the turn
-signals the outcome to `run`; requests still outstanding (a race's loser)
-still complete, and run their continuations, before the run ends.
+Runs of one scope run one after the other, as invocations of an object's
+exclusive handlers do: a run waiting on a timer holds its scope. Give runs
+that must overlap keys of their own.
 
-`make test-qjs-restate` runs both against a real Restate server: RPCs,
-timers, KV shared by the runs of a scope, a failing program, and turns that
-crash after their commit (`quickjs_restate::faults`).
+`make test-qjs-restate` runs it against a real Restate server: RPCs, timers,
+KV shared by the runs of a scope, a failing program, a race that answers
+before its loser, and an attempt that crashes while its call runs, whose
+retry attaches to the call (`quickjs_restate::faults`).
 
 ## Not yet
 
 - `durable.call(name)`, the runtime's host operation, fails: call a service
   with `ctx.rpc.call`.
-- A run is not cancelled, and a `run` that gives up leaves it running.
+- A re-issued call attaches only within the callee's idempotency retention
+  (24 hours by default): a run waiting longer on a call that its attempt lost
+  would call again.
+- A cancelled `run` ends its run where it is.
 - The engine runs on the async runtime's threads: a long turn holds one.

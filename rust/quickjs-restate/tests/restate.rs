@@ -8,20 +8,36 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     process::{Child, Command},
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 const INGRESS: &str = "http://127.0.0.1:8080";
 const ADMIN: &str = "http://127.0.0.1:9070";
 
-/// The service a run calls.
+/// The service a run calls. `slow` takes half a second, and counts its runs.
 struct Doubler;
+
+static SLOW_RUNS: AtomicU32 = AtomicU32::new(0);
 
 #[restate_sdk::service]
 impl Doubler {
     #[handler]
     async fn double(&self, _ctx: Context<'_>, n: Json<i64>) -> HandlerResult<Json<i64>> {
+        Ok(Json(n.into_inner() * 2))
+    }
+
+    #[handler]
+    async fn slow(&self, ctx: Context<'_>, n: Json<i64>) -> HandlerResult<Json<i64>> {
+        ctx.run(|| async {
+            SLOW_RUNS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await?;
+        ctx.sleep(Duration::from_millis(500)).await?;
         Ok(Json(n.into_inner() * 2))
     }
 }
@@ -83,7 +99,8 @@ where
     }
 }
 
-/// The test programs: `counter` calls `Doubler`, `failing` throws.
+/// The test programs: `counter` calls `Doubler`, `failing` throws, `attach`
+/// waits on a slow call and a timer, `race` answers before its loser.
 fn programs() -> Arc<Programs> {
     static PROGRAMS: OnceLock<Arc<Programs>> = OnceLock::new();
     PROGRAMS
@@ -92,6 +109,8 @@ fn programs() -> Arc<Programs> {
             let programs = Programs::new(runtime)
                 .compile("counter", COUNTER)
                 .and_then(|p| p.compile("failing", FAILING))
+                .and_then(|p| p.compile("attach", ATTACH))
+                .and_then(|p| p.compile("race", RACE))
                 .unwrap();
             Arc::new(programs)
         })
@@ -176,6 +195,19 @@ const FAILING: &str = r#"async function main() {
 }
 async function ctx_free() { throw new RangeError('no luck'); }"#;
 
+const ATTACH: &str = r#"async function main(n, ctx) {
+  const doubled = ctx.rpc.call({ service: 'Doubler', handler: 'slow' }, n);
+  await ctx.sleep(50);
+  return await doubled;
+}"#;
+
+const RACE: &str = r#"async function main(input, ctx) {
+  if (input === 'late') return await ctx.kv.get('late');
+  const slow = ctx.rpc.call({ service: 'Doubler', handler: 'slow' }, 21);
+  slow.then((v) => ctx.kv.set('late', v));
+  return await Promise.race([ctx.sleep(50).then(() => 'timer'), slow]);
+}"#;
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs restate-server: make test-qjs-restate"]
 async fn runs_wait_on_rpcs_and_timers_and_share_their_scope() {
@@ -206,21 +238,40 @@ async fn runs_wait_on_rpcs_and_timers_and_share_their_scope() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs restate-server: make test-qjs-restate"]
-async fn a_turn_that_crashes_after_its_commit_dispatches_on_the_retry() {
+async fn a_retried_attempt_attaches_to_its_calls() {
     let _server = server().await;
     serve().await;
 
-    // Every turn of this run commits, then crashes: the start (the RPC is due),
-    // the RPC's completion (the timer is due), and the timer's.
-    quickjs_restate::faults::crash_after_commit(3);
-    let (status, run) = call("counter/carol/run", json!(5)).await;
-    assert_eq!(
-        (status, run),
-        (200, json!({"n": 5, "doubled": 10, "slept": true}))
-    );
+    // The first turn commits and calls slow; the timer's turn commits, then
+    // its attempt crashes while the call is still running. The retry restores
+    // the timer's image and calls again, under the same idempotency key.
+    let before = SLOW_RUNS.load(Ordering::SeqCst);
+    quickjs_restate::faults::crash_after_commit(1, 1);
+    let (status, doubled) = call("attach/carol/run", json!(5)).await;
+    assert_eq!((status, doubled), (200, json!(10)));
     assert_eq!(quickjs_restate::faults::pending(), 0);
+    assert_eq!(
+        SLOW_RUNS.load(Ordering::SeqCst) - before,
+        1,
+        "slow ran once"
+    );
+}
 
-    // The KV write of the run's first attempt, once.
-    let (_, again) = call("counter/carol/run", json!(0)).await;
-    assert_eq!(again["n"], json!(5));
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-qjs-restate"]
+async fn a_race_answers_first_and_drains_its_loser() {
+    let _server = server().await;
+    serve().await;
+
+    let started = Instant::now();
+    let (_, winner) = call("race/dave/run", json!("go")).await;
+    assert_eq!(winner, json!("timer"));
+    assert!(
+        started.elapsed() < Duration::from_millis(450),
+        "{:?}",
+        started.elapsed()
+    );
+    // The next run of the scope waits for the drain: the loser's continuation ran.
+    let (_, late) = call("race/dave/run", json!("late")).await;
+    assert_eq!(late, json!(42));
 }

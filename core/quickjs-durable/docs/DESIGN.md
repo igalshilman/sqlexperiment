@@ -1084,24 +1084,23 @@ a scope.
 `rust/quickjs-restate` binds §7.1's host to a live Restate server, on the
 Rust SDK with journal replay off:
 
-- A scope is a virtual object key; exclusive handlers serialize its turns, so
-  every run in a scope shares one writer. A turn is one invocation of `start`
-  or `complete`; a retried attempt runs it again against the stored state, and
-  the engine's duplicate handling makes it a no-op.
-- The `effects` table is an outbox. After the commit, the turn sends each new
-  request with its operation ID as idempotency key: an RPC to a proxy service
-  that makes the call and sends the outcome to `complete`, a timer as a delayed
-  send to `complete`, Resume as an immediate one. It then records the IDs it
-  sent in the object's state; Restate stores state writes in order, so a
-  stored record implies stored sends, and a retry sends what the record lacks.
-  Uncommitted IDs are never sent, so their reuse is safe (§2.2).
-- The `complete` invocation is the inbox: Restate retries it until its turn
-  commits, so the host keeps no results. The proxy's call is a normal,
-  journaled invocation.
 - Each program is a virtual object of its name, with no registration: the
-  binary embeds its programs and their dumps.
-- A caller (the object's shared `run`) waits on a signal, sent by the turn in which `outcome`
-  first appears, even while losers of a race are still outstanding (§2.2).
+  binary embeds its programs and their dumps (§5.3). An object key is a
+  scope; its exclusive handlers serialize its runs, one writer at a time.
+- A run is one invocation of the object's `run` handler, which drives its
+  turns itself. After each turn commits, the handler waits on Restate for the
+  first pending request: an RPC as a call whose idempotency key is the
+  operation ID, a timer as a sleep until the deadline; Resume is delivered at
+  once. The completion is the next turn's event. Uncommitted IDs are never
+  waited on, so their reuse is safe (§2.2).
+- A retried attempt restores the last committed image and waits again on its
+  pending requests under the same keys: Restate attaches a re-issued call to
+  the original invocation, within the callee's idempotency retention. Nothing
+  is replayed, and the host keeps no results: `effects` only checks that a
+  delivered ID is pending.
+- `run` returns once `outcome` appears (§2.2). Requests still outstanding then
+  are finished by a `drain` invocation of the same object, which recovers the
+  run and continues it until its status is terminal.
 
 An implementation can be built and accepted in this order:
 

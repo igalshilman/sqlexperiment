@@ -6,11 +6,10 @@
 //! The namespace is one application KV scope: every run in it shares `state`.
 //! Its owner (the object's exclusive handler) runs one turn at a time.
 //!
-//! Unlike [`crate::sqlite`], this host keeps no results: the embedding's inbox
-//! (a Restate invocation of the object, retried until its turn commits) holds a
-//! completion until the engine consumes it. `effects` is the outbox: the
-//! requests the host must dispatch once the turn that issued them commits, and
-//! again after a crash, under their stable IDs.
+//! Unlike [`crate::sqlite`], this host keeps no results: the embedding waits
+//! for each request itself, under its stable ID, once the turn that issued it
+//! has committed, and again after a crash. `effects` lists the run's requests
+//! still pending, and a delivery must name one of them.
 use crate::{Kv, Operation, Outcome, Resolution, Transaction};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value as Json;

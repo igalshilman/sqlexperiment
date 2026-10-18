@@ -217,7 +217,7 @@ tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, wor
 	cd typescript/tests && node restate-tools.ts
 
 # One server at a time, on the default ports.
-test-qjs-restate: $(SDK_RS) goldens $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: runs, scopes and a crash after a commit, against a Restate server
+test-qjs-restate: $(SDK_RS) goldens $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: runs, scopes, races and a crash during a call, against a Restate server
 	cd $(QJS_RESTATE) && $(CARGO) test --locked --release -- --include-ignored --test-threads 1
 
 restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
