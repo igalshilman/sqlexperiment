@@ -39,7 +39,10 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, io, ops::Range};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+};
 use zstd_safe::{CCtx, CParameter, DCtx};
 
 /// Largest segment.
@@ -267,6 +270,16 @@ pub(crate) fn stored_segments(bytes: &Bytes) -> io::Result<Vec<Bytes>> {
     Ok(segments)
 }
 
+/// A stored value holding the first `segments` inline segments of a record's
+/// log, acknowledged, which the record lists as garbage until the next names
+/// it.
+#[derive(Clone, Debug)]
+pub(crate) struct Sealed {
+    pub n: u64,
+    pub value: Bytes,
+    pub segments: usize,
+}
+
 /// Where a segment of a committed transaction is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Part {
@@ -287,8 +300,9 @@ pub(crate) struct Logged {
 /// The commit record at `commit`.
 ///
 /// Encoding: `SC14`, then LEB128 varints: the version, the epoch, the
-/// database size in 512-byte units, the next segment number, the garbage
-/// range's start and end, the effects' length and bytes, and the
+/// database size in 512-byte units, the next segment number, the garbage's
+/// count and its numbers (ascending, each from the one before), the
+/// effects' length and bytes, and the
 /// transaction count; per transaction its
 /// size in 512-byte units and its part count; per part 0 and the segment's
 /// length and bytes (inline), or 1, the stored value's number and the
@@ -303,8 +317,9 @@ pub(crate) struct Commit {
     pub size: u64,
     /// The number of the next stored segment.
     pub next_segment: u64,
-    /// Stored segments no transaction in the log names, to delete.
-    pub garbage: Range<u64>,
+    /// Stored values no transaction in the log names, to delete: those a
+    /// checkpoint passed, and a seal not yet named.
+    pub garbage: BTreeSet<u64>,
     /// The host's bytes, committed with the last transaction that set them
     /// (its outbox, say): opaque here, and kept by checkpoints.
     pub effects: Bytes,
@@ -320,7 +335,7 @@ impl Default for Commit {
             epoch: 0,
             size: 0,
             next_segment: 0,
-            garbage: 0..0,
+            garbage: BTreeSet::new(),
             effects: Bytes::new(),
             log: Vec::new(),
         }
@@ -345,10 +360,14 @@ impl Commit {
             self.epoch,
             self.size / 512,
             self.next_segment,
-            self.garbage.start,
-            self.garbage.end,
+            self.garbage.len() as u64,
         ] {
             put_varint(&mut out, n);
+        }
+        let mut previous = 0;
+        for &n in &self.garbage {
+            put_varint(&mut out, n - previous);
+            previous = n;
         }
         put_varint(&mut out, self.effects.len() as u64);
         out.extend_from_slice(&self.effects);
@@ -385,7 +404,20 @@ impl Commit {
         let epoch = varint(&mut at)?;
         let size = varint(&mut at)?.checked_mul(512).ok_or_else(record)?;
         let next_segment = varint(&mut at)?;
-        let garbage = varint(&mut at)?..varint(&mut at)?;
+        let garbage_count = varint(&mut at)?;
+        if garbage_count > MAX_TRANSACTIONS || next_segment > MAX_SEQUENCE {
+            return Err(record());
+        }
+        let mut garbage = BTreeSet::new();
+        let mut previous = 0u64;
+        for first in (0..garbage_count).map(|i| i == 0) {
+            let delta = varint(&mut at)?;
+            // Ascending, and below the next segment.
+            let n = previous.checked_add(delta).filter(|&n| n < next_segment);
+            let n = n.filter(|_| first || delta > 0).ok_or_else(record)?;
+            garbage.insert(n);
+            previous = n;
+        }
         let len = varint(&mut at)? as usize;
         let end = at.checked_add(len).filter(|&end| end <= bytes.len());
         let end = end
@@ -398,8 +430,6 @@ impl Commit {
             .iter()
             .all(|&n| n <= MAX_SEQUENCE)
             && valid_size(size)
-            && garbage.start <= garbage.end
-            && garbage.end <= next_segment
             && count <= MAX_TRANSACTIONS
             && count <= version;
         if !plausible {
@@ -477,6 +507,17 @@ impl Commit {
             })
             .flat_map(|(pages, _)| pages.into_iter().map(|(index, _)| index))
             .collect()
+    }
+
+    /// Name `sealed`, acknowledged, in place of the inline segments it holds,
+    /// and take it out of the garbage.
+    pub(crate) fn name(&mut self, sealed: &Sealed) {
+        let parts = self.log.iter_mut().flat_map(|t| &mut t.parts);
+        let inline = parts.filter(|part| matches!(part, Part::Inline(_)));
+        for (index, part) in inline.take(sealed.segments).enumerate() {
+            *part = Part::Stored(sealed.n, index as u32);
+        }
+        self.garbage.remove(&sealed.n);
     }
 
     /// The stored values the log names, by number.

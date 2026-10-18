@@ -43,8 +43,8 @@ A namespace holds four kinds of keys:
 
 | Key            | Holds                                                                                                                         |
 | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `v14/commit`   | The commit record: the version, the epoch, the size, the log since the last checkpoint (inline, or naming stored segments), the host's effects. |
-| `v14/log/<n>`  | A stored segment of a large transaction's log. Immutable: written once, before a record names it, deleted once none does.     |
+| `v14/commit`   | The commit record: the version, the epoch, the size, the log since the last checkpoint (its tail inline, the rest naming stored values), the host's effects. |
+| `v14/log/<n>`  | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, named once acknowledged, deleted once no record names it. |
 | `v14/page/<n>` | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                     |
 | `v14/hint`     | Advisory: pages a cold open should fetch. Never needed for correctness.                                                       |
 
@@ -67,9 +67,9 @@ empty log). Everything else follows from five invariants:
 4. **Overwrite only what the log covers.** A checkpoint writes only images of
    transactions in the durable record's log, so whatever subset of its page
    puts lands, the log still replays over them.
-5. **Fresh segments, deleted unnamed.** A stored segment is put only at a
-   number the durable record has not yet allocated, and deleted only once a
-   durable record no longer names it.
+5. **Fresh values, deleted unnamed.** A stored value is put only at a number
+   the durable record has not yet allocated, and deleted only once a durable
+   record no longer names it.
 
 So no write needs another to land first except by waiting for its
 acknowledgement, and a crash at any point leaves a durable record whose log
@@ -86,26 +86,33 @@ and commits them:
 1. **Encode.** The changed pages as one transaction of segments (up to 240
    pages each), compressed against the log (below).
 2. **Inline or stored.** A transaction whose segments total at most
-   `max_inline_bytes` (64 KiB) goes inline in the record, while the record's
-   inline log stays within `max(checkpoint_log_bytes, max_inline_bytes)`.
-   A larger one is put first at fresh `log/<n>` keys, concurrently, and the
-   record names them once acknowledged (invariant 1).
-3. **Commit.** Put the record: the previous record's log plus this
+   `inline_log_bytes` (4 KiB) goes inline in the record. A larger one is put
+   first at fresh `log/<n>` keys, a segment each, concurrently, and the record
+   names them once acknowledged (invariant 1): a round trip more.
+3. **Seal.** Once the record's inline log would pass `inline_log_bytes`, the
+   commit seals the inline segments (the durable record's) into one stored
+   value, put in the record's round trip. This record still holds them
+   inline, and lists the value as garbage; the owner's next commit, its put
+   acknowledged, names it in their place and drops it from the garbage. The
+   owner cache carries the acknowledged seal between sessions. Without a
+   cache, nothing would: the commit puts the value first, and the record names
+   it. So every commit rewrites a record of a few KiB, while the log grows long
+   between checkpoints.
+4. **Commit.** Put the record: the previous record's log plus this
    transaction, at the next version, with the host's effects if it set them.
    One put, one round trip, for a small transaction.
-4. **Garbage, in the same round trip.** Delete the stored segments still in
-   the record's garbage range (a checkpoint's deletes that failed); once
-   acknowledged, the next record forgets them.
-5. **Checkpoint the whole log, now and then.** When the log then holds more
-   than `checkpoint_after` transactions (default 4; the bindings use 16) or
-   `checkpoint_log_bytes` (default 256 KiB; the bindings use 16 KiB), the save
-   checkpoints it after committing: each page's latest image to its page key
-   (holes become deletes) and the hint, then, once all are acknowledged, a
-   record with an empty log at the next epoch, whose garbage range takes the
-   stored segments the log named, and once that is acknowledged, their
-   deletes. Two more round trips, three with stored segments. This owner's
-   cache keeps its pages into the next epoch: only the log's pages changed,
-   and it writes those through.
+5. **Garbage, in the same round trip.** Delete the stored values in the
+   record's garbage (a seal never named, a checkpoint's deletes that failed);
+   once acknowledged, the next record forgets them.
+6. **Checkpoint the whole log, now and then.** When the log then holds more
+   than `checkpoint_after` transactions (32) or `checkpoint_log_bytes`
+   (64 KiB), the save checkpoints it after committing: each page's latest
+   image to its page key (holes become deletes) and the hint, then, once all
+   are acknowledged, a record with an empty log at the next epoch, whose
+   garbage takes the stored values the log named, and once that is
+   acknowledged, their deletes. Two more round trips, three with stored
+   values. This owner's cache keeps its pages into the next epoch: only the
+   log's pages changed, and it writes those through.
 
 **Compression.** A commit rewrites the same few pages as the ones before it,
 each a little changed. A segment's images are one zstd frame whose
@@ -114,7 +121,9 @@ costs about what changed in it. Replay rebuilds those images as it goes, from
 the last checkpoint, where the chain restarts.
 
 **Bytes.** The record is rewritten whole by each commit, so its inline log is
-the cost of a commit: the checkpoint thresholds bound it. At most 64
+the cost of a commit: the seal bounds it, and a transaction's segments are
+written about twice (inline, then sealed), its pages once more at a
+checkpoint. Pages are zstd frames by default (`PageCompression::Zstd`). At most 64
 mutations of distinct keys are in flight per group. `Ok(SaveReport)` means
 committed. `cleanup_error` means committed but checkpoint work failed; a later
 save retries it. Any other error leaves the commit outcome unknown.
@@ -175,8 +184,8 @@ acknowledged work when a later step fails.
 
 1. Read the record. An owner that knows no pages of the namespace also reads
    `v14/hint`, in the same round trip.
-2. Replay its log: inline segments are in hand, and stored ones are read
-   together, in one more round trip.
+2. Replay its log: inline segments are in hand, stored values the owner
+   cache holds too, and the others are read together, in one more round trip.
 3. **Cold opens prefetch.** The engine reads one dependent page at a time, so
    without warm cache pages each B-tree level of a query would cost a round
    trip. An owner whose cache holds no pages of the record's epoch fetches,
@@ -185,10 +194,10 @@ acknowledged work when a later step fails.
    dropped from the prefetch; the log wins as always.
 
 There is nothing to confirm or repair: the record read is durable, and
-whatever a crashed save left (stored segments no record names, pages a
-checkpoint wrote) is either covered by the log or unreachable. Unnamed
-segments are numbered at or past the record's next segment, so the next save
-overwrites them.
+whatever a crashed save left (stored values no record names, pages a
+checkpoint wrote) is either covered by the log, garbage the next commit
+deletes, or numbered at or past the record's next segment, where the next
+save overwrites it.
 
 **The working-set hint.** An owner (or, without a cache, a session) records the
 pages its sessions read. A save that checkpoints writes the most useful of
@@ -278,6 +287,9 @@ namespaces. Values are stored encoded (LZ4) by default, or decoded with
 - the exact record bytes this owner last read or wrote, and its epoch: the
   cached pages are those of that epoch;
 - the version of this owner's last acknowledged commit;
+- the stored values the record names (immutable once named), so an open
+  reads the record alone, and this owner's last seal, acknowledged, for its
+  next commit to name;
 - a parked engine.
 
 **Correctness rule.** Page keys change only under a checkpoint, and a
@@ -336,10 +348,10 @@ one-thread runtime of its own. It is the only background work.
 
 | Operation                            | Round trips                                                  | Mutations                                                                                 |
 | ------------------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| Save                                 | 1; 2 for a large transaction; 2 more when it checkpoints, 3 with stored segments | The record (its inline log rewritten); a large transaction's segments; when the log is long, every logged page, the hint, the record and the stored segments' deletes |
+| Save                                 | 1; 2 for a large transaction, or a seal without a cache; 2 more when it checkpoints, 3 with stored values | The record (its inline tail rewritten); a seal now and then; a large transaction's segments; when the log is long, every logged page, the hint, the record and the stored values' deletes |
 | SQL commit with `Durability::Commit` | Same as a save                                               | Same as a save                                                                            |
-| Open, with cache                     | 1, plus 1 if the log names stored segments                   | None                                                                                      |
-| Cold open                            | 1, then the hinted pages (or a small database whole) and stored segments together | None                                                                     |
+| Open, with cache                     | 1, plus 1 if the log names stored values the cache lacks      | None                                                                                      |
+| Cold open                            | 1, then the hinted pages (or a small database whole) and stored values together | None                                                                     |
 | Cold page read                       | 1 get; sequential reads fetch up to 64 ahead                 | None                                                                                      |
 
 Each page is written twice, once to the log (compressed against its previous
@@ -349,10 +361,11 @@ checkpoint. Measurements: [log shipping](../benches/LOG_RESULTS.md),
 
 ## Limits and open questions
 
-- **The record's size.** Every commit rewrites the inline log since the last
-  checkpoint. The checkpoint thresholds trade that against checkpoints, which
-  write each changed page; a large transaction's segments are stored once
-  instead.
+- **The record's size.** Every commit rewrites the inline tail of the log;
+  `inline_log_bytes` trades that against seals (a stored value per few KiB of
+  log), and the checkpoint thresholds trade the log's length against
+  checkpoints, which write each changed page. A cold open reads the whole
+  log, up to `checkpoint_log_bytes`.
 - **Fencing.** Exclusive ownership is assumed. A delayed write from a former
   owner could overwrite newer data. A conditional put of the record would
   close that gap.

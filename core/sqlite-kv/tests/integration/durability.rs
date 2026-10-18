@@ -147,8 +147,10 @@ fn a_commit_is_one_round_trip_with_a_cache() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
         let cache = fresh_namespace();
+        // A log the record holds inline: no commit seals it.
         let options = StorageOptions {
             checkpoint_after: 32,
+            inline_log_bytes: usize::MAX,
             ..options(Some(cache))
         };
         let mut db = Session::open_with_options(store.clone(), options).await?;
@@ -398,6 +400,7 @@ fn an_overlapping_reader_keeps_its_view() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let namespace = fresh_namespace();
         let opts = || StorageOptions {
+            checkpoint_after: 4,
             prefetch_pages: 0,
             hint_pages: 0,
             ..options(Some(namespace.clone()))

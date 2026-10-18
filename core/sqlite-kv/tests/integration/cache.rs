@@ -187,7 +187,12 @@ fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
             create(store.clone(), cached(&cache)).await?;
             let other = fresh_namespace();
             for n in 0..saves {
-                let mut db = Session::open_with_options(store.clone(), cached(&other)).await?;
+                // Its fifth save checkpoints.
+                let options = StorageOptions {
+                    checkpoint_after: 4,
+                    ..cached(&other)
+                };
+                let mut db = Session::open_with_options(store.clone(), options).await?;
                 db.execute(&format!(
                     "UPDATE t SET payload = printf('%0800d', id) WHERE id = {}",
                     n * 31 + 1

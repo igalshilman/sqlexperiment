@@ -7,7 +7,7 @@
 //! only durable values. Round trips come from `LatencyKv`'s virtual clock;
 //! operation and byte counts from `MemoryKv`. Output is CSV.
 use sqlite_kv::{
-    NamespaceCache, Result, Session, StorageOptions,
+    NamespaceCache, PageCompression, Result, Session, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
@@ -39,24 +39,19 @@ struct Policy {
     log_bytes: usize,
     inline_bytes: usize,
 }
-/// The default (4 transactions), 16 transactions, and the bindings' cadence:
-/// 16 transactions or 16 KiB. `POLICIES` overrides them:
-/// `after:log_bytes[:inline_bytes]`, comma-separated.
-const POLICIES: [Policy; 3] = [
+/// The default (32 transactions or 64 KiB, the log sealed past 1 KiB inline),
+/// and the previous one (16 transactions or 16 KiB, all inline). `POLICIES`
+/// overrides them: `after:log_bytes[:inline_bytes]`, comma-separated.
+const POLICIES: [Policy; 2] = [
     Policy {
-        after: 4,
-        log_bytes: sqlite_kv::CHECKPOINT_LOG_BYTES,
-        inline_bytes: sqlite_kv::INLINE_LOG_BYTES,
-    },
-    Policy {
-        after: 16,
+        after: sqlite_kv::CHECKPOINT_AFTER,
         log_bytes: sqlite_kv::CHECKPOINT_LOG_BYTES,
         inline_bytes: sqlite_kv::INLINE_LOG_BYTES,
     },
     Policy {
         after: 16,
         log_bytes: 16 * 1024,
-        inline_bytes: sqlite_kv::INLINE_LOG_BYTES,
+        inline_bytes: 16 * 1024,
     },
 ];
 
@@ -84,8 +79,19 @@ const WORKLOADS: [&str; 4] = ["read_pk", "update_1", "update_10", "insert_1"];
 
 type Store = Arc<LatencyKv<MemoryKv>>;
 
+/// The page codec: `PAGE_COMPRESSION` (`raw`, `lz4` or `zstd`), or the default.
+fn codec() -> PageCompression {
+    match std::env::var("PAGE_COMPRESSION").as_deref() {
+        Ok("raw") => PageCompression::Raw,
+        Ok("lz4") => PageCompression::Lz4,
+        Ok("zstd") => PageCompression::Zstd,
+        _ => PageCompression::default(),
+    }
+}
+
 fn options(policy: Policy, cache: &Option<NamespaceCache>) -> StorageOptions {
     StorageOptions {
+        page_compression: codec(),
         checkpoint_after: policy.after,
         checkpoint_log_bytes: policy.log_bytes,
         inline_log_bytes: policy.inline_bytes,
@@ -97,7 +103,14 @@ fn options(policy: Policy, cache: &Option<NamespaceCache>) -> StorageOptions {
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
-    let mut db = Session::open(kv.clone()).await?;
+    let mut db = Session::open_with_options(
+        kv.clone(),
+        StorageOptions {
+            page_compression: codec(),
+            ..StorageOptions::default()
+        },
+    )
+    .await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, payload TEXT)")
         .await?;
     if case.indexes > 0 {

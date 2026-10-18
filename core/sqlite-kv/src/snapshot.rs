@@ -12,9 +12,11 @@
 //! A save commits its changed pages as one transaction (see [`crate::log`]):
 //!
 //! - **Commit:** one put of the commit record, the log so far plus the new
-//!   transaction. A transaction too large to hold inline
-//!   ([`StorageOptions::max_inline_bytes`]) is put first at stored segments,
-//!   and the record, put once they are acknowledged, names them.
+//!   transaction. A transaction larger than the record's inline budget
+//!   ([`StorageOptions::inline_log_bytes`]) is put first at stored values,
+//!   and the record, put once they are acknowledged, names them. Past the
+//!   budget, the record's inline log is sealed into a stored value with the
+//!   record, which the next commit names.
 //! - **Checkpoint:** once more than [`StorageOptions::checkpoint_after`]
 //!   transactions or [`StorageOptions::checkpoint_log_bytes`] are in the log,
 //!   the save then checkpoints it ([`Snapshot::compact`]): the latest image
@@ -41,7 +43,7 @@ use crate::{
     format::{COMMIT, HINT, log_key, page_key},
     hint::{self, Usage},
     kv::KvStore,
-    log::{self, Commit, Images, Log, Logged, Part},
+    log::{self, Commit, Images, Log, Logged, Part, Sealed},
     page_codec::{self, Page, PageCompression},
 };
 use bytes::Bytes;
@@ -70,12 +72,12 @@ const PAGE: u64 = crate::io::BLOCK_SIZE as u64;
 const READAHEAD_AFTER: u32 = 3;
 /// Largest readahead window, in pages.
 const MAX_READAHEAD: u64 = 64;
+/// Default [`StorageOptions::checkpoint_after`].
+pub const CHECKPOINT_AFTER: u32 = 32;
 /// Default [`StorageOptions::checkpoint_log_bytes`].
-pub const CHECKPOINT_LOG_BYTES: usize = 256 * 1024;
-/// Default [`StorageOptions::max_inline_bytes`].
-pub const MAX_INLINE_BYTES: usize = 64 * 1024;
+pub const CHECKPOINT_LOG_BYTES: usize = 64 * 1024;
 /// Default [`StorageOptions::inline_log_bytes`].
-pub const INLINE_LOG_BYTES: usize = 8 * 1024;
+pub const INLINE_LOG_BYTES: usize = 4 * 1024;
 
 /// When a session's SQL changes become durable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -104,14 +106,12 @@ pub struct StorageOptions {
     /// Encoded bytes kept in the log: a save that logs more checkpoints the
     /// whole log.
     pub checkpoint_log_bytes: usize,
-    /// A transaction whose segments take more is put at stored segments, which
-    /// the commit record names, rather than inline in it: a save then costs a
-    /// round trip more, and the log's later saves do not rewrite it.
-    pub max_inline_bytes: usize,
-    /// Bytes of log the record holds inline. A commit that would take it past
-    /// this seals the inline segments, with its own, into one stored value,
-    /// which the record names: a round trip more for that commit, and every
-    /// later one rewrites a smaller record.
+    /// Bytes of log the commit record holds inline, which every commit
+    /// rewrites. A transaction that takes more is put first at stored values,
+    /// one per segment: a round trip more. Once the inline log would pass it,
+    /// a commit seals the inline segments into a stored value: with a cache,
+    /// in its own round trip, and the owner's next commit names it; without
+    /// one, before its record, which names it.
     pub inline_log_bytes: usize,
     /// A cold open (no warm cache pages) fetches every page of a database of
     /// at most this many pages, alongside replay.
@@ -135,9 +135,8 @@ impl Default for StorageOptions {
         Self {
             page_compression: PageCompression::default(),
             cache: None,
-            checkpoint_after: 4,
+            checkpoint_after: CHECKPOINT_AFTER,
             checkpoint_log_bytes: CHECKPOINT_LOG_BYTES,
-            max_inline_bytes: MAX_INLINE_BYTES,
             inline_log_bytes: INLINE_LOG_BYTES,
             prefetch_pages: PREFETCH_PAGES,
             hint_pages: HINT_PAGES,
@@ -215,6 +214,9 @@ pub(crate) struct Snapshot {
     usage: Mutex<Usage>,
     /// This view's registration with the owner cache while a session uses it.
     reader: Mutex<Option<Reader>>,
+    /// The value the last commit sealed and had acknowledged, which the next
+    /// commit names.
+    sealed: Option<Sealed>,
 }
 
 /// A stored page value, with the cache key taken before it was read (see
@@ -304,6 +306,11 @@ impl Snapshot {
             cache.record(commit_bytes.clone(), commit.epoch, committed);
         }
         let reader = cache.map(|cache| cache.reader(commit.version));
+        // This owner's seal, acknowledged, that the record lists as garbage:
+        // the next commit names it.
+        let sealed = (cache.filter(|_| known))
+            .and_then(NamespaceCache::sealed)
+            .filter(|sealed| commit.garbage.contains(&sealed.n));
         Ok(Self {
             store,
             options,
@@ -311,6 +318,7 @@ impl Snapshot {
             commit_bytes,
             log,
             unchanged,
+            sealed,
             page: Mutex::default(),
             fetched: Mutex::default(),
             readahead: Mutex::default(),
@@ -519,43 +527,69 @@ impl Snapshot {
         let logged_bytes = segments.iter().map(Bytes::len).sum::<usize>();
         let store = &*self.store;
         let mut commit = self.commit.clone();
-        // A large transaction goes to stored values, a segment each; and once
-        // the record's inline log would outgrow its budget, the commit seals
-        // it, with its own segments, into one. Either is durable before the
-        // record that names it.
-        let mut stored = log::Values::new();
-        let parts = if logged_bytes > self.options.max_inline_bytes {
+        // Stored values this record names, durable: for the cache.
+        let mut named = log::Values::new();
+        // The value the last commit sealed, acknowledged since: this record
+        // names it in place of the inline segments it holds.
+        if let Some(sealed) = &self.sealed {
+            commit.name(sealed);
+            named.insert(sealed.n, sealed.value.clone());
+        }
+        // A transaction past the inline budget goes to stored values first, a
+        // segment each, durable before the record that names them.
+        let large = logged_bytes > self.options.inline_log_bytes;
+        let parts = if large {
             let first = commit.next_segment;
             commit.next_segment += segments.len() as u64;
             for (n, segment) in (first..).zip(&segments) {
-                stored.insert(n, log::stored_value(std::slice::from_ref(segment)));
+                named.insert(n, log::stored_value(std::slice::from_ref(segment)));
+            }
+            let puts = (named.range(first..))
+                .map(|(&n, value)| Mutation::Put(log_key(n), value.clone()))
+                .collect();
+            if let Err(error) = concurrently(store, puts).await {
+                return Err(self.failed(error));
             }
             (first..commit.next_segment)
                 .map(|n| Part::Stored(n, 0))
                 .collect()
-        } else if commit.inline_bytes() + logged_bytes > self.options.inline_log_bytes {
-            let n = commit.next_segment;
-            commit.next_segment += 1;
-            let mut sealed = Vec::new();
-            for part in commit.log.iter_mut().flat_map(|t| &mut t.parts) {
-                if let Part::Inline(segment) = part {
-                    sealed.push(std::mem::take(segment));
-                    *part = Part::Stored(n, sealed.len() as u32 - 1);
-                }
-            }
-            let first = sealed.len() as u32;
-            sealed.extend(segments);
-            let last = sealed.len() as u32;
-            stored.insert(n, log::stored_value(&sealed));
-            (first..last).map(|index| Part::Stored(n, index)).collect()
         } else {
             segments.into_iter().map(Part::Inline).collect()
         };
-        let puts = (stored.iter())
-            .map(|(&n, value)| Mutation::Put(log_key(n), value.clone()))
+        // Past its budget, the record's inline log is sealed into a stored
+        // value. With a cache it is put in this commit's round trip: this
+        // record still holds it inline, and lists the value as garbage until
+        // the owner's next commit names it. Without one, nothing would carry
+        // the seal to the next session: it is put first, and named now.
+        let inline: Vec<Bytes> = (commit.log.iter().flat_map(|t| &t.parts))
+            .filter_map(|part| match part {
+                Part::Inline(segment) => Some(segment.clone()),
+                Part::Stored(..) => None,
+            })
             .collect();
-        if let Err(error) = concurrently(store, puts).await {
-            return Err(self.failed(error));
+        let added = if large { 0 } else { logged_bytes };
+        let mut seal = (!inline.is_empty()
+            && commit.inline_bytes() + added > self.options.inline_log_bytes)
+            .then(|| {
+                let n = commit.next_segment;
+                commit.next_segment += 1;
+                commit.garbage.insert(n);
+                Sealed {
+                    n,
+                    value: log::stored_value(&inline),
+                    segments: inline.len(),
+                }
+            });
+        if cache.is_none()
+            && let Some(sealed) = seal.take()
+            && store
+                .put(&log_key(sealed.n), sealed.value.clone())
+                .await
+                .is_ok()
+        {
+            // A seal that failed stays garbage, deleted by a later commit.
+            commit.name(&sealed);
+            named.insert(sealed.n, sealed.value);
         }
         commit.version += 1;
         commit.size = size;
@@ -564,16 +598,30 @@ impl Snapshot {
             commit.effects = effects;
         }
         let bytes = commit.encode();
-        // Garbage goes in the commit's round trip; the record after this one
-        // forgets it, once deleted.
-        let garbage = commit.garbage.clone();
-        let deletes = garbage
-            .clone()
-            .map(|n| Mutation::Delete(log_key(n)))
+        // The previous record's garbage, but the value named now, goes in the
+        // commit's round trip; the record after this one forgets it, once
+        // deleted.
+        let garbage: Vec<u64> = (self.commit.garbage.iter())
+            .filter(|&&n| self.sealed.as_ref().is_none_or(|sealed| sealed.n != n))
+            .copied()
             .collect();
-        let (committed, collected) = futures::join!(
+        let deletes = garbage
+            .iter()
+            .map(|&n| Mutation::Delete(log_key(n)))
+            .collect();
+        let sealing = async {
+            match &seal {
+                Some(seal) => store
+                    .put(&log_key(seal.n), seal.value.clone())
+                    .await
+                    .is_ok(),
+                None => false,
+            }
+        };
+        let (committed, collected, sealed) = futures::join!(
             store.put(COMMIT, bytes.clone()),
-            concurrently(store, deletes)
+            concurrently(store, deletes),
+            sealing
         );
         if let Err(error) = committed {
             return Err(self.failed(error));
@@ -581,13 +629,18 @@ impl Snapshot {
         let version = commit.version;
         if let Some(cache) = cache {
             cache.record(Some(bytes.clone()), commit.epoch, Some(version));
-            cache.keep_values(&commit.stored_values(), stored);
+            cache.keep_values(&commit.stored_values(), named);
+            cache.keep_sealed(seal.clone().filter(|_| sealed));
         }
         let mut after = self.continued(commit, Some(bytes));
         after.extend(size, images, logged_bytes);
         if collected.is_ok() {
-            after.commit.garbage = garbage.end..garbage.end;
+            for n in &garbage {
+                after.commit.garbage.remove(n);
+            }
         }
+        // A seal whose put failed stays garbage, deleted by a later commit.
+        after.sealed = seal.filter(|_| sealed);
         let after = after.registered();
         let report = SaveReport {
             checkpointed_pages: 0,
@@ -650,7 +703,7 @@ impl Snapshot {
         // The record passes the log only now that its pages are acknowledged.
         let commit = Commit {
             epoch: self.commit.epoch + 1,
-            garbage: self.commit.garbage.start..self.commit.next_segment,
+            garbage: &self.commit.garbage | &self.commit.stored_values(),
             log: Vec::new(),
             ..self.commit.clone()
         };
@@ -662,6 +715,7 @@ impl Snapshot {
         }
         if let Some(cache) = cache {
             cache.checkpointed(bytes.clone(), commit.epoch, commit.version);
+            cache.keep_sealed(None);
             for (index, image) in &checkpoint.images {
                 match image {
                     Some(image) => cache.replace(*index, image.clone()),
@@ -677,16 +731,16 @@ impl Snapshot {
             after.hint = Some(Bytes::from(hint));
         }
         after.log = Log::new();
-        // The stored segments no durable record names any more: deleted now,
-        // so they are not kept until the next commit; that one forgets them.
-        let garbage = after.commit.garbage.clone();
-        let deletes = garbage
-            .clone()
-            .map(|n| Mutation::Delete(log_key(n)))
+        // A seal not yet named is garbage now, with the log's values.
+        after.sealed = None;
+        // The stored values no durable record names any more: deleted now, so
+        // they are not kept until the next commit; that one forgets them.
+        let deletes = (after.commit.garbage.iter())
+            .map(|&n| Mutation::Delete(log_key(n)))
             .collect();
         let cleanup_error = concurrently(store, deletes).await.err();
         if cleanup_error.is_none() {
-            after.commit.garbage = garbage.end..garbage.end;
+            after.commit.garbage.clear();
         }
         let report = SaveReport {
             checkpointed_pages: checkpoint.images.len(),
@@ -721,6 +775,7 @@ impl Snapshot {
             commit_bytes,
             log,
             unchanged: false,
+            sealed: self.sealed.clone(),
             page: Mutex::default(),
             fetched: Mutex::new(std::mem::take(&mut *self.fetched.lock().unwrap())),
             readahead: Mutex::default(),
@@ -737,6 +792,7 @@ impl Snapshot {
         idle.log = Log::new();
         idle.fetched = Mutex::default();
         idle.usage = Mutex::default();
+        idle.sealed = None;
         idle
     }
 

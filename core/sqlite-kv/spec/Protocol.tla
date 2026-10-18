@@ -3,8 +3,11 @@
 (* The storage protocol of docs/DESIGN.md, as a state machine.             *)
 (*                                                                         *)
 (* A key/value store holds one commit record (the log since the last       *)
-(* checkpoint, each transaction inline or in a stored segment), stored    *)
-(* segments and pages checkpointed in place. Writes are not ordered: each *)
+(* checkpoint, each transaction inline or in a stored value), stored      *)
+(* values and pages checkpointed in place. A commit may seal the record's *)
+(* inline transactions into a stored value: a process with a cache puts   *)
+(* it with its record, which lists it as garbage, and its next commit     *)
+(* names it; one without puts it first, and names it in that record. Writes are not ordered: each *)
 (* is acknowledged and durable, durable without the acknowledgement, or   *)
 (* lost, independently, and reads return durable values. Processes take   *)
 (* turns owning the namespace; some keep an owner cache across their      *)
@@ -18,7 +21,7 @@
 (*                                                                         *)
 (* Not modelled: the SQL engine, compression, effects (they ride in the   *)
 (* record), the hint, prefetch and readahead (they change which reads     *)
-(* happen, not their values), transactions of several stored segments,    *)
+(* happen, not their values), transactions of several stored values,      *)
 (* overlapping sessions of one process, and deleted pages (holes).        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
@@ -42,7 +45,7 @@ ReadRecord(r) == IF r = Nil THEN Empty ELSE r
 
 VARIABLES
     commitS,        \* the commit record, or Nil
-    segS,           \* stored segments, by number
+    segS,           \* stored values, by number: sets of transactions
     pageS,          \* page keys
     pending,        \* requests in flight: [key, val]; at most one per key
     results,        \* key -> acknowledged?, for the current operation
@@ -76,13 +79,25 @@ Expected(seq) == [p \in Pages |-> LatestIn(seq, p)]
 
 LogPages(log) == UNION {log[i].pages : i \in DOMAIN log}
 
-\* The stored segments a record's log names.
+\* The stored values a record's log names.
 Named(r) == {r.log[i].seg : i \in DOMAIN r.log} \ {0}
 
-\* Replay reads each stored segment the log names: it must hold that
+Tx(t) == [tx |-> t.tx, pages |-> t.pages]
+
+\* Replay reads each stored value the log names: it must hold that
 \* transaction.
 Replays(r) == \A i \in DOMAIN r.log :
-    r.log[i].seg = 0 \/ segS[r.log[i].seg] = [tx |-> r.log[i].tx, pages |-> r.log[i].pages]
+    r.log[i].seg = 0 \/ (segS[r.log[i].seg] # Nil /\ Tx(r.log[i]) \in segS[r.log[i].seg])
+
+\* The record's inline transactions.
+InlineTx(r) == {Tx(r.log[i]) : i \in {j \in DOMAIN r.log : r.log[j].seg = 0}}
+
+\* Name the acknowledged seal `s` in place of its inline transactions.
+Rename(r, s) ==
+    [r EXCEPT !.log = [i \in DOMAIN r.log |->
+                         IF r.log[i].seg = 0 /\ Tx(r.log[i]) \in s.txs
+                         THEN [r.log[i] EXCEPT !.seg = s.n] ELSE r.log[i]],
+              !.garbage = @ \ {s.n}]
 
 (*************************************************************************)
 (* Processes.                                                            *)
@@ -94,6 +109,8 @@ Down == [pc |-> "down",
          op |-> [none |-> TRUE],
          \* the owner cache, which survives sessions but not a crash
          cRec |-> None, cEpoch |-> None, cCommitted |-> None,
+         \* this owner's last seal, acknowledged, for its next commit to name
+         cSealed |-> None,
          cPages |-> [p \in Pages |-> None]]
 
 \* A ready session reads its log, then its cache, then the page key.
@@ -105,7 +122,7 @@ ReadPage(pr, st, p) ==
 View(pr, st) == [p \in Pages |-> ReadPage(pr, st, p)]
 
 \* Forget the record: an outcome is unknown.
-Forget(st) == [st EXCEPT !.cRec = None, !.cCommitted = None]
+Forget(st) == [st EXCEPT !.cRec = None, !.cCommitted = None, !.cSealed = None]
 
 (*************************************************************************)
 (* The store.                                                            *)
@@ -156,6 +173,7 @@ Open(pr) ==
                                 !.cCommitted = IF ~cached THEN None
                                                ELSE IF known THEN st.cCommitted
                                                ELSE r.version,
+                                !.cSealed = IF known THEN st.cSealed ELSE None,
                                 !.cPages = IF sameEpoch THEN st.cPages
                                            ELSE [p \in Pages |-> None]]
            view == View(pr, opened)
@@ -185,37 +203,86 @@ Save(pr) ==
     /\ txCount < MaxTx
     /\ LET st == ps[pr] IN
        /\ MayWrite(pr, st)
-       /\ \E changed \in (SUBSET Pages) \ {{}}, stored \in BOOLEAN :
+       /\ \E changed \in (SUBSET Pages) \ {{}}, stored \in BOOLEAN, seal \in BOOLEAN :
           LET tx == txCount + 1
               n == st.rec.next
               t == [tx |-> tx, pages |-> changed, seg |-> IF stored THEN n ELSE 0]
-              segPut == IF stored THEN {[key |-> <<"seg", n>>, val |-> [tx |-> tx, pages |-> changed]]}
-                        ELSE {}
+              segPut == IF stored THEN {[key |-> <<"seg", n>>, val |-> {Tx(t)}]} ELSE {}
           IN /\ ~stored \/ n <= MaxSeg
              /\ txCount' = tx
              /\ Issue(segPut)
              /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "segment",
-                         !.op = [t |-> t, keys |-> Keys(segPut)]]]
+                         !.op = [t |-> t, keys |-> Keys(segPut), seal |-> seal]]]
     /\ UNCHANGED <<store, owner, truth, unknown, crashes, violation>>
 
-\* The segment settled: the record names it only once it is acknowledged.
-CommitRecord(pr) ==
+\* The record this commit builds on: the durable one, its acknowledged seal
+\* named.
+Base(pr, st) ==
+    IF pr \in Cached /\ st.cSealed # None /\ st.cSealed.n \in st.rec.garbage
+    THEN Rename(st.rec, st.cSealed) ELSE st.rec
+
+\* The large transaction's value settled: the record names it only once it is
+\* acknowledged. A seal of the base's inline transactions, if chosen, goes
+\* with the record (with a cache) or first (without one).
+Prepare(pr) ==
     /\ ps[pr].pc = "segment"
     /\ Settled(ps[pr].op.keys)
     /\ LET st == ps[pr]
            t == st.op.t
-           r == [st.rec EXCEPT !.version = @ + 1, !.log = Append(@, t),
-                               !.next = IF t.seg = 0 THEN @ ELSE @ + 1]
-           puts == {[key |-> <<"commit">>, val |-> r]}
-           deletes == {[key |-> <<"seg", s>>, val |-> Nil] : s \in st.rec.garbage}
+           base == Base(pr, st)
+           m == base.next + (IF t.seg = 0 THEN 0 ELSE 1)
+           sealing == st.op.seal /\ InlineTx(base) # {} /\ m <= MaxSeg
+           sealPut == IF sealing THEN {[key |-> <<"seg", m>>, val |-> InlineTx(base)]} ELSE {}
        IN IF ~Acked(st.op.keys)
           THEN \* nothing committed: the session fails
                /\ ps' = [ps EXCEPT ![pr] = [Forget(st) EXCEPT !.pc = "failed", !.op = [none |-> TRUE]]]
                /\ results' = NoResults
                /\ UNCHANGED pending
-          ELSE /\ Issue(puts \cup deletes)
-               /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "commit",
-                           !.op = [t |-> t, rec |-> r, commit |-> Keys(puts), deletes |-> Keys(deletes)]]]
+          ELSE IF sealing /\ pr \notin Cached
+          THEN \* without a cache, the seal first
+               /\ Issue(sealPut)
+               /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "sealing",
+                           !.op = [t |-> t, keys |-> Keys(sealPut), m |-> m, txs |-> InlineTx(base)]]]
+          ELSE /\ results' = NoResults
+               /\ UNCHANGED pending
+               /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "recording",
+                           !.op = [t |-> t, base |-> base, seal |-> IF sealing THEN m ELSE None,
+                                   next |-> m + (IF sealing THEN 1 ELSE 0)]]]
+    /\ UNCHANGED <<store, owner, truth, unknown, txCount, crashes, violation>>
+
+\* Without a cache: the seal settled; named if acknowledged, else garbage.
+Sealed(pr) ==
+    /\ ps[pr].pc = "sealing"
+    /\ Settled(ps[pr].op.keys)
+    /\ results' = NoResults
+    /\ LET st == ps[pr]
+           op == st.op
+           alloc == [st.rec EXCEPT !.garbage = @ \cup {op.m}]
+           base == IF Acked(op.keys) THEN Rename(alloc, [n |-> op.m, txs |-> op.txs]) ELSE alloc
+       IN ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "recording",
+                   !.op = [t |-> op.t, base |-> base, seal |-> None, next |-> op.m + 1]]]
+    /\ UNCHANGED <<store, pending, owner, truth, unknown, txCount, crashes, violation>>
+
+\* The record, with the previous record's garbage deletes (but the value
+\* named now), and a pipelined seal.
+CommitRecord(pr) ==
+    /\ ps[pr].pc = "recording"
+    /\ LET st == ps[pr]
+           op == st.op
+           t == op.t
+           sealing == op.seal # None
+           withSeal == IF sealing THEN [op.base EXCEPT !.garbage = @ \cup {op.seal}] ELSE op.base
+           r == [withSeal EXCEPT !.version = @ + 1, !.log = Append(@, t), !.next = op.next]
+           puts == {[key |-> <<"commit">>, val |-> r]}
+           \* garbage of the durable record but values the base names
+           old == st.rec.garbage \ Named(op.base)
+           deletes == {[key |-> <<"seg", x>>, val |-> Nil] : x \in old}
+           sealPut == IF sealing THEN {[key |-> <<"seg", op.seal>>, val |-> InlineTx(op.base)]} ELSE {}
+       IN /\ Issue(puts \cup deletes \cup sealPut)
+          /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "commit",
+                      !.op = [t |-> t, rec |-> r, commit |-> Keys(puts), deletes |-> Keys(deletes),
+                              old |-> old, seal |-> Keys(sealPut), sealed |->
+                                  IF sealing THEN [n |-> op.seal, txs |-> InlineTx(op.base)] ELSE None]]]
     /\ UNCHANGED <<store, owner, truth, unknown, txCount, crashes, violation>>
 
 Committed(pr) ==
@@ -223,20 +290,22 @@ Committed(pr) ==
     /\ LET st == ps[pr]
            op == st.op
        IN
-       /\ Settled(op.commit \cup op.deletes)
+       /\ Settled(op.commit \cup op.deletes \cup op.seal)
        /\ results' = NoResults
        /\ IF ~Acked(op.commit)
           THEN \* the outcome is unknown
-               /\ unknown' = [tx |-> op.t.tx, pages |-> op.t.pages]
+               /\ unknown' = Tx(op.t)
                /\ ps' = [ps EXCEPT ![pr] = [Forget(st) EXCEPT !.pc = "failed", !.op = [none |-> TRUE]]]
                /\ UNCHANGED truth
           ELSE \* durable; acknowledged deletes leave the next record's garbage
-               LET r == [op.rec EXCEPT !.garbage = IF Acked(op.deletes) THEN {} ELSE @]
-               IN /\ truth' = Append(truth, [tx |-> op.t.tx, pages |-> op.t.pages])
+               LET r == [op.rec EXCEPT !.garbage = IF Acked(op.deletes) THEN @ \ op.old ELSE @]
+               IN /\ truth' = Append(truth, Tx(op.t))
                   /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "ready", !.rec = r,
                               !.op = [none |-> TRUE],
                               !.cRec = IF pr \in Cached THEN op.rec ELSE None,
-                              !.cCommitted = IF pr \in Cached THEN r.version ELSE None]]
+                              !.cCommitted = IF pr \in Cached THEN r.version ELSE None,
+                              !.cSealed = IF pr \in Cached /\ op.sealed # None /\ Acked(op.seal)
+                                          THEN op.sealed ELSE None]]
                   /\ UNCHANGED unknown
     /\ UNCHANGED <<store, pending, owner, txCount, crashes, violation>>
 
@@ -295,6 +364,7 @@ CheckpointRecorded(pr) ==
                            !.cRec = IF cached THEN r ELSE None,
                            !.cEpoch = IF cached THEN r.epoch ELSE None,
                            !.cCommitted = IF cached THEN r.version ELSE None,
+                           !.cSealed = None,
                            !.cPages = [p \in Pages |->
                                IF cached /\ p \in LogPages(st.rec.log) THEN LatestIn(st.rec.log, p)
                                ELSE IF cached /\ st.cEpoch = st.rec.epoch THEN st.cPages[p]
@@ -368,7 +438,7 @@ Init ==
 
 Next ==
     \/ Resolve
-    \/ \E pr \in Procs : Open(pr) \/ Save(pr) \/ CommitRecord(pr) \/ Committed(pr)
+    \/ \E pr \in Procs : Open(pr) \/ Save(pr) \/ Prepare(pr) \/ Sealed(pr) \/ CommitRecord(pr) \/ Committed(pr)
                          \/ Checkpoint(pr) \/ CheckpointRecord(pr) \/ CheckpointRecorded(pr)
                          \/ Collected(pr)
                          \/ Read(pr) \/ EndSession(pr)
@@ -381,6 +451,13 @@ Spec == Init /\ [][Next]_vars
 (* one that a previous open decided was not committed; and replay finds   *)
 (* every stored segment the record names.                                 *)
 OpensReadTheHistory == ~violation
+
+(* No stored value leaks: each one present is named by the durable record, *)
+(* listed as its garbage, or at a number it has not allocated (which a    *)
+(* later save overwrites).                                                 *)
+NothingLeaks ==
+    LET r == ReadRecord(commitS)
+    IN \A n \in 1..MaxSeg : segS[n] # Nil => n \in Named(r) \cup r.garbage \/ n >= r.next
 
 (* A ready session reads the history at every moment, through its log,    *)
 (* its cache and the page keys: no checkpoint exposes a stale page.       *)

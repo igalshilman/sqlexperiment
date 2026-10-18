@@ -178,12 +178,6 @@ fn open<'py>(
         let options = StorageOptions {
             cache: Some(page_cache().await?.namespace(&namespace)),
             durability: Durability::Commit,
-            // Each commit rewrites the record with the log inline, so a short
-            // log keeps commits small, and a checkpoint writes each changed
-            // page: 16 transactions or 16 KiB of log measured best, in bytes
-            // read and written (core/sqlite-kv/benches/LOG_RESULTS.md).
-            checkpoint_after: 16,
-            checkpoint_log_bytes: 16 * 1024,
             ..StorageOptions::default()
         };
         let session = Session::open_with_options(store, options)

@@ -1,6 +1,7 @@
 use super::*;
 use crate::io::BLOCK_SIZE;
 use bytes::Bytes;
+use std::collections::BTreeSet;
 
 fn image(n: u8) -> Page {
     Bytes::from(vec![n; BLOCK_SIZE])
@@ -86,7 +87,7 @@ fn record() -> io::Result<Commit> {
         epoch: 2,
         size: 3 * 4096,
         next_segment: 12,
-        garbage: 4..7,
+        garbage: BTreeSet::from([4, 5, 6]),
         effects: Bytes::from_static(b"out"),
         log: vec![
             Logged {
@@ -112,11 +113,11 @@ fn commit_records_round_trip() -> io::Result<()> {
     assert_eq!(commit.stored_values().into_iter().collect::<Vec<_>>(), [7]);
     let empty = Commit::default();
     assert_eq!(Commit::decode(&empty.encode())?, empty);
-    // `SC14`, version, epoch, units, next segment, garbage 4..7, the effects,
-    // 3 transactions.
+    // `SC14`, version, epoch, units, next segment, garbage {4, 5, 6} (as
+    // deltas), the effects, 3 transactions.
     assert_eq!(
-        commit.encode()[..15],
-        *b"SC14\x09\x02\x18\x0c\x04\x07\x03out\x03"
+        commit.encode()[..17],
+        *b"SC14\x09\x02\x18\x0c\x03\x04\x01\x01\x03out\x03"
     );
     Ok(())
 }
@@ -164,13 +165,13 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
     invalid.push(bytes); // another format
     for bad in [
         Commit {
-            garbage: std::ops::Range { start: 7, end: 4 },
+            garbage: BTreeSet::from([7]),
             ..record()?
-        },
+        }, // garbage the log names
         Commit {
-            garbage: 4..13,
+            garbage: BTreeSet::from([4, 12]),
             ..record()?
-        },
+        }, // garbage not allocated
         Commit {
             version: 2,
             ..record()?

@@ -77,16 +77,17 @@ async fn record(store: &MemoryKv) -> io::Result<Commit> {
         None => Ok(Commit::default()),
     }
 }
-/// No stored segment below the record's garbage survives: every one is named
-/// by the record, listed as its garbage, or debris a later save overwrites.
+/// Every stored value is named by the record, listed as its garbage, or
+/// debris at a number it has not allocated, which a later save overwrites.
 async fn assert_collected(store: &MemoryKv) -> io::Result<()> {
     let commit = record(store).await?;
+    let named = commit.stored_values();
     for key in keys(store, LOG_PREFIX) {
         let n = u64::from_str_radix(key.trim_start_matches(LOG_PREFIX), 16).unwrap();
         assert!(
-            n >= commit.garbage.start,
-            "{key} below {:?}",
-            commit.garbage
+            named.contains(&n) || commit.garbage.contains(&n) || n >= commit.next_segment,
+            "{key}: unnamed, not garbage, below {}",
+            commit.next_segment
         );
     }
     Ok(())
@@ -267,7 +268,7 @@ fn large_transactions_are_stored_and_failed_ones_leave_only_debris() -> io::Resu
         ))));
         let memory = || store.inner.inner.inner.clone();
         let large = StorageOptions {
-            max_inline_bytes: 0,
+            inline_log_bytes: 0,
             ..options(4, None)
         };
         let big = |n: u64| -> Changes { (0..300).map(|i| (i, Some(page(i + n)))).collect() };
@@ -348,7 +349,7 @@ fn every_save_mutation_is_crash_safe() -> io::Result<()> {
                             let store = Arc::new(MonitorKv::seeded(FaultKv::new(base, 0), seed));
                             let opts = StorageOptions {
                                 page_compression: PageCompression::Raw,
-                                max_inline_bytes: if large { 0 } else { MAX_INLINE_BYTES },
+                                inline_log_bytes: if large { 0 } else { usize::MAX },
                                 ..options(1, cache.as_ref())
                             };
                             let snapshot = open(&store, &opts).await?;
@@ -632,13 +633,16 @@ fn sequential_reads_fetch_ahead() -> io::Result<()> {
 }
 
 /// With a cache, open reads the record alone, and every save is one round
-/// trip, or three when it checkpoints.
+/// trip, or three when it checkpoints (with a log the record holds inline).
 #[test]
 fn an_owner_opens_and_saves_in_one_round_trip() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
         let cache = fresh_namespace();
-        let opts = options(16, Some(&cache));
+        let opts = StorageOptions {
+            inline_log_bytes: usize::MAX,
+            ..options(16, Some(&cache))
+        };
         for round in 0..40u64 {
             store.reset();
             store.inner.reset_stats();
@@ -653,6 +657,62 @@ fn an_owner_opens_and_saves_in_one_round_trip() -> io::Result<()> {
             let report = snapshot.publish(changes, 20 * 4096).await?;
             let expected = if report.checkpointed_pages > 0 { 3 } else { 1 };
             assert_eq!(store.round_trips(), expected, "save {round}");
+        }
+        Ok(())
+    })
+}
+
+/// A commit that would take the inline log past its budget seals it into a
+/// stored value, put with its record, which lists it as garbage; the next
+/// commit, of this session or the owner's next, names it. Every commit is one
+/// round trip, an owner whose cache holds the values opens on the record
+/// alone, and one without reads them too.
+#[test]
+fn a_commit_seals_the_inline_log_into_a_stored_value() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(LatencyKv::new(MemoryKv::default()));
+        let cache = fresh_namespace();
+        let opts = StorageOptions {
+            inline_log_bytes: 6 * 1024,
+            ..options(1000, Some(&cache))
+        };
+        // Pages of noise: about 2 KiB of log each.
+        let noisy = |seed: u64| -> Page {
+            let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+            let mut p: Vec<u8> = (0..BLOCK_SIZE)
+                .map(|i| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    if i % 2 == 0 { state as u8 } else { 0 }
+                })
+                .collect();
+            p[..8].copy_from_slice(&seed.to_le_bytes());
+            p.into()
+        };
+        let mut sealed = 0;
+        for round in 0..12u64 {
+            let snapshot = open(&store, &opts).await?;
+            let changes: Changes = (0..2).map(|i| (i, Some(noisy(round * 10 + i)))).collect();
+            store.reset();
+            snapshot.publish(changes, 2 * 4096).await?;
+            assert_eq!(store.round_trips(), 1, "commit {round}");
+            sealed = record(&store.inner).await?.stored_values().len();
+        }
+        assert!(sealed >= 2, "{sealed} sealed values");
+        store.reset();
+        store.inner.reset_stats();
+        let snapshot = open(&store, &opts).await?;
+        assert_eq!(
+            store.inner.stats().gets,
+            1,
+            "the cache holds the sealed values"
+        );
+        let cold = open(&store, &options(1000, None)).await?;
+        for (index, snapshot) in [&snapshot, &cold].into_iter().enumerate() {
+            for i in 0..2 {
+                assert_eq!(snapshot.block(i).await?, Some(noisy(110 + i)), "{index}");
+            }
         }
         Ok(())
     })

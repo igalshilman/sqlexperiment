@@ -232,6 +232,8 @@ struct Owner {
     /// Stored log values a durable record named, by number: a number is never
     /// reused once named, so they stay valid while a record names them.
     values: crate::log::Values,
+    /// This owner's last seal, acknowledged, for the next commit to name.
+    sealed: Option<crate::log::Sealed>,
 }
 
 impl NamespaceCache {
@@ -329,6 +331,16 @@ impl NamespaceCache {
             .extend(values.into_iter().filter(|(n, _)| named.contains(n)));
     }
 
+    /// This owner's last seal, acknowledged, if the record is still the one
+    /// that lists it.
+    pub(crate) fn sealed(&self) -> Option<crate::log::Sealed> {
+        self.owner().sealed.clone()
+    }
+
+    pub(crate) fn keep_sealed(&self, sealed: Option<crate::log::Sealed>) {
+        self.owner().sealed = sealed;
+    }
+
     /// Register an open session at version `next`; see [`Reader`].
     pub(crate) fn reader(&self, next: u64) -> Reader {
         *self.owner().readers.entry(next).or_default() += 1;
@@ -353,6 +365,7 @@ impl NamespaceCache {
     fn forget_locked(&self, owner: &mut Owner) {
         owner.commit = None;
         owner.committed = None;
+        owner.sealed = None;
         self.take_engine_of(owner.id);
     }
 
@@ -479,6 +492,7 @@ impl Owner {
             hint: None,
             readers: BTreeMap::new(),
             values: crate::log::Values::new(),
+            sealed: None,
         }
     }
 

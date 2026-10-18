@@ -147,7 +147,10 @@ impl Known {
                 && sizes(&commit)[..known.log.len()] == sizes(&known)[..]
                 && earlier.is_some()
                 && earlier == self.transactions(&known)
-                && commit.garbage.end <= known.next_segment;
+                // garbage grows only by numbers the known record has not
+                // allocated (a seal not yet named)
+                && (commit.garbage.iter())
+                    .all(|n| known.garbage.contains(n) || *n >= known.next_segment);
             if !extends {
                 self.violation(format!(
                     "commit {}: does not extend the known record",
