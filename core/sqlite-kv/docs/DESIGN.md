@@ -93,16 +93,19 @@ and commits them:
 3. **Commit.** Put the record: the previous record's log plus this
    transaction, at the next version, with the host's effects if it set them.
    One put, one round trip, for a small transaction.
-4. **Garbage, in the same round trip.** Delete the stored segments in the
-   record's garbage range, left by a checkpoint; once acknowledged, the next
-   record forgets them.
+4. **Garbage, in the same round trip.** Delete the stored segments still in
+   the record's garbage range (a checkpoint's deletes that failed); once
+   acknowledged, the next record forgets them.
 5. **Checkpoint the whole log, now and then.** When the log then holds more
    than `checkpoint_after` transactions (default 4; the bindings use 16) or
    `checkpoint_log_bytes` (default 256 KiB; the bindings use 16 KiB), the save
    checkpoints it after committing: each page's latest image to its page key
    (holes become deletes) and the hint, then, once all are acknowledged, a
    record with an empty log at the next epoch, whose garbage range takes the
-   stored segments the log named. Two more round trips.
+   stored segments the log named, and once that is acknowledged, their
+   deletes. Two more round trips, three with stored segments. This owner's
+   cache keeps its pages into the next epoch: only the log's pages changed,
+   and it writes those through.
 
 **Compression.** A commit rewrites the same few pages as the ones before it,
 each a little changed. A segment's images are one zstd frame whose
@@ -333,7 +336,7 @@ one-thread runtime of its own. It is the only background work.
 
 | Operation                            | Round trips                                                  | Mutations                                                                                 |
 | ------------------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| Save                                 | 1; 2 for a large transaction; 2 more when it checkpoints     | The record (its inline log rewritten); a large transaction's segments; when the log is long, every logged page, the hint and the record |
+| Save                                 | 1; 2 for a large transaction; 2 more when it checkpoints, 3 with stored segments | The record (its inline log rewritten); a large transaction's segments; when the log is long, every logged page, the hint, the record and the stored segments' deletes |
 | SQL commit with `Durability::Commit` | Same as a save                                               | Same as a save                                                                            |
 | Open, with cache                     | 1, plus 1 if the log names stored segments                   | None                                                                                      |
 | Cold open                            | 1, then the hinted pages (or a small database whole) and stored segments together | None                                                                     |
