@@ -1,7 +1,7 @@
 # Benchmarks
 
 These are standalone Cargo bench targets (`harness = false`), separate from tests
-and examples. All use the current (v12) storage format and require the opt-in `simulation` feature. They count logical KV
+and examples. All use the current (v14) storage format and require the opt-in `simulation` feature. They count logical KV
 operations and bytes in MemoryKv; they do not model a real remote backend.
 
 Run from the repository root:
@@ -30,7 +30,7 @@ filtered by each custom entry point. The page compression target also writes
 | `page_compression` | Paired Raw/LZ4 on repetitive, JSON and random payloads; isolated codec timing                                                                                               | [COMPRESSION_RESULTS.md](COMPRESSION_RESULTS.md)     |
 | `small_databases`  | Tiny databases, index counts, save grouping and a larger control                                                                                                            | `results/small_databases.csv`                        |
 | `cache_cpu`        | Process-wide memory and disk cache by memory size, encoded versus decoded: misses, round trips, allocations and CPU time                                                    | [CACHE_RESULTS.md](CACHE_RESULTS.md)                 |
-| `log_shipping`     | The WAL-native store by checkpoint policy, backend strength and owner cache, in critical-path round trips, against the recorded v11 design (`results/log-shipping-v11.csv`) | [LOG_RESULTS.md](LOG_RESULTS.md)                     |
+| `log_shipping`     | The commit record by checkpoint policy and owner cache, in critical-path round trips, against the recorded v13 format (`results/log-shipping-v13.csv`)                       | [LOG_RESULTS.md](LOG_RESULTS.md)                     |
 
 All SQL result checks remain active in release builds. Successful writes are
 reopened and verified. The analyzers check repeat agreement, complete workload
@@ -39,8 +39,8 @@ coverage and traffic accounting. They understand only the current page format.
 ## Measurements
 
 `amplification` resets counters between open, SQL/query, checkpoint, save and
-recovery-open phases. Each phase has a total row plus page, log, meta and
-other-key rows. Do not add totals to their components. Warm query observations
+recovery-open phases. Each phase has a total row plus page, log (stored
+segments), commit (the record), hint and other-key rows. Do not add totals to their components. Warm query observations
 reuse one session; cold totals include initialization. Unique keys are per-phase
 counts and are not summed across phases.
 
@@ -56,9 +56,7 @@ WAL/database writes are local I/O, not durable KV traffic. Failed-operation cost
 are not inferred from successful-operation counters.
 
 Baselines are bulk loads followed by a save that checkpoints them, so cold reads
-reach page keys. The simulated backend is weak (a failed put may be visible
-without being durable), so a fresh open re-puts the log tail and `meta`; those
-puts appear in open phases.
+reach page keys. Open writes nothing.
 
 The compression target includes open in every SQL observation. Repetitions use
 independent forks of the same baseline, with no owner cache. Raw and LZ4

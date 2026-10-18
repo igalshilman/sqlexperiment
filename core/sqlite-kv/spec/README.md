@@ -21,8 +21,10 @@ fault schedules at random, while this enumerates all of them up to a size.
   commits only on its own last record.
 - **Checkpoint.** At any time a ready session's log is not empty: each page's
   latest image, then, once all are acknowledged, a record with an empty log at
-  the next epoch. A failed page put keeps the log; a record put of unknown
-  outcome ends the session's writing.
+  the next epoch, then the deletes of the stored segments no record names any
+  more. A failed page put keeps the log; a record put of unknown outcome keeps
+  the session on its log, and forgets the record (so a cached process commits
+  no more in that session).
 - **Open.** Read the record, replay its log (every stored segment it names
   must hold its transaction), keep cached pages of the same epoch, and drop
   them for another.
@@ -58,14 +60,34 @@ spec/check.sh MCDeep.cfg      # three transactions, three segments
 The script downloads `tla2tools.jar` (TLA+ tools 1.8.0) on first use and
 needs Java 11 or later.
 
-RESULTS
+| Configuration   | Bounds                                                                        | Distinct states | Result       |
+| --------------- | ----------------------------------------------------------------------------- | --------------- | ------------ |
+| `MC.cfg`        | both processes cached; 2 pages, 2 processes, 2 transactions, 2 segments, 1 crash | 1,702,483       | No violation |
+| `MCNoCache.cfg` | as `MC.cfg`, no cache                                                         | 95,885          | No violation |
+| `MCMixed.cfg`   | as `MC.cfg`, one process cached and one not                                   | 854,074         | No violation |
+| `MCDeep.cfg`    | as `MCMixed.cfg`, 3 transactions, 3 segments                                  | DEEP            | DEEPRESULT   |
+
+The two processes of `MC.cfg` and `MCNoCache.cfg` are symmetric, so TLC
+checks one of each pair of mirrored states (`Symmetry`).
 
 ## Mutations
 
 Each deliberately broken protocol must fail a property, or the model is too
 weak to trust:
 
-MUTATIONS
+| Broken rule                                                            | Found by               |
+| ---------------------------------------------------------------------- | ---------------------- |
+| A record names a stored segment before its put is acknowledged         | `OpensReadTheHistory`  |
+| The checkpoint record goes out before its pages are acknowledged       | `OpensReadTheHistory`  |
+| The garbage is deleted with the checkpoint record, not after it        | `OpensReadTheHistory`  |
+| Open keeps cached pages of another epoch                               | `OpensReadTheHistory`  |
+| This owner's checkpoint keeps cached pages without writing its log's   | `ReadyReadsTheHistory` |
+
+Two rules no bounded run breaks, as expected: the one-writer check guards
+sessions that overlap within one process, which the model leaves out; and a
+session may go on committing after a checkpoint record of unknown outcome,
+since ownership moves only once its sessions end, so no other process can
+have seen the epoch it might put again.
 
 ## The code against the model
 

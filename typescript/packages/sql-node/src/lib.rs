@@ -143,11 +143,12 @@ pub fn open<'env>(
         let options = StorageOptions {
             cache,
             durability: Durability::Commit,
-            // Commits rewrite the record with the log inline, so its size is
-            // the cost of each: a checkpoint once it holds 64 KiB keeps it
-            // small, and 60 transactions of a few hundred bytes stay inline.
-            checkpoint_after: 60,
-            checkpoint_log_bytes: 64 * 1024,
+            // Each commit rewrites the record with the log inline, so a short
+            // log keeps commits small, and a checkpoint writes each changed
+            // page: 16 transactions or 16 KiB of log measured best, in bytes
+            // read and written (core/sqlite-kv/benches/LOG_RESULTS.md).
+            checkpoint_after: 16,
+            checkpoint_log_bytes: 16 * 1024,
             ..StorageOptions::default()
         };
         let session = match reader.unwrap_or(false) {

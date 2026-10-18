@@ -433,6 +433,21 @@ impl Commit {
             .sum()
     }
 
+    /// The pages the log's inline segments change, read from their entries
+    /// without decoding images: the log overrides them, so open need not
+    /// fetch their page keys.
+    pub(crate) fn inline_pages(&self) -> std::collections::BTreeSet<u64> {
+        self.log
+            .iter()
+            .flat_map(|t| &t.parts)
+            .filter_map(|part| match part {
+                Part::Inline(bytes) => entries(bytes).ok(),
+                Part::Stored(_) => None,
+            })
+            .flat_map(|(pages, _)| pages.into_iter().map(|(index, _)| index))
+            .collect()
+    }
+
     /// The stored segments the log names.
     pub(crate) fn stored_segments(&self) -> impl Iterator<Item = u64> + '_ {
         self.log

@@ -283,6 +283,19 @@ impl NamespaceCache {
         }
     }
 
+    /// Record this owner's checkpoint: the durable record `bytes`, at the
+    /// next epoch after the one the cached pages belong to, which keep it.
+    /// Only the pages of the log it checkpointed changed, and the caller
+    /// replaces those; any other page is the same in both epochs.
+    pub(crate) fn checkpointed(&self, bytes: Page, epoch: u64, committed: u64) {
+        let mut owner = self.owner();
+        if owner.epoch.is_some_and(|known| known + 1 == epoch) {
+            owner.epoch = Some(epoch);
+        }
+        drop(owner);
+        self.record(Some(bytes), epoch, Some(committed));
+    }
+
     /// Forget the commit record after a commit or checkpoint whose outcome is
     /// unknown. Cached pages stay: a checkpoint that landed moved the epoch,
     /// which the next open sees.

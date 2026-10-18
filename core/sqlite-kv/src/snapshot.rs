@@ -209,11 +209,6 @@ pub(crate) struct Snapshot {
     usage: Mutex<Usage>,
     /// This view's registration with the owner cache while a session uses it.
     reader: Mutex<Option<Reader>>,
-    /// A checkpoint's record put failed, so the durable record may be either
-    /// one: this view commits no more. (A later checkpoint could otherwise
-    /// reuse that epoch for other pages, which a cache that saw the first
-    /// would take for its own.)
-    doubtful: bool,
 }
 
 /// A stored page value, with the cache key taken before it was read (see
@@ -275,12 +270,14 @@ impl Snapshot {
         // working-set hint lists, alongside the log's stored segments.
         let pages = commit.size.div_ceil(PAGE);
         let cold = cache.is_none_or(|cache| !cache.knows_epoch(commit.epoch));
+        let logged = commit.inline_pages();
         let wanted: Vec<u64> = match (cold, &hint) {
             (false, _) => Vec::new(),
             _ if pages <= options.prefetch_pages => (0..pages).collect(),
             (true, Some(hint)) => hint::decode(hint, options.hint_pages).unwrap_or_default(),
             (true, None) => Vec::new(),
         };
+        let wanted: Vec<u64> = wanted.into_iter().filter(|n| !logged.contains(n)).collect();
         let prefetch = async {
             let tokens: Vec<_> = wanted.iter().map(|&n| cache.map(|c| c.token(n))).collect();
             let keys: Vec<_> = wanted.iter().copied().map(page_key).collect();
@@ -302,7 +299,6 @@ impl Snapshot {
             commit_bytes,
             log,
             unchanged,
-            doubtful: false,
             page: Mutex::default(),
             fetched: Mutex::default(),
             readahead: Mutex::default(),
@@ -496,11 +492,6 @@ impl Snapshot {
             let after = self.continued(self.commit.clone(), self.commit_bytes.clone());
             return Ok((report, after.registered()));
         }
-        if self.doubtful {
-            return Err(io::Error::other(
-                "a checkpoint's outcome is unknown; reopen",
-            ));
-        }
         // One writer at a time: another session's commit since this view was
         // taken would be overwritten.
         let cache = self.options.cache.as_ref();
@@ -640,12 +631,10 @@ impl Snapshot {
         if let Err(error) = store.put(COMMIT, bytes.clone()).await {
             // It may have landed: the next open sees which epoch did.
             self.forget();
-            let (report, mut after) = unchanged(Some(error));
-            after.doubtful = true;
-            return Ok((report, after));
+            return Ok(unchanged(Some(error)));
         }
         if let Some(cache) = cache {
-            cache.record(Some(bytes.clone()), commit.epoch, Some(commit.version));
+            cache.checkpointed(bytes.clone(), commit.epoch, commit.version);
             for (index, image) in &checkpoint.images {
                 match image {
                     Some(image) => cache.replace(*index, image.clone()),
@@ -661,9 +650,20 @@ impl Snapshot {
             after.hint = Some(Bytes::from(hint));
         }
         after.log = Log::new();
+        // The stored segments no durable record names any more: deleted now,
+        // so they are not kept until the next commit; that one forgets them.
+        let garbage = after.commit.garbage.clone();
+        let deletes = garbage
+            .clone()
+            .map(|n| Mutation::Delete(log_key(n)))
+            .collect();
+        let cleanup_error = concurrently(store, deletes).await.err();
+        if cleanup_error.is_none() {
+            after.commit.garbage = garbage.end..garbage.end;
+        }
         let report = SaveReport {
             checkpointed_pages: checkpoint.images.len(),
-            cleanup_error: None,
+            cleanup_error,
             version: self.version(),
         };
         Ok((report, after.registered()))
@@ -694,7 +694,6 @@ impl Snapshot {
             commit_bytes,
             log,
             unchanged: false,
-            doubtful: self.doubtful,
             page: Mutex::default(),
             fetched: Mutex::new(std::mem::take(&mut *self.fetched.lock().unwrap())),
             readahead: Mutex::default(),

@@ -570,9 +570,10 @@ fn effects_commit_with_their_transaction() -> Result<()> {
 }
 
 /// A checkpoint whose record put failed may have landed or not: the session
-/// commits no more, and a new one reads whichever record did.
+/// continues on the log, which covers the pages either way, and a new one
+/// reads whichever record did.
 #[test]
-fn a_session_commits_no_more_after_a_checkpoint_of_unknown_outcome() -> Result<()> {
+fn a_session_continues_after_a_checkpoint_of_unknown_outcome() -> Result<()> {
     futures::executor::block_on(async {
         for effect in [Effect::None, Effect::After] {
             let store = Arc::new(MonitorKv::new(FaultKv::new(MemoryKv::default(), 1)));
@@ -583,7 +584,7 @@ fn a_session_commits_no_more_after_a_checkpoint_of_unknown_outcome() -> Result<(
             let mut db = Session::open_with_options(store.clone(), options.clone()).await?;
             db.execute("CREATE TABLE t(n INTEGER)").await?;
             // The next commit checkpoints: its record is the second put.
-            let _signal = store.arm(Failpoint {
+            let signal = store.arm(Failpoint {
                 operation: Operation::Put,
                 key_prefix: "v14/commit".into(),
                 nth: 2,
@@ -592,14 +593,17 @@ fn a_session_commits_no_more_after_a_checkpoint_of_unknown_outcome() -> Result<(
             });
             db.execute("INSERT INTO t VALUES(1)").await?;
             assert!(db.take_cleanup_error().is_some(), "{effect:?}");
-            let refused = db.execute("INSERT INTO t VALUES(2)").await.unwrap_err();
-            assert!(refused.to_string().contains("checkpoint"), "{refused}");
-            drop(db);
+            drop(signal);
             store.disarm();
+            for n in 2..6 {
+                db.execute(&format!("INSERT INTO t VALUES({n})")).await?;
+            }
+            drop(db);
 
             let mut db = Session::open_with_options(store.clone(), options).await?;
-            assert_eq!(db.query("SELECT n FROM t").await?, [[1.into()]]);
-            db.execute("INSERT INTO t VALUES(3)").await?;
+            let rows = db.query("SELECT sum(n), count(*) FROM t").await?;
+            assert_eq!(rows[0][0].as_int(), Some(15), "{effect:?}");
+            assert_eq!(rows[0][1].as_int(), Some(5));
             assert_eq!(
                 db.query("PRAGMA integrity_check").await?[0][0].to_string(),
                 "ok"

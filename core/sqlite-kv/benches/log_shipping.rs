@@ -3,11 +3,9 @@
 //! Each configuration replays the same interleaved session sequence: a point
 //! read, a one-row update, a ten-row update and an insert, 32 times. Every
 //! session reopens; with `cache`, all sessions of a run share one `PageCache`
-//! as a long-lived owner process would. `backend` is `weak` when a failed put
-//! may be visible without being durable (open confirms what it did not write)
-//! and `strong` otherwise. Round trips come from `LatencyKv`'s virtual clock;
-//! operation and byte counts from `MemoryKv`. Output is CSV, comparable with
-//! `results/log-shipping-v11.csv` from the previous design.
+//! as a long-lived owner process would. The backend is strong: a read returns
+//! only durable values. Round trips come from `LatencyKv`'s virtual clock;
+//! operation and byte counts from `MemoryKv`. Output is CSV.
 use sqlite_kv::{
     NamespaceCache, Result, Session, StorageOptions,
     kv::KvStore,
@@ -33,22 +31,54 @@ const CASES: [Case; 2] = [
         indexes: 1,
     },
 ];
-/// Transactions kept in the log before saves checkpoint; 60 is the bindings'
-/// cadence, with 64 KiB of log.
-const POLICIES: [u32; 3] = [4, 16, 60];
+/// When saves checkpoint: once the log holds more than `after` transactions or
+/// `log_bytes` bytes.
+#[derive(Clone, Copy)]
+struct Policy {
+    after: u32,
+    log_bytes: usize,
+}
+/// The default (4 transactions), 16 transactions, and the bindings' cadence:
+/// 16 transactions or 16 KiB. `POLICIES`
+/// overrides them: `after:log_bytes`, comma-separated.
+const POLICIES: [Policy; 3] = [
+    Policy {
+        after: 4,
+        log_bytes: sqlite_kv::CHECKPOINT_LOG_BYTES,
+    },
+    Policy {
+        after: 16,
+        log_bytes: sqlite_kv::CHECKPOINT_LOG_BYTES,
+    },
+    Policy {
+        after: 16,
+        log_bytes: 16 * 1024,
+    },
+];
+
+fn policies() -> Vec<Policy> {
+    let Ok(list) = std::env::var("POLICIES") else {
+        return POLICIES.to_vec();
+    };
+    list.split(',')
+        .map(|policy| {
+            let (after, log_bytes) = policy.split_once(':').expect("after:log_bytes");
+            Policy {
+                after: after.parse().expect("transactions"),
+                log_bytes: log_bytes.parse().expect("bytes"),
+            }
+        })
+        .collect()
+}
 const ITERATIONS: u64 = 32;
 const WORKLOADS: [&str; 4] = ["read_pk", "update_1", "update_10", "insert_1"];
 
 type Store = Arc<LatencyKv<MemoryKv>>;
 
-fn options(policy: u32, cache: &Option<NamespaceCache>) -> StorageOptions {
+fn options(policy: Policy, cache: &Option<NamespaceCache>) -> StorageOptions {
     StorageOptions {
-        checkpoint_after: policy,
-        checkpoint_log_bytes: if policy == 60 {
-            64 * 1024
-        } else {
-            sqlite_kv::CHECKPOINT_LOG_BYTES
-        },
+        checkpoint_after: policy.after,
+        checkpoint_log_bytes: policy.log_bytes,
         cache: cache.clone(),
         ..StorageOptions::default()
     }
@@ -71,7 +101,17 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     .await?;
     db.save().await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
-    let mut db = Session::open_with_options(kv, options(0, &None)).await?;
+    let mut db = Session::open_with_options(
+        kv,
+        options(
+            Policy {
+                after: 0,
+                log_bytes: 0,
+            },
+            &None,
+        ),
+    )
+    .await?;
     db.execute("CREATE TABLE other(x)").await?;
     db.save().await?;
     Ok(store)
@@ -84,7 +124,7 @@ fn row(case: Case, iteration: u64, n: u64) -> u64 {
 
 struct Phase<'a> {
     case: Case,
-    policy: u32,
+    policy: Policy,
     strong: bool,
     cache: &'a Option<NamespaceCache>,
     run: usize,
@@ -101,11 +141,12 @@ impl Phase<'_> {
             .filter(|k| k.contains("/log/"))
             .count();
         println!(
-            "{},{},{},{},{},{},{},{},{},{phase},{},{},{},{},{},{},{segments},{}",
+            "{},{},{},{},{},{},{},{},{},{},{phase},{},{},{},{},{},{},{segments},{}",
             self.case.rows,
             self.case.payload,
             self.case.indexes,
-            self.policy,
+            self.policy.after,
+            self.policy.log_bytes,
             if self.strong { "strong" } else { "weak" },
             self.cache.is_some(),
             self.run,
@@ -176,7 +217,7 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
     Ok(())
 }
 
-async fn run(case: Case, policy: u32, strong: bool, cached: bool, run: usize) -> Result<()> {
+async fn run(case: Case, policy: Policy, strong: bool, cached: bool, run: usize) -> Result<()> {
     let store: Store = Arc::new(LatencyKv::new(baseline(case).await?));
     let cache = cached.then(|| open_cache(cache_config(256 << 20, 1 << 30)).namespace("bench"));
     // Warm the owner state outside the measurement.
@@ -210,11 +251,11 @@ fn main() -> Result<()> {
         .find(|arg| !arg.starts_with('-'))
         .map_or(Ok(1), |arg| arg.parse())?;
     println!(
-        "rows,payload_bytes,indexes,checkpoint_after,backend,cache,run,iteration,workload,phase,round_trips,gets,puts,deletes,bytes_read,bytes_written,log_segments,stored_bytes"
+        "rows,payload_bytes,indexes,checkpoint_after,checkpoint_log_bytes,backend,cache,run,iteration,workload,phase,round_trips,gets,puts,deletes,bytes_read,bytes_written,log_segments,stored_bytes"
     );
     futures::executor::block_on(async {
         for case in CASES {
-            for policy in POLICIES {
+            for &policy in &policies() {
                 // A read returns only durable values: the backend is strong.
                 for strong in [true] {
                     for cached in [false, true] {

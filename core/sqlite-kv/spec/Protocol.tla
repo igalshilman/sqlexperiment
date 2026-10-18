@@ -89,9 +89,8 @@ Replays(r) == \A i \in DOMAIN r.log :
 (*************************************************************************)
 
 Down == [pc |-> "down",
-         \* the session's view: the record it holds, and whether a
-         \* checkpoint's outcome is unknown
-         rec |-> Empty, doubtful |-> FALSE,
+         \* the session's view: the record it holds
+         rec |-> Empty,
          op |-> [none |-> TRUE],
          \* the owner cache, which survives sessions but not a crash
          cRec |-> None, cEpoch |-> None, cCommitted |-> None,
@@ -151,7 +150,7 @@ Open(pr) ==
            cached == pr \in Cached
            known == cached /\ st.cRec = r
            sameEpoch == cached /\ st.cEpoch = r.epoch
-           opened == [st EXCEPT !.pc = "ready", !.rec = r, !.doubtful = FALSE,
+           opened == [st EXCEPT !.pc = "ready", !.rec = r,
                                 !.cRec = IF cached THEN r ELSE None,
                                 !.cEpoch = IF cached THEN r.epoch ELSE None,
                                 !.cCommitted = IF ~cached THEN None
@@ -177,9 +176,7 @@ Open(pr) ==
 (*************************************************************************)
 
 \* One writer: with a cache, nothing committed since this view was taken.
-MayWrite(pr, st) ==
-    /\ ~st.doubtful
-    /\ pr \in Cached => st.cCommitted = st.rec.version
+MayWrite(pr, st) == pr \in Cached => st.cCommitted = st.rec.version
 
 Save(pr) ==
     /\ owner = pr
@@ -279,23 +276,39 @@ CheckpointRecord(pr) ==
 CheckpointRecorded(pr) ==
     /\ ps[pr].pc = "record"
     /\ Settled(ps[pr].op.keys)
-    /\ results' = NoResults
     /\ LET st == ps[pr]
            r == st.op.rec
            cached == pr \in Cached
+           deletes == {[key |-> <<"seg", s>>, val |-> Nil] : s \in r.garbage}
        IN IF ~Acked(st.op.keys)
-          THEN \* it may have landed: the session writes no more
-               ps' = [ps EXCEPT ![pr] = [Forget(st) EXCEPT !.pc = "ready", !.doubtful = TRUE,
-                                                          !.op = [none |-> TRUE]]]
-          ELSE \* the new epoch's pages, written through the cache
-               ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "ready", !.rec = r, !.op = [none |-> TRUE],
+          THEN \* it may have landed: the session continues on its log, which
+               \* covers the pages either way, and forgets the record
+               /\ ps' = [ps EXCEPT ![pr] = [Forget(st) EXCEPT !.pc = "ready", !.op = [none |-> TRUE]]]
+               /\ results' = NoResults
+               /\ UNCHANGED pending
+          ELSE \* the next epoch: the cache keeps the previous one's pages, but
+               \* those of the log, which it writes through. No durable record
+               \* names the garbage now: delete it.
+               /\ Issue(deletes)
+               /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "collect", !.rec = r,
+                           !.op = [keys |-> Keys(deletes)],
                            !.cRec = IF cached THEN r ELSE None,
                            !.cEpoch = IF cached THEN r.epoch ELSE None,
                            !.cCommitted = IF cached THEN r.version ELSE None,
                            !.cPages = [p \in Pages |->
                                IF cached /\ p \in LogPages(st.rec.log) THEN LatestIn(st.rec.log, p)
-                               ELSE IF cached /\ st.cEpoch = r.epoch THEN st.cPages[p]
+                               ELSE IF cached /\ st.cEpoch = st.rec.epoch THEN st.cPages[p]
                                ELSE None]]]
+    /\ UNCHANGED <<store, owner, truth, unknown, txCount, crashes, violation>>
+
+\* Acknowledged deletes leave the next record's garbage.
+Collected(pr) ==
+    /\ ps[pr].pc = "collect"
+    /\ Settled(ps[pr].op.keys)
+    /\ results' = NoResults
+    /\ LET st == ps[pr] IN
+       ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "ready", !.op = [none |-> TRUE],
+                 !.rec = [st.rec EXCEPT !.garbage = IF Acked(st.op.keys) THEN {} ELSE @]]]
     /\ UNCHANGED <<store, pending, owner, truth, unknown, txCount, crashes, violation>>
 
 (*************************************************************************)
@@ -357,6 +370,7 @@ Next ==
     \/ Resolve
     \/ \E pr \in Procs : Open(pr) \/ Save(pr) \/ CommitRecord(pr) \/ Committed(pr)
                          \/ Checkpoint(pr) \/ CheckpointRecord(pr) \/ CheckpointRecorded(pr)
+                         \/ Collected(pr)
                          \/ Read(pr) \/ EndSession(pr)
     \/ Handover \/ CrashProc
 

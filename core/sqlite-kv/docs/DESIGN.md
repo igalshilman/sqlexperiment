@@ -97,8 +97,8 @@ and commits them:
    record's garbage range, left by a checkpoint; once acknowledged, the next
    record forgets them.
 5. **Checkpoint the whole log, now and then.** When the log then holds more
-   than `checkpoint_after` transactions (default 4; the bindings use 60) or
-   `checkpoint_log_bytes` (default 256 KiB; the bindings use 64 KiB), the save
+   than `checkpoint_after` transactions (default 4; the bindings use 16) or
+   `checkpoint_log_bytes` (default 256 KiB; the bindings use 16 KiB), the save
    checkpoints it after committing: each page's latest image to its page key
    (holes become deletes) and the hint, then, once all are acknowledged, a
    record with an empty log at the next epoch, whose garbage range takes the
