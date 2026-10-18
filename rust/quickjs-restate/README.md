@@ -1,14 +1,12 @@
 # Durable JavaScript in Restate objects
 
-JavaScript that waits on Restate (RPCs and timers) without a journal to
-replay: [the durable QuickJS runtime](../../core/quickjs-durable/README.md)
-in virtual objects, on [the patched Rust SDK](../sdk/README.md). At each wait,
-a run's memory is saved as the pages that changed; a result restores it and
-carries on.
-
-A program is a static file, [`programs/counter.js`](programs/counter.js):
+JavaScript that waits on Restate (RPCs, timers) for as long as it takes, and
+survives crashes without a journal to replay. At each wait the JavaScript
+VM's memory is saved; a crash or a result restores it, and the program
+carries on where it was.
 
 ```js
+// programs/counter.js
 async function main(input, ctx) {
   const n = ((await ctx.kv.get('count')) ?? 0) + input;
   await ctx.kv.set('count', n);
@@ -17,84 +15,130 @@ async function main(input, ctx) {
 }
 ```
 
-`ctx.kv` is the scope's key/value state; `ctx.rpc.call({ service, handler, key }, input)`
-calls any Restate service or object, and `ctx.sleep(ms)` waits on a Restate
-timer.
+```sh
+curl localhost:8080/counter/alice/run --json 20    # 20, a second later
+curl localhost:8080/counter/alice/run --json 1     # 21
+```
 
 ## Run it
 
 ```sh
 make restate-server qjs-restate              # from the repository's root
 target/restate/restate-server &
-target/release/quickjs-restate &             # serves each program, on PORT (9080)
+target/release/quickjs-restate &             # serves programs/, on PORT (9080)
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
-
-curl localhost:8080/counter/alice/run --json 20    # 20, a second later
-curl localhost:8080/counter/alice/run --json 1     # 21
 ```
 
-Each program is a virtual object of its name, and its key a scope: the runs
-of `counter/alice` share their `ctx.kv`, and `counter/bob` has its own. `run`
-takes the input as its body, and returns the run's outcome: what `main`
-returns, or its error as a terminal error.
+A program is a file in [`programs/`](programs): `<name>.js`, defining
+`async function main(input, ctx)`. `cargo build` ships it in the binary, and
+the binary serves it as the virtual object `<name>`. The object's key is a
+**scope**: the runs of `counter/alice` share their `ctx.kv`; `counter/bob`
+has its own.
 
-## Programs
+| Program                          | Shows                                                                       |
+| -------------------------------- | --------------------------------------------------------------------------- |
+| [`counter`](programs/counter.js) | KV state and a timer                                                        |
+| [`memory`](programs/memory.js)   | A class instance, a closure and a paused generator surviving waits          |
+| [`fanout`](programs/fanout.js)   | Programs calling programs, in parallel: `Promise.all` over RPCs             |
+| [`timeout`](programs/timeout.js) | A deadline: `Promise.race` of a [`slow`](programs/slow.js) call and a timer |
+| [`primes`](programs/primes.js)   | A long computation, carried over many turns                                 |
 
-The binary is built with its programs: each `<name>.js` in `QJS_PROGRAMS`
-(by default [`programs/`](programs)), and its golden dump `<name>.golden`
-beside it, the memory image of the evaluated source that every run starts
-from and every checkpoint is relative to. `make goldens` computes the dumps
-(quickjs-durable's `golden` binary), again when a source or the runtime
-changes; `make qjs-restate` does it first. A dump is valid for one source and
-one build of the runtime, and the binary refuses to start with a stale one.
+## Writing a program
 
-A run keeps the version of its program it started on: once a program
-changes, its runs from before fail to restore. Give a new version a new name
-(`counter-v2.js`) while the old one's runs finish.
+| `ctx`                                                 | What                                        |
+| ----------------------------------------------------- | ------------------------------------------- |
+| `ctx.kv.get(key)`, `.set(key, value)`, `.delete(key)` | The scope's state: JSON values              |
+| `ctx.rpc.call({ service, handler, key? }, input)`     | Call any Restate service, object or program |
+| `ctx.sleep(ms)`                                       | A durable timer                             |
 
-Bind programs into an endpoint of your own, beside the services they call,
-with `quickjs_restate::bind(Endpoint::builder(), &programs)`: the embedded
-ones (`quickjs_restate::embedded()`), or a `quickjs_durable::Programs` you
-compile or load.
+- **Values are JSON**: inputs, outputs, KV values and RPC payloads.
+- **I/O goes through `ctx`**: no `fetch`, timers or modules. Call a Restate
+  service for the rest of the world (a model, an API).
+- **`Date.now()` and `Math.random()` are the run's**: time is the host's at
+  each turn, and the random generator is seeded per run and saved with it.
+- **The run ends when `main` settles.** Unlike in Node.js, promises still
+  pending then (a race's loser, an RPC nobody awaited) are dropped, and their
+  callbacks never run. Await what must happen.
+- **Runs of one scope run one at a time**, as an object's exclusive handlers
+  do: a run waiting on a timer holds its scope. Runs that must overlap need
+  scopes of their own.
+- **A changed program is a new program.** A run restores only with the source
+  it started on: ship the new version under a new name while old runs finish.
 
 ## How it works
 
-`<program>/<scope>/run` is an exclusive handler without journal replay, and
-it runs the program itself. The JavaScript runs until it waits on a request
-the handler cannot answer at once; the handler commits the run's image, its
-KV writes and its requests in one save of the scope's database
-([sqlite-kv](../../core/sqlite-kv/README.md), in the object's state): a
-**turn**. Then it waits on Restate for the first of those requests to
-complete, an RPC (`ctx.rpc.call`, a call with the operation's ID as
-idempotency key) or a timer (`ctx.sleep`, until the request's deadline), and
-delivers it in the next turn. `ctx.kv` is answered within the turn.
+The JavaScript engine is [QuickJS](https://bellard.org/quickjs/), compiled to
+WebAssembly and run by Wasmtime. A WebAssembly instance's whole state is one
+linear memory and a stack pointer, so the VM, heap, closures, pending
+promises and all, is a byte array. [The durable QuickJS
+runtime](../../core/quickjs-durable/README.md) saves that array; this crate
+binds it to Restate.
 
-A retried attempt replays nothing: it restores the last committed image and
-waits again on its requests, under the same idempotency keys, so Restate
-attaches it to a call made before the crash instead of making it again, and a
-timer waits only for what is left.
+**A run is one invocation** of `<program>/<scope>/run`, an exclusive handler
+without journal replay. It is a loop of **turns**:
 
-The run ends when `main` settles, and `run` returns. Unlike a Node.js process,
-it does not wait for its other promises: requests still outstanding (a race's
-loser, a promise nobody awaited) are dropped, and their continuations never
-run. A call already made finishes at its callee, unobserved. Await what must
-happen.
+```
+restore the image ─▶ deliver one result ─▶ run the JavaScript until it waits
+     ▲                                                       │
+     │                                                       ▼
+ wait on Restate for the first          commit: the image's changed pages, the KV
+ pending request to complete    ◀────── writes and the new requests, in one save
+```
 
-Runs of one scope run one after the other, as invocations of an object's
-exclusive handlers do: a run waiting on a timer holds its scope. Give runs
-that must overlap keys of their own.
+Within a turn, `ctx.kv` is answered at once from the scope's SQL database;
+an RPC or a timer is a request the handler waits on, on Restate itself: a
+call (with the request's ID as idempotency key) or a sleep until its deadline.
 
-`make test-qjs-restate` runs it against a real Restate server: RPCs, timers,
-KV shared by the runs of a scope, a failing program, a race whose loser is
-dropped, and an attempt that crashes while its call runs, whose
-retry attaches to the call (`quickjs_restate::faults`).
+### Snapshots: the key choices
+
+- **Snapshot only at a wait.** A turn ends when the JavaScript has run all it
+  can and waits on a promise: no JavaScript or native frame is on the stack,
+  so memory and the stack pointer are the whole state. There is no
+  mid-function capture, and no OS-level process snapshot.
+- **Every run starts from a golden image.** At build time, each program is
+  evaluated once (QuickJS initialized, the bridge and the program loaded) and
+  its memory dumped into the binary. A run starts from a copy of it, so the
+  startup work is never repeated, and every snapshot is relative to it.
+- **Save only the pages that changed.** The Wasm is rewritten once, at
+  startup, so that every store also marks its 4 KiB page in a side table. At
+  the end of a turn, only marked pages are compared, and only those that
+  changed are saved: a turn that touches a few objects writes a few pages, not
+  the whole heap.
+- **Pages relative to golden, not to the last turn.** A saved page is XORed
+  against its golden page, and a turn's pages are compressed together (Zstd)
+  into one batch. Each snapshot's manifest maps every page that differs from
+  golden to the batch holding it, so a restore is golden plus one lookup per
+  page, never a chain of diffs. Past 16 referenced batches, a turn rewrites
+  every live page into its own, so restores stay bounded however long a run
+  lives.
+- **The snapshot commits with what it did.** The image, the KV writes and the
+  new requests are one transaction of the scope's database, in the object's
+  state ([sqlite-kv](../../core/sqlite-kv/README.md)): a turn happened
+  entirely or not at all.
+- **Nothing is replayed.** A retried attempt restores the last committed
+  image and waits again on its pending requests, under the same idempotency
+  keys, so Restate attaches it to a call already made instead of making it
+  again, and a timer waits only for what is left.
+- **A turn has a CPU budget.** Execution is metered (Wasmtime fuel); past half
+  the budget, the run is saved at its next wait and continues in a new turn,
+  so a long computation is never cut off. A single job that exceeds the whole
+  budget (an endless loop) ends the run as failed.
+
+With the runtime's SQLite host, a turn (cold restore, execution, capture and
+commit) takes about 3 ms for a program of a 1.3 MiB image, and about 18 ms
+for one of 9 MiB ([measurements](../../core/quickjs-durable/docs/DESIGN.md#11-measurements-and-reproduction)).
+
+## Tests
+
+`make test-qjs-restate` runs the binding against a real Restate server: RPCs,
+timers, scopes, a failing program, a race whose loser is dropped, an attempt
+that crashes while its call runs (its retry attaches to the call, and the
+callee runs once), and the shipped programs.
 
 ## Not yet
 
-- `durable.call(name)`, the runtime's host operation, fails: call a service
-  with `ctx.rpc.call`.
 - A re-issued call attaches only within the callee's idempotency retention
-  (24 hours by default): a run waiting longer on a call that its attempt lost
-  would call again.
-- A cancelled `run` ends its run where it is.
-- The engine runs on the async runtime's threads: a long turn holds one.
+  (24 hours by default): a run waiting longer on a call its attempt lost
+  would make it again.
+- A cancelled run ends where it is.
+- A turn runs on the async runtime's threads: a long one holds a thread.
