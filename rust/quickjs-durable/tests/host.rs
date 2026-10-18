@@ -101,6 +101,11 @@ impl Kv for FaultTransaction {
         self.inner.put(key, value).await?;
         self.after()
     }
+    async fn delete(&mut self, key: &str) -> Result<()> {
+        self.before()?;
+        self.inner.delete(key).await?;
+        self.after()
+    }
 }
 impl Transaction for FaultTransaction {
     async fn execute(&mut self, op: &Operation) -> Result<Resolution> {
@@ -396,6 +401,9 @@ fn custom_rust_function_and_guest_errors_resolve_inside_the_transaction() -> Res
         async fn put(&mut self, k: &str, v: &[u8]) -> Result<()> {
             self.0.put(k, v).await
         }
+        async fn delete(&mut self, k: &str) -> Result<()> {
+            self.0.delete(k).await
+        }
     }
     impl Transaction for Local {
         async fn execute(&mut self, op: &Operation) -> Result<Resolution> {
@@ -581,6 +589,10 @@ fn checkpoint_storage_may_suspend() -> Result<()> {
             Yield(false).await;
             self.suspended += 1;
             self.inner.put(key, value).await
+        }
+        async fn delete(&mut self, key: &str) -> Result<()> {
+            Yield(false).await;
+            self.inner.delete(key).await
         }
     }
     impl Transaction for Remote {

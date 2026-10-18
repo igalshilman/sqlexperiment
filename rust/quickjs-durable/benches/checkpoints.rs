@@ -21,6 +21,9 @@ impl Kv for MeasuredKv {
         self.writes += 1;
         self.inner.put(key, value).await
     }
+    async fn delete(&mut self, key: &str) -> Result<()> {
+        self.inner.delete(key).await
+    }
 }
 impl Transaction for MeasuredKv {
     async fn execute(&mut self, operation: &Operation) -> Result<Resolution> {

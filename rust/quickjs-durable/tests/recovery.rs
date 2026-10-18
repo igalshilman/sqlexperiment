@@ -318,10 +318,15 @@ fn zero_growth_overwrites_and_no_history_dependency() -> Result<()> {
         Outcome::success(Value::Null),
         3,
     ))?;
-    let mut kv = e.into_storage()?;
-    // History IDs remain in metadata, but are not needed to restore this head.
-    kv.values
-        .retain(|key, _| !key.starts_with("checkpoint/") || key.ends_with(&state.checkpoint_id));
+    // Only the head's manifest is kept: it alone restores the run.
+    let kv = e.into_storage()?;
+    assert_eq!(
+        kv.values
+            .keys()
+            .filter(|key| key.starts_with("checkpoint/"))
+            .count(),
+        1
+    );
     let mut e = Engine::new(kv, programs(source));
     assert_eq!(
         futures_executor::block_on(e.recover("r"))?.checkpoint_id,
@@ -564,16 +569,29 @@ fn long_runs_reference_a_bounded_number_of_batches() -> Result<()> {
         let manifest: Value = serde_json::from_slice(
             &e.storage().values[&format!("checkpoint/{}", view.checkpoint_id)],
         )?;
-        let batches: std::collections::BTreeSet<&str> = manifest["pages"]
+        let batches: std::collections::BTreeSet<u64> = manifest["pages"]
             .as_object()
             .unwrap()
             .values()
-            .map(|reference| reference["blob"].as_str().unwrap())
+            .map(|reference| reference["b"].as_u64().unwrap())
             .collect();
         most = most.max(batches.len());
+        // Only the head's manifest and the batches it references are kept.
+        assert_eq!(stored(&e, "blob/"), batches.len());
+        assert_eq!(stored(&e, "checkpoint/"), 1);
     }
     assert_eq!(value(&view.state.outcome), json!("60:59"));
     assert!(most <= 16, "{most} batches");
     assert!(most > 1);
+    // A settled run keeps its outcome, not its image.
+    assert_eq!(stored(&e, "blob/"), 0);
     Ok(())
+}
+
+fn stored(e: &Engine<MemoryTransaction>, prefix: &str) -> usize {
+    e.storage()
+        .values
+        .keys()
+        .filter(|key| key.starts_with(prefix))
+        .count()
 }

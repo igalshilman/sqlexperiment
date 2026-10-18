@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 const MAX_JSON: usize = 16 * 1024 * 1024;
 /// Most page batches a manifest may reference. Restore reads each referenced
 /// batch in full, superseded pages and all; past this many, a turn writes every
@@ -40,8 +40,12 @@ struct Loaded {
 fn run_prefix(run: &str) -> String {
     format!("run/{}/", hash(run.as_bytes()))
 }
-fn blob_key(id: &str) -> String {
-    format!("blob/{id}")
+fn blob_key(run: &str, batch: u64) -> String {
+    format!("blob/{}{batch}", run_prefix(run))
+}
+/// The batches a manifest's pages are in.
+fn batches(pages: &BTreeMap<u32, PageRef>) -> BTreeSet<u64> {
+    pages.values().map(|reference| reference.batch).collect()
 }
 fn checkpoint_key(id: &str) -> String {
     format!("checkpoint/{id}")
@@ -253,16 +257,20 @@ impl<K: Transaction> Engine<K> {
             manifest_bytes: loaded.manifest_bytes,
         }
     }
-    async fn get_blob(&mut self, id: &str) -> Result<Vec<u8>> {
-        let bytes = self.kv.get(&blob_key(id)).await?.context("Missing blob")?;
+    async fn get_blob(&mut self, run: &str, batch: u64) -> Result<Vec<u8>> {
+        let bytes = self
+            .kv
+            .get(&blob_key(run, batch))
+            .await?
+            .context("Missing blob")?;
         ensure!(
             bytes.len() <= MAX_MEMORY + 1024 * 1024,
             "Blob exceeds size limit"
         );
         Ok(bytes)
     }
-    async fn put_blob(&mut self, id: &str, bytes: &[u8]) -> Result<()> {
-        self.kv.put(&blob_key(id), bytes).await
+    async fn put_blob(&mut self, run: &str, batch: u64, bytes: &[u8]) -> Result<()> {
+        self.kv.put(&blob_key(run, batch), bytes).await
     }
     /// The run's program, the version it started on.
     fn program(&self, manifest: &Manifest) -> Result<&Program> {
@@ -300,19 +308,19 @@ impl<K: Transaction> Engine<K> {
         memory.resize(manifest.memory_len, 0);
         // Group references, then release each decoded blob before loading the
         // next. Keeping all historical batches can vastly exceed VM memory.
-        let mut blobs: BTreeMap<&str, Vec<(u32, usize)>> = BTreeMap::new();
+        let mut blobs: BTreeMap<u64, Vec<(u32, usize)>> = BTreeMap::new();
         for (index, reference) in &manifest.pages {
             ensure!(
                 (*index as usize) < memory.len() / PAGE,
                 "Page beyond current memory"
             );
             blobs
-                .entry(&reference.blob)
+                .entry(reference.batch)
                 .or_default()
                 .push((*index, reference.slot));
         }
-        for (blob, references) in blobs {
-            let decoded = codec::decode_pages(&self.get_blob(blob).await?)?;
+        for (batch, references) in blobs {
+            let decoded = codec::decode_pages(&self.get_blob(run, batch).await?)?;
             for (index, slot) in references {
                 let (stored_index, xor) = decoded.get(slot).context("Invalid page slot")?;
                 ensure!(*stored_index == index, "Page reference mismatch");
@@ -335,9 +343,9 @@ impl<K: Transaction> Engine<K> {
     }
 
     /// The guest trapped mid-turn: its image is unusable, and the same delivery
-    /// would trap again. End the run instead of failing the turn forever. Its
-    /// last good image stays; the KV writes made before the trap stand, as for a
-    /// thrown error; its outstanding requests are abandoned.
+    /// would trap again. End the run instead of failing the turn forever. The
+    /// KV writes made before the trap stand, as for a thrown error; its
+    /// outstanding requests are abandoned, and its image dropped.
     #[allow(clippy::too_many_arguments)]
     async fn end_trapped(
         &mut self,
@@ -345,8 +353,7 @@ impl<K: Transaction> Engine<K> {
         id: String,
         sequence: u64,
         program: (String, String),
-        previous: Option<String>,
-        pages: BTreeMap<u32, PageRef>,
+        previous: Option<(String, BTreeSet<u64>)>,
         image: Image,
         event: &Event,
         next_operation: u64,
@@ -365,17 +372,17 @@ impl<K: Transaction> Engine<K> {
             program: program.0,
             source: program.1,
             build: self.programs.runtime().build.clone(),
-            previous,
+            previous: previous.as_ref().map(|(id, _)| id.clone()),
             sequence,
             meta: image.meta.clone(),
             memory_len: image.memory.len(),
-            pages,
+            pages: BTreeMap::new(),
             state,
             changed_pages: 0,
             examined_pages: 0,
             new_blob_bytes: 0,
         };
-        self.stage(run, &id, &manifest).await?;
+        self.stage(run, &id, &manifest, previous).await?;
         Ok(Loaded {
             id,
             manifest_bytes: json_bytes(&manifest)?.len(),
@@ -384,15 +391,29 @@ impl<K: Transaction> Engine<K> {
         })
     }
 
-    /// Stage a manifest and point the run's head at it. Only the outer host
-    /// commit makes it visible, with application state and effects.
-    async fn stage(&mut self, run: &str, id: &str, manifest: &Manifest) -> Result<usize> {
+    /// Stage a manifest and point the run's head at it, and delete what only
+    /// the `previous` checkpoint needed: its manifest, and its batches the new
+    /// one no longer references. Recovery reads the head alone. Only the outer
+    /// host commit makes it visible, with application state and effects.
+    async fn stage(
+        &mut self,
+        run: &str,
+        id: &str,
+        manifest: &Manifest,
+        previous: Option<(String, BTreeSet<u64>)>,
+    ) -> Result<usize> {
         let bytes = json_bytes(manifest)?;
         ensure!(bytes.len() <= MAX_JSON, "Checkpoint metadata exceeds limit");
         self.kv.put(&checkpoint_key(id), &bytes).await?;
         self.kv
             .put(&format!("{}head", run_prefix(run)), id.as_bytes())
             .await?;
+        if let Some((previous, previous_batches)) = previous {
+            self.kv.delete(&checkpoint_key(&previous)).await?;
+            for batch in previous_batches.difference(&batches(&manifest.pages)) {
+                self.kv.delete(&blob_key(run, *batch)).await?;
+            }
+        }
         Ok(bytes.len())
     }
 
@@ -421,9 +442,9 @@ impl<K: Transaction> Engine<K> {
         let next_operation = current
             .as_ref()
             .map_or(0, |c| c.manifest.state.next_operation);
-        let current_id_pages = current
+        let previous = current
             .as_ref()
-            .map(|c| (c.id.clone(), c.manifest.pages.clone()));
+            .map(|c| (c.id.clone(), batches(&c.manifest.pages)));
         let turn = self
             .programs
             .runtime()
@@ -450,10 +471,6 @@ impl<K: Transaction> Engine<K> {
                     (Some(c), _) => c.image,
                     (None, first) => first.context("Missing golden image")?,
                 };
-                let (previous, pages) = match &current_id_pages {
-                    Some((id, pages)) => (Some(id.clone()), pages.clone()),
-                    None => (None, BTreeMap::new()),
-                };
                 return self
                     .end_trapped(
                         run,
@@ -461,7 +478,6 @@ impl<K: Transaction> Engine<K> {
                         sequence,
                         program,
                         previous,
-                        pages,
                         image,
                         event,
                         next_operation,
@@ -499,15 +515,15 @@ impl<K: Transaction> Engine<K> {
             memory,
         };
         let changed_indices: BTreeSet<u32> = deltas.iter().map(|(index, _)| *index).collect();
-        let mut batches: BTreeSet<&str> = pages
+        let mut referenced: BTreeSet<u64> = pages
             .iter()
             .filter(|(index, _)| !changed_indices.contains(index))
-            .map(|(_, reference)| reference.blob.as_str())
+            .map(|(_, reference)| reference.batch)
             .collect();
         if !deltas.is_empty() {
-            batches.insert(&id);
+            referenced.insert(sequence);
         }
-        if batches.len() > MAX_BATCHES {
+        if referenced.len() > MAX_BATCHES {
             let live: BTreeSet<u32> = pages.keys().copied().chain(changed_indices).collect();
             deltas = live
                 .into_iter()
@@ -521,17 +537,22 @@ impl<K: Transaction> Engine<K> {
                 })
                 .collect();
         }
+        // A settled run never restores again: it keeps its outcome, not its
+        // image.
+        if state.status != Status::Waiting {
+            deltas.clear();
+            pages.clear();
+        }
         let mut new_blob_bytes = 0;
         if !deltas.is_empty() {
             let bytes = codec::encode_pages(&deltas)?;
             new_blob_bytes = bytes.len();
-            let blob = id.clone();
-            self.put_blob(&blob, &bytes).await?;
+            self.put_blob(run, sequence, &bytes).await?;
             for (slot, (index, _)) in deltas.iter().enumerate() {
                 pages.insert(
                     *index,
                     PageRef {
-                        blob: blob.clone(),
+                        batch: sequence,
                         slot,
                     },
                 );
@@ -552,7 +573,7 @@ impl<K: Transaction> Engine<K> {
             examined_pages: capture.examined_pages,
             new_blob_bytes,
         };
-        let manifest_bytes = self.stage(run, &id, &manifest).await?;
+        let manifest_bytes = self.stage(run, &id, &manifest, previous).await?;
         Ok(Loaded {
             id,
             manifest,

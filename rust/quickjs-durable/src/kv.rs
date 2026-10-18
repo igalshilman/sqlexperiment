@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 pub trait Kv {
     fn get(&mut self, key: &str) -> impl Future<Output = Result<Option<Vec<u8>>>>;
     fn put(&mut self, key: &str, value: &[u8]) -> impl Future<Output = Result<()>>;
+    fn delete(&mut self, key: &str) -> impl Future<Output = Result<()>>;
 }
 
 /// Isolated transaction workspace for tests and benchmarks.
@@ -30,6 +31,10 @@ impl Kv for MemoryTransaction {
     }
     async fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
         self.values.insert(key.into(), value.into());
+        Ok(())
+    }
+    async fn delete(&mut self, key: &str) -> Result<()> {
+        self.values.remove(key);
         Ok(())
     }
 }

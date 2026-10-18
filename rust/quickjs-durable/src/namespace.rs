@@ -118,6 +118,13 @@ impl Kv for NamespaceTransaction {
             .await
             .map_err(sql)
     }
+
+    async fn delete(&mut self, key: &str) -> Result<()> {
+        self.db
+            .execute_with("DELETE FROM checkpoints WHERE key = ?", [text(key)])
+            .await
+            .map_err(sql)
+    }
 }
 
 impl Transaction for NamespaceTransaction {

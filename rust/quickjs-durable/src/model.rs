@@ -189,11 +189,15 @@ pub(crate) struct Image {
     pub memory: Vec<u8>,
 }
 
-/// One compressed blob batches multiple XOR pages. The slot selects a page in
-/// that blob; each page is relative to golden, never another invocation page.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// One compressed batch holds several XOR pages: a page is in the batch the
+/// run's checkpoint `batch` (its sequence) wrote, at `slot`. Each page is
+/// relative to golden, never to another checkpoint's page. Short names: a
+/// manifest lists every page that differs from golden.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(crate) struct PageRef {
-    pub blob: String,
+    #[serde(rename = "b")]
+    pub batch: u64,
+    #[serde(rename = "s")]
     pub slot: usize,
 }
 
