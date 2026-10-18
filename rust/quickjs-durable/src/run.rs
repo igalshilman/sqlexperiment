@@ -65,6 +65,8 @@ pub struct Run {
     programs: Arc<Programs>,
     /// The scope's database, this attempt's session of it.
     db: Session,
+    /// Whether this session made sure the KV table exists.
+    kv_table: bool,
     commit: Commit,
     /// The VM, and its memory as of the last commit: restored when a delivery
     /// needs it, and dropped once the run has settled.
@@ -127,6 +129,7 @@ impl Run {
             return Ok(Self {
                 programs: programs.clone(),
                 db,
+                kv_table: false,
                 commit,
                 live: None,
                 last: Written::default(),
@@ -159,6 +162,7 @@ impl Run {
         let mut this = Self {
             programs: programs.clone(),
             db,
+            kv_table: false,
             commit,
             live: Some(Live { vm, base: golden }),
             last: Written::default(),
@@ -282,11 +286,13 @@ impl Run {
 
     /// Run the JavaScript on `delivery`, capture what changed, and commit.
     async fn turn(&mut self, delivery: Delivery, now: u64) -> Result<()> {
-        // The turn's KV writes, and its pages and state, commit together.
-        self.db.execute("BEGIN").await.map_err(sql)?;
-        self.db.execute(KV_TABLE).await.map_err(sql)?;
         let live = self.live.as_mut().context("No live VM")?;
-        let ran = run(&mut live.vm, &mut self.db, &self.commit, delivery, now).await;
+        let mut kv = Kv {
+            db: &mut self.db,
+            table: &mut self.kv_table,
+            began: false,
+        };
+        let ran = run(&mut live.vm, &mut kv, &self.commit, delivery, now).await;
         let mut written = Written::default();
         let mut live_pages = self.commit.live_pages;
         let (state, meta, memory_len, changed) = match ran {
@@ -413,7 +419,7 @@ impl Run {
 /// turn's own writes.
 async fn run(
     vm: &mut Vm,
-    db: &mut Session,
+    kv: &mut Kv<'_>,
     commit: &Commit,
     delivery: Delivery,
     now: u64,
@@ -448,9 +454,9 @@ async fn run(
         let mut answered = false;
         for operation in report.issued.iter().cloned() {
             let kv = match &operation {
-                Operation::KvGet { key, .. } => read(db, key).await,
-                Operation::KvSet { key, value, .. } => write(db, key, Some(value)).await,
-                Operation::KvDelete { key, .. } => write(db, key, None).await,
+                Operation::KvGet { key, .. } => kv.read(key).await,
+                Operation::KvSet { key, value, .. } => kv.write(key, Some(value)).await,
+                Operation::KvDelete { key, .. } => kv.write(key, None).await,
                 _ => {
                     pending.push(operation);
                     continue;
@@ -499,38 +505,60 @@ fn completion(operation: &str, outcome: Outcome, now: u64) -> Value {
     json!({"kind": "complete", "operationId": operation, "outcome": outcome, "now": now})
 }
 
-/// The scope's KV value for `key`, as this turn sees it.
-async fn read(db: &mut Session, key: &str) -> Result<Value> {
-    let rows = db
-        .query_with(
-            "SELECT value FROM kv WHERE key = ?",
-            [SqlValue::build_text(key.to_owned())],
-        )
-        .await
-        .map_err(sql)?;
-    let text = match rows.first().and_then(|row| row.first()) {
-        None => return Ok(Value::Null),
-        Some(SqlValue::Text(text)) => text.as_str(),
-        Some(_) => anyhow::bail!("KV value is not text"),
-    };
-    ensure!(text.len() <= MAX_INPUT, "KV value exceeds limit");
-    Ok(serde_json::from_str(text)?)
+/// The scope's KV, in the turn's SQL transaction: begun at the first request,
+/// so a turn without KV commits its pages and state alone. The turn's commit
+/// ends it.
+struct Kv<'a> {
+    db: &'a mut Session,
+    /// Whether the session made sure the table exists.
+    table: &'a mut bool,
+    began: bool,
 }
 
-/// Set `key` to `value`, or with `None` delete it, in this turn.
-async fn write(db: &mut Session, key: &str, value: Option<&Value>) -> Result<Value> {
-    let key = SqlValue::build_text(key.to_owned());
-    match value {
-        Some(value) => {
-            let value = SqlValue::build_text(serde_json::to_string(value)?);
-            let set =
-                "INSERT INTO kv VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value";
-            db.execute_with(set, [key, value]).await
+impl Kv<'_> {
+    async fn begin(&mut self) -> Result<()> {
+        if self.began {
+            return Ok(());
         }
-        None => db.execute_with("DELETE FROM kv WHERE key = ?", [key]).await,
+        self.db.execute("BEGIN").await.map_err(sql)?;
+        self.began = true;
+        if !*self.table {
+            self.db.execute(KV_TABLE).await.map_err(sql)?;
+            *self.table = true;
+        }
+        Ok(())
     }
-    .map_err(sql)?;
-    Ok(Value::Null)
+
+    /// The value of `key`, as this turn sees it.
+    async fn read(&mut self, key: &str) -> Result<Value> {
+        self.begin().await?;
+        let select = "SELECT value FROM kv WHERE key = ?";
+        let key = SqlValue::build_text(key.to_owned());
+        let rows = self.db.query_with(select, [key]).await.map_err(sql)?;
+        let text = match rows.first().and_then(|row| row.first()) {
+            None => return Ok(Value::Null),
+            Some(SqlValue::Text(text)) => text.as_str(),
+            Some(_) => anyhow::bail!("KV value is not text"),
+        };
+        ensure!(text.len() <= MAX_INPUT, "KV value exceeds limit");
+        Ok(serde_json::from_str(text)?)
+    }
+
+    /// Set `key` to `value`, or with `None` delete it, in this turn.
+    async fn write(&mut self, key: &str, value: Option<&Value>) -> Result<Value> {
+        self.begin().await?;
+        let key = SqlValue::build_text(key.to_owned());
+        match value {
+            Some(value) => {
+                let value = SqlValue::build_text(serde_json::to_string(value)?);
+                let set = "INSERT INTO kv VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+                self.db.execute_with(set, [key, value]).await
+            }
+            None => self.db.execute_with("DELETE FROM kv WHERE key = ?", [key]).await,
+        }
+        .map_err(sql)?;
+        Ok(Value::Null)
+    }
 }
 
 /// The scope's current run, as its database's last commit holds it.

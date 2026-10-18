@@ -45,12 +45,13 @@ Assumptions and invariants:
 2. One writer owns a scope at a time: in Restate, the object's exclusive
    handler, for the whole run. A scope holds one run's image at a time; its
    KV is shared by its runs, in turn.
-3. Writes may be acknowledged before they are durable, as long as a failure
-   loses only a suffix of them, in issue order (Restate's state commands).
+3. Writes land in any order: a write counts once it is acknowledged (in
+   Restate, by a sync after it), and a failure may lose any that was not.
    Reads within an attempt see its own writes.
-4. A turn happened once its commit record is stored, with everything it
-   lists (§7). Effects are dispatched only after the commit that issued them,
-   in issue order, so a crash that loses the commit loses them too.
+4. A turn happened once its commit, one put of the scope's database record,
+   is stored, with its pages and its KV writes (§7). Effects are dispatched
+   only after the commit that issued them, in issue order, so a crash that
+   loses the commit loses them too.
 5. Snapshot only after returning completely from Wasm. The image contains
    QuickJS promises and queued jobs, never a native Wasm stack or a Rust future.
 6. Recovery reconstructs the committed image. It does not replay JavaScript,
@@ -198,11 +199,12 @@ run.view() -> View
 `Run::start` begins a run with its first turn, or, when the scope's commit is
 already that run's, continues it as committed: another attempt. `deliver`
 answers one pending request and runs a turn; `deliver_all` answers several,
-in order, in one turn. Every store call is awaited
-outside any Wasm call, so a remote store may suspend in each. An error leaves
-the `Run` unusable: the attempt ends, and the next one starts from the store.
-`MemoryStore` keeps every write in order, so a test can keep any prefix of
-them, as a crash may.
+in order, in one turn. A run takes its `Scope`: the store its database lives
+in, and, for a process that keeps owning it, an owner cache. Every store call
+is awaited outside any Wasm call, so a remote store may suspend in each. An
+error leaves the `Run` unusable: the attempt ends, and the next one starts
+from the store. Tests run over sqlite-kv's `MemoryKv`, and its `FaultKv`
+fails any one write, as a crash may.
 
 ## 3. QuickJS/Wasm snapshot ABI
 
@@ -553,36 +555,38 @@ Zeroing free chunks (§5.6) already makes what it allocates and frees free.
 
 ### 5.1. Record identities and layouts
 
-A scope's store holds three kinds of key:
+A scope's store holds one sqlite-kv database
+([its format](../../../core/sqlite-kv/docs/FORMAT.md)): the commit record at
+`v14/commit`, the values it outgrew at `v14/log/<n>`, and SQL pages. The
+record holds, besides the SQL log:
 
-| Key         | Value                                                    |
-| ----------- | -------------------------------------------------------- |
-| `commit`    | The scope's current run as of its last turn: JSON, below |
-| `batch/<n>` | An immutable compressed page batch (§5.2); n counts up   |
-| `kv/<key>`  | The scope's KV value of `key`, as JSON                   |
+| Part    | Value                                                                |
+| ------- | -------------------------------------------------------------------- |
+| Effects | The scope's current run as of its last turn: JSON, below             |
+| Chain   | The image's page batches (§5.2), each inline or a stored value       |
+| SQL     | The scope's KV: a table `kv(key TEXT PRIMARY KEY, value TEXT)`, JSON |
 
 Programs and their golden images are not stored: the process supplies them
-(§5.5). The commit, in camelCase JSON:
+(§5.5). The run, in camelCase JSON:
 
 ```text
 VmMeta = {stack: i32, runtime: i32, context: i32}
 Commit = {
     run: run_id, program: name, version: u64, runtime: u64,
     turns: count, meta: VmMeta, memoryLen: byte_count,
-    chain: [batch_number, ...], baseBytes: count, deltaBytes: count,
-    livePages: count, nextBatch: u64, state: State,
-    writes: {key: json, ...}, deletes: [key, ...], garbage: [batch_number, ...]
+    batches: count, baseBytes: count, deltaBytes: count,
+    livePages: count, state: State
 }
 ```
 
-`chain` is the image, as batches applied in order over golden (zeros beyond
-its length): the first, the **base**, holds each page that differs from
-golden; each later one, a **delta**, the pages one turn changed. Base and
-deltas apply alike: each batch is compressed against the pages it replaces,
-in the memory as it stands. `baseBytes` and `deltaBytes` size the chain, for when to write a new
-base (§5.3); `livePages` counts pages that differ from golden. A settled run's
-chain is empty. `writes`, `deletes` and `garbage`
-are what follows the commit (§7). `runtime` is the runtime's version, a
+The chain is the image, as batches applied in order over golden (zeros
+beyond its length): the first, the **base**, holds each page that differs
+from golden; each later one, a **delta**, the pages one turn changed. Base
+and deltas apply alike: each batch is compressed against the pages it
+replaces, in the memory as it stands. `batches` counts this run's,
+`baseBytes` and `deltaBytes` size them, for when to write a new base (§5.3);
+`livePages` counts pages that differ from golden. A settled run's chain is
+empty. `runtime` is the runtime's version, a
 constant bumped by hand with anything an image depends on: the Wasm, the
 bridge, the limits, the imports' behavior. A run restores only on the
 program version and runtime it started on: a changed program needs a new
@@ -633,14 +637,16 @@ capture(G, P, chain, VM):
         if current == previous: continue
         batch.append(i, current, against previous)
         P.page(i) = current
-    if the run settled: chain = []                  // no image is kept
+    if the run settled: clear the chain              // no image is kept
+    else if the run has no batch yet:
+        restart the chain with the batch, the base    // P was G; clears the
+                                                      // scope's previous run's
     else if batch is not empty:
-        if chain is empty: the batch is the base     // P was G
-        else if chain has 256 batches, or deltaBytes + batch > 2 * baseBytes:
+        if chain has 256 batches, or deltaBytes + batch > 2 * baseBytes:
             batch = every page of P that differs from G, against G
-            chain = []                               // a new base
-        chain.append(nextBatch)
-    return chain, batch
+            restart the chain with it                 // a new base
+        else: append the batch to the chain
+    return the chain update
 ```
 
 Count compared pages as examined, actual changes as changed. Zeroing dead
@@ -677,8 +683,8 @@ reconstruct(commit):
     require the program's version and the runtime's match the commit's
     require golden_length <= memoryLen <= limit, 64-KiB aligned
     memory = golden bytes, extended with zeros to memoryLen
-    read every batch in commit.chain, at once
-    for each batch in commit.chain, in order:
+    the chain's batches came with the record, at open
+    for each batch in the chain, in order:
         indexes = its page indexes; require each within memory
         pages = its frame, decoded against memory's pages at indexes
         write pages into memory at indexes
@@ -770,8 +776,8 @@ loop:
     answered = false
     for op in report.issued, in issue order:
         if op is a KV request:
-            get: the turn's own write or delete of the key, else kv/<key>
-            set/delete: record it in the turn's writes
+            get/set/delete: SQL on the kv table, in the turn's transaction
+                (begun at its first KV request), so a get sees its writes
             deliver the result, with this turn's logical time
             answered = true
         else: append op to pending              // an effect for the host
@@ -805,39 +811,44 @@ Resume can coexist. Once the root settles, the run is final.
 
 ## 7. Storage: one commit per turn
 
-A turn writes, in this order:
+A turn is one commit of the scope's database (`Session::commit_turn`), one
+put of its record:
 
-1. `batch/<nextBatch>`, when pages changed;
-2. `commit`: the turn happened once it is stored;
-3. what follows the commit: `writes` to `kv/<key>`, `deletes` of `kv/<key>`,
-   and deleting `batch/<n>` for each garbage batch.
+1. its KV writes, the SQL transaction its first KV request began;
+2. its pages: the chain update of §5.3 (append, restart or clear);
+3. the run's state, as the record's effects, with the pending requests.
 
-A failure loses a suffix of the writes (§1), so a stored commit always has its
-batch. The next attempt reads the commit and applies what follows it again:
-puts and deletes of the same values, so applying twice changes nothing, and a
-crash between the commit and its last write loses nothing. A crash before the
-commit loses the whole turn, and the next attempt runs it again from the
-previous commit: the requests it issued were never dispatched (§1). The next
-commit's own lists replace the previous one's. An orphan batch, written by a
-turn whose commit was lost, has the number the next turn writes over.
+Writes land in any order (§1), so nothing may be its own put: a turn's batch
+and a commit that names it could not be ordered. The record carries the
+batch inline, or names it as a stored value it waits for first (a batch
+larger than the inline budget, 1 KiB here). Past the budget, the record's
+earlier inline parts are sealed into one stored value, which the next commit
+names; a SQL checkpoint keeps the chain. A crash before the record is stored
+loses the whole turn, which the next attempt runs again from the previous
+commit: the requests it issued were never dispatched (§1). Nothing is
+applied after a commit.
 
-Why not SQL. Until 18 October 2026 a scope's records lived in SQL tables
-(`checkpoints`, `state`, `effects`) through sqlite-kv, which made a turn's
-writes atomic with its own log. Measured against Restate, that cost a turn
-about 2 ms of CPU to open the database again and parse its schema, wrote
-every changed B-tree page, put each log segment twice (once more on the next
-open, to confirm it), and copied all pages into place at each checkpoint. A
-20-wait run journaled ~150 state commands and wrote ~150 KiB. The tables were
-key/value maps (the effects table even repeated the run's pending list), and a
-single writer with ordered writes needs no general transaction: one commit
-record, written last, is the atomic step. It also made the runtime
-independent of turso. A program that wants SQL can still call a Restate
-service that has it.
+**SQL again.** Until 18 October 2026 the scope's records lived in SQL tables
+through an earlier sqlite-kv; it cost a turn about 2 ms of CPU and wrote
+every log segment twice, so it gave way to one commit record of its own
+(with `batch/<n>` and `kv/<key>` keys) that relied on ordered writes. With
+the journal off, writes are not ordered, and sqlite-kv v14's one record per
+commit, with the host's effects and chain in it, is that commit. Measured on
+18 October 2026 (`cargo bench --bench checkpoints`, medians), against that
+record of its own:
 
-`MemoryStore` implements the same contract for tests and the benchmark, and
-keeps its writes in order so a test can keep any prefix of them: the crash
-tests start an attempt after every write of a run, and again after every write
-of the attempt that recovers from it.
+| Workload    | Live turn, before | Live turn | Restored turn, before | Restored turn | Bytes a turn, before | Bytes a turn |
+| ----------- | ----------------: | --------: | --------------------: | ------------: | -------------------: | -----------: |
+| scalar      |           0.58 ms |   0.71 ms |               1.38 ms |       2.24 ms |                1,259 |        1,708 |
+| sparse-8m   |           2.33 ms |   2.33 ms |              11.37 ms |      11.84 ms |                1,401 |        1,353 |
+| growth-3m   |           1.28 ms |   1.68 ms |               4.57 ms |       5.23 ms |                2,140 |        2,096 |
+| heap-churn  |           8.03 ms |   7.58 ms |               9.81 ms |      11.37 ms |               53,358 |       53,319 |
+| write-heavy |           5.52 ms |   5.31 ms |               6.92 ms |       7.47 ms |                2,342 |        2,301 |
+
+A turn is one or two writes instead of two to four. A restored turn opens
+the SQL engine (0.4-1.5 ms; an owner cache keeps it between attempts of one
+process), and a small batch is written twice, inline and then sealed. A turn
+without KV runs no SQL.
 
 ## 8. Worked execution and failure examples
 
@@ -855,16 +866,17 @@ async function main(input, ctx) {
 
 With count=41:
 
-| Turn                                | Writes, in order                                                                 | Effect R                    |
-| ----------------------------------- | -------------------------------------------------------------------------------- | --------------------------- |
-| T1: execute until the RPC wait      | `batch/0`, `commit` (count=42, R pending), `kv/count`=42                         | Dispatched after the commit |
-| T2: deliver R's result 84, continue | `commit` (completed, no pages; lastAnswer=84), `kv/lastAnswer`, delete `batch/0` | Done                        |
+| Turn                                | The record's put                                             | Effect R                    |
+| ----------------------------------- | ------------------------------------------------------------ | --------------------------- |
+| T1: execute until the RPC wait      | count=42 in SQL, the base batch, the run (R pending)         | Dispatched after the commit |
+| T2: deliver R's result 84, continue | lastAnswer=84 in SQL, the chain cleared, the run (completed) | Done                        |
 
-A crash before T1's commit leaves nothing: the next attempt starts the run
-again, and R was never dispatched. After T1's commit but before `kv/count`,
-the next attempt applies it. After dispatch, the next attempt waits on R again
-under its stable ID: Restate attaches to the call already made. After T2's
-commit, a repeated delivery is a no-op and another attempt returns the outcome.
+A crash before T1's record is stored leaves nothing: the next attempt starts
+the run again, and R was never dispatched. After it, count=42 is stored with
+it. After dispatch, the next attempt waits on R again under its stable ID:
+Restate attaches to the call already made. After T2's record, a repeated
+delivery is a no-op and another attempt returns the outcome; the base batch,
+stored or not, is garbage the next commit deletes.
 
 ### 8.2. Fan-out
 
@@ -939,7 +951,7 @@ Restate server, including a crash between a call's commit and its answer.
 ## 10. Measurements
 
 `cargo bench --bench checkpoints` (and `--features full-scan`, the control)
-runs a few workloads over `MemoryStore`, once with the VM live and once
+runs a few workloads over an in-memory store, once with the VM live and once
 restoring it every turn, and writes its results beside it as JSON.
 
 Against Restate, measured on 18 October 2026 (4 vCPUs, one restate-server
@@ -974,7 +986,7 @@ and the interpreter runs compute-bound code ~10x slower than V8.
 ### 10.1. A long coding session
 
 `cargo bench --bench agent` runs the shipped `coder` program through a
-scripted session of up to 300 steps over `MemoryStore`. Each step is a few
+scripted session of up to 300 steps over an in-memory store. Each step is a few
 hundred bytes of model text and one tool call: a file read (~6 KiB), a
 command (~1.5 KiB of output), an edit, or a written file (~3 KiB). On
 18 October 2026:

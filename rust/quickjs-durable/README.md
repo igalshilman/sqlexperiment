@@ -72,10 +72,10 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   it, in a chain over a base relative to golden. Dead bytes (the
   stack between calls, freed heap memory) are zeroed first, so garbage is
   not saved.
-- **One commit**: a turn puts its batch of pages, then one `commit` record
-  (the image's chain of batches, the pending requests, the KV writes), then applies
-  the KV writes. Restate loses only a suffix of writes on a crash, so the
-  commit is the atomic step; the next attempt re-applies what follows it.
+- **One commit**: a turn is one put of the scope's
+  [sqlite-kv](../../core/sqlite-kv) record: its page batch, its KV writes (a
+  SQL table) and the run's state with its pending requests. Writes may land
+  in any order; the record is the atomic step.
 - **No replay**: a retry restores the VM from the last commit and waits
   again on its requests under the same idempotency keys, attaching to calls
   already made.
