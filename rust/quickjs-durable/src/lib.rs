@@ -14,6 +14,7 @@
 
 mod claude;
 mod codec;
+mod heap;
 #[cfg(any(not(feature = "full-scan"), test))]
 mod instrument;
 mod model;
@@ -35,6 +36,10 @@ pub use vm::Runtime;
 #[cfg(test)]
 #[path = "../tests/unit/codec.rs"]
 mod codec_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/heap.rs"]
+mod heap_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/instrument.rs"]

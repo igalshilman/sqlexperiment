@@ -304,6 +304,24 @@ fn pages_back_to_golden_leave_the_commit() -> Result<()> {
     Ok(())
 }
 
+/// What a turn allocates and frees is not saved: capture zeroes free heap
+/// chunks, so the pages the garbage was written to end as they were.
+#[test]
+fn garbage_a_turn_frees_is_not_saved() -> Result<()> {
+    let source = "async function main(){let n=0;for(let i=0;i<5;i++){n+=JSON.stringify(Array.from({length:4000},(_,j)=>j*i+Math.random())).length;await durable.call('tick');}return n>0;}";
+    let store = MemoryStore::default();
+    let mut run = start(&store, source, Value::Null, 1)?;
+    step(&mut run, &store)?;
+    for _ in 0..3 {
+        let turn = step(&mut run, &store)?;
+        // ~100 KiB of strings and arrays went through the heap: without
+        // zeroing, ~60 pages changed and the batch took ~70 KiB.
+        assert!(turn.batch_bytes < 4096, "{} bytes", turn.batch_bytes);
+    }
+    assert_eq!(value(&finish(&mut run, &store)?), json!(true));
+    Ok(())
+}
+
 /// More local requests than one turn's fuel allows: the turn stops at a safe
 /// boundary once half the fuel is spent, and a wakeup goes on in the next.
 #[test]

@@ -61,7 +61,9 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   (deterministically, so every process agrees).
 - **Only the pages that changed**: rewritten Wasm marks each written 4 KiB
   page; a turn saves those, compressed together against their contents
-  before it, in a chain over a base relative to golden.
+  before it, in a chain over a base relative to golden. Dead bytes (the
+  stack between calls, freed heap memory) are zeroed first, so garbage is
+  not saved.
 - **One commit**: a turn puts its batch of pages, then one `commit` record
   (the image's chain of batches, the pending requests, the KV writes), then applies
   the KV writes. Restate loses only a suffix of writes on a crash, so the

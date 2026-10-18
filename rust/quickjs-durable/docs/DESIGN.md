@@ -397,9 +397,11 @@ prefix**, in a chain over a base compressed against golden (§5.1). Zstd
 matches each page against what it replaces, wherever the data now sits: a
 page a turn changed by a few pointers costs a few bytes, and so does one whose
 contents moved, which an XOR against the same offsets cannot see. Before
-comparing, capture zeroes the stack below its pointer (§5.3): between calls
-no frame is live there, and the turn's dead frames would otherwise count as
-changes.
+comparing, capture zeroes the dead bytes of the pages it compares (§5.3): the
+stack below its pointer, where between calls no frame is live, and the free
+chunks of the heap. A turn's dead frames, and what it allocated and freed,
+would otherwise count as changes: a turn that churns ~100 KiB of strings
+writes ~1.5 KiB, against ~70 KiB without.
 
 Measured on 18 October 2026 over traces of seven workloads (40 turns each, 80
 for the agent; batch KiB summed over the run's turns, and Zstd time over all
@@ -412,8 +414,8 @@ of them):
 | Prefix of previous, Zstd 3                    | 38    | 111 | 138   | 62    | 226   | 2,672 | 862 | 4,111 | 251 ms |
 | Prefix of previous, Zstd 3, long matching     | 37    | 109 | 135   | 41    | 66    | 2,692 | 769 | 3,851 | 443 ms |
 | Same, stack zeroed                            | 32    | 100 | 116   | 35    | 59    | 2,671 | 762 | 3,777 | 422 ms |
-| Same, Zstd 2 (selected)                       | 32    | 102 | 115   | 37    | 62    | 2,762 | 827 | 3,939 | 300 ms |
-| Same, and free heap chunks zeroed (simulated) | 33    | 94  | 109   | 36    | 62    | 2,455 | 524 | 3,315 | 303 ms |
+| Same, Zstd 2                                  | 32    | 102 | 115   | 37    | 62    | 2,762 | 827 | 3,939 | 300 ms |
+| Same, and free heap chunks zeroed (selected)  | 33    | 94  | 109   | 36    | 62    | 2,455 | 524 | 3,315 | 303 ms |
 
 The workloads: a sleep loop (steps), KV reads and writes with an RPC each
 (kv), a growing chat history (agent), arrays and strings shifted at the front
@@ -422,7 +424,7 @@ objects each turn (churn), and a Map of 5,000 entries updated in place (map).
 Zstd 19 on the XORs reached 4,015 KiB in 14.6 s; Zstd 1 with a prefix loses
 most matches without long matching. Encoding a typical 20-page turn takes
 ~0.24 ms against ~0.06 ms for the XOR. On a run's bytes in `MemoryStore`, the
-steps, kv, agent and typed runs wrote 28%, 32%, 42% and 54% less.
+steps, kv, agent, typed and churn runs wrote 31%, 38%, 45%, 53% and 35% less.
 
 Reasons and alternatives from the experiment's earlier measurements:
 
@@ -517,7 +519,8 @@ capture(G, P, chain, VM):
     batch = []
     for each marked page i in ascending order:
         previous = P.page(i), or zeros beyond P.length
-        if i is below the stack pointer: zero VM's stack bytes in page i
+        zero VM's dead bytes in page i: below the stack pointer, and
+            free heap chunks past their links (§5.6)
         current = VM.page(i)
         if current == previous: continue
         batch.append(i, current, against previous)
@@ -532,9 +535,10 @@ capture(G, P, chain, VM):
     return chain, batch
 ```
 
-Count compared pages as examined, actual changes as changed. Zeroing the
-dead stack in the VM itself keeps the VM equal to the image it restores from;
-golden is captured with its stack zeroed too. Updating P with
+Count compared pages as examined, actual changes as changed. Zeroing dead
+bytes in the VM itself keeps the VM equal to the image it restores from;
+golden is captured with all its dead bytes zeroed. Dead bytes in pages not
+compared stay as they were, in the VM and in P alike. Updating P with
 each changed page keeps it equal to the VM's memory as of the commit: the
 `verify-dirty` build checks that every page that differs from it was marked.
 A new base bounds restoring to at most 16 batches, and at most three times the
@@ -568,6 +572,34 @@ same source on the same runtime build gives the same image, byte for byte, in
 every process. A checkpoint written by one process therefore restores in
 another, and nothing but the source needs shipping. A commit records its
 program's version and the runtime's; a run restores only with both.
+
+### 5.6. Dead heap bytes
+
+The pinned binary allocates with wasi-libc's dlmalloc (32-bit). Its heap is
+chunks back to back from the first, at a fixed address after the binary's
+static data (`heap::START`), to the end of memory: each a 4-byte footer slot
+and a 4-byte head (the size, with bit 1 set when the chunk is in use and bit 0
+when the one before it is), the last the allocator's top foot. A free chunk
+holds its links in its first 32 bytes (footer slot, head, list or tree
+links); the rest is dead until an allocation writes it, and `calloc` clears
+what it returns.
+
+```text
+dead(memory):
+    at = heap::START; previous_in_use = true
+    loop:
+        size, in_use, flag = head at at
+        require size >= 16, a multiple of 8, within memory; flag == previous_in_use
+        if the chunk ends memory: require it and the one before free; return dead
+        if not in_use:
+            require previous_in_use                  // free chunks never touch
+            if size > 32: dead += [at + 32, at + size)
+        at += size; previous_in_use = in_use
+```
+
+A walk that fails any check finds nothing dead, and capture zeroes only the
+stack; golden registration requires the walk to succeed, so a binary with
+another heap layout fails at startup.
 
 ## 6. Run algorithms and turn boundaries
 
@@ -793,8 +825,8 @@ SDK 1.17.3 on Node 22:
 Rows vary by ~10% from run to run. Before the commit record and the live VM,
 the same rows were 220/s, 64 ms, 1.36 s, 40/s, 8.3/s, 1.8 s and 1.1 MiB;
 before the chain of batches, the run of 20 waits wrote 137 KiB. These rows
-predate compressing pages against their previous contents (§4), which wrote
-28-54% fewer bytes in `MemoryStore`. The Rust
+predate compressing pages against their previous contents (§4) and zeroing
+dead bytes, which wrote 31-53% fewer bytes in `MemoryStore`. The Rust
 SDK's server now sets `TCP_NODELAY`, which saved ~40 ms per round trip. One
 synchronous JavaScript job is still capped at about 10^8 Wasm instructions,
 and the interpreter runs compute-bound code ~10x slower than V8.
@@ -818,7 +850,8 @@ from the published quickjs-wasi 3.6.2 package, not a claimed reproducible source
 build; the package does not supply a complete toolchain/submodule manifest.
 Retain `assets/quickjs-wasi-LICENSE`, `quickjs-ng-LICENSE`, `wasi-libc-LICENSE`
 and component notices in `assets/licenses/`. Replacing the binary requires
-ABI review, cold-restore validation and a new runtime version.
+ABI review, cold-restore validation, a new runtime version, and its heap's
+first chunk as `heap::START` (§5.6).
 
 Supporting sources for the already selected mechanisms:
 
