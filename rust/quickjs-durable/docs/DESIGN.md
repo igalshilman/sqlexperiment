@@ -1,22 +1,23 @@
 # QuickJS/Wasm durable execution
 
 This is the implementation specification for a single-writer durable JavaScript
-runtime intended for embedding in Restate. It defines the guest bridge, snapshot
-ABI, record formats, execution algorithms, host transactions and recovery rules.
-It is self-contained: source links and references are supporting material, not
-substitutes for protocol steps. Last consolidated: 17 October 2026.
+runtime embedded in Restate. It defines the guest bridge, snapshot ABI, record
+formats, execution algorithms, the commit protocol and recovery rules. It is
+self-contained: source links and references are supporting material, not
+substitutes for protocol steps. Last consolidated: 18 October 2026.
 
 The implementation in this crate uses QuickJS compiled to WebAssembly, Wasmtime,
-4 KiB page tracking, and XOR/Zstd checkpoint payloads relative to a shared golden
-image. Its storage is SQL tables on sqlite-kv in a Restate object's state (§7),
-which the `restate` module drives from each program's `run` handler (§9.1).
+4 KiB page tracking, and XOR/Zstd page batches relative to a shared golden
+image. A turn ends in one commit record per scope (§7), in a Restate object's
+state, which the `restate` module drives from each program's `run` handler
+(§9.1). The VM stays live from turn to turn of one attempt.
 
-Reading map: [ownership](#1-model-ownership-and-durability),
+Reading map: [model](#1-model-ownership-and-durability),
 [interfaces](#2-guest-and-host-interfaces), [VM ABI](#3-quickjswasm-snapshot-abi),
 [write tracking](#4-discovering-writes-and-choosing-a-diff),
 [persistent format](#5-persistent-format-capture-and-reconstruction),
-[engine algorithms](#6-engine-algorithms-and-checkpoint-boundaries),
-[storage](#7-storage-sqlite-kv-in-the-objects-state),
+[run algorithms](#6-run-algorithms-and-turn-boundaries),
+[storage and commit](#7-storage-one-commit-per-turn),
 [examples](#8-worked-execution-and-failure-examples),
 [acceptance](#9-restate-binding-and-implementation-acceptance),
 [measurements](#10-measurements),
@@ -24,53 +25,35 @@ Reading map: [ownership](#1-model-ownership-and-durability),
 
 ## 1. Model, ownership and durability
 
-An **application version** names immutable source and an exact runtime build.
-Its **golden image** is initialized before any invocation input is bound. An
-**invocation** has a globally unique run ID and a host-selected application KV
-scope. A **turn** starts or resumes an invocation and ends at one checkpoint.
-An **effect** is a registered request whose result can be delivered in a later
-turn. A **checkpoint** is the current VM image plus its scheduling metadata.
+A **program** is a named, immutable source, identified by its name and its
+**version**, a 64-bit fingerprint of the source. Its **golden image** is the VM
+after evaluating it, before any run's input is bound. A **scope** is the unit
+of storage and ownership: in Restate, one virtual object key. A **run** is one
+invocation of `main` in a scope, identified by a run ID. A **turn** starts or
+continues a run and ends at one commit. A **request** is a guest operation; an
+**effect** is a request the host answers in a later turn (an RPC, a timer, a
+wakeup). An **attempt** is one try at a run in one process: a crash ends it,
+and the next attempt continues from the last commit.
 
-The host owns scheduling, transaction commit/abort, initial invocation delivery,
-effect dispatch and recovery. The engine owns execution and snapshot creation.
-It returns a provisional view; returning that view is not a commit.
+The host owns scheduling, effects and retries. The run owns execution,
+capture and the commit protocol over the scope's store.
 
 Assumptions and invariants:
 
-1. KV is reliable. A successful atomic put durably replaces one complete value;
-   recovery reads observe settled writes. No snapshot/blob/manifest integrity
-   hashes are required. Namespace and source/build identity hashes serve different
-   purposes and do not validate snapshot contents.
-2. One writer owns the entire conflicting domain: checkpoint records, application
-   KV, effect/result records and discovery indexes. No old owner may finish a
-   delayed write after a replacement owner starts. Per-run ownership alone is
-   insufficient when runs share application state or a WAL slot.
-3. A transaction provides read-your-own-writes and isolation from conflicting
-   commits. Each turn publishes the following changes atomically:
-
-   | Component                   | Changes                                                       |
-   | --------------------------- | ------------------------------------------------------------- |
-   | VM                          | Changed-page payloads, full page index, manifest and head     |
-   | Application state           | All guest KV mutations and deletions                          |
-   | New effects                 | RPC/custom requests, timers, internal resume wakeups          |
-   | Consumed result             | Removal/acknowledgement of the completion delivered to the VM |
-   | Host metadata, when changed | Run/scope binding, input identity and work-discovery indexes  |
-
-4. Effects dispatch, wakeups become runnable, and terminal replies publish only
-   after the transaction is committed and storage recovery/application is complete.
-5. Before a durable commit decision, an execution error or cancellation aborts
-   all staged work. After that decision, failure requires completing the stored
-   decision. An ambiguous acknowledgement must be resolved before further work.
-6. Snapshot only after returning completely from Wasm. The image contains QuickJS
-   promises and queued jobs, never a native Wasm stack or a Rust future.
-7. Recovery reconstructs the saved image. It does not replay JavaScript, issue
-   historical KV reads, or repeat callbacks to regenerate a checkpoint.
-
-A transaction covers a turn, not the entire invocation. Other invocations may
-update the same scope while this invocation waits for an RPC. Captured local
-variables retain their old values; a new KV read observes the new transaction.
-Exclusive object ownership across the entire invocation is an additional host
-scheduling policy.
+1. Storage is trusted: no integrity hashes. A put replaces one complete value.
+2. One writer owns a scope at a time: in Restate, the object's exclusive
+   handler, for the whole run. A scope holds one run's image at a time; its
+   KV is shared by its runs, in turn.
+3. Writes may be acknowledged before they are durable, as long as a failure
+   loses only a suffix of them, in issue order (Restate's state commands).
+   Reads within an attempt see its own writes.
+4. A turn happened once its commit record is stored, with everything it
+   lists (§7). Effects are dispatched only after the commit that issued them,
+   in issue order, so a crash that loses the commit loses them too.
+5. Snapshot only after returning completely from Wasm. The image contains
+   QuickJS promises and queued jobs, never a native Wasm stack or a Rust future.
+6. Recovery reconstructs the committed image. It does not replay JavaScript,
+   issue historical KV reads, or repeat callbacks.
 
 ## 2. Guest and host interfaces
 
@@ -82,8 +65,8 @@ one frozen API. Its nested KV and RPC objects are frozen too.
 | Call                                 | Request fields, in addition to `id` | Result                          |
 | ------------------------------------ | ----------------------------------- | ------------------------------- |
 | `ctx.kv.get(key)`                    | `kind:"kv.get", key`                | JSON value, or null when absent |
-| `ctx.kv.set(key, value)`             | `kind:"kv.set", key, value`         | null after staging              |
-| `ctx.kv.delete(key)`                 | `kind:"kv.delete", key`             | null after staging              |
+| `ctx.kv.set(key, value)`             | `kind:"kv.set", key, value`         | null, the write in the turn     |
+| `ctx.kv.delete(key)`                 | `kind:"kv.delete", key`             | null, the delete in the turn    |
 | `ctx.rpc.call(target, input = null)` | `kind:"rpc", target, input`         | JSON response                   |
 | `ctx.call(name, args = null)`        | `kind:"call", name, args`           | Custom host response            |
 | `ctx.sleep(ms)`                      | `kind:"sleep", deadline: now + ms`  | null at/after deadline          |
@@ -122,10 +105,10 @@ an Error carrying the supplied name/message and may be caught by the application
 A terminal guest failure may commit prior KV mutations. So does a VM trap: the
 guest running out of fuel inside one job, or an error QuickJS cannot hand to a
 script. The same image and delivery would trap again on every retry, so the
-engine ends the run instead: it stages a failed outcome named `Trap` over the
-last good image (the trapped one is mid-mutation) and abandons the run's
-outstanding requests. Infrastructure errors and cancelled turns abort the
-transaction.
+run ends instead: it commits a failed outcome named `Trap`, drops the trapped
+VM (it is mid-mutation) and the run's outstanding requests. An infrastructure
+error ends the attempt: the turn is not committed, and the next attempt
+starts from the last commit.
 
 ### 2.2. Snapshot-resident promise bridge
 
@@ -183,78 +166,34 @@ settles, then follows its success or failure: **the run ends when `main`
 settles**, as a request handler does, not when every promise has (as a Node.js
 process would). Requests still pending then, such as a losing `Promise.race`
 branch or an ignored promise, are dropped with the pending map: their results
-are never delivered and their continuations never run, and the engine abandons
-the run's outstanding effects in the terminal turn's transaction. A result that
-arrives later finds no pending request and changes nothing.
+are never delivered and their continuations never run; the terminal commit
+has no pending request. A result that arrives later changes nothing.
 When pausing with queued jobs, create the resume request **before** inspecting
 state so the queued continuation is not misclassified as stalled.
 
-### 2.3. Rust transaction contract
-
-The following signatures describe the implemented API; `Json` denotes a JSON value:
+### 2.3. Rust interface
 
 ```rust,ignore
-trait Kv {
+trait Store {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
-    async fn put(&mut self, key: &str, value: &[u8]) -> Result<()>;
-}
-
-enum Resolution { Ready(Outcome), Pending }
-
-trait Transaction: Kv {
-    fn check_run(&self, run: &str) -> Result<()>; // default allows unscoped hosts
-    async fn execute(&mut self, op: &Operation) -> Result<Resolution>;
-    async fn acknowledge(&mut self, id: &str, outcome: &Outcome, now: u64)
-        -> Result<()>;
-    async fn abandon(&mut self, run: &str) -> Result<()>; // the run trapped
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
+    async fn delete(&self, key: &str) -> Result<()>;
 }
 
 Program::compile(runtime, name, source) -> Result<Program>   // golden creation
 Programs::new(shared_runtime).compile(name, source)?
-Engine::new(transaction, shared_programs)
-Engine::with_checkpoint_interval(NonZeroUsize) // optional host request budget
-Engine::start(run, program, input, now).await -> Result<View>
-Engine::complete(run, operation_id, outcome, now).await -> Result<View>
-Engine::recover(run).await -> Result<View>
-Engine::into_storage() -> Result<Transaction>
+Run::start(&programs, &store, run, program, input, now).await -> Result<Run>
+run.deliver(&store, operation_id, outcome, now).await -> Result<View>
+run.view() -> View
 ```
 
-`execute` runs outside Wasm, serially in issue order. KV requests must resolve as
-Ready, possibly after awaited transactional I/O. Pure custom functions and local
-transactional RPCs may also return Ready. Pending means the host has staged a
-recoverable effect under that exact ID. Sleep and Resume must return Pending;
-Resume is a local wakeup already carrying successful null once commit finishes.
-Never perform an irreversible external RPC inside this transaction.
-
-`acknowledge` verifies that the selected outcome is the recoverable result, and
-that effective delivery time is no earlier than result availability, before
-staging consumption. It must not durably remove the result independently of the
-next VM checkpoint. A host with an external durable inbox may implement that
-contract without a separate result table. The memory test adapter assumes its
-embedding supplies that result; the sqlite-kv host checks it is still pending.
-
-Set an engine usability flag false before registration/turn execution and restore
-it only after success. If a polled future is dropped, an error occurs, or an
-unwind interrupts execution, leave it false. Reject reuse, recovery and storage
-extraction from that engine. Failed extraction consumes/drops the transaction;
-the sqlite-kv host discards staged changes on drop. A fresh attempt starts from
-committed state. This is an API guard, not permission for adapters to publish
-staged data independently.
-
-Commit is explicitly host-owned:
-
-```rust,ignore
-let mut engine = Engine::new(host.begin(run, scope)?, runtime);
-let provisional = engine.complete(run, id, outcome, now).await?;
-let transaction = engine.into_storage()?;
-host.commit(transaction)?; // resolve an ambiguous outcome through storage recovery
-publish(provisional);     // only after confirmed commit/application
-```
-
-Every host call is awaitable: checkpoint `get/put`, guest operation execution and
-acknowledgement. The engine awaits them outside any Wasm call, so a remote store
-may suspend in each. No worker thread or serialized Rust future is part of this
-protocol.
+`Run::start` begins a run with its first turn, or, when the scope's commit is
+already that run's, continues it as committed: another attempt. `deliver`
+answers one pending request and runs a turn. Every store call is awaited
+outside any Wasm call, so a remote store may suspend in each. An error leaves
+the `Run` unusable: the attempt ends, and the next one starts from the store.
+`MemoryStore` keeps every write in order, so a test can keep any prefix of
+them, as a crash may.
 
 ## 3. QuickJS/Wasm snapshot ABI
 
@@ -298,10 +237,11 @@ required to capture an otherwise safe boundary.
 
 ### 3.2. Golden creation, eval and restore
 
-Compile the instrumented module once and share it. Each current turn uses a fresh
-Wasmtime Store/instance, deliberately exercising cold restore.
+Compile the instrumented module once and share it. A run's Wasmtime
+Store/instance lives for its attempt: it is restored once, from golden for a
+new run or from the commit for another attempt, and then runs turn after turn.
 
-Golden creation, once per program version, ahead of time (§5.5):
+Golden creation, once per program version, when the process starts (§5.5):
 
 1. Instantiate with logical time zero and host identity `program/<name>`.
 2. Call `_initialize()`, then `qjs_init2(~((1<<9)|(1<<10)))`; require return zero.
@@ -313,9 +253,8 @@ Golden creation, once per program version, ahead of time (§5.5):
 5. Free temporary handles/strings, read runtime/context pointers and stack global,
    and copy complete linear memory: the program's golden image.
 
-Runtime-dependent initialization values become shared defaults. Keep per-invocation
-input, identity and entropy out of top-level initialization. Reusing an application
-ID with another source or build is rejected.
+Runtime-dependent initialization values become shared defaults. Keep per-run
+input, identity and entropy out of top-level initialization.
 
 Relevant reactor exports, with wasm32 pointers/handles represented as i32:
 
@@ -340,7 +279,7 @@ argument with `qjs_new_string`, call `qjs_call`, and free every handle before
 capture. No value becomes source, so none can inject it; and a call costs a
 fraction of an eval. Preserve explicit lengths so embedded NUL characters in
 values work.
-Any trap/error during this process discards the working instance and transaction.
+Any trap/error during this process discards the instance.
 
 Restore in this order:
 
@@ -353,7 +292,9 @@ Restore in this order:
 5. Reapply allocator/stack limits. These rebinding writes belong to the new dirty
    epoch. Do not call `_initialize`, `qjs_init2`, bridge initialization or top-level
    application evaluation over the restored heap.
-6. Bind invocation state on first start, or deliver one completion, then run jobs.
+6. Bind run state on first start, or deliver one completion, then run jobs.
+   Each later turn reuses the instance: it resets fuel and logical time,
+   delivers, runs, captures, and clears the tracker once the commit is stored.
 
 Before capture, call the runtime/context getters and read the stack global, then
 select/copy pages. If metadata getters touch memory, those writes must be included.
@@ -365,17 +306,17 @@ The host's `now` stays fixed during a turn. On completion use
 `0..=18_446_744_073_709`, allowing conversion to unsigned 64-bit nanoseconds.
 Sleep requires a nonnegative safe-integer duration and an in-range sum.
 
-| Import                                                                                             | Binding                                                                                                                              |
-| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `clock_time_get(i32 clock, i64 precision, i32 out) -> i32`                                         | Clock 0 or 1: write `now * 1_000_000` as little-endian u64; unsupported clocks return errno 52                                       |
-| `random_get(i32 ptr, i32 len) -> i32`                                                              | Write repeated bytes of SHA-256(host identity), bounded by guest memory; deterministic bootstrap input, not cryptographic randomness |
-| `fd_write(i32 fd, i32 iov, i32 count, i32 written) -> i32`                                         | For fd 1/2, validate at most 1,024 vectors and bounds, discard output and write total byte count; other fds return errno 8           |
-| `fd_fdstat_get(i32 fd, i32 out) -> i32`                                                            | For fd 1/2, write the 24-byte zeroed character-device descriptor with byte zero set to 2; other fds return errno 8                   |
-| `fd_close(i32) -> i32`, `fd_seek(i32, i64, i32, i32) -> i32`                                       | Unsupported, errno 52                                                                                                                |
-| `env.host_get_timezone_offset(i32 hi, i32 lo) -> i32`                                              | Return zero: UTC                                                                                                                     |
-| `env.host_interrupt() -> i32`                                                                      | Return zero; Wasmtime fuel bounds execution                                                                                          |
-| `env.host_module_normalize(i32, i32) -> i32`, `env.host_module_load(i32, i32) -> i32`              | Return null/zero: no external module loader                                                                                          |
-| `env.host_call(i32, i32, i32, i32, i32) -> i32`, `env.host_promise_rejection(i32, i32, i32) -> ()` | Unexpected use traps; no native callback registry is enabled                                                                         |
+| Import                                                                                             | Binding                                                                                                                    |
+| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `clock_time_get(i32 clock, i64 precision, i32 out) -> i32`                                         | Clock 0 or 1: write `now * 1_000_000` as little-endian u64; unsupported clocks return errno 52                             |
+| `random_get(i32 ptr, i32 len) -> i32`                                                              | Write repeated bytes of the 64-bit FNV-1a fingerprint of the host identity; deterministic bootstrap input, not randomness  |
+| `fd_write(i32 fd, i32 iov, i32 count, i32 written) -> i32`                                         | For fd 1/2, validate at most 1,024 vectors and bounds, discard output and write total byte count; other fds return errno 8 |
+| `fd_fdstat_get(i32 fd, i32 out) -> i32`                                                            | For fd 1/2, write the 24-byte zeroed character-device descriptor with byte zero set to 2; other fds return errno 8         |
+| `fd_close(i32) -> i32`, `fd_seek(i32, i64, i32, i32) -> i32`                                       | Unsupported, errno 52                                                                                                      |
+| `env.host_get_timezone_offset(i32 hi, i32 lo) -> i32`                                              | Return zero: UTC                                                                                                           |
+| `env.host_interrupt() -> i32`                                                                      | Return zero; Wasmtime fuel bounds execution                                                                                |
+| `env.host_module_normalize(i32, i32) -> i32`, `env.host_module_load(i32, i32) -> i32`              | Return null/zero: no external module loader                                                                                |
+| `env.host_call(i32, i32, i32, i32, i32) -> i32`, `env.host_promise_rejection(i32, i32, i32) -> ()` | Unexpected use traps; no native callback registry is enabled                                                               |
 
 Unprefixed imports in the table belong to `wasi_snapshot_preview1`; successful
 WASI calls return zero. An I/O vector is a little-endian u32 pointer and u32 length;
@@ -384,8 +325,8 @@ Every import writing guest memory uses the same range-marking helper as source
 and argument copies. Imports must be rebound on each fresh Store.
 
 The bridge overrides Math.random with xorshift32: `s ^= s << 13; s ^= s >>> 17;
-s ^= s << 5; return (s >>> 0) / 2^32`. For a run, seed from the first four SHA-256
-bytes of its UTF-8 ID, interpreted big-endian; replace zero with one. The state is
+s ^= s << 5; return (s >>> 0) / 2^32`. For a run, seed from the low 32 bits of
+the FNV-1a fingerprint of its UTF-8 ID; replace zero with one. The state is
 in the heap and survives checkpoints. Golden initialization starts from seed one.
 These streams are deterministic and are unsuitable for secrets.
 
@@ -396,12 +337,12 @@ Reference limits, not a general resource-management API:
 | Guest linear memory                                       |                          64 MiB |
 | QuickJS allocator                                         |                          32 MiB |
 | QuickJS stack                                             |                          32 KiB |
-| Wasmtime fuel per fresh turn                              | 200,000,000, including barriers |
+| Wasmtime fuel per turn                                    | 200,000,000, including barriers |
 | Tracker memory                                            |    64 KiB, excluded from images |
 | Application source, input, host outcome                   |                      1 MiB each |
 | VM string extraction, including aggregate inspected state |                           1 MiB |
-| Stored JSON metadata                                      |                          16 MiB |
-| Run ID                                                    |             1–1,024 UTF-8 bytes |
+| Commit record                                             |                          16 MiB |
+| Run ID                                                    |     1–1,024 UTF-8 bytes, no `/` |
 | Program name                                              | 1–128 letters, digits, `-`, `_` |
 
 The 32 KiB stack limit is deliberately lower than upstream's 512 KiB ceiling:
@@ -443,12 +384,12 @@ cross-page destinations. Newly grown memory is zero-filled: persist the new
 length even if no new page is written. Reject unsupported writing instructions
 rather than silently missing them.
 
-At a safe boundary compare only marked pages with the parent image, treating
-pages beyond parent length as zeros. Dirty means written; changed means different
-at capture. A page written and restored to its original value needs no new payload.
-Reset the tracker on restore before rebinding pointers/limits. A future warm-VM
-path must retain the dirty epoch until commit, or restore committed state after
-abort; it must resolve an uncertain commit before choosing a new epoch.
+At a safe boundary compare only marked pages with the parent image (the memory
+as of the last commit, which the run keeps beside its live VM), treating pages
+beyond parent length as zeros. Dirty means written; changed means different at
+capture. A page written and restored to its original value needs no new
+payload. Reset the tracker on restore before rebinding pointers/limits, and
+after each commit is stored. A failed commit ends the attempt with its VM.
 
 Selected encoding: **changed 4 KiB pages XORed against golden, batched with Zstd
 level 3**. Reasons and alternatives from the experiment's existing measurements:
@@ -465,7 +406,7 @@ level 3**. Reasons and alternatives from the experiment's existing measurements:
 These are workload-dependent historical codec results, not current host-commit
 latencies. Wasm compilation alone does not make a diff algorithm heap-aware.
 Wasmtime COW initialization/Wizer can help preinitialization, but do not implement
-this invocation transaction protocol. The pinned public engine APIs supplied no
+this run commit protocol. The pinned public engine APIs supplied no
 ready-made dirty-page checkpoint list. Allocator layout cooperation may reduce
 writes to golden pages, but must supplement complete write tracking.
 
@@ -473,57 +414,41 @@ writes to golden pages, but must supplement complete write tracking.
 
 ### 5.1. Record identities and layouts
 
-Let `H(s)` be lowercase hex SHA-256 of UTF-8 s, and `R=H(run)`.
-The first checkpoint sequence is zero. Its checkpoint/blob ID is `run/R/sequence`.
-A blob reference is an ID; prepend `blob/` to fetch it. This is naming and build
-identity, not snapshot content addressing or integrity verification.
+A scope's store holds three kinds of key:
 
-| Logical key                 | Encoded value                                    |
-| --------------------------- | ------------------------------------------------ |
-| `blob/run/R/sequence`       | Compressed changed-page batch, if nonempty       |
-| `checkpoint/run/R/sequence` | Manifest JSON record                             |
-| `run/R/input`               | Original input JSON for duplicate-start checking |
-| `run/R/head`                | Raw UTF-8 checkpoint ID, not a JSON string       |
+| Key         | Value                                                    |
+| ----------- | -------------------------------------------------------- |
+| `commit`    | The scope's current run as of its last turn: JSON, below |
+| `batch/<n>` | An immutable compressed page batch (§5.2); n counts up   |
+| `kv/<key>`  | The scope's KV value of `key`, as JSON                   |
 
-Programs and their golden images are not stored here: the host supplies them
-(§5.5). Record field spelling matches the Rust experiment. Manifest fields
-use snake_case; nested State uses camelCase. Optional State.outcome is omitted;
-Manifest.previous is null for sequence zero. Integer page keys are decimal strings
-in a JSON object. JSON whitespace/property order are not semantically significant.
+Programs and their golden images are not stored: the process supplies them
+(§5.5). The commit, in camelCase JSON:
 
 ```text
 VmMeta = {stack: i32, runtime: i32, context: i32}
-PageRef = {blob: blob_id, slot: zero_based_entry_index}
-Manifest = {
-    format: 1, program: name, source: H(program_source), build: runtime_build_id,
-    previous: prior_checkpoint_id_or_null, sequence: unsigned_integer,
-    meta: VmMeta, memory_len: byte_count,
+PageRef = {b: batch_number, s: zero_based_slot}
+Commit = {
+    run: run_id, program: name, version: u64, runtime: u64,
+    turns: count, meta: VmMeta, memoryLen: byte_count,
     pages: {decimal_page_index: PageRef, ...},
-    state: State,
-    changed_pages: count, examined_pages: count, new_blob_bytes: count
+    nextBatch: u64, state: State,
+    writes: {key: json, ...}, deletes: [key, ...], garbage: [batch_number, ...]
 }
 ```
 
-`pages` is the **complete current override map** relative to golden, not a list of
-edits to the previous manifest. Missing entries inherit the golden page or zeros
-beyond golden length. `previous` is optional history navigation; reconstruction
-never follows it. A page reference can point into an older batch without needing
-that batch's old manifest.
-
-For the reference implementation the build ID is SHA-256 of concatenated compiled-
-input Wasm bytes (transformed in tracked mode), UTF-8 bridge source, then the restore
-contract as a literal: `abi=<version>;wasmtime=49.0.3;stack=<bytes>;heap=<bytes>;
-intrinsics=<flags>`. It covers what a restored image depends on, not the host's source
-code: editing the host keeps stored runs restorable. Bump the ABI version when the
-restore contract changes in a way these inputs don't show (import behavior, the bridge
-protocol, VM metadata). A new implementation may use its own immutable compatibility
-identity, but must pin all state-layout and restore semantics. A run restores only
-with the program source and build it started on: a changed program needs a new
+`pages` is the **complete current override map** relative to golden: missing
+entries inherit the golden page, or zeros beyond golden's length. A page
+reference can point into an older batch. `writes`, `deletes` and `garbage`
+are what follows the commit (§7). `runtime` is the runtime's version, a
+constant bumped by hand with anything an image depends on: the Wasm, the
+bridge, the limits, the imports' behavior. A run restores only on the
+program version and runtime it started on: a changed program needs a new
 name while the old one's runs finish. There is no heap migration.
 
-The returned View contains checkpoint ID, program name, sequence, State, image
-length and diagnostics: changed/examined/override page counts, new blob bytes and
-manifest bytes. It contains no host commit acknowledgement.
+The returned View holds the run, program, turns, State, memory length, live
+pages, and what the last turn wrote: changed and examined pages, batch and
+commit bytes.
 
 ### 5.2. Binary page batch
 
@@ -545,210 +470,175 @@ and allocation checks, not extra assumptions about unreliable KV.
 
 ### 5.3. Capture algorithm
 
-Inputs are golden image G, reconstructed parent P, current override map M, live VM
-and its dirty tracker. On first start, P=G and M is empty.
+Inputs are golden image G, the parent P (the memory as of the last commit), the
+current override map M, the live VM and its tracker. A new run has P=G and an
+empty M.
 
 ```text
-capture(G, P, M, VM, next_sequence):
+capture(G, P, M, VM):
     require no active Wasm call or pending host operation future
     read VM metadata first
     require VM.length >= P.length, aligned to 64 KiB, within limit
-    next_map = copy(M)
-    batch = []
+    next_map = copy(M); batch = []
     for each marked page i in ascending order:
         current = VM.page(i)
-        previous = P.page(i), or zeros beyond P.length
-        if current == previous: continue
-        base = G.page(i), or zeros beyond G.length
-        if current == base:
-            remove next_map[i]
-        else:
-            batch.append((i, current XOR base))
-    encode nonempty batch under blob/run/R/next_sequence
-    set next_map[i] = {blob: new_blob_id, slot: entry_number} for batch entries
-    stage manifest with full next_map, current length/metadata/State
-    stage head = manifest_id
-    return provisional View
+        if current == P.page(i, zeros beyond P.length): continue
+        P.page(i) = current
+        if current == G.page(i, zeros beyond G.length): remove next_map[i]
+        else: batch.append((i, current XOR G.page(i)))
+    if the run settled: next_map = {}, batch = []   // no image is kept
+    if next_map would reference more than 16 batches:
+        batch = every live page of next_map and the batch, XORed against G
+    set next_map[i] = {b: nextBatch, s: entry} for batch entries
+    return next_map, batch
 ```
 
-Count compared pages as examined_pages. Count actual changes even when their
-existing override is removed as changed_pages. No new blob is needed for an empty
-batch. A zero page that differs from a nonzero golden page remains an explicit
-XOR override. Size-only zero growth still requires the new manifest length. When
-the next manifest would reference more batches than the bound of section 5.4,
-replace the batch with every live override, XORed against golden.
-
-The reference reuses/updates the reconstructed parent buffer to form the next
-image, copying only actual changes out of Wasm. This avoids another full capture
-copy; it does not eliminate full-image cold restoration.
+Count compared pages as examined, actual changes as changed. A zero page that
+differs from a nonzero golden page stays an explicit XOR override. Size-only
+zero growth still needs the new memory length. Updating P with each changed
+page keeps it equal to the VM's memory as of the commit: the `verify-dirty`
+build checks that every page that differs from it was marked.
 
 ### 5.4. Reconstruction algorithm
 
 ```text
-reconstruct(run):
-    read head and manifest; require matching format/build
-    read application; require matching ID/format/build
-    decompress golden; require its exact declared length
-    require golden_length <= manifest.memory_len <= limit; both 64-KiB aligned
-    memory = golden bytes, extended with zeros to manifest.memory_len
-    group manifest page references by blob ID
-    for each referenced blob:
-        decode and validate the batch
-        for each live reference (page i, slot) into that blob:
+reconstruct(commit):
+    require the program's version and the runtime's match the commit's
+    require golden_length <= memoryLen <= limit, 64-KiB aligned
+    memory = golden bytes, extended with zeros to memoryLen
+    group commit.pages by batch
+    for each referenced batch:
+        decode and validate it
+        for each reference (page i, slot) into it:
             require i within memory and batch[slot].page_index == i
             memory.page(i) XOR= batch[slot].xor_bytes
-        release decoded batch before loading the next blob
-    return Image(memory, manifest.meta), manifest.State
+        release the decoded batch before loading the next
+    return Image(memory, commit.meta)
 ```
 
-The golden image is immutable per program version, so a host keeps it
-decompressed across turns: the reference's catalog holds it. Each live page is applied once, against golden/zero bytes. Do not apply a golden-
-relative delta to the previous invocation page. Do not retain every decoded old
-batch simultaneously: mostly superseded batches can amplify retained memory.
-Each referenced batch is still read/decompressed in full, so capture bounds how
-many a manifest references (16 in the reference): when the next manifest would
-reference more, the turn writes every live override into its own batch, and the
-manifest then references that one alone. A long run's restore reads at most that
-many batches instead of one per turn. Retain golden and every referenced blob. No
-record GC is implemented.
+The process keeps each golden image decompressed in its catalog. Each live
+page is applied once, against golden or zeros. Capture bounds how many batches
+a commit references (16), so restoring reads at most that many however long a
+run lives. An attempt reconstructs once, when its first delivery needs the
+VM; reading a settled run's commit needs no image.
 
 ### 5.5. Programs
 
 A program is static: a named source file, shipped in the binary. At startup the
 process evaluates each into its golden image (§3.2) and keeps them in a catalog
-(`Programs`) that every engine of the process shares. Evaluation is
+(`Programs`) that every run of the process shares. Evaluation is
 deterministic: a fixed identity, clock and seed, and no other input, so the
 same source on the same runtime build gives the same image, byte for byte, in
 every process. A checkpoint written by one process therefore restores in
-another, and nothing but the source needs shipping. A manifest records its
-program's source hash and the runtime build; a run restores only with both.
+another, and nothing but the source needs shipping. A commit records its
+program's version and the runtime's; a run restores only with both.
 
-## 6. Engine algorithms and checkpoint boundaries
+## 6. Run algorithms and turn boundaries
 
-### 6.1. Start, completion and read-only recovery
+### 6.1. Start, delivery and another attempt
 
-Start validates the run ID, input and time, finds the program in the catalog
-and calls `check_run`. If the run already has a head, require the same program
-(name and source hash) and structurally equal
-original input; return its current View without guest execution. Otherwise stage
-input identity, restore golden, bind run ID/time/seed, queue main and execute one
-turn. The host must retain/redeliver initial admission until that first commit;
-an uncommitted input record cannot recover a lost initial request.
+`Run::start(run, program, input, now)` validates the run ID, input and time,
+then reads the scope's commit and applies what follows it (§7). If the commit
+is this run's, it is another attempt: require the same program, check its
+version and the runtime's, and return the run as committed, without guest
+execution and without a VM. Otherwise a new run takes the scope: restore
+golden into a new VM, bind run ID, time and seed, queue `main` and run its
+first turn. The previous run's batches become garbage of that first commit.
 
-Completion validates outcome/time and `check_run`, then loads current state:
+`deliver(operation, outcome, now)` validates outcome and time:
 
-1. If the operation is pending, set effective time to max(input time, state.now).
-   For sleep require effective time at least deadline. Verify/stage result
-   consumption through `acknowledge(id, outcome, effective_time)`.
-2. Restore the image, initialize `handled` with **all IDs pending in the old
-   manifest**, and deliver the one selected completion into the captured promise.
-3. Execute a turn and stage the next checkpoint with sequence+1 in the same tx.
+1. If the operation is pending, set effective time to max(input time,
+   state.now). For a timer require effective time at least its deadline.
+2. If the attempt has no VM yet, reconstruct the committed image into one.
+3. Deliver the one completion into its promise and run a turn (§6.2).
 
-If the ID is not pending, accept a no-op only for canonical `run/<decimal n>` with
-`n < nextOperation`; return current View without acknowledgement or guest work.
-This includes locally resolved operations. There is no historical result receipt
-to distinguish them. Foreign-run, noncanonical and never-issued IDs fail. A late
-conflicting duplicate does not replace the committed outcome.
+If the ID is not pending, accept a no-op only for canonical `run/<decimal n>`
+with `n < nextOperation`; return the current View without guest work. This
+includes requests answered in their turn, and those dropped when the run
+settled. Foreign-run, noncanonical and never-issued IDs fail.
 
-Read-only `recover(run)` validates run binding, reconstructs the image and returns
-its View. It does not instantiate/enter Wasm, consume a result or re-emit a request.
-The host reconnects pending IDs to its durable effects and chooses deliveries.
-An invocation with a stored result and a VM still waiting for it is normal.
+### 6.2. Turn
 
-### 6.2. Turn pump
-
-All native calls below return before calling the transactional host:
+All native calls below return before the run awaits the store:
 
 ```text
-handled = IDs from the pre-turn manifest's pending list, or empty for a start
-ready_count = 0
+begin: reset fuel, set logical time
+seen = IDs pending in the last commit, or empty for a start
 loop:
     drain all QuickJS jobs
     state = inspect bridge
-    saw_ready = false
-    for op in state.pending, in issue order:
-        if op.id in handled: continue
-        add op.id to handled
-        resolution = await transaction.execute(op) // no active Wasm call
-        if Ready(outcome):
-            require op is not Sleep or Resume
-            validate outcome and size
-            deliver outcome into its guest promise, with this turn's logical time
-            // delivery queues jobs; do not run those jobs inside this batch
-            saw_ready = true
-            ready_count += 1
-        else:
-            require op is not a KV request
-            // host has staged a durable effect; leave its promise pending
-    if not saw_ready:
-        break with state
-    if (configured_budget exists and ready_count >= configured_budget)
-            or remaining_fuel < half of the turn's fuel:
+    answered = false
+    for op in state.pending, in issue order, not in seen:
+        add op.id to seen
+        if op is a KV request:
+            get: the turn's own write or delete of the key, else kv/<key>
+            set/delete: record it in the turn's writes
+            deliver the result, with this turn's logical time
+            answered = true
+        // other requests stay pending: effects for the host
+    if not answered: break with state
+    if the turn has spent half its fuel:
         invoke internal pause(), then inspect without draining jobs
-        require last pending request is Resume
-        require await transaction.execute(that Resume) returns Pending
+        require the last pending request is a Resume
         break with that state
-capture and stage one image/manifest/head
-return provisional View
+capture (§5.3) and commit (§7)
 ```
 
-Pre-populating `handled` prevents existing effects from being registered again
-when one sibling finishes. Process the entire issued batch before testing the
-budget; otherwise a capture could contain unregistered requests. Validate state
-and outcome before capture. Any execution, host, serialization or staging error
-poisons the engine and aborts the pre-decision transaction.
+Pre-populating `seen` keeps effects already issued from being issued again
+when a sibling finishes. A turn continues through local requests until only
+effects remain, the run settles, or it has spent half its fuel: one local KV
+await costs roughly 300,000 fuel (more with write barriers), so a few hundred
+sequential awaits would otherwise exhaust a turn, trap, and trap again on
+every retry. The committed Resume makes the queued continuations schedulable
+after a crash.
 
-Default policy has no request budget: continue through local operations until
-only durable effects remain, the invocation is terminal, or the turn has spent
-half its fuel. That last stop matters: one local KV await costs roughly 300,000
-fuel (more with write barriers), so a few hundred sequential awaits would
-otherwise exhaust a turn, trap, and trap again on every retry. A configured positive
-budget counts Ready requests, not JS statements or elapsed time. A batch can
-exceed it. A checkpoint may preserve queued continuations of already-resolved
-promises; the committed Resume makes them schedulable after a crash.
+| Situation                                   | Action                                                               |
+| ------------------------------------------- | -------------------------------------------------------------------- |
+| KV request                                  | Answer in the turn and continue                                      |
+| Store read awaiting I/O                     | Keep the VM and the tracker; no Wasm call is live; do not capture    |
+| Effects only, no runnable jobs              | Capture and commit the pending requests                              |
+| Half the fuel spent                         | Finish the batch, add a Resume, capture before queued jobs run       |
+| Root settled                                | Commit the outcome with no image and no pending request; drop the VM |
+| Infinite synchronous job or microtask chain | Fuel traps; the run ends failed                                      |
 
-| Situation                                   | Action                                                                  |
-| ------------------------------------------- | ----------------------------------------------------------------------- |
-| Local KV/custom result                      | Deliver and continue in the same turn unless budget reached             |
-| Rust operation future awaiting I/O          | Retain VM, transaction and tracker; do not capture                      |
-| Durable RPC/timer wait, no runnable jobs    | Capture and commit pending effect identities                            |
-| Host budget reached                         | Finish batch, stage ready Resume, capture before queued jobs run        |
-| Root settled                                | Capture terminal state, dropping pending requests; publish after commit |
-| Infinite synchronous job or microtask chain | Fuel traps; the run ends failed. No native-stack preemption snapshot    |
+Any pending effect can be delivered next, not just a Resume. More than one
+Resume can coexist. Once the root settles, the run is final.
 
-Any available effect can be delivered next, not just Resume. If an RPC arrives
-before Resume, its turn also drains already queued jobs. More than one Resume
-can coexist; each remains a pending effect until consumed, and none replays an
-old host operation. Once the root settles, the run is final, whatever is pending.
+## 7. Storage: one commit per turn
 
-## 7. Storage: sqlite-kv in the object's state
+A turn writes, in this order:
 
-`namespace::NamespaceTransaction` keeps a scope's records in SQL tables in one
-namespace of a key/value store, through sqlite-kv: in Restate, a virtual
-object's state, one namespace per object key. sqlite-kv turns a session's page
-writes into one atomic commit (a log transaction, usually a single put), so the
-runtime needs no write-ahead log of its own.
+1. `batch/<nextBatch>`, when pages changed;
+2. `commit`: the turn happened once it is stored;
+3. what follows the commit: `writes` to `kv/<key>`, `deletes` of `kv/<key>`,
+   and deleting `batch/<n>` for each garbage batch.
 
-```sql
-CREATE TABLE checkpoints (key TEXT PRIMARY KEY, value BLOB NOT NULL);
-CREATE TABLE state (key TEXT PRIMARY KEY, value BLOB NOT NULL);
-CREATE TABLE effects (id TEXT PRIMARY KEY, run TEXT NOT NULL, operation BLOB NOT NULL);
-```
+A failure loses a suffix of the writes (§1), so a stored commit always has its
+batch. The next attempt reads the commit and applies what follows it again:
+puts and deletes of the same values, so applying twice changes nothing, and a
+crash between the commit and its last write loses nothing. A crash before the
+commit loses the whole turn, and the next attempt runs it again from the
+previous commit: the requests it issued were never dispatched (§1). The next
+commit's own lists replace the previous one's. An orphan batch, written by a
+turn whose commit was lost, has the number the next turn writes over.
 
-- A turn is one sqlite-kv session; `commit` is one `save()`. Dropping the
-  transaction discards every staged change. The namespace's owner (the object's
-  exclusive handler) runs one turn at a time.
-- The namespace is one application KV scope: every run in it shares `state`.
-  KV requests resolve Ready in the turn, against `state`.
-- `effects` is an outbox, `(id, run, operation)`, with no results: RPCs,
-  timers and Resume are staged there and resolve Pending. The embedding waits
-  for each itself, under its stable ID, once the turn that staged it has
-  committed, and again after a crash. `acknowledge` checks that a delivered ID
-  is still the run's outstanding request, and deletes it with the turn.
-- When a run settles, `abandon` deletes its remaining requests in the same turn.
+Why not SQL. Until 18 October 2026 a scope's records lived in SQL tables
+(`checkpoints`, `state`, `effects`) through sqlite-kv, which made a turn's
+writes atomic with its own log. Measured against Restate, that cost a turn
+about 2 ms of CPU to open the database again and parse its schema, wrote
+every changed B-tree page, put each log segment twice (once more on the next
+open, to confirm it), and copied all pages into place at each checkpoint. A
+20-wait run journaled ~150 state commands and wrote ~150 KiB. The tables were
+key/value maps (the effects table even repeated the run's pending list), and a
+single writer with ordered writes needs no general transaction: one commit
+record, written last, is the atomic step. It also made the runtime
+independent of turso. A program that wants SQL can still call a Restate
+service that has it.
 
-For tests and the benchmark, `MemoryTransaction` implements the same contract
-over an in-memory map that the test publishes or discards as a whole.
+`MemoryStore` implements the same contract for tests and the benchmark, and
+keeps its writes in order so a test can keep any prefix of them: the crash
+tests start an attempt after every write of a run, and again after every write
+of the attempt that recovers from it.
 
 ## 8. Worked execution and failure examples
 
@@ -764,94 +654,46 @@ async function main(input, ctx) {
 }
 ```
 
-With count=41 and no request budget:
+With count=41:
 
-| Transaction                             | Application KV | VM checkpoint                            | Effect R                  |
-| --------------------------------------- | -------------- | ---------------------------------------- | ------------------------- |
-| T1: execute until RPC wait              | count=42       | C0 contains n=41 and pending RPC promise | Request for 42 registered |
-| T2: result arrival                      | Unchanged      | Still C0                                 | Outcome 84 available      |
-| T3: consume result and run continuation | lastAnswer=84  | C1 completed with 84                     | Consumed/removed          |
+| Turn                                | Writes, in order                                                                 | Effect R                    |
+| ----------------------------------- | -------------------------------------------------------------------------------- | --------------------------- |
+| T1: execute until the RPC wait      | `batch/0`, `commit` (count=42, R pending), `kv/count`=42                         | Dispatched after the commit |
+| T2: deliver R's result 84, continue | `commit` (completed, no pages; lastAnswer=84), `kv/lastAnswer`, delete `batch/0` | Done                        |
 
-```mermaid
-sequenceDiagram
-    participant H as Host and QuickJS
-    participant D as Transactional storage
-    participant R as Remote service
-    H->>D: T1 commit count, effect R and C0
-    H->>R: Dispatch R with stable ID
-    R-->>H: Result 84
-    H->>D: T2 commit result availability
-    H->>D: T3 read C0 and result; stage consumption
-    Note over H: Restore and resume captured promise
-    H->>D: T3 commit lastAnswer, C1 and consumption
-    Note over H: Return committed result
-```
+A crash before T1's commit leaves nothing: the next attempt starts the run
+again, and R was never dispatched. After T1's commit but before `kv/count`,
+the next attempt applies it. After dispatch, the next attempt waits on R again
+under its stable ID: Restate attaches to the call already made. After T2's
+commit, a repeated delivery is a no-op and another attempt returns the outcome.
 
-A crash before T1 commits leaves no increment or dispatchable request. Initial
-admission is redelivered. After T1 and before dispatch, recovery discovers R and
-sends/reconnects it. After remote execution but before T2, local storage cannot
-know whether the remote action happened: the transport/receiver must recover or
-deduplicate by R's stable ID. After T2, C0 plus the available result is recoverable.
-An abort during T3 preserves both. After T3 commits, a repeated completion is a
-no-op and a repeated start returns the committed outcome.
+### 8.2. Fan-out
 
-With the KV WAL, T3 freezes final assignments for lastAnswer, tombstone(effect R),
-new blob/manifest/head and active_runs removal. If a crash occurs after effect
-removal but before head replacement, the physical base is mixed. Redo recovery
-reinstalls the complete frozen transaction before anything reads it. It does not
-rerun the continuation to recreate C1.
-
-### 8.2. A KV read that fetches remotely
-
-For `const n = await ctx.kv.get("n"); await ctx.kv.set("n", n+1)`, a host read may
-return Poll::Pending while doing transactional I/O. Keep the transaction, VM and
-tracker alive; no native Wasm call is active. Once I/O completes, return Ready and
-continue. With no budget, both operations can share one checkpoint.
-
-A crash/cancellation during the read aborts the whole pre-decision turn. An
-explicit retry from the previous committed image may read a newer value; there
-is no committed read-result receipt to replay. The remote read must nevertheless
-participate in the host's isolation/ownership contract. An arbitrary unrelated
-HTTP read is not automatically transactional KV.
-
-### 8.3. Host-scheduled capture and fan-out
-
-With a Ready budget of two, a loop performing get then set checkpoints after each
-pair. The set's success has resolved its promise, but its continuation may still
-be queued. Stage Resume with the image, commit, then deliver Resume to continue.
-A ten-pair budget counts twenty Ready operations. There can be a final extra
-checkpoint to drain the last continuation and record the terminal outcome.
-
-For `Promise.all([rpcA(), rpcB()])`, the first checkpoint registers both requests
-atomically. Completing B removes/consumes only B; `handled` prevents re-emitting A.
-The next image retains B's resolved value while waiting for A. Completing A then
-returns values in application array order. For Promise.race, the run completes in
-the turn the winner settles it; the losing effect is abandoned.
+For `Promise.all([rpcA(), rpcB()])`, the first commit has both pending.
+Delivering B commits a turn that keeps A pending; `seen` keeps A from being
+issued again. Delivering A then returns values in array order. For
+`Promise.race`, the run completes in the turn the winner settles it; the loser
+is dropped.
 
 ## 9. Restate binding and implementation acceptance
 
-The Rust core requires an embedding, not an SDK journal. Map host invocation
-identity and object/workflow scope to start/check_run, application state access
-to KV requests, target service/handler/key to RPC routing, sleep to the host timer
-service, and Resume to local scheduling. The host chooses an available completion
-and uses its explicit durable recovery path to call complete.
-
-Ship programs' sources, retain initial admission until first commit,
-and include checkpoint storage, KV changes, effect registration and consumption
-in the same host transaction. Scope selection and RPC authorization belong to
-the host. Publish only committed terminal status. Choose an explicit concurrency policy for different invocations sharing
-a scope.
+The runtime requires an embedding, not an SDK journal: a store per scope, one
+writer per scope, effect dispatch after the commit that issued them, and
+delivery of their results. Scope selection and RPC authorization belong to
+the host.
 
 ### 9.1. The Restate binding
 
-The `restate` module binds §7's storage to a live Restate server, on the
-Rust SDK with journal replay off:
+The `restate` module binds runs to a live Restate server, on the Rust SDK with
+journal replay off:
 
 - Each program is a virtual object of its name, with no registration: the
   binary embeds its programs and evaluates them when it starts (§5.5). An object key is a
   scope; its exclusive handlers serialize its runs, one writer at a time.
 - A run is one invocation of the object's `run` handler, which drives its
-  turns itself. After each turn commits, the handler waits on Restate for the
+  turns itself, on one live VM. Its store is the object's state, remembering
+  every key it read or wrote for the attempt: a key is read from Restate at
+  most once. After each turn commits, the handler waits on Restate for the
   first pending request: an RPC as a call whose idempotency key is the
   operation ID, a timer as a sleep until the deadline; Resume is delivered at
   once. The completion is the next turn's event. Uncommitted IDs are never
@@ -859,8 +701,7 @@ Rust SDK with journal replay off:
 - A retried attempt restores the last committed image and waits again on its
   pending requests under the same keys: Restate attaches a re-issued call to
   the original invocation, within the callee's idempotency retention. Nothing
-  is replayed, and the host keeps no results: `effects` only checks that a
-  delivered ID is pending.
+  is replayed, and the host keeps no results.
 - `run` returns once `main` settles, when the run ends (§2.2): requests still
   outstanding are dropped, and a call already made finishes at its callee
   unobserved.
@@ -870,26 +711,24 @@ An implementation can be built and accepted in this order:
 1. Pin the reactor, bind imports and implement golden creation plus full-memory
    cold restore. Validate pointer/stack restoration, closures, cycles, maps,
    pending promises and queued jobs before optimizing capture.
-2. Implement the JSON bridge and turn pump with an isolated in-memory transaction.
-   Add stable IDs, duplicate handling, run checks and poisoning on errors/cancel.
-3. Add golden-relative page maps, exact batch codec, growth and override removal.
-   Verify reconstructed memory/behavior without following old manifests.
+2. Implement the JSON bridge and the turn over a store in memory. Add stable
+   IDs, duplicate handling, and an unusable run after an error.
+3. Add golden-relative page maps, the batch codec, growth and override removal.
 4. Add write barriers and host marking, retaining a full-scan control and a
    verification oracle: every actually changed page must have been marked.
-5. Bind a real atomic transaction, then add effects/results and result consumption.
-   Verify before/after commit crash behavior and mismatch rejection.
+5. Add the commit protocol, then crash tests at every write.
 
 Required acceptance cases:
 
-| Area         | Cases                                                                                                                                                                           |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Snapshot ABI | Hidden mutable globals/table mutation/passive lifecycle rejected; stack limit catches recursive overflow before/after restore                                                   |
-| Tracking     | Every scalar store width, offsets and cross-page writes; overlapping bulk writes; zero lengths; traps; growth; host writes; epoch reset; deliberate missed-write detection      |
-| Images       | Golden isolation; sparse writes; zero growth; zero over nonzero golden; return-to-golden removes override; multiple referenced old blobs; bounded decoding                      |
-| Promises     | all/race/any/allSettled, rejection, fan-out delivery order, captured queued KV result, RPC before Resume and multiple Resume delivery orders                                    |
-| Transactions | Read-your-writes; true pending host read; cancel before/after mutations; trap; failure before/after each staging action; no extraction/reuse after failure                      |
-| Identities   | Changed source/build/input rejected; immutable scope across reopen; wrong-run transaction rejected even without requests; canonical duplicate IDs are no-ops                    |
-| Completions  | Exact stored result and time checked; early/out-of-range timer result rejected; aborted consumption leaves result; duplicate after committed consumption does not execute guest |
+| Area         | Cases                                                                                                                                                                             |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Snapshot ABI | Hidden mutable globals/table mutation/passive lifecycle rejected; stack limit catches recursive overflow before/after restore                                                     |
+| Tracking     | Every scalar store width, offsets and cross-page writes; overlapping bulk writes; zero lengths; traps; growth; host writes; epoch reset; deliberate missed-write detection        |
+| Images       | Golden isolation; sparse writes; zero growth; zero over nonzero golden; return-to-golden removes override; multiple referenced old blobs; bounded decoding                        |
+| Promises     | all/race/any/allSettled, rejection, fan-out delivery order, captured queued KV result, RPC before Resume and multiple Resume delivery orders                                      |
+| Commits      | Read-your-writes in a turn; a crash after any write, and again after any write of the recovering attempt, ends as without one; a live run and a restored one store the same bytes |
+| Identities   | Another program version or runtime rejected; canonical duplicate IDs are no-ops; unknown IDs fail                                                                                 |
+| Completions  | Early/out-of-range timer result rejected; a late result after the run settled changes nothing                                                                                     |
 
 `make test-qjs` runs the runtime's tests with `verify-dirty` (every changed page
 must have been marked) and again with `full-scan`, then the programs against a
@@ -898,51 +737,49 @@ Restate server, including a crash between a call's commit and its answer.
 ## 10. Measurements
 
 `cargo bench --bench checkpoints` (and `--features full-scan`, the control)
-measures capture and restore over `MemoryTransaction`, and writes its results
-beside it as JSON.
+runs a few workloads over `MemoryStore`, once with the VM live and once
+restoring it every turn, and writes its results beside it as JSON.
 
 Against Restate, measured on 18 October 2026 (4 vCPUs, one restate-server
-1.7.13), compared with the same workloads as regular virtual objects of the
-TypeScript SDK 1.17.3 on Node 22:
+1.7.13), with the same workloads as regular virtual objects of the TypeScript
+SDK 1.17.3 on Node 22:
 
-| Workload                                          | TypeScript       | QuickJS           |
-| ------------------------------------------------- | ---------------- | ----------------- |
-| Read and write the KV, a new key each, 32 at once | 520/s, p50 57 ms | 220/s, p50 140 ms |
-| One wait, one run at a time                       | 4 ms             | 68 ms             |
-| 5 waits, 32 runs at once                          | 243/s            | 40/s              |
-| Journal entries and bytes written per wait        | 1, ~1 KiB        | ~30, ~55 KiB      |
-| CPU per turn (SDK process + Restate)              | 0.6 + 1.2 ms     | 7 + 5 ms          |
+| Workload                                      | TypeScript       | QuickJS          |
+| --------------------------------------------- | ---------------- | ---------------- |
+| KV read and write, a new key each, 32 at once | 510/s, p50 57 ms | 339/s, p50 91 ms |
+| KV read and write, one key, one at a time     | p50 7.8 ms       | p50 12 ms        |
+| 20 waits on a 1 ms timer, one run             | 69 ms            | 78 ms            |
+| 5 waits, 32 runs at once                      | 228/s            | 137/s            |
+| `Promise.all` of 10 calls, 8 at once          | 45/s             | 26/s             |
+| Primes below 100,000                          | 46 ms            | 480 ms           |
+| Written to Restate by a run of 20 waits       | ~20 KiB          | ~137 KiB         |
 
-A turn reads and writes the scope's database pages as state commands, which
-the invocation's journal keeps until the run ends: a long run's journal grows
-with every turn. The Rust SDK's server does not set `TCP_NODELAY`, which adds
-~40 ms to each round trip (19 ms per wait with it). One synchronous JavaScript
-job is capped at about 10^8 Wasm instructions, and the interpreter runs
-compute-bound code ~30x slower than V8.
+Before the commit record and the live VM, the same rows were 220/s, 64 ms,
+1.36 s, 40/s, 8.3/s, 1.8 s and 1.1 MiB. The Rust SDK's server now sets
+`TCP_NODELAY`, which saved ~40 ms per round trip. One synchronous JavaScript
+job is still capped at about 10^8 Wasm instructions, and the interpreter runs
+compute-bound code ~10x slower than V8.
 
 ## 11. Scope limits, provenance and references
 
-The baseline deliberately has no warm-VM cache, GC, heap migration,
-background WAL apply, concurrent writers, generic Wasm snapshots or dynamic native
-extensions. Full page indexes and checkpoint history accumulate. Future GC must
-retain every blob/golden/runtime artifact reachable from retained heads, not just
-remove blobs whose checkpoint manifest is old. Snapshot memory limits are not
-whole-process memory limits. A request budget cannot preempt arbitrary JS.
+There is no heap migration, no concurrent writers in a scope, no generic Wasm
+snapshot and no dynamic native extension. A settled run keeps only its commit
+record, with its outcome. Snapshot memory limits are not whole-process memory
+limits. Nothing preempts a single long JavaScript job but fuel.
 
 Applications are cooperative: the internal bridge and JavaScript built-ins are
 not hardened against tampering. There is no guest filesystem/network/module-loader
 API; RPC routing and authorization belong to the embedding. A non-idempotent remote
-provider still needs a transport recovery/deduplication contract. These limitations
-are separate from assuming reliable local KV.
+provider still needs a transport recovery/deduplication contract.
 
-The shipped binary's provenance fingerprint is SHA-256
-`d4c9375f2b1ca4dc95f72c8aa2982a7a9951ac8011490d79c6582df732b4bbd9`.
-This identifies the pinned dependency, not a snapshot integrity scheme. It comes
+The pinned QuickJS binary's SHA-256 is
+`d4c9375f2b1ca4dc95f72c8aa2982a7a9951ac8011490d79c6582df732b4bbd9`,
+for provenance only; nothing checks it at runtime. It comes
 from the published quickjs-wasi 3.6.2 package, not a claimed reproducible source
 build; the package does not supply a complete toolchain/submodule manifest.
 Retain `assets/quickjs-wasi-LICENSE`, `quickjs-ng-LICENSE`, `wasi-libc-LICENSE`
 and component notices in `assets/licenses/`. Replacing the binary requires
-ABI review and new cold-restore validation/goldens.
+ABI review, cold-restore validation and a new runtime version.
 
 Supporting sources for the already selected mechanisms:
 

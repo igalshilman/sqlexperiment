@@ -45,12 +45,12 @@ and an AI agent with the shop as its tools ([`assistant`](programs/assistant.js)
 
 QuickJS runs as WebAssembly, so the whole VM (heap, closures, pending
 promises) is one byte array. A run is one invocation of `run`, without journal
-replay, looping over turns:
+replay, looping over turns on one live VM:
 
 ```
-restore ─▶ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wait on Restate ─┐
-   ▲                                                                                          │
-   └──────────────────────────────────────────────────────────────────────────────────────────┘
+deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wait on Restate ─┐
+       ▲                                                                           │
+       └───────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Snapshot only at a wait**, when no frame is on the stack: memory is the
@@ -59,25 +59,28 @@ restore ─▶ deliver one result ─▶ run until the JavaScript waits ─▶ c
   (deterministically, so every process agrees).
 - **Only the pages that changed**: rewritten Wasm marks each written 4 KiB
   page; a turn saves those, XORed against golden and compressed together.
-- **One commit**: the pages, the KV writes and the new requests are one save
-  of the object's state ([sqlite-kv](../../core/sqlite-kv/README.md)).
-- **No replay**: a retry restores the last commit and waits again on its
-  requests under the same idempotency keys, attaching to calls already made.
+- **One commit**: a turn puts its batch of pages, then one `commit` record
+  (the image's page map, the pending requests, the KV writes), then applies
+  the KV writes. Restate loses only a suffix of writes on a crash, so the
+  commit is the atomic step; the next attempt re-applies what follows it.
+- **No replay**: a retry restores the VM from the last commit, once, and
+  waits again on its requests under the same idempotency keys, attaching to
+  calls already made.
 
 ## What it costs
 
 Against the same workloads as regular TypeScript virtual objects (SDK 1.17.3,
 Node 22), one restate-server 1.7.13 on 4 vCPUs:
 
-| Workload                                      | TypeScript       | QuickJS           |
-| --------------------------------------------- | ---------------- | ----------------- |
-| KV read and write, a new key each, 32 at once | 520/s, p50 57 ms | 220/s, p50 140 ms |
-| KV read and write, one key, one at a time     | p50 8 ms         | p50 64 ms         |
-| One wait (a 1 ms timer), one run at a time    | 4 ms             | 68 ms             |
-| 5 waits, 32 runs at once                      | 243/s            | 40/s              |
-| `Promise.all` of 10 calls, 8 at once          | 47/s             | 8.3/s             |
-| Primes below 100,000                          | 60 ms            | 1.8 s             |
-| Written to Restate per wait                   | ~1 KiB           | ~55 KiB           |
+| Workload                                      | TypeScript       | QuickJS          |
+| --------------------------------------------- | ---------------- | ---------------- |
+| KV read and write, a new key each, 32 at once | 510/s, p50 57 ms | 339/s, p50 91 ms |
+| KV read and write, one key, one at a time     | p50 7.8 ms       | p50 12 ms        |
+| 20 waits on a 1 ms timer, one run             | 69 ms            | 78 ms            |
+| 5 waits, 32 runs at once                      | 228/s            | 137/s            |
+| `Promise.all` of 10 calls, 8 at once          | 45/s             | 26/s             |
+| Primes below 100,000                          | 46 ms            | 480 ms           |
+| Written to Restate by a run of 20 waits       | ~20 KiB          | ~137 KiB         |
 
 Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md). Tests:
 `make test-qjs` (with a Restate server), `make lint-qjs`.
