@@ -59,9 +59,11 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   a new attempt (after a crash) restores it, once.
 - **Relative to a golden image**: each program, evaluated once at startup
   (deterministically, so every process agrees).
-- **Only the pages that changed**: rewritten Wasm marks each written 4 KiB
-  page; a turn saves those, compressed together against their contents
-  before it, in a chain over a base relative to golden. Dead bytes (the
+- **Only what changed**: the kernel reports which 4 KiB pages a turn wrote
+  (`userfaultfd` write protection and `PAGEMAP_SCAN`, on Linux 6.7 or later;
+  elsewhere, rewritten Wasm marks them); a turn saves the 64-byte blocks of
+  those pages that differ, compressed together against their contents before
+  it, in a chain over a base relative to golden. Dead bytes (the
   stack between calls, freed heap memory) are zeroed first, so garbage is
   not saved.
 - **One commit**: a turn puts its batch of pages, then one `commit` record
