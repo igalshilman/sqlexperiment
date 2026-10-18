@@ -386,6 +386,34 @@ fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
     Ok(())
 }
 
+/// Outcomes that arrive together go in one turn, in order, and commit once.
+#[test]
+fn outcomes_delivered_together_take_one_turn() -> Result<()> {
+    let source = "async function main(_,ctx){const order=[];await Promise.all([1,2,3].map(async n=>{await ctx.rpc.call({service:'S',handler:'h'},n);order.push(n);}));return order;}";
+    let store = MemoryStore::default();
+    let mut run = start(&store, source, Value::Null, 1)?;
+    let started = run.view();
+    let mut outcomes: Vec<_> = started
+        .state
+        .pending
+        .iter()
+        .map(|operation| (operation.id().to_owned(), answer(operation)))
+        .collect();
+    outcomes.reverse();
+    let duplicate = vec![outcomes[0].clone(), outcomes[0].clone()];
+    assert!(block(run.deliver_all(&store, duplicate, 2)).is_err());
+    let mut run = start(&store, source, Value::Null, 2)?;
+    let done = block(run.deliver_all(&store, outcomes.clone(), 2))?;
+    assert_eq!(done.turns, started.turns + 1);
+    assert_eq!(value(&done), json!([3, 2, 1]));
+    // Delivered before: nothing to do.
+    assert_eq!(
+        block(run.deliver_all(&store, outcomes, 3))?.turns,
+        done.turns
+    );
+    Ok(())
+}
+
 /// A scope's KV: a turn's reads see its own writes, the scope's runs share
 /// it, and a new run replaces the scope's last one, collecting its batches.
 #[test]

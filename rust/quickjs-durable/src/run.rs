@@ -103,7 +103,8 @@ struct Written {
 
 enum Delivery {
     Start(Value),
-    Complete { operation: String, outcome: Outcome },
+    /// Requests' outcomes, delivered in order before the JavaScript runs.
+    Complete(Vec<(String, Outcome)>),
 }
 
 impl Run {
@@ -195,35 +196,55 @@ impl Run {
         outcome: Outcome,
         now: u64,
     ) -> Result<View> {
+        self.deliver_all(store, vec![(operation.to_owned(), outcome)], now)
+            .await
+    }
+
+    /// Deliver the outcomes of several pending requests at `now`, in order,
+    /// and run one turn: what arrived together commits once. Requests
+    /// delivered before, or dropped when the run settled, are skipped.
+    pub async fn deliver_all(
+        &mut self,
+        store: &impl Store,
+        outcomes: Vec<(String, Outcome)>,
+        now: u64,
+    ) -> Result<View> {
         ensure!(
             self.usable,
             "This attempt at the run failed: start it again"
         );
         validate_time(now)?;
-        outcome.validate()?;
-        input_size(&outcome)?;
         let state = &self.commit.state;
-        let Some(request) = state.pending.iter().find(|p| p.id() == operation) else {
-            let issued = operation
-                .strip_prefix(&format!("{}/", self.commit.run))
-                .and_then(|n| n.parse::<u64>().ok())
-                .is_some_and(|n| {
-                    n < state.next_operation && operation == format!("{}/{n}", self.commit.run)
-                });
-            ensure!(issued, "Unknown operation ID");
-            return Ok(self.view());
-        };
         let now = now.max(state.now);
-        if let Operation::Sleep { deadline, .. } = request {
-            ensure!(now >= *deadline, "Timer completed before deadline");
+        let mut delivered = HashSet::new();
+        let mut pending = Vec::new();
+        for (operation, outcome) in outcomes {
+            outcome.validate()?;
+            input_size(&outcome)?;
+            ensure!(delivered.insert(operation.clone()), "Duplicate outcome");
+            let Some(request) = state.pending.iter().find(|p| p.id() == operation) else {
+                let issued = operation
+                    .strip_prefix(&format!("{}/", self.commit.run))
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .is_some_and(|n| {
+                        n < state.next_operation && operation == format!("{}/{n}", self.commit.run)
+                    });
+                ensure!(issued, "Unknown operation ID");
+                continue;
+            };
+            if let Operation::Sleep { deadline, .. } = request {
+                ensure!(now >= *deadline, "Timer completed before deadline");
+            }
+            pending.push((operation, outcome));
+        }
+        if pending.is_empty() {
+            return Ok(self.view());
         }
         self.usable = false;
         if self.live.is_none() {
             self.live = Some(self.restore(store, now).await?);
         }
-        let operation = operation.to_owned();
-        self.turn(store, Delivery::Complete { operation, outcome }, now)
-            .await?;
+        self.turn(store, Delivery::Complete(pending), now).await?;
         self.usable = true;
         Ok(self.view())
     }
@@ -452,8 +473,10 @@ async fn run(
             vm.invoke("init", &init)?;
             vm.invoke("start", &input)?;
         }
-        Delivery::Complete { operation, outcome } => {
-            vm.invoke("deliver", &completion(&operation, outcome, now))?;
+        Delivery::Complete(outcomes) => {
+            for (operation, outcome) in outcomes {
+                vm.invoke("deliver", &completion(&operation, outcome, now))?;
+            }
         }
     }
     // The requests already pending are the host's, issued in earlier turns.

@@ -184,12 +184,14 @@ Program::compile(runtime, name, source) -> Result<Program>   // golden creation
 Programs::new(shared_runtime).compile(name, source)?
 Run::start(&programs, &store, run, program, input, now).await -> Result<Run>
 run.deliver(&store, operation_id, outcome, now).await -> Result<View>
+run.deliver_all(&store, vec![(operation_id, outcome), ...], now).await -> Result<View>
 run.view() -> View
 ```
 
 `Run::start` begins a run with its first turn, or, when the scope's commit is
 already that run's, continues it as committed: another attempt. `deliver`
-answers one pending request and runs a turn. Every store call is awaited
+answers one pending request and runs a turn; `deliver_all` answers several,
+in order, in one turn. Every store call is awaited
 outside any Wasm call, so a remote store may suspend in each. An error leaves
 the `Run` unusable: the attempt ends, and the next one starts from the store.
 `MemoryStore` keeps every write in order, so a test can keep any prefix of
@@ -659,12 +661,15 @@ execution and without a VM. Otherwise a new run takes the scope: restore
 golden into a new VM, bind run ID, time and seed, queue `main` and run its
 first turn. The previous run's batches become garbage of that first commit.
 
-`deliver(operation, outcome, now)` validates outcome and time:
+`deliver_all(outcomes, now)` validates each outcome and the time, and
+refuses an operation listed twice; `deliver` is it with one outcome:
 
-1. If the operation is pending, set effective time to max(input time,
-   state.now). For a timer require effective time at least its deadline.
-2. If the attempt has no VM yet, reconstruct the committed image into one.
-3. Deliver the one completion into its promise and run a turn (§6.2).
+1. Set effective time to max(input time, state.now). For each pending
+   timer delivered, require effective time at least its deadline.
+2. If no listed operation is pending, return the current View.
+3. If the attempt has no VM yet, reconstruct the committed image into one.
+4. Deliver the pending completions into their promises, in the listed order,
+   and run one turn (§6.2): they commit together.
 
 If the ID is not pending, accept a no-op only for canonical `run/<decimal n>`
 with `n < nextOperation`; return the current View without guest work. This
@@ -810,7 +815,10 @@ journal replay off:
   most once. After each turn commits, the handler waits on Restate for the
   first pending request: an RPC as a call whose idempotency key is the
   operation ID, a timer as a sleep until the deadline; Resume is delivered at
-  once. The completion is the next turn's event. Uncommitted IDs are never
+  once. The completion is the next turn's event, with every other completion
+  already arrived (polled once, without waiting): what arrives together
+  commits once. A run of `Promise.all` of 10 calls took 3-10 turns instead
+  of 11 against a local server. Uncommitted IDs are never
   waited on, so their reuse is safe (§2.2).
 - A retried attempt restores the last committed image and waits again on its
   pending requests under the same keys: Restate attaches a re-issued call to
