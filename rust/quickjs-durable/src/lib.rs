@@ -15,14 +15,13 @@
 mod claude;
 mod codec;
 mod heap;
-#[cfg(any(not(feature = "full-scan"), test))]
 mod instrument;
 mod model;
 mod program;
 pub mod restate;
 mod run;
 mod store;
-pub mod tracking;
+mod tracking;
 mod vm;
 
 pub use claude::Claude;
@@ -40,6 +39,10 @@ mod codec_tests;
 #[cfg(test)]
 #[path = "../tests/unit/heap.rs"]
 mod heap_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/tracking.rs"]
+mod tracking_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/instrument.rs"]

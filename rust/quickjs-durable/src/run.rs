@@ -433,7 +433,7 @@ impl Run {
         self.last = written;
         match &mut self.live {
             Some(_) if settled => self.live = None,
-            Some(live) => live.vm.committed(),
+            Some(live) => live.vm.committed()?,
             None => {}
         }
         Ok(())

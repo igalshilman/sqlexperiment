@@ -16,13 +16,15 @@ fn main() -> Result<()> {
         !cfg!(feature = "verify-dirty"),
         "Benchmarks must not include the verification scan"
     );
-    let mode = if cfg!(feature = "full-scan") {
-        "full-scan"
-    } else {
-        "tracked"
-    };
     let before = Instant::now();
     let runtime = Arc::new(Runtime::new()?);
+    let mode = if cfg!(feature = "full-scan") {
+        "full-scan"
+    } else if runtime.native_tracking() {
+        "native"
+    } else {
+        "barriers"
+    };
     let compile_ms = before.elapsed().as_secs_f64() * 1000.0;
     let cases = [
         (
@@ -128,11 +130,11 @@ fn main() -> Result<()> {
         .output()?;
     let output = json!({"rustc":String::from_utf8_lossy(&rust.stdout).trim(),"arch":std::env::consts::ARCH,
         "os":std::env::consts::OS,"wasmtime":"49.0.3",
-        "compile_ms":compile_ms,"capture_mode":mode,"native_tracking_probe":quickjs_durable::tracking::probe(),
+        "compile_ms":compile_ms,"capture_mode":mode,
         "notes":["Optimized Rust; one warm-up and three repetitions; a store in memory, not a network or a disk.",
         "A live turn delivers to the VM kept from the last one: execution, capture, compression and the writes. A restored turn starts a new attempt first: reading the commit and its batches, and a new Wasm instance.",
         "written_bytes: the turn's batch, its commit, and the writes and deletes that follow it.",
-        "Tracked mode examines only pages marked by Wasm write barriers and host writes. Full-scan mode compiles the original uninstrumented module and examines all pages."],"rows":rows});
+        "Native mode examines the pages the kernel saw written (userfaultfd write protection, PAGEMAP_SCAN); barriers mode, those marked by Wasm write barriers and host writes. Full-scan mode examines all pages."],"rows":rows});
     let output = serde_json::to_string_pretty(&output)?;
     std::fs::write(format!("bench-{mode}.json"), &output)?;
     println!("{output}");

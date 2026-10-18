@@ -1,5 +1,6 @@
-use crate::heap;
 use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, Report, VmMeta, fingerprint};
+use crate::{heap, instrument::instrument, tracking::Tracker};
+use std::sync::Arc;
 use wasmtime::error::Context;
 use wasmtime::{
     Caller, Config, Engine, Global, Instance, InstanceAllocationStrategy, InstancePre, Linker,
@@ -31,7 +32,7 @@ const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
 /// The runtime's version: an image restores only on the runtime that made it.
 /// Bump it with anything an image depends on: the Wasm, the bridge
 /// (`guest.js`), the limits above, the imports' behavior, the VM metadata.
-pub(crate) const VERSION: u64 = 3;
+pub(crate) const VERSION: u64 = 4;
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.
@@ -103,6 +104,18 @@ pub struct Runtime {
     engine: Engine,
     /// The module, its imports resolved once for every VM.
     instance: InstancePre<Host>,
+    tracking: Tracking,
+}
+
+/// How a VM learns which pages a turn wrote, chosen once per process.
+#[derive(Clone)]
+enum Tracking {
+    /// The kernel tracks them (`tracking`): the module runs as compiled.
+    Native(Arc<Tracker>),
+    /// Every store in the module is instrumented to mark its page.
+    Barriers,
+    /// None: every page is compared. The benchmarks' control.
+    Nothing,
 }
 struct Host {
     now: u64,
@@ -111,7 +124,13 @@ struct Host {
 }
 
 impl Runtime {
+    /// The runtime, tracking writes natively where the kernel can, else with
+    /// instrumented stores (or always, with `QJS_TRACKING=barriers`).
     pub fn new() -> Result<Self> {
+        Self::tracked(std::env::var("QJS_TRACKING").as_deref() != Ok("barriers"))
+    }
+
+    pub(crate) fn tracked(native: bool) -> Result<Self> {
         validate_snapshot_abi(WASM)?;
         let mut config = Config::new();
         config.consume_fuel(true);
@@ -126,14 +145,29 @@ impl Runtime {
             .max_memory_size(MAX_MEMORY)
             .linear_memory_keep_resident(RESIDENT);
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+        // Memory starts as golden, written in: no copy-on-write image of the
+        // module's data, which would also replace a slot's tracked mapping.
+        config.memory_init_cow(false);
         let engine = Engine::new(&config)?;
-        #[cfg(not(feature = "full-scan"))]
-        let instrumented =
-            crate::instrument::instrument(WASM).map_err(wasmtime::Error::from_anyhow)?;
-        #[cfg(not(feature = "full-scan"))]
-        let wasm = instrumented.as_slice();
-        #[cfg(feature = "full-scan")]
-        let wasm = WASM;
+        if cfg!(feature = "full-scan") {
+            return Self::with(engine, WASM, Tracking::Nothing);
+        }
+        if native && let Ok(tracker) = Tracker::new() {
+            let native = Self::with(engine.clone(), WASM, Tracking::Native(Arc::new(tracker)));
+            // The pool's memory must register: a VM tries.
+            if let Ok(runtime) = native
+                && Vm::new(&runtime, "probe", 0)
+                    .and_then(|vm| vm.written())
+                    .is_ok()
+            {
+                return Ok(runtime);
+            }
+        }
+        let instrumented = instrument(WASM).map_err(wasmtime::Error::from_anyhow)?;
+        Self::with(engine, &instrumented, Tracking::Barriers)
+    }
+
+    fn with(engine: Engine, wasm: &[u8], tracking: Tracking) -> Result<Self> {
         let module = Module::new(&engine, wasm)?;
         // This pinned, extension-free reactor exports exactly the global that
         // must be restored outside linear memory. A new ABI must fail closed.
@@ -146,7 +180,16 @@ impl Runtime {
             }
         }
         let instance = linker(&engine)?.instantiate_pre(&module)?;
-        Ok(Self { engine, instance })
+        Ok(Self {
+            engine,
+            instance,
+            tracking,
+        })
+    }
+
+    /// Whether the kernel tracks writes, instead of instrumented stores.
+    pub fn native_tracking(&self) -> bool {
+        matches!(self.tracking, Tracking::Native(_))
     }
 
     pub(crate) fn golden(&self, name: &str, source: &str) -> Result<Image> {
@@ -207,14 +250,25 @@ pub(crate) fn trap(error: &wasmtime::Error) -> Option<String> {
     error.downcast_ref::<Uncatchable>().map(ToString::to_string)
 }
 
+/// A VM's record of the pages written since it last committed.
+enum Writes {
+    /// The kernel's, for the memory at `base`.
+    Native {
+        tracker: Arc<Tracker>,
+        base: usize,
+    },
+    /// The instrumented module's: a byte per page in this memory.
+    Barriers(Memory),
+    Nothing,
+}
+
 /// A live QuickJS VM: one Wasm instance, for one run, turn after turn.
 pub(crate) struct Vm {
     store: Store<Host>,
     instance: Instance,
     memory: Memory,
     stack: Global,
-    #[cfg(not(feature = "full-scan"))]
-    dirty: Memory,
+    writes: Writes,
     malloc: TypedFunc<i32, i32>,
     free: TypedFunc<i32, ()>,
     eval_fn: TypedFunc<(i32, i32, i32, i32), i32>,
@@ -239,17 +293,15 @@ fn caller_memory(c: &mut Caller<'_, Host>) -> Result<Memory> {
 
 fn caller_write(c: &mut Caller<'_, Host>, offset: usize, bytes: &[u8]) -> Result<()> {
     caller_memory(c)?.write(&mut *c, offset, bytes)?;
-    #[cfg(not(feature = "full-scan"))]
+    // Instrumented stores do not cover the host's: mark them too.
+    if let Some(dirty) = c
+        .get_export(crate::instrument::EXPORT)
+        .and_then(|e| e.into_memory())
     {
-        let dirty = c
-            .get_export(crate::instrument::EXPORT)
-            .and_then(|e| e.into_memory())
-            .context("Missing tracker")?;
         mark_host_range(dirty.data_mut(c), offset, bytes.len())?;
     }
     Ok(())
 }
-#[cfg(not(feature = "full-scan"))]
 fn mark_host_range(bitmap: &mut [u8], offset: usize, len: usize) -> Result<()> {
     if len != 0 {
         let end = offset.checked_add(len - 1).context("Host range overflow")? / PAGE;
@@ -383,10 +435,23 @@ impl Vm {
         let stack = instance
             .get_global(&mut store, "__stack_pointer")
             .context("Missing stack export")?;
-        #[cfg(not(feature = "full-scan"))]
-        let dirty = instance
-            .get_memory(&mut store, crate::instrument::EXPORT)
-            .context("Missing tracker")?;
+        let writes = match &runtime.tracking {
+            Tracking::Native(tracker) => {
+                // The slot's whole reservation, however far memory grows.
+                let base = memory.data_ptr(&store) as usize;
+                tracker.register(base, MAX_MEMORY)?;
+                Writes::Native {
+                    tracker: tracker.clone(),
+                    base,
+                }
+            }
+            Tracking::Barriers => Writes::Barriers(
+                instance
+                    .get_memory(&mut store, crate::instrument::EXPORT)
+                    .context("Missing tracker")?,
+            ),
+            Tracking::Nothing => Writes::Nothing,
+        };
         Ok(Self {
             malloc: instance.get_typed_func(&mut store, "wasm_malloc")?,
             free: instance.get_typed_func(&mut store, "wasm_free")?,
@@ -406,8 +471,7 @@ impl Vm {
             instance,
             memory,
             stack,
-            #[cfg(not(feature = "full-scan"))]
-            dirty,
+            writes,
         })
     }
     /// Begin a turn at logical time `now`, with a full fuel budget.
@@ -422,9 +486,31 @@ impl Vm {
         Ok(self.store.get_fuel()? < CHECKPOINT_FUEL)
     }
     /// The captured pages are committed: track writes anew.
-    pub(crate) fn committed(&mut self) {
-        #[cfg(not(feature = "full-scan"))]
-        self.dirty.data_mut(&mut self.store).fill(0);
+    pub(crate) fn committed(&mut self) -> Result<()> {
+        let len = self.memory.data_size(&self.store);
+        match &self.writes {
+            // Only the written pages: protecting them all walks and
+            // flushes every page, ~10x the cost.
+            Writes::Native { tracker, base } => drop(tracker.written(*base, len, true)?),
+            Writes::Barriers(dirty) => dirty.data_mut(&mut self.store).fill(0),
+            Writes::Nothing => {}
+        }
+        Ok(())
+    }
+    /// The pages written since the last commit, in order.
+    fn written(&self) -> Result<Vec<usize>> {
+        let len = self.memory.data_size(&self.store);
+        Ok(match &self.writes {
+            Writes::Native { tracker, base } => tracker.written(*base, len, false)?,
+            Writes::Barriers(dirty) => dirty
+                .data(&self.store)
+                .iter()
+                .take(len / PAGE)
+                .enumerate()
+                .filter_map(|(index, bit)| (*bit != 0).then_some(index))
+                .collect(),
+            Writes::Nothing => (0..len / PAGE).collect(),
+        })
     }
     fn limits(&mut self) -> Result<()> {
         self.instance
@@ -452,8 +538,7 @@ impl Vm {
         image.write(self.memory.data_mut(&mut self.store));
         // Committed restore bytes are not new writes. Begin tracking before
         // re-binding runtime pointers and limits, which may modify memory.
-        #[cfg(not(feature = "full-scan"))]
-        self.dirty.data_mut(&mut self.store).fill(0);
+        self.committed()?;
         self.stack
             .set(&mut self.store, Val::I32(image.meta.stack))?;
         self.instance
@@ -585,8 +670,9 @@ impl Vm {
     }
     fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<()> {
         self.memory.write(&mut self.store, offset, bytes)?;
-        #[cfg(not(feature = "full-scan"))]
-        mark_host_range(self.dirty.data_mut(&mut self.store), offset, bytes.len())?;
+        if let Writes::Barriers(dirty) = &self.writes {
+            mark_host_range(dirty.data_mut(&mut self.store), offset, bytes.len())?;
+        }
         Ok(())
     }
     fn snapshot(&mut self) -> Result<Image> {
@@ -613,17 +699,7 @@ impl Vm {
             memory_len <= MAX_MEMORY && memory_len >= base.len() && stack <= memory_len,
             "Invalid captured memory size"
         );
-        #[cfg(not(feature = "full-scan"))]
-        let candidates: Vec<usize> = self
-            .dirty
-            .data(&self.store)
-            .iter()
-            .take(memory_len / PAGE)
-            .enumerate()
-            .filter_map(|(index, bit)| (*bit != 0).then_some(index))
-            .collect();
-        #[cfg(feature = "full-scan")]
-        let candidates: Vec<usize> = (0..memory_len / PAGE).collect();
+        let candidates = self.written()?;
         let memory = self.memory.data_mut(&mut self.store);
         let mut compared = vec![false; memory_len / PAGE];
         for &index in &candidates {
@@ -638,8 +714,6 @@ impl Vm {
             }
         }
         let memory = self.memory.data(&self.store);
-        #[cfg(all(feature = "verify-dirty", not(feature = "full-scan")))]
-        let dirty = self.dirty.data(&self.store);
         let mut pages = Vec::new();
         let mut examined_pages = 0;
         for index in candidates {
@@ -650,10 +724,10 @@ impl Vm {
                 pages.push((index as u32, next.to_vec()));
             }
         }
-        #[cfg(all(feature = "verify-dirty", not(feature = "full-scan")))]
+        #[cfg(feature = "verify-dirty")]
         for (index, next) in memory.as_chunks::<PAGE>().0.iter().enumerate() {
             ensure!(
-                next == base.page(index as u32) || dirty[index] != 0,
+                next == base.page(index as u32) || compared[index],
                 "Dirty tracker missed page {index}"
             );
         }
