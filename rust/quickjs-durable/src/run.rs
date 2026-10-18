@@ -4,8 +4,9 @@
 //! A scope's storage is three kinds of key: `commit`, its current run as of
 //! its last turn ([`Commit`]); `batch/<n>`, immutable batches of changed
 //! pages; and `kv/<key>`, the scope's KV. The image is a chain of batches over
-//! the program's golden image: the first XORed against golden, each next one
-//! against the image before it, so a turn writes only what it changed. A turn
+//! the program's golden image: the first holds the pages that differ from
+//! golden, each next one the pages one turn changed, each compressed against
+//! what it replaces, so a turn writes little more than what it changed. A turn
 //! puts its batch, then `commit`: the turn happened once `commit` is
 //! stored, and a crash that loses a suffix of the writes never keeps a commit
 //! without its batch. Then it applies what the commit lists: the turn's KV
@@ -48,12 +49,25 @@ fn page(memory: &[u8], index: usize) -> &[u8] {
         .get(index * PAGE..(index + 1) * PAGE)
         .unwrap_or(&ZERO)
 }
-fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
-    a.iter().zip(b).map(|(a, b)| a ^ b).collect()
+/// The pages of `memory` at `indexes`, back to back.
+fn pages(memory: &[u8], indexes: &[u32]) -> Vec<u8> {
+    let mut pages = Vec::with_capacity(indexes.len() * PAGE);
+    for &index in indexes {
+        pages.extend_from_slice(page(memory, index as usize));
+    }
+    pages
 }
 fn input_size<T: serde::Serialize>(input: &T) -> Result<()> {
     ensure!(json_bytes(input)?.len() <= MAX_INPUT, "Input exceeds limit");
     Ok(())
+}
+
+/// The pages a turn changed, and what they held before it.
+#[derive(Default)]
+struct Changed {
+    indexes: Vec<u32>,
+    old: Vec<u8>,
+    new: Vec<u8>,
 }
 
 /// A run of a program in one scope, in one attempt. An error leaves it
@@ -245,12 +259,17 @@ impl Run {
                 .get(&batch_key(*batch))
                 .await?
                 .context("Missing page batch")?;
-            for (index, delta) in codec::decode_pages(&bytes)? {
-                let at = index as usize * PAGE;
-                let target = memory
-                    .get_mut(at..at + PAGE)
-                    .context("Page beyond memory")?;
-                target.copy_from_slice(&xor(target, &delta));
+            let (indexes, frame) = codec::page_indexes(&bytes)?;
+            ensure!(
+                indexes
+                    .last()
+                    .is_none_or(|&last| (last as usize + 1) * PAGE <= memory.len()),
+                "Page beyond memory"
+            );
+            let decoded = codec::decode_pages(frame, &pages(&memory, &indexes))?;
+            for (index, page) in indexes.iter().zip(decoded.chunks_exact(PAGE)) {
+                let at = *index as usize * PAGE;
+                memory[at..at + PAGE].copy_from_slice(page);
             }
         }
         let base = Image {
@@ -278,7 +297,7 @@ impl Run {
         .await;
         let mut written = Written::default();
         let mut live_pages = self.commit.live_pages;
-        let (state, meta, memory_len, deltas) = match ran {
+        let (state, meta, memory_len, changed) = match ran {
             Ok(state) => {
                 let capture = live.vm.capture(&live.base)?;
                 written.changed_pages = capture.pages.len();
@@ -286,17 +305,19 @@ impl Run {
                 let base = &mut live.base;
                 base.meta = capture.meta.clone();
                 base.memory.resize(capture.memory_len, 0);
-                let mut deltas = Vec::new();
+                let mut changed = Changed::default();
                 for (index, new) in capture.pages {
                     let at = index as usize * PAGE;
                     let original = page(&golden, index as usize);
                     let old = &base.memory[at..at + PAGE];
                     live_pages =
                         live_pages + usize::from(new != original) - usize::from(old != original);
-                    deltas.push((index, xor(&new, old)));
+                    changed.indexes.push(index);
+                    changed.old.extend_from_slice(old);
+                    changed.new.extend_from_slice(&new);
                     base.memory[at..at + PAGE].copy_from_slice(&new);
                 }
-                (state, capture.meta, capture.memory_len, deltas)
+                (state, capture.meta, capture.memory_len, changed)
             }
             // The guest trapped: its image is unusable, and the same delivery
             // would trap again. The run ends; the KV writes before the trap
@@ -312,7 +333,12 @@ impl Run {
                         outcome: Some(Outcome::failure("Trap", message)),
                     };
                     let commit = &self.commit;
-                    (state, commit.meta.clone(), commit.memory_len, Vec::new())
+                    (
+                        state,
+                        commit.meta.clone(),
+                        commit.memory_len,
+                        Changed::default(),
+                    )
                 }
                 None => return Err(error.into()),
             },
@@ -327,19 +353,17 @@ impl Run {
             // its image.
             chain.clear();
             live_pages = 0;
-        } else if !deltas.is_empty() {
-            let mut bytes = codec::encode_pages(&deltas)?;
+        } else if !changed.indexes.is_empty() {
+            let mut bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
             if chain.is_empty() {
                 base_bytes = bytes.len();
             } else if chain.len() >= MAX_CHAIN || delta_bytes + bytes.len() > 2 * base_bytes {
                 // A new first batch: every page that differs from golden.
                 let memory = &self.live.as_ref().context("No live VM")?.base.memory;
-                let pages = memory.len() / PAGE;
-                let live: Vec<(u32, Vec<u8>)> = (0..pages)
-                    .filter(|&index| page(memory, index) != page(&golden, index))
-                    .map(|index| (index as u32, xor(page(memory, index), page(&golden, index))))
+                let live: Vec<u32> = (0..(memory.len() / PAGE) as u32)
+                    .filter(|&index| page(memory, index as usize) != page(&golden, index as usize))
                     .collect();
-                bytes = codec::encode_pages(&live)?;
+                bytes = codec::encode_pages(&live, &pages(memory, &live), &pages(&golden, &live))?;
                 chain.clear();
                 (base_bytes, delta_bytes) = (bytes.len(), 0);
             } else {
