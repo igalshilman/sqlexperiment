@@ -298,3 +298,53 @@ async fn the_shipped_programs_do_what_they_say() {
     let (_, primes) = call("primes/alice/run", json!(20000)).await;
     assert_eq!(primes, json!(2262));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-qjs-restate"]
+async fn the_shop_programs_compose() {
+    let _server = server().await;
+    serve_programs(&quickjs_restate::embedded().unwrap()).await;
+    let order = |customer: &str, items: Value| json!({"customer": customer, "items": items});
+    call("inventory/widget/run", json!({"restock": 5})).await;
+    call("inventory/gadget/run", json!({"restock": 1})).await;
+    call("payments/alice/run", json!({"deposit": 100})).await;
+
+    // Reserved, then charged.
+    let both =
+        json!([{"sku": "widget", "qty": 2, "price": 10}, {"sku": "gadget", "qty": 1, "price": 30}]);
+    let (_, paid) = call("checkout/order-1/run", order("alice", both.clone())).await;
+    assert_eq!(paid, json!({"status": "paid", "total": 50}));
+    // The gadget is gone: the widget reserved before it is released.
+    let (_, cancelled) = call("checkout/order-2/run", order("alice", both)).await;
+    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["reason"], "Error: Out of stock: 0 left, 1 wanted");
+    // Declined: the reservation is released too.
+    let one = json!([{"sku": "widget", "qty": 1, "price": 10}]);
+    let (_, declined) = call("checkout/order-3/run", order("bob", one)).await;
+    assert_eq!(declined["reason"], "Error: Declined: balance 0, charge 10");
+    // An order checks out once.
+    let (_, again) = call("checkout/order-1/run", order("alice", json!([]))).await;
+    assert_eq!(again, paid);
+    assert_eq!(call("inventory/widget/run", json!({})).await.1, json!(3));
+    assert_eq!(call("inventory/gadget/run", json!({})).await.1, json!(0));
+    assert_eq!(call("payments/alice/run", json!({})).await.1, json!(50));
+
+    let (_, retried) = call("retry/a/run", json!({"failures": 2, "attempts": 5})).await;
+    assert_eq!(retried["answer"], "ok after 3 calls");
+    assert_eq!(retried["errors"].as_array().unwrap().len(), 2);
+    let (status, gave_up) = call("retry/b/run", json!({"failures": 5, "attempts": 2})).await;
+    assert_eq!(status, 500);
+    assert_eq!(gave_up["message"], "Error: Gave up after 2 attempts");
+
+    call("payments/carol/run", json!({"deposit": 25})).await;
+    let plan = json!({"customer": "carol", "price": 10, "periods": 3, "every": 100});
+    let (_, lapsed) = call("subscription/carol/run", plan).await;
+    assert_eq!(
+        lapsed,
+        json!({
+            "status": "lapsed",
+            "charges": [{"period": 1, "balance": 15}, {"period": 2, "balance": 5}],
+            "reason": "Error: Declined: balance 5, charge 10",
+        })
+    );
+}

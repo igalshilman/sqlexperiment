@@ -35,13 +35,16 @@ the binary serves it as the virtual object `<name>`. The object's key is a
 **scope**: the runs of `counter/alice` share their `ctx.kv`; `counter/bob`
 has its own.
 
-| Program                          | Shows                                                                       |
-| -------------------------------- | --------------------------------------------------------------------------- |
-| [`counter`](programs/counter.js) | KV state and a timer                                                        |
-| [`memory`](programs/memory.js)   | A class instance, a closure and a paused generator surviving waits          |
-| [`fanout`](programs/fanout.js)   | Programs calling programs, in parallel: `Promise.all` over RPCs             |
-| [`timeout`](programs/timeout.js) | A deadline: `Promise.race` of a [`slow`](programs/slow.js) call and a timer |
-| [`primes`](programs/primes.js)   | A long computation, carried over many turns                                 |
+| Program                                    | Shows                                                                                                                                      |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`counter`](programs/counter.js)           | KV state and a timer                                                                                                                       |
+| [`memory`](programs/memory.js)             | A class instance, a closure and a paused generator surviving waits                                                                         |
+| [`fanout`](programs/fanout.js)             | Programs calling programs, in parallel: `Promise.all` over RPCs                                                                            |
+| [`timeout`](programs/timeout.js)           | A deadline: `Promise.race` of a [`slow`](programs/slow.js) call and a timer                                                                |
+| [`primes`](programs/primes.js)             | A long computation, carried over many turns                                                                                                |
+| [`checkout`](programs/checkout.js)         | A saga over [`inventory`](programs/inventory.js) and [`payments`](programs/payments.js): reserve, charge, and undo in reverse on a failure |
+| [`retry`](programs/retry.js)               | Retries with exponential backoff (durable timers) around a [`flaky`](programs/flaky.js) service                                            |
+| [`subscription`](programs/subscription.js) | A recurring charge, every period, until it is declined                                                                                     |
 
 ## Writing a program
 
