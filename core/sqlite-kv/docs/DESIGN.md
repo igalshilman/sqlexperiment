@@ -85,7 +85,7 @@ and commits them:
 2. **Garbage.** Delete the stored values the record lists as garbage: the
    record before named them, this one no longer lists them.
 3. **Inline or stored.** A transaction whose segments total at most
-   `inline_log_bytes` (4 KiB) goes inline in the record. A larger one goes to
+   `inline_log_bytes` (1 KiB) goes inline in the record. A larger one goes to
    fresh `log/<n>` keys, a segment each, which the record names.
 4. **Seal.** Once the record's inline parts would pass that budget, the
    commit puts them into one stored value, and the record names it in their

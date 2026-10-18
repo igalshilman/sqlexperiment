@@ -77,7 +77,7 @@ pub const CHECKPOINT_AFTER: u32 = 32;
 /// Default [`StorageOptions::checkpoint_log_bytes`].
 pub const CHECKPOINT_LOG_BYTES: usize = 64 * 1024;
 /// Default [`StorageOptions::inline_log_bytes`].
-pub const INLINE_LOG_BYTES: usize = 4 * 1024;
+pub const INLINE_LOG_BYTES: usize = 1024;
 
 /// A change to the host's chain, committed with a transaction
 /// ([`crate::Session::commit_turn`]). The chain is the host's: a sequence of

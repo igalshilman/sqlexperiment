@@ -39,7 +39,7 @@ struct Policy {
     log_bytes: usize,
     inline_bytes: usize,
 }
-/// The default (32 transactions or 64 KiB, the log sealed past 4 KiB inline),
+/// The default (32 transactions or 64 KiB, the log sealed past 1 KiB inline),
 /// and the previous one (16 transactions or 16 KiB, all inline). `POLICIES`
 /// overrides them: `after:log_bytes[:inline_bytes]`, comma-separated.
 const POLICIES: [Policy; 2] = [
