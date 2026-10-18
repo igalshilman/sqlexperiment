@@ -162,17 +162,6 @@ pub(crate) struct Image {
     pub memory: Vec<u8>,
 }
 
-/// One compressed batch holds several XOR pages: a page is in batch `batch`, at
-/// `slot`. Each page is relative to golden, never to another turn's page.
-/// Short names: a commit lists every page that differs from golden.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub(crate) struct PageRef {
-    #[serde(rename = "b")]
-    pub batch: u64,
-    #[serde(rename = "s")]
-    pub slot: usize,
-}
-
 /// A scope's commit: its current run, as of its last turn. It is the one record
 /// a turn writes last, after the batch of pages it references: the turn
 /// happened once it is stored. What follows it (the turn's KV writes, and the
@@ -191,9 +180,15 @@ pub(crate) struct Commit {
     pub turns: u64,
     pub meta: VmMeta,
     pub memory_len: usize,
-    /// Every page that differs from golden, and the batch it is in. Missing
-    /// pages are golden's, or zeros beyond golden's length.
-    pub pages: BTreeMap<u32, PageRef>,
+    /// The image, as batches to apply in order over golden (zeros beyond its
+    /// length): the first XORed against golden, each next one against the
+    /// image before it. Empty once the run has settled.
+    pub chain: Vec<u64>,
+    /// Bytes of the chain's first batch, and of the others.
+    pub base_bytes: usize,
+    pub delta_bytes: usize,
+    /// Pages that differ from golden.
+    pub live_pages: usize,
     /// The number of the next batch a turn writes.
     pub next_batch: u64,
     pub state: State,

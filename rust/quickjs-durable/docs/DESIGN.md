@@ -391,8 +391,12 @@ capture. A page written and restored to its original value needs no new
 payload. Reset the tracker on restore before rebinding pointers/limits, and
 after each commit is stored. A failed commit ends the attempt with its VM.
 
-Selected encoding: **changed 4 KiB pages XORed against golden, batched with Zstd
-level 3**. Reasons and alternatives from the experiment's existing measurements:
+Selected encoding: **changed 4 KiB pages XORed against their previous contents,
+batched with Zstd level 3**, in a chain over a golden-relative base (§5.1).
+Against the previous contents, a page a turn changed by a few pointers is
+nearly all zeros: a steady sleep loop's batch is ~1.2 KiB, against ~4.9 KiB
+for the same pages XORed against golden. Reasons and alternatives from the
+experiment's existing measurements:
 
 | Candidate                 | Trade-off                                                                                                                                                                                               |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -427,19 +431,22 @@ Programs and their golden images are not stored: the process supplies them
 
 ```text
 VmMeta = {stack: i32, runtime: i32, context: i32}
-PageRef = {b: batch_number, s: zero_based_slot}
 Commit = {
     run: run_id, program: name, version: u64, runtime: u64,
     turns: count, meta: VmMeta, memoryLen: byte_count,
-    pages: {decimal_page_index: PageRef, ...},
-    nextBatch: u64, state: State,
+    chain: [batch_number, ...], baseBytes: count, deltaBytes: count,
+    livePages: count, nextBatch: u64, state: State,
     writes: {key: json, ...}, deletes: [key, ...], garbage: [batch_number, ...]
 }
 ```
 
-`pages` is the **complete current override map** relative to golden: missing
-entries inherit the golden page, or zeros beyond golden's length. A page
-reference can point into an older batch. `writes`, `deletes` and `garbage`
+`chain` is the image, as batches applied in order over golden (zeros beyond
+its length): the first, the **base**, XORs each page against golden; each
+later one, a **delta**, XORs the pages one turn changed against their
+contents before it. Base and deltas apply alike: XOR into the memory as it
+stands. `baseBytes` and `deltaBytes` size the chain, for when to write a new
+base (§5.3); `livePages` counts pages that differ from golden. A settled run's
+chain is empty. `writes`, `deletes` and `garbage`
 are what follows the commit (§7). `runtime` is the runtime's version, a
 constant bumped by hand with anything an image depends on: the Wasm, the
 bridge, the limits, the imports' behavior. A run restores only on the
@@ -463,41 +470,44 @@ Changed-page payload: Zstd level-3 compression of this uncompressed structure:
 Entries are sorted by increasing page index and unique. Decompressed length must
 be exactly `8 + N * 4100`; N and each index are bounded by `64 MiB / 4096`.
 The largest raw page batch is `8 + (64 MiB / 4096) * 4100` bytes. Reject truncated,
-extra-length, unsorted or out-of-range entries and invalid slot references. Bound
+extra-length, unsorted or out-of-range entries. Bound
 decompression output, including reading at most limit+1 bytes to detect overflow.
 The reference also bounds compressed blobs at 64 MiB + 1 MiB. These are format
 and allocation checks, not extra assumptions about unreliable KV.
 
 ### 5.3. Capture algorithm
 
-Inputs are golden image G, the parent P (the memory as of the last commit), the
-current override map M, the live VM and its tracker. A new run has P=G and an
-empty M.
+Inputs are golden image G, the parent P (the memory as of the last commit, kept
+beside the live VM), the commit's chain, the live VM and its tracker. A new run
+has P=G and an empty chain.
 
 ```text
-capture(G, P, M, VM):
+capture(G, P, chain, VM):
     require no active Wasm call or pending host operation future
     read VM metadata first
     require VM.length >= P.length, aligned to 64 KiB, within limit
-    next_map = copy(M); batch = []
+    batch = []
     for each marked page i in ascending order:
         current = VM.page(i)
-        if current == P.page(i, zeros beyond P.length): continue
+        previous = P.page(i), or zeros beyond P.length
+        if current == previous: continue
+        batch.append((i, current XOR previous))
         P.page(i) = current
-        if current == G.page(i, zeros beyond G.length): remove next_map[i]
-        else: batch.append((i, current XOR G.page(i)))
-    if the run settled: next_map = {}, batch = []   // no image is kept
-    if next_map would reference more than 16 batches:
-        batch = every live page of next_map and the batch, XORed against G
-    set next_map[i] = {b: nextBatch, s: entry} for batch entries
-    return next_map, batch
+    if the run settled: chain = []                  // no image is kept
+    else if batch is not empty:
+        if chain is empty: the batch is the base     // P was G
+        else if chain has 16 batches, or deltaBytes + batch > 2 * baseBytes:
+            batch = every page of P that differs from G, XORed against G
+            chain = []                               // a new base
+        chain.append(nextBatch)
+    return chain, batch
 ```
 
-Count compared pages as examined, actual changes as changed. A zero page that
-differs from a nonzero golden page stays an explicit XOR override. Size-only
-zero growth still needs the new memory length. Updating P with each changed
-page keeps it equal to the VM's memory as of the commit: the `verify-dirty`
-build checks that every page that differs from it was marked.
+Count compared pages as examined, actual changes as changed. Updating P with
+each changed page keeps it equal to the VM's memory as of the commit: the
+`verify-dirty` build checks that every page that differs from it was marked.
+A new base bounds restoring to at most 16 batches, and at most three times the
+base's size. The batches it replaces become garbage.
 
 ### 5.4. Reconstruction algorithm
 
@@ -506,21 +516,17 @@ reconstruct(commit):
     require the program's version and the runtime's match the commit's
     require golden_length <= memoryLen <= limit, 64-KiB aligned
     memory = golden bytes, extended with zeros to memoryLen
-    group commit.pages by batch
-    for each referenced batch:
+    for each batch in commit.chain, in order:
         decode and validate it
-        for each reference (page i, slot) into it:
-            require i within memory and batch[slot].page_index == i
-            memory.page(i) XOR= batch[slot].xor_bytes
-        release the decoded batch before loading the next
+        for each entry (page i, xor):
+            require i within memory
+            memory.page(i) XOR= xor
     return Image(memory, commit.meta)
 ```
 
-The process keeps each golden image decompressed in its catalog. Each live
-page is applied once, against golden or zeros. Capture bounds how many batches
-a commit references (16), so restoring reads at most that many however long a
-run lives. An attempt reconstructs once, when its first delivery needs the
-VM; reading a settled run's commit needs no image.
+The process keeps each golden image decompressed in its catalog. An attempt
+reconstructs once, when its first delivery needs the VM; reading a settled
+run's commit needs no image.
 
 ### 5.5. Programs
 
@@ -713,7 +719,7 @@ An implementation can be built and accepted in this order:
    pending promises and queued jobs before optimizing capture.
 2. Implement the JSON bridge and the turn over a store in memory. Add stable
    IDs, duplicate handling, and an unusable run after an error.
-3. Add golden-relative page maps, the batch codec, growth and override removal.
+3. Add the batch codec, the chain of batches, growth, and new bases.
 4. Add write barriers and host marking, retaining a full-scan control and a
    verification oracle: every actually changed page must have been marked.
 5. Add the commit protocol, then crash tests at every write.
@@ -724,7 +730,7 @@ Required acceptance cases:
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Snapshot ABI | Hidden mutable globals/table mutation/passive lifecycle rejected; stack limit catches recursive overflow before/after restore                                                     |
 | Tracking     | Every scalar store width, offsets and cross-page writes; overlapping bulk writes; zero lengths; traps; growth; host writes; epoch reset; deliberate missed-write detection        |
-| Images       | Golden isolation; sparse writes; zero growth; zero over nonzero golden; return-to-golden removes override; multiple referenced old blobs; bounded decoding                        |
+| Images       | Golden isolation; sparse writes; zero growth; zero over nonzero golden; pages back to golden leave the live count; a new base bounds the chain; bounded decoding                  |
 | Promises     | all/race/any/allSettled, rejection, fan-out delivery order, captured queued KV result, RPC before Resume and multiple Resume delivery orders                                      |
 | Commits      | Read-your-writes in a turn; a crash after any write, and again after any write of the recovering attempt, ends as without one; a live run and a restored one store the same bytes |
 | Identities   | Another program version or runtime rejected; canonical duplicate IDs are no-ops; unknown IDs fail                                                                                 |
@@ -746,19 +752,20 @@ SDK 1.17.3 on Node 22:
 
 | Workload                                      | TypeScript       | QuickJS          |
 | --------------------------------------------- | ---------------- | ---------------- |
-| KV read and write, a new key each, 32 at once | 510/s, p50 57 ms | 339/s, p50 91 ms |
-| KV read and write, one key, one at a time     | p50 7.8 ms       | p50 12 ms        |
-| 20 waits on a 1 ms timer, one run             | 69 ms            | 78 ms            |
-| 5 waits, 32 runs at once                      | 228/s            | 137/s            |
-| `Promise.all` of 10 calls, 8 at once          | 45/s             | 26/s             |
-| Primes below 100,000                          | 46 ms            | 480 ms           |
-| Written to Restate by a run of 20 waits       | ~20 KiB          | ~137 KiB         |
+| KV read and write, a new key each, 32 at once | 484/s, p50 60 ms | 307/s, p50 98 ms |
+| KV read and write, one key, one at a time     | p50 8 ms         | p50 14 ms        |
+| 20 waits on a 1 ms timer, one run             | 82 ms            | 93 ms            |
+| 5 waits, 32 runs at once                      | 220/s            | 155/s            |
+| `Promise.all` of 10 calls, 8 at once          | 47/s             | 27/s             |
+| Primes below 100,000                          | 53 ms            | 488 ms           |
+| Written to Restate by a run of 20 waits       | ~21 KiB          | ~70 KiB          |
 
-Before the commit record and the live VM, the same rows were 220/s, 64 ms,
-1.36 s, 40/s, 8.3/s, 1.8 s and 1.1 MiB. The Rust SDK's server now sets
-`TCP_NODELAY`, which saved ~40 ms per round trip. One synchronous JavaScript
-job is still capped at about 10^8 Wasm instructions, and the interpreter runs
-compute-bound code ~10x slower than V8.
+Rows vary by ~10% from run to run. Before the commit record and the live VM,
+the same rows were 220/s, 64 ms, 1.36 s, 40/s, 8.3/s, 1.8 s and 1.1 MiB;
+before the chain of batches, the run of 20 waits wrote 137 KiB. The Rust
+SDK's server now sets `TCP_NODELAY`, which saved ~40 ms per round trip. One
+synchronous JavaScript job is still capped at about 10^8 Wasm instructions,
+and the interpreter runs compute-bound code ~10x slower than V8.
 
 ## 11. Scope limits, provenance and references
 
