@@ -56,61 +56,56 @@ db.transaction(async |db| {                    // durable as a whole, or rolled 
 
 ## How durability and recovery work
 
-The backend only offers single-key puts. A database change touches many
-pages, so it can't be written atomically as pages. Like SQLite's WAL, this
-crate commits through a log instead, and copies pages into place later.
+The backend only offers single-key puts, in no particular order: a write is
+durable once acknowledged, and a crash may keep any of the others. A database
+change touches many pages, so it can't be written atomically as pages. Like
+SQLite's WAL, this crate commits through a log instead, and copies pages into
+place later; here the log lives in one key.
 
-A namespace holds three kinds of key:
+A namespace holds:
 
-- **Log segments** (`log/<n>`): each transaction is a run of segments holding
-  the new images of the pages it changed.
-- **Pages** (`page/<n>`): each page as of some checkpoint, overwritten in place.
-- **`meta`**: where the log starts, meaning everything before it has been
-  copied into the pages.
+- **The commit record** (`commit`): the database's version and size, and the
+  log since the last checkpoint: each transaction's changed pages, compressed
+  against their previous images. The record holds the log's last few KiB
+  inline; older parts, and large transactions, are stored at `log/<n>` keys,
+  which the record names.
+- **Pages** (`page/<n>`): each page as of the last checkpoint, overwritten in
+  place.
 
-A page's current value is its latest image in the log, or else its page key.
+A page's current value is its latest image in the record's log, or else its
+page key.
 
-**Commit.** A transaction's segments are written first. Its last segment has
-a commit flag, and it is put only after the others are acknowledged. When
-that put is acknowledged, the transaction is durable. This one put is the
-atomic step: before it, the transaction doesn't exist; after it, all of it
-does. Usually the whole transaction fits in that one segment, so a save is
-one put.
+**Commit.** A transaction is one put: the record, with the log so far plus
+this transaction. When that put is acknowledged, the transaction is durable;
+before it, it doesn't exist. A large transaction's segments are put first,
+and the record names them only once they are acknowledged. Once the inline
+log outgrows a few KiB, a commit also puts it, sealed, into a stored value,
+which the next commit names: so every commit rewrites a small record.
 
-**Checkpoint.** Once the log holds more than a few transactions, a save
-also copies the latest images of the oldest ones to their page keys. These
-writes ride in the same round trip as the commit. Only after those copies
-are acknowledged does `meta` move past those transactions. Segments are
-deleted only after a durable `meta` has moved past them. A half-finished
-checkpoint is harmless, because the log still holds every image it was
-copying and replays over whatever landed.
+**Checkpoint.** Once the log holds more than a few transactions, a save also
+copies the latest image of each page in it to its page key. Only once those
+copies are acknowledged does it put a record with an empty log. A
+half-finished checkpoint is harmless, because the log still holds every image
+it was copying and replays over whatever landed.
 
-**Recovery.** There's no separate recovery step; every open does the same
-thing:
-
-1. Read `meta`.
-2. Read the log from where it starts, applying each transaction whose commit
-   segment is present.
-3. Stop at the first missing segment.
-
-Segments a failed save left past that point are ignored, and the next commit
-overwrites them. On a backend where a failed put can be visible without being
-durable, open first re-puts the last commit segment and `meta` it read, so
-nothing it shows can disappear later.
+**Recovery.** There's no separate recovery step; every open reads the record
+and replays its log. Whatever a failed save left (segments no record names,
+pages a checkpoint wrote) is ignored, or covered by the log.
 
 **What a crash leaves.** Interrupting any step leaves a state the next open
 reads correctly:
 
-| Interrupted                  | Result                                                  |
-| ---------------------------- | ------------------------------------------------------- |
-| A commit                     | Either all of the transaction or none of it             |
-| A checkpoint                 | Pages hold old or new images; the log replays over them |
-| A `meta` write or a deletion | Repeated by a later save                                |
+| Interrupted                | Result                                                  |
+| -------------------------- | ------------------------------------------------------- |
+| A commit                   | Either all of the transaction or none of it             |
+| A checkpoint               | Pages hold old or new images; the log replays over them |
+| A deletion of old segments | Repeated by a later save                                |
 
 **What it relies on.**
 
 - **One owner at a time.** The host must guarantee it, and settle every
   outstanding request before another owner opens.
+- **Acknowledged means durable.** No order between writes is assumed.
 - **Reliable storage.** The backend returns what was stored. Values are
   checked for structure and bounds, not checksummed.
 

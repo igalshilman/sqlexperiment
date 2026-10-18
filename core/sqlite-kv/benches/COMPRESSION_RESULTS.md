@@ -1,45 +1,47 @@
-# Page compression experiment — 2026-10-10
+# Page compression experiment — 2026-10-18
 
-Crate **0.11.0**, storage format **v12**, SQLite-compatible engine `turso_core` **0.8.2**.
+Crate **0.11.0**, storage format **v14**, SQLite-compatible engine `turso_core` **0.8.2**.
 
-Adaptive LZ4 materially reduces the bytes in this experiment's repetitive and
-synthetic JSON workloads. It offers little benefit for random row payloads and
-adds encoding CPU cost. KV get/put/delete counts are unchanged. LZ4 is the
-default; `PageCompression::Raw` remains available for comparison or
-workloads where attempting compression is not useful.
+Adaptive zstd (level 3, one frame per page) reduces the bytes of checkpointed
+pages 77–93% in this experiment's repetitive and synthetic JSON workloads, and
+about 42% below LZ4 on JSON. It offers little for random row payloads and
+costs encoding CPU. KV get/put/delete counts are unchanged. zstd is the
+default; `PageCompression::Lz4` and `PageCompression::Raw` remain available.
 
 ## Implementation and boundaries
 
-- `src/page_codec.rs` uses pinned `lz4_flex` **0.14.0**, with safe encoding and
-  decoding enabled. Each immutable page has a three-byte envelope: one-byte tag
-  (0 raw, 1 LZ4 block), then u16 LE logical size (4096), followed by its payload.
-  The codec uses independent LZ4 blocks, without a dictionary or frame wrapper.
+- `src/page_codec.rs` uses `zstd-safe` and `lz4_flex` **0.14.0**. Each
+  immutable page has a three-byte envelope: one-byte tag (0 raw, 1 LZ4 block,
+  2 zstd frame), then u16 LE logical size (4096), followed by its payload. Each
+  page is independent: no dictionary. zstd contexts are reused per thread
+  (creating one costs more than coding a page: 25 µs a decode before).
 - A compressed payload is retained only when smaller than the 4096-byte raw
   payload. Maximum encoded value: **4099 bytes**. Incompressible pages cost three
   extra bytes versus an unwrapped 4096-byte page (0.073%); raw fallback avoids larger compression expansion,
-  but still pays for attempting compression under the LZ4 policy.
+  but still pays for attempting compression.
 - Decoding validates encoded bounds, tag, logical size and decoded length. The
   decoder always gets a fixed 4096-byte destination, never an allocation sized
   from stored metadata. Invalid LZ4 back-references and incorrect expansion sizes
   are rejected. Storage is assumed reliable, so there is no checksum.
-- Encoding happens once per changed page when a save builds its log
-  transaction; checkpoints copy those encoded images to `page/<n>` unchanged.
-  Decoding happens when a segment is replayed and when a page is read. The
+- The policy applies to checkpointed pages: a checkpoint encodes each page it
+  writes to `page/<n>`, and a read decodes it. The log is compressed with zstd
+  against the pages' previous images whatever the policy, so commits write the
+  same bytes under either. The
   private WAL, dirty overlay and cached decoded page remain ordinary logical
   bytes. Commit and checkpoint ordering are unaffected by the policy.
 - `StorageOptions::page_compression` selects new writes only. Raw and compressed
   pages coexist; a different policy on reopen does not require rewriting them.
   Switching policy and performing a read-only save causes no mutations.
-- Namespace keys and magic numbers are v12/`SL12`/`SM12`. Start with a fresh
-  namespace. Only this format is supported; there are no compatibility probes.
+- Namespace keys and magic numbers are v14/`SC14`/`SL14`/`SH14`. Start with a
+  fresh namespace. Only this format is supported; there are no compatibility probes.
 
 ## Paired workload results
 
 `benches/page_compression.rs` creates identical logical SQL pages with
-Raw and Lz4 policies and checks their decoded equality. Four database/payload
+Raw and zstd policies and checks their decoded equality. Four database/payload
 sizes (100 × 64 B, 100 × 512 B, 100 × 9000 B and 10,000 × 256 B), three payload
 families, seven operations and two policies give **168 configurations**,
-repeated three times: **504 SQL observations**, or **84 raw/LZ4 workload pairs**.
+repeated three times: **504 SQL observations**, or **84 raw/zstd workload pairs**.
 Each baseline is a bulk load that a later save has checkpointed into page keys.
 All traffic counters agree exactly across repeats.
 
@@ -49,8 +51,7 @@ random bytes. They are stored as BLOBs so the random case has no hex expansion
 in the database. JSON is a useful compressible case, not a claim to represent
 production event distributions. SQL uses hex literals/results for transport;
 logical read/write denominators count decoded payload bytes. There is no owner
-cache, and the simulated backend is weak, so every open re-puts the log tail it
-did not write; those confirmation bytes are part of each observation.
+cache, and open writes nothing.
 
 Operations: cold PK lookup, ten-row range, full scan, one replacement, ten
 adjacent replacements, ten scattered replacements and read-only save. Each
@@ -58,34 +59,33 @@ observation includes open; updates include SQL, the private checkpoint and the
 save. Correctness checks after measurement reopen with the opposite write
 policy, verify the changed payloads and row count, and run `integrity_check`.
 
-**One-row replacement, total mutation key + value bytes (open's confirmation plus the commit):**
+**One-row replacement, total mutation key + value bytes (the commit record):**
 
-|   Rows | Payload bytes | Payload family |    Raw | Adaptive LZ4 | Reduction |
-| -----: | ------------: | -------------- | -----: | -----------: | --------: |
-|    100 |            64 | Repetitive     | 12,477 |        1,218 |     90.2% |
-|    100 |            64 | JSON           | 12,477 |        2,114 |     83.1% |
-|    100 |            64 | Random         | 12,477 |        4,518 |     63.8% |
-| 10,000 |           256 | Repetitive     | 12,477 |          748 |     94.0% |
-| 10,000 |           256 | JSON           | 12,477 |        2,069 |     83.4% |
-| 10,000 |           256 | Random         | 12,477 |        4,539 |     63.6% |
+|   Rows | Payload bytes | Payload family |   Raw | Adaptive zstd | Reduction |
+| -----: | ------------: | -------------- | ----: | ------------: | --------: |
+|    100 |            64 | Repetitive     |   460 |           460 |      0.0% |
+|    100 |            64 | JSON           | 1,082 |         1,082 |      0.0% |
+|    100 |            64 | Random         | 3,960 |         3,960 |      0.0% |
+| 10,000 |           256 | Repetitive     |   250 |           250 |      0.0% |
+| 10,000 |           256 | JSON           |   941 |           941 |      0.0% |
+| 10,000 |           256 | Random         | 4,064 |         4,064 |      0.0% |
 
-These bytes now include the log tail that open re-puts on this weak backend
-(here the baseline's last save, which touched the header and schema pages) in
-addition to the commit. Header and schema pages compress well even when row
-payloads are random, which is why the random case shows a 63% reduction; the
-v11 measurement, which had no confirmation, showed 1–1.5%.
+A commit writes its transaction to the record's log, compressed against the
+pages' previous images: a page costs about what changed in it, under either
+policy. (v12 wrote whole page images to the log, and the policy cut these
+bytes 64–94%.) The policy pays off where pages are stored and read: at
+checkpoints, and on every cold read.
 
-All 84 pairs have identical get/put/delete counts, page counts and `meta` bytes. Encoded reads, mutations and stored values
+All 84 pairs have identical get/put/delete counts, page counts and commit record bytes. Encoded reads, mutations and stored values
 never increase relative to raw pages. Random row payloads can still leave compressible
 SQLite headers and free space, explaining their small improvement. In the codec
-sample for 9000-byte random payloads, **56 of 64 pages used raw fallback**.
+sample for 9000-byte random payloads, **58 of 64 pages used raw fallback**.
 The unit tests separately exercise fully random 4096-byte pages and verify the
 4099-byte fallback bound.
 
 For the 10,000-row JSON cold PK lookup, read key/value traffic fell from
-**20,803 to 9,552 bytes (54.1%)**, and stored value bytes from 5,721,146 to
-2,243,946 (60.8%). Stored bytes include the bulk load's log segments, which wait
-for the next checkpoint to collect them. The workload still performs the same
+**16,518 to 6,339 bytes (61.6%)**, and stored value bytes from 2,857,015 to
+646,216 (77.4%; LZ4: 1,118,355, 60.9%). The workload still performs the same
 dependent KV gets.
 
 ## Amplification matrix
@@ -102,15 +102,20 @@ Release build, Rust **1.97.0**, Linux x86_64, reported CPU **Intel Xeon @ 2.10GH
 The harness samples up to 64 evenly spaced actual SQL pages per dataset, with
 five warm-up passes and 200 measured passes per repeat. It alternates policy
 order, uses `black_box`, includes codec allocations and validates round trips.
-There are **72 timed samples** (12 datasets × two policies × three repeats).
+There are **108 timed samples** (12 datasets × three codecs × three repeats).
 
-Median time per page for the 10,000-row / 256-byte datasets:
+Median time per page, and the sample's encoded bytes, for the 10,000-row /
+256-byte datasets (64 pages, 262,336 bytes raw):
 
-| Payload    | Raw encode | LZ4 encode | Raw decode | Adaptive decode |
-| ---------- | ---------: | ---------: | ---------: | --------------: |
-| Repetitive |    0.09 µs |    1.09 µs |    0.24 µs |         0.40 µs |
-| JSON       |    0.09 µs |    5.98 µs |    0.22 µs |         2.01 µs |
-| Random     |    0.13 µs |    1.53 µs |    0.26 µs |         0.37 µs |
+| Payload    | LZ4 encode | zstd encode | LZ4 decode | zstd decode | LZ4 bytes | zstd bytes |
+| ---------- | ---------: | ----------: | ---------: | ----------: | --------: | ---------: |
+| Repetitive |    1.95 µs |     7.46 µs |    0.69 µs |     2.21 µs |    23,457 |     18,309 |
+| JSON       |    8.50 µs |    20.81 µs |    3.07 µs |     8.09 µs |   101,667 |     59,027 |
+| Random     |    2.53 µs |    19.08 µs |    0.61 µs |     1.08 µs |   251,388 |    246,452 |
+
+Raw pages take 0.13 µs to encode and 0.29 µs to decode. Encoding runs only
+when a checkpoint writes pages; decoding on every cold page read. Levels 9 and
+19 saved at most 3–9% more for several times the encode time.
 
 These are elapsed times in isolated codec loops on this shared host, not remote
 request timings or a production speedup. Min/median/max are retained. Raw SQL

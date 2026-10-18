@@ -321,10 +321,9 @@ and write) took 1,755 µs in `MemoryStore`, of which 1,112 µs restoring golden
 (mostly page faults) and 253 µs copying it; the pool made it 1,073 µs, the
 linked imports 924 µs, the shared golden 771 µs. Against a server, one-turn
 runs went from ~298/s to ~340/s and `Promise.all` of 10 calls from ~24/s to
-~28/s; runs of 5 waits stayed at ~130/s.
-6. Bind run state on first start, or deliver one completion, then run jobs.
-   Each later turn reuses the instance: it resets fuel and logical time,
-   delivers, runs, captures, and clears the tracker once the commit is stored.
+~28/s; runs of 5 waits stayed at ~130/s. 6. Bind run state on first start, or deliver one completion, then run jobs.
+Each later turn reuses the instance: it resets fuel and logical time,
+delivers, runs, captures, and clears the tracker once the commit is stored.
 
 Before capture, call the runtime/context getters and read the stack global, then
 select/copy pages. If metadata getters touch memory, those writes must be included.
@@ -412,13 +411,13 @@ The cost moves from every store to the first write of each page in a turn: a
 fault of ~1.5 µs. Measured on 18 October 2026, with the block encoding (§5.2)
 in both:
 
-| Workload                                 | Barriers       | Native         |
-| ---------------------------------------- | -------------- | -------------- |
-| 8,000 objects, one synchronous job       | 12.8-13.4 ms   | 11.0 ms        |
-| 800 JSON round trips, one job            | 18.4-18.7 ms   | 16.0 ms        |
-| A turn of a wait loop (~23 pages)        | 205 µs         | 265 µs         |
-| A turn of a KV update                    | 713-738 µs     | 717-740 µs     |
-| A turn building 2,000 objects            | 9.5-9.7 ms     | 9.3 ms         |
+| Workload                           | Barriers     | Native     |
+| ---------------------------------- | ------------ | ---------- |
+| 8,000 objects, one synchronous job | 12.8-13.4 ms | 11.0 ms    |
+| 800 JSON round trips, one job      | 18.4-18.7 ms | 16.0 ms    |
+| A turn of a wait loop (~23 pages)  | 205 µs       | 265 µs     |
+| A turn of a KV update              | 713-738 µs   | 717-740 µs |
+| A turn building 2,000 objects      | 9.5-9.7 ms   | 9.3 ms     |
 
 Barriers cost compute-bound code 15-20%, and spend fuel: their instructions
 count against a job's budget, so a job reached the cap with less JavaScript
@@ -485,15 +484,15 @@ Measured on 18 October 2026 over traces of seven workloads (40 turns each, 80
 for the agent; batch KiB summed over the run's turns, and Zstd time over all
 of them):
 
-| Encoding of a turn's changed pages            | steps | kv  | agent | shift | typed | churn | map | Total | Encode |
-| --------------------------------------------- | ----- | --- | ----- | ----- | ----- | ----- | --- | ----- | ------ |
-| XOR with previous, Zstd 3 (before)            | 47    | 161 | 198   | 80    | 234   | 3,543 | 740 | 5,006 | 132 ms |
-| XOR with golden, Zstd 3 (before the chain)    |       |     |       |       |       |       |     | 12,921 | 279 ms |
-| Prefix of previous, Zstd 3                    | 38    | 111 | 138   | 62    | 226   | 2,672 | 862 | 4,111 | 251 ms |
-| Prefix of previous, Zstd 3, long matching     | 37    | 109 | 135   | 41    | 66    | 2,692 | 769 | 3,851 | 443 ms |
-| Same, stack zeroed                            | 32    | 100 | 116   | 35    | 59    | 2,671 | 762 | 3,777 | 422 ms |
-| Same, Zstd 2                                  | 32    | 102 | 115   | 37    | 62    | 2,762 | 827 | 3,939 | 300 ms |
-| Same, and free heap chunks zeroed (selected)  | 33    | 94  | 109   | 36    | 62    | 2,455 | 524 | 3,315 | 303 ms |
+| Encoding of a turn's changed pages           | steps | kv  | agent | shift | typed | churn | map | Total  | Encode |
+| -------------------------------------------- | ----- | --- | ----- | ----- | ----- | ----- | --- | ------ | ------ |
+| XOR with previous, Zstd 3 (before)           | 47    | 161 | 198   | 80    | 234   | 3,543 | 740 | 5,006  | 132 ms |
+| XOR with golden, Zstd 3 (before the chain)   |       |     |       |       |       |       |     | 12,921 | 279 ms |
+| Prefix of previous, Zstd 3                   | 38    | 111 | 138   | 62    | 226   | 2,672 | 862 | 4,111  | 251 ms |
+| Prefix of previous, Zstd 3, long matching    | 37    | 109 | 135   | 41    | 66    | 2,692 | 769 | 3,851  | 443 ms |
+| Same, stack zeroed                           | 32    | 100 | 116   | 35    | 59    | 2,671 | 762 | 3,777  | 422 ms |
+| Same, Zstd 2                                 | 32    | 102 | 115   | 37    | 62    | 2,762 | 827 | 3,939  | 300 ms |
+| Same, and free heap chunks zeroed (selected) | 33    | 94  | 109   | 36    | 62    | 2,455 | 524 | 3,315  | 303 ms |
 
 The workloads: a sleep loop (steps), KV reads and writes with an RPC each
 (kv), a growing chat history (agent), arrays and strings shifted at the front
@@ -506,13 +505,13 @@ steps, kv, agent, typed and churn runs wrote 31%, 38%, 45%, 53% and 35% less.
 
 Reasons and alternatives from the experiment's earlier measurements:
 
-| Candidate                 | Trade-off                                                                                                                                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| bsdiff4                   | Smaller heap-churn patches, expensive whole-image matching; historical scalar median ~143 ms, sparse-8-MiB ~1,084 ms among successful samples, with timeouts on larger pairs                            |
-| Page XOR + Zstd           | Exploits stable memory offsets; historical scalar encode ~0.26 ms; ~73 KiB heap-churn patch versus ~25 KiB for bsdiff. Blind to data that moves within or between pages; replaced, above              |
-| Replacing changed pages   | Simpler, but wastes space on unchanged bytes inside a dirty page                                                                                                                                        |
-| Zstd patch-from, image    | The whole previous image as prefix: barely smaller than the changed pages' previous contents, and indexes the whole memory each turn (~2 ms per MiB)                                                     |
-| Xdelta/VCDIFF, HDiffPatch | General alternatives; no special knowledge of Wasm heaps. The tested Xdelta Wasm port ran out of memory; its bundled native source was measured separately. HDiffPatch was researched, not measured     |
+| Candidate                 | Trade-off                                                                                                                                                                                                                  |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| bsdiff4                   | Smaller heap-churn patches, expensive whole-image matching; historical scalar median ~143 ms, sparse-8-MiB ~1,084 ms among successful samples, with timeouts on larger pairs                                               |
+| Page XOR + Zstd           | Exploits stable memory offsets; historical scalar encode ~0.26 ms; ~73 KiB heap-churn patch versus ~25 KiB for bsdiff. Blind to data that moves within or between pages; replaced, above                                   |
+| Replacing changed pages   | Simpler, but wastes space on unchanged bytes inside a dirty page                                                                                                                                                           |
+| Zstd patch-from, image    | The whole previous image as prefix: barely smaller than the changed pages' previous contents, and indexes the whole memory each turn (~2 ms per MiB)                                                                       |
+| Xdelta/VCDIFF, HDiffPatch | General alternatives; no special knowledge of Wasm heaps. The tested Xdelta Wasm port ran out of memory; its bundled native source was measured separately. HDiffPatch was researched, not measured                        |
 | Kernel write tracking     | Selected where available (above): asynchronous userfaultfd write protection and PAGEMAP_SCAN need no trap handling; mprotect with a fault handler or soft-dirty bits would need signal coordination or process-wide resets |
 
 These are workload-dependent historical codec results, not current host-commit
@@ -529,15 +528,15 @@ Measured on 18 October 2026 over eight workloads (the seven above with a 100-tur
 agent, plus `cycles`, dropping 300 objects with cycles and closures a turn,
 and `fan`, `Promise.all` of 10 calls), bytes written per run in `MemoryStore`:
 
-| Workload | Default | Collect every turn | Threshold 1 MiB | Threshold 4 MiB or more |
-| -------- | ------- | ------------------ | --------------- | ----------------------- |
-| steps    | 61 KiB  | 66 KiB             | 61 KiB          | 61 KiB                  |
-| kv       | 179 KiB | 194 KiB            | 179 KiB         | 179 KiB                 |
-| agent    | 501 KiB | 498 KiB            | 487 KiB         | 487 KiB                 |
-| map      | 811 KiB | 812 KiB            | 814 KiB         | 809 KiB                 |
-| churn    | 2,473 KiB | 2,475 KiB        | 2,433 KiB       | 2,433 KiB               |
-| cycles   | 653 KiB | 726 KiB            | 822 KiB         | 1,997 KiB (5 MiB heap)  |
-| fan      | 626 KiB | 652 KiB            | 626 KiB         | 626 KiB                 |
+| Workload | Default   | Collect every turn | Threshold 1 MiB | Threshold 4 MiB or more |
+| -------- | --------- | ------------------ | --------------- | ----------------------- |
+| steps    | 61 KiB    | 66 KiB             | 61 KiB          | 61 KiB                  |
+| kv       | 179 KiB   | 194 KiB            | 179 KiB         | 179 KiB                 |
+| agent    | 501 KiB   | 498 KiB            | 487 KiB         | 487 KiB                 |
+| map      | 811 KiB   | 812 KiB            | 814 KiB         | 809 KiB                 |
+| churn    | 2,473 KiB | 2,475 KiB          | 2,433 KiB       | 2,433 KiB               |
+| cycles   | 653 KiB   | 726 KiB            | 822 KiB         | 1,997 KiB (5 MiB heap)  |
+| fan      | 626 KiB   | 652 KiB            | 626 KiB         | 626 KiB                 |
 
 Collecting at every turn's end costs CPU (up to ~1 ms a turn on the Map) and
 writes more, not less: the collector relinks the objects it visits, which
@@ -595,13 +594,13 @@ commit bytes.
 
 ### 5.2. Binary page batch
 
-| Part            | Encoding                                                                     |
-| --------------- | ---------------------------------------------------------------------------- |
-| Magic           | ASCII `QPD3`                                                                 |
-| Count           | Page count N, LEB128                                                         |
-| N page indexes  | Each as its gap from the previous index plus one (the first: from 0), LEB128 |
-| N block lists   | Each page's changed 64-byte blocks: a count byte k; then, if k < 8, the k block numbers in order, one byte each; if 8 <= k < 64, a 64-bit mask, little-endian; if k = 64, nothing |
-| Blocks          | One Zstd frame: the changed blocks, page by page, in order, back to back     |
+| Part           | Encoding                                                                                                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Magic          | ASCII `QPD3`                                                                                                                                                                      |
+| Count          | Page count N, LEB128                                                                                                                                                              |
+| N page indexes | Each as its gap from the previous index plus one (the first: from 0), LEB128                                                                                                      |
+| N block lists  | Each page's changed 64-byte blocks: a count byte k; then, if k < 8, the k block numbers in order, one byte each; if 8 <= k < 64, a 64-bit mask, little-endian; if k = 64, nothing |
+| Blocks         | One Zstd frame: the changed blocks, page by page, in order, back to back                                                                                                          |
 
 The **reference** is the blocks the batch replaces, back to back: their
 contents in the memory the batch applies to. The frame is compressed with the
@@ -660,12 +659,12 @@ reads of a restore, which fetches the chain's batches all at once; each new
 base it forces costs a whole image. Measured on 18 October 2026, total bytes
 written in `MemoryStore` (batches and commits):
 
-| New base when                          | sleep loop, 400 turns | agent, 400 turns | Map of 5,000 entries, 100 turns |
-| -------------------------------------- | --------------------- | ---------------- | ------------------------------- |
-| 16 batches, or deltas > 2 × base       | 633 KiB               | 1,085 KiB        | 5,878 KiB                       |
-| 256 batches, or deltas > 2 × base      | 620 KiB               | 1,010 KiB        | 2,256 KiB (58 batches)          |
-| deltas > 1 × base                      | 735 KiB               | 1,229 KiB        | 2,669 KiB                       |
-| deltas > 4 × base                      | 570 KiB               | 904 KiB          | 2,547 KiB                       |
+| New base when                     | sleep loop, 400 turns | agent, 400 turns | Map of 5,000 entries, 100 turns |
+| --------------------------------- | --------------------- | ---------------- | ------------------------------- |
+| 16 batches, or deltas > 2 × base  | 633 KiB               | 1,085 KiB        | 5,878 KiB                       |
+| 256 batches, or deltas > 2 × base | 620 KiB               | 1,010 KiB        | 2,256 KiB (58 batches)          |
+| deltas > 1 × base                 | 735 KiB               | 1,229 KiB        | 2,669 KiB                       |
+| deltas > 4 × base                 | 570 KiB               | 904 KiB          | 2,547 KiB                       |
 
 The sleep loop and the agent write mostly commits and small deltas, over a
 base of 5-10 KiB once dead bytes are zeroed; the Map's base is ~600 KiB, and

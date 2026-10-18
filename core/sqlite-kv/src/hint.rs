@@ -1,16 +1,16 @@
 //! The working-set hint: which pages a cold open should fetch.
 //!
 //! An owner records the pages its sessions read. Checkpointing saves write the
-//! most useful ones to `v13/hint`; a cold open reads that key together with
-//! `meta` and fetches the listed pages alongside replay, so its first queries
-//! find them without a round trip per B-tree level.
+//! most useful ones to `v14/hint`; a cold open reads that key together with
+//! the commit record and fetches the listed pages alongside replay, so its
+//! first queries find them without a round trip per B-tree level.
 //!
-//! The hint is advisory. It is never confirmed or ordered against other writes:
+//! The hint is advisory. Nothing waits for it, or depends on it:
 //! a stale, missing or malformed hint only wastes or saves gets, because pages
 //! are still read through the normal rules. (A backend error reading it fails
 //! open like any other read.)
 //!
-//! Encoding: `SH13`, entry count u16 LE, then the page numbers in ascending
+//! Encoding: `SH14`, entry count u16 LE, then the page numbers in ascending
 //! order as LEB128 deltas (the first from zero).
 use crate::format::HINT_MAGIC;
 use std::collections::HashMap;

@@ -24,7 +24,7 @@ struct Sample {
 impl Sample {
     fn emit(&self, phase: &str, store: &MemoryKv, local_db: u64, local_wal: u64) {
         let s = store.stats();
-        for kind in ["all", "page", "log", "meta", "hint", "other"] {
+        for kind in ["all", "page", "log", "commit", "hint", "other"] {
             let t = if kind == "all" {
                 sum(&s)
             } else {
@@ -343,31 +343,42 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
 
 /// Interrupt a save at its commit or its checkpoint, crash, then measure the
 /// open that follows. A save opened with `checkpoint_after = 0` checkpoints the
-/// logged transaction while committing, then writes meta.
+/// logged transaction after committing, then puts the record again.
 async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
-    for (op, operation, prefix, effect, committed) in [
+    for (op, operation, prefix, nth, effect, committed) in [
         (
             "commit_lost",
             Operation::Put,
-            "v13/log/",
+            "v14/commit",
+            1,
             Effect::None,
             false,
         ),
         (
             "commit_ack_lost",
             Operation::Put,
-            "v13/log/",
+            "v14/commit",
+            1,
             Effect::After,
             true,
         ),
         (
             "checkpoint_error",
             Operation::Put,
-            "v13/page/",
+            "v14/page/",
+            1,
             Effect::None,
             true,
         ),
-        ("meta_error", Operation::Put, "v13/meta", Effect::None, true),
+        // The checkpoint's own record: the second record a save puts.
+        (
+            "checkpoint_record_error",
+            Operation::Put,
+            "v14/commit",
+            2,
+            Effect::None,
+            true,
+        ),
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
         let mut db = Session::open_with_options(store.clone(), checkpoint_all()).await?;
@@ -380,14 +391,14 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
         let _gate = store.arm(Failpoint {
             operation,
             key_prefix: prefix.into(),
-            nth: 1,
+            nth,
             effect,
             cancel: false,
         });
         let result = db.save().await;
         let hit = store.events().iter().any(|e| e.faulted);
         assert!(hit, "recovery failpoint was not reached");
-        if prefix == "v13/log/" {
+        if op.starts_with("commit") {
             assert!(result.is_err());
         } else {
             assert!(result?.cleanup_error.is_some());

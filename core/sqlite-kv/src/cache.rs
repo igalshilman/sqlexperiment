@@ -7,19 +7,17 @@
 //!
 //! # Pages
 //!
-//! Pages are overwritten in place, so cached values can go stale. Each namespace
-//! keeps a *base*: the log start of the last durable `meta` this owner saw. A
-//! cached page is current unless a committed transaction at or after the base
-//! changed it, and while such a transaction is still in the replayed log, its
-//! image overrides the cache. Only a checkpoint that moves `meta` past it makes
-//! the cached value visible, and only another writer does that without writing
-//! through this cache.
+//! Pages are overwritten in place, so cached values can go stale. Page keys
+//! change only in checkpoints, and a checkpoint that lands moves the commit
+//! record to a new *epoch*. The namespace keeps the epoch its cached pages
+//! belong to: until it changes, a page key changed only by a checkpoint whose
+//! record did not land, which wrote images the log still holds, and the log's
+//! images override the cache. This owner updates the cache as it checkpoints;
+//! an open that finds another epoch drops every page.
 //!
-//! The namespace also remembers the exact `meta` bytes it last read or wrote. If
-//! open reads anything else, another writer checkpointed (or this owner's last
-//! save failed). Open then reads the segments from the base to the new log start
-//! and refreshes the cached pages they changed. If any is gone, or there are more
-//! than one probe batch, the namespace drops all its pages instead.
+//! The namespace also remembers the exact commit record it last read or wrote.
+//! If open reads the same bytes, nothing changed since: the log, the version
+//! this owner committed and an idle engine all still hold.
 //!
 //! # Keys are never reused
 //!
@@ -33,12 +31,9 @@
 //!
 //! # Durability knowledge
 //!
-//! The namespace also remembers facts that would otherwise cost round trips:
-//! - the commit it last had acknowledged, so open need not re-put that tail;
-//! - a checkpoint claim: pages through some log position were acknowledged, so the
-//!   next save can advance `meta` in the same round trip as its commit, and
-//!   replay can start there;
-//! - an idle engine at that commit, for the next session.
+//! Besides pages, the namespace remembers its last acknowledged commit (so a
+//! session can tell another committed since it opened) and an idle engine at
+//! that commit, for the next session.
 //!
 //! Namespace states are kept for a bounded number of namespaces, and parked
 //! engines within a byte budget, least recently used first; forgetting either
@@ -46,7 +41,6 @@
 use crate::{
     WarmEngine,
     hint::Usage,
-    log::Meta,
     page_codec::{self, Page},
 };
 use foyer::{
@@ -220,39 +214,29 @@ struct Owner {
     generation: u64,
     /// Version of each page replaced or invalidated in this generation.
     versions: HashMap<u64, u32>,
-    /// `meta` bytes as last read or written by this owner; `None` when absent.
-    meta: Option<Page>,
-    /// Cached pages are current unless changed by a committed transaction at or
-    /// after this log position; `None` when unknown.
-    base: Option<u64>,
-    /// A durable checkpoint this owner may record in `meta`.
-    claim: Option<Meta>,
-    /// One past this owner's last acknowledged commit.
+    /// The commit record as last read or written by this owner; `None` when
+    /// unknown, which matches no record.
+    commit: Option<Page>,
+    /// The checkpoint epoch the cached pages belong to; `None` when unknown.
+    epoch: Option<u64>,
+    /// The version of this owner's last acknowledged commit.
     committed: Option<u64>,
     /// Pages this owner's sessions read, for the working-set hint.
     usage: Usage,
     /// The hint this owner last wrote, to skip rewriting an unchanged one.
     hint: Option<Vec<u8>>,
-    /// Sessions with unconfirmed writes to an ordered store.
-    unconfirmed: usize,
-    /// A session ended with unconfirmed writes, which may be lost: what this
-    /// owner knows may describe writes that do not exist.
-    doubtful: bool,
-    /// Log positions of open sessions (as a multiset): each reads pages
-    /// outside its log from the page keys and this cache, so a checkpoint may
-    /// not write images of transactions at or after the oldest of them.
+    /// Versions of open sessions (as a multiset): each reads pages outside its
+    /// log from the page keys and this cache, so a checkpoint may not write
+    /// images of transactions after the oldest of them.
     readers: BTreeMap<u64, usize>,
-}
-
-/// What open may reuse, given the durable `meta` it read.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Reuse {
-    /// `meta` is what this owner last saw: the claim and acknowledged commit hold.
-    Known(Option<Meta>, Option<u64>),
-    /// `meta` changed. With a base, cached pages changed by transactions from the
-    /// base to the new log start must be refreshed before the next read; without
-    /// one, the pages were dropped.
-    Changed(Option<u64>),
+    /// Stored log values a durable record named, by number: a number is never
+    /// reused once named, so they stay valid while a record names them.
+    values: crate::log::Values,
+    /// This owner's last seal, acknowledged, for the next commit to name.
+    sealed: Option<crate::log::Sealed>,
+    /// Garbage the record lists that this owner deleted since, acknowledged:
+    /// the next commit leaves it out instead of deleting it again.
+    collected: std::collections::BTreeSet<u64>,
 }
 
 impl NamespaceCache {
@@ -264,104 +248,112 @@ impl NamespaceCache {
         self.shared.decoded
     }
 
-    /// Where this owner expects the log to start, for a speculative probe.
-    pub(crate) fn expected_start(&self) -> Option<u64> {
-        let owner = self.owner();
-        owner.claim.map(|claim| claim.log_start).or(owner.base)
-    }
-
-    /// Compare the durable `meta` that open read, with log start `log_start`, to
-    /// what this owner last saw.
-    pub(crate) fn validate(&self, meta: Option<&[u8]>, log_start: u64) -> Reuse {
+    /// Compare the commit record that open read (`bytes`, in epoch `epoch`)
+    /// to what this owner last saw: whether it is the same. Another epoch
+    /// drops every cached page.
+    pub(crate) fn validate(&self, bytes: Option<&[u8]>, epoch: u64) -> bool {
         let mut owner = self.owner();
-        if owner.meta.as_deref() == meta {
-            return Reuse::Known(owner.claim, owner.committed);
+        // An absent record is an empty namespace; a real record is never empty.
+        if owner.commit.as_deref() == Some(bytes.unwrap_or_default()) {
+            return true;
         }
         self.forget_locked(&mut owner);
-        match owner.base {
-            Some(base) if base <= log_start => Reuse::Changed(Some(base)),
-            _ => {
-                owner.clear(&self.shared.ids);
-                Reuse::Changed(None)
-            }
-        }
-    }
-
-    /// Drop the cached pages that the transactions between the base and the
-    /// new log start changed, as read by open after [`Reuse::Changed`]; `None`
-    /// means they could not be read, and drops every page.
-    pub(crate) fn refresh(&self, changes: Option<&std::collections::BTreeSet<u64>>) {
-        let Some(changes) = changes else {
-            return self.owner().clear(&self.shared.ids);
-        };
-        for &index in changes {
-            self.remove(index);
-        }
-    }
-
-    /// Record durable `meta` bytes, a claim beyond them, and the acknowledged
-    /// commit. Cached pages must be current as of the log start of `meta`.
-    pub(crate) fn record(&self, meta: Option<Page>, claim: Option<Meta>, committed: u64) {
-        let mut owner = self.owner();
-        owner.base = match &meta {
-            Some(bytes) => Meta::decode(bytes).ok().map(|meta| meta.log_start),
-            None => Some(Meta::default().log_start),
-        };
-        if owner.base.is_none() {
+        if owner.epoch != Some(epoch) {
             owner.clear(&self.shared.ids);
         }
-        owner.meta = meta;
-        owner.claim = claim;
-        owner.committed = Some(committed);
+        false
     }
 
-    /// Before a session of an ordered store opens: if an earlier session's
-    /// writes are unconfirmed, drop everything this owner knows (`meta`, claim,
-    /// commit, pages and the parked engine), since it may describe lost writes.
-    pub(crate) fn open_ordered(&self) {
+    /// Whether cached pages belong to some epoch: this owner has seen the
+    /// namespace.
+    pub(crate) fn knows_pages(&self) -> bool {
+        self.owner().epoch.is_some()
+    }
+
+    /// Whether cached pages belong to `epoch`.
+    pub(crate) fn knows_epoch(&self, epoch: u64) -> bool {
+        self.owner().epoch == Some(epoch)
+    }
+
+    /// Record the durable commit record `bytes`, in epoch `epoch`, and this
+    /// owner's acknowledged commit, if any. Cached pages must be current as of
+    /// that epoch.
+    pub(crate) fn record(&self, bytes: Option<Page>, epoch: u64, committed: Option<u64>) {
         let mut owner = self.owner();
-        if !owner.doubtful && owner.unconfirmed == 0 {
-            return;
+        if owner.epoch != Some(epoch) {
+            owner.clear(&self.shared.ids);
+            owner.epoch = Some(epoch);
         }
-        owner.doubtful = false;
-        owner.meta = Some(Page::new()); // matches no real record
-        owner.claim = None;
-        owner.committed = None;
-        owner.clear(&self.shared.ids);
-        let id = owner.id;
-        drop(owner);
-        // Dropped outside the lock: an engine's store may settle on drop.
-        drop(self.take_engine_of(id));
+        // An absent record is a real state: an empty namespace.
+        owner.commit = Some(bytes.unwrap_or_default());
+        if committed.is_some() {
+            owner.committed = committed;
+        }
     }
 
-    /// A session's first write to an ordered store.
-    pub(crate) fn write_unconfirmed(&self) {
-        self.owner().unconfirmed += 1;
-    }
-
-    /// That session's writes were confirmed, or it ended without.
-    pub(crate) fn settle(&self, confirmed: bool) {
+    /// Record this owner's checkpoint: the durable record `bytes`, at the
+    /// next epoch after the one the cached pages belong to, which keep it.
+    /// Only the pages of the log it checkpointed changed, and the caller
+    /// replaces those; any other page is the same in both epochs.
+    pub(crate) fn checkpointed(&self, bytes: Page, epoch: u64, committed: u64) {
         let mut owner = self.owner();
-        owner.unconfirmed -= 1;
-        owner.doubtful |= !confirmed;
+        if owner.epoch.is_some_and(|known| known + 1 == epoch) {
+            owner.epoch = Some(epoch);
+        }
+        drop(owner);
+        self.record(Some(bytes), epoch, Some(committed));
     }
 
-    /// Forget durability knowledge after a save with an unknown outcome. Cached
-    /// pages stay: whatever the save did, it changed only pages of transactions
-    /// after the base, which the next open refreshes if `meta` moved past them.
+    /// Forget the commit record after a commit or checkpoint whose outcome is
+    /// unknown. Cached pages stay: a checkpoint that landed moved the epoch,
+    /// which the next open sees.
     pub(crate) fn forget(&self) {
         self.forget_locked(&mut self.owner());
     }
 
-    /// Forget the durable `meta` after checkpoint work failed, keeping the
-    /// acknowledged commit at `committed`.
-    pub(crate) fn forget_meta(&self, committed: u64) {
-        let mut owner = self.owner();
-        self.forget_locked(&mut owner);
-        owner.committed = Some(committed);
+    /// The stored log values this owner holds, of those in `named`.
+    pub(crate) fn values(&self, named: &std::collections::BTreeSet<u64>) -> crate::log::Values {
+        let owner = self.owner();
+        (owner.values.iter())
+            .filter(|(n, _)| named.contains(n))
+            .map(|(&n, value)| (n, value.clone()))
+            .collect()
     }
 
-    /// Register an open session at log position `next`; see [`Reader`].
+    /// Keep the stored log values a durable record names, `named`: those held
+    /// already, and `values`.
+    pub(crate) fn keep_values(
+        &self,
+        named: &std::collections::BTreeSet<u64>,
+        values: crate::log::Values,
+    ) {
+        let mut owner = self.owner();
+        owner.values.retain(|n, _| named.contains(n));
+        owner
+            .values
+            .extend(values.into_iter().filter(|(n, _)| named.contains(n)));
+    }
+
+    /// This owner's last seal, acknowledged, if the record is still the one
+    /// that lists it.
+    pub(crate) fn sealed(&self) -> Option<crate::log::Sealed> {
+        self.owner().sealed.clone()
+    }
+
+    pub(crate) fn keep_sealed(&self, sealed: Option<crate::log::Sealed>) {
+        self.owner().sealed = sealed;
+    }
+
+    /// Garbage the record lists, deleted since by this owner, acknowledged.
+    pub(crate) fn collected(&self) -> std::collections::BTreeSet<u64> {
+        self.owner().collected.clone()
+    }
+
+    pub(crate) fn keep_collected(&self, collected: std::collections::BTreeSet<u64>) {
+        self.owner().collected = collected;
+    }
+
+    /// Register an open session at version `next`; see [`Reader`].
     pub(crate) fn reader(&self, next: u64) -> Reader {
         *self.owner().readers.entry(next).or_default() += 1;
         Reader {
@@ -383,9 +375,10 @@ impl NamespaceCache {
     }
 
     fn forget_locked(&self, owner: &mut Owner) {
-        owner.meta = Some(Page::new()); // matches no real record
-        owner.claim = None;
+        owner.commit = None;
         owner.committed = None;
+        owner.sealed = None;
+        owner.collected.clear();
         self.take_engine_of(owner.id);
     }
 
@@ -406,7 +399,7 @@ impl NamespaceCache {
         self.owner().hint = Some(hint);
     }
 
-    /// One past this owner's last acknowledged commit, if still known.
+    /// The version of this owner's last acknowledged commit, if still known.
     pub(crate) fn committed(&self) -> Option<u64> {
         self.owner().committed
     }
@@ -505,17 +498,15 @@ impl Owner {
             id: ids.fetch_add(1, Relaxed),
             generation: ids.fetch_add(1, Relaxed),
             versions: HashMap::new(),
-            // Knows nothing yet: the first open neither probes speculatively
-            // nor refreshes pages it does not have.
-            meta: Some(Page::new()),
-            base: None,
-            claim: None,
+            commit: None,
+            epoch: None,
             committed: None,
             usage: Usage::default(),
             hint: None,
-            unconfirmed: 0,
-            doubtful: false,
             readers: BTreeMap::new(),
+            values: crate::log::Values::new(),
+            sealed: None,
+            collected: std::collections::BTreeSet::new(),
         }
     }
 
@@ -523,7 +514,7 @@ impl Owner {
     fn clear(&mut self, ids: &AtomicU64) {
         self.generation = ids.fetch_add(1, Relaxed);
         self.versions.clear();
-        self.base = None;
+        self.epoch = None;
     }
 }
 
@@ -539,7 +530,7 @@ fn random_start() -> u64 {
     hasher.finish() >> 1
 }
 
-/// An open session's registration at its log position; dropping it ends it.
+/// An open session's registration at its version; dropping it ends it.
 pub(crate) struct Reader {
     cache: NamespaceCache,
     next: u64,

@@ -1,8 +1,8 @@
 //! Independent immutable-page envelopes; logical pages remain 4096 bytes.
 //!
 //! The value starts with a codec tag (u8) and logical size (u16 LE, always 4096),
-//! followed by raw bytes (tag 0) or one LZ4 block (tag 1). Compression is retained only
-//! when its payload is smaller than the raw page. Incompressible pages therefore use
+//! followed by raw bytes (tag 0), one LZ4 block (tag 1) or one zstd frame (tag 2).
+//! Compression is retained only when its payload is smaller than the raw page. Incompressible pages therefore use
 //! 4099 bytes including the header, even under the LZ4 policy.
 //!
 //! Raw and compressed pages can coexist. Write policy is per session, while stored
@@ -14,7 +14,15 @@
 //! enters the snapshot cache. A valid-looking bit change can remain undetected:
 //! there is no checksum or corruption repair.
 use crate::io::BLOCK_SIZE;
+use std::cell::RefCell;
 use std::io;
+use zstd_safe::{CCtx, DCtx};
+
+thread_local! {
+    // A zstd context costs more to set up than a page to code: one per thread.
+    static ZSTD_C: RefCell<CCtx<'static>> = RefCell::new(CCtx::create());
+    static ZSTD_D: RefCell<DCtx<'static>> = RefCell::new(DCtx::create());
+}
 
 const HEADER: usize = 3;
 /// A page held in memory, encoded or decoded, shared without copying.
@@ -28,23 +36,38 @@ pub enum PageCompression {
     /// Store every new page verbatim behind the envelope; useful for CPU/traffic comparisons.
     Raw,
     /// Try an independent LZ4 block, falling back to raw if compression would not shrink it.
-    #[default]
     Lz4,
+    /// Try an independent zstd frame (level 3): smaller than LZ4 on SQL pages,
+    /// at more CPU per page; raw if it would not shrink it.
+    #[default]
+    Zstd,
 }
+
+const ZSTD_LEVEL: i32 = 3;
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-/// Tag (0 = raw, 1 = LZ4 block), u16 LE logical length, then payload.
-/// Compression is retained only when it is smaller than the raw payload.
+/// Tag (0 = raw, 1 = LZ4 block, 2 = zstd frame), u16 LE logical length, then
+/// payload. Compression is retained only when it is smaller than the raw payload.
 pub fn encode(page: &[u8], policy: PageCompression) -> io::Result<Vec<u8>> {
     if page.len() != BLOCK_SIZE {
         return Err(invalid("invalid logical page length"));
     }
-    let compressed = (policy == PageCompression::Lz4).then(|| lz4_flex::block::compress(page));
-    let (tag, payload) = match compressed.as_deref() {
-        Some(bytes) if bytes.len() < BLOCK_SIZE => (1, bytes),
+    let compressed = match policy {
+        PageCompression::Raw => None,
+        PageCompression::Lz4 => Some((1, lz4_flex::block::compress(page))),
+        PageCompression::Zstd => {
+            let mut frame = Vec::with_capacity(zstd_safe::compress_bound(BLOCK_SIZE));
+            ZSTD_C
+                .with_borrow_mut(|cctx| cctx.compress(&mut frame, page, ZSTD_LEVEL))
+                .map_err(|e| io::Error::other(zstd_safe::get_error_name(e)))?;
+            Some((2, frame))
+        }
+    };
+    let (tag, payload) = match &compressed {
+        Some((tag, bytes)) if bytes.len() < BLOCK_SIZE => (*tag, &bytes[..]),
         _ => (0, page),
     };
     let mut out = Vec::with_capacity(HEADER + payload.len());
@@ -61,7 +84,7 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 /// Like [`decode`], but a raw page is returned as a slice of `bytes` without
-/// copying; only LZ4 pages allocate.
+/// copying; only compressed pages allocate.
 pub(crate) fn decode_bytes(bytes: &bytes::Bytes) -> io::Result<Page> {
     if bytes.len() < HEADER || bytes.len() > MAX_ENCODED_PAGE {
         return Err(invalid("invalid encoded page length"));
@@ -78,6 +101,16 @@ pub(crate) fn decode_bytes(bytes: &bytes::Bytes) -> io::Result<Page> {
                 .map_err(|_| invalid("invalid LZ4 page"))?;
             if decoded != BLOCK_SIZE {
                 return Err(invalid("invalid LZ4 decoded length"));
+            }
+            Ok(page.into())
+        }
+        2 if !payload.is_empty() && payload.len() < BLOCK_SIZE => {
+            let mut page = Vec::with_capacity(BLOCK_SIZE);
+            let decoded = ZSTD_D
+                .with_borrow_mut(|dctx| dctx.decompress(&mut page, payload))
+                .map_err(|_| invalid("invalid zstd page"))?;
+            if decoded != BLOCK_SIZE {
+                return Err(invalid("invalid zstd decoded length"));
             }
             Ok(page.into())
         }

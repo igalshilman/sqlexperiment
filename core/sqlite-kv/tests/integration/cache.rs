@@ -161,7 +161,7 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v13/log/".into(),
+            key_prefix: "v14/commit".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,
@@ -187,7 +187,12 @@ fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
             create(store.clone(), cached(&cache)).await?;
             let other = fresh_namespace();
             for n in 0..saves {
-                let mut db = Session::open_with_options(store.clone(), cached(&other)).await?;
+                // Its fifth save checkpoints.
+                let options = StorageOptions {
+                    checkpoint_after: 4,
+                    ..cached(&other)
+                };
+                let mut db = Session::open_with_options(store.clone(), options).await?;
                 db.execute(&format!(
                     "UPDATE t SET payload = printf('%0800d', id) WHERE id = {}",
                     n * 31 + 1

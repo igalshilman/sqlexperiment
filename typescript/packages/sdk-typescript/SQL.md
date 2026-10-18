@@ -48,14 +48,14 @@ below). It commits when `body` resolves and rolls back when it rejects. A
 library that brings its own transactions uses `ctx.db.transaction`.
 
 An attempt has one session. It opens on the first call to `ctx.db` or
-`ctx.transaction` (a read of `meta` and a probe of the log), stays open while the
-handler runs, however many calls it makes, and is saved when the handler
-ends: one `ctx.run`, if it wrote, so the page cache may trust the writes. A
-commit is durable once its writes are stored, which Restate does in order, so
-it needs no barrier of its own: a lost commit takes everything after it,
-including calls and the response. A library that wants a database for the
-handler's work gets `ctx.db`: the [pi integration](../integrations/src/pi/README.md) runs
-pi-durable's storage this way.
+`ctx.transaction` (a read of the commit record, with the log inline), stays
+open while the handler runs, however many calls it makes, and is saved when
+the handler ends. A transaction commits with one state write, of the commit
+record, and is durable when the statement or `ctx.transaction` that commits
+it resolves: the SDK waits for an empty `ctx.run` after the write. A library
+that wants a database for the handler's work gets `ctx.db`: the
+[pi integration](../integrations/src/pi/README.md) runs pi-durable's storage
+this way.
 
 An SQL error rejects as a `TerminalError` (its `cause` the SQL error), from
 `ctx.db` and `ctx.transaction` alike, since a retry would repeat it; a storage
@@ -74,76 +74,70 @@ ctx.transaction(async ({ db, tx }) => {
 });
 ```
 
-The sends wait in the object's state while the transaction commits: just
-before the COMMIT, the SDK writes them under one state key
-(`_restate_sql_sends`), with the database's version (a number that grows with
-each commit, and only then; the SDK has this commit logged even if it changes
-nothing) and a random id of the transaction, and once the
-commit is done it makes them, each with an idempotency key of the transaction,
-`transaction/<id>/<index>` (or the send's own key), and clears the key. Restate
-stores an attempt's writes and sends in order, and keeps a prefix after a
-crash: so the commit is stored only with its pending sends, and the sends are
-stored before they are cleared. Pending sends that the session's next open
-finds are made again, with the same keys, if the database's version grew past
-theirs (the commit landed; Restate drops a send whose key it has seen), and
-dropped if it did not. So each send of a committed transaction is made once,
-even when a retried attempt never runs the transaction's body again (it finds
-its work done, by its id), and a send of a transaction rolled back or lost is
-not made. A transaction without sends writes nothing more; one with sends
-costs two state writes. Two limits: Restate keeps an idempotency key for the
-target's retention (a day by default), and a send made again after that, by
-an invocation that died between the commit and its sends and whose object is
-not used again for that long, is made twice; and a send has no invocation id,
-which only exists once it is made. Only `db` and `tx` are part of the
-transaction: a call, whose result the body would wait for, cannot be, and one
-made through `ctx` inside the body is made whether or not the transaction
-commits, while holding it open. Make calls before the transaction, with an
-idempotency key of their own, and record their outcome in it, as the shop's
-`Orders` does; its `expire` is a send of `tx`.
+The sends commit with the transaction, in the same write: the commit record
+holds them (its _effects_, opaque to the storage), as the database's outbox.
+Once the commit is done the SDK makes them, each with an idempotency key of
+the transaction, `transaction/<id>/<index>` (or the send's own key), with a
+random id of the transaction. A send is stored once an empty `ctx.run` made
+after it resolves: the next transaction's commit leaves the stored ones out
+of the outbox, and the handler's end empties it (a `ctx.run`, then a commit
+of the empty outbox). The session's next open makes again the sends the
+outbox still holds, with the same keys; Restate drops a send whose key it has
+seen. So each send of a committed transaction is made once, even when a
+retried attempt never runs the transaction's body again (it finds its work
+done, by its id), and a send of a transaction rolled back or lost is not
+made, since the commit that would hold it is not stored. A transaction
+without sends costs nothing more; a handler whose transactions sent costs
+two `ctx.run`s and a commit at its end. Two limits: Restate keeps an
+idempotency key for the target's retention (a day by default), and a send
+made again after that, by an invocation that died between the commit and its
+end and whose object is not used again for that long, is made twice; and a
+send has no invocation id, which only exists once it is made. Only `db` and
+`tx` are part of the transaction: a call, whose result the body would wait
+for, cannot be, and one made through `ctx` inside the body is made whether or
+not the transaction commits, while holding it open. Make calls before the
+transaction, with an idempotency key of their own, and record their outcome
+in it, as the shop's `Orders` does; its `expire` is a send of `tx`.
 
 The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
-`ctx.set` and `ctx.clear`, and the barrier is an empty `ctx.run`. The SDK loads
+`ctx.set` and `ctx.clear`, and `sync` is an empty `ctx.run`. The SDK loads
 the sqlite-kv addon, an optional peer dependency, on first use.
 
-**The database is the object's state.** Its keys (`v13/meta`, `v13/log/…`,
-`v13/page/…`, `v13/hint`) sit next to the object's other state keys, so
+**The database is the object's state.** Its keys (`v14/commit`, `v14/log/…`,
+`v14/page/…`, `v14/hint`) sit next to the object's other state keys, so
 `ctx.clearAll()` in any handler of the object deletes the database, a handler's
-own key starting with `v13/` corrupts it, and `ctx.stateKeys()` lists its
-pages. Keep other state out of `v13/`, and do not clear all of an object that
-uses `ctx.db`. The state key `_restate_sql_sends` is the SDK's too.
-(Reserving these keys in the SDK is future work.)
+own key starting with `v14/` corrupts it, and `ctx.stateKeys()` lists its
+pages. Keep other state out of `v14/`, and do not clear all of an object that
+uses `ctx.db`. (Reserving these keys in the SDK is future work.)
 
 **One cluster per process.** The page cache knows a database by its namespace,
-`service/key`, and trusts what it cached while the database's `meta` and log
-look as it left them; nothing identifies the database itself. A process
+`service/key`, and trusts what it cached while the database's commit record
+is the one it left; nothing identifies the database itself. A process
 registered with two Restate clusters (staging and production, or a dev
 cluster wiped and recreated) could take one cluster's `Ledger/bank` for the
 other's and serve its cached pages. Run one process per cluster, or give each
 its own `SQLITE_KV_CACHE_FILE` and restart it after recreating a cluster.
-(A database id in `meta` is future work.)
+(A database id in the commit record is future work.)
 
 ## How it works
 
 **State access.** A get is a state read, from the runtime unless this attempt
 wrote the key (lazy state, so an invocation does not start by loading every
-page). A set or clear is a state write, and returns at once. Restate stores an
-invocation's commands in order, and after a crash keeps a prefix of them, so
-writes are FIFO: a lost write takes every later command with it, including
-later writes, calls to other services and the response. The protocol's
-ordering rules (commit after the transaction's other segments, `meta` after
-the checkpointed pages, deletes after `meta`) hold by that order, without
-waiting for acknowledgements.
+page). A set or clear is a state write, and returns at once. The protocol
+assumes nothing of their order: a write is stored once an empty `ctx.run`
+made after it resolves, and until then a crash may lose any of the writes
+before it, and keep the others. Each transaction is one write, of the commit
+record, which holds the log since the last checkpoint (a large transaction's
+log also goes to segments, written and synced before the record). A
+checkpoint writes the pages, syncs, and only then the record that no longer
+needs the log. So whatever subset of unsynced writes a crash keeps, the
+stored record names only what is stored.
 
-**A barrier only for the page cache.** The process's page cache keeps what it
-wrote (the last commit, checkpointed pages, the parked engine) for the
-object's next invocation, so it must not trust writes that may be lost. The
-store is ordered: a session that wrote confirms its writes when it is saved,
-with one empty `ctx.run`, which the runtime acknowledges after the commands
-before it. If the attempt dies first, the next session in this process starts
-cold. Without that barrier a lost checkpoint would stay claimed, and the next
-save would record `meta` past log segments whose pages were never stored, and
-delete them (`tests/integration/ordered.rs` in the main crate simulates
-exactly that).
+**The page cache.** The process's page cache keeps the pages it read and
+wrote, with the commit record they belong to, for the object's next
+invocation. A session opens on them only when the stored record is the one
+the cache saw last; any other record, such as one a crashed attempt in
+another process wrote, makes it read the pages again.
 
 **No journal replay.** On a retry or a resume, the SDK normally replays the
 journal: each operation returns its recorded result and must match it. That
@@ -151,8 +145,8 @@ cannot work here, since a later attempt makes different reads (the page cache,
 the log length and the other owners' checkpoints all differ). With
 `journalReplay: false` the SDK skips the recorded journal: the handler runs
 again from the start against the state as it is. Recovery is then the storage
-protocol's: open reads `meta` and the log, so a half-written commit or
-checkpoint from the crashed attempt is ignored or replayed over.
+protocol's: open reads the commit record, so a lost commit or checkpoint from
+the crashed attempt is as if it never started.
 
 **One owner.** The protocol needs one writer per namespace. Restate runs one
 exclusive invocation per object key at a time, and one attempt of it at a
@@ -169,8 +163,8 @@ operation it reaches happens again. What each one does then:
 | `ctx.db`, `ctx.transaction`                                              | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
 | Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result.                                                   |
 | Sends, delayed sends                                                     | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer.                                                                                                                      |
-| `ctx.get`, `ctx.set`, `ctx.clear`                                        | Read the state as stored; writes are ordered, and a lost one takes the later commands with it.                                                                                                                                |
-| `ctx.run`                                                                | Not available: its result would not be kept, and a retried attempt runs the handler again anyway, so call the function directly. A call to it is a terminal error. (The SDK uses an empty run itself, as the barrier above.)  |
+| `ctx.get`, `ctx.set`, `ctx.clear`                                        | Read the state as stored; a write is stored once an empty `ctx.run` after it resolves, and a crash before that may lose it.                                                                                                   |
+| `ctx.run`                                                                | Not available: its result would not be kept, and a retried attempt runs the handler again anyway, so call the function directly. A call to it is a terminal error. (The SDK uses an empty run itself, to sync the store.)     |
 | `ctx.sleep`                                                              | Starts over.                                                                                                                                                                                                                  |
 | `attach`, `cancel`                                                       | Idempotent already.                                                                                                                                                                                                           |
 | Awakeables                                                               | Refused.                                                                                                                                                                                                                      |
@@ -284,16 +278,14 @@ transfers take 18.8 ms each on one local node.
   appends its own.
 - **A suspension is a restart.** Resuming means running from the start, so
   long handlers that hit the inactivity timeout start over.
-- **Outside the model.** The TLA+ specification and the protocol monitor
-  assume independent, acknowledged puts. Writes that return before they are
-  stored are safe only by the FIFO argument above, which the crash tests test
-  but nothing proves.
-- **Assumptions to confirm with the runtime:** an attempt's stored commands
-  are a prefix of those it sent, in order (FIFO writes); an empty `ctx.run` is
-  acknowledged only after the commands before it are stored (the barrier); an
-  abandoned attempt's commands are never applied after a new attempt starts
-  (fencing); state a lazy read returns is durable. The crash tests kill
-  processes, so they check ordering and recovery, not storage durability
+- **A sync per commit.** Every transaction waits for an empty `ctx.run` after
+  its record: a round trip to the runtime, which statements that commit one
+  by one pay each time. Group them in a transaction.
+- **Assumptions to confirm with the runtime:** an empty `ctx.run` is
+  acknowledged only after the commands before it are stored (writes and
+  sends: the sync); an abandoned attempt's commands are never applied after a
+  new attempt starts (fencing); state a lazy read returns is durable. The
+  crash tests kill processes, so they check recovery, not storage durability
   across a machine crash.
 
 ## Shared handlers

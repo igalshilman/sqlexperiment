@@ -1,6 +1,6 @@
 //! In-memory visibility/durability model and exact logical traffic counters.
 use crate::{
-    format::{HINT, LOG_PREFIX, META, PAGE_PREFIX},
+    format::{COMMIT, HINT, LOG_PREFIX, PAGE_PREFIX},
     kv::KvStore,
     yield_now,
 };
@@ -29,14 +29,14 @@ pub struct Traffic {
     pub delete_key_bytes: u64,
 }
 
-/// Class of a key, used to split traffic counters: `page`, `log`, `meta` or `other`.
+/// Class of a key, used to split traffic counters: `page`, `log`, `commit`, `hint` or `other`.
 pub fn object_kind(key: &str) -> &'static str {
     if key.starts_with(PAGE_PREFIX) {
         "page"
     } else if key.starts_with(LOG_PREFIX) {
         "log"
-    } else if key == META {
-        "meta"
+    } else if key == COMMIT {
+        "commit"
     } else if key == HINT {
         "hint"
     } else {

@@ -26,13 +26,12 @@ const OPTIONS = {
 
 /**
  * The metadata of every object here: Restate's UI hides the SQL storage from
- * the journal view (the database's pages, log and header in the object's
- * state, `v13/...`; the sends pending with a transaction; and the `sync` run
- * before an attempt ends).
+ * the journal view (the database's commit record, log, pages and hint in the
+ * object's state, `v14/...`; and the `sync` runs after its writes).
  */
 const METADATA = {
-  'dev.restate.tooling.journal.hidden.names': 'sync,_restate_sql_sends',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v13/',
+  'dev.restate.tooling.journal.hidden.names': 'sync',
+  'dev.restate.tooling.journal.hidden.name.prefix': 'v14/',
 };
 
 /** What an object is doing: the message it answers, if any, and what its tools wait for. */

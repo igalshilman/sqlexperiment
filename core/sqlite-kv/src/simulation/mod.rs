@@ -9,11 +9,20 @@ pub use latency::LatencyKv;
 pub use memory::{MemoryKv, Stats, Traffic, object_kind};
 pub use monitor::MonitorKv;
 
-use crate::{NamespaceCache, PageCache, PageCacheConfig};
+use crate::{NamespaceCache, PageCache, PageCacheConfig, format::COMMIT, kv::KvStore, log::Commit};
 use std::sync::{
     OnceLock,
     atomic::{AtomicU64, Ordering::Relaxed},
 };
+
+/// The transactions in the durable commit record's log: those committed since
+/// the last checkpoint.
+pub async fn logged_transactions(store: &dyn KvStore) -> std::io::Result<usize> {
+    Ok(match store.get(COMMIT).await? {
+        Some(bytes) => Commit::decode(&bytes)?.log.len(),
+        None => 0,
+    })
+}
 
 /// Cache settings for tests: a new temporary file and 1 MiB disk blocks. Files
 /// left by earlier test processes are removed.
