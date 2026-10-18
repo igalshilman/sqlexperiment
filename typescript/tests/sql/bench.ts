@@ -8,7 +8,8 @@
 // process (so that a phase can restart them, cold), and prints one JSON row
 // per phase. Stored bytes and keys are read from the server's state table.
 import { spawn } from 'node:child_process';
-import { mkdtempSync, openSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,9 +46,8 @@ export const bench = restate.object({
         for (let i = 0; i < rows; i++) await db.execute('INSERT INTO rows(v) VALUES(?)', [`${i}`.padEnd(bytes, 'y')]);
       }),
     /** The rows' count and total length, from a shared handler. */
-    read: restate.handlers.object.shared(
-      async (ctx: restate.ObjectSharedContext): Promise<[number, number]> =>
-        row<[number, number]>((ctx as unknown as restate.SqlObjectContext).db, 'SELECT count(*), coalesce(sum(length(v)), 0) FROM rows'),
+    read: restate.handlers.object.shared({ journalReplay: false }, (ctx: restate.SqlObjectSharedContext) =>
+      row<[number, number]>(ctx.db, 'SELECT count(*), coalesce(sum(length(v)), 0) FROM rows'),
     ),
   },
   options: { ...restate.sqlOptions, retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 } },
@@ -84,6 +84,82 @@ async function until(what: string, ok: () => Promise<boolean>) {
   }
 }
 
+async function retried<T>(f: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await f();
+    } catch (error) {
+      if (attempt === 20) throw error;
+      await sleep(500);
+    }
+  }
+}
+
+/** The objects' stored state: its keys and bytes. */
+async function stored() {
+  const query =
+    "SELECT count(*) AS keys, sum(length(encode(value, 'hex'))) / 2 AS bytes FROM state WHERE service_name = 'SqlBench'";
+  const response = await fetch(`${ADMIN}/query`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ query }),
+  });
+  const { rows, message } = (await response.json()) as {
+    rows?: { keys: number; bytes: number | null }[];
+    message?: string;
+  };
+  if (!rows) throw new Error(`state query: ${message}`);
+  return { stateKeys: rows[0]?.keys ?? 0, stateBytes: rows[0]?.bytes ?? 0 };
+}
+
+/** Call `handler` `calls` times, `concurrency` at once, on the key `key(i)`. */
+async function phase(
+  name: string,
+  handler: string,
+  input: unknown,
+  calls: number,
+  concurrency: number,
+  key: (i: number) => string,
+): Promise<Phase> {
+  let next = 0;
+  let errors = 0;
+  const latencies: number[] = [];
+  const body = JSON.stringify(input);
+  const worker = async () => {
+    for (let i = next++; i < calls; i = next++) {
+      const started = performance.now();
+      const response = await fetch(`${INGRESS}/SqlBench/${key(i)}/${handler}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      await response.text();
+      if (response.ok) latencies.push(performance.now() - started);
+      else errors++;
+    }
+  };
+  const started = performance.now();
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  const seconds = (performance.now() - started) / 1000;
+  latencies.sort((a, b) => a - b);
+  const at = (q: number) =>
+    +(latencies[Math.min(latencies.length - 1, Math.floor(q * latencies.length))] ?? NaN).toFixed(1);
+  const result = {
+    phase: name,
+    calls,
+    concurrency,
+    rps: +(latencies.length / seconds).toFixed(1),
+    p50: at(0.5),
+    p90: at(0.9),
+    p99: at(0.99),
+    errors,
+    // A partition just started may refuse the query for a moment.
+    ...(await retried(stored)),
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
 async function drive(out?: string) {
   const server = process.env.RESTATE_SERVER;
   if (!server) throw new Error('RESTATE_SERVER is not set');
@@ -97,75 +173,33 @@ async function drive(out?: string) {
   const start = async () => {
     objects?.kill('SIGKILL');
     objects = spawn(process.execPath, [fileURLToPath(import.meta.url), 'serve'], { stdio: ['ignore', log, log] });
-    await until('objects', async () => (await fetch(`http://127.0.0.1:${PORT}/discover`)).status < 500);
+    // The endpoint speaks HTTP/2: wait until it accepts connections.
+    await until(
+      'objects',
+      () =>
+        new Promise((resolve) => {
+          const socket = connect(PORT, '127.0.0.1', () => {
+            socket.destroy();
+            resolve(true);
+          });
+          socket.on('error', () => resolve(false));
+        }),
+    );
   };
+  // Leave nothing running, and no server data (a run stores some 200 MB).
   process.on('exit', () => {
     objects?.kill('SIGKILL');
     restateServer.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
   });
   await until('restate-server', async () => (await fetch(`${ADMIN}/health`)).ok);
   await start();
   await until('registration', async () => {
     const body = JSON.stringify({ uri: `http://127.0.0.1:${PORT}`, force: true });
-    return (await fetch(`${ADMIN}/deployments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })).ok;
+    return (
+      await fetch(`${ADMIN}/deployments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+    ).ok;
   });
-
-  const stored = async () => {
-    const query = "SELECT count(*) AS keys, sum(length(value)) AS bytes FROM state WHERE service_name = 'SqlBench'";
-    const response = await fetch(`${ADMIN}/query`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ query }),
-    });
-    const [result] = (await response.json()).rows as { keys: number; bytes: number | null }[];
-    return { stateKeys: Number(result?.keys ?? 0), stateBytes: Number(result?.bytes ?? 0) };
-  };
-
-  /** Call `handler` `calls` times, `concurrency` at once, on the key `key(i)`. */
-  const phase = async (
-    name: string,
-    handler: string,
-    input: unknown,
-    calls: number,
-    concurrency: number,
-    key: (i: number) => string,
-  ): Promise<Phase> => {
-    let next = 0;
-    let errors = 0;
-    const latencies: number[] = [];
-    const body = JSON.stringify(input);
-    const worker = async () => {
-      for (let i = next++; i < calls; i = next++) {
-        const started = performance.now();
-        const response = await fetch(`${INGRESS}/SqlBench/${key(i)}/${handler}`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body,
-        });
-        await response.text();
-        if (response.ok) latencies.push(performance.now() - started);
-        else errors++;
-      }
-    };
-    const started = performance.now();
-    await Promise.all(Array.from({ length: concurrency }, worker));
-    const seconds = (performance.now() - started) / 1000;
-    latencies.sort((a, b) => a - b);
-    const at = (q: number) => +(latencies[Math.min(latencies.length - 1, Math.floor(q * latencies.length))] ?? NaN).toFixed(1);
-    const result = {
-      phase: name,
-      calls,
-      concurrency,
-      rps: +(latencies.length / seconds).toFixed(1),
-      p50: at(0.5),
-      p90: at(0.9),
-      p99: at(0.99),
-      errors,
-      ...(await stored()),
-    };
-    console.log(JSON.stringify(result));
-    return result;
-  };
 
   const run = Math.random().toString(36).slice(2, 8);
   const phases: Phase[] = [];
@@ -174,7 +208,9 @@ async function drive(out?: string) {
   // One database, one call at a time: the owner's warm path.
   phases.push(await phase('count, one key, sequential', 'count', null, 500, 1, () => `${run}-hot`));
   // 16 databases growing: their logs checkpoint as they go.
-  phases.push(await phase('insert 2 KiB, 16 keys, 16 at once', 'insert', 2048, 4000, 16, (i) => `${run}-grow-${i % 16}`));
+  phases.push(
+    await phase('insert 2 KiB, 16 keys, 16 at once', 'insert', 2048, 4000, 16, (i) => `${run}-grow-${i % 16}`),
+  );
   // Large transactions: many pages each.
   phases.push(await phase('bulk 200 rows, one key, sequential', 'bulk', [200, 200], 50, 1, () => `${run}-bulk`));
   // Reads from a shared handler, warm, then after a restart of the objects.
