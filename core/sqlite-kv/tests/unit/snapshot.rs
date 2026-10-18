@@ -737,7 +737,7 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
             let mut rewrite = Changes::from([(5, Some(page(500)))]);
             for round in 0..12u64 {
                 let size = PREFETCH_PAGES * 4096;
-                let (_, next) = snapshot.commit(rewrite.clone(), size, None).await?;
+                let (_, next) = snapshot.commit(rewrite.clone(), size, None, None).await?;
                 model.apply(&rewrite, size);
                 snapshot = next;
                 rewrite = Changes::from([(round % 3, Some(page(1000 + round)))]);
@@ -770,7 +770,7 @@ fn compacting_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             let mut snapshot = open(&store, &opts).await?;
             for round in 0..12 {
                 let (changes, size) = dirty(round);
-                let (report, after) = snapshot.commit(changes.clone(), size, None).await?;
+                let (report, after) = snapshot.commit(changes.clone(), size, None, None).await?;
                 assert_eq!(report.checkpointed_pages, 0);
                 model.apply(&changes, size);
                 snapshot = after;
@@ -838,7 +838,8 @@ fn every_compact_mutation_is_crash_safe() -> io::Result<()> {
                             let mut snapshot = open(&store, &opts).await?;
                             for round in 0..6 {
                                 let (changes, size) = dirty(round);
-                                snapshot = snapshot.commit(changes.clone(), size, None).await?.1;
+                                snapshot =
+                                    snapshot.commit(changes.clone(), size, None, None).await?.1;
                                 model.apply(&changes, size);
                             }
                             let _gate = store.arm(Failpoint {

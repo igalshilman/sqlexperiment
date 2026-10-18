@@ -89,6 +89,18 @@ impl Known {
         Some(transactions)
     }
 
+    /// The values of `commit`'s chain; `None` when one it names is unknown.
+    fn chain(&self, commit: &Commit) -> Option<Vec<Bytes>> {
+        let value = |part: &Part| match part {
+            Part::Inline(bytes) => Some(bytes.clone()),
+            Part::Stored(n, index) => log::stored_segments(self.segments.get(n)?)
+                .ok()?
+                .get(*index as usize)
+                .cloned(),
+        };
+        commit.chain.iter().map(value).collect()
+    }
+
     /// The logical image a page key's value holds; `None` for a hole.
     fn image(value: &Option<Bytes>) -> Option<Option<Bytes>> {
         match value {
@@ -122,7 +134,7 @@ impl Known {
         };
         let known = self.commit();
         // 1, 6: it names known segments, and its log decodes
-        if self.transactions(&commit).is_none() {
+        if self.transactions(&commit).is_none() || self.chain(&commit).is_none() {
             return self.violation(format!(
                 "commit {}: names an unknown segment, or does not decode",
                 commit.version
@@ -135,22 +147,39 @@ impl Known {
             (a.size, a.next_segment, &a.effects) == (b.size, b.next_segment, &b.effects)
         };
         if commit.version == known.version + 1 {
-            // 2: the known log plus one transaction, whether its earlier
-            // transactions stay inline or are sealed into a stored value
+            // 2: the known log plus one transaction (or none, for a commit
+            // without SQL changes), whether its earlier transactions stay
+            // inline or are sealed into a stored value; the known chain, plus
+            // a value, or restarted with one
             let sizes = |c: &Commit| c.log.iter().map(|t| t.size).collect::<Vec<_>>();
             let earlier = self.transactions(&commit).map(|mut t| {
                 t.truncate(known.log.len());
                 t
             });
+            let added = commit.log.len().checked_sub(known.log.len());
+            let (chain, known_chain) = (self.chain(&commit), self.chain(&known));
+            let chain_follows = match (chain, known_chain) {
+                (Some(chain), Some(known)) => {
+                    chain == known
+                        || chain.len() == 1
+                        || (chain.len() == known.len() + 1 && chain[..known.len()] == known[..])
+                }
+                _ => false,
+            };
+            let (named, known_named) = (commit.stored_values(), known.stored_values());
             let extends = commit.epoch == known.epoch
-                && commit.log.len() == known.log.len() + 1
+                && (added == Some(1) || (added == Some(0) && commit.size == known.size))
                 && sizes(&commit)[..known.log.len()] == sizes(&known)[..]
                 && earlier.is_some()
                 && earlier == self.transactions(&known)
+                && chain_follows
                 // garbage grows only by numbers the known record has not
-                // allocated (a seal not yet named)
-                && (commit.garbage.iter())
-                    .all(|n| known.garbage.contains(n) || *n >= known.next_segment);
+                // allocated (a seal not yet named), or names no more
+                && commit.garbage.iter().all(|n| {
+                    known.garbage.contains(n)
+                        || *n >= known.next_segment
+                        || (known_named.contains(n) && !named.contains(n))
+                });
             if !extends {
                 self.violation(format!(
                     "commit {}: does not extend the known record",
@@ -161,6 +190,7 @@ impl Known {
             && commit.epoch == known.epoch + 1
             && commit.log.is_empty()
             && same(&commit, &known)
+            && self.chain(&commit) == self.chain(&known)
         {
             // 3: every page of the known log is known at its key
             let Some(known_log) = self.transactions(&known) else {

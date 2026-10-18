@@ -18,26 +18,32 @@ varints unless stated otherwise.
 
 ## Commit record
 
-| Field             | Encoding                                                                                                               |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Magic             | `SC14`                                                                                                                 |
-| Version           | Transactions ever committed; at most 2^62                                                                              |
-| Epoch             | Checkpoints ever recorded; at most 2^62                                                                                |
-| Database length   | In 512-byte units, after the log; at most 2^44 bytes                                                                   |
-| Next segment      | The number the next stored value gets; at most 2^62                                                                    |
-| Garbage           | Count, then ascending numbers, each from the one before: stored values no transaction names, to delete; below the next |
-| Effects           | Length (at most 1 MiB), then the host's bytes, opaque here                                                             |
-| Transaction count | At most the version, and 2^20                                                                                          |
-| Transactions      | Each: its database length in 512-byte units, its part count, then its parts                                            |
+| Field             | Encoding                                                                                                                   |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Magic             | `SC14`                                                                                                                     |
+| Version           | Commits ever made; at most 2^62                                                                                            |
+| Epoch             | Checkpoints ever recorded; at most 2^62                                                                                    |
+| Database length   | In 512-byte units, after the log; at most 2^44 bytes                                                                       |
+| Next segment      | The number the next stored value gets; at most 2^62                                                                        |
+| Garbage           | Count, then ascending numbers, each from the one before: stored values the record does not name, to delete; below the next |
+| Effects           | Length (at most 16 MiB), then the host's bytes, opaque here                                                                |
+| Transaction count | At most the version, and 2^20                                                                                              |
+| Transactions      | Each: its database length in 512-byte units, its part count, then its parts                                                |
+| Chain count       | At most 2^20                                                                                                               |
+| Chain             | The host's values, each a part                                                                                             |
 
-A part is `0`, a length and an inline segment (at most 1 MiB), or `1`, the
-number of a stored value (below the next segment, not in the garbage) and the
-segment's index in it. The last transaction's length is the database length. Nothing may follow. A
+A part is `0`, a length and inline bytes (a segment of at most 1 MiB, or a
+chain value of at most 16 MiB), or `1`, the number of a stored value (below the
+next segment, not in the garbage) and the bytes' index in it. The last transaction's length is the database length. Nothing may follow. A
 missing record means version 0, epoch 0 and an empty database.
 
 The transactions are the log since the last checkpoint, in commit order.
 Pages they change are authoritative from the log; any other page is read at
-`page/<n>`.
+`page/<n>`. A commit without SQL changes adds none.
+
+The chain is the host's (`Session::commit_turn`): opaque values in the order
+it appended them since it last restarted the chain. Checkpoints keep it. A
+stored value may hold log segments and chain values together (a seal).
 
 ## Log segments
 

@@ -41,12 +41,12 @@ covers differs.
 
 A namespace holds four kinds of keys:
 
-| Key            | Holds                                                                                                                                                                 |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v14/commit`   | The commit record: the version, the epoch, the size, the log since the last checkpoint (its tail inline, the rest naming stored values), the host's effects.          |
-| `v14/log/<n>`  | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, named once acknowledged, deleted once no record names it. |
-| `v14/page/<n>` | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                             |
-| `v14/hint`     | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                               |
+| Key            | Holds                                                                                                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v14/commit`   | The commit record: the version, the epoch, the size, the log since the last checkpoint (its tail inline, the rest naming stored values), the host's effects and chain. |
+| `v14/log/<n>`  | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, named once acknowledged, deleted once no record names it.  |
+| `v14/page/<n>` | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                              |
+| `v14/hint`     | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                                |
 
 **Read rule.** Page _n_ is its latest image in the record's log, else
 `page/<n>`, else zeros.
@@ -138,6 +138,14 @@ save retries it. Any other error leaves the commit outcome unknown.
 durable exactly when the transaction is, and stay, through checkpoints, until
 a later commit replaces them. The Restate SDKs keep a transaction's sends
 there, as its outbox, and make them once it commits.
+
+**The chain.** A host may also commit a value that applies over its earlier
+ones (`Session::commit_turn`), such as the pages a VM's turn changed: the
+chain, beside the log, in the same put. Values are inline or stored, and
+sealed with the log's segments, under the same rules; a checkpoint keeps the
+chain, and the host restarts it (`ChainUpdate::Restart`) when one value can
+replace it, after which the old values are garbage. A commit with no SQL
+changes adds no log transaction, so a host's turns do not checkpoint SQL.
 
 ## When a save happens
 
