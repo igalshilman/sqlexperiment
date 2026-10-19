@@ -13,6 +13,8 @@ set -euo pipefail
 CPYTHON=3.15.0
 WASI_SDK=33
 WASMTIME=49.0.3
+ZLIB=1.3.1
+TZDATA=2026.5
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
@@ -34,10 +36,21 @@ if [ ! -d "$source" ]; then
   curl -fsSL "https://www.python.org/ftp/python/$CPYTHON/Python-$CPYTHON.tar.xz" | tar xJ
 fi
 
+# zlib, into the SDK's sysroot, where CPython's configure looks for it.
+sysroot=$sdk/share/wasi-sysroot
+if [ ! -f "$sysroot/lib/libz.a" ]; then
+  curl -fsSL "https://github.com/madler/zlib/releases/download/v$ZLIB/zlib-$ZLIB.tar.gz" | tar xz
+  (cd "zlib-$ZLIB" &&
+    CC="$sdk/bin/clang --target=wasm32-wasip1 --sysroot=$sysroot" AR="$sdk/bin/llvm-ar" \
+      RANLIB="$sdk/bin/llvm-ranlib" CFLAGS=-O2 ./configure --static --prefix="$sysroot" >/dev/null &&
+    make -s libz.a && make -s install >/dev/null)
+fi
+
+# CPython, with zlib and its own copy of libmpdec (for the C decimal module).
 host=$source/cross-build/wasm32-wasip1
 build_python=$source/cross-build/$(uname -m)-pc-linux-gnu/python
 if [ ! -f "$host/libpython3.15.a" ]; then
-  (cd "$source" && PATH=$wasmtime:$PATH WASI_SDK_PATH=$sdk python3 Platforms/WASI build)
+  (cd "$source" && PATH=$wasmtime:$PATH WASI_SDK_PATH=$sdk python3 Platforms/WASI build -- --without-system-libmpdec)
 fi
 
 # The reactor: CPython's library and modules, with reactor.c's exports instead
@@ -52,7 +65,7 @@ mkdir -p "$out.tmp"
   -z stack-size=2097152 -Wl,--stack-first -Wl,--strip-debug \
   -Wl,--export=__heap_base -Wl,--export=__stack_pointer \
   -o "$out.tmp/python.wasm" "$work/reactor.o" "$host/libpython3.15.a" \
-  "$host"/Modules/_hacl/libHacl_*.a "$host/Modules/expat/libexpat.a" \
+  $(find "$host/Modules" -name '*.a' | sort) -L"$sysroot/lib" -lz \
   -ldl -lwasi-emulated-signal -lwasi-emulated-getpid -lwasi-emulated-process-clocks -lpthread -lm
 
 # The standard library, without tests and GUI toolkits, with bytecode that
@@ -61,6 +74,17 @@ mkdir -p "$out.tmp/lib"
 (cd "$source/Lib" && tar cf - --exclude=__pycache__ --exclude=test --exclude=idlelib \
   --exclude=tkinter --exclude=turtledemo --exclude=ensurepip --exclude=site-packages .) |
   (cd "$out.tmp/lib" && tar xf -)
+# The build's configuration, which sysconfig (and zoneinfo, pydoc) read.
+cp "$host"/build/lib.wasi-wasm32-3.15/_sysconfigdata__wasi_wasm32-wasi.py "$out.tmp/lib/"
+# The time zone database, for zoneinfo: there is no system one.
+tzdata=$work/tzdata-$TZDATA.whl
+if [ ! -f "$tzdata" ]; then
+  curl -fsSL -o "$tzdata.tmp" "$(curl -fsSL https://pypi.org/pypi/tzdata/$TZDATA/json |
+    python3 -c 'import json, sys; print(next(f["url"] for f in json.load(sys.stdin)["urls"] if f["filename"].endswith(".whl")))')"
+  mv "$tzdata.tmp" "$tzdata"
+fi
+python3 -m zipfile -e "$tzdata" "$out.tmp/lib/"
+rm -rf "$out.tmp/lib"/tzdata-*.dist-info
 "$build_python" -E -m compileall -q -j 0 --invalidation-mode unchecked-hash "$out.tmp/lib" >/dev/null
 
 rm -rf "$out"

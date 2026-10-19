@@ -22,6 +22,12 @@ const CASES: &[(&str, &str, &str, i64)] = &[
         "async def main(input, ctx):\n    for i in range(3):\n        a = [{'id': j, 'value': f'item-{i}-{j}'} for j in range(2000)]\n        await ctx.call('observe')\n    return len(a)\n",
         2000,
     ),
+    (
+        "primes",
+        "async function main(_, ctx) { let count = 0; for (let i = 2; i < 100000; i++) { let prime = true; for (let d = 2; d * d <= i; d++) { if (i % d === 0) { prime = false; break; } } if (prime) count++; } await ctx.call('observe'); return count; }",
+        "async def main(input, ctx):\n    count = 0\n    for i in range(2, 100000):\n        d = 2\n        while d * d <= i:\n            if i % d == 0:\n                break\n            d += 1\n        else:\n            count += 1\n    await ctx.call('observe')\n    return count\n",
+        9592,
+    ),
 ];
 
 fn main() -> Result<()> {
