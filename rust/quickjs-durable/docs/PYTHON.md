@@ -167,6 +167,20 @@ CPython in Wasm is about as fast as natively. What a turn writes to Restate,
 which dominates throughput ([ENGINES.md](ENGINES.md)), is about the same in
 both languages.
 
+Against a Restate server (1.8.0, on the same 4 vCPUs as the load and the
+runtime; two rounds of equivalent programs in both languages):
+
+| Workload                                      | JavaScript             | Python                 |
+| --------------------------------------------- | ---------------------- | ---------------------- |
+| KV read and write, a new key each, 32 at once | 289–342/s, p50 ~100 ms | 178–183/s, p50 ~168 ms |
+| KV read and write, one at a time              | p50 14 ms              | p50 16 ms              |
+| 5 waits, 32 runs at once                      | 170–175/s              | 99–102/s               |
+| 20 waits on a 1 ms timer, one run             | 99–104 ms              | 122–125 ms             |
+
+One at a time, a Python call is within ~15% of a JavaScript one; under load,
+where the CPU is shared, Python serves ~55–60% as many, as its turns cost 2–3
+times the CPU. The process stayed at ~400 MiB through both.
+
 From the first build, these brought Python's figures down:
 
 - **Bytecode for the standard library.** Without it, every program's
