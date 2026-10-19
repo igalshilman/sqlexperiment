@@ -144,12 +144,17 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .unwrap()
         .port();
     let cache = functions::page_cache().await.unwrap();
-    let endpoint = functions::bind(Endpoint::builder(), programs, &cache)
-        .unwrap()
-        .bind(Doubler)
-        .bind(fakes::Claude)
-        .bind(functions::Workspace::new(workspaces()))
-        .build();
+    let endpoint = functions::bind(
+        Endpoint::builder(),
+        programs,
+        &cache,
+        &functions::Budget::from_env().unwrap(),
+    )
+    .unwrap()
+    .bind(Doubler)
+    .bind(fakes::Claude)
+    .bind(functions::Workspace::new(workspaces()))
+    .build();
     tokio::spawn(
         HttpServer::new(endpoint).listen_and_serve(format!("127.0.0.1:{port}").parse().unwrap()),
     );

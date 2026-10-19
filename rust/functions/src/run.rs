@@ -240,6 +240,39 @@ impl Run {
         Ok(self.view())
     }
 
+    /// The memory the run holds while live: its VM's, and the image beside
+    /// it (each page that differs from golden). Parked, it holds none.
+    pub fn resident(&self) -> usize {
+        match self.live {
+            Some(_) => self.footprint(),
+            None => 0,
+        }
+    }
+
+    /// The memory the run will hold once its next delivery restores it.
+    pub fn footprint(&self) -> usize {
+        self.commit.memory_len + self.commit.live_pages * PAGE
+    }
+
+    /// The memory the last turn held at its peak: the run's, and the commit's
+    /// buffers (the pages it changed, captured, before and after, and
+    /// encoded).
+    pub fn turn_peak(&self) -> usize {
+        let last = &self.last;
+        self.commit.memory_len
+            + self.commit.live_pages.max(last.changed_pages) * PAGE
+            + 3 * last.changed_pages * PAGE
+            + last.batch_bytes
+            + last.commit_bytes
+    }
+
+    /// Let go of the VM and its image: the next delivery restores them from
+    /// the scope, as a retried attempt would. Only between turns, which have
+    /// committed all the run is.
+    pub fn park(&mut self) {
+        self.live = None;
+    }
+
     /// The run as of its last commit.
     pub fn view(&self) -> View {
         let commit = &self.commit;
