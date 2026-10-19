@@ -378,7 +378,7 @@ checkpoint. Measurements: [log shipping](../benches/LOG_RESULTS.md),
 - **Validation.** A monitor checks every write of the simulator's crash
   and handover campaigns against the rules above, and the campaigns crash at
   every sync keeping each prefix of its writes. The TLA+ specification
-  ([spec/README.md](../spec/README.md)) still models the earlier protocol, for
-  a store that keeps any subset of the unacknowledged writes, and the
-  previous format's log and `meta`. The Restate crash tests kill processes;
+  ([spec/README.md](../spec/README.md)) models this protocol over a store
+  that keeps writes in order, with the owner cache, and TLC checks it in
+  small bounds. The Restate crash tests kill processes;
   there are no power-loss tests. See [REVIEW.md](REVIEW.md).
