@@ -142,7 +142,7 @@ impl Run {
         }
         let golden = programs.get(program)?.image();
         let language = programs.get(program)?.language();
-        let mut vm = Vm::new(programs.runtime(), language, run, now).await?;
+        let mut vm = Vm::for_image(programs.runtime(), language, &golden, run, now).await?;
         vm.restore(&golden).await?;
         vm.attach(db.clone());
         let commit = Commit {
@@ -287,7 +287,8 @@ impl Run {
             }
         }
         let language = self.programs.get(&commit.program)?.language();
-        let mut vm = Vm::new(self.programs.runtime(), language, &commit.run, now).await?;
+        let mut vm =
+            Vm::for_image(self.programs.runtime(), language, &base, &commit.run, now).await?;
         vm.restore(&base).await?;
         vm.attach(self.db.clone());
         Ok(Live { vm, base })

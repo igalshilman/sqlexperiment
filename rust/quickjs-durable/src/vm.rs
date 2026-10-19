@@ -2,6 +2,7 @@
 //! run, turn after turn. The engine inside (QuickJS or CPython) is a driver
 //! ([`crate::quickjs`], [`crate::python`]); this module starts instances,
 //! tracks the pages they write, and captures and restores their memory.
+use crate::cow::{self, Golden};
 use crate::db::Db;
 use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, Report, VmMeta, fingerprint};
 use crate::python::{self, Python};
@@ -17,7 +18,7 @@ use wasmtime::{
     Memory, Module, PoolConcurrencyLimitError, PoolingAllocationConfig, Store, StoreLimits,
     StoreLimitsBuilder, Val,
 };
-use wasmtime::{Result, ensure};
+use wasmtime::{Result, bail, ensure};
 
 /// How often the engine's epoch ticks: a running guest checks the clock, and
 /// yields to the executor, at its next function entry or loop back-edge.
@@ -31,9 +32,6 @@ const NATIVE_STACK: usize = 32 << 20;
 /// Most VMs at once, live or starting, in a process. Past it, starting one
 /// fails as [`exhausted`], and the attempt is retried.
 const POOL: u32 = 1000;
-/// Bytes of each VM's memory kept mapped from one VM to the next: golden's
-/// and a little more.
-const RESIDENT: usize = 2 * 1024 * 1024;
 /// The runtime's version: an image restores only on the runtime that made it.
 /// Bump it with anything an image depends on: the Wasm, the bridges
 /// (`guest.js`, `guest.py`), the limits, the imports' behavior, the VM
@@ -119,15 +117,26 @@ fn validate_snapshot_abi(wasm: &[u8]) -> Result<()> {
 pub struct Runtime {
     engine: Engine,
     /// QuickJS, its imports resolved once for every VM.
-    quickjs: InstancePre<Host>,
+    quickjs: Compiled,
     /// CPython, loaded with the first Python program.
     python: OnceLock<std::result::Result<PythonModule, String>>,
     tracking: Tracking,
     limits: Limits,
 }
 
+/// An engine's module, compiled once without its data segments: every VM
+/// maps a golden image over its memory ([`crate::cow`]). A program's VMs map
+/// its image; a fresh VM maps `data`, the memory the segments lay out.
+struct Compiled {
+    module: InstancePre<Host>,
+    data: Arc<Golden>,
+}
+
 struct PythonModule {
-    instance: InstancePre<Host>,
+    compiled: Compiled,
+    /// The interpreter started and the bridge run, made once: each program's
+    /// golden image is this, with the program loaded.
+    base: OnceLock<std::result::Result<Image, String>>,
     files: Arc<Files>,
     /// Where the allocator's heap starts: after the stack and static data.
     heap: usize,
@@ -219,19 +228,19 @@ impl Runtime {
         // touched only as deep as a guest recurses.
         config.max_wasm_stack(NATIVE_STACK);
         config.async_stack_size(NATIVE_STACK + (1 << 20));
-        // A pool of instance slots, reused from VM to VM, with the first
-        // pages of each memory kept resident: a new VM writes golden over
-        // memory already mapped, instead of faulting in every page.
+        // A pool of instance slots, reused from VM to VM. A VM maps its
+        // golden image over its memory, so nothing is kept resident: what
+        // would be is unmapped when the VM ends.
         let mut pool = PoolingAllocationConfig::default();
         pool.total_core_instances(POOL)
             .total_memories(2 * POOL)
             .total_tables(POOL)
             .max_memories_per_module(2)
             .max_memory_size(MAX_MEMORY)
-            .linear_memory_keep_resident(RESIDENT);
+            .linear_memory_keep_resident(0);
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-        // Memory starts as golden, written in: no copy-on-write image of the
-        // module's data, which would also replace a slot's tracked mapping.
+        // The modules have no data to map: their memory starts as zeros, and
+        // the runtime maps golden over it.
         config.memory_init_cow(false);
         let engine = Engine::new(&config)?;
         if cfg!(feature = "full-scan") {
@@ -254,7 +263,11 @@ impl Runtime {
     fn with(engine: Engine, tracking: Tracking) -> Result<Self> {
         let mut linker = base_linker(&engine)?;
         quickjs::link(&mut linker)?;
-        let quickjs = linker.instantiate_pre(&module(&engine, &tracking, quickjs::WASM)?)?;
+        let (code, data) = split(quickjs::WASM)?;
+        let quickjs = Compiled {
+            module: linker.instantiate_pre(&cached(&engine, &tracking, "quickjs", &code)?)?,
+            data: Arc::new(Golden::new(data)),
+        };
         // The epoch's ticker, for as long as the engine lives.
         let weak = engine.weak();
         std::thread::Builder::new()
@@ -284,12 +297,20 @@ impl Runtime {
                 let heap = heap::first_chunk(heap_base(&build.wasm)?);
                 let mut linker = base_linker(&self.engine)?;
                 python::link(&mut linker)?;
-                let module = cached(&self.engine, &self.tracking, &build.wasm, &build.dir)?;
-                let instance = linker.instantiate_pre(&module)?;
+                let (code, data) = split(&build.wasm)?;
                 Ok(PythonModule {
-                    instance,
+                    compiled: Compiled {
+                        module: linker.instantiate_pre(&cached(
+                            &self.engine,
+                            &self.tracking,
+                            "python",
+                            &code,
+                        )?)?,
+                        data: Arc::new(Golden::new(data)),
+                    },
                     files: build.files,
                     heap,
+                    base: OnceLock::new(),
                 })
             };
             load().map_err(|error| format!("{error:#}"))
@@ -323,20 +344,51 @@ impl Runtime {
         name: &str,
         source: &str,
     ) -> Result<(Image, Vec<String>)> {
-        futures::executor::block_on(self.evaluate(language, name, source))
+        let base = match language {
+            Language::JavaScript => None,
+            Language::Python => Some(self.python_base()?),
+        };
+        futures::executor::block_on(self.evaluate(language, base, name, source))
+    }
+
+    /// CPython's base image, made on first use.
+    fn python_base(&self) -> Result<Image> {
+        let python = self.python()?;
+        let base = python.base.get_or_init(|| {
+            let boot = async {
+                let mut vm = Vm::new(self, Language::Python, "python", 0).await?;
+                vm.store.data_mut().entropy = false;
+                let Guest::Python(python) = vm.guest.clone() else {
+                    unreachable!("a Python VM")
+                };
+                python.boot(&mut vm).await?;
+                vm.snapshot().await
+            };
+            futures::executor::block_on(boot).map_err(|error| format!("{error:#}"))
+        });
+        base.clone().map_err(wasmtime::Error::msg)
     }
 
     async fn evaluate(
         &self,
         language: Language,
+        base: Option<Image>,
         name: &str,
         source: &str,
     ) -> Result<(Image, Vec<String>)> {
-        let mut vm = Vm::new(self, language, &format!("program/{name}"), 0).await?;
+        let identity = format!("program/{name}");
+        let mut vm = match &base {
+            Some(base) => Vm::for_image(self, language, base, &identity, 0).await?,
+            None => Vm::new(self, language, &identity, 0).await?,
+        };
         vm.store.data_mut().entropy = false;
-        match vm.guest.clone() {
-            Guest::QuickJs(quickjs) => quickjs.evaluate(&mut vm, source).await?,
-            Guest::Python(python) => python.evaluate(&mut vm, name, source).await?,
+        match (vm.guest.clone(), &base) {
+            (Guest::QuickJs(quickjs), _) => quickjs.evaluate(&mut vm, source).await?,
+            (Guest::Python(python), Some(base)) => {
+                vm.restore(base).await?;
+                python.load(&mut vm, name, source).await?;
+            }
+            (Guest::Python(_), None) => unreachable!("Python evaluates from its base"),
         }
         let handlers: Vec<String> = serde_json::from_str(&vm.call("handlers", None).await?)?;
         ensure!(
@@ -368,21 +420,21 @@ fn module(engine: &Engine, tracking: &Tracking, wasm: &[u8]) -> Result<Module> {
     Ok(module)
 }
 
-/// [`module`], compiled once into `dir` and loaded from there after: CPython
-/// takes seconds to compile. Each engine configuration and tracking mode has
-/// its own file; a directory that cannot be written only loses the cache.
-fn cached(
-    engine: &Engine,
-    tracking: &Tracking,
-    wasm: &[u8],
-    dir: &std::path::Path,
-) -> Result<Module> {
+/// [`module`], compiled once and loaded from the cache directory after:
+/// compiling takes a second for QuickJS, and several for CPython, at every
+/// start of the process. Each engine configuration and tracking mode has its
+/// own file, named for its engine (`quickjs`, `python`); writing one
+/// removes that engine's older ones. A directory that cannot be written only
+/// loses the cache.
+fn cached(engine: &Engine, tracking: &Tracking, name: &str, wasm: &[u8]) -> Result<Module> {
     use std::hash::{Hash, Hasher};
     let mut key = std::collections::hash_map::DefaultHasher::new();
     engine.precompile_compatibility_hash().hash(&mut key);
-    matches!(tracking, Tracking::Barriers).hash(&mut key);
     fingerprint(wasm).hash(&mut key);
-    let path = dir.join(format!("python-{:016x}.cwasm", key.finish()));
+    let barriers = matches!(tracking, Tracking::Barriers);
+    let prefix = format!("{name}-{}-", if barriers { "barriers" } else { "native" });
+    let dir = cache_dir();
+    let path = dir.join(format!("{prefix}{:016x}.cwasm", key.finish()));
     if path.exists() {
         // SAFETY: the file is this engine's own serialization of a module,
         // under a name that only this engine configuration and Wasm produce.
@@ -391,11 +443,83 @@ fn cached(
         }
     }
     let module = module(engine, tracking, wasm)?;
-    let temporary = path.with_extension("tmp");
-    if std::fs::write(&temporary, module.serialize()?).is_ok() {
-        let _ = std::fs::rename(&temporary, &path);
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_ok()
+        && std::fs::write(&temporary, module.serialize()?).is_ok()
+        && std::fs::rename(&temporary, &path).is_ok()
+    {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let stale = entry.file_name().to_str().is_some_and(|file| {
+                file.starts_with(&prefix) && file.ends_with(".cwasm") && entry.path() != path
+            });
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
+    let _ = std::fs::remove_file(&temporary);
     Ok(module)
+}
+
+/// Where compiled modules are kept between processes: `QJS_CACHE`, or else
+/// `quickjs-durable` in the user's cache directory.
+fn cache_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("QJS_CACHE") {
+        return dir.into();
+    }
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("quickjs-durable")
+}
+
+/// `wasm` split in two: the module without its data segments, whose memory
+/// starts as zeros; and the memory its active segments lay out, to map over
+/// it. Passive segments go too: the snapshot ABI never initializes from them.
+fn split(wasm: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    use wasm_encoder::RawSection;
+    use wasmparser::{DataKind, Operator, Payload};
+    let mut module = wasm_encoder::Module::new();
+    let mut memory = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        match payload? {
+            Payload::StartSection { .. } => {
+                bail!("A start function would run before its data is mapped")
+            }
+            Payload::DataCountSection { .. } => {}
+            Payload::DataSection(section) => {
+                for segment in section {
+                    let segment = segment?;
+                    let DataKind::Active {
+                        memory_index: 0,
+                        offset_expr,
+                    } = segment.kind
+                    else {
+                        continue;
+                    };
+                    let Operator::I32Const { value } = offset_expr.get_operators_reader().read()?
+                    else {
+                        bail!("A data segment's offset must be a constant");
+                    };
+                    let start = value as u32 as usize;
+                    let end = start + segment.data.len();
+                    ensure!(end <= MAX_MEMORY, "A data segment exceeds memory");
+                    if memory.len() < end {
+                        memory.resize(end.next_multiple_of(65536), 0);
+                    }
+                    memory[start..end].copy_from_slice(segment.data);
+                }
+            }
+            payload => {
+                if let Some((id, range)) = payload.as_section() {
+                    let data = &wasm[range.start as usize..range.end as usize];
+                    module.section(&RawSection { id, data });
+                }
+            }
+        }
+    }
+    Ok((module.finish(), memory))
 }
 
 /// The value of `wasm`'s exported constant `__heap_base`.
@@ -492,6 +616,25 @@ pub(crate) struct Vm {
     guest: Guest,
     /// Where the allocator's heap starts, for [`heap::dead`].
     heap: usize,
+    /// The golden memory mapped over this VM's memory: a restore relative to
+    /// it writes only the pages that differ.
+    golden: Arc<Golden>,
+    /// The heap's chunks as of the last capture or restore, if known: the
+    /// next capture walks only around the pages written since.
+    chunks: Option<heap::Chunks>,
+}
+
+impl Drop for Vm {
+    fn drop(&mut self) {
+        let base = self.memory.data_ptr(&self.store);
+        // SAFETY: golden is mapped there (`Vm::starting`), and the store,
+        // which still owns the memory, runs no more guest code.
+        if let Err(error) = unsafe { cow::unmap(base, self.golden.bytes().len()) } {
+            // Wasmtime would reuse memory that still holds this image.
+            eprintln!("Could not unmap a golden image: {error}");
+            std::process::abort();
+        }
+    }
 }
 
 pub(crate) fn caller_memory(c: &mut Caller<'_, Host>) -> Result<Memory> {
@@ -588,6 +731,28 @@ impl Vm {
         identity: &str,
         now: u64,
     ) -> Result<Self> {
+        Self::starting(runtime, language, None, identity, now).await
+    }
+
+    /// A VM to restore `image` into: its memory starts as the image's golden
+    /// memory, mapped copy-on-write.
+    pub(crate) async fn for_image(
+        runtime: &Runtime,
+        language: Language,
+        image: &Image,
+        identity: &str,
+        now: u64,
+    ) -> Result<Self> {
+        Self::starting(runtime, language, Some(image), identity, now).await
+    }
+
+    async fn starting(
+        runtime: &Runtime,
+        language: Language,
+        image: Option<&Image>,
+        identity: &str,
+        now: u64,
+    ) -> Result<Self> {
         let python = match language {
             Language::JavaScript => None,
             Language::Python => Some(runtime.python()?),
@@ -620,15 +785,27 @@ impl Vm {
             }
             Ok(wasmtime::UpdateDeadline::Yield(1))
         });
-        let instance = match python {
+        let compiled = match python {
             None => &runtime.quickjs,
-            Some(python) => &python.instance,
-        }
-        .instantiate_async(&mut store)
-        .await?;
+            Some(python) => &python.compiled,
+        };
+        let instance = compiled.module.instantiate_async(&mut store).await?;
         let memory = instance
             .get_memory(&mut store, "memory")
             .context("Missing memory export")?;
+        let golden = match image {
+            Some(image) => image.golden_memory(),
+            None => &compiled.data,
+        }
+        .clone();
+        let current = memory.data_size(&store);
+        let len = golden.bytes().len().max(current);
+        ensure!(len <= MAX_MEMORY, "Invalid image size");
+        memory.grow(&mut store, ((len - current) / 65536) as u64)?;
+        // SAFETY: the start of this VM's memory, at least golden's length,
+        // which nothing reads until the VM runs; `Drop` puts zeros back
+        // before Wasmtime has the memory again.
+        unsafe { golden.map(memory.data_ptr(&store)) }?;
         let stack = instance
             .get_global(&mut store, "__stack_pointer")
             .context("Missing stack export")?;
@@ -667,6 +844,8 @@ impl Vm {
             writes,
             guest,
             heap,
+            golden,
+            chunks: None,
         })
     }
     /// Let the guest's host calls reach `db`.
@@ -728,7 +907,20 @@ impl Vm {
             self.memory
                 .grow(&mut self.store, ((image.len() - current) / 65536) as u64)?;
         }
-        image.write(self.memory.data_mut(&mut self.store));
+        if Arc::ptr_eq(&self.golden, image.golden_memory()) {
+            let memory = self.memory.data_mut(&mut self.store);
+            image.write_changed(memory);
+            // Golden's chunks, as the pages restored over it changed them.
+            let changed: Vec<usize> = image.changed().map(|index| index as usize).collect();
+            self.chunks = image
+                .golden_memory()
+                .chunks(self.heap)
+                .and_then(|chunks| chunks.update(memory, &changed))
+                .map(|(chunks, _)| chunks);
+        } else {
+            image.write(self.memory.data_mut(&mut self.store));
+            self.chunks = None;
+        }
         // Committed restore bytes are not new writes. Begin tracking before
         // re-binding runtime pointers and limits, which may modify memory.
         self.committed()?;
@@ -781,7 +973,7 @@ impl Vm {
         }
         let memory = memory.to_vec();
         ensure!(memory.len() <= MAX_MEMORY, "Image exceeds limit");
-        Ok(Image::golden(meta, std::sync::Arc::new(memory)))
+        Ok(Image::golden(meta, memory))
     }
     /// What changed since `base`, with the dead bytes of the pages it compares
     /// zeroed first: the stack below its pointer (between calls no frame is
@@ -807,7 +999,30 @@ impl Vm {
         for &index in &candidates {
             compared[index] = true;
         }
-        let dead = std::iter::once(0..stack).chain(heap::dead(memory, heap).unwrap_or_default());
+        // The heap's chunks and its dead bytes: walked only around the pages
+        // written, where the chunks before are known.
+        let walked = match self
+            .chunks
+            .as_ref()
+            .and_then(|chunks| chunks.update(memory, &candidates))
+        {
+            Some(walked) => Some(walked),
+            None => heap::walk(memory, heap),
+        };
+        #[cfg(feature = "verify-dirty")]
+        if let Some((chunks, dead)) = &walked {
+            let (all, everywhere) = heap::walk(memory, heap).context("Heap walked only in part")?;
+            ensure!(*chunks == all, "Partial heap walk missed chunks");
+            let near = |range: &std::ops::Range<usize>| {
+                (range.start / PAGE..range.end.div_ceil(PAGE)).any(|index| compared[index])
+            };
+            let partial: Vec<_> = dead.iter().filter(|range| near(range)).collect();
+            let whole: Vec<_> = everywhere.iter().filter(|range| near(range)).collect();
+            ensure!(partial == whole, "Partial heap walk missed dead bytes");
+        }
+        let (chunks, dead) = walked.unzip();
+        self.chunks = chunks;
+        let dead = std::iter::once(0..stack).chain(dead.unwrap_or_default());
         for range in dead {
             let pages = range.start / PAGE..range.end.div_ceil(PAGE);
             for index in pages.filter(|&index| compared[index]) {

@@ -32,10 +32,10 @@ wasi-sdk, as CPython's own `Platforms/WASI` script does. It then links
 CPython's library with [`python/reactor.c`](../python/reactor.c) instead of a
 `main`, into a reactor. The result goes to `target/pywasm/out`:
 
-| File          | What                                                                                                                                                                |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `python.wasm` | 8 MB: the interpreter and its built-in modules. A 2 MB stack placed first in memory, so that it overflows into a trap. `__stack_pointer` as the only mutable global |
-| `lib/`        | The standard library (27 MB), without tests or GUI toolkits, with bytecode checked by its source's hash                                                             |
+| File          | What                                                                                                                                                                                                    |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `python.wasm` | 8 MB: the interpreter and its built-in modules, with zlib and the C decimal module. A 2 MB stack placed first in memory, so that it overflows into a trap. `__stack_pointer` as the only mutable global |
+| `lib/`        | The standard library (27 MB), without tests or GUI toolkits, with bytecode checked by its source's hash; the build's sysconfig data, and the `tzdata` package for `zoneinfo`                            |
 
 The reactor's call surface is the one [ENGINES.md](ENGINES.md) asks for:
 
@@ -56,12 +56,15 @@ in. No host call re-enters the guest.
 ## The bridge
 
 [`assets/guest.py`](../assets/guest.py) gives the program its `ctx`. It speaks
-the protocol of `guest.js` (`handlers`, `init`, `start`, `deliver`, `inspect`, `pause`),
-so the run loop cannot tell the two languages apart. It also gives the
-program an asyncio event loop that the host drains each turn:
+the protocol of `guest.js` (`handlers`, `init`, `start`, `deliver`, `inspect`,
+`pause`), so the run loop cannot tell the two languages apart. A module's
+handlers are the functions it defines (not imports) whose names do not start
+with `_`, or those its `__all__` names; they may be sync or async. The bridge
+also gives the program an asyncio event loop that the host drains each turn:
 
 - **Tasks are asyncio's own** (`asyncio.Task`, `Future`, `gather`, `wait`,
-  `TaskGroup`). A pending request is a future, completed by `deliver`.
+  `TaskGroup`). A pending request is a future, completed by `deliver`, and
+  `ctx`'s operations are coroutines, so tasks and task groups take them.
 - **Timers are durable sleeps.** The loop's `call_at` issues a sleep request,
   so `asyncio.sleep`, `asyncio.timeout` and `asyncio.wait_for` survive crashes
   like `ctx.sleep` does. Time is the turn's logical clock.
@@ -92,59 +95,138 @@ import from:
   order. Evaluating a program therefore reads the same metadata in every
   process, and its golden image is the same byte for byte (tested).
 - **Open files are host state**, which no image keeps. A turn that ends with
-  a file open fails, rather than restoring a VM whose descriptors are gone.
+  a file open fails the run, rather than restoring a VM whose descriptors are
+  gone.
 - **stdout and stderr** go to the host's stderr: a program's `print` shows in
   the server's log.
 - **Randomness** comes from the operating system after golden evaluation
   (`os.urandom`, `uuid4`, `secrets`); memory is saved, not replayed, so
   nothing needs to repeat. `random` is seeded per run, as `Math.random` is.
-- **No sockets, writes, subprocesses or blocking sleeps.** All I/O goes through
-  `ctx`.
+- **No sockets, writes, subprocesses, threads or blocking sleeps.** Each
+  raises as Python would (`OSError`, `RuntimeError`), where the program can
+  catch it. All I/O goes through `ctx`.
+
+## At the edges
+
+`tests/python.rs` and the crash suite (`tests/crashes.rs`, which runs a Python
+twin of its flow: a crash at every write, and during the recovery from one)
+pin down what happens where a Python program meets the runtime's limits:
+
+| A program that                                               | Gets                                                                     |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| Recurses deeply in Python                                    | `RecursionError` (the usual limit of 1,000 frames)                       |
+| Recurses deeply in C (`json.dumps`, `repr` of nested lists)  | `RecursionError`: see below                                              |
+| Allocates past 64 MiB                                        | `MemoryError`, and the run goes on                                       |
+| Loops without waiting past the turn's limit                  | The run fails: "Out of time"                                             |
+| Calls `sys.exit`, or raises `KeyboardInterrupt`              | The run fails with `SystemExit` or `KeyboardInterrupt`                   |
+| Sends an int beyond 2\*\*53, a lone surrogate, or over 1 MiB | `TypeError` at the call that sends it: JSON crosses as doubles and UTF-8 |
+| Leaves a file open across a wait                             | The run fails: "A file is open across a wait"                            |
+
+CPython's guard against deep C recursion measures its stack in linear memory,
+but every C frame also takes Wasmtime's native stack, which the guard cannot
+see, at 10 to 30 times the rate. With Wasmtime's default 512 KiB, deep
+recursion trapped long before the guard fired, whatever its budget. The
+runtime now gives VMs 32 MiB of native stack (address space, touched only as
+deep as a guest recurses) and the guard a budget of 512 KiB (`reactor.c`):
+recursion 100,000 deep raises `RecursionError` in under half a second.
+
+## The standard library
+
+A durable run that imports every module of `sys.stdlib_module_names` imports 245. Of the 50 others:
+
+- **Cannot work in WASI:** `ssl`, `ctypes`, `mmap`, `multiprocessing`,
+  `subprocess`'s internals, `curses`, `readline`, `termios`, `pty`, `tty`,
+  `pwd`, `grp`, `fcntl`, `resource`, `syslog`, subinterpreters, and the
+  Windows and macOS modules.
+- **Need a C library the build lacks:** `bz2`, `lzma`, `zstd` (compression)
+  and `sqlite3` (programs have `ctx.db`).
+
+`decimal` (C), `zlib` and `gzip`, `zoneinfo` (with `tzdata`), `sysconfig`,
+`hashlib`'s common hashes, `json`, `re`, `asyncio`, `dataclasses`, `typing`
+and `datetime` all work.
 
 ## What it costs
 
-`cargo bench --bench languages` runs the same workloads in both languages.
-These are figures from one machine, against a store in memory:
+`cargo bench --bench languages` runs the same workloads in both languages:
+medians of 15 runs, on one machine, against a store in memory.
 
-| Metric                                                 | JavaScript | Python      |
-| ------------------------------------------------------ | ---------- | ----------- |
-| Golden image (memory)                                  | 1.4 MB     | 11.4 MB     |
-| Evaluating a program at startup                        | ~3 ms      | ~110–210 ms |
-| A turn on a live VM (`scalar`)                         | 0.3–0.7 ms | 1.2–2.4 ms  |
-| A turn on a restored VM (`scalar`)                     | 1.6–2.1 ms | 8.6–12.8 ms |
-| Pages a turn changes (`scalar`)                        | 18–39      | 66–109      |
-| Pages a turn changes, 2,000 new objects (`heap-churn`) | 107–169    | 225–323     |
-| Batch a turn writes to Restate (`heap-churn`)          | 52–56 KB   | 57–62 KB    |
+| Metric                                                 | JavaScript | Python                       |
+| ------------------------------------------------------ | ---------- | ---------------------------- |
+| Golden image (memory)                                  | 1.4 MB     | 11.4 MB                      |
+| Evaluating a program at startup                        | ~3 ms      | 18–24 ms (the first ~250 ms) |
+| A call's first turn (`scalar`)                         | 1.0 ms     | 2.6 ms                       |
+| A turn on a live VM (`scalar`)                         | 0.2–0.3 ms | 0.7–0.8 ms                   |
+| A turn on a restored VM (`scalar`)                     | 1.0 ms     | 2.3 ms                       |
+| Pages a turn changes (`scalar`)                        | 20–38      | 73–121                       |
+| Pages a turn changes, 2,000 new objects (`heap-churn`) | 110–170    | 223–314                      |
+| Batch a turn writes to Restate (`heap-churn`)          | 48–55 KB   | 55–59 KB                     |
+| Primes below 100,000                                   | 264 ms     | 330 ms                       |
 
-What a turn writes to Restate is about the same in both languages, and that
-dominates throughput ([ENGINES.md](ENGINES.md)). Restoring a VM costs more in
-Python, because the runtime writes the whole 11 MB image into a fresh
-instance. That happens once per attempt, not once per turn.
+Native CPython 3.13 runs the primes loop in ~300 ms on the same machine:
+CPython in Wasm is about as fast as natively. What a turn writes to Restate,
+which dominates throughput ([ENGINES.md](ENGINES.md)), is about the same in
+both languages.
 
-Three changes brought these figures down from the first build:
+Against a Restate server (1.8.0, on the same 4 vCPUs as the load and the
+runtime; two rounds of equivalent programs in both languages):
+
+| Workload                                      | JavaScript             | Python                 |
+| --------------------------------------------- | ---------------------- | ---------------------- |
+| KV read and write, a new key each, 32 at once | 289–342/s, p50 ~100 ms | 178–183/s, p50 ~168 ms |
+| KV read and write, one at a time              | p50 14 ms              | p50 16 ms              |
+| 5 waits, 32 runs at once                      | 170–175/s              | 99–102/s               |
+| 20 waits on a 1 ms timer, one run             | 99–104 ms              | 122–125 ms             |
+
+One at a time, a Python call is within ~15% of a JavaScript one; under load,
+where the CPU is shared, Python serves ~55–60% as many, as its turns cost 2–3
+times the CPU. The process stayed at ~400 MiB through both.
+
+From the first build, these brought Python's figures down:
 
 - **Bytecode for the standard library.** Without it, every program's
   evaluation compiled asyncio and its imports from source: about 1 s.
 - **A cached compiled module.** Cranelift takes ~8 s to compile CPython. The
-  runtime serializes the module next to the engine, keyed by the engine's
-  configuration and the Wasm, and loads it from there afterwards.
+  runtime serializes the module into its cache directory and loads it from
+  there afterwards, as it does QuickJS's (~1 s): a server restarts in ~0.35 s
+  with both engines, where it took ~3 s compiling QuickJS twice, with and
+  without its data segments, before each engine had one module.
 - **`gc.freeze()` after load.** Pages changed per turn fell from 85–147 to
-  66–109, and from 680–1,190 to 225–323 under heap churn. Batches shrank by
-  half.
+  66–109, and from 680–1,190 to 225–323 under heap churn; batches by half.
+- **A shared base image.** CPython starts and imports asyncio once per
+  process; a program's golden image is that base with the program loaded:
+  ~110 ms became 18–24 ms.
+- **Golden mapped copy-on-write** ([DESIGN.md](DESIGN.md) §3.2): starting and
+  restoring a VM took 1.7 + 3.9 ms, writing the 11 MB image into it; mapped,
+  30 + 26 µs. A restored turn went from 7.8–8.8 ms to 3.9–4.4 ms.
+- **Walking the heap only where a turn wrote** (DESIGN.md §5.6): without
+  pymalloc every object is a chunk, and the whole walk took 0.5–1.5 ms a
+  turn. A restored turn went to 2.3 ms.
+
+## Other engines
+
+| Engine                                                                 | For us                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CPython for WASI (this)                                                | All of Python 3.15 and its standard library; the largest image, which copy-on-write makes cheap to start                                                                                                                                                                                                                                                              |
+| [Monty](https://github.com/pydantic/monty) (Pydantic)                  | A Python subset in Rust that pauses at host calls and serializes its own state (kilobytes, under 1 ms to start). No class inheritance, `yield`, `@property`, `async with`/`for`, `except*`; asyncio is `run`, `gather` and `sleep`. Built for short code a model writes, not for programs people write. A fit for a sandboxed "run this snippet" tool inside an agent |
+| [MicroPython](https://github.com/micropython/micropython)              | A 1–2 MB image (not measured), MIT. Python 3.4 with later additions, a subset of asyncio, a small standard library; its WASI build is not merged upstream                                                                                                                                                                                                             |
+| [RustPython](https://github.com/RustPython/RustPython)                 | Builds for WASI; no published footprint or speed; slower than CPython by reputation                                                                                                                                                                                                                                                                                   |
+| [componentize-py](https://github.com/bytecodealliance/componentize-py) | CPython 3.14 as a component, pre-initialized like Wizer; several memories and globals: not our one-memory ABI                                                                                                                                                                                                                                                         |
+| Pyodide                                                                | CPython for Emscripten: its system lives in JavaScript, outside the memory we save                                                                                                                                                                                                                                                                                    |
+
+No Wasm runtime but Wasmtime maps an image copy-on-write into a pooled
+instance (Wasmer copies; WasmEdge and WAMR have proposals). Wasmtime takes the
+image only from a module's data segments ([#14347](https://github.com/bytecodealliance/wasmtime/issues/14347)
+asks for more), which is why the runtime maps it itself.
 
 ## Next
 
-- **A shared base image.** Every program evaluates the interpreter, the
-  bridge and asyncio again (~100 ms). One image of those, restored before
-  each program loads, would leave only the program to evaluate.
-- **Cheaper restores.** The image could become the module's data segment, as
-  Wizer does, so that Wasmtime maps it copy-on-write instead of writing
-  11 MB. That needs native write tracking to coexist with the
-  copy-on-write mapping, which is why `memory_init_cow` is off today.
-- **Dead heap bytes.** The heap walker zeroes free dlmalloc chunks, but most
-  Python objects live in pymalloc's arenas, which are always in use from
-  dlmalloc's point of view. Walking pymalloc's free blocks too would keep
-  freed objects out of the batches.
+- **asyncio's weight.** Importing asyncio (and with it `inspect`, `socket`,
+  `subprocess`, `concurrent.futures`, ...) is 5 of the base image's 6 MB of
+  heap. A lighter loop, or stubs for what asyncio imports and never uses here,
+  would halve the image.
+- **pymalloc.** It is off in CPython's WASI build, so every object is a
+  dlmalloc chunk. On, objects would pack into pools: fewer pages a turn, but
+  freed objects inside pools would no longer be known to be dead.
 - **Packages.** A program can import the standard library only. Pure-Python
-  packages could be added to the tree; packages with C extensions would need
+  packages could join the tree; packages with C extensions would need
   building for WASI and linking into the reactor.

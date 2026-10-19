@@ -22,8 +22,6 @@ const STDLIB: &str = "lib/python3.15";
 pub(crate) struct Build {
     pub(crate) wasm: Vec<u8>,
     pub(crate) files: Arc<Files>,
-    /// Where compiled modules are cached.
-    pub(crate) dir: PathBuf,
 }
 
 impl Build {
@@ -45,7 +43,6 @@ impl Build {
         Ok(Self {
             wasm,
             files: Arc::new(files),
-            dir,
         })
     }
 }
@@ -90,9 +87,9 @@ impl Python {
         Ok(String::from_utf8(bytes)?)
     }
 
-    /// Start the interpreter, run the bridge, and load the program, which
-    /// must define `async def main(input, ctx)`.
-    pub(crate) async fn evaluate(&self, vm: &mut Vm, name: &str, source: &str) -> Result<()> {
+    /// Start the interpreter and run the bridge: the base every program's
+    /// golden image starts from.
+    pub(crate) async fn boot(&self, vm: &mut Vm) -> Result<()> {
         vm.instance
             .get_typed_func::<(), ()>(&mut vm.store, "_initialize")?
             .call_async(&mut vm.store, ())
@@ -116,6 +113,12 @@ impl Python {
         if status != 0 {
             bail!("The Python bridge failed: {}", self.result(vm).await?);
         }
+        Ok(())
+    }
+
+    /// Load a program into a booted VM: its module, whose functions are its
+    /// handlers.
+    pub(crate) async fn load(&self, vm: &mut Vm, name: &str, source: &str) -> Result<()> {
         let program = serde_json::json!({"name": name, "source": source}).to_string();
         self.call(vm, "load", Some(&program)).await?;
         Ok(())
