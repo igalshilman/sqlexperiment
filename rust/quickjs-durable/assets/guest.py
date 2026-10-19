@@ -286,14 +286,15 @@ class _Bridge:
         module.__file__ = f"{program['name']}.py"
         sys.modules[program["name"]] = module
         exec(compile(program["source"], module.__file__, "exec"), module.__dict__)
-        # Its handlers: the coroutine functions it defines, but not those whose
-        # names start with an underscore, nor those it imports.
+        # Its handlers: the functions it names in __all__, or else every
+        # function it defines (not imports) whose name has no leading _.
+        names = getattr(module, "__all__", None)
         self.exports = {
             name: value
             for name, value in vars(module).items()
-            if not name.startswith("_")
-            and inspect.iscoroutinefunction(value)
+            if inspect.isfunction(value)
             and value.__module__ == module.__name__
+            and (name in names if names is not None else not name.startswith("_"))
         }
         # Everything loaded so far lives as long as the program: out of the
         # collector's sight, so a collection in a turn does not visit it, nor
@@ -323,7 +324,12 @@ class _Bridge:
         if handler is None:
             self.outcome = _failure(TypeError(f"No handler {call['handler']}"))
             return
-        task = self.loop.create_task(handler(call["input"], Context(self)))
+
+        async def run():
+            result = handler(call["input"], Context(self))
+            return await result if inspect.isawaitable(result) else result
+
+        task = self.loop.create_task(run())
 
         def settled(task):
             if task.cancelled():
