@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn snapshot_abi_rejects_state_outside_memory_and_stack_pointer() -> Result<()> {
-    validate_snapshot_abi(WASM)?;
+    validate_snapshot_abi(quickjs::WASM)?;
     for extra in [
         "(global (mut i32) (i32.const 7))",
         "(table 1 funcref) (func i32.const 0 ref.null func table.set 0)",
@@ -30,8 +30,12 @@ fn runtimes() -> Result<Vec<Runtime>> {
 #[tokio::test]
 async fn host_writes_are_tracked_until_the_next_commit() -> Result<()> {
     for runtime in runtimes()? {
-        let (image, _) = runtime.golden("host", "export async function main() { return 1; }")?;
-        let mut vm = Vm::new(&runtime, "host", 1).await?;
+        let (image, _) = runtime.golden(
+            Language::JavaScript,
+            "host",
+            "export async function main() { return 1; }",
+        )?;
+        let mut vm = Vm::new(&runtime, Language::JavaScript, "host", 1).await?;
         vm.restore(&image).await?;
         vm.committed()?;
         // No guest allocator call: these must come from the host write path.
@@ -54,8 +58,12 @@ async fn host_writes_are_tracked_until_the_next_commit() -> Result<()> {
 #[cfg(feature = "verify-dirty")]
 async fn verification_oracle_detects_an_untracked_write() -> Result<()> {
     for runtime in runtimes()? {
-        let (image, _) = runtime.golden("oracle", "export async function main() { return 1; }")?;
-        let mut vm = Vm::new(&runtime, "oracle", 1).await?;
+        let (image, _) = runtime.golden(
+            Language::JavaScript,
+            "oracle",
+            "export async function main() { return 1; }",
+        )?;
+        let mut vm = Vm::new(&runtime, Language::JavaScript, "oracle", 1).await?;
         vm.restore(&image).await?;
         // A write the tracker then forgets, as if it had missed it.
         let offset = image.len() - 1;

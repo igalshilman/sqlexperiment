@@ -21,11 +21,14 @@ mod heap;
 mod instrument;
 mod model;
 mod program;
+mod python;
+mod quickjs;
 pub mod restate;
 mod run;
 mod store;
 mod tracking;
 mod vm;
+mod wasi;
 mod workspace;
 
 pub use claude::Claude;
@@ -34,7 +37,7 @@ pub use program::{Program, Programs};
 pub use restate::{bind, embedded, endpoint, faults, page_cache};
 pub use run::Run;
 pub use store::Scope;
-pub use vm::{Limits, Runtime};
+pub use vm::{Language, Limits, Runtime};
 pub use workspace::Workspace;
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //! a driver that answers a run's requests until it settles.
 #![allow(dead_code)]
 use anyhow::Result;
-use quickjs_durable::{Limits, Operation, Outcome, Programs, Run, Runtime, Scope, View};
+use quickjs_durable::{Language, Limits, Operation, Outcome, Programs, Run, Runtime, Scope, View};
 use serde_json::{Value, json};
 use sqlite_kv::{Session, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
 use std::{
@@ -85,17 +85,26 @@ pub fn runtime() -> Arc<Runtime> {
         .clone()
 }
 
-/// A catalog with `source` as program "v1", compiled once per source.
+/// A catalog with JavaScript `source` as program "v1", compiled once per source.
 pub fn programs(source: &str) -> Arc<Programs> {
+    catalog(Language::JavaScript, source)
+}
+
+/// A catalog with `source`, in `language`, as program "v1", compiled once per
+/// source.
+pub fn catalog(language: Language, source: &str) -> Arc<Programs> {
     static PROGRAMS: OnceLock<Mutex<HashMap<String, Arc<Programs>>>> = OnceLock::new();
     let mut catalogs = PROGRAMS.get_or_init(Default::default).lock().unwrap();
     catalogs
         .entry(source.into())
         .or_insert_with(|| {
+            let programs = Programs::new(runtime());
             Arc::new(
-                Programs::new(runtime())
-                    .compile("v1", source)
-                    .expect("compile v1"),
+                match language {
+                    Language::JavaScript => programs.compile("v1", source),
+                    Language::Python => programs.compile_python("v1", source),
+                }
+                .expect("compile v1"),
             )
         })
         .clone()
@@ -108,6 +117,21 @@ pub fn block<F: Future>(future: F) -> F::Output {
 /// Run "r" of `source`'s program "v1" in `store`: started, or another attempt.
 pub fn start(store: &Store, source: &str, input: Value, now: u64) -> Result<Run> {
     start_in(&store.scope(), source, input, now)
+}
+
+/// Run "r" of Python `source`'s program "v1" in `store`: started, or another
+/// attempt.
+pub fn start_python(store: &Store, source: &str, input: Value, now: u64) -> Result<Run> {
+    block(Run::start(
+        &catalog(Language::Python, source),
+        &store.scope(),
+        "s",
+        "r",
+        "v1",
+        "main",
+        input,
+        now,
+    ))
 }
 
 /// [`start`], in `scope`.

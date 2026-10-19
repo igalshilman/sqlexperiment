@@ -141,7 +141,8 @@ impl Run {
             });
         }
         let golden = programs.get(program)?.image();
-        let mut vm = Vm::new(programs.runtime(), run, now).await?;
+        let language = programs.get(program)?.language();
+        let mut vm = Vm::new(programs.runtime(), language, run, now).await?;
         vm.restore(&golden).await?;
         vm.attach(db.clone());
         let commit = Commit {
@@ -285,7 +286,8 @@ impl Run {
                 base.set(*index, page);
             }
         }
-        let mut vm = Vm::new(self.programs.runtime(), &commit.run, now).await?;
+        let language = self.programs.get(&commit.program)?.language();
+        let mut vm = Vm::new(self.programs.runtime(), language, &commit.run, now).await?;
         vm.restore(&base).await?;
         vm.attach(self.db.clone());
         Ok(Live { vm, base })
@@ -294,13 +296,19 @@ impl Run {
     /// Run the JavaScript on `delivery`, capture what changed, and commit.
     async fn turn(&mut self, delivery: Delivery, now: u64) -> Result<()> {
         let live = self.live.as_mut().context("No live VM")?;
-        let ran = run(&mut live.vm, &self.db, &self.commit, delivery, now).await;
+        let ran = match run(&mut live.vm, &self.db, &self.commit, delivery, now).await {
+            Ok(state) => live
+                .vm
+                .capture(&live.base)
+                .await
+                .map(|capture| (state, capture)),
+            Err(error) => Err(error),
+        };
         let mut db = self.db.lock().await;
         let mut written = Written::default();
         let mut live_pages = self.commit.live_pages;
         let (state, meta, memory_len, changed) = match ran {
-            Ok(state) => {
-                let capture = live.vm.capture(&live.base).await?;
+            Ok((state, capture)) => {
                 written.changed_pages = capture.pages.len();
                 written.examined_pages = capture.examined_pages;
                 let base = &mut live.base;

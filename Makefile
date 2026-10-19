@@ -8,10 +8,11 @@
 #   python/      the uv workspace: the patched Python SDK, the Python
 #                extension, the agent integrations and their tests; and the
 #                examples (examples-python/, a project of their own)
-#   rust/        the patched Rust SDK (rust/sdk), and durable JavaScript in
-#                Restate objects on it (rust/quickjs-durable; its own
-#                targets: qjs, test-qjs, lint-qjs), which serves the
-#                durable functions (examples-functions/)
+#   rust/        the patched Rust SDK (rust/sdk), and durable JavaScript and
+#                Python in Restate objects on it (rust/quickjs-durable; its
+#                own targets: qjs, qjs-python, python-engine, test-qjs,
+#                lint-qjs), which serves the durable functions
+#                (examples-functions/, examples-functions-python/)
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -27,6 +28,8 @@ CARGO ?= cargo
 SDK_TARBALL := typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
 CORE := core/sqlite-kv
 QJS := rust/quickjs-durable
+# CPython for WASI, with its standard library: the engine of durable Python.
+PY_ENGINE := $(CARGO_TARGET_DIR)/pywasm/out/python.wasm
 ADDON := typescript/packages/sql-node/sqlite_kv.node
 CORE_PATCH := core/sdk-shared-core/sdk-shared-core.patch
 SDK_PY := python/sdk/.build/sdk-python/.patched
@@ -57,7 +60,7 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core qjs addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
+.PHONY: all help core qjs qjs-python python-engine addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
 	test-sdk-py test-sdk-rs test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs format crash-test concurrency-test tools-test \
 	crash-test-py concurrency-test-py wheels clean
 
@@ -73,6 +76,14 @@ core: ## The sqlite-kv crate
 
 qjs: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/quickjs-durable): a binary serving the durable functions of examples-functions/ (or QJS_PROGRAMS)
 	cd $(QJS) && $(CARGO) build --locked --release
+
+qjs-python: $(SDK_RS) $(PY_ENGINE) ## Durable Python in Restate objects: the same binary, serving the durable functions of examples-functions-python/
+	cd $(QJS) && QJS_PROGRAMS=$(CURDIR)/examples-functions-python $(CARGO) build --locked --release
+
+python-engine: $(PY_ENGINE) ## CPython for WASI, as durable Python's engine (target/pywasm/out): a few minutes the first time
+
+$(PY_ENGINE): $(QJS)/python/build.sh $(QJS)/python/reactor.c
+	$(QJS)/python/build.sh
 
 addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)
 
@@ -158,7 +169,7 @@ lint-core: ## The Rust crates (the core, the addon and the Python extension): ru
 	cd typescript/packages/sql-node && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 	cd python/sqlite-kv && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
-lint-qjs: $(SDK_RS) ## Durable JavaScript in Restate objects: rustfmt --check and clippy, in both capture modes
+lint-qjs: $(SDK_RS) ## Durable JavaScript and Python in Restate objects: rustfmt --check and clippy, in both capture modes
 	cd $(QJS) && $(CARGO) fmt --check
 	cd $(QJS) && $(CARGO) clippy --locked --release --features verify-dirty --all-targets -- -D warnings
 	cd $(QJS) && $(CARGO) clippy --locked --release --features full-scan --all-targets -- -D warnings
@@ -168,9 +179,9 @@ lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware)
 	$(OXLINT) --type-aware typescript examples-typescript
 	$(OXFMT) --check
 
-lint-py: py ## The Python (python/, examples-python/): ruff format --check and ruff check; and the patched SDK's ruff, as it configures it, and rustfmt
-	uv run --project python --locked ruff format --check python examples-python
-	uv run --project python --locked ruff check python examples-python
+lint-py: py ## The Python (python/, examples-python/, the durable functions in Python and their bridge): ruff format --check and ruff check; and the patched SDK's ruff, as it configures it, and rustfmt
+	uv run --project python --locked ruff format --check python examples-python examples-functions-python rust/quickjs-durable/assets
+	uv run --project python --locked ruff check python examples-python examples-functions-python rust/quickjs-durable/assets
 	cd python/sdk/.build/sdk-python && uv run --extra lint ruff format --check && uv run --extra lint ruff check \
 		&& $(CARGO) fmt --check
 
@@ -180,7 +191,7 @@ format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Mark
 	cd typescript/packages/sql-node && $(CARGO) fmt
 	cd python/sqlite-kv && $(CARGO) fmt
 	$(OXFMT)
-	uv run --project python --locked ruff format python examples-python
+	uv run --project python --locked ruff format python examples-python examples-functions-python rust/quickjs-durable/assets
 
 crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through crashes, against a Restate server
 	cd typescript/tests && node crash.ts
@@ -198,10 +209,10 @@ tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, wor
 	cd typescript/tests && node restate-tools.ts
 
 # One server at a time, on the default ports.
-test-qjs: $(SDK_RS) $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: the runtime with native and with barrier write tracking (verified), and with full scans, then the programs against a Restate server
-	cd $(QJS) && $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql --test handlers
-	cd $(QJS) && QJS_TRACKING=barriers $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql --test handlers
-	cd $(QJS) && $(CARGO) test --locked --release --features full-scan --lib --test runs --test crashes --test sql --test handlers
+test-qjs: $(SDK_RS) $(PY_ENGINE) $(RESTATE_SERVER) ## Durable JavaScript and Python in Restate objects: the runtime with native and with barrier write tracking (verified), and with full scans, then the programs against a Restate server
+	cd $(QJS) && $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql --test handlers --test python
+	cd $(QJS) && QJS_TRACKING=barriers $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql --test handlers --test python
+	cd $(QJS) && $(CARGO) test --locked --release --features full-scan --lib --test runs --test crashes --test sql --test handlers --test python
 	cd $(QJS) && $(CARGO) test --locked --release --test restate -- --include-ignored --test-threads 1
 
 # Into a temporary file, moved into place once it runs: a failed download or
