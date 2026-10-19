@@ -10,18 +10,101 @@ each turn. Its timers are durable sleeps, so `asyncio.sleep`, `asyncio.timeout`
 and `asyncio.wait_for` survive crashes like `ctx.sleep` does.
 """
 
-import asyncio
-import collections
+import collections.abc
 import gc
-import inspect
+import importlib.util
 import json
 import random
 import sys
 import types
-from asyncio import events
 from string.templatelib import Interpolation, Template
 
 import _durable
+
+
+class _Placeholder(types.ModuleType):
+    """A module asyncio's core imports for what a run seldom or never does
+    (sockets, subprocesses, thread pools, formatting stacks): it holds the few
+    names asyncio reads as it loads, and imports the real module on any other
+    use. Programs importing the module get the real one."""
+
+    def __init__(self, name, **constants):
+        super().__init__(name)
+        self.__dict__.update(constants)
+
+    def __getattr__(self, name):
+        if sys.modules.get(self.__name__) is self:
+            raise AttributeError(f"{self.__name__}.{name} is used while asyncio loads")
+        return getattr(_real(self.__name__), name)
+
+
+def _real(name):
+    return sys.modules.get(name) or importlib.import_module(name)
+
+
+def _extract_stack(*args, **kwargs):
+    return _real("traceback").extract_stack(*args, **kwargs)
+
+
+def _import_asyncio_core():
+    """Import asyncio's core: events, futures, tasks, locks, queues, timeouts
+    and task groups. The rest (streams, subprocesses, threads, `asyncio.run`)
+    loads on first use. Every program's image is 2.8 MB smaller."""
+    placeholders = [
+        _Placeholder("socket", AF_UNSPEC=0, AI_PASSIVE=1),
+        _Placeholder("subprocess", PIPE=-1),
+        _Placeholder("signal"),
+        _Placeholder("logging", DEBUG=10),
+        _Placeholder("inspect"),
+        # The C half of asyncio keeps this function, for debug mode.
+        _Placeholder("traceback", extract_stack=_extract_stack),
+        _Placeholder(
+            "concurrent.futures",
+            FIRST_COMPLETED="FIRST_COMPLETED",
+            FIRST_EXCEPTION="FIRST_EXCEPTION",
+            ALL_COMPLETED="ALL_COMPLETED",
+        ),
+    ]
+    import concurrent
+
+    for placeholder in placeholders:
+        sys.modules[placeholder.__name__] = placeholder
+    concurrent.futures = placeholders[-1]
+
+    spec = importlib.util.find_spec("asyncio")
+    package = importlib.util.module_from_spec(spec)
+    sys.modules["asyncio"] = package
+    try:
+        for name in (
+            "exceptions",
+            "events",
+            "futures",
+            "tasks",
+            "locks",
+            "queues",
+            "timeouts",
+            "taskgroups",
+            "coroutines",
+        ):
+            module = importlib.import_module(f"asyncio.{name}")
+            package.__dict__.update((export, getattr(module, export)) for export in module.__all__)
+    finally:
+        for placeholder in placeholders:
+            del sys.modules[placeholder.__name__]
+        del concurrent.futures
+
+    def load_the_rest(name):
+        # asyncio's own __init__, run over the package: it imports the rest,
+        # and defines asyncio's own __getattr__ in place of this one.
+        del package.__getattr__
+        spec.loader.exec_module(package)
+        return getattr(package, name)
+
+    package.__getattr__ = load_the_rest
+    return package
+
+
+asyncio = _import_asyncio_core()
 
 
 class OperationError(Exception):
@@ -82,7 +165,7 @@ class _Loop(asyncio.AbstractEventLoop):
         pass
 
     def drain(self):
-        events._set_running_loop(self)
+        asyncio.events._set_running_loop(self)
         try:
             while self._ready:
                 handle = self._ready.popleft()
@@ -94,7 +177,7 @@ class _Loop(asyncio.AbstractEventLoop):
                         # and if it is main's, the run fails with it.
                         pass
         finally:
-            events._set_running_loop(None)
+            asyncio.events._set_running_loop(None)
 
 
 # What crosses to the host: JSON, read there as UTF-8, with numbers as
@@ -327,7 +410,7 @@ class _Bridge:
         self.exports = {
             name: value
             for name, value in vars(module).items()
-            if inspect.isfunction(value)
+            if isinstance(value, types.FunctionType)
             and value.__module__ == module.__name__
             and (name in names if names is not None else not name.startswith("_"))
         }
@@ -362,7 +445,7 @@ class _Bridge:
 
         async def run():
             result = handler(call["input"], Context(self))
-            return await result if inspect.isawaitable(result) else result
+            return await result if isinstance(result, collections.abc.Awaitable) else result
 
         task = self.loop.create_task(run())
 
