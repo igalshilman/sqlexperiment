@@ -1,10 +1,10 @@
-# Durable JavaScript in Restate objects
+# Durable JavaScript and Python in Restate objects
 
-Run a plain JavaScript module as a Restate virtual object, its exported
+Run a plain JavaScript or Python module as a Restate virtual object, its
 functions the handlers. A call can wait as long
 as it needs to: on a timer, a call to another service, or a model. It survives
 crashes and restarts, and Restate never replays it. Each time the program
-waits, the runtime saves the JavaScript VM's memory. When a result arrives, or
+waits, the runtime saves its VM's memory. When a result arrives, or
 after a crash, the runtime restores that memory and carries on from where the
 program stopped.
 
@@ -23,15 +23,31 @@ export async function get(_, ctx) {
 }
 ```
 
+```python
+# examples-functions-python/counter.py: the same object, in Python; every
+# function the module defines (but _private ones) is a handler
+async def add(n, ctx):
+    count = (await ctx.kv.get("count") or 0) + n
+    await ctx.kv.set("count", count)
+    await ctx.sleep(1)
+    return count
+
+
+async def get(_, ctx):
+    return await ctx.kv.get("count") or 0
+```
+
 The functions this binary serves, how to run them and how to write one:
-[examples-functions/](../../examples-functions/README.md). The coding agent's
+[examples-functions/](../../examples-functions/README.md), and in Python
+[examples-functions-python/](../../examples-functions-python/README.md). The coding agent's
 workspace is the [`workspace`](src/workspace.rs) object, and models are
 [`claude`](src/claude.rs).
 
 ## How it works
 
-QuickJS runs as WebAssembly, so the whole VM (heap, closures, pending
-promises) is one byte array. A run is one call of a handler, without journal
+QuickJS (or CPython, for Python: [docs/PYTHON.md](docs/PYTHON.md)) runs as
+WebAssembly, so the whole VM (heap, closures, pending promises or tasks) is
+one byte array. A run is one call of a handler, without journal
 replay, looping over turns on one live VM:
 
 ```
