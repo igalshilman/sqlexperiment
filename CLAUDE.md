@@ -11,3 +11,6 @@
   (tests/fakes).
 - Commit in small steps, and open frequent PRs so the owner can follow the
   changes; merge them yourself once the checks pass (no real users yet).
+- [FUTURE.md](FUTURE.md) lists work waiting on something outside this
+  repository (such as a Restate release), with its `TODO:` comments: check
+  it when that changes.

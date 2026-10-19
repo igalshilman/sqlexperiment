@@ -839,10 +839,10 @@ index f14da79..82ed9e5 100644
      await this.doProgressInner(restatePromise);
 diff --git a/packages/libs/restate-sdk/src/sql.ts b/packages/libs/restate-sdk/src/sql.ts
 new file mode 100644
-index 0000000..cb62f9b
+index 0000000..e62c78c
 --- /dev/null
 +++ b/packages/libs/restate-sdk/src/sql.ts
-@@ -0,0 +1,699 @@
+@@ -0,0 +1,711 @@
 +/*
 + * Copyright (c) 2023-2024 - Restate Software, Inc., Restate GmbH
 + *
@@ -951,6 +951,8 @@ index 0000000..cb62f9b
 +  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 +  readonly defaultSerde: Serde<any>;
 +  request(): { readonly target: { readonly service: string } };
++  /** A state get, journaled. */
++  get(name: string, serde: Serde<Uint8Array>): Promise<Uint8Array | null>;
 +  /** A state get left out of the journal (protocol v8). */
 +  ephemeralStateGet(
 +    name: string,
@@ -1074,6 +1076,18 @@ index 0000000..cb62f9b
 + * `sync` the attempt's end leaves waiting rejects, so the session that made it
 + * ends instead of holding its lock for the life of the process.
 + */
++// A state read for the store.
++// TODO: read with protocol v8's ephemeral get (`ctx.ephemeralStateGet`), left
++// out of the journal, once a Restate release ships v8 (FUTURE.md at the
++// repository's root). Restate 1.8 negotiates v7 at most: a journaled get.
++async function read(
++  ctx: SqlHost,
++  end: AttemptEnd,
++  key: string
++): Promise<Uint8Array | undefined> {
++  return (await end.race(ctx.get(key, serde.binary))) ?? undefined;
++}
++
 +function objectStore(ctx: SqlHost, end: AttemptEnd): SqlStore {
 +  if (ctx.handlerKind !== HandlerKind.EXCLUSIVE) {
 +    // A shared handler's reader writes nothing.
@@ -1081,16 +1095,14 @@ index 0000000..cb62f9b
 +      throw new Error("a shared handler writes no state");
 +    };
 +    return {
-+      get: async (key) =>
-+        (await end.race(ctx.ephemeralStateGet(key, serde.binary))) ?? undefined,
++      get: (key) => read(ctx, end, key),
 +      set: refused,
 +      clear: refused,
 +      sync: async () => {},
 +    };
 +  }
 +  return {
-+    get: async (key) =>
-+      (await end.race(ctx.ephemeralStateGet(key, serde.binary))) ?? undefined,
++    get: (key) => read(ctx, end, key),
 +    set: (key, value) => ctx.set(key, value, serde.binary),
 +    clear: (key) => ctx.clear(key),
 +    sync: async () => {

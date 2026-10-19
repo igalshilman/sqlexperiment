@@ -35,7 +35,7 @@ crash resumes the reply. The integrations are in
 
 ```sh
 ANTHROPIC_API_KEY=… node chat.ts                                             # the agent, on port 9080
-RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true npx @restatedev/restate-server  # Restate, in another terminal
+npx @restatedev/restate-server  # Restate, in another terminal
 npx @restatedev/restate deployments register http://localhost:9080           # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
 curl localhost:8080/assistant/alice/messages                                 # the conversation so far
@@ -48,7 +48,7 @@ With Restate in Docker, the agent is at the host's address, as the
 container sees it:
 
 ```sh
-docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true ghcr.io/restatedev/restate:1.8.0
+docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.8.0
 npx @restatedev/restate deployments register http://host.docker.internal:9080
 ```
 

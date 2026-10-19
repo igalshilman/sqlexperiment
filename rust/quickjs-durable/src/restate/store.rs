@@ -3,8 +3,9 @@
 //! them. It remembers
 //! every key it read or wrote, for the attempt: the handler is the object's
 //! only writer meanwhile, so a key is read from Restate at most once: a round
-//! trip unless the invocation started with it (eager state), and never a
-//! journal entry (protocol v8's unjournaled get).
+//! trip unless the invocation started with it (eager state). Each read is a
+//! journal entry for now; protocol v8's unjournaled get will drop it (TODO in
+//! `RawState::get`, FUTURE.md at the repository's root).
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use restate_sdk::context::RawState;

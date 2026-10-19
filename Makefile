@@ -36,10 +36,9 @@ OXFMT := typescript/node_modules/.bin/oxfmt
 # Lints the TypeScript of every part, as .oxlintrc.json says; its type-aware
 # rules run tsgolint, from the pnpm workspace too.
 OXLINT := OXLINT_TSGOLINT_PATH=$(CURDIR)/typescript/node_modules/.bin/tsgolint typescript/node_modules/.bin/oxlint
-# The tests against a Restate server need service protocol v8 (state reads
-# left out of the journal): Restate 1.8 or later, with v8 enabled
-# (RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8, exported below). By default they
-# run RESTATE_VERSION's GitHub release for this platform. Or RESTATE_FROM=image
+# The tests against a Restate server run RESTATE_VERSION's GitHub release for
+# this platform by default (1.8; its protocol is v7: the stores' state reads
+# are journaled until v8 ships, see FUTURE.md). Or RESTATE_FROM=image
 # takes restate-server out of RESTATE_IMAGE without docker (Linux only), or set
 # RESTATE_SERVER to a restate-server binary.
 RESTATE_FROM ?= release
@@ -51,7 +50,6 @@ else
 RESTATE_SERVER ?= $(CARGO_TARGET_DIR)/restate/$(RESTATE_VERSION)/restate-server
 endif
 export RESTATE_SERVER
-export RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8 ?= true
 RESTATE_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
 ifeq ($(shell uname -s),Darwin)
 RESTATE_TARGET := $(RESTATE_ARCH)-apple-darwin

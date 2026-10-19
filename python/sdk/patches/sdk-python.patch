@@ -518,7 +518,7 @@ index c5e233f..66d5478 100644
                      dict(request_headers),
                      receive_channel,
 diff --git a/python/restate/server_context.py b/python/restate/server_context.py
-index 80fbec3..151c85a 100644
+index 80fbec3..eef40f9 100644
 --- a/python/restate/server_context.py
 +++ b/python/restate/server_context.py
 @@ -56,7 +56,9 @@ from restate.exceptions import (
@@ -697,7 +697,7 @@ index 80fbec3..151c85a 100644
          if isinstance(serde, DefaultSerde):
              serde = serde.with_maybe_type(type_hint)
          name, handle = self.vm.sys_awakeable()
-@@ -1258,6 +1322,101 @@ class ServerInvocationContext(ObjectContext):
+@@ -1258,6 +1322,108 @@ class ServerInvocationContext(ObjectContext):
      def key(self) -> str:
          return self.invocation.key
  
@@ -730,6 +730,13 @@ index 80fbec3..151c85a 100644
 +        return f"{self.handler.service_tag.name}/{self.invocation.key}"
 +
 +    def sql_get(self, key: str) -> Awaitable[Optional[bytes]]:
++        """A state read, issued now and journaled."""
++        # TODO: read with protocol v8's ephemeral get (``_sql_get_ephemeral``),
++        # left out of the journal, once a Restate release ships v8 (FUTURE.md at
++        # the repository's root). Restate 1.8 negotiates v7 at most.
++        return self.get(key, serde=BytesSerde())
++
++    def _sql_get_ephemeral(self, key: str) -> Awaitable[Optional[bytes]]:
 +        """A state read, issued now and left out of the journal (protocol V8)."""
 +        completion_id = self.vm.ephemeral_state_get(key)
 +        assert self.selector is not None, "ctx.db runs without journal replay"
@@ -799,7 +806,7 @@ index 80fbec3..151c85a 100644
      def cancel_invocation(self, invocation_id: str):
          """cancel an existing invocation by id."""
          if invocation_id is None:
-@@ -1283,3 +1442,73 @@ class ServerInvocationContext(ObjectContext):
+@@ -1283,3 +1449,73 @@ class ServerInvocationContext(ObjectContext):
      def set_extension_data(self, key: str, value: Any) -> None:
          """Set extension data by key."""
          self.extension_data[key] = value

@@ -22,10 +22,10 @@ index 5dcf242..0000000
 -profile = "minimal"
 -components = ["rustfmt", "clippy"]
 diff --git a/src/context/mod.rs b/src/context/mod.rs
-index dd43c1c..be3d155 100644
+index dd43c1c..ce726cd 100644
 --- a/src/context/mod.rs
 +++ b/src/context/mod.rs
-@@ -199,6 +199,47 @@ impl ObjectContext<'_> {
+@@ -199,6 +199,50 @@ impl ObjectContext<'_> {
      pub fn idempotency_key(&self) -> Option<&str> {
          self.idempotency_key.as_deref()
      }
@@ -39,9 +39,9 @@ index dd43c1c..be3d155 100644
 +}
 +
 +/// An object's state as bytes, for this invocation: see [`ObjectContext::raw_state`].
-+/// Its writes are the invocation's, in the order they are made; its reads are
-+/// ephemeral (protocol V8): not journaled, they see the stored state and this
-+/// invocation's own writes. For a handler that replays nothing.
++/// Its writes are the invocation's, in the order they are made; its reads see
++/// the stored state and this invocation's own writes. For a handler that
++/// replays nothing.
 +#[derive(Clone)]
 +pub struct RawState(ContextInternal);
 +
@@ -51,7 +51,10 @@ index dd43c1c..be3d155 100644
 +        &'a self,
 +        key: &'a str,
 +    ) -> impl Future<Output = Result<Option<bytes::Bytes>, TerminalError>> + Send + 'a {
-+        self.0.get_ephemeral(key)
++        // TODO: read with protocol v8's ephemeral get (`get_ephemeral`), left
++        // out of the journal, once a Restate release ships v8 (FUTURE.md at the
++        // repository's root). Restate 1.8 negotiates v7 at most: a journaled get.
++        self.0.get(key)
 +    }
 +
 +    /// Set `key` to `value`.
