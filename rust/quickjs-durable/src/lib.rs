@@ -34,7 +34,7 @@ pub use program::{Program, Programs};
 pub use restate::{bind, embedded, endpoint, faults, page_cache};
 pub use run::Run;
 pub use store::Scope;
-pub use vm::Runtime;
+pub use vm::{Limits, Runtime};
 pub use workspace::Workspace;
 
 #[cfg(test)]

@@ -43,7 +43,7 @@
   function copy(value) {
     validate(value);
     // A primitive is already plain data, and the round trip below costs about
-    // 40,000 fuel: only objects and arrays need it.
+    // 40,000 Wasm instructions: only objects and arrays need it.
     if (value === null || typeof value !== 'object') return value;
     const result = JSON.parse(JSON.stringify(value));
     // Accessors can return a different value during JSON serialization. Validate
