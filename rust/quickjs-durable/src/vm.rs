@@ -144,6 +144,9 @@ impl Modules {
 
 struct PythonModule {
     modules: Modules,
+    /// The interpreter started and the bridge run, made once: each program's
+    /// golden image is this, with the program loaded.
+    base: OnceLock<std::result::Result<Image, String>>,
     files: Arc<Files>,
     /// Where the allocator's heap starts: after the stack and static data.
     heap: usize,
@@ -317,6 +320,7 @@ impl Runtime {
                     },
                     files: build.files,
                     heap,
+                    base: OnceLock::new(),
                 })
             };
             load().map_err(|error| format!("{error:#}"))
@@ -350,20 +354,51 @@ impl Runtime {
         name: &str,
         source: &str,
     ) -> Result<(Image, Vec<String>)> {
-        futures::executor::block_on(self.evaluate(language, name, source))
+        let base = match language {
+            Language::JavaScript => None,
+            Language::Python => Some(self.python_base()?),
+        };
+        futures::executor::block_on(self.evaluate(language, base, name, source))
+    }
+
+    /// CPython's base image, made on first use.
+    fn python_base(&self) -> Result<Image> {
+        let python = self.python()?;
+        let base = python.base.get_or_init(|| {
+            let boot = async {
+                let mut vm = Vm::new(self, Language::Python, "python", 0).await?;
+                vm.store.data_mut().entropy = false;
+                let Guest::Python(python) = vm.guest.clone() else {
+                    unreachable!("a Python VM")
+                };
+                python.boot(&mut vm).await?;
+                vm.snapshot().await
+            };
+            futures::executor::block_on(boot).map_err(|error| format!("{error:#}"))
+        });
+        base.clone().map_err(wasmtime::Error::msg)
     }
 
     async fn evaluate(
         &self,
         language: Language,
+        base: Option<Image>,
         name: &str,
         source: &str,
     ) -> Result<(Image, Vec<String>)> {
-        let mut vm = Vm::new(self, language, &format!("program/{name}"), 0).await?;
+        let identity = format!("program/{name}");
+        let mut vm = match &base {
+            Some(base) => Vm::for_image(self, language, base, &identity, 0).await?,
+            None => Vm::new(self, language, &identity, 0).await?,
+        };
         vm.store.data_mut().entropy = false;
-        match vm.guest.clone() {
-            Guest::QuickJs(quickjs) => quickjs.evaluate(&mut vm, source).await?,
-            Guest::Python(python) => python.evaluate(&mut vm, name, source).await?,
+        match (vm.guest.clone(), &base) {
+            (Guest::QuickJs(quickjs), _) => quickjs.evaluate(&mut vm, source).await?,
+            (Guest::Python(python), Some(base)) => {
+                vm.restore(base).await?;
+                python.load(&mut vm, name, source).await?;
+            }
+            (Guest::Python(_), None) => unreachable!("Python evaluates from its base"),
         }
         let handlers: Vec<String> = serde_json::from_str(&vm.call("handlers", None).await?)?;
         ensure!(
