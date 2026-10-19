@@ -224,9 +224,14 @@ asks for more), which is why the runtime maps it itself.
   `subprocess`, `concurrent.futures`, ...) is 5 of the base image's 6 MB of
   heap. A lighter loop, or stubs for what asyncio imports and never uses here,
   would halve the image.
-- **pymalloc.** It is off in CPython's WASI build, so every object is a
-  dlmalloc chunk. On, objects would pack into pools: fewer pages a turn, but
-  freed objects inside pools would no longer be known to be dead.
+- **pymalloc: tried, not taken.** It is off in CPython's WASI build, so every
+  object is a dlmalloc chunk. On (4 KiB pools in 256 KiB arenas, taken from
+  `malloc`, so the heap walk still works), a turn changed 10–20% fewer pages,
+  but under heap churn its batches grew from 55–59 to 68–105 KB: freed blocks
+  inside pools keep their bytes, which no walk knows to be dead. Patching
+  `pymalloc_free` to zero each freed block made pages 12–32% fewer and most
+  batches smaller, yet one heap-churn turn still grew (55 to 71 KB) and ran
+  slower (6.5 to 9.6 ms). Not worth carrying a patch to CPython's allocator.
 - **Packages.** A program can import the standard library only. Pure-Python
   packages could join the tree; packages with C extensions would need
   building for WASI and linking into the reactor.
