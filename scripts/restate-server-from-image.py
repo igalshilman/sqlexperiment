@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Copy restate-server out of a Restate container image, without docker.
 
-    scripts/restate-server-from-image.py ghcr.io/restatedev/restate:1.8.0 out
+    scripts/restate-server-from-image.py ghcr.io/restatedev/restate:service-protocol-v8 out
 
 Pulls the image's linux/amd64 (or arm64, on such a machine) manifest from the
 registry anonymously, then reads its layers, newest first, until one holds

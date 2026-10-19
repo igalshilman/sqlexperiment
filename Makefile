@@ -37,14 +37,14 @@ OXFMT := typescript/node_modules/.bin/oxfmt
 # rules run tsgolint, from the pnpm workspace too.
 OXLINT := OXLINT_TSGOLINT_PATH=$(CURDIR)/typescript/node_modules/.bin/tsgolint typescript/node_modules/.bin/oxlint
 # The tests against a Restate server need service protocol v8 (state reads
-# left out of the journal): Restate 1.8 or later, with v8 enabled
-# (RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8, exported below). By default they
-# run RESTATE_VERSION's GitHub release for this platform. Or RESTATE_FROM=image
-# takes restate-server out of RESTATE_IMAGE without docker (Linux only), or set
-# RESTATE_SERVER to a restate-server binary.
-RESTATE_FROM ?= release
+# left out of the journal), which no release has yet: by default they run the
+# restate-server of RESTATE_IMAGE, Restate's service-protocol-v8 branch, taken
+# out of the image without docker (Linux only), with v8 enabled. Or
+# RESTATE_FROM=release downloads RESTATE_VERSION's GitHub release for this
+# platform, or set RESTATE_SERVER to a restate-server binary.
+RESTATE_FROM ?= image
+RESTATE_IMAGE ?= ghcr.io/restatedev/restate:service-protocol-v8
 RESTATE_VERSION ?= 1.8.0
-RESTATE_IMAGE ?= ghcr.io/restatedev/restate:$(RESTATE_VERSION)
 ifeq ($(RESTATE_FROM),image)
 RESTATE_SERVER ?= $(CARGO_TARGET_DIR)/restate/$(lastword $(subst :, ,$(RESTATE_IMAGE)))/restate-server
 else

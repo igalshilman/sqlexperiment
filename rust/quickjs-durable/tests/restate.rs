@@ -62,7 +62,7 @@ async fn server() -> Server {
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/restate/1.8.0/restate-server")
+                .join("../../target/restate/service-protocol-v8/restate-server")
         });
     let dir = tempfile::tempdir().unwrap();
     // Kept for a failed test, beside its binary.

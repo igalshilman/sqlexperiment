@@ -42,12 +42,12 @@ Run it, from [`examples-typescript/`](../../../examples-typescript/README.md), a
 repository's root ([Build your own](#build-your-own)):
 
 ```sh
-ANTHROPIC_API_KEY=… node chat.ts                                             # the agent, on port 9080
-RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true npx @restatedev/restate-server  # Restate, in another terminal
-npx @restatedev/restate deployments register http://localhost:9080           # tell Restate where the agent is
+ANTHROPIC_API_KEY=… node chat.ts                                     # the agent, on port 9080
+npx @restatedev/restate-server                                        # Restate, in another terminal
+npx @restatedev/restate deployments register http://localhost:9080   # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
 curl localhost:8080/assistant/alice/chat -d 'What is my name?'
-curl localhost:8080/assistant/alice/messages                                 # the conversation so far
+curl localhost:8080/assistant/alice/messages                          # the conversation so far
 ```
 
 `assistant` is a virtual object: each key (`alice`, `bob`) is a

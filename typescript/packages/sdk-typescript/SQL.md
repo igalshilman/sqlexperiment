@@ -259,7 +259,7 @@ storage in the object's database.
 ```sh
 make js   # from the repository root: the addon, the patched SDK, pnpm install
 cd typescript/tests && pnpm serve
-docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true ghcr.io/restatedev/restate:1.8.0   # Restate (see the repository's README, Requirements), in another terminal
+docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
 curl localhost:8080/Warehouse/apple/restock --json '{"id": "first", "qty": 10}'   # without stock, an order is rejected
