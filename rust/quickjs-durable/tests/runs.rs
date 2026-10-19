@@ -2,9 +2,9 @@
 //! turn commits, and what a new attempt restores.
 use anyhow::Result;
 use common::*;
-use quickjs_durable::{Operation, Outcome, Program, Programs, Run, Runtime, Status};
+use quickjs_durable::{Limits, Operation, Outcome, Program, Programs, Run, Runtime, Status};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 mod common;
 
@@ -253,7 +253,7 @@ fn programs_are_checked_and_failures_end_runs() -> Result<()> {
     Ok(())
 }
 
-/// A synchronous job longer than a turn's fuel traps, and would trap again:
+/// A synchronous job longer than a turn allows traps, and would trap again:
 /// the run ends instead. The KV writes before the trap stand, as for a thrown
 /// error; its requests still outstanding are dropped.
 #[test]
@@ -270,7 +270,7 @@ fn a_trap_ends_the_run() -> Result<()> {
         panic!("Expected a failure: {:?}", failed.state.outcome);
     };
     assert_eq!(error.name, "Trap");
-    assert!(error.message.contains("fuel"), "{}", error.message);
+    assert!(error.message.contains("Out of time"), "{}", error.message);
     assert_eq!(kv(&store, "after"), Some(json!(1)));
     assert_eq!(store.batches(), 0);
     let late = block(run.deliver(pending[0].id(), Outcome::success(1), 3))?;
@@ -344,13 +344,27 @@ fn garbage_a_turn_frees_is_not_saved() -> Result<()> {
     Ok(())
 }
 
-/// More local requests than one turn's fuel allows: the turn stops at a safe
-/// boundary once half the fuel is spent, and a wakeup goes on in the next.
+/// More local requests than one turn's time allows: the turn stops at a safe
+/// boundary past the checkpoint limit, and a wakeup goes on in the next.
 #[test]
 fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
     let source = "async function main(_,ctx){for(let i=0;i<2000;i++){await ctx.kv.set('k',i);}return await ctx.kv.get('k');}";
+    let limits = Limits {
+        checkpoint: Duration::from_millis(5),
+        ..Limits::default()
+    };
+    let programs =
+        Arc::new(Programs::new(Arc::new(Runtime::new()?.limited(limits))).compile("v1", source)?);
     let store = Store::default();
-    let mut run = start(&store, source, Value::Null, 1)?;
+    let mut run = block(Run::start(
+        &programs,
+        &store.scope(),
+        "s",
+        "r",
+        "v1",
+        Value::Null,
+        1,
+    ))?;
     let mut turns = 1;
     while run.view().state.outcome.is_none() {
         let pending = run.view().state.pending;

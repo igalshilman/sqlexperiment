@@ -107,7 +107,7 @@ Root return `undefined` becomes successful null. A root value outside the JSON
 contract becomes a failed outcome. A failed operation rejects its promise with
 an Error carrying the supplied name/message and may be caught by the application.
 A terminal guest failure may commit prior KV mutations. So does a VM trap: the
-guest running out of fuel inside one job, or an error QuickJS cannot hand to a
+guest running out of time inside one job, or an error QuickJS cannot hand to a
 script. The same image and delivery would trap again on every retry, so the
 run ends instead: it commits a failed outcome named `Trap`, drops the trapped
 VM (it is mid-mutation) and the run's outstanding requests. An infrastructure
@@ -295,7 +295,7 @@ Any trap/error during this process discards the instance.
 Restore in this order:
 
 1. Reconstruct memory from storage as specified in section 5. Instantiate the same
-   compiled module with fresh host imports, fuel, logical time and memory limits.
+   compiled module with fresh host imports, logical time and memory limits.
 2. Require image length at least initial module memory, a multiple of 64 KiB and
    no more than the configured maximum; grow memory to that exact length.
 3. Copy reconstructed bytes into linear memory zero. Clear the transient tracker.
@@ -324,7 +324,7 @@ and write) took 1,755 µs in `MemoryStore`, of which 1,112 µs restoring golden
 linked imports 924 µs, the shared golden 771 µs. Against a server, one-turn
 runs went from ~298/s to ~340/s and `Promise.all` of 10 calls from ~24/s to
 ~28/s; runs of 5 waits stayed at ~130/s. 6. Bind run state on first start, or deliver one completion, then run jobs.
-Each later turn reuses the instance: it resets fuel and logical time,
+Each later turn reuses the instance: it restarts the turn's clock, sets logical time,
 delivers, runs, captures, and clears the tracker once the commit is stored.
 
 Before capture, call the runtime/context getters and read the stack global, then
@@ -345,7 +345,7 @@ Sleep requires a nonnegative safe-integer duration and an in-range sum.
 | `fd_fdstat_get(i32 fd, i32 out) -> i32`                                               | For fd 1/2, write the 24-byte zeroed character-device descriptor with byte zero set to 2; other fds return errno 8                                           |
 | `fd_close(i32) -> i32`, `fd_seek(i32, i64, i32, i32) -> i32`                          | Unsupported, errno 52                                                                                                                                        |
 | `env.host_get_timezone_offset(i32 hi, i32 lo) -> i32`                                 | Return zero: UTC                                                                                                                                             |
-| `env.host_interrupt() -> i32`                                                         | Return zero; Wasmtime fuel bounds execution                                                                                                                  |
+| `env.host_interrupt() -> i32`                                                         | Return zero; Wasmtime's epoch deadline bounds execution                                                                                                      |
 | `env.host_module_normalize(i32, i32) -> i32`, `env.host_module_load(i32, i32) -> i32` | Return null/zero: no external module loader                                                                                                                  |
 | `env.host_call(i32 name, i32 name_len, i32 this, i32 argc, i32 argv) -> i32`          | The guest's `__host(operation, request)`: two strings in, a JSON string handle out, from the scope's database ([HOST.md](HOST.md)); awaits on the Wasm fiber |
 | `env.host_promise_rejection(i32, i32, i32) -> ()`                                     | Unexpected use traps                                                                                                                                         |
@@ -369,7 +369,7 @@ Reference limits, not a general resource-management API:
 | Guest linear memory                                       |                          64 MiB |
 | QuickJS allocator                                         |                          32 MiB |
 | QuickJS stack                                             |                          32 KiB |
-| Wasmtime fuel per turn                                    | 200,000,000, including barriers |
+| A turn's JavaScript, by the wall clock (`Limits`)         |         10 s; commits after 1 s |
 | Tracker memory                                            |    64 KiB, excluded from images |
 | Application source, input, host outcome                   |                      1 MiB each |
 | VM string extraction, including aggregate inspected state |                           1 MiB |
@@ -422,9 +422,7 @@ in both:
 | A turn of a KV update              | 713-738 µs   | 717-740 µs |
 | A turn building 2,000 objects      | 9.5-9.7 ms   | 9.3 ms     |
 
-Barriers cost compute-bound code 15-20%, and spend fuel: their instructions
-count against a job's budget, so a job reached the cap with less JavaScript
-done. Native tracking costs a light turn ~60 µs in faults and scans, a small
+Barriers cost compute-bound code 15-20%. Native tracking costs a light turn ~60 µs in faults and scans, a small
 part of what Restate spends on a turn. It is the default where available.
 Changing the barriers' shape (one 16-bit mark of a page and the next instead
 of two marks) saved ~5%; even one unsound mark kept most of their cost.
@@ -768,7 +766,7 @@ settled. Foreign-run, noncanonical and never-issued IDs fail.
 All native calls below return before the run awaits the store:
 
 ```text
-begin: reset fuel, set logical time
+begin: start the turn's clock, set logical time
 pending = the last commit's pending requests, less those delivered
 loop:
     drain all QuickJS jobs
@@ -783,7 +781,7 @@ loop:
             answered = true
         else: append op to pending              // an effect for the host
     if not answered: break
-    if the turn has spent half its fuel:
+    if the turn has run past the checkpoint limit (1 s):
         invoke internal pause(), then inspect without draining jobs
         require it issued exactly one Resume; append it to pending
         break
@@ -792,10 +790,9 @@ capture (§5.3) and commit (§7)
 
 As the guest reports each request once, effects already issued are never
 issued again when a sibling finishes. A turn continues through local requests until only
-effects remain, the run settles, or it has spent half its fuel: one local KV
-await costs roughly 300,000 fuel (more with write barriers), so a few hundred
-sequential awaits would otherwise exhaust a turn, trap, and trap again on
-every retry. The committed Resume makes the queued continuations schedulable
+effects remain, the run settles, or it has run past the checkpoint limit:
+thousands of sequential local awaits would otherwise run into the turn's
+limit, trap, and trap again on every retry. The committed Resume makes the queued continuations schedulable
 after a crash.
 
 | Situation                                   | Action                                                               |
@@ -803,9 +800,9 @@ after a crash.
 | KV request                                  | Answer in the turn and continue                                      |
 | Store read awaiting I/O                     | Keep the VM and the tracker; no Wasm call is live; do not capture    |
 | Effects only, no runnable jobs              | Capture and commit the pending requests                              |
-| Half the fuel spent                         | Finish the batch, add a Resume, capture before queued jobs run       |
+| Past the checkpoint limit                   | Finish the batch, add a Resume, capture before queued jobs run       |
 | Root settled                                | Commit the outcome with no image and no pending request; drop the VM |
-| Infinite synchronous job or microtask chain | Fuel traps; the run ends failed                                      |
+| Infinite synchronous job or microtask chain | The epoch deadline traps; the run ends failed                        |
 
 Any pending effect can be delivered next, not just a Resume. More than one
 Resume can coexist. Once the root settles, the run is final.
@@ -981,8 +978,8 @@ zeroing dead bytes; the throughput rows did not move with those (an A/B of
 both binaries on one server). Most of what is left is Restate's: a commit
 record and the journal per turn. The Rust
 SDK's server now sets `TCP_NODELAY`, which saved ~40 ms per round trip. One
-synchronous JavaScript job is still capped at about 10^8 Wasm instructions,
-and the interpreter runs compute-bound code ~10x slower than V8.
+synchronous JavaScript job is capped by time (10 s by default), and the
+interpreter runs compute-bound code ~10x slower than V8.
 
 ### 10.1. A long coding session
 
@@ -990,17 +987,20 @@ and the interpreter runs compute-bound code ~10x slower than V8.
 scripted session of up to 300 steps over an in-memory store. Each step is a few
 hundred bytes of model text and one tool call: a file read (~6 KiB), a
 command (~1.5 KiB of output), an edit, or a written file (~3 KiB). On
-18 October 2026:
+19 October 2026, with turns bounded by time:
 
 | Step | Request to the model | Stored by the step | Of it, the commit | Tool turn |
 | ---: | -------------------: | -----------------: | ----------------: | --------: |
-|    1 |              1.7 KiB |              12 KB |            4.4 KB |    2.7 ms |
-|   10 |               31 KiB |              44 KB |             33 KB |    8.8 ms |
-|   20 |               62 KiB |              85 KB |             71 KB |     18 ms |
-|   40 |              130 KiB |             153 KB |            140 KB |     35 ms |
+|    1 |              1.7 KiB |              12 KB |            4.3 KB |    1.6 ms |
+|   10 |               31 KiB |              47 KB |             33 KB |    5.8 ms |
+|   20 |               62 KiB |              83 KB |             71 KB |     11 ms |
+|   40 |              130 KiB |             157 KB |            140 KB |     21 ms |
+|   99 |              328 KiB |             360 KB |            340 KB |     45 ms |
+|  190 |              636 KiB |             670 KB |            653 KB |     88 ms |
 
-At step 45 (a request of ~145 KiB) the run fails: copying the request out
-of the VM runs out of fuel. Each request is the whole conversation so far,
+The session runs to the program's own limit of 200 steps. With fuel, it
+failed at step 45 (a request of ~145 KiB): copying the request out of the VM
+spent the turn's budget. Each request is the whole conversation so far,
 and it is copied, checked and serialized in the guest, then kept in the
 commit record as a pending request. Every step therefore costs time and
 storage in proportion to the conversation, quadratic in total. The page
@@ -1011,7 +1011,8 @@ batches stay at 4–11 KB a step.
 There is no heap migration, no concurrent writers in a scope, no generic Wasm
 snapshot and no dynamic native extension. A settled run keeps only its commit
 record, with its outcome. Snapshot memory limits are not whole-process memory
-limits. Nothing preempts a single long JavaScript job but fuel.
+limits. Nothing preempts a single long JavaScript job but the turn's time
+limit; meanwhile it yields its thread to the executor at every 10 ms tick.
 
 Applications are cooperative: the internal bridge and JavaScript built-ins are
 not hardened against tampering. There is no guest filesystem/network/module-loader

@@ -155,3 +155,18 @@ fn a_trap_in_a_transaction_undoes_it() -> Result<()> {
     assert_eq!(outcome(&mut run)?, json!([1]));
     Ok(())
 }
+
+/// A turn is bounded by time, not instructions: thousands of statements in
+/// one synchronous job are fine.
+#[test]
+fn a_job_runs_thousands_of_statements() -> Result<()> {
+    let source = r#"async function main(_,ctx){
+      ctx.db.sql`CREATE TABLE t(n INTEGER)`;
+      ctx.db.transaction(()=>{for(let i=0;i<3000;i++) ctx.db.sql`INSERT INTO t VALUES(${i})`;});
+      return ctx.db.sql`SELECT count(*) AS n, sum(n) AS total FROM t`[0];
+    }"#;
+    let store = Store::default();
+    let mut run = start(&store, source, Value::Null, 1)?;
+    assert_eq!(outcome(&mut run)?, json!({"n": 3000, "total": 4498500}));
+    Ok(())
+}

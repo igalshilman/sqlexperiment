@@ -2,12 +2,13 @@
 //! a driver that answers a run's requests until it settles.
 #![allow(dead_code)]
 use anyhow::Result;
-use quickjs_durable::{Operation, Outcome, Programs, Run, Runtime, Scope, View};
+use quickjs_durable::{Limits, Operation, Outcome, Programs, Run, Runtime, Scope, View};
 use serde_json::{Value, json};
 use sqlite_kv::{Session, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 
 /// A scope's store in memory: what the tests read back from it.
@@ -70,10 +71,17 @@ impl Store {
 }
 
 /// The runtime every catalog of a test binary is on: compiling it is slow.
+/// Its turns are short, so a job that never returns fails quickly.
 pub fn runtime() -> Arc<Runtime> {
     static RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
     RUNTIME
-        .get_or_init(|| Arc::new(Runtime::new().expect("compile QuickJS")))
+        .get_or_init(|| {
+            let limits = Limits {
+                turn: Duration::from_secs(1),
+                ..Limits::default()
+            };
+            Arc::new(Runtime::new().expect("compile QuickJS").limited(limits))
+        })
         .clone()
 }
 

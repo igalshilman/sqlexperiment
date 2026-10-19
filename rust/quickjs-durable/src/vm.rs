@@ -2,6 +2,7 @@ use crate::db::Db;
 use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, Report, VmMeta, fingerprint};
 use crate::{heap, instrument::instrument, tracking::Tracker};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use wasmtime::error::Context;
 use wasmtime::{
@@ -13,11 +14,9 @@ use wasmtime::{Result, bail, ensure};
 
 const WASM: &[u8] = include_bytes!("../assets/quickjs.wasm");
 const BOOTSTRAP: &str = include_str!("../assets/guest.js");
-const FUEL: u64 = 200_000_000;
-/// Fuel left when a turn stops at its next safe boundary to checkpoint, so a
-/// long run of local requests makes progress across turns instead of trapping
-/// in every one of them. The rest covers that boundary's batch and capture.
-const CHECKPOINT_FUEL: u64 = FUEL / 2;
+/// How often the engine's epoch ticks: a running guest checks the clock, and
+/// yields to the executor, at its next function entry or loop back-edge.
+const TICK: Duration = Duration::from_millis(10);
 // Below upstream's 512 KiB ceiling: Wasmtime native frames need their own
 // headroom, especially in the instrumented interpreter. Reapply after restore.
 const MAX_STACK: i32 = 32 * 1024;
@@ -34,7 +33,7 @@ const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
 /// The runtime's version: an image restores only on the runtime that made it.
 /// Bump it with anything an image depends on: the Wasm, the bridge
 /// (`guest.js`), the limits above, the imports' behavior, the VM metadata.
-pub(crate) const VERSION: u64 = 6;
+pub(crate) const VERSION: u64 = 7;
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.
@@ -107,7 +106,43 @@ pub struct Runtime {
     /// The module, its imports resolved once for every VM.
     instance: InstancePre<Host>,
     tracking: Tracking,
+    limits: Limits,
 }
+
+/// How long a turn's JavaScript may run, by the wall clock. Nothing is
+/// replayed, so a turn needs no deterministic budget.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Past this, the run fails with a trap: a synchronous job that never
+    /// returns would otherwise hold the handler, and do so on every retry.
+    pub turn: Duration,
+    /// Past this, a turn answering local requests stops at the next one and
+    /// commits; the work goes on in the next turn.
+    pub checkpoint: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            turn: Duration::from_secs(10),
+            checkpoint: Duration::from_secs(1),
+        }
+    }
+}
+
+/// A turn's JavaScript ran past [`Limits::turn`].
+#[derive(Debug)]
+struct Overtime(Duration);
+impl std::fmt::Display for Overtime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Out of time: one synchronous job ran longer than a turn allows ({:?})",
+            self.0
+        )
+    }
+}
+impl std::error::Error for Overtime {}
 
 /// How a VM learns which pages a turn wrote, chosen once per process.
 #[derive(Clone)]
@@ -121,6 +156,9 @@ enum Tracking {
 }
 struct Host {
     now: u64,
+    /// When the turn began, and its limits.
+    began: Instant,
+    time: Limits,
     seed: [u8; 8],
     limits: StoreLimits,
     /// The scope's database, which the guest's host calls reach.
@@ -137,7 +175,9 @@ impl Runtime {
     pub(crate) fn tracked(native: bool) -> Result<Self> {
         validate_snapshot_abi(WASM)?;
         let mut config = Config::new();
-        config.consume_fuel(true);
+        // A cheap clock check at function entries and loop back-edges,
+        // instead of counting every instruction.
+        config.epoch_interruption(true);
         // A pool of instance slots, reused from VM to VM, with the first
         // pages of each memory kept resident: a new VM writes golden over
         // memory already mapped, instead of faulting in every page.
@@ -184,11 +224,29 @@ impl Runtime {
             }
         }
         let instance = linker(&engine)?.instantiate_pre(&module)?;
+        // The epoch's ticker, for as long as the engine lives.
+        let weak = engine.weak();
+        std::thread::Builder::new()
+            .name("qjs-epoch".into())
+            .spawn(move || {
+                while let Some(engine) = weak.upgrade() {
+                    engine.increment_epoch();
+                    drop(engine);
+                    std::thread::sleep(TICK);
+                }
+            })?;
         Ok(Self {
             engine,
             instance,
             tracking,
+            limits: Limits::default(),
         })
+    }
+
+    /// This runtime, with turns limited to `limits`.
+    pub fn limited(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Whether the kernel tracks writes, instead of instrumented stores.
@@ -252,16 +310,15 @@ impl std::fmt::Display for Uncatchable {
 impl std::error::Error for Uncatchable {}
 
 /// The guest's own failure, if `error` is one: a host's error is not. The
-/// guest ran out of fuel, or QuickJS hit an error no script can catch: its
-/// image is mid-mutation, and the same image and delivery would fail again.
+/// guest ran out of time, trapped, or QuickJS hit an error no script can
+/// catch: its image is mid-mutation, and the same image and delivery would
+/// likely fail again.
 pub(crate) fn trap(error: &wasmtime::Error) -> Option<String> {
     if let Some(trap) = error.downcast_ref::<wasmtime::Trap>() {
-        return Some(match trap {
-            wasmtime::Trap::OutOfFuel => {
-                "Out of fuel: one synchronous job ran longer than a turn allows".into()
-            }
-            trap => trap.to_string(),
-        });
+        return Some(trap.to_string());
+    }
+    if let Some(overtime) = error.downcast_ref::<Overtime>() {
+        return Some(overtime.to_string());
     }
     error.downcast_ref::<Uncatchable>().map(ToString::to_string)
 }
@@ -521,6 +578,8 @@ impl Vm {
     pub(crate) async fn new(runtime: &Runtime, identity: &str, now: u64) -> Result<Self> {
         let host = Host {
             now,
+            began: Instant::now(),
+            time: runtime.limits,
             seed: fingerprint(identity.as_bytes()).to_le_bytes(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(MAX_MEMORY)
@@ -530,7 +589,17 @@ impl Vm {
         };
         let mut store = Store::new(&runtime.engine, host);
         store.limiter(|h| &mut h.limits);
-        store.set_fuel(FUEL)?;
+        // At every tick: past the turn's limit, fail; else yield to the
+        // executor, so a long job does not hold its thread.
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(|store| {
+            let host = store.data();
+            let elapsed = host.began.elapsed();
+            if elapsed > host.time.turn {
+                return Err(wasmtime::Error::new(Overtime(host.time.turn)));
+            }
+            Ok(wasmtime::UpdateDeadline::Yield(1))
+        });
         let instance = runtime.instance.instantiate_async(&mut store).await?;
         let memory = instance
             .get_memory(&mut store, "memory")
@@ -606,16 +675,19 @@ impl Vm {
         self.free_value.call_async(&mut self.store, global).await?;
         Ok(())
     }
-    /// Begin a turn at logical time `now`, with a full fuel budget.
+    /// Begin a turn at logical time `now`, its clock started.
     pub(crate) fn begin_turn(&mut self, now: u64) -> Result<()> {
-        self.store.data_mut().now = now;
-        self.store.set_fuel(FUEL)
+        let host = self.store.data_mut();
+        host.now = now;
+        host.began = Instant::now();
+        Ok(())
     }
-    /// Whether the turn has spent half its fuel: time to stop at the next safe
-    /// boundary, so a long run of local requests goes on in the next turn
-    /// instead of running out.
+    /// Whether the turn has run past [`Limits::checkpoint`]: time to stop at
+    /// the next safe boundary, so a long run of local requests goes on in the
+    /// next turn instead of running out of time.
     pub(crate) fn tired(&self) -> Result<bool> {
-        Ok(self.store.get_fuel()? < CHECKPOINT_FUEL)
+        let host = self.store.data();
+        Ok(host.began.elapsed() > host.time.checkpoint)
     }
     /// The captured pages are committed: track writes anew.
     pub(crate) fn committed(&mut self) -> Result<()> {
