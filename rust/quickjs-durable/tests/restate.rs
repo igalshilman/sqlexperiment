@@ -73,8 +73,6 @@ async fn server() -> Server {
         .arg(dir.path())
         .env("RESTATE_BIND_IP", "127.0.0.1")
         .env("RESTATE_LISTEN_MODE", "tcp")
-        // The stores read state through v8's unjournaled gets.
-        .env("RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8", "true")
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()

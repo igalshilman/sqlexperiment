@@ -121,8 +121,8 @@ its own `SQLITE_KV_CACHE_FILE` and restart it after recreating a cluster.
 
 ## How it works
 
-**State access.** A get is a state read left out of the journal (protocol
-v8's ephemeral get), from the runtime unless this attempt wrote the key or
+**State access.** A get is a state read (journaled for now; left out of the
+journal once protocol v8 ships, see FUTURE.md), from the runtime unless this attempt wrote the key or
 the invocation started with it (lazy state, so an invocation does not start
 by loading every page). A set or clear is a state write, and returns at once.
 Restate keeps an attempt's writes, and its sends, in the order they were
@@ -259,7 +259,7 @@ storage in the object's database.
 ```sh
 make js   # from the repository root: the addon, the patched SDK, pnpm install
 cd typescript/tests && pnpm serve
-docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true ghcr.io/restatedev/restate:1.8.0   # Restate (see the repository's README, Requirements), in another terminal
+docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.8.0   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
 curl localhost:8080/Warehouse/apple/restock --json '{"id": "first", "qty": 10}'   # without stock, an order is rejected
