@@ -27,12 +27,12 @@ on the same runtime: CPython 3.15 in WebAssembly instead of QuickJS
 ## Run them
 
 ```sh
-make functions-python                                                              # from the repository's root; builds CPython for WASI the first time (minutes)
-ANTHROPIC_API_KEY=... target/release/functions                         # every function here, on port 9080
-npx @restatedev/restate-server                                               # Restate, in another terminal
+make functions-python                            # from the repository's root; builds CPython for WASI the first time (minutes)
+ANTHROPIC_API_KEY=... target/release/functions   # every function here, on port 9080
+npx @restatedev/restate-server                   # Restate, in another terminal
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
-curl localhost:8080/counter/alice/add --json 20                              # 20, a second later
-curl localhost:8080/counter/alice/get                                        # 20
+curl localhost:8080/counter/alice/add --json 20  # 20, a second later
+curl localhost:8080/counter/alice/get            # 20
 ```
 
 The object's key (`alice`) names a scope: calls under the same key share its

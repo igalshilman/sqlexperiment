@@ -24,12 +24,12 @@ export async function get(_, ctx) {
 ## Run them
 
 ```sh
-make functions                                                                     # from the repository's root
-ANTHROPIC_API_KEY=... target/release/functions                         # every function here, on port 9080
-npx @restatedev/restate-server  # Restate, in another terminal
+make functions                                   # from the repository's root
+ANTHROPIC_API_KEY=... target/release/functions   # every function here, on port 9080
+npx @restatedev/restate-server                   # Restate, in another terminal
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
-curl localhost:8080/counter/alice/add --json 20                              # 20, a second later
-curl localhost:8080/counter/alice/get                                        # 20; bob has a count of his own
+curl localhost:8080/counter/alice/add --json 20  # 20, a second later
+curl localhost:8080/counter/alice/get            # 20; bob has a count of his own
 ```
 
 The object's key (`alice`) names a scope: calls under the same key share its
