@@ -137,8 +137,8 @@ impl Run {
             });
         }
         let golden = programs.get(program)?.image();
-        let mut vm = Vm::new(programs.runtime(), run, now)?;
-        vm.restore(&golden)?;
+        let mut vm = Vm::new(programs.runtime(), run, now).await?;
+        vm.restore(&golden).await?;
         let commit = Commit {
             run: run.into(),
             program: program.into(),
@@ -226,7 +226,7 @@ impl Run {
         }
         self.usable = false;
         if self.live.is_none() {
-            self.live = Some(self.restore(now)?);
+            self.live = Some(self.restore(now).await?);
         }
         self.turn(Delivery::Complete(pending), now).await?;
         self.usable = true;
@@ -251,7 +251,7 @@ impl Run {
     }
 
     /// The committed image, from golden and the batches, in a new VM.
-    fn restore(&self, now: u64) -> Result<Live> {
+    async fn restore(&self, now: u64) -> Result<Live> {
         let commit = &self.commit;
         let mut base = check(&self.programs, commit)?.image();
         ensure!(
@@ -279,8 +279,8 @@ impl Run {
                 base.set(*index, page);
             }
         }
-        let mut vm = Vm::new(self.programs.runtime(), &commit.run, now)?;
-        vm.restore(&base)?;
+        let mut vm = Vm::new(self.programs.runtime(), &commit.run, now).await?;
+        vm.restore(&base).await?;
         Ok(Live { vm, base })
     }
 
@@ -297,7 +297,7 @@ impl Run {
         let mut live_pages = self.commit.live_pages;
         let (state, meta, memory_len, changed) = match ran {
             Ok(state) => {
-                let capture = live.vm.capture(&live.base)?;
+                let capture = live.vm.capture(&live.base).await?;
                 written.changed_pages = capture.pages.len();
                 written.examined_pages = capture.examined_pages;
                 let base = &mut live.base;
@@ -438,19 +438,20 @@ async fn run(
                 "maxTime": MAX_TIME,
                 "seed": seed,
             });
-            vm.invoke("init", &init)?;
-            vm.invoke("start", &input)?;
+            vm.invoke("init", &init).await?;
+            vm.invoke("start", &input).await?;
         }
         Delivery::Complete(outcomes) => {
             for (operation, outcome) in outcomes {
                 pending.retain(|pending| pending.id() != operation);
-                vm.invoke("deliver", &completion(&operation, outcome, now))?;
+                vm.invoke("deliver", &completion(&operation, outcome, now))
+                    .await?;
             }
         }
     }
     let report = loop {
-        vm.drain()?;
-        let report = vm.inspect()?;
+        vm.drain().await?;
+        let report = vm.inspect().await?;
         let mut answered = false;
         for operation in report.issued.iter().cloned() {
             let kv = match &operation {
@@ -464,7 +465,8 @@ async fn run(
             };
             let value = kv.map_err(wasmtime::Error::from_anyhow)?;
             let outcome = Outcome::success(value);
-            vm.invoke("deliver", &completion(operation.id(), outcome, now))?;
+            vm.invoke("deliver", &completion(operation.id(), outcome, now))
+                .await?;
             answered = true;
         }
         if !answered {
@@ -474,8 +476,8 @@ async fn run(
             // Every request so far is answered, and the answers are in the
             // heap and the job queue; no Wasm call is live. A wakeup, which
             // the host delivers in the next turn, runs the queued jobs then.
-            vm.call("pause", None)?;
-            let report = vm.inspect()?;
+            vm.call("pause", None).await?;
+            let report = vm.inspect().await?;
             wasmtime::ensure!(
                 matches!(&report.issued[..], [Operation::Resume { .. }]),
                 "Missing resume wakeup"

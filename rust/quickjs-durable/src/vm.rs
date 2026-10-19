@@ -156,7 +156,7 @@ impl Runtime {
             let native = Self::with(engine.clone(), WASM, Tracking::Native(Arc::new(tracker)));
             // The pool's memory must register: a VM tries.
             if let Ok(runtime) = native
-                && Vm::new(&runtime, "probe", 0)
+                && futures::executor::block_on(Vm::new(&runtime, "probe", 0))
                     .and_then(|vm| vm.written())
                     .is_ok()
             {
@@ -192,27 +192,38 @@ impl Runtime {
         matches!(self.tracking, Tracking::Native(_))
     }
 
+    /// Evaluate a program's source into its golden image. No host function
+    /// awaits anything while it runs, so it blocks rather than being async.
     pub(crate) fn golden(&self, name: &str, source: &str) -> Result<Image> {
-        let mut vm = Vm::new(self, &format!("program/{name}"), 0)?;
+        futures::executor::block_on(self.evaluate(name, source))
+    }
+
+    async fn evaluate(&self, name: &str, source: &str) -> Result<Image> {
+        let mut vm = Vm::new(self, &format!("program/{name}"), 0).await?;
         vm.instance
             .get_typed_func::<(), ()>(&mut vm.store, "_initialize")?
-            .call(&mut vm.store, ())?;
+            .call_async(&mut vm.store, ())
+            .await?;
         ensure!(
             vm.instance
                 .get_typed_func::<i32, i32>(&mut vm.store, "qjs_init2")?
-                .call(&mut vm.store, INTRINSICS)?
+                .call_async(&mut vm.store, INTRINSICS)
+                .await?
                 == 0,
             "QuickJS initialization failed"
         );
-        vm.limits()?;
-        vm.eval(BOOTSTRAP, false)?;
-        vm.eval(source, false)?;
-        vm.drain()?;
+        vm.limits().await?;
+        vm.eval(BOOTSTRAP, false).await?;
+        vm.eval(source, false).await?;
+        vm.drain().await?;
         ensure!(
-            vm.eval("typeof main === 'function'", true)?.as_deref() == Some("true"),
+            vm.eval("typeof main === 'function'", true)
+                .await?
+                .as_deref()
+                == Some("true"),
             "A program must define main(input, ctx)"
         );
-        vm.snapshot()
+        vm.snapshot().await
     }
 }
 
@@ -416,7 +427,7 @@ fn linker(engine: &Engine) -> Result<Linker<Host>> {
 }
 
 impl Vm {
-    pub(crate) fn new(runtime: &Runtime, identity: &str, now: u64) -> Result<Self> {
+    pub(crate) async fn new(runtime: &Runtime, identity: &str, now: u64) -> Result<Self> {
         let host = Host {
             now,
             seed: fingerprint(identity.as_bytes()).to_le_bytes(),
@@ -428,7 +439,7 @@ impl Vm {
         let mut store = Store::new(&runtime.engine, host);
         store.limiter(|h| &mut h.limits);
         store.set_fuel(FUEL)?;
-        let instance = runtime.instance.instantiate(&mut store)?;
+        let instance = runtime.instance.instantiate_async(&mut store).await?;
         let memory = instance
             .get_memory(&mut store, "memory")
             .context("Missing memory export")?;
@@ -512,16 +523,18 @@ impl Vm {
             Writes::Nothing => (0..len / PAGE).collect(),
         })
     }
-    fn limits(&mut self) -> Result<()> {
+    async fn limits(&mut self) -> Result<()> {
         self.instance
             .get_typed_func::<i32, ()>(&mut self.store, "qjs_set_memory_limit")?
-            .call(&mut self.store, MAX_HEAP)?;
+            .call_async(&mut self.store, MAX_HEAP)
+            .await?;
         self.instance
             .get_typed_func::<i32, ()>(&mut self.store, "qjs_set_max_stack_size")?
-            .call(&mut self.store, MAX_STACK)?;
+            .call_async(&mut self.store, MAX_STACK)
+            .await?;
         Ok(())
     }
-    pub(crate) fn restore(&mut self, image: &Image) -> Result<()> {
+    pub(crate) async fn restore(&mut self, image: &Image) -> Result<()> {
         ensure!(
             image.len() <= MAX_MEMORY && image.len().is_multiple_of(65536),
             "Invalid image size"
@@ -543,21 +556,26 @@ impl Vm {
             .set(&mut self.store, Val::I32(image.meta.stack))?;
         self.instance
             .get_typed_func::<(i32, i32), ()>(&mut self.store, "qjs_set_runtime_and_context")?
-            .call(&mut self.store, (image.meta.runtime, image.meta.context))?;
-        self.limits()
+            .call_async(&mut self.store, (image.meta.runtime, image.meta.context))
+            .await?;
+        self.limits().await
     }
-    fn alloc(&mut self, data: &[u8]) -> Result<i32> {
+    async fn alloc(&mut self, data: &[u8]) -> Result<i32> {
         let ptr = self
             .malloc
-            .call(&mut self.store, (data.len() + 1).try_into()?)?;
+            .call_async(&mut self.store, (data.len() + 1).try_into()?)
+            .await?;
         ensure!(ptr != 0, "Guest allocation failed");
         self.write(ptr as u32 as usize, data)?;
         self.write(ptr as u32 as usize + data.len(), &[0])?;
         Ok(ptr)
     }
-    fn string(&mut self, value: i32) -> Result<String> {
-        let len_ptr = self.alloc(&[0; 4])?;
-        let ptr = self.get_string.call(&mut self.store, (value, len_ptr))?;
+    async fn string(&mut self, value: i32) -> Result<String> {
+        let len_ptr = self.alloc(&[0; 4]).await?;
+        let ptr = self
+            .get_string
+            .call_async(&mut self.store, (value, len_ptr))
+            .await?;
         ensure!(ptr != 0, "String conversion failed");
         let mut len = [0; 4];
         self.memory
@@ -567,36 +585,39 @@ impl Vm {
         let mut bytes = vec![0; len];
         self.memory
             .read(&self.store, ptr as u32 as usize, &mut bytes)?;
-        self.free_string.call(&mut self.store, ptr)?;
-        self.free.call(&mut self.store, len_ptr)?;
+        self.free_string.call_async(&mut self.store, ptr).await?;
+        self.free.call_async(&mut self.store, len_ptr).await?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
-    fn exception(&mut self) -> Result<String> {
-        let ptr = self.get_exception.call(&mut self.store, ())?;
+    async fn exception(&mut self) -> Result<String> {
+        let ptr = self.get_exception.call_async(&mut self.store, ()).await?;
         ensure!(ptr != 0, "Missing exception value");
-        let result = self.string(ptr);
-        self.free_value.call(&mut self.store, ptr)?;
+        let result = self.string(ptr).await;
+        self.free_value.call_async(&mut self.store, ptr).await?;
         result
     }
-    fn eval(&mut self, code: &str, stringify: bool) -> Result<Option<String>> {
-        let code_ptr = self.alloc(code.as_bytes())?;
-        let filename = self.alloc(b"program.js")?;
-        let value = self.eval_fn.call(
-            &mut self.store,
-            (code_ptr, code.len().try_into()?, filename, 0),
-        )?;
-        self.free.call(&mut self.store, code_ptr)?;
-        self.free.call(&mut self.store, filename)?;
+    async fn eval(&mut self, code: &str, stringify: bool) -> Result<Option<String>> {
+        let code_ptr = self.alloc(code.as_bytes()).await?;
+        let filename = self.alloc(b"program.js").await?;
+        let value = self
+            .eval_fn
+            .call_async(
+                &mut self.store,
+                (code_ptr, code.len().try_into()?, filename, 0),
+            )
+            .await?;
+        self.free.call_async(&mut self.store, code_ptr).await?;
+        self.free.call_async(&mut self.store, filename).await?;
         ensure!(value != 0, "Missing evaluated value");
-        let is_exception = self.is_exception.call(&mut self.store, value)? != 0;
+        let is_exception = self.is_exception.call_async(&mut self.store, value).await? != 0;
         let result = if !is_exception && stringify {
-            Some(self.string(value)?)
+            Some(self.string(value).await?)
         } else {
             None
         };
-        self.free_value.call(&mut self.store, value)?;
+        self.free_value.call_async(&mut self.store, value).await?;
         if is_exception {
-            bail!("Guest exception: {}", self.exception()?)
+            bail!("Guest exception: {}", self.exception().await?)
         }
         Ok(result)
     }
@@ -605,65 +626,76 @@ impl Vm {
     /// source to compile, so it costs a fraction of an eval, and no argument
     /// can inject source. Every handle is freed before returning; after an
     /// error the turn is discarded, so leaks then don't matter.
-    pub(crate) fn call(&mut self, name: &str, argument: Option<&str>) -> Result<String> {
-        let global = self.global.call(&mut self.store, ())?;
+    pub(crate) async fn call(&mut self, name: &str, argument: Option<&str>) -> Result<String> {
+        let global = self.global.call_async(&mut self.store, ()).await?;
         ensure!(global != 0, "Missing global object");
-        let bridge = self.property(global, "__durable")?;
-        self.free_value.call(&mut self.store, global)?;
-        let function = self.property(bridge, name)?;
+        let bridge = self.property(global, "__durable").await?;
+        self.free_value.call_async(&mut self.store, global).await?;
+        let function = self.property(bridge, name).await?;
         let (argc, argv, value, text) = match argument {
             Some(argument) => {
-                let text = self.alloc(argument.as_bytes())?;
+                let text = self.alloc(argument.as_bytes()).await?;
                 let value = self
                     .new_string
-                    .call(&mut self.store, (text, argument.len().try_into()?))?;
+                    .call_async(&mut self.store, (text, argument.len().try_into()?))
+                    .await?;
                 ensure!(value != 0, "Guest string allocation failed");
-                let argv = self.alloc(&value.to_le_bytes())?;
+                let argv = self.alloc(&value.to_le_bytes()).await?;
                 (1, argv, value, text)
             }
             None => (0, 0, 0, 0),
         };
         let result = self
             .call_fn
-            .call(&mut self.store, (function, bridge, argc, argv))?;
+            .call_async(&mut self.store, (function, bridge, argc, argv))
+            .await?;
         for handle in [function, bridge, value] {
             if handle != 0 {
-                self.free_value.call(&mut self.store, handle)?;
+                self.free_value.call_async(&mut self.store, handle).await?;
             }
         }
         for buffer in [argv, text] {
             if buffer != 0 {
-                self.free.call(&mut self.store, buffer)?;
+                self.free.call_async(&mut self.store, buffer).await?;
             }
         }
         ensure!(result != 0, "Missing call result");
-        if self.is_exception.call(&mut self.store, result)? != 0 {
-            self.free_value.call(&mut self.store, result)?;
-            bail!("Guest exception: {}", self.exception()?)
+        if self
+            .is_exception
+            .call_async(&mut self.store, result)
+            .await?
+            != 0
+        {
+            self.free_value.call_async(&mut self.store, result).await?;
+            bail!("Guest exception: {}", self.exception().await?)
         }
-        let string = self.string(result);
-        self.free_value.call(&mut self.store, result)?;
+        let string = self.string(result).await;
+        self.free_value.call_async(&mut self.store, result).await?;
         string
     }
-    fn property(&mut self, object: i32, name: &str) -> Result<i32> {
-        let key = self.alloc(name.as_bytes())?;
-        let value = self.property.call(&mut self.store, (object, key))?;
-        self.free.call(&mut self.store, key)?;
+    async fn property(&mut self, object: i32, name: &str) -> Result<i32> {
+        let key = self.alloc(name.as_bytes()).await?;
+        let value = self
+            .property
+            .call_async(&mut self.store, (object, key))
+            .await?;
+        self.free.call_async(&mut self.store, key).await?;
         ensure!(value != 0, "Missing property {name}");
         Ok(value)
     }
-    pub(crate) fn invoke(&mut self, name: &str, value: &serde_json::Value) -> Result<()> {
-        self.call(name, Some(&serde_json::to_string(value)?))?;
+    pub(crate) async fn invoke(&mut self, name: &str, value: &serde_json::Value) -> Result<()> {
+        self.call(name, Some(&serde_json::to_string(value)?))
+            .await?;
         Ok(())
     }
     /// What the guest issued since it last reported, and where it stands.
-    pub(crate) fn inspect(&mut self) -> Result<Report> {
-        Ok(serde_json::from_str(&self.call("inspect", None)?)?)
+    pub(crate) async fn inspect(&mut self) -> Result<Report> {
+        Ok(serde_json::from_str(&self.call("inspect", None).await?)?)
     }
-    pub(crate) fn drain(&mut self) -> Result<()> {
-        while self.pending.call(&mut self.store, ())? != 0 {
-            if self.execute.call(&mut self.store, ())? < 0 {
-                return Err(wasmtime::Error::new(Uncatchable(self.exception()?)));
+    pub(crate) async fn drain(&mut self) -> Result<()> {
+        while self.pending.call_async(&mut self.store, ()).await? != 0 {
+            if self.execute.call_async(&mut self.store, ()).await? < 0 {
+                return Err(wasmtime::Error::new(Uncatchable(self.exception().await?)));
             }
         }
         Ok(())
@@ -675,9 +707,9 @@ impl Vm {
         }
         Ok(())
     }
-    fn snapshot(&mut self) -> Result<Image> {
+    async fn snapshot(&mut self) -> Result<Image> {
         // Only golden registration needs a complete copy of guest memory.
-        let meta = self.metadata()?;
+        let meta = self.metadata().await?;
         let memory = self.memory.data_mut(&mut self.store);
         memory[..meta.stack as u32 as usize].fill(0);
         for range in heap::dead(memory).context("Unexpected heap layout")? {
@@ -691,8 +723,8 @@ impl Vm {
     /// zeroed first: the stack below its pointer (between calls no frame is
     /// live there), and free heap chunks. The turn's leftover frames and the
     /// memory it allocated and freed would otherwise be saved as changes.
-    pub(crate) fn capture(&mut self, base: &Image) -> Result<Capture> {
-        let meta = self.metadata()?;
+    pub(crate) async fn capture(&mut self, base: &Image) -> Result<Capture> {
+        let meta = self.metadata().await?;
         let stack = meta.stack as u32 as usize;
         let memory_len = self.memory.data_size(&self.store);
         ensure!(
@@ -738,15 +770,17 @@ impl Vm {
             examined_pages,
         })
     }
-    fn metadata(&mut self) -> Result<VmMeta> {
+    async fn metadata(&mut self) -> Result<VmMeta> {
         let runtime = self
             .instance
             .get_typed_func::<(), i32>(&mut self.store, "qjs_get_runtime_ptr")?
-            .call(&mut self.store, ())?;
+            .call_async(&mut self.store, ())
+            .await?;
         let context = self
             .instance
             .get_typed_func::<(), i32>(&mut self.store, "qjs_get_context_ptr")?
-            .call(&mut self.store, ())?;
+            .call_async(&mut self.store, ())
+            .await?;
         let stack = self
             .stack
             .get(&mut self.store)
