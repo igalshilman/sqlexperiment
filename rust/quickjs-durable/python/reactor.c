@@ -19,6 +19,13 @@ durable_host(const char *operation, int32_t operation_len, const char *request,
 __attribute__((import_module("durable"), import_name("host_read"))) void
 durable_host_read(char *answer);
 
+// How much of the stack CPython's recursion guard allows. Wasmtime's native
+// stack (vm.rs, NATIVE_STACK) must outlast it: measured, CPython's C frames
+// take 10 to 30 times more native stack than stack here.
+#define STACK_BUDGET (512 * 1024)
+// The top of the stack: wasm-ld places it first, growing down to 0.
+extern char __stack_high;
+
 // The last call's result (or error text), until the next call.
 static char *result;
 static int32_t result_len;
@@ -115,6 +122,14 @@ EXPORT(py_init) int32_t py_init(void) {
     const char *message = status.err_msg ? status.err_msg : "Python init";
     set_result(message, strlen(message));
     return -1;
+  }
+  // CPython's C recursion guard measures this stack, in linear memory. Each
+  // C frame also takes Wasmtime's native stack, which the guard cannot see:
+  // keep to a budget under which the native stack lasts longer, so that deep
+  // recursion raises RecursionError instead of trapping.
+  if (PyUnstable_ThreadState_SetStackProtection(
+          PyThreadState_Get(), &__stack_high - STACK_BUDGET, STACK_BUDGET) < 0) {
+    return fail();
   }
   return 0;
 }

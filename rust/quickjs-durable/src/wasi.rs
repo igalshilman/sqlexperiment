@@ -142,7 +142,10 @@ pub(crate) struct Fds {
 impl Fds {
     /// Nothing open but stdio and the root: the VM's memory is all its state.
     pub(crate) fn idle(&self) -> Result<()> {
-        ensure!(self.open.is_empty(), "A file is open across a wait");
+        ensure!(
+            self.open.is_empty(),
+            "A file is open across a wait: close it (`with open(...)`) before awaiting"
+        );
         Ok(())
     }
 

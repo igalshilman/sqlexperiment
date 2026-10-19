@@ -6,7 +6,7 @@
 //! behind.
 use anyhow::Result;
 use common::*;
-use quickjs_durable::{Run, Scope, View};
+use quickjs_durable::{Language, Run, Scope, View};
 use serde_json::{Value, json};
 use sqlite_kv::{
     NamespaceCache,
@@ -38,6 +38,44 @@ const FLOW: &str = r#"export async function main(input, ctx){
     const [{rows}]=ctx.db.sql`SELECT count(*) AS rows FROM log`;
     return {sum:big[0]+big[1000], id:echoed.id, rows, inserted};
 }"#;
+
+/// FLOW, in Python.
+const FLOW_PY: &str = r#"
+async def main(input, ctx):
+    # The heap counts the rows it inserted; the database must agree, whatever
+    # a crash kept: a turn's SQL commits with the turn.
+    ctx.db.sql("CREATE TABLE IF NOT EXISTS log(n INTEGER)")
+    inserted = 0
+
+    def insert():
+        nonlocal inserted
+        inserted += 1
+        ctx.db.sql(t"INSERT INTO log VALUES({inserted})")
+
+    before = await ctx.kv.get("n") or 0
+    insert()
+    await ctx.kv.set("n", before + input)
+    echoed = await ctx.rpc.call("Echo", "echo", {"n": before + input})
+    insert()
+    await ctx.kv.set("echoed", echoed["input"]["n"])
+    big = bytearray(b"" * (512 * 1024))
+    await ctx.sleep(0.005)
+    insert()
+    try:
+        with ctx.db.transaction():
+            ctx.db.sql("INSERT INTO log VALUES(-1)")
+            raise RuntimeError("undo")
+    except RuntimeError:
+        pass
+    big[1000] = 2
+    await ctx.kv.delete("n")
+    await ctx.call("observe")
+    [row] = ctx.db.sql("SELECT count(*) AS rows FROM log")
+    return {"sum": big[0] + big[1000], "id": echoed["id"], "rows": row["rows"], "inserted": inserted}
+"#;
+
+/// The flow in each language.
+const FLOWS: [(Language, &str); 2] = [(Language::JavaScript, FLOW), (Language::Python, FLOW_PY)];
 
 /// A store whose `nth` sync fails, storing nothing, read back through
 /// `memory`.
@@ -98,15 +136,24 @@ impl Faulty {
     }
 }
 
-/// The run to its end in `scope`: started, or another attempt.
-fn attempt(scope: &Scope) -> Result<View> {
-    let mut run: Run = start_in(scope, FLOW, json!(5), 1)?;
+/// The run of `flow` to its end in `scope`: started, or another attempt.
+fn attempt(flow: (Language, &str), scope: &Scope) -> Result<View> {
+    let mut run: Run = block(Run::start(
+        &catalog(flow.0, flow.1),
+        scope,
+        "s",
+        "r",
+        "v1",
+        "main",
+        json!(5),
+        1,
+    ))?;
     finish(&mut run)
 }
 
-fn reference() -> Result<View> {
+fn reference(flow: (Language, &str)) -> Result<View> {
     let store = Store::default();
-    let expected = attempt(&store.scope())?;
+    let expected = attempt(flow, &store.scope())?;
     assert_eq!(
         value(&expected),
         json!({"sum":3,"id":"r/2","rows":3,"inserted":3})
@@ -128,14 +175,21 @@ fn assert_ended_as(store: &Store, done: &View, expected: &View, case: &str) {
 
 #[test]
 fn an_attempt_after_a_crash_at_any_write_ends_as_without_one() -> Result<()> {
-    let expected = reference()?;
+    for flow in FLOWS {
+        crash_at_any_write(flow)?;
+    }
+    Ok(())
+}
+
+fn crash_at_any_write(flow: (Language, &str)) -> Result<()> {
+    let expected = reference(flow)?;
     let mut cases = 0;
     for cached in [false, true] {
         for nth in 1.. {
             let store = Faulty::new();
             let cache = cached.then(fresh_namespace);
             store.arm(nth);
-            let failed = attempt(&store.scope(&cache)).is_err();
+            let failed = attempt(flow, &store.scope(&cache)).is_err();
             if !store.faulted() {
                 assert!(!failed, "a run fails without a fault");
                 break;
@@ -149,8 +203,8 @@ fn an_attempt_after_a_crash_at_any_write_ends_as_without_one() -> Result<()> {
                     0 => cache.clone(),
                     _ => cached.then(fresh_namespace),
                 };
-                let case = format!("sync #{nth}, {kept} kept, cached={cached}");
-                let done = attempt(&crashed.scope(&cache))?;
+                let case = format!("{:?}: sync #{nth}, {kept} kept, cached={cached}", flow.0);
+                let done = attempt(flow, &crashed.scope(&cache))?;
                 assert_ended_as(&crashed.memory, &done, &expected, &case);
                 cases += 1;
             }
@@ -165,12 +219,19 @@ fn an_attempt_after_a_crash_at_any_write_ends_as_without_one() -> Result<()> {
 /// crash.
 #[test]
 fn a_crash_while_recovering_from_one_changes_nothing() -> Result<()> {
-    let expected = reference()?;
+    for flow in FLOWS {
+        crash_while_recovering(flow)?;
+    }
+    Ok(())
+}
+
+fn crash_while_recovering(flow: (Language, &str)) -> Result<()> {
+    let expected = reference(flow)?;
     let mut attempts = 0;
     for first in 1.. {
         let store = Faulty::new();
         store.arm(first);
-        let _ = attempt(&store.scope(&None));
+        let _ = attempt(flow, &store.scope(&None));
         if !store.faulted() {
             break;
         }
@@ -178,18 +239,18 @@ fn a_crash_while_recovering_from_one_changes_nothing() -> Result<()> {
             for second in 1.. {
                 let store = Faulty::over(crashed.faults.inner.fork());
                 store.arm(second);
-                let recovered = attempt(&store.scope(&None));
+                let recovered = attempt(flow, &store.scope(&None));
                 if !store.faulted() {
                     assert_ended_as(&store.memory, &recovered?, &expected, "");
                     break;
                 }
                 let store = store.crashed(store.unsynced());
-                let done = attempt(&store.scope(&None))?;
+                let done = attempt(flow, &store.scope(&None))?;
                 assert_ended_as(
                     &store.memory,
                     &done,
                     &expected,
-                    &format!("#{first}, then #{second}"),
+                    &format!("{:?}: #{first}, then #{second}", flow.0),
                 );
                 attempts += 1;
             }

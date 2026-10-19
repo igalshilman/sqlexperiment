@@ -87,17 +87,52 @@ class _Loop(asyncio.AbstractEventLoop):
             while self._ready:
                 handle = self._ready.popleft()
                 if not handle.cancelled():
-                    handle._run()
+                    try:
+                        handle._run()
+                    except (SystemExit, KeyboardInterrupt):
+                        # A task raised it: the task holds it as its error,
+                        # and if it is main's, the run fails with it.
+                        pass
         finally:
             events._set_running_loop(None)
+
+
+# What crosses to the host: JSON, read there as UTF-8, with numbers as
+# doubles, and at most a megabyte.
+_MAX_INT = 2**53
+_MAX_BYTES = 1024 * 1024
+
+
+class _Encoder(json.JSONEncoder):
+    def iterencode(self, value, _one_shot=False):
+        return super().iterencode(_checked(value), _one_shot)
+
+
+def _checked(value):
+    """`value`, with an int a double cannot hold refused."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        if not -_MAX_INT < value < _MAX_INT:
+            raise ValueError(f"{value} is beyond 2**53: send it as a string")
+        return value
+    if isinstance(value, dict):
+        return {key: _checked(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_checked(item) for item in value]
+    return value
 
 
 def _plain(value):
     """`value` as plain JSON data, or a TypeError."""
     try:
-        return json.loads(json.dumps(value, allow_nan=False, ensure_ascii=False))
-    except (TypeError, ValueError) as error:
+        text = json.dumps(value, allow_nan=False, ensure_ascii=False, cls=_Encoder)
+        size = len(text.encode())
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
         raise TypeError(f"Expected JSON data: {error}") from None
+    if size > _MAX_BYTES:
+        raise TypeError(f"Expected JSON data of at most 1 MiB, not {size} bytes")
+    return json.loads(text)
 
 
 def _failure(error):
@@ -180,14 +215,14 @@ class Kv:
     def __init__(self, bridge):
         self._bridge = bridge
 
-    def get(self, key):
-        return self._bridge.request({"kind": "kv.get", "key": _key(key)})
+    async def get(self, key):
+        return await self._bridge.request({"kind": "kv.get", "key": _key(key)})
 
-    def set(self, key, value):
-        return self._bridge.request({"kind": "kv.set", "key": _key(key), "value": _plain(value)})
+    async def set(self, key, value):
+        return await self._bridge.request({"kind": "kv.set", "key": _key(key), "value": _plain(value)})
 
-    def delete(self, key):
-        return self._bridge.request({"kind": "kv.delete", "key": _key(key)})
+    async def delete(self, key):
+        return await self._bridge.request({"kind": "kv.delete", "key": _key(key)})
 
 
 def _key(key):
@@ -202,7 +237,7 @@ class Rpc:
     def __init__(self, bridge):
         self._bridge = bridge
 
-    def call(self, service, handler, input=None, *, key=None):
+    async def call(self, service, handler, input=None, *, key=None):
         """Call `service`'s `handler` (on object `key`, if given) with `input`;
         its answer."""
         if not (isinstance(service, str) and service and isinstance(handler, str) and handler):
@@ -210,13 +245,13 @@ class Rpc:
         target = {"service": service, "handler": handler}
         if key is not None:
             target["key"] = _key(key)
-        return self._bridge.request({"kind": "rpc", "target": target, "input": _plain(input)})
+        return await self._bridge.request({"kind": "rpc", "target": target, "input": _plain(input)})
 
 
 class Context:
     """What a program's handlers get, as `ctx`: their scope's state, and their
-    durable operations. Each returns an awaitable; await several at once with
-    `asyncio.gather`."""
+    durable operations. Each is a coroutine: await it, or run several at once
+    with `asyncio.gather` or a task group."""
 
     def __init__(self, bridge):
         self._bridge = bridge
@@ -229,11 +264,11 @@ class Context:
         """The scope: the key of the object this program is served as."""
         return self._bridge.scope
 
-    def call(self, name, args=None):
+    async def call(self, name, args=None):
         """The host's operation `name` (a model call, a tool), with `args`."""
         if not isinstance(name, str) or not name:
             raise TypeError("An operation name is a nonempty string")
-        return self._bridge.request({"kind": "call", "name": name, "args": _plain(args)})
+        return await self._bridge.request({"kind": "call", "name": name, "args": _plain(args)})
 
     async def sleep(self, seconds):
         """Wait `seconds`, durably (as `asyncio.sleep` does here)."""

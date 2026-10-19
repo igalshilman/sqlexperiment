@@ -22,6 +22,12 @@ use wasmtime::{Result, ensure};
 /// How often the engine's epoch ticks: a running guest checks the clock, and
 /// yields to the executor, at its next function entry or loop back-edge.
 const TICK: Duration = Duration::from_millis(10);
+/// Wasmtime's own stack for a VM's frames. CPython's frames take 10 to 30
+/// times more of it than of their stack in linear memory, which its
+/// recursion guard measures (512 KiB, `python/reactor.c`): with less,
+/// deep recursion in C (`json.dumps`, `repr` of nested lists) traps instead
+/// of raising `RecursionError`.
+const NATIVE_STACK: usize = 32 << 20;
 /// Most VMs at once, live or starting, in a process. Past it, starting one
 /// fails as [`exhausted`], and the attempt is retried.
 const POOL: u32 = 1000;
@@ -208,6 +214,11 @@ impl Runtime {
         // A cheap clock check at function entries and loop back-edges,
         // instead of counting every instruction.
         config.epoch_interruption(true);
+        // Room for deep C recursion in CPython, whose guard counts only its
+        // stack in linear memory (python/reactor.c). Address space: pages are
+        // touched only as deep as a guest recurses.
+        config.max_wasm_stack(NATIVE_STACK);
+        config.async_stack_size(NATIVE_STACK + (1 << 20));
         // A pool of instance slots, reused from VM to VM, with the first
         // pages of each memory kept resident: a new VM writes golden over
         // memory already mapped, instead of faulting in every page.
@@ -777,8 +788,11 @@ impl Vm {
     /// live there), and free heap chunks. The turn's leftover frames and the
     /// memory it allocated and freed would otherwise be saved as changes.
     pub(crate) async fn capture(&mut self, base: &Image) -> Result<Capture> {
-        // Open files are host state that no image keeps.
-        self.store.data().fds.idle()?;
+        // Open files are host state that no image keeps: the same turn would
+        // leave them open again, so the run fails rather than retrying.
+        if let Err(error) = self.store.data().fds.idle() {
+            return Err(wasmtime::Error::new(Uncatchable(error.to_string())));
+        }
         let meta = self.metadata().await?;
         let stack = meta.stack as u32 as usize;
         let memory_len = self.memory.data_size(&self.store);

@@ -208,3 +208,143 @@ async def main(input, ctx):
     assert_eq!(kv(&store, "tuple"), Some(json!([1, "two"])));
     Ok(())
 }
+
+/// The outcome of Python `source`, run to its end.
+fn outcome(source: &str) -> Result<quickjs_durable::View> {
+    let store = Store::default();
+    let mut run = start_python(&store, source, Value::Null, 1000)?;
+    finish(&mut run)
+}
+
+fn failure(view: &quickjs_durable::View) -> (String, String) {
+    match &view.state.outcome {
+        Some(Outcome::Failure { error, .. }) => (error.name.clone(), error.message.clone()),
+        other => panic!("Expected a failure, not {other:?}"),
+    }
+}
+
+/// Deep recursion in C raises RecursionError, which the program can catch,
+/// instead of exhausting Wasmtime's stack; so does running out of memory.
+#[test]
+fn python_runs_out_of_stack_and_memory_catchably() -> Result<()> {
+    let source = r#"
+import json
+
+async def main(input, ctx):
+    nested = []
+    for _ in range(100_000):
+        nested = [nested]
+    caught = []
+    for dump in (json.dumps, repr):
+        try:
+            dump(nested)
+        except RecursionError:
+            caught.append(dump.__name__)
+    try:
+        bytearray(200 * 1024 * 1024)
+    except MemoryError:
+        caught.append("memory")
+    await ctx.sleep(0.001)
+    return caught
+"#;
+    assert_eq!(value(&outcome(source)?), json!(["dumps", "repr", "memory"]));
+    Ok(())
+}
+
+/// What a program cannot do fails as it would in Python, where it can be
+/// caught: no threads, no blocking sleeps, no writes.
+#[test]
+fn python_has_no_threads_sleeps_or_writes() -> Result<()> {
+    let source = r#"
+import threading, time
+
+async def main(input, ctx):
+    errors = []
+    for attempt in (
+        lambda: threading.Thread(target=print).start(),
+        lambda: time.sleep(0.1),
+        lambda: open("/tmp/x", "w"),
+    ):
+        try:
+            attempt()
+        except (RuntimeError, OSError) as error:
+            errors.append(type(error).__name__)
+    return errors
+"#;
+    assert_eq!(
+        value(&outcome(source)?),
+        json!(["RuntimeError", "OSError", "OSError"])
+    );
+    Ok(())
+}
+
+/// `sys.exit` fails the run like any exception, and so do a value JSON
+/// cannot carry exactly and a file left open across a wait.
+#[test]
+fn python_exits_and_bad_values_fail_the_run() -> Result<()> {
+    let exit =
+        "import sys\nasync def main(input, ctx):\n    await ctx.sleep(0.001)\n    sys.exit(3)\n";
+    assert_eq!(failure(&outcome(exit)?), ("SystemExit".into(), "3".into()));
+    let surrogate = "async def main(input, ctx):\n    return '\\ud800'\n";
+    assert_eq!(failure(&outcome(surrogate)?).0, "TypeError");
+    let big = "async def main(input, ctx):\n    await ctx.kv.set('n', 2**70)\n";
+    let (name, message) = failure(&outcome(big)?);
+    assert!(
+        name == "TypeError" && message.contains("beyond 2**53"),
+        "{message}"
+    );
+    let huge = "async def main(input, ctx):\n    return 'x' * (2 * 1024 * 1024)\n";
+    assert_eq!(failure(&outcome(huge)?).0, "TypeError");
+    let open = "async def main(input, ctx):\n    f = open('/lib/python3.15/os.py')\n    await ctx.sleep(0.001)\n    return f.readline()\n";
+    let (_, message) = failure(&outcome(open)?);
+    assert!(
+        message.contains("A file is open across a wait"),
+        "{message}"
+    );
+    Ok(())
+}
+
+/// Async generators, context variables and task groups live across waits.
+#[test]
+fn python_async_generators_and_task_groups_survive_waits() -> Result<()> {
+    let source = r#"
+import asyncio, contextvars
+
+factor = contextvars.ContextVar("factor")
+
+async def main(input, ctx):
+    async def counted():
+        for k in range(3):
+            await ctx.sleep(0.001)
+            yield k * factor.get()
+
+    factor.set(10)
+    seen = [x async for x in counted()]
+
+    async def boom():
+        await ctx.sleep(0.001)
+        raise ValueError("boom")
+
+    try:
+        async with asyncio.TaskGroup() as group:
+            group.create_task(boom())
+            group.create_task(ctx.rpc.call("S", "h", 1))
+    except* ValueError as errors:
+        caught = [str(error) for error in errors.exceptions]
+    return {"seen": seen, "caught": caught}
+"#;
+    let store = Store::default();
+    start_python(&store, source, Value::Null, 1)?;
+    // Every turn on a restored VM.
+    loop {
+        let mut run = start_python(&store, source, Value::Null, 1)?;
+        if run.view().state.outcome.is_some() {
+            assert_eq!(
+                value(&run.view()),
+                json!({"seen": [0, 10, 20], "caught": ["boom"]})
+            );
+            return Ok(());
+        }
+        step(&mut run)?;
+    }
+}
