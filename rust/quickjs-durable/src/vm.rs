@@ -122,6 +122,10 @@ pub struct Runtime {
     quickjs: InstancePre<Host>,
     /// CPython, loaded with the first Python program.
     python: OnceLock<std::result::Result<PythonModule, String>>,
+    /// With `QJS_COW`: each program's module, its memory starting as the
+    /// program's golden image (mapped copy-on-write by Wasmtime), by that
+    /// image's address.
+    seeded: std::sync::Mutex<std::collections::HashMap<usize, InstancePre<Host>>>,
     tracking: Tracking,
     limits: Limits,
 }
@@ -232,7 +236,7 @@ impl Runtime {
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
         // Memory starts as golden, written in: no copy-on-write image of the
         // module's data, which would also replace a slot's tracked mapping.
-        config.memory_init_cow(false);
+        config.memory_init_cow(cow());
         let engine = Engine::new(&config)?;
         if cfg!(feature = "full-scan") {
             return Self::with(engine, Tracking::Nothing);
@@ -270,6 +274,7 @@ impl Runtime {
             engine,
             quickjs,
             python: OnceLock::new(),
+            seeded: Default::default(),
             tracking,
             limits: Limits::default(),
         })
@@ -323,7 +328,38 @@ impl Runtime {
         name: &str,
         source: &str,
     ) -> Result<(Image, Vec<String>)> {
-        futures::executor::block_on(self.evaluate(language, name, source))
+        let (image, handlers) = futures::executor::block_on(self.evaluate(language, name, source))?;
+        if cow() {
+            self.seed(language, &image)?;
+        }
+        Ok((image, handlers))
+    }
+
+    /// Compile the engine with `image`'s golden memory as its initial
+    /// memory: Wasmtime maps it copy-on-write into each new VM of the
+    /// program, instead of the runtime writing it.
+    fn seed(&self, language: Language, image: &Image) -> Result<()> {
+        let mut linker = base_linker(&self.engine)?;
+        let module = match language {
+            Language::JavaScript => {
+                quickjs::link(&mut linker)?;
+                module(
+                    &self.engine,
+                    &self.tracking,
+                    &seeded(quickjs::WASM, image.golden_memory())?,
+                )?
+            }
+            Language::Python => {
+                python::link(&mut linker)?;
+                let build = python::Build::load()?;
+                let wasm = seeded(&build.wasm, image.golden_memory())?;
+                cached(&self.engine, &self.tracking, &wasm, &build.dir)?
+            }
+        };
+        let key = Arc::as_ptr(image.golden_memory()) as usize;
+        let instance = linker.instantiate_pre(&module)?;
+        self.seeded.lock().unwrap().insert(key, instance);
+        Ok(())
     }
 
     async fn evaluate(
@@ -396,6 +432,67 @@ fn cached(
         let _ = std::fs::rename(&temporary, &path);
     }
     Ok(module)
+}
+
+/// Whether VMs start from their program's golden image mapped copy-on-write
+/// (`QJS_COW=1`), instead of having it written in.
+fn cow() -> bool {
+    std::env::var_os("QJS_COW").is_some()
+}
+
+/// `wasm` with its memory starting as `memory`: one data segment for each
+/// run of pages that are not all zeros, in place of its own segments.
+fn seeded(wasm: &[u8], memory: &[u8]) -> Result<Vec<u8>> {
+    use wasm_encoder::{
+        ConstExpr, DataCountSection, DataSection, MemorySection, MemoryType, RawSection,
+    };
+    let mut data = DataSection::new();
+    let zero = |page: &[u8]| page.iter().all(|byte| *byte == 0);
+    let pages: Vec<&[u8]> = memory.chunks(PAGE).collect();
+    let mut index = 0;
+    while index < pages.len() {
+        if zero(pages[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < pages.len() && !zero(pages[index]) {
+            index += 1;
+        }
+        let bytes = memory[start * PAGE..index * PAGE].iter().copied();
+        data.active(0, &ConstExpr::i32_const((start * PAGE) as i32), bytes);
+    }
+    let mut module = wasm_encoder::Module::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        let payload = payload?;
+        match &payload {
+            wasmparser::Payload::MemorySection(reader) => {
+                let original = reader.clone().into_iter().next().context("No memory")??;
+                let mut memories = MemorySection::new();
+                memories.memory(MemoryType {
+                    minimum: (memory.len() / 65536) as u64,
+                    maximum: original.maximum,
+                    memory64: false,
+                    shared: false,
+                    page_size_log2: None,
+                });
+                module.section(&memories);
+            }
+            wasmparser::Payload::DataCountSection { .. } => {
+                module.section(&DataCountSection { count: data.len() });
+            }
+            wasmparser::Payload::DataSection(_) => {
+                module.section(&data);
+            }
+            _ => {
+                if let Some((id, range)) = payload.as_section() {
+                    let data = &wasm[range.start as usize..range.end as usize];
+                    module.section(&RawSection { id, data });
+                }
+            }
+        }
+    }
+    Ok(module.finish())
 }
 
 /// The value of `wasm`'s exported constant `__heap_base`.
@@ -492,6 +589,9 @@ pub(crate) struct Vm {
     guest: Guest,
     /// Where the allocator's heap starts, for [`heap::dead`].
     heap: usize,
+    /// The golden memory this VM's memory started as, if it did: a restore
+    /// relative to it writes only the pages that differ.
+    golden: Option<usize>,
 }
 
 pub(crate) fn caller_memory(c: &mut Caller<'_, Host>) -> Result<Memory> {
@@ -588,6 +688,30 @@ impl Vm {
         identity: &str,
         now: u64,
     ) -> Result<Self> {
+        Self::starting(runtime, language, None, identity, now).await
+    }
+
+    /// A VM to restore `image` into: where the runtime has a module whose
+    /// memory starts as the image's golden memory, one of that module.
+    pub(crate) async fn for_image(
+        runtime: &Runtime,
+        language: Language,
+        image: &Image,
+        identity: &str,
+        now: u64,
+    ) -> Result<Self> {
+        Self::starting(runtime, language, Some(image), identity, now).await
+    }
+
+    async fn starting(
+        runtime: &Runtime,
+        language: Language,
+        image: Option<&Image>,
+        identity: &str,
+        now: u64,
+    ) -> Result<Self> {
+        let key = image.map(|image| Arc::as_ptr(image.golden_memory()) as usize);
+        let seeded = key.and_then(|key| runtime.seeded.lock().unwrap().get(&key).cloned());
         let python = match language {
             Language::JavaScript => None,
             Language::Python => Some(runtime.python()?),
@@ -620,9 +744,10 @@ impl Vm {
             }
             Ok(wasmtime::UpdateDeadline::Yield(1))
         });
-        let instance = match python {
-            None => &runtime.quickjs,
-            Some(python) => &python.instance,
+        let instance = match (&seeded, python) {
+            (Some(seeded), _) => seeded,
+            (None, None) => &runtime.quickjs,
+            (None, Some(python)) => &python.instance,
         }
         .instantiate_async(&mut store)
         .await?;
@@ -667,6 +792,7 @@ impl Vm {
             writes,
             guest,
             heap,
+            golden: seeded.and(key),
         })
     }
     /// Let the guest's host calls reach `db`.
@@ -728,7 +854,11 @@ impl Vm {
             self.memory
                 .grow(&mut self.store, ((image.len() - current) / 65536) as u64)?;
         }
-        image.write(self.memory.data_mut(&mut self.store));
+        if self.golden == Some(Arc::as_ptr(image.golden_memory()) as usize) {
+            image.write_changed(self.memory.data_mut(&mut self.store));
+        } else {
+            image.write(self.memory.data_mut(&mut self.store));
+        }
         // Committed restore bytes are not new writes. Begin tracking before
         // re-binding runtime pointers and limits, which may modify memory.
         self.committed()?;

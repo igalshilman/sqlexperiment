@@ -225,6 +225,19 @@ impl Image {
     pub fn changed(&self) -> impl Iterator<Item = u32> + '_ {
         self.changed.keys().copied()
     }
+    /// The golden memory this image is relative to, shared by every image of
+    /// the program.
+    pub fn golden_memory(&self) -> &Arc<Vec<u8>> {
+        &self.golden
+    }
+    /// Write only the pages that differ from golden over `memory`, which
+    /// holds golden already (and zeros beyond it).
+    pub fn write_changed(&self, memory: &mut [u8]) {
+        for (index, page) in &self.changed {
+            let at = *index as usize * PAGE;
+            memory[at..at + PAGE].copy_from_slice(page);
+        }
+    }
     /// Write the image over `memory`, of its length.
     pub fn write(&self, memory: &mut [u8]) {
         memory[..self.golden.len()].copy_from_slice(&self.golden);
