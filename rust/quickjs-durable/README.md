@@ -8,7 +8,7 @@ after a crash, the runtime restores that memory and carries on from where the
 program stopped.
 
 ```js
-// programs/counter.js: served as the virtual object `counter`
+// examples-functions/counter.js: served as the virtual object `counter`
 async function main(input, ctx) {
   const n = ((await ctx.kv.get('count')) ?? 0) + input;
   await ctx.kv.set('count', n);
@@ -17,46 +17,10 @@ async function main(input, ctx) {
 }
 ```
 
-```sh
-make qjs                                              # from the repository's root
-ANTHROPIC_API_KEY=... target/release/quickjs-durable  # the programs, on port 9080
-npx @restatedev/restate-server                        # Restate, in another terminal
-curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
-curl localhost:8080/counter/alice/run --json 20       # 20, a second later
-```
-
-Each file `programs/<name>.js` becomes the virtual object `<name>`. The
-object's key names a scope: runs under the same key share its database
-(`ctx.db`) and `ctx.kv`. More in [`programs/`](programs): notes in SQL
-([`notes`](programs/notes.js)), a saga ([`checkout`](programs/checkout.js)), retries
-with backoff ([`retry`](programs/retry.js)), a deadline
-([`timeout`](programs/timeout.js)), an AI agent with the shop as its tools
-([`assistant`](programs/assistant.js)), and a coding agent with a shell and
-files ([`coder`](programs/coder.js)), served by the
-[`workspace`](src/workspace.rs) object.
-
-## Writing a program
-
-`ctx.db.sql` for the scope's SQL database, a tagged template whose `${}`
-values are parameters, never SQL text; `ctx.db.transaction(fn)` to undo
-`fn`'s statements if it throws. `ctx.kv.get/set/delete(key)` for the scope's
-JSON state, `ctx.rpc.call({ service, handler, key? }, input)` for any Restate service, and
-`ctx.sleep(ms)`; `ctx.key` is the object's key. Models are a service too: `claude/messages` takes a
-[Messages API](https://platform.claude.com/docs/en/api/messages) request.
-
-- All I/O goes through `ctx`; values are JSON.
-- SQL is synchronous and commits with the turn, together with the run's
-  memory: a program needs no transaction to stay consistent with itself.
-  `transaction(fn)` is for rollback; `fn` cannot await, and `BEGIN`/`COMMIT`
-  are refused.
-- The run ends when `main` settles: unlike Node.js, promises still pending are
-  dropped. Await what must happen.
-- A scope runs one run at a time.
-- Compute as long as you need: a turn may run 10 minutes of JavaScript
-  without awaiting (`QJS_TURN_TIMEOUT`, which the endpoint also gives Restate
-  as its inactivity timeout). Work that awaits has no limit at all: it
-  commits every second and carries on.
-- A changed program is a new program: runs restore only with their source.
+The functions this binary serves, how to run them and how to write one:
+[examples-functions/](../../examples-functions/README.md). The coding agent's
+workspace is the [`workspace`](src/workspace.rs) object, and models are
+[`claude`](src/claude.rs).
 
 ## How it works
 
