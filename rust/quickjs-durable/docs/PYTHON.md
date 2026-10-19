@@ -72,6 +72,12 @@ also gives the program an asyncio event loop that the host drains each turn:
   (modules, classes, the bridge) out of the collector's sight. A collection
   in a turn then neither visits those objects nor writes to their pages. A
   turn changes a quarter fewer pages, and under heap churn two thirds fewer.
+- **asyncio loads its core only:** events, futures, tasks, locks, queues,
+  timeouts and task groups. Streams, subprocesses, threads and `asyncio.run`
+  load on first use, as do the modules the core imports only for them or for
+  formatting errors (`socket`, `subprocess`, `logging`, `concurrent.futures`,
+  `inspect`, `traceback`): placeholders stand in for them while asyncio
+  loads, and a program that imports one gets the real module.
 
 `ctx` is the JavaScript `ctx`, written the Python way:
 
@@ -152,14 +158,14 @@ medians of 15 runs, on one machine, against a store in memory.
 
 | Metric                                                 | JavaScript | Python                       |
 | ------------------------------------------------------ | ---------- | ---------------------------- |
-| Golden image (memory)                                  | 1.4 MB     | 11.4 MB                      |
+| Golden image (memory)                                  | 1.4 MB     | 8.6 MB                       |
 | Evaluating a program at startup                        | ~3 ms      | 18–24 ms (the first ~250 ms) |
 | A call's first turn (`scalar`)                         | 1.0 ms     | 2.6 ms                       |
-| A turn on a live VM (`scalar`)                         | 0.2–0.3 ms | 0.7–0.8 ms                   |
-| A turn on a restored VM (`scalar`)                     | 1.0 ms     | 2.3 ms                       |
-| Pages a turn changes (`scalar`)                        | 20–38      | 73–121                       |
-| Pages a turn changes, 2,000 new objects (`heap-churn`) | 110–170    | 223–314                      |
-| Batch a turn writes to Restate (`heap-churn`)          | 48–55 KB   | 55–59 KB                     |
+| A turn on a live VM (`scalar`)                         | 0.2–0.3 ms | 0.6–0.75 ms                  |
+| A turn on a restored VM (`scalar`)                     | 1.0 ms     | 2.1–2.3 ms                   |
+| Pages a turn changes (`scalar`)                        | 20–38      | 58–120                       |
+| Pages a turn changes, 2,000 new objects (`heap-churn`) | 110–170    | 213–301                      |
+| Batch a turn writes to Restate (`heap-churn`)          | 48–55 KB   | 56–61 KB                     |
 | Primes below 100,000                                   | 264 ms     | 330 ms                       |
 
 Native CPython 3.13 runs the primes loop in ~300 ms on the same machine:
@@ -201,6 +207,9 @@ From the first build, these brought Python's figures down:
 - **Walking the heap only where a turn wrote** (DESIGN.md §5.6): without
   pymalloc every object is a chunk, and the whole walk took 0.5–1.5 ms a
   turn. A restored turn went to 2.3 ms.
+- **Only asyncio's core in the base** (above): the golden image went from
+  11.4 to 8.6 MB and a server's start with the Python examples from 0.36 to
+  0.31 s; a turn changes 5–20% fewer pages.
 
 ## Other engines
 
@@ -220,10 +229,6 @@ asks for more), which is why the runtime maps it itself.
 
 ## Next
 
-- **asyncio's weight.** Importing asyncio (and with it `inspect`, `socket`,
-  `subprocess`, `concurrent.futures`, ...) is 5 of the base image's 6 MB of
-  heap. A lighter loop, or stubs for what asyncio imports and never uses here,
-  would halve the image.
 - **pymalloc: tried, not taken.** It is off in CPython's WASI build, so every
   object is a dlmalloc chunk. On (4 KiB pools in 256 KiB arenas, taken from
   `malloc`, so the heap walk still works), a turn changed 10–20% fewer pages,

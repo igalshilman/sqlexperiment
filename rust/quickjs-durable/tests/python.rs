@@ -278,6 +278,65 @@ async def main(input, ctx):
     Ok(())
 }
 
+/// The bridge loads asyncio's core only; the rest of asyncio, and the modules
+/// the core defers (sockets, subprocesses, logging, thread pools), load when
+/// a program uses them, as the real modules.
+#[test]
+fn python_loads_the_rest_of_asyncio_on_use() -> Result<()> {
+    let source = r#"
+import asyncio, sys
+
+DEFERRED = ("asyncio.streams", "socket", "subprocess", "logging", "concurrent.futures", "inspect", "traceback")
+
+async def main(input, ctx):
+    # What programs use most loads none of them.
+    done, _ = await asyncio.wait(
+        [asyncio.ensure_future(ctx.sleep(0.001))], return_when=asyncio.FIRST_COMPLETED
+    )
+    await asyncio.gather(ctx.sleep(0.001), asyncio.sleep(0.001))
+    async with asyncio.TaskGroup() as group:
+        group.create_task(ctx.sleep(0.001))
+    try:
+        async with asyncio.timeout(0.001):
+            await asyncio.Event().wait()
+    except TimeoutError:
+        pass
+    task = asyncio.ensure_future(asyncio.sleep(1))
+    await asyncio.sleep(0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    deferred = [name in sys.modules for name in DEFERRED]
+    import concurrent.futures, logging, socket, subprocess
+    return {
+        "deferred": deferred,
+        "waited": len(done),
+        "streams": asyncio.StreamReader.__module__,
+        "to_thread": callable(asyncio.to_thread),
+        "socket": int(socket.AF_INET6) > 0 and asyncio.events.socket.AF_INET6 == socket.AF_INET6,
+        "pipe": subprocess.PIPE,
+        "logger": logging.getLogger("asyncio").name,
+        "pool": concurrent.futures.ThreadPoolExecutor.__name__,
+    }
+"#;
+    assert_eq!(
+        value(&outcome(source)?),
+        json!({
+            "deferred": [false, false, false, false, false, false, false],
+            "waited": 1,
+            "streams": "asyncio.streams",
+            "to_thread": true,
+            "socket": true,
+            "pipe": -1,
+            "logger": "asyncio",
+            "pool": "ThreadPoolExecutor",
+        })
+    );
+    Ok(())
+}
+
 /// `sys.exit` fails the run like any exception, and so do a value JSON
 /// cannot carry exactly and a file left open across a wait.
 #[test]
