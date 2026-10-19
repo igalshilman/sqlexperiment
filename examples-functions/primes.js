@@ -1,10 +1,13 @@
-// A long computation: count the primes below `n`, recording progress in
-// ctx.kv as it goes. Past a second of work, the run is saved at its next
-// wait and carries on in the next turn.
+// A long computation: count the primes below `n`. One call may compute for
+// minutes without awaiting (QJS_TURN_TIMEOUT, 10 by default); what it found
+// stays in memory for the next.
 //
-//   curl localhost:8080/primes/alice/run --json 100000
-async function main(n, ctx) {
-  let count = 0;
+//   curl localhost:8080/primes/alice/count --json 100000    # 9592
+//   curl localhost:8080/primes/alice/largest                # 99991
+let biggest = 0;
+
+export function count(n) {
+  let found = 0;
   for (let i = 2; i < n; i++) {
     let prime = true;
     for (let d = 2; d * d <= i; d++) {
@@ -13,8 +16,14 @@ async function main(n, ctx) {
         break;
       }
     }
-    if (prime) count++;
-    if (i % 1000 === 0) await ctx.kv.set('progress', i);
+    if (prime) {
+      found++;
+      biggest = Math.max(biggest, i);
+    }
   }
-  return count;
+  return found;
+}
+
+export function largest() {
+  return biggest;
 }

@@ -1,16 +1,16 @@
-// A shop assistant: Claude, with the shop's programs as its tools. It looks
-// up stock and the customer's balance, and buys through `checkout`. The
-// conversation is the scope's: each run continues it.
+// A shop assistant: Claude, with the shop's functions as its tools. It looks
+// up stock and the customer's balance, and buys through `checkout`. The key
+// is the customer, and the conversation is a plain array: each message
+// continues it.
 //
 // The agent loop is plain JavaScript. While it waits on Claude or on a tool,
-// the loop and the conversation are saved with the rest of the heap: a crash
+// the loop and the conversation are saved with the rest of memory: a crash
 // resumes them, and a model call already answered is not made again.
 //
 //   ANTHROPIC_API_KEY=... target/release/quickjs-durable
-//   curl localhost:8080/inventory/widget/run --json '{"restock": 5}'
-//   curl localhost:8080/payments/alice/run --json '{"deposit": 100}'
-//   curl localhost:8080/assistant/alice/run --json \
-//     '{"customer": "alice", "message": "Buy two widgets, if I can afford them"}'
+//   curl localhost:8080/inventory/widget/restock --json 5
+//   curl localhost:8080/payments/alice/deposit --json 100
+//   curl localhost:8080/assistant/alice/chat --json '"Buy two widgets, if I can afford them"'
 const MODEL = 'claude-opus-5-5';
 const PRICES = { widget: 10, gadget: 30, gizmo: 5 };
 
@@ -50,24 +50,25 @@ const TOOLS = [
   },
 ];
 
-// The tools, as calls to the shop's programs.
+const messages = [];
+let orders = 0;
+
+// The tools, as calls to the shop's functions.
 function shop(customer, ctx) {
-  const call = (service, key, input) => ctx.rpc.call({ service, handler: 'run', key }, input);
+  const call = (service, handler, key, input) => ctx.rpc.call({ service, handler, key }, input);
   return {
     catalog: () =>
       Promise.all(
         Object.entries(PRICES).map(async ([sku, price]) => ({
           sku,
           price,
-          stock: await call('inventory', sku, {}),
+          stock: await call('inventory', 'available', sku),
         })),
       ),
-    balance: () => call('payments', customer, {}),
-    async buy({ items }) {
+    balance: () => call('payments', 'current', customer),
+    buy({ items }) {
       for (const { sku } of items) if (!(sku in PRICES)) throw new Error(`No such product: ${sku}`);
-      const orders = ((await ctx.kv.get('orders')) ?? 0) + 1;
-      await ctx.kv.set('orders', orders);
-      return call('checkout', `${customer}-${orders}`, {
+      return call('checkout', 'pay', `${customer}-${++orders}`, {
         customer,
         items: items.map(({ sku, qty }) => ({ sku, qty, price: PRICES[sku] })),
       });
@@ -75,9 +76,9 @@ function shop(customer, ctx) {
   };
 }
 
-async function main({ customer, message }, ctx) {
+export async function chat(message, ctx) {
+  const customer = ctx.key;
   const tools = shop(customer, ctx);
-  const messages = (await ctx.kv.get('messages')) ?? [];
   messages.push({ role: 'user', content: message });
   for (let step = 0; step < 10; step++) {
     const response = await ctx.rpc.call(
@@ -94,7 +95,6 @@ async function main({ customer, message }, ctx) {
     if (response.stop_reason === 'refusal') return { answer: 'Sorry, I cannot help with that.' };
     messages.push({ role: 'assistant', content: response.content });
     if (response.stop_reason !== 'tool_use') {
-      await ctx.kv.set('messages', messages);
       const answer = response.content.filter((block) => block.type === 'text');
       return { answer: answer.map((block) => block.text).join('\n') };
     }

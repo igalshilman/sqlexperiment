@@ -201,9 +201,9 @@ tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, wor
 
 # One server at a time, on the default ports.
 test-qjs: $(SDK_RS) $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: the runtime with native and with barrier write tracking (verified), and with full scans, then the programs against a Restate server
-	cd $(QJS) && $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql
-	cd $(QJS) && QJS_TRACKING=barriers $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql
-	cd $(QJS) && $(CARGO) test --locked --release --features full-scan --lib --test runs --test crashes --test sql
+	cd $(QJS) && $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql --test objects
+	cd $(QJS) && QJS_TRACKING=barriers $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql --test objects
+	cd $(QJS) && $(CARGO) test --locked --release --features full-scan --lib --test runs --test crashes --test sql --test objects
 	cd $(QJS) && $(CARGO) test --locked --release --test restate -- --include-ignored --test-threads 1
 
 # Into a temporary file, moved into place once it runs: a failed download or

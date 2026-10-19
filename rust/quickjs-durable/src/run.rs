@@ -1,5 +1,7 @@
-//! A run: one invocation of a program's `main`, turn by turn. A turn delivers
-//! one event to the VM, runs the JavaScript until it waits, and commits.
+//! An object and its calls. An object is a program's module in one scope (a
+//! key): its memory lives on from call to call. A run is one call of one of
+//! its exported functions, turn by turn: a turn delivers one event to the
+//! VM, runs the JavaScript until it waits, and commits.
 //!
 //! A scope's storage is a sqlite-kv database ([`Scope`]). A turn is one
 //! commit of it, one put: the run's state ([`Commit`]) as the record's
@@ -11,8 +13,9 @@
 //! what it changed. Nothing is applied after a commit, and a crash before one
 //! loses the whole turn, which runs again.
 //!
-//! The VM stays live from turn to turn of one attempt; a new attempt restores
-//! it from the commit, once, when a delivery needs it.
+//! The VM stays live from turn to turn of one attempt; a new attempt, or the
+//! object's next call, restores it from the commit, once. A trap reverts the
+//! turn: the memory to the last commit, and the turn's SQL with it.
 use crate::{
     Scope, codec,
     db::Db,
@@ -56,8 +59,8 @@ struct Changed {
     new: Vec<u8>,
 }
 
-/// A run of a program in one scope, in one attempt. An error leaves it
-/// unusable: the attempt starts again, from the store.
+/// A call on an object, in one attempt. An error leaves it unusable: the
+/// attempt starts again, from the store.
 pub struct Run {
     programs: Arc<Programs>,
     /// The scope's database, this attempt's session of it, which the VM's
@@ -65,7 +68,7 @@ pub struct Run {
     db: Arc<Mutex<Db>>,
     commit: Commit,
     /// The VM, and its memory as of the last commit: restored when a delivery
-    /// needs it, and dropped once the run has settled.
+    /// needs it.
     live: Option<Live>,
     last: Written,
     usable: bool,
@@ -86,24 +89,31 @@ struct Written {
 }
 
 enum Delivery {
-    /// The run's first turn: `main(input)`, in `scope`.
-    Start { scope: String, input: Value },
+    /// The call's first turn: `handler(input)`, on the object `scope`.
+    Start {
+        scope: String,
+        handler: String,
+        input: Value,
+    },
     /// Requests' outcomes, delivered in order before the JavaScript runs.
     Complete(Vec<(String, Outcome)>),
 }
 
 impl Run {
-    /// Start run `run` of `program` on `input`, in the scope `key` (the
-    /// program's `ctx.key`), stored in `scope`: its first turn runs `main`
-    /// until it waits or settles, and commits. When the scope's commit is
-    /// already this run's, this is another attempt at it: the run continues as
-    /// committed, and `input` is the one it started with.
+    /// Start the call `run` of `handler` on `input`, on the object of
+    /// `program` whose key is `key` (its `ctx.key`), stored in `scope`: its
+    /// first turn runs the handler until it waits or settles, and commits.
+    /// The object's memory is as its last call left it. When the scope's
+    /// commit is already this call's, this is another attempt at it: the call
+    /// continues as committed, and `input` is the one it started with.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         programs: &Arc<Programs>,
         scope: &Scope,
         key: &str,
         run: &str,
         program: &str,
+        handler: &str,
         input: Value,
         now: u64,
     ) -> Result<Self> {
@@ -116,56 +126,83 @@ impl Run {
         let db = Db::new(scope.open().await?);
         let previous = load(&db)?;
         let db = Arc::new(Mutex::new(db));
-        if let Some(commit) = previous.filter(|commit| commit.run == run) {
+        if let Some(commit) = previous.as_ref().filter(|commit| commit.run == run) {
             ensure!(
-                commit.program == program,
-                "Run {run} is of program {}",
-                commit.program
+                commit.program == program && commit.handler == handler,
+                "Run {run} is a call of {}.{}",
+                commit.program,
+                commit.handler
             );
-            check(programs, &commit)?;
+            check(programs, commit)?;
             return Ok(Self {
                 programs: programs.clone(),
                 db,
-                commit,
+                commit: commit.clone(),
                 live: None,
                 last: Written::default(),
                 usable: true,
             });
         }
-        let golden = programs.get(program)?.image();
-        let mut vm = Vm::new(programs.runtime(), run, now).await?;
-        vm.restore(&golden).await?;
-        vm.attach(db.clone());
-        let commit = Commit {
-            run: run.into(),
-            program: program.into(),
-            version: programs.get(program)?.version(),
-            runtime: vm::VERSION,
-            turns: 0,
-            meta: golden.meta.clone(),
-            memory_len: golden.len(),
-            batches: 0,
-            base_bytes: 0,
-            delta_bytes: 0,
-            live_pages: 0,
-            state: State {
-                pending: Vec::new(),
-                next_operation: 0,
-                now,
-                status: Status::Waiting,
-                outcome: None,
-            },
+        let state = State {
+            pending: Vec::new(),
+            next_operation: 0,
+            now,
+            status: Status::Waiting,
+            outcome: None,
+        };
+        let (live, commit) = match previous {
+            // The object's next call: on its memory, as committed. What its
+            // last call left pending is dropped.
+            Some(previous) => {
+                ensure!(
+                    previous.program == program,
+                    "The object's memory is of program {}",
+                    previous.program
+                );
+                check(programs, &previous)?;
+                let live = restore(programs, &db, &previous, run, now).await?;
+                let commit = Commit {
+                    run: run.into(),
+                    handler: handler.into(),
+                    state,
+                    ..previous
+                };
+                (live, commit)
+            }
+            None => {
+                let golden = programs.get(program)?.image();
+                let mut vm = Vm::new(programs.runtime(), run, now).await?;
+                vm.restore(&golden).await?;
+                vm.attach(db.clone());
+                let commit = Commit {
+                    run: run.into(),
+                    handler: handler.into(),
+                    program: program.into(),
+                    version: programs.get(program)?.version(),
+                    runtime: vm::VERSION,
+                    turns: 0,
+                    meta: golden.meta.clone(),
+                    memory_len: golden.len(),
+                    batches: 0,
+                    base_bytes: 0,
+                    delta_bytes: 0,
+                    live_pages: 0,
+                    state,
+                };
+                (Live { vm, base: golden }, commit)
+            }
         };
         let mut this = Self {
             programs: programs.clone(),
             db,
             commit,
-            live: Some(Live { vm, base: golden }),
+            live: Some(live),
             last: Written::default(),
             usable: false,
         };
         let start = Delivery::Start {
             scope: key.into(),
+            handler: handler.into(),
             input,
         };
         this.turn(start, now).await?;
@@ -222,7 +259,14 @@ impl Run {
         }
         self.usable = false;
         if self.live.is_none() {
-            self.live = Some(self.restore(now).await?);
+            let live = restore(
+                &self.programs,
+                &self.db,
+                &self.commit,
+                &self.commit.run,
+                now,
+            );
+            self.live = Some(live.await?);
         }
         self.turn(Delivery::Complete(pending), now).await?;
         self.usable = true;
@@ -244,41 +288,6 @@ impl Run {
             batch_bytes: self.last.batch_bytes,
             commit_bytes: self.last.commit_bytes,
         }
-    }
-
-    /// The committed image, from golden and the batches, in a new VM.
-    async fn restore(&self, now: u64) -> Result<Live> {
-        let commit = &self.commit;
-        let mut base = check(&self.programs, commit)?.image();
-        ensure!(
-            commit.memory_len >= base.len()
-                && commit.memory_len <= MAX_MEMORY
-                && commit.memory_len.is_multiple_of(65536),
-            "Invalid committed memory size"
-        );
-        base.meta = commit.meta.clone();
-        base.grow(commit.memory_len);
-        // Read with the record at open: the chain is this run's since its
-        // first turn restarted it.
-        let batches = self.db.lock().await.session().chain();
-        ensure!(batches.len() == commit.batches, "Missing page batch");
-        for bytes in batches {
-            let (indexes, frame) = codec::page_indexes(&bytes)?;
-            ensure!(
-                indexes
-                    .last()
-                    .is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
-                "Page beyond memory"
-            );
-            let decoded = codec::decode_pages(frame, &pages(|i| base.page(i), &indexes))?;
-            for (index, page) in indexes.iter().zip(decoded.chunks_exact(PAGE)) {
-                base.set(*index, page);
-            }
-        }
-        let mut vm = Vm::new(self.programs.runtime(), &commit.run, now).await?;
-        vm.restore(&base).await?;
-        vm.attach(self.db.clone());
-        Ok(Live { vm, base })
     }
 
     /// Run the JavaScript on `delivery`, capture what changed, and commit.
@@ -306,13 +315,14 @@ impl Run {
                 live_pages = base.changed().count();
                 (state, capture.meta, capture.memory_len, changed)
             }
-            // The guest trapped: its image is unusable, and the same delivery
-            // would trap again. The run ends; the KV writes before the trap
-            // stand, as for a thrown error.
+            // The guest trapped: its memory is mid-mutation, and the same
+            // delivery would trap again. The call fails, and the turn is
+            // undone: the object's memory is as last committed, and so is
+            // its SQL.
             Err(error) => match vm::trap(&error) {
                 Some(message) => {
                     self.live = None;
-                    db.abandon_transactions().await?;
+                    db.rollback_turn().await?;
                     let state = State {
                         pending: Vec::new(),
                         next_operation: self.commit.state.next_operation,
@@ -334,25 +344,15 @@ impl Run {
         let previous = &self.commit;
         let (mut base_bytes, mut delta_bytes) = (previous.base_bytes, previous.delta_bytes);
         let mut batches = previous.batches;
-        let settled = state.status != Status::Waiting;
-        let empty = db.session().chain().is_empty();
-        let update = if settled || (batches == 0 && changed.indexes.is_empty()) {
-            // A settled run never restores again: it keeps its outcome, not
-            // its image. A run that has changed no page yet keeps none of the
-            // scope's previous run's.
-            if settled {
-                live_pages = 0;
-                batches = 0;
-            }
-            (!empty).then_some(ChainUpdate::Clear)
+        let update = if changed.indexes.is_empty() {
+            None
         } else if batches == 0 {
-            // The run's first batch, against golden: it replaces whatever the
-            // scope's previous run left.
+            // The object's first batch, against golden.
             let bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
             (base_bytes, delta_bytes, batches) = (bytes.len(), 0, 1);
             written.batch_bytes = bytes.len();
             Some(ChainUpdate::Restart(bytes.into()))
-        } else if !changed.indexes.is_empty() {
+        } else {
             let bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
             if batches >= MAX_CHAIN || delta_bytes + bytes.len() > 2 * base_bytes {
                 // A new first batch: every page that differs from golden.
@@ -372,11 +372,10 @@ impl Run {
                 written.batch_bytes = bytes.len();
                 Some(ChainUpdate::Append(bytes.into()))
             }
-        } else {
-            None
         };
         let commit = Commit {
             run: previous.run.clone(),
+            handler: previous.handler.clone(),
             program: previous.program.clone(),
             version: previous.version,
             runtime: previous.runtime,
@@ -395,13 +394,50 @@ impl Run {
         drop(db);
         self.commit = commit;
         self.last = written;
-        match &mut self.live {
-            Some(_) if settled => self.live = None,
-            Some(live) => live.vm.committed()?,
-            None => {}
+        if let Some(live) = &mut self.live {
+            live.vm.committed()?;
         }
         Ok(())
     }
+}
+
+/// The committed image, from golden and the batches, in a new VM.
+async fn restore(
+    programs: &Programs,
+    db: &Arc<Mutex<Db>>,
+    commit: &Commit,
+    identity: &str,
+    now: u64,
+) -> Result<Live> {
+    let mut base = check(programs, commit)?.image();
+    ensure!(
+        commit.memory_len >= base.len()
+            && commit.memory_len <= MAX_MEMORY
+            && commit.memory_len.is_multiple_of(65536),
+        "Invalid committed memory size"
+    );
+    base.meta = commit.meta.clone();
+    base.grow(commit.memory_len);
+    // Read with the record at open: the chain is the object's.
+    let batches = db.lock().await.session().chain();
+    ensure!(batches.len() == commit.batches, "Missing page batch");
+    for bytes in batches {
+        let (indexes, frame) = codec::page_indexes(&bytes)?;
+        ensure!(
+            indexes
+                .last()
+                .is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
+            "Page beyond memory"
+        );
+        let decoded = codec::decode_pages(frame, &pages(|i| base.page(i), &indexes))?;
+        for (index, page) in indexes.iter().zip(decoded.chunks_exact(PAGE)) {
+            base.set(*index, page);
+        }
+    }
+    let mut vm = Vm::new(programs.runtime(), identity, now).await?;
+    vm.restore(&base).await?;
+    vm.attach(db.clone());
+    Ok(Live { vm, base })
 }
 
 /// Deliver to the VM, and run the JavaScript until it waits on what the host
@@ -420,17 +456,17 @@ async fn run(
     // ones delivered, then those the guest issues, as it reports them.
     let mut pending = commit.state.pending.clone();
     match delivery {
-        Delivery::Start { scope, input } => {
-            let seed = fingerprint(commit.run.as_bytes()) as u32;
-            let init = json!({
-                "runId": commit.run,
-                "scope": scope,
-                "now": now,
-                "maxTime": MAX_TIME,
-                "seed": seed,
-            });
+        Delivery::Start {
+            scope,
+            handler,
+            input,
+        } => {
+            // The object's generator is seeded once, from its key.
+            let seed = fingerprint(scope.as_bytes()) as u32;
+            let init = json!({"scope": scope, "maxTime": MAX_TIME, "seed": seed});
             vm.invoke("init", &init).await?;
-            vm.invoke("start", &input).await?;
+            let call = json!({"runId": commit.run, "handler": handler, "input": input, "now": now});
+            vm.invoke("start", &call).await?;
         }
         Delivery::Complete(outcomes) => {
             for (operation, outcome) in outcomes {
@@ -500,7 +536,8 @@ fn completion(operation: &str, outcome: Outcome, now: u64) -> Value {
     json!({"kind": "complete", "operationId": operation, "outcome": outcome, "now": now})
 }
 
-/// The scope's current run, as its database's last commit holds it.
+/// The object, as its database's last commit holds it: its memory, and its
+/// last call.
 fn load(db: &Db) -> Result<Option<Commit>> {
     let effects = db.session().effects();
     if effects.is_empty() {
@@ -509,17 +546,17 @@ fn load(db: &Db) -> Result<Option<Commit>> {
     Ok(Some(serde_json::from_slice(&effects)?))
 }
 
-/// The run's program, as the version and runtime it started on.
+/// The object's program, as the version and runtime its memory is of.
 fn check<'a>(programs: &'a Programs, commit: &Commit) -> Result<&'a Program> {
     let program = programs.get(&commit.program)?;
     ensure!(
         program.version() == commit.version,
-        "The run started on another version of program {}",
+        "The object's memory is of another version of program {}",
         commit.program
     );
     ensure!(
         commit.runtime == vm::VERSION,
-        "The run started on another version of the runtime"
+        "The object's memory is of another version of the runtime"
     );
     Ok(program)
 }

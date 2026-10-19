@@ -28,9 +28,12 @@ Reading map: [model](#1-model-ownership-and-durability),
 
 A **program** is a named, immutable source, identified by its name and its
 **version**, a 64-bit fingerprint of the source. Its **golden image** is the VM
-after evaluating it, before any run's input is bound. A **scope** is the unit
-of storage and ownership: in Restate, one virtual object key. A **run** is one
-invocation of `main` in a scope, identified by a run ID. A **turn** starts or
+after evaluating it as a module, before any call. A **scope** is the unit
+of storage and ownership: in Restate, one virtual object key. Its **object**
+is the program's module in that scope: one image, which lives on from call to
+call (the module's variables and everything they reach), and one SQL
+database. A **run** is one call of one of the module's exported functions on
+an object, identified by a run ID (the invocation's). A **turn** starts or
 continues a run and ends at one commit. A **request** is a guest operation; an
 **effect** is a request the host answers in a later turn (an RPC, a timer, a
 wakeup). An **attempt** is one try at a run in one process: a crash ends it,
@@ -43,8 +46,8 @@ Assumptions and invariants:
 
 1. Storage is trusted: no integrity hashes. A put replaces one complete value.
 2. One writer owns a scope at a time: in Restate, the object's exclusive
-   handler, for the whole run. A scope holds one run's image at a time; its
-   KV is shared by its runs, in turn.
+   handler, for the whole run. A scope holds its object's image, which its
+   runs change in turn.
 3. Writes are kept in issue order: a sync makes every write before it
    durable, and a crash keeps a prefix of those not yet synced. Reads within
    an attempt see its own writes.
@@ -61,7 +64,9 @@ Assumptions and invariants:
 
 ### 2.1. JavaScript API and wire values
 
-Application source defines `main(input, ctx)`. `ctx` and global `durable` refer to
+Application source is an ES module: each function it exports is a handler,
+called as `handler(input, ctx)`. Other exports, and functions it does not
+export, are not handlers; it imports nothing. `ctx` and global `durable` refer to
 one frozen API. Its nested KV and RPC objects are frozen too.
 
 | Call                                 | Request fields, in addition to `id` | Result                          |
@@ -106,11 +111,13 @@ Validate the discriminator: a success must have `ok:true`, a failure `ok:false`.
 Root return `undefined` becomes successful null. A root value outside the JSON
 contract becomes a failed outcome. A failed operation rejects its promise with
 an Error carrying the supplied name/message and may be caught by the application.
-A terminal guest failure may commit prior KV mutations. So does a VM trap: the
-guest running out of time inside one job, or an error QuickJS cannot hand to a
-script. The same image and delivery would trap again on every retry, so the
-run ends instead: it commits a failed outcome named `Trap`, drops the trapped
-VM (it is mid-mutation) and the run's outstanding requests. An infrastructure
+A terminal guest failure commits what the run did, memory and SQL, as a
+success does. A VM trap does not: the guest running out of time inside one
+job, or an error QuickJS cannot hand to a script. The same image and delivery
+would trap again on every retry, so the run ends instead: it commits a failed
+outcome named `Trap` and drops the trapped VM (it is mid-mutation) and the
+run's outstanding requests. The turn is undone: the object's memory is as its
+last commit left it, and the turn's SQL is rolled back with it. An infrastructure
 error ends the attempt: the turn is not committed, and the next attempt
 starts from the last commit.
 
@@ -148,13 +155,14 @@ because uncommitted requests must never have dispatched.
 
 The internal bridge exposes five host hooks, not application API methods:
 
-| Hook                 | Behavior                                                                                                             |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `init(configJson)`   | Once only: set run ID, time, PRNG seed and time limit                                                                |
-| `start(inputJson)`   | Queue `main(input, durable)` through `Promise.resolve().then(...)`; capture its normalized root outcome              |
-| `deliver(eventJson)` | Advance logical time monotonically; find and remove the pending entry; resolve/reject its promise; do not drain jobs |
-| `pause()`            | Create an internal `{kind:"resume"}` request through the same ID/map mechanism                                       |
-| `inspect()`          | Return the requests issued since the last `inspect()`, then forget them; and where the run stands                    |
+| Hook                 | Behavior                                                                                                                                                                     |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bind(namespace)`    | At golden creation: keep the module's namespace promise; `handlers()` then lists its exported functions                                                                      |
+| `init(configJson)`   | At each run: set the scope and time limit; seed the PRNG the first time only                                                                                                 |
+| `start(callJson)`    | Reset the run's state (ID, time, operation counter, pending map); queue `handler(input, durable)` through `Promise.resolve().then(...)`; capture its normalized root outcome |
+| `deliver(eventJson)` | Advance logical time monotonically; find and remove the pending entry; resolve/reject its promise; do not drain jobs                                                         |
+| `pause()`            | Create an internal `{kind:"resume"}` request through the same ID/map mechanism                                                                                               |
+| `inspect()`          | Return the requests issued since the last `inspect()`, then forget them; and where the run stands                                                                            |
 
 `inspect()` returns:
 
@@ -170,8 +178,8 @@ Report = {
 
 After draining jobs, a root still unsettled with no pending request is a failed
 "Execution stalled: no durable wakeup" outcome. Status is waiting until the root
-settles, then follows its success or failure: **the run ends when `main`
-settles**, as a request handler does, not when every promise has (as a Node.js
+settles, then follows its success or failure: **the run ends when its
+handler settles**, as a request handler does, not when every promise has (as a Node.js
 process would). Requests still pending then, such as a losing `Promise.race`
 branch or an ignored promise, are dropped with the pending map: their results
 are never delivered and their continuations never run; the terminal report
@@ -190,14 +198,15 @@ trait Store {
 
 Program::compile(runtime, name, source) -> Result<Program>   // golden creation
 Programs::new(shared_runtime).compile(name, source)?
-Run::start(&programs, &store, run, program, input, now).await -> Result<Run>
+Run::start(&programs, &scope, key, run, program, handler, input, now).await -> Result<Run>
 run.deliver(&store, operation_id, outcome, now).await -> Result<View>
 run.deliver_all(&store, vec![(operation_id, outcome), ...], now).await -> Result<View>
 run.view() -> View
 ```
 
-`Run::start` begins a run with its first turn, or, when the scope's commit is
-already that run's, continues it as committed: another attempt. `deliver`
+`Run::start` begins a run with its first turn, on the object's image as last
+committed (golden, for a new object), or, when the scope's commit is already
+that run's, continues it as committed: another attempt. `deliver`
 answers one pending request and runs a turn; `deliver_all` answers several,
 in order, in one turn. A run takes its `Scope`: the store its database lives
 in, and, for a process that keeps owning it, an owner cache. Every store call
@@ -258,9 +267,11 @@ Golden creation, once per program version, when the process starts (§5.5):
 2. Call `_initialize()`, then `qjs_init2(~((1<<9)|(1<<10)))`; require return zero.
    These flags disable weak references/finalization and the performance intrinsic.
 3. Apply QuickJS allocator and stack limits. Evaluate bridge code, then application
-   source as a global script, and drain all QuickJS jobs.
-4. Require `typeof main === 'function'`. Durable requests during initialization
-   throw because the bridge has no run ID yet.
+   source as a module (`qjs_eval` flag 1), hand its namespace promise to
+   `bind`, and drain all QuickJS jobs.
+4. Require at least one exported function (`handlers()`), each a Restate
+   handler name. Durable requests during evaluation throw because the bridge
+   has no run ID yet.
 5. Free temporary handles/strings, read runtime/context pointers and stack global,
    and copy complete linear memory: the program's golden image.
 
@@ -357,8 +368,9 @@ Every import writing guest memory uses the same range-marking helper as source
 and argument copies. Imports must be rebound on each fresh Store.
 
 The bridge overrides Math.random with xorshift32: `s ^= s << 13; s ^= s >>> 17;
-s ^= s << 5; return (s >>> 0) / 2^32`. For a run, seed from the low 32 bits of
-the FNV-1a fingerprint of its UTF-8 ID; replace zero with one. The state is
+s ^= s << 5; return (s >>> 0) / 2^32`. For an object, seed once, at its first
+run, from the low 32 bits of the FNV-1a fingerprint of its UTF-8 key; replace
+zero with one. The state is
 in the heap and survives checkpoints. Golden initialization starts from seed one.
 These streams are deterministic and are unsuitable for secrets.
 
@@ -582,10 +594,10 @@ The chain is the image, as batches applied in order over golden (zeros
 beyond its length): the first, the **base**, holds each page that differs
 from golden; each later one, a **delta**, the pages one turn changed. Base
 and deltas apply alike: each batch is compressed against the pages it
-replaces, in the memory as it stands. `batches` counts this run's,
+replaces, in the memory as it stands. `batches` counts the object's,
 `baseBytes` and `deltaBytes` size them, for when to write a new base (§5.3);
-`livePages` counts pages that differ from golden. A settled run's chain is
-empty. `runtime` is the runtime's version, a
+`livePages` counts pages that differ from golden. The chain outlives each
+run: the next run of the object starts on it. `runtime` is the runtime's version, a
 constant bumped by hand with anything an image depends on: the Wasm, the
 bridge, the limits, the imports' behavior. A run restores only on the
 program version and runtime it started on: a changed program needs a new
@@ -636,11 +648,10 @@ capture(G, P, chain, VM):
         if current == previous: continue
         batch.append(i, current, against previous)
         P.page(i) = current
-    if the run settled: clear the chain              // no image is kept
-    else if the run has no batch yet:
-        restart the chain with the batch, the base    // P was G; clears the
-                                                      // scope's previous run's
-    else if batch is not empty:
+    if batch is empty: no chain update
+    else if the object has no batch yet:
+        restart the chain with the batch, the base    // P was G
+    else:
         if chain has 256 batches, or deltaBytes + batch > 2 * baseBytes:
             batch = every page of P that differs from G, against G
             restart the chain with it                 // a new base
@@ -692,8 +703,8 @@ reconstruct(commit):
 
 The process keeps each golden image decompressed in its catalog, shared by
 every image made from it: an image holds only the pages that differ. An attempt
-reconstructs once, when its first delivery needs the VM; reading a settled
-run's commit needs no image.
+reconstructs once, when its first delivery or the object's next run needs
+the VM; reading a settled run's commit needs no image.
 
 ### 5.5. Programs
 
@@ -704,7 +715,8 @@ deterministic: a fixed identity, clock and seed, and no other input, so the
 same source on the same runtime build gives the same image, byte for byte, in
 every process. A checkpoint written by one process therefore restores in
 another, and nothing but the source needs shipping. A commit records its
-program's version and the runtime's; a run restores only with both.
+program's version and the runtime's; an object restores only with both, so a
+changed source fails the calls of objects made by the old one.
 
 ### 5.6. Dead heap bytes
 
@@ -738,13 +750,15 @@ another heap layout fails at startup.
 
 ### 6.1. Start, delivery and another attempt
 
-`Run::start(run, program, input, now)` validates the run ID, input and time,
-then reads the scope's commit and applies what follows it (§7). If the commit
-is this run's, it is another attempt: require the same program, check its
-version and the runtime's, and return the run as committed, without guest
-execution and without a VM. Otherwise a new run takes the scope: restore
-golden into a new VM, bind run ID, time and seed, queue `main` and run its
-first turn. The previous run's batches become garbage of that first commit.
+`Run::start(key, run, program, handler, input, now)` validates the run ID,
+input and time, then reads the scope's commit and applies what follows it
+(§7). If the commit is this run's, it is another attempt: require the same
+program and handler, check its version and the runtime's, and return the run
+as committed, without guest execution and without a VM. Otherwise a new run
+takes the object: restore its image (golden, if it has none) into a new VM,
+`init` the scope, `start` the handler with the run ID, time and input, and
+run its first turn. What the object's previous run left pending, if it never
+settled (cancelled, say), is dropped.
 
 `deliver_all(outcomes, now)` validates each outcome and the time, and
 refuses an operation listed twice; `deliver` is it with one outcome:
@@ -795,14 +809,14 @@ thousands of sequential local awaits would otherwise run into the turn's
 limit, trap, and trap again on every retry. The committed Resume makes the queued continuations schedulable
 after a crash.
 
-| Situation                                   | Action                                                               |
-| ------------------------------------------- | -------------------------------------------------------------------- |
-| KV request                                  | Answer in the turn and continue                                      |
-| Store read awaiting I/O                     | Keep the VM and the tracker; no Wasm call is live; do not capture    |
-| Effects only, no runnable jobs              | Capture and commit the pending requests                              |
-| Past the checkpoint limit                   | Finish the batch, add a Resume, capture before queued jobs run       |
-| Root settled                                | Commit the outcome with no image and no pending request; drop the VM |
-| Infinite synchronous job or microtask chain | The epoch deadline traps; the run ends failed                        |
+| Situation                                   | Action                                                                                |
+| ------------------------------------------- | ------------------------------------------------------------------------------------- |
+| KV request                                  | Answer in the turn and continue                                                       |
+| Store read awaiting I/O                     | Keep the VM and the tracker; no Wasm call is live; do not capture                     |
+| Effects only, no runnable jobs              | Capture and commit the pending requests                                               |
+| Past the checkpoint limit                   | Finish the batch, add a Resume, capture before queued jobs run                        |
+| Root settled                                | Capture, and commit the outcome with no pending request: the image stays the object's |
+| Infinite synchronous job or microtask chain | The epoch deadline traps: the run fails, and its turn is undone (memory and SQL)      |
 
 Any pending effect can be delivered next, not just a Resume. More than one
 Resume can coexist. Once the root settles, the run is final.
@@ -853,7 +867,7 @@ without KV runs no SQL.
 ### 8.1. KV mutation, RPC and completion
 
 ```js
-async function main(input, ctx) {
+export async function main(input, ctx) {
   const n = await ctx.kv.get('count');
   await ctx.kv.set('count', n + 1);
   const answer = await ctx.rpc.call({ service: 'Worker', handler: 'double' }, n + 1);
@@ -899,7 +913,9 @@ journal replay off:
 - Each program is a virtual object of its name, with no registration: the
   binary embeds its programs and evaluates them when it starts (§5.5). An object key is a
   scope; its exclusive handlers serialize its runs, one writer at a time.
-- A run is one invocation of the object's `run` handler, which drives its
+- Each exported function is an exclusive handler of the object, registered
+  from the program at startup (a manifest of its exports, not a macro). A run
+  is one invocation of a handler, which drives its
   turns itself, on one live VM. Its store is the object's state, remembering
   every key it read or wrote for the attempt: a key is read from Restate at
   most once. After each turn commits, the handler waits on Restate for the
@@ -914,7 +930,7 @@ journal replay off:
   pending requests under the same keys: Restate attaches a re-issued call to
   the original invocation, within the callee's idempotency retention. Nothing
   is replayed, and the host keeps no results.
-- `run` returns once `main` settles, when the run ends (§2.2): requests still
+- A handler returns once its function settles, when the run ends (§2.2): requests still
   outstanding are dropped, and a call already made finishes at its callee
   unobserved.
 
@@ -1009,8 +1025,8 @@ batches stay at 4–11 KB a step.
 ## 11. Scope limits, provenance and references
 
 There is no heap migration, no concurrent writers in a scope, no generic Wasm
-snapshot and no dynamic native extension. A settled run keeps only its commit
-record, with its outcome. Snapshot memory limits are not whole-process memory
+snapshot and no dynamic native extension. An object keeps its image for as
+long as it lives: its memory grows with what its module keeps reachable. Snapshot memory limits are not whole-process memory
 limits. Nothing preempts a single long JavaScript job but the turn's time
 limit; meanwhile it yields its thread to the executor at every 10 ms tick.
 

@@ -1,19 +1,26 @@
 # Durable JavaScript in Restate objects
 
-Run plain JavaScript as a Restate virtual object. A program can wait as long
-as it needs to: on a timer, a call to another service, or a model. It survives
-crashes and restarts, and Restate never replays it. Each time the program
-waits, the runtime saves the JavaScript VM's memory. When a result arrives, or
-after a crash, the runtime restores that memory and carries on from where the
-program stopped.
+Run a plain JavaScript module as a Restate virtual object: its exported
+functions are the handlers, and each key keeps its own memory (the module's
+variables, and all they hold) from call to call. A call can wait as long as
+it needs to: on a timer, a call to another service, or a model. It survives
+crashes and restarts, and Restate never replays it. Each time it waits, the
+runtime saves the JavaScript VM's memory. When a result arrives, or after a
+crash, the runtime restores that memory and carries on from where it stopped.
 
 ```js
-// examples-functions/counter.js: served as the virtual object `counter`
-async function main(input, ctx) {
-  const n = ((await ctx.kv.get('count')) ?? 0) + input;
-  await ctx.kv.set('count', n);
+// examples-functions/counter.js: the virtual object `counter`, its exports
+// the handlers, a key's variables its state
+let count = 0;
+
+export async function add(n, ctx) {
+  count += n;
   await ctx.sleep(1000);
-  return n;
+  return count;
+}
+
+export function get() {
+  return count;
 }
 ```
 
@@ -25,7 +32,7 @@ workspace is the [`workspace`](src/workspace.rs) object, and models are
 ## How it works
 
 QuickJS runs as WebAssembly, so the whole VM (heap, closures, pending
-promises) is one byte array. A run is one invocation of `run`, without journal
+promises) is one byte array. A call is one invocation of a handler, without journal
 replay, looping over turns on one live VM:
 
 ```
@@ -36,6 +43,8 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
 
 - **Snapshot only at a wait**, when no frame is on the stack: memory is the
   whole state.
+- **The object is its memory**: when a call ends, its key's image stays, and
+  the next call starts on it. A trap (a call out of time) undoes its turn.
 - **A live VM**: the VM stays in memory from turn to turn of an attempt; only
   a new attempt (after a crash) restores it, once.
 - **Relative to a golden image**: each program, evaluated once at startup

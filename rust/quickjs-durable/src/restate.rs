@@ -1,31 +1,33 @@
 //! Durable JavaScript in Restate virtual objects. A program is a static
-//! JavaScript file defining `main(input, ctx)`, embedded in the binary. Each
-//! program is served as a virtual object of its name, whose key is a scope:
-//! its runs share their `ctx.kv`, kept with the run's image in the object's
-//! state.
+//! JavaScript module, embedded in the binary, served as a virtual object of
+//! its name: each function it exports is a handler, and each key is an
+//! object of its own, whose memory (the module's variables, and all they
+//! hold) lives on from call to call, with its SQL database.
 //!
-//! `<program>/<key>/run` runs `main(input)` in its handler, exclusive and
-//! without journal replay, and returns its outcome. The JavaScript runs until
-//! it waits; the handler commits the run's changed pages, its KV writes and
-//! its requests (a turn), in one write of the scope's database, then waits on
-//! Restate itself for the first request to complete, and delivers it in the
-//! next turn, to the same live VM:
+//! `<program>/<key>/<export>` calls `export(input, ctx)` in its handler,
+//! exclusive and without journal replay, and returns its outcome. The
+//! JavaScript runs until it waits; the handler commits the changed pages,
+//! the SQL and the call's requests (a turn), in one write of the object's
+//! database, then waits on Restate itself for the first request to complete,
+//! and delivers it in the next turn, to the same live VM:
 //!
 //! | `ctx` request             | The handler waits on                                        |
 //! | ------------------------- | ----------------------------------------------------------- |
 //! | `ctx.rpc.call(target, x)` | A call to `target`, its idempotency key the operation's ID |
 //! | `ctx.sleep(ms)`           | A timer, until the request's deadline                       |
-//! | `ctx.kv.*`                | Nothing: answered in the turn, from the object's state     |
+//! | `ctx.kv.*`, `ctx.db.*`    | Nothing: answered in the turn, from the object's database  |
 //!
 //! A retried attempt replays nothing: it restores the last committed image and
 //! waits again on its requests, under the same idempotency keys, so a call
-//! made before the crash is attached to, not made again. The run ends when
-//! `main` settles: requests still outstanding (a race's loser) are dropped,
-//! and their continuations never run.
+//! made before the crash is attached to, not made again. The call ends when
+//! its function settles: requests still outstanding (a race's loser) are
+//! dropped, and their continuations never run.
 use crate::{Operation, Outcome, Programs, Run, Runtime, Scope, vm};
 use restate_sdk::{
     context::{DurableFuture, RequestTarget},
+    endpoint::ContextInternal,
     prelude::*,
+    service::{ServiceDefinition, macro_support},
 };
 use serde_json::Value;
 use std::{
@@ -72,25 +74,58 @@ pub mod faults {
     }
 }
 
-/// A program, served as a virtual object of its name: a key is a scope.
+/// A program, served as a virtual object of its name: a key is an object.
 pub struct JsObject {
     program: String,
     programs: Arc<Programs>,
-    /// The scopes' databases this process owned, kept between attempts.
+    /// The objects' databases this process owned, kept between attempts.
     cache: PageCache,
 }
 
 /// A request the handler waits on: its outcome, and the time to deliver it at.
 type Waiting<'ctx> = Pin<Box<dyn DurableFuture<Output = (Outcome, u64)> + Send + 'ctx>>;
 
-#[restate_sdk::object]
 impl JsObject {
-    /// Run the program's `main(input)` in this scope, and return its outcome:
-    /// the main promise's value, or its error as a terminal error.
-    #[handler]
-    async fn run(&self, ctx: ObjectContext<'_>, input: Json<Value>) -> HandlerResult<Json<Value>> {
+    /// The object as Restate sees it: one exclusive handler per exported
+    /// function, taking and returning JSON.
+    fn definition(self) -> anyhow::Result<ServiceDefinition> {
+        let handlers = self.programs.get(&self.program)?.handlers();
+        let handlers: Vec<Value> = (handlers.iter())
+            .map(|name| {
+                serde_json::json!({
+                    "name": name,
+                    "input": {"contentType": "application/json", "required": false},
+                    "output": {"contentType": "application/json", "setContentTypeIfEmpty": false},
+                })
+            })
+            .collect();
+        let manifest = serde_json::json!({
+            "name": self.program,
+            "ty": "VIRTUAL_OBJECT",
+            "handlers": handlers,
+        });
+        let discovery = serde_json::from_value(manifest)?;
+        Ok(macro_support::service_definition(
+            Dispatch(Arc::new(self)),
+            discovery,
+        ))
+    }
+
+    /// Call `handler(input)` on this object, and return its outcome: the
+    /// promise's value, or its error as a terminal error. No input is null.
+    async fn call(
+        &self,
+        ctx: ObjectContext<'_>,
+        handler: &str,
+        input: bytes::Bytes,
+    ) -> HandlerResult<Json<Value>> {
+        let input = match input.is_empty() {
+            true => Value::Null,
+            false => serde_json::from_slice(&input)
+                .map_err(|error| TerminalError::new(format!("The input is not JSON: {error}")))?,
+        };
         let run = ctx.invocation_id().to_owned();
-        match self.drive(&ctx, &run, input.into_inner()).await? {
+        match self.drive(&ctx, &run, handler, input).await? {
             Outcome::Success { value, .. } => Ok(Json(value)),
             Outcome::Failure { error, .. } => {
                 Err(TerminalError::new(format!("{}: {}", error.name, error.message)).into())
@@ -99,13 +134,40 @@ impl JsObject {
     }
 }
 
+/// Routes each of the object's handlers to [`JsObject::call`].
+struct Dispatch(Arc<JsObject>);
+
+impl restate_sdk::service::Service for Dispatch {
+    type Future = macro_support::ServiceBoxFuture;
+
+    fn handle(&self, ctx: ContextInternal) -> Self::Future {
+        let object = self.0.clone();
+        Box::pin(async move {
+            let handler = ctx.handler_name().to_owned();
+            let program = object.programs.get(&object.program);
+            if !program.is_ok_and(|program| program.handlers().contains(&handler)) {
+                return Err(restate_sdk::endpoint::Error::unknown_handler(
+                    ctx.service_name(),
+                    &handler,
+                ));
+            }
+            let (input, metadata) = ctx.input::<bytes::Bytes>().await;
+            let result = object.call((&ctx, metadata).into(), &handler, input).await;
+            ctx.handle_handler_result(result);
+            ctx.end();
+            Ok(())
+        })
+    }
+}
+
 impl JsObject {
-    /// Start the run with `input`, then run turns until `main` settles, each
-    /// waiting for the first of the run's requests to complete.
+    /// Start the call with `input`, then run turns until `handler` settles,
+    /// each waiting for the first of the call's requests to complete.
     async fn drive<'ctx>(
         &self,
         ctx: &'ctx ObjectContext<'ctx>,
         run: &str,
+        handler: &str,
         input: Value,
     ) -> HandlerResult<Outcome> {
         // One store for the whole attempt: its handler is the object's only
@@ -119,6 +181,7 @@ impl JsObject {
             ctx.key(),
             run,
             &self.program,
+            handler,
             input,
             now(),
         )
@@ -288,7 +351,7 @@ mod shipped {
     include!(concat!(env!("OUT_DIR"), "/programs.rs"));
 }
 
-/// Bind each program as a virtual object of its name: `run` without journal
+/// Bind each program as a virtual object of its name: its handlers without journal
 /// replay (a retried attempt restores the last image instead), its state
 /// loaded lazily (an attempt reads only what its database needs), no
 /// journal kept once an invocation is done (it holds every page it wrote),
@@ -298,7 +361,7 @@ pub fn bind(
     mut builder: restate_sdk::endpoint::Builder,
     programs: &Arc<Programs>,
     cache: &PageCache,
-) -> restate_sdk::endpoint::Builder {
+) -> anyhow::Result<restate_sdk::endpoint::Builder> {
     for name in programs.names() {
         let object = JsObject {
             program: name.to_owned(),
@@ -306,9 +369,8 @@ pub fn bind(
             cache: cache.clone(),
         };
         builder = builder.bind(
-            object.into_service_definition().options(
+            object.definition()?.options(
                 ServiceOptions::new()
-                    .name(name)
                     .journal_replay(false)
                     .enable_lazy_state(true)
                     .journal_retention(Duration::ZERO)
@@ -316,13 +378,13 @@ pub fn bind(
             ),
         );
     }
-    builder
+    Ok(builder)
 }
 
 /// An endpoint serving `programs`, and [`crate::Claude`] and
 /// [`crate::Workspace`] for them to call.
 pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
-    Ok(bind(Endpoint::builder(), programs, &page_cache().await?)
+    Ok(bind(Endpoint::builder(), programs, &page_cache().await?)?
         .bind(crate::Claude::from_env())
         .bind(crate::Workspace::from_env())
         .build())

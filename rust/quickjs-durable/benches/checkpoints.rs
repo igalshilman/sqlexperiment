@@ -30,32 +30,32 @@ fn main() -> Result<()> {
     let cases = [
         (
             "scalar",
-            "async function main(){let n=0;for(let i=0;i<3;i++){n+=i;await durable.call('observe');}return n;}",
+            "export async function main(){let n=0;for(let i=0;i<3;i++){n+=i;await durable.call('observe');}return n;}",
             json!(3),
         ),
         (
             "sparse-256k",
-            "const bytes=new Uint8Array(256*1024);async function main(){for(let i=0;i<3;i++){bytes[i*8192]=i+1;await durable.call('observe');}return bytes[16384];}",
+            "const bytes=new Uint8Array(256*1024);export async function main(){for(let i=0;i<3;i++){bytes[i*8192]=i+1;await durable.call('observe');}return bytes[16384];}",
             json!(3),
         ),
         (
             "heap-churn",
-            "async function main(){let a;for(let i=0;i<3;i++){a=Array.from({length:2000},(_,j)=>({id:j,value:'item-'+i+'-'+j}));await durable.call('observe');}return a.length;}",
+            "export async function main(){let a;for(let i=0;i<3;i++){a=Array.from({length:2000},(_,j)=>({id:j,value:'item-'+i+'-'+j}));await durable.call('observe');}return a.length;}",
             json!(2000),
         ),
         (
             "growth-3m",
-            "async function main(){await durable.call('observe');const b=new Uint8Array(3*1024*1024);b[0]=7;b[b.length-1]=9;await durable.call('observe');b[4096]=8;await durable.call('observe');return b[0]+b[4096];}",
+            "export async function main(){await durable.call('observe');const b=new Uint8Array(3*1024*1024);b[0]=7;b[b.length-1]=9;await durable.call('observe');b[4096]=8;await durable.call('observe');return b[0]+b[4096];}",
             json!(15),
         ),
         (
             "sparse-8m",
-            "const bytes=new Uint8Array(8*1024*1024);async function main(){for(let i=0;i<2;i++){bytes[i*1024*1024]=i+1;await durable.call('observe');}return bytes[0];}",
+            "const bytes=new Uint8Array(8*1024*1024);export async function main(){for(let i=0;i<2;i++){bytes[i*1024*1024]=i+1;await durable.call('observe');}return bytes[0];}",
             json!(1),
         ),
         (
             "write-heavy",
-            "const bytes=new Uint8Array(256*1024);async function main(){for(let t=0;t<3;t++){for(let i=0;i<10000;i++)bytes[(i*97)%bytes.length]^=i;await durable.call('observe');}return bytes[97];}",
+            "const bytes=new Uint8Array(256*1024);export async function main(){for(let t=0;t<3;t++){for(let i=0;i<10000;i++)bytes[(i*97)%bytes.length]^=i;await durable.call('observe');}return bytes[97];}",
             json!(1),
         ),
     ];
@@ -78,6 +78,7 @@ fn main() -> Result<()> {
                     "scope",
                     "bench",
                     name,
+                    "main",
                     Value::Null,
                     1000,
                 ))?;
@@ -115,6 +116,7 @@ fn main() -> Result<()> {
                             "scope",
                             "bench",
                             name,
+                            "main",
                             Value::Null,
                             1000,
                         ))?;

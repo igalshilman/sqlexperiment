@@ -1,7 +1,8 @@
 // A coding agent: Claude, with a shell and the files of a workspace as its
 // tools, working on a task until it is done. The object's key names the
 // workspace: a directory of the `workspace` service (under QJS_WORKSPACES),
-// which outlives the run, so the next task finds the last one's files.
+// so the next task finds the last one's files, and the tasks done so far
+// stay in memory.
 //
 // The agent loop is plain JavaScript, and runs for as long as the task
 // takes. At each wait, on Claude or on a tool, the conversation and the loop
@@ -9,8 +10,9 @@
 // was, and a model call or a command already answered is not made again.
 //
 //   ANTHROPIC_API_KEY=... target/release/quickjs-durable
-//   curl localhost:8080/coder/primes/run --json \
+//   curl localhost:8080/coder/primes/work --json \
 //     '{"task": "Write primes.py, printing the primes below 100, with a test, and run both"}'
+//   curl localhost:8080/coder/primes/history
 //   ls workspaces/primes
 const MODEL = 'claude-opus-5-5';
 const MAX_STEPS = 200;
@@ -84,7 +86,13 @@ function workspace(ctx) {
   };
 }
 
-async function main({ task }, ctx) {
+const done = [];
+
+export function history() {
+  return done;
+}
+
+export async function work({ task }, ctx) {
   const tools = workspace(ctx);
   const messages = [{ role: 'user', content: task }];
   for (let step = 1; step <= MAX_STEPS; step++) {
@@ -102,8 +110,10 @@ async function main({ task }, ctx) {
     if (response.stop_reason === 'refusal') throw new Error('Claude declined the task');
     messages.push({ role: 'assistant', content: response.content });
     if (response.stop_reason !== 'tool_use') {
-      const answer = response.content.filter((block) => block.type === 'text');
-      return { answer: answer.map((block) => block.text).join('\n'), steps: step };
+      const text = response.content.filter((block) => block.type === 'text');
+      const answer = text.map((block) => block.text).join('\n');
+      done.push({ task, answer, steps: step });
+      return { answer, steps: step };
     }
     // Every tool the model asked for, in order: commands may depend on the
     // files written before them. The results go back in one message.
