@@ -78,17 +78,17 @@ The sends commit with the transaction, in the same write: the commit record
 holds them (its _effects_, opaque to the storage), as the database's outbox.
 Once the commit is done the SDK makes them, each with an idempotency key of
 the transaction, `transaction/<id>/<index>` (or the send's own key), with a
-random id of the transaction. A send is stored once an empty `ctx.run` made
-after it resolves: the next transaction's commit leaves the stored ones out
-of the outbox, and the handler's end empties it (a `ctx.run`, then a commit
-of the empty outbox). The session's next open makes again the sends the
-outbox still holds, with the same keys; Restate drops a send whose key it has
-seen. So each send of a committed transaction is made once, even when a
+random id of the transaction. Restate keeps an attempt's commands in the
+order they were made, so a send is stored whenever a commit made after it
+is: the next transaction's commit leaves this attempt's sends out of the
+outbox, and the handler's end empties it with a commit of its own. The
+session's next open makes again the sends the outbox still holds, with the
+same keys; Restate drops a send whose key it has seen. So each send of a committed transaction is made once, even when a
 retried attempt never runs the transaction's body again (it finds its work
 done, by its id), and a send of a transaction rolled back or lost is not
 made, since the commit that would hold it is not stored. A transaction
 without sends costs nothing more; a handler whose transactions sent costs
-two `ctx.run`s and a commit at its end. Two limits: Restate keeps an
+one more commit at its end. Two limits: Restate keeps an
 idempotency key for the target's retention (a day by default), and a send
 made again after that, by an invocation that died between the commit and its
 end and whose object is not used again for that long, is made twice; and a
