@@ -26,8 +26,9 @@ curl localhost:8080/counter/alice/run --json 20       # 20, a second later
 ```
 
 Each file `programs/<name>.js` becomes the virtual object `<name>`. The
-object's key names a scope: runs under the same key share `ctx.kv`. More in
-[`programs/`](programs): a saga ([`checkout`](programs/checkout.js)), retries
+object's key names a scope: runs under the same key share its database
+(`ctx.db`) and `ctx.kv`. More in [`programs/`](programs): notes in SQL
+([`notes`](programs/notes.js)), a saga ([`checkout`](programs/checkout.js)), retries
 with backoff ([`retry`](programs/retry.js)), a deadline
 ([`timeout`](programs/timeout.js)), an AI agent with the shop as its tools
 ([`assistant`](programs/assistant.js)), and a coding agent with a shell and
@@ -36,12 +37,18 @@ files ([`coder`](programs/coder.js)), served by the
 
 ## Writing a program
 
-`ctx.kv.get/set/delete(key)` for the scope's JSON state,
-`ctx.rpc.call({ service, handler, key? }, input)` for any Restate service, and
+`ctx.db.sql` for the scope's SQL database, a tagged template whose `${}`
+values are parameters, never SQL text; `ctx.db.transaction(fn)` to undo
+`fn`'s statements if it throws. `ctx.kv.get/set/delete(key)` for the scope's
+JSON state, `ctx.rpc.call({ service, handler, key? }, input)` for any Restate service, and
 `ctx.sleep(ms)`; `ctx.key` is the object's key. Models are a service too: `claude/messages` takes a
 [Messages API](https://platform.claude.com/docs/en/api/messages) request.
 
 - All I/O goes through `ctx`; values are JSON.
+- SQL is synchronous and commits with the turn, together with the run's
+  memory: a program needs no transaction to stay consistent with itself.
+  `transaction(fn)` is for rollback; `fn` cannot await, and `BEGIN`/`COMMIT`
+  are refused.
 - The run ends when `main` settles: unlike Node.js, promises still pending are
   dropped. Await what must happen.
 - A scope runs one run at a time.
@@ -73,8 +80,8 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   stack between calls, freed heap memory) are zeroed first, so garbage is
   not saved.
 - **One commit**: a turn is one put of the scope's
-  [sqlite-kv](../../core/sqlite-kv) record: its page batch, its KV writes (a
-  SQL table) and the run's state with its pending requests. Restate keeps
+  [sqlite-kv](../../core/sqlite-kv) record: its page batch, its SQL (`ctx.kv`
+  is a table too) and the run's state with its pending requests. Restate keeps
   writes in order, so whatever the record names is stored before it.
 - **No replay**: a retry restores the VM from the last commit and waits
   again on its requests under the same idempotency keys, attaching to calls

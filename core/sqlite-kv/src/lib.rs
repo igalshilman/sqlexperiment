@@ -133,7 +133,7 @@ pub use snapshot::{
     MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport, StorageOptions,
 };
 /// SQL values, as returned in rows and bound as parameters.
-pub use turso_core::Value;
+pub use turso_core::{Numeric, Value};
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use crate::kv::KvStore;

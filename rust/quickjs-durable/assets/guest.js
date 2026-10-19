@@ -1,4 +1,8 @@
 (() => {
+  // The host's one function, which the host defines before this bridge runs:
+  // host(operation, request) answers a JSON string, synchronously.
+  const host = globalThis.__host;
+  delete globalThis.__host;
   let runId,
     scope,
     nextOperation = 0,
@@ -52,6 +56,44 @@
     validate(key);
     return key;
   }
+  // A host call, in the turn: its answer, or the error it throws.
+  function hostCall(operation, request) {
+    if (runId === undefined) throw new Error('The database is unavailable during application initialization');
+    const answer = JSON.parse(host(operation, JSON.stringify(request)));
+    if (answer.ok) return answer.value;
+    const error = new Error(answer.error.message);
+    error.name = answer.error.name;
+    throw error;
+  }
+  // SQL values cross as JSON: a bigint as {$int}, bytes as {$blob} in hex.
+  function sqlParam(value) {
+    if (value === undefined || value === null) return null;
+    if (typeof value === 'bigint') return { $int: String(value) };
+    if (value instanceof Uint8Array) {
+      let hex = '';
+      for (const byte of value) hex += (byte < 16 ? '0' : '') + byte.toString(16);
+      return { $blob: hex };
+    }
+    if (typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') {
+      validate(value);
+      return value;
+    }
+    throw new TypeError('An SQL parameter is a number, bigint, string, boolean, null or Uint8Array');
+  }
+  function sqlValue(value) {
+    if (value === null || typeof value !== 'object') return value;
+    if ('$int' in value) return BigInt(value.$int);
+    const bytes = new Uint8Array(value.$blob.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(value.$blob.substr(i * 2, 2), 16);
+    return bytes;
+  }
+  function query(sql, params) {
+    if (typeof sql !== 'string') throw new TypeError('SQL must be a string');
+    validate(sql);
+    const rows = hostCall('db.sql', { sql, params: params.map(sqlParam) });
+    for (const row of rows) for (const column in row) row[column] = sqlValue(row[column]);
+    return rows;
+  }
   function request(operation) {
     if (runId === undefined) throw new Error('Durable operations are unavailable during application initialization');
     const id = runId + '/' + nextOperation++;
@@ -65,6 +107,34 @@
     get key() {
       return scope;
     },
+    db: Object.freeze({
+      // A tagged template: each ${value} is a parameter, never SQL text.
+      sql(strings, ...values) {
+        if (!Array.isArray(strings) || !Array.isArray(strings.raw))
+          throw new TypeError('db.sql is a tagged template: db.sql`SELECT ...`');
+        return query(strings.join('?'), values);
+      },
+      query(sql, params = []) {
+        if (!Array.isArray(params)) throw new TypeError('Parameters are an array');
+        return query(sql, params);
+      },
+      // fn's statements stand together, or not at all if it throws.
+      transaction(fn) {
+        if (typeof fn !== 'function') throw new TypeError('A transaction runs a function');
+        hostCall('db.begin', null);
+        let result;
+        try {
+          result = fn();
+          if (result && typeof result.then === 'function')
+            throw new TypeError('A transaction function is synchronous: it cannot await');
+        } catch (error) {
+          hostCall('db.rollback', null);
+          throw error;
+        }
+        hostCall('db.commit', null);
+        return result;
+      },
+    }),
     kv: Object.freeze({
       get(key) {
         return request({ kind: 'kv.get', key: kvKey(key) });

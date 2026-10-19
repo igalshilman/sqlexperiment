@@ -17,16 +17,26 @@ use std::sync::Arc;
 mod common;
 
 const FLOW: &str = r#"async function main(input, ctx){
+    // The heap counts the rows it inserted; the database must agree, whatever
+    // a crash kept: a turn's SQL commits with the turn.
+    ctx.db.sql`CREATE TABLE IF NOT EXISTS log(n INTEGER)`;
+    let inserted=0;
+    const insert=()=>ctx.db.sql`INSERT INTO log VALUES(${++inserted})`;
     const before=(await ctx.kv.get('n')) ?? 0;
+    insert();
     await ctx.kv.set('n', before+input);
     const echoed=await ctx.rpc.call({service:'Echo',handler:'echo'},{n:before+input});
+    insert();
     await ctx.kv.set('echoed',echoed.input.n);
     const big=new Uint8Array(512*1024).fill(1);
     await ctx.sleep(5);
+    insert();
+    try{ctx.db.transaction(()=>{ctx.db.sql`INSERT INTO log VALUES(${-1})`;throw new Error('undo');});}catch{}
     big[1000]=2;
     await ctx.kv.delete('n');
     await durable.call('observe');
-    return {sum:big[0]+big[1000], id:echoed.id};
+    const [{rows}]=ctx.db.sql`SELECT count(*) AS rows FROM log`;
+    return {sum:big[0]+big[1000], id:echoed.id, rows, inserted};
 }"#;
 
 /// A store whose `nth` sync fails, storing nothing, read back through
@@ -97,7 +107,10 @@ fn attempt(scope: &Scope) -> Result<View> {
 fn reference() -> Result<View> {
     let store = Store::default();
     let expected = attempt(&store.scope())?;
-    assert_eq!(value(&expected), json!({"sum":3,"id":"r/2"}));
+    assert_eq!(
+        value(&expected),
+        json!({"sum":3,"id":"r/2","rows":3,"inserted":3})
+    );
     assert_eq!(
         (kv(&store, "n"), kv(&store, "echoed")),
         (None, Some(json!(5)))
