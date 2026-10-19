@@ -80,8 +80,9 @@ pub struct PageCacheConfig {
     /// Namespaces whose durability knowledge is kept.
     pub namespaces: usize,
     /// Bytes of idle engines kept for the next session of their namespace, by
-    /// estimate: a parked engine holds its parsed schema, about 48 KiB plus 16
-    /// bytes per byte of schema SQL. Least recently parked go first.
+    /// estimate: a parked engine holds its database's buffer pool (~4 MiB)
+    /// and its parsed schema, 16 bytes per byte of schema SQL. Least recently
+    /// parked go first.
     pub engine_bytes: usize,
 }
 
