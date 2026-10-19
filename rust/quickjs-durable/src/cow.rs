@@ -61,6 +61,9 @@ impl Golden {
     /// `base` is the start of a VM's linear memory, of at least this image's
     /// length, accessible, and nothing else maps or reads it meanwhile.
     pub(crate) unsafe fn map(&self, base: *mut u8) -> io::Result<()> {
+        if self.bytes.is_empty() {
+            return Ok(());
+        }
         let file = self.file()?;
         let mapped = unsafe {
             libc::mmap(
@@ -86,6 +89,9 @@ impl Golden {
 ///
 /// As for [`Golden::map`]; afterwards the memory reads as zeros.
 pub(crate) unsafe fn unmap(base: *mut u8, len: usize) -> io::Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
     let mapped = unsafe {
         libc::mmap(
             base.cast(),

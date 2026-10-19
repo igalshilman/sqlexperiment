@@ -22,8 +22,6 @@ const STDLIB: &str = "lib/python3.15";
 pub(crate) struct Build {
     pub(crate) wasm: Vec<u8>,
     pub(crate) files: Arc<Files>,
-    /// Where compiled modules are cached.
-    pub(crate) dir: PathBuf,
 }
 
 impl Build {
@@ -45,7 +43,6 @@ impl Build {
         Ok(Self {
             wasm,
             files: Arc::new(files),
-            dir,
         })
     }
 }

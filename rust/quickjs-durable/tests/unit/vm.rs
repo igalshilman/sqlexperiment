@@ -16,6 +16,36 @@ fn snapshot_abi_rejects_state_outside_memory_and_stack_pointer() -> Result<()> {
     Ok(())
 }
 
+/// A module split in two lays out the memory it would have instantiated as
+/// built, and runs nothing before that memory is mapped.
+#[test]
+fn split_lays_out_the_memory_the_module_would_have() -> Result<()> {
+    let wasm = wat::parse_str(
+        r#"(module (memory (export "memory") 3)
+            (data (i32.const 16) "abc") (data (i32.const 70000) "far")
+            (data $passive "never"))"#,
+    )?;
+    let (code, data) = split(&wasm)?;
+    let engine = Engine::default();
+    let mut store = Store::new(&engine, ());
+    let built = Instance::new(&mut store, &Module::new(&engine, &wasm)?, &[])?;
+    let built = built.get_memory(&mut store, "memory").unwrap();
+    assert_eq!(data.len(), 2 * 65536, "up to the last segment's page");
+    assert_eq!(data[..], built.data(&store)[..data.len()]);
+    assert!(
+        built.data(&store)[data.len()..]
+            .iter()
+            .all(|&byte| byte == 0)
+    );
+    let mut store = Store::new(&engine, ());
+    let bare = Instance::new(&mut store, &Module::new(&engine, &code)?, &[])?;
+    let bare = bare.get_memory(&mut store, "memory").unwrap();
+    assert!(bare.data(&store).iter().all(|&byte| byte == 0));
+    let started = wat::parse_str("(module (memory 1) (func $f) (start $f))")?;
+    assert!(split(&started).is_err());
+    Ok(())
+}
+
 /// A runtime of each kind this host supports: barriers always, native
 /// tracking where the kernel has it.
 fn runtimes() -> Result<Vec<Runtime>> {

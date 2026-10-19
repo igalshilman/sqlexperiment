@@ -186,8 +186,10 @@ From the first build, these brought Python's figures down:
 - **Bytecode for the standard library.** Without it, every program's
   evaluation compiled asyncio and its imports from source: about 1 s.
 - **A cached compiled module.** Cranelift takes ~8 s to compile CPython. The
-  runtime serializes the module next to the engine and loads it from there
-  afterwards.
+  runtime serializes the module into its cache directory and loads it from
+  there afterwards, as it does QuickJS's (~1 s): a server restarts in ~0.35 s
+  with both engines, where it took ~3 s compiling QuickJS twice, with and
+  without its data segments, before each engine had one module.
 - **`gc.freeze()` after load.** Pages changed per turn fell from 85–147 to
   66–109, and from 680–1,190 to 225–323 under heap churn; batches by half.
 - **A shared base image.** CPython starts and imports asyncio once per

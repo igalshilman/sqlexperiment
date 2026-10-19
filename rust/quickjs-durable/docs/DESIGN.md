@@ -252,13 +252,21 @@ required to capture an otherwise safe boundary.
 
 ### 3.2. Golden creation, eval and restore
 
-Compile the instrumented module once and share it. A run's Wasmtime
+Compile each engine's module once, without its data segments, and share it:
+every VM maps a golden image over its memory (below). A fresh VM maps the
+memory the segments lay out, as instantiating the module as built would; the
+module must have no start function, which would run before it. The compiled
+module is cached on disk (`QJS_CACHE`, by default `~/.cache/quickjs-durable`),
+keyed by the engine's configuration, the tracking mode and the Wasm: a restart
+loads it in milliseconds instead of compiling QuickJS (~1 s) and CPython
+(~8 s) again. A run's Wasmtime
 Store/instance lives for its attempt: it is restored once, from golden for a
 new run or from the commit for another attempt, and then runs turn after turn.
 
 Golden creation, once per program version, when the process starts (§5.5):
 
-1. Instantiate with logical time zero and host identity `program/<name>`.
+1. Instantiate with logical time zero and host identity `program/<name>`, and
+   map the module's data over its memory.
 2. Call `_initialize()`, then `qjs_init2(~((1<<9)|(1<<10)))`; require return zero.
    These flags disable weak references/finalization and the performance intrinsic.
 3. Apply QuickJS allocator and stack limits. Evaluate bridge code, then application
@@ -331,7 +339,8 @@ Starting a VM is most of what a short run costs, so the runtime keeps it cheap:
   differ from golden. Wasmtime could map an image itself, but only from a
   module's data segments, which would mean compiling a module per program
   (seconds for CPython); the runtime maps it instead, into a module without
-  data segments, one per engine. The memory is Wasmtime's: when a VM ends it
+  data segments, one per engine, which every VM of the engine shares, golden
+  evaluation's included. The memory is Wasmtime's: when a VM ends it
   maps fresh zeros back before Wasmtime has the memory again, as its slot
   would hold after any VM (a unit test checks that nothing a VM wrote, over
   golden or past it, reaches the next).
