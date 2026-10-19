@@ -45,12 +45,13 @@ Assumptions and invariants:
 2. One writer owns a scope at a time: in Restate, the object's exclusive
    handler, for the whole run. A scope holds one run's image at a time; its
    KV is shared by its runs, in turn.
-3. Writes may be acknowledged before they are durable, as long as a failure
-   loses only a suffix of them, in issue order (Restate's state commands).
+3. Writes land in any order: a write counts once it is acknowledged (in
+   Restate, by a sync after it), and a failure may lose any that was not.
    Reads within an attempt see its own writes.
-4. A turn happened once its commit record is stored, with everything it
-   lists (§7). Effects are dispatched only after the commit that issued them,
-   in issue order, so a crash that loses the commit loses them too.
+4. A turn happened once its commit, one put of the scope's database record,
+   is stored, with its pages and its KV writes (§7). Effects are dispatched
+   only after the commit that issued them, in issue order, so a crash that
+   loses the commit loses them too.
 5. Snapshot only after returning completely from Wasm. The image contains
    QuickJS promises and queued jobs, never a native Wasm stack or a Rust future.
 6. Recovery reconstructs the committed image. It does not replay JavaScript,
@@ -198,11 +199,12 @@ run.view() -> View
 `Run::start` begins a run with its first turn, or, when the scope's commit is
 already that run's, continues it as committed: another attempt. `deliver`
 answers one pending request and runs a turn; `deliver_all` answers several,
-in order, in one turn. Every store call is awaited
-outside any Wasm call, so a remote store may suspend in each. An error leaves
-the `Run` unusable: the attempt ends, and the next one starts from the store.
-`MemoryStore` keeps every write in order, so a test can keep any prefix of
-them, as a crash may.
+in order, in one turn. A run takes its `Scope`: the store its database lives
+in, and, for a process that keeps owning it, an owner cache. Every store call
+is awaited outside any Wasm call, so a remote store may suspend in each. An
+error leaves the `Run` unusable: the attempt ends, and the next one starts
+from the store. Tests run over sqlite-kv's `MemoryKv`, and its `FaultKv`
+fails any one write, as a crash may.
 
 ## 3. QuickJS/Wasm snapshot ABI
 
@@ -321,10 +323,9 @@ and write) took 1,755 µs in `MemoryStore`, of which 1,112 µs restoring golden
 (mostly page faults) and 253 µs copying it; the pool made it 1,073 µs, the
 linked imports 924 µs, the shared golden 771 µs. Against a server, one-turn
 runs went from ~298/s to ~340/s and `Promise.all` of 10 calls from ~24/s to
-~28/s; runs of 5 waits stayed at ~130/s.
-6. Bind run state on first start, or deliver one completion, then run jobs.
-   Each later turn reuses the instance: it resets fuel and logical time,
-   delivers, runs, captures, and clears the tracker once the commit is stored.
+~28/s; runs of 5 waits stayed at ~130/s. 6. Bind run state on first start, or deliver one completion, then run jobs.
+Each later turn reuses the instance: it resets fuel and logical time,
+delivers, runs, captures, and clears the tracker once the commit is stored.
 
 Before capture, call the runtime/context getters and read the stack global, then
 select/copy pages. If metadata getters touch memory, those writes must be included.
@@ -412,13 +413,13 @@ The cost moves from every store to the first write of each page in a turn: a
 fault of ~1.5 µs. Measured on 18 October 2026, with the block encoding (§5.2)
 in both:
 
-| Workload                                 | Barriers       | Native         |
-| ---------------------------------------- | -------------- | -------------- |
-| 8,000 objects, one synchronous job       | 12.8-13.4 ms   | 11.0 ms        |
-| 800 JSON round trips, one job            | 18.4-18.7 ms   | 16.0 ms        |
-| A turn of a wait loop (~23 pages)        | 205 µs         | 265 µs         |
-| A turn of a KV update                    | 713-738 µs     | 717-740 µs     |
-| A turn building 2,000 objects            | 9.5-9.7 ms     | 9.3 ms         |
+| Workload                           | Barriers     | Native     |
+| ---------------------------------- | ------------ | ---------- |
+| 8,000 objects, one synchronous job | 12.8-13.4 ms | 11.0 ms    |
+| 800 JSON round trips, one job      | 18.4-18.7 ms | 16.0 ms    |
+| A turn of a wait loop (~23 pages)  | 205 µs       | 265 µs     |
+| A turn of a KV update              | 713-738 µs   | 717-740 µs |
+| A turn building 2,000 objects      | 9.5-9.7 ms   | 9.3 ms     |
 
 Barriers cost compute-bound code 15-20%, and spend fuel: their instructions
 count against a job's budget, so a job reached the cap with less JavaScript
@@ -485,15 +486,15 @@ Measured on 18 October 2026 over traces of seven workloads (40 turns each, 80
 for the agent; batch KiB summed over the run's turns, and Zstd time over all
 of them):
 
-| Encoding of a turn's changed pages            | steps | kv  | agent | shift | typed | churn | map | Total | Encode |
-| --------------------------------------------- | ----- | --- | ----- | ----- | ----- | ----- | --- | ----- | ------ |
-| XOR with previous, Zstd 3 (before)            | 47    | 161 | 198   | 80    | 234   | 3,543 | 740 | 5,006 | 132 ms |
-| XOR with golden, Zstd 3 (before the chain)    |       |     |       |       |       |       |     | 12,921 | 279 ms |
-| Prefix of previous, Zstd 3                    | 38    | 111 | 138   | 62    | 226   | 2,672 | 862 | 4,111 | 251 ms |
-| Prefix of previous, Zstd 3, long matching     | 37    | 109 | 135   | 41    | 66    | 2,692 | 769 | 3,851 | 443 ms |
-| Same, stack zeroed                            | 32    | 100 | 116   | 35    | 59    | 2,671 | 762 | 3,777 | 422 ms |
-| Same, Zstd 2                                  | 32    | 102 | 115   | 37    | 62    | 2,762 | 827 | 3,939 | 300 ms |
-| Same, and free heap chunks zeroed (selected)  | 33    | 94  | 109   | 36    | 62    | 2,455 | 524 | 3,315 | 303 ms |
+| Encoding of a turn's changed pages           | steps | kv  | agent | shift | typed | churn | map | Total  | Encode |
+| -------------------------------------------- | ----- | --- | ----- | ----- | ----- | ----- | --- | ------ | ------ |
+| XOR with previous, Zstd 3 (before)           | 47    | 161 | 198   | 80    | 234   | 3,543 | 740 | 5,006  | 132 ms |
+| XOR with golden, Zstd 3 (before the chain)   |       |     |       |       |       |       |     | 12,921 | 279 ms |
+| Prefix of previous, Zstd 3                   | 38    | 111 | 138   | 62    | 226   | 2,672 | 862 | 4,111  | 251 ms |
+| Prefix of previous, Zstd 3, long matching    | 37    | 109 | 135   | 41    | 66    | 2,692 | 769 | 3,851  | 443 ms |
+| Same, stack zeroed                           | 32    | 100 | 116   | 35    | 59    | 2,671 | 762 | 3,777  | 422 ms |
+| Same, Zstd 2                                 | 32    | 102 | 115   | 37    | 62    | 2,762 | 827 | 3,939  | 300 ms |
+| Same, and free heap chunks zeroed (selected) | 33    | 94  | 109   | 36    | 62    | 2,455 | 524 | 3,315  | 303 ms |
 
 The workloads: a sleep loop (steps), KV reads and writes with an RPC each
 (kv), a growing chat history (agent), arrays and strings shifted at the front
@@ -506,13 +507,13 @@ steps, kv, agent, typed and churn runs wrote 31%, 38%, 45%, 53% and 35% less.
 
 Reasons and alternatives from the experiment's earlier measurements:
 
-| Candidate                 | Trade-off                                                                                                                                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| bsdiff4                   | Smaller heap-churn patches, expensive whole-image matching; historical scalar median ~143 ms, sparse-8-MiB ~1,084 ms among successful samples, with timeouts on larger pairs                            |
-| Page XOR + Zstd           | Exploits stable memory offsets; historical scalar encode ~0.26 ms; ~73 KiB heap-churn patch versus ~25 KiB for bsdiff. Blind to data that moves within or between pages; replaced, above              |
-| Replacing changed pages   | Simpler, but wastes space on unchanged bytes inside a dirty page                                                                                                                                        |
-| Zstd patch-from, image    | The whole previous image as prefix: barely smaller than the changed pages' previous contents, and indexes the whole memory each turn (~2 ms per MiB)                                                     |
-| Xdelta/VCDIFF, HDiffPatch | General alternatives; no special knowledge of Wasm heaps. The tested Xdelta Wasm port ran out of memory; its bundled native source was measured separately. HDiffPatch was researched, not measured     |
+| Candidate                 | Trade-off                                                                                                                                                                                                                  |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| bsdiff4                   | Smaller heap-churn patches, expensive whole-image matching; historical scalar median ~143 ms, sparse-8-MiB ~1,084 ms among successful samples, with timeouts on larger pairs                                               |
+| Page XOR + Zstd           | Exploits stable memory offsets; historical scalar encode ~0.26 ms; ~73 KiB heap-churn patch versus ~25 KiB for bsdiff. Blind to data that moves within or between pages; replaced, above                                   |
+| Replacing changed pages   | Simpler, but wastes space on unchanged bytes inside a dirty page                                                                                                                                                           |
+| Zstd patch-from, image    | The whole previous image as prefix: barely smaller than the changed pages' previous contents, and indexes the whole memory each turn (~2 ms per MiB)                                                                       |
+| Xdelta/VCDIFF, HDiffPatch | General alternatives; no special knowledge of Wasm heaps. The tested Xdelta Wasm port ran out of memory; its bundled native source was measured separately. HDiffPatch was researched, not measured                        |
 | Kernel write tracking     | Selected where available (above): asynchronous userfaultfd write protection and PAGEMAP_SCAN need no trap handling; mprotect with a fault handler or soft-dirty bits would need signal coordination or process-wide resets |
 
 These are workload-dependent historical codec results, not current host-commit
@@ -529,15 +530,15 @@ Measured on 18 October 2026 over eight workloads (the seven above with a 100-tur
 agent, plus `cycles`, dropping 300 objects with cycles and closures a turn,
 and `fan`, `Promise.all` of 10 calls), bytes written per run in `MemoryStore`:
 
-| Workload | Default | Collect every turn | Threshold 1 MiB | Threshold 4 MiB or more |
-| -------- | ------- | ------------------ | --------------- | ----------------------- |
-| steps    | 61 KiB  | 66 KiB             | 61 KiB          | 61 KiB                  |
-| kv       | 179 KiB | 194 KiB            | 179 KiB         | 179 KiB                 |
-| agent    | 501 KiB | 498 KiB            | 487 KiB         | 487 KiB                 |
-| map      | 811 KiB | 812 KiB            | 814 KiB         | 809 KiB                 |
-| churn    | 2,473 KiB | 2,475 KiB        | 2,433 KiB       | 2,433 KiB               |
-| cycles   | 653 KiB | 726 KiB            | 822 KiB         | 1,997 KiB (5 MiB heap)  |
-| fan      | 626 KiB | 652 KiB            | 626 KiB         | 626 KiB                 |
+| Workload | Default   | Collect every turn | Threshold 1 MiB | Threshold 4 MiB or more |
+| -------- | --------- | ------------------ | --------------- | ----------------------- |
+| steps    | 61 KiB    | 66 KiB             | 61 KiB          | 61 KiB                  |
+| kv       | 179 KiB   | 194 KiB            | 179 KiB         | 179 KiB                 |
+| agent    | 501 KiB   | 498 KiB            | 487 KiB         | 487 KiB                 |
+| map      | 811 KiB   | 812 KiB            | 814 KiB         | 809 KiB                 |
+| churn    | 2,473 KiB | 2,475 KiB          | 2,433 KiB       | 2,433 KiB               |
+| cycles   | 653 KiB   | 726 KiB            | 822 KiB         | 1,997 KiB (5 MiB heap)  |
+| fan      | 626 KiB   | 652 KiB            | 626 KiB         | 626 KiB                 |
 
 Collecting at every turn's end costs CPU (up to ~1 ms a turn on the Map) and
 writes more, not less: the collector relinks the objects it visits, which
@@ -554,36 +555,38 @@ Zeroing free chunks (§5.6) already makes what it allocates and frees free.
 
 ### 5.1. Record identities and layouts
 
-A scope's store holds three kinds of key:
+A scope's store holds one sqlite-kv database
+([its format](../../../core/sqlite-kv/docs/FORMAT.md)): the commit record at
+`v14/commit`, the values it outgrew at `v14/log/<n>`, and SQL pages. The
+record holds, besides the SQL log:
 
-| Key         | Value                                                    |
-| ----------- | -------------------------------------------------------- |
-| `commit`    | The scope's current run as of its last turn: JSON, below |
-| `batch/<n>` | An immutable compressed page batch (§5.2); n counts up   |
-| `kv/<key>`  | The scope's KV value of `key`, as JSON                   |
+| Part    | Value                                                                |
+| ------- | -------------------------------------------------------------------- |
+| Effects | The scope's current run as of its last turn: JSON, below             |
+| Chain   | The image's page batches (§5.2), each inline or a stored value       |
+| SQL     | The scope's KV: a table `kv(key TEXT PRIMARY KEY, value TEXT)`, JSON |
 
 Programs and their golden images are not stored: the process supplies them
-(§5.5). The commit, in camelCase JSON:
+(§5.5). The run, in camelCase JSON:
 
 ```text
 VmMeta = {stack: i32, runtime: i32, context: i32}
 Commit = {
     run: run_id, program: name, version: u64, runtime: u64,
     turns: count, meta: VmMeta, memoryLen: byte_count,
-    chain: [batch_number, ...], baseBytes: count, deltaBytes: count,
-    livePages: count, nextBatch: u64, state: State,
-    writes: {key: json, ...}, deletes: [key, ...], garbage: [batch_number, ...]
+    batches: count, baseBytes: count, deltaBytes: count,
+    livePages: count, state: State
 }
 ```
 
-`chain` is the image, as batches applied in order over golden (zeros beyond
-its length): the first, the **base**, holds each page that differs from
-golden; each later one, a **delta**, the pages one turn changed. Base and
-deltas apply alike: each batch is compressed against the pages it replaces,
-in the memory as it stands. `baseBytes` and `deltaBytes` size the chain, for when to write a new
-base (§5.3); `livePages` counts pages that differ from golden. A settled run's
-chain is empty. `writes`, `deletes` and `garbage`
-are what follows the commit (§7). `runtime` is the runtime's version, a
+The chain is the image, as batches applied in order over golden (zeros
+beyond its length): the first, the **base**, holds each page that differs
+from golden; each later one, a **delta**, the pages one turn changed. Base
+and deltas apply alike: each batch is compressed against the pages it
+replaces, in the memory as it stands. `batches` counts this run's,
+`baseBytes` and `deltaBytes` size them, for when to write a new base (§5.3);
+`livePages` counts pages that differ from golden. A settled run's chain is
+empty. `runtime` is the runtime's version, a
 constant bumped by hand with anything an image depends on: the Wasm, the
 bridge, the limits, the imports' behavior. A run restores only on the
 program version and runtime it started on: a changed program needs a new
@@ -595,13 +598,13 @@ commit bytes.
 
 ### 5.2. Binary page batch
 
-| Part            | Encoding                                                                     |
-| --------------- | ---------------------------------------------------------------------------- |
-| Magic           | ASCII `QPD3`                                                                 |
-| Count           | Page count N, LEB128                                                         |
-| N page indexes  | Each as its gap from the previous index plus one (the first: from 0), LEB128 |
-| N block lists   | Each page's changed 64-byte blocks: a count byte k; then, if k < 8, the k block numbers in order, one byte each; if 8 <= k < 64, a 64-bit mask, little-endian; if k = 64, nothing |
-| Blocks          | One Zstd frame: the changed blocks, page by page, in order, back to back     |
+| Part           | Encoding                                                                                                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Magic          | ASCII `QPD3`                                                                                                                                                                      |
+| Count          | Page count N, LEB128                                                                                                                                                              |
+| N page indexes | Each as its gap from the previous index plus one (the first: from 0), LEB128                                                                                                      |
+| N block lists  | Each page's changed 64-byte blocks: a count byte k; then, if k < 8, the k block numbers in order, one byte each; if 8 <= k < 64, a 64-bit mask, little-endian; if k = 64, nothing |
+| Blocks         | One Zstd frame: the changed blocks, page by page, in order, back to back                                                                                                          |
 
 The **reference** is the blocks the batch replaces, back to back: their
 contents in the memory the batch applies to. The frame is compressed with the
@@ -634,14 +637,16 @@ capture(G, P, chain, VM):
         if current == previous: continue
         batch.append(i, current, against previous)
         P.page(i) = current
-    if the run settled: chain = []                  // no image is kept
+    if the run settled: clear the chain              // no image is kept
+    else if the run has no batch yet:
+        restart the chain with the batch, the base    // P was G; clears the
+                                                      // scope's previous run's
     else if batch is not empty:
-        if chain is empty: the batch is the base     // P was G
-        else if chain has 256 batches, or deltaBytes + batch > 2 * baseBytes:
+        if chain has 256 batches, or deltaBytes + batch > 2 * baseBytes:
             batch = every page of P that differs from G, against G
-            chain = []                               // a new base
-        chain.append(nextBatch)
-    return chain, batch
+            restart the chain with it                 // a new base
+        else: append the batch to the chain
+    return the chain update
 ```
 
 Count compared pages as examined, actual changes as changed. Zeroing dead
@@ -660,12 +665,12 @@ reads of a restore, which fetches the chain's batches all at once; each new
 base it forces costs a whole image. Measured on 18 October 2026, total bytes
 written in `MemoryStore` (batches and commits):
 
-| New base when                          | sleep loop, 400 turns | agent, 400 turns | Map of 5,000 entries, 100 turns |
-| -------------------------------------- | --------------------- | ---------------- | ------------------------------- |
-| 16 batches, or deltas > 2 × base       | 633 KiB               | 1,085 KiB        | 5,878 KiB                       |
-| 256 batches, or deltas > 2 × base      | 620 KiB               | 1,010 KiB        | 2,256 KiB (58 batches)          |
-| deltas > 1 × base                      | 735 KiB               | 1,229 KiB        | 2,669 KiB                       |
-| deltas > 4 × base                      | 570 KiB               | 904 KiB          | 2,547 KiB                       |
+| New base when                     | sleep loop, 400 turns | agent, 400 turns | Map of 5,000 entries, 100 turns |
+| --------------------------------- | --------------------- | ---------------- | ------------------------------- |
+| 16 batches, or deltas > 2 × base  | 633 KiB               | 1,085 KiB        | 5,878 KiB                       |
+| 256 batches, or deltas > 2 × base | 620 KiB               | 1,010 KiB        | 2,256 KiB (58 batches)          |
+| deltas > 1 × base                 | 735 KiB               | 1,229 KiB        | 2,669 KiB                       |
+| deltas > 4 × base                 | 570 KiB               | 904 KiB          | 2,547 KiB                       |
 
 The sleep loop and the agent write mostly commits and small deltas, over a
 base of 5-10 KiB once dead bytes are zeroed; the Map's base is ~600 KiB, and
@@ -678,8 +683,8 @@ reconstruct(commit):
     require the program's version and the runtime's match the commit's
     require golden_length <= memoryLen <= limit, 64-KiB aligned
     memory = golden bytes, extended with zeros to memoryLen
-    read every batch in commit.chain, at once
-    for each batch in commit.chain, in order:
+    the chain's batches came with the record, at open
+    for each batch in the chain, in order:
         indexes = its page indexes; require each within memory
         pages = its frame, decoded against memory's pages at indexes
         write pages into memory at indexes
@@ -771,8 +776,8 @@ loop:
     answered = false
     for op in report.issued, in issue order:
         if op is a KV request:
-            get: the turn's own write or delete of the key, else kv/<key>
-            set/delete: record it in the turn's writes
+            get/set/delete: SQL on the kv table, in the turn's transaction
+                (begun at its first KV request), so a get sees its writes
             deliver the result, with this turn's logical time
             answered = true
         else: append op to pending              // an effect for the host
@@ -806,39 +811,44 @@ Resume can coexist. Once the root settles, the run is final.
 
 ## 7. Storage: one commit per turn
 
-A turn writes, in this order:
+A turn is one commit of the scope's database (`Session::commit_turn`), one
+put of its record:
 
-1. `batch/<nextBatch>`, when pages changed;
-2. `commit`: the turn happened once it is stored;
-3. what follows the commit: `writes` to `kv/<key>`, `deletes` of `kv/<key>`,
-   and deleting `batch/<n>` for each garbage batch.
+1. its KV writes, the SQL transaction its first KV request began;
+2. its pages: the chain update of §5.3 (append, restart or clear);
+3. the run's state, as the record's effects, with the pending requests.
 
-A failure loses a suffix of the writes (§1), so a stored commit always has its
-batch. The next attempt reads the commit and applies what follows it again:
-puts and deletes of the same values, so applying twice changes nothing, and a
-crash between the commit and its last write loses nothing. A crash before the
-commit loses the whole turn, and the next attempt runs it again from the
-previous commit: the requests it issued were never dispatched (§1). The next
-commit's own lists replace the previous one's. An orphan batch, written by a
-turn whose commit was lost, has the number the next turn writes over.
+Writes land in any order (§1), so nothing may be its own put: a turn's batch
+and a commit that names it could not be ordered. The record carries the
+batch inline, or names it as a stored value it waits for first (a batch
+larger than the inline budget, 1 KiB here). Past the budget, the record's
+earlier inline parts are sealed into one stored value, which the next commit
+names; a SQL checkpoint keeps the chain. A crash before the record is stored
+loses the whole turn, which the next attempt runs again from the previous
+commit: the requests it issued were never dispatched (§1). Nothing is
+applied after a commit.
 
-Why not SQL. Until 18 October 2026 a scope's records lived in SQL tables
-(`checkpoints`, `state`, `effects`) through sqlite-kv, which made a turn's
-writes atomic with its own log. Measured against Restate, that cost a turn
-about 2 ms of CPU to open the database again and parse its schema, wrote
-every changed B-tree page, put each log segment twice (once more on the next
-open, to confirm it), and copied all pages into place at each checkpoint. A
-20-wait run journaled ~150 state commands and wrote ~150 KiB. The tables were
-key/value maps (the effects table even repeated the run's pending list), and a
-single writer with ordered writes needs no general transaction: one commit
-record, written last, is the atomic step. It also made the runtime
-independent of turso. A program that wants SQL can still call a Restate
-service that has it.
+**SQL again.** Until 18 October 2026 the scope's records lived in SQL tables
+through an earlier sqlite-kv; it cost a turn about 2 ms of CPU and wrote
+every log segment twice, so it gave way to one commit record of its own
+(with `batch/<n>` and `kv/<key>` keys) that relied on ordered writes. With
+the journal off, writes are not ordered, and sqlite-kv v14's one record per
+commit, with the host's effects and chain in it, is that commit. Measured on
+18 October 2026 (`cargo bench --bench checkpoints`, medians), against that
+record of its own:
 
-`MemoryStore` implements the same contract for tests and the benchmark, and
-keeps its writes in order so a test can keep any prefix of them: the crash
-tests start an attempt after every write of a run, and again after every write
-of the attempt that recovers from it.
+| Workload    | Live turn, before | Live turn | Restored turn, before | Restored turn | Bytes a turn, before | Bytes a turn |
+| ----------- | ----------------: | --------: | --------------------: | ------------: | -------------------: | -----------: |
+| scalar      |           0.58 ms |   0.71 ms |               1.38 ms |       2.24 ms |                1,259 |        1,708 |
+| sparse-8m   |           2.33 ms |   2.33 ms |              11.37 ms |      11.84 ms |                1,401 |        1,353 |
+| growth-3m   |           1.28 ms |   1.68 ms |               4.57 ms |       5.23 ms |                2,140 |        2,096 |
+| heap-churn  |           8.03 ms |   7.58 ms |               9.81 ms |      11.37 ms |               53,358 |       53,319 |
+| write-heavy |           5.52 ms |   5.31 ms |               6.92 ms |       7.47 ms |                2,342 |        2,301 |
+
+A turn is one or two writes instead of two to four. A restored turn opens
+the SQL engine (0.4-1.5 ms; an owner cache keeps it between attempts of one
+process), and a small batch is written twice, inline and then sealed. A turn
+without KV runs no SQL.
 
 ## 8. Worked execution and failure examples
 
@@ -856,16 +866,17 @@ async function main(input, ctx) {
 
 With count=41:
 
-| Turn                                | Writes, in order                                                                 | Effect R                    |
-| ----------------------------------- | -------------------------------------------------------------------------------- | --------------------------- |
-| T1: execute until the RPC wait      | `batch/0`, `commit` (count=42, R pending), `kv/count`=42                         | Dispatched after the commit |
-| T2: deliver R's result 84, continue | `commit` (completed, no pages; lastAnswer=84), `kv/lastAnswer`, delete `batch/0` | Done                        |
+| Turn                                | The record's put                                             | Effect R                    |
+| ----------------------------------- | ------------------------------------------------------------ | --------------------------- |
+| T1: execute until the RPC wait      | count=42 in SQL, the base batch, the run (R pending)         | Dispatched after the commit |
+| T2: deliver R's result 84, continue | lastAnswer=84 in SQL, the chain cleared, the run (completed) | Done                        |
 
-A crash before T1's commit leaves nothing: the next attempt starts the run
-again, and R was never dispatched. After T1's commit but before `kv/count`,
-the next attempt applies it. After dispatch, the next attempt waits on R again
-under its stable ID: Restate attaches to the call already made. After T2's
-commit, a repeated delivery is a no-op and another attempt returns the outcome.
+A crash before T1's record is stored leaves nothing: the next attempt starts
+the run again, and R was never dispatched. After it, count=42 is stored with
+it. After dispatch, the next attempt waits on R again under its stable ID:
+Restate attaches to the call already made. After T2's record, a repeated
+delivery is a no-op and another attempt returns the outcome; the base batch,
+stored or not, is garbage the next commit deletes.
 
 ### 8.2. Fan-out
 
@@ -940,7 +951,7 @@ Restate server, including a crash between a call's commit and its answer.
 ## 10. Measurements
 
 `cargo bench --bench checkpoints` (and `--features full-scan`, the control)
-runs a few workloads over `MemoryStore`, once with the VM live and once
+runs a few workloads over an in-memory store, once with the VM live and once
 restoring it every turn, and writes its results beside it as JSON.
 
 Against Restate, measured on 18 October 2026 (4 vCPUs, one restate-server
@@ -975,7 +986,7 @@ and the interpreter runs compute-bound code ~10x slower than V8.
 ### 10.1. A long coding session
 
 `cargo bench --bench agent` runs the shipped `coder` program through a
-scripted session of up to 300 steps over `MemoryStore`. Each step is a few
+scripted session of up to 300 steps over an in-memory store. Each step is a few
 hundred bytes of model text and one tool call: a file read (~6 KiB), a
 command (~1.5 KiB of output), an edit, or a written file (~3 KiB). On
 18 October 2026:

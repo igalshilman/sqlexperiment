@@ -15,9 +15,17 @@ a day, changes nothing ([`examples-typescript/support.ts`](examples-typescript/s
 const support = pi.agent({
   name: 'support',
   tools: [
-    call(orders, 'status', { description: 'The status of an order.', input: z.object({ order: z.string() }) }),
-    signal('approval', { description: "Wait for a manager's decision on a refund." }),
-    workflow(refund, { description: 'Refund an order.', input: z.object({ order: z.string(), amount: z.number() }) }),
+    call(orders, 'status', {
+      description: 'The status of an order.',
+      input: z.object({ order: z.string() }),
+    }),
+    signal('approval', {
+      description: "Wait for a manager's decision on a refund.",
+    }),
+    workflow(refund, {
+      description: 'Refund an order.',
+      input: z.object({ order: z.string(), amount: z.number() }),
+    }),
   ],
 });
 
@@ -68,17 +76,15 @@ its examples in `examples-<part>/`.
 
 |                | Version                                                                                                                           |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Restate server | 1.7.13, the latest release (or later)                                                                                             |
+| Restate server | 1.8 with service protocol v8 (state reads left out of the journal): the `service-protocol-v8` image, until a release has it       |
 | TypeScript SDK | 1.17.3 with [the patches](typescript/packages/sdk-typescript/README.md), over the shared core's unreleased main; `make` builds it |
 | Python SDK     | 1.0.5 with [the patches](python/sdk/README.md), over the same shared core; `make` builds it                                       |
 | Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), over the same shared core; `make sdk-rs` builds it                                 |
 
 ```sh
-docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.7.13
+docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway \
+  -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true ghcr.io/restatedev/restate:service-protocol-v8
 ```
-
-Or run `restate-server` directly: `make restate-server` downloads the release
-binary for this platform to `target/restate/restate-server`.
 
 ## Build and test
 
@@ -107,5 +113,6 @@ The Python parts need Python 3.13 and [uv](https://docs.astral.sh/uv/), which
 installs [their workspace](python/README.md) into `python/.venv` (`make py`),
 building the patched SDK and the extension with maturin.
 
-The tests against a Restate server download its release binary on first use
-(see the [`Makefile`](Makefile): `RESTATE_VERSION`, `RESTATE_FROM`, `RESTATE_SERVER`).
+The tests against a Restate server take its binary out of that image on first
+use, without docker (Linux only; see the [`Makefile`](Makefile): `RESTATE_FROM`,
+`RESTATE_IMAGE`, `RESTATE_VERSION`, `RESTATE_SERVER`), and enable v8.

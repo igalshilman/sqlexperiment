@@ -33,7 +33,7 @@ impl KvStore for GateKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             let value = self.inner.get(key).await?;
-            let gate = match key.starts_with("v13/page/") {
+            let gate = match key.starts_with("v14/page/") {
                 true => self.release.lock().unwrap().clone(),
                 false => None,
             };
@@ -46,11 +46,14 @@ impl KvStore for GateKv {
             Ok(value)
         })
     }
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
         self.inner.put(key, value)
     }
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
+    fn delete(&self, key: &str) -> io::Result<()> {
         self.inner.delete(key)
+    }
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        self.inner.sync()
     }
 }
 

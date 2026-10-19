@@ -61,7 +61,7 @@ fn sql_errors_leave_the_session_usable() -> Result<()> {
             } else {
                 drop(db);
             }
-            store.crash(&[]);
+            store.crash();
             let mut db = Session::open_with_options(store, options(durability)).await?;
             assert_eq!(
                 rows(&mut db).await?,
@@ -108,7 +108,10 @@ fn a_duplicate_request_rolls_back_and_the_session_goes_on() -> Result<()> {
 #[test]
 fn storage_errors_end_the_session() -> Result<()> {
     futures::executor::block_on(async {
-        for (operation, prefix) in [(Operation::Get, "v13/page/"), (Operation::Put, "v13/log/")] {
+        for (operation, prefix) in [
+            (Operation::Get, "v14/page/"),
+            (Operation::Put, "v14/commit"),
+        ] {
             let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
             let mut db =
                 Session::open_with_options(store.clone(), options(Durability::Commit)).await?;
@@ -248,7 +251,7 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
             } else {
                 drop(db);
             }
-            store.crash(&[]);
+            store.crash();
             let mut db = Session::open_with_options(store, options(durability)).await?;
             let got: Vec<String> = db
                 .query("SELECT id, n FROM t ORDER BY id")

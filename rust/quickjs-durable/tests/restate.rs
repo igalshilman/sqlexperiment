@@ -1,5 +1,5 @@
-//! The services against a real Restate server (RESTATE_SERVER, or the one
-//! `make restate-server` gets): `make test-qjs`. Ignored by a plain
+//! The services against a real Restate server: `make test-qjs`, which
+//! downloads one to RESTATE_SERVER. Ignored by a plain
 //! `cargo test`, which has no server.
 mod fakes;
 
@@ -61,7 +61,8 @@ async fn server() -> Server {
     let binary = std::env::var("RESTATE_SERVER")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/restate/restate-server")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/restate/service-protocol-v8/restate-server")
         });
     let dir = tempfile::tempdir().unwrap();
     // Kept for a failed test, beside its binary.
@@ -72,10 +73,12 @@ async fn server() -> Server {
         .arg(dir.path())
         .env("RESTATE_BIND_IP", "127.0.0.1")
         .env("RESTATE_LISTEN_MODE", "tcp")
+        // The stores read state through v8's unjournaled gets.
+        .env("RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8", "true")
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
-        .unwrap_or_else(|e| panic!("{}: {e} (make restate-server)", binary.display()));
+        .unwrap_or_else(|e| panic!("{}: {e} (make test-qjs gets it)", binary.display()));
     let server = Server { process, _dir: dir };
     let client = reqwest::Client::new();
     wait(|| async {
@@ -142,7 +145,8 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .local_addr()
         .unwrap()
         .port();
-    let endpoint = quickjs_durable::bind(Endpoint::builder(), programs)
+    let cache = quickjs_durable::page_cache().await.unwrap();
+    let endpoint = quickjs_durable::bind(Endpoint::builder(), programs, &cache)
         .bind(Doubler)
         .bind(fakes::Claude)
         .bind(quickjs_durable::Workspace::new(workspaces()))

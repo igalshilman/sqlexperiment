@@ -6,8 +6,8 @@
 //! - [`restate`]: each program as a virtual object; its `run` handler drives
 //!   the runtime and waits on Restate for the run's calls and timers.
 //! - [`Run`], [`Runtime`], [`Programs`]: the runtime. A run keeps its VM live
-//!   from turn to turn, and commits each turn to a [`Store`] (in Restate, the
-//!   object's state; in tests, a [`MemoryStore`]).
+//!   from turn to turn, and commits each turn to its [`Scope`]'s database (in
+//!   Restate, kept in the object's state).
 //! - [`Claude`]: the `claude` service, for programs to call models.
 //! - [`Workspace`]: the `workspace` object, a directory and a shell for
 //!   coding agents.
@@ -30,9 +30,9 @@ mod workspace;
 pub use claude::Claude;
 pub use model::{GuestError, Operation, Outcome, RpcTarget, State, Status, View};
 pub use program::{Program, Programs};
-pub use restate::{bind, embedded, endpoint, faults};
+pub use restate::{bind, embedded, endpoint, faults, page_cache};
 pub use run::Run;
-pub use store::{MemoryStore, Store};
+pub use store::Scope;
 pub use vm::Runtime;
 pub use workspace::Workspace;
 

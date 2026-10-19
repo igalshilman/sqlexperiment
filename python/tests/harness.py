@@ -1,6 +1,6 @@
 """
 A Restate server and Python services, for the tests against a real server:
-``restate-server`` from RESTATE_SERVER (``make restate-server`` gets it), on
+``restate-server`` from RESTATE_SERVER (the Makefile's test targets get it), on
 the default ports, and services from files that end in ``serve(...)``, such
 as the examples.
 """

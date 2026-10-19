@@ -127,7 +127,7 @@ struct Sample {
 }
 
 async fn run(base: &MemoryKv, mode: &str, capacity: usize) -> Result<Sample> {
-    let store: Store = Arc::new(LatencyKv::new(base.fork()).with_durable_when_visible(true));
+    let store: Store = Arc::new(LatencyKv::new(base.fork()));
     let cache = open_cache(PageCacheConfig {
         decoded: mode == "decoded",
         ..cache_config(capacity, 1 << 30)

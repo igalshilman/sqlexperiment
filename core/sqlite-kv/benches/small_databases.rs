@@ -24,8 +24,8 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
             .await?;
     }
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x, x, x, 0, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
-    assert!(db.save().await?.cleanup_error.is_none());
-    store.crash(&[]);
+    db.save().await?;
+    store.crash();
     Ok(store)
 }
 fn print_row(
@@ -51,7 +51,7 @@ fn print_row(
         s.bytes_written,
         s.kind("page").bytes_written,
         s.kind("log").bytes_written,
-        s.kind("meta").bytes_written
+        s.kind("commit").bytes_written
     );
 }
 async fn run(case: Case, repeats: usize) -> Result<()> {
@@ -137,14 +137,14 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
                         db.execute(&format!("UPDATE t SET note={n} WHERE id={id}"))
                             .await?;
                         if op == "ten_updates_ten_saves" && n < 10 {
-                            assert!(db.save().await?.cleanup_error.is_none());
+                            db.save().await?;
                             db = Session::open(store.clone()).await?;
                         }
                     }
                 }
                 _ => unreachable!(),
             }
-            assert!(db.save().await?.cleanup_error.is_none());
+            db.save().await?;
             let elapsed = start.elapsed();
             let stats = store.stats();
             print_row(
@@ -157,7 +157,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             );
             // Validate results after timing/count capture, with simulated loss of
             // all unacknowledged state and a fresh engine.
-            store.crash(&[]);
+            store.crash();
             let mut reopened = Session::open(store.clone()).await?;
             let count = reopened.query("SELECT count(*) FROM t").await?[0][0].to_string();
             let expected_count =
@@ -198,7 +198,7 @@ fn main() -> Result<()> {
         return Err("repeats must be positive".into());
     }
     println!(
-        "rows,payload_bytes,indexes,operation,run,db_bytes,stored_before,stored_after,elapsed_us,gets,puts,deletes,bytes_read,bytes_written,page_bytes,log_bytes,meta_bytes"
+        "rows,payload_bytes,indexes,operation,run,db_bytes,stored_before,stored_after,elapsed_us,gets,puts,deletes,bytes_read,bytes_written,page_bytes,log_bytes,commit_bytes"
     );
     futures::executor::block_on(async {
         for rows in [10, 100, 300] {

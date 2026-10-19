@@ -1,9 +1,10 @@
 //! SQLite-compatible SQL over an asynchronous key/value store.
 //!
 //! The engine is Turso's Rust implementation (`turso_core`); this crate supplies
-//! its file I/O and makes the database durable in a KV store. It requires only
-//! [`kv::KvStore::get`], [`kv::KvStore::put`] and [`kv::KvStore::delete`], not a
-//! multi-key transaction, compare-and-swap, listing operation or backend WAL API.
+//! its file I/O and makes the database durable in a KV store: a Restate
+//! object's state, which keeps writes in issue order and makes them durable at
+//! a sync (see [`kv`]). It needs no multi-key transaction, compare-and-swap,
+//! listing operation or backend WAL API.
 //!
 //! # When changes become durable
 //!
@@ -19,23 +20,23 @@
 //! | Layer | Representation | Survives dropping the session? |
 //! |---|---|---|
 //! | SQL working state | Dirty 4096-byte pages and private engine WAL | No |
-//! | Log | Segments of committed page images, compressed against their previous images, one transaction per save | Yes, after acknowledged save |
+//! | Commit record | `commit`: the log since the last checkpoint, one transaction per save, compressed against the previous images; a large one's segments at `log/<n>` | Yes, after an acknowledged save |
 //! | Pages | `page/<n>`, overwritten in place by checkpoints | Yes |
-//! | Checkpoint record | `meta`: where replay starts and garbage ends | Yes |
 //!
-//! A save commits by appending one log transaction, usually a single put. An
-//! unchanged save performs no mutations. If [`SaveReport::cleanup_error`] is set,
-//! the SQL changes **are committed**; only checkpoint work failed. An error or
-//! cancellation can have an unknown commit outcome. Settle outstanding backend
-//! requests and reopen before deciding whether to retry application work.
+//! A save commits by putting the record with one more transaction, usually a
+//! single put, then one sync. An unchanged save performs no mutations. An
+//! error or cancellation can have an unknown commit outcome. Settle
+//! outstanding backend requests and reopen before deciding whether to retry
+//! application work.
 //!
 //! # Why a log and pages in place?
 //!
-//! One put is the only atomic operation the backend offers. A durable log turns
-//! it into a multi-page commit: a transaction is visible once its commit segment
-//! is. Because the log holds every page a checkpoint has not yet recorded in
-//! `meta`, checkpoints may overwrite `page/<n>` in place: replay applies the log
-//! over whatever they left. This is SQLite's own WAL design, applied to KV keys.
+//! One put is the only atomic operation the backend offers: a crash may keep
+//! some of a save's writes and lose the ones after them. The record turns one
+//! put into a multi-page commit: a transaction is visible once a record
+//! holding it is. Because the log holds every page a checkpoint has not yet
+//! recorded, checkpoints may overwrite `page/<n>` in place, after the record:
+//! replay applies the log over whatever they left. This is SQLite's own WAL design, applied to KV keys.
 //! There is no page map, no object allocation, no intent and no orphan collection.
 //! See `docs/DESIGN.md` and the private `snapshot` and `log` modules.
 //!
@@ -48,24 +49,24 @@
 //!
 //! The host grants one owner exclusive use of a namespace, including settlement
 //! of cancelled requests before reopening or handing ownership to another session.
-//! There is no distributed lock or fence here. A save issues its commit, then,
-//! when the log is long, checkpoints it: at most 64 mutations of distinct keys
-//! at a time per group. Open reads `meta` and probes the log, together when a
-//! [`PageCache`] knows where the log starts. The I/O pump batches adjacent file
-//! reads without crossing write, truncate or sync barriers.
+//! There is no distributed lock or fence here. A save queues its commit, then,
+//! when the log is long, its checkpoint, and syncs once. Open reads the
+//! record, and the stored segments its log names, if any. The I/O pump
+//! batches adjacent file reads without crossing write, truncate or sync
+//! barriers.
 //!
 //! Sessions of one owner may overlap when they share a [`NamespaceCache`]:
-//! each reads the state it opened at (checkpoints write no image past the
-//! oldest open session's log position), and a commit is refused if another
+//! each reads the state it opened at (a checkpoint waits while another session
+//! holds an older version), and a commit is refused if another
 //! session committed since this one opened. Without a cache they must not
 //! overlap.
 //!
 //! [`StorageOptions::cache`] can hold a [`NamespaceCache`]: one namespace's handle
 //! on the process-wide [`PageCache`], which keeps pages in memory and on a local
-//! disk tier under one budget for every namespace. It refreshes pages another
-//! writer's checkpoint rewrote (or drops them all when it cannot tell which), and
-//! remembers what this owner has made durable, so a steady-state open and save
-//! are each one round trip. A session that ends cleanly leaves its idle engine
+//! disk tier under one budget for every namespace. It keeps them while the
+//! record's epoch (its checkpoint count) is the one they belong to, and
+//! remembers the record this owner made durable, so a steady-state open and
+//! save are each one round trip. A session that ends cleanly leaves its idle engine
 //! there; the next open reuses it when nothing changed, keeping the parsed
 //! schema and engine page cache. The disk tier's I/O runs on tokio.
 //!
@@ -96,11 +97,7 @@
 //! let mut session = Session::open(store).await?;
 //! session.execute("CREATE TABLE messages(body TEXT)").await?;
 //! session.execute("INSERT INTO messages VALUES('hello')").await?;
-//! let saved = session.save().await?;
-//! if let Some(error) = saved.cleanup_error {
-//!     // Committed: reopen to finish cleanup; do not replay the INSERT.
-//!     eprintln!("cleanup pending: {error}");
-//! }
+//! session.save().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -108,6 +105,8 @@
 //! # Limits
 //!
 //! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
+//! A commit's effects are capped at [`MAX_EFFECTS_BYTES`], a chain value at
+//! [`MAX_CHAIN_VALUE_BYTES`].
 //! A session's private changes and a statement's result rows are capped by
 //! [`StorageOptions::max_private_bytes`] and [`StorageOptions::max_result_bytes`].
 //! The backend is assumed to return what was stored; decoding checks structure
@@ -127,11 +126,11 @@ mod snapshot;
 
 pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
-pub use log::MAX_SEGMENT_BYTES;
+pub use log::{MAX_CHAIN_VALUE_BYTES, MAX_EFFECTS_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::PageCompression;
 pub use snapshot::{
-    CHECKPOINT_LOG_BYTES, Durability, MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport,
-    StorageOptions,
+    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, ChainUpdate, Durability, INLINE_LOG_BYTES,
+    MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport, StorageOptions,
 };
 /// SQL values, as returned in rows and bound as parameters.
 pub use turso_core::Value;
@@ -139,6 +138,7 @@ pub use turso_core::Value;
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use crate::kv::KvStore;
 use crate::snapshot::Snapshot;
+use bytes::Bytes;
 use std::{
     future::poll_fn,
     sync::{
@@ -182,93 +182,18 @@ pub struct Session {
     durability: Durability,
     /// A [`Self::transaction`] body is running.
     in_body: bool,
-    /// The statement running is a [`Self::commit`] that logs even a commit
-    /// without changes.
-    record: bool,
+    /// The statement running is a [`Self::commit_with`] or
+    /// [`Self::commit_turn`]: the effects it commits, and its chain update.
+    effects: Option<Bytes>,
+    chain: Option<ChainUpdate>,
     /// Set when a [`Self::transaction`] future is dropped or unwinds before
     /// finishing, which may leave its SQL transaction open.
     abandoned: Arc<AtomicBool>,
-    /// A checkpoint failure after a commit, kept for [`Self::take_cleanup_error`].
-    cleanup_error: Option<std::io::Error>,
     /// Bytes of the schema's SQL as of the last commit, to weigh a parked
     /// engine; `None` when unknown, which prevents parking.
     schema_bytes: Option<usize>,
     /// SQL since the last commit may have changed the schema.
     schema_changed: bool,
-    /// This session's writes to an ordered store with an owner cache.
-    ordered: Option<Arc<Ordered>>,
-}
-
-/// Tracks a session's writes to an ordered store (see [`KvStore::ordered`]):
-/// the owner cache trusts them only once [`Session::save`] confirms them.
-struct Ordered {
-    store: Arc<dyn KvStore>,
-    cache: NamespaceCache,
-    unconfirmed: AtomicBool,
-}
-
-impl Ordered {
-    fn wrote(&self) {
-        if !self.unconfirmed.swap(true, Ordering::SeqCst) {
-            self.cache.write_unconfirmed();
-        }
-    }
-
-    /// Confirm the writes so far, if any.
-    async fn confirm(&self) -> std::io::Result<()> {
-        if self.unconfirmed.load(Ordering::SeqCst) {
-            self.store.sync().await?;
-            self.settle(true);
-        }
-        Ok(())
-    }
-
-    fn settle(&self, confirmed: bool) {
-        if self.unconfirmed.swap(false, Ordering::SeqCst) {
-            self.cache.settle(confirmed);
-        }
-    }
-}
-
-impl Drop for Ordered {
-    fn drop(&mut self) {
-        self.settle(false);
-    }
-}
-
-impl KvStore for Ordered {
-    fn get<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> futures::future::BoxFuture<'a, std::io::Result<Option<bytes::Bytes>>> {
-        self.store.get(key)
-    }
-
-    fn put<'a>(
-        &'a self,
-        key: &'a str,
-        value: bytes::Bytes,
-    ) -> futures::future::BoxFuture<'a, std::io::Result<()>> {
-        self.wrote();
-        self.store.put(key, value)
-    }
-
-    fn delete<'a>(&'a self, key: &'a str) -> futures::future::BoxFuture<'a, std::io::Result<()>> {
-        self.wrote();
-        self.store.delete(key)
-    }
-
-    fn durable_when_visible(&self) -> bool {
-        self.store.durable_when_visible()
-    }
-
-    fn ordered(&self) -> bool {
-        true
-    }
-
-    fn sync(&self) -> futures::future::BoxFuture<'_, std::io::Result<()>> {
-        self.store.sync()
-    }
 }
 
 /// Marks a session abandoned unless it finished; see [`Session::transaction`].
@@ -292,8 +217,8 @@ impl Drop for Abandon {
 pub(crate) struct WarmEngine {
     database: Arc<Database>,
     io: Arc<KvIo>,
-    /// The log position its state corresponds to.
-    next: u64,
+    /// The version its state corresponds to.
+    version: u64,
     /// Bytes of its schema's SQL, which sizes its parsed schema.
     schema_bytes: usize,
 }
@@ -357,34 +282,19 @@ impl Session {
     /// format: existing page tags determine decoding.
     ///
     /// With a [`PageCache`], an engine left idle by this owner's previous session
-    /// is reused when nothing changed since: the cache validated `meta` and the
-    /// log ends where that engine left it. Its page cache and parsed schema stay
-    /// warm.
+    /// is reused when nothing changed since: the record is the one that engine
+    /// committed. Its page cache and parsed schema stay warm.
     pub async fn open_with_options(
         store: Arc<dyn KvStore>,
         options: StorageOptions,
     ) -> Result<Self> {
         let cache = options.cache.clone();
         let durability = options.durability;
-        // With an ordered store, start cold after a session whose writes were
-        // not confirmed, and track this session's.
-        let (store, ordered) = match &cache {
-            Some(cache) if store.ordered() => {
-                cache.open_ordered();
-                let ordered = Arc::new(Ordered {
-                    store,
-                    cache: cache.clone(),
-                    unconfirmed: AtomicBool::new(false),
-                });
-                (ordered.clone() as Arc<dyn KvStore>, Some(ordered))
-            }
-            _ => (store, None),
-        };
         let snapshot = Snapshot::open_with_options(store, options).await?;
         let warm = match &cache {
             Some(cache) if snapshot.unchanged => cache
                 .take_engine()
-                .filter(|warm| warm.next == snapshot.log.next && warm.io.is_clean()),
+                .filter(|warm| warm.version == snapshot.version() && warm.io.is_clean()),
             _ => None,
         };
         if let Some(warm) = warm {
@@ -399,12 +309,11 @@ impl Session {
                 reusable: true,
                 durability,
                 in_body: false,
-                record: false,
+                effects: None,
+                chain: None,
                 abandoned: Arc::default(),
-                cleanup_error: None,
                 schema_bytes: Some(warm.schema_bytes),
                 schema_changed: false,
-                ordered,
             };
             session.io.resume(snapshot).await?;
             session.connection = Some(connect(&session.io, &warm.database).await?);
@@ -423,12 +332,11 @@ impl Session {
             reusable: true,
             durability,
             in_body: false,
-            record: false,
+            effects: None,
+            chain: None,
             abandoned: Arc::default(),
-            cleanup_error: None,
             schema_bytes: None,
             schema_changed: false,
-            ordered,
         };
         session.io.prepare_engine().await?;
         let database = open_engine(&session.io).await?;
@@ -446,12 +354,7 @@ impl Session {
     /// private, [`Durability::Save`], and it is never saved) and keeps no
     /// cache. It reads the state as of open, unless the owner checkpoints
     /// meanwhile: [`Self::is_current`], once it has read, says whether it did.
-    /// The store must be [`KvStore::durable_when_visible`], as open would
-    /// otherwise confirm what it read by writing it again.
     pub async fn open_reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        if !store.durable_when_visible() {
-            return Err("a reader needs a store whose visible values are durable".into());
-        }
         let options = StorageOptions {
             cache: None,
             durability: Durability::Save,
@@ -471,8 +374,8 @@ impl Session {
     /// overlapping session left behind holds an older state.
     fn park(&mut self) {
         let Some(cache) = &self.cache else { return };
-        let next = self.io.log_next();
-        if cache.committed() != Some(next) || !self.reusable || self.schema_changed {
+        let version = self.io.version();
+        if cache.committed() != Some(version) || !self.reusable || self.schema_changed {
             return;
         }
         let Some(schema_bytes) = self.schema_bytes else {
@@ -497,7 +400,7 @@ impl Session {
             cache.park(WarmEngine {
                 database,
                 io: self.io.clone(),
-                next,
+                version,
                 schema_bytes,
             });
             self.parked = true;
@@ -556,16 +459,68 @@ impl Session {
         self.query_with(sql, params).await.map(|_| ())
     }
 
-    /// `COMMIT` the open transaction. With `record` and [`Durability::Commit`],
-    /// the commit is logged even if the transaction changed nothing (it only
-    /// read, or its writes matched no rows), so [`Self::version`] grows all
-    /// the same: a host that recorded the version before can tell from a
-    /// later open that this commit landed. A `COMMIT` that fails logs nothing.
-    pub async fn commit(&mut self, record: bool) -> Result<()> {
-        self.record = record;
+    /// `COMMIT` the open transaction, with [`Durability::Commit`], and make
+    /// `effects` the commit record's: they are durable exactly when the
+    /// transaction is, in the same put, even if it changed nothing. They are
+    /// the host's bytes, opaque here (the sends a transaction makes once it
+    /// commits, say), and stay until a later commit replaces them; see
+    /// [`Self::effects`]. A `COMMIT` that fails changes nothing. With no
+    /// transaction open, the effects commit alone, without the SQL engine.
+    pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
+        self.commit_extras(effects, None).await
+    }
+
+    /// [`Self::commit_with`], also changing the host's chain in the same put:
+    /// a host's turn, committing its SQL, its state (`effects`) and what its
+    /// turn changed (a VM's page batch, say) together. See [`ChainUpdate`]
+    /// and [`Self::chain`].
+    pub async fn commit_turn(&mut self, effects: Bytes, chain: ChainUpdate) -> Result<()> {
+        self.commit_extras(effects, Some(chain)).await
+    }
+
+    async fn commit_extras(&mut self, effects: Bytes, chain: Option<ChainUpdate>) -> Result<()> {
+        if self.durability != Durability::Commit {
+            return Err("effects commit with Durability::Commit".into());
+        }
+        if effects.len() > log::MAX_EFFECTS_BYTES {
+            return Err(format!(
+                "effects of {} bytes exceed {}",
+                effects.len(),
+                log::MAX_EFFECTS_BYTES
+            )
+            .into());
+        }
+        let open =
+            (self.connection.as_ref()).is_some_and(|connection| !connection.get_auto_commit());
+        if !open && self.io.is_clean() {
+            // No SQL to commit: the record alone.
+            if self.is_poisoned() {
+                return Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into());
+            }
+            // Until the commit is acknowledged its outcome is unknown.
+            self.poisoned = true;
+            self.io.publish_with(Some(effects), chain).await?;
+            self.poisoned = false;
+            return Ok(());
+        }
+        self.effects = Some(effects);
+        self.chain = chain;
         let result = self.execute("COMMIT").await;
-        self.record = false;
+        self.effects = None;
+        self.chain = None;
         result
+    }
+
+    /// The effects of the last commit that set them, as this session holds
+    /// the database (opened on, or committed itself); empty if none did.
+    pub fn effects(&self) -> Bytes {
+        self.io.snapshot().effects().clone()
+    }
+
+    /// The host's chain, as this session holds the database: each value, in
+    /// order, from the last restart. Empty if no commit changed it.
+    pub fn chain(&self) -> Vec<Bytes> {
+        self.io.snapshot().chain().to_vec()
     }
 
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
@@ -652,14 +607,15 @@ impl Session {
         Ok(bytes.unwrap_or(0).max(0) as usize)
     }
 
-    /// Make the committed SQL state durable and continue on it. A cleanup error
-    /// leaves it committed; a later commit retries the checkpoint work.
+    /// Make the committed SQL state durable and continue on it.
     async fn publish(&mut self) -> Result<SaveReport> {
         self.checkpoint().await?;
         // Until the commit is acknowledged the engine may hold uncommitted pages,
         // so a failure must not leave it for reuse.
         self.poisoned = true;
-        let report = self.io.publish_recorded(self.record).await?;
+        let report = (self.io)
+            .publish_with(self.effects.take(), self.chain.take())
+            .await?;
         // Resident already, unless the page size grew. The commit is durable
         // either way; a failure here only ends the session.
         if self.io.prepare_engine().await.is_ok() {
@@ -673,14 +629,11 @@ impl Session {
         Ok(report)
     }
 
-    /// The database's version: it grows with each commit that changes the
-    /// database, or that [`Self::commit`] records, and only then. It is one
-    /// past the log sequence of the last committed transaction this
-    /// session holds (opened on, or committed itself); an open transaction
-    /// does not change it. A host can record it before a commit, and tell
-    /// from a later open whether that commit landed.
+    /// The database's version: the transactions ever committed, as this
+    /// session holds the database (opened on, or committed itself); an open
+    /// transaction does not change it.
     pub fn version(&self) -> u64 {
-        self.io.log_next()
+        self.io.version()
     }
 
     /// Whether the store still holds the state this session opened on (see
@@ -788,10 +741,9 @@ impl Session {
             }
             if idle
                 && self.durability == Durability::Commit
-                && (!self.io.is_clean() || self.record)
-                && let Some(error) = self.publish().await?.cleanup_error
+                && (!self.io.is_clean() || self.effects.is_some() || self.chain.is_some())
             {
-                self.cleanup_error = Some(error);
+                self.publish().await?;
             }
         }
         rows.ok_or_else(|| "the SQL contains no statements".into())
@@ -811,13 +763,6 @@ impl Session {
         };
         self.poisoned = false;
         Ok(rows)
-    }
-
-    /// Take the error of checkpoint work that failed after a commit with
-    /// [`Durability::Commit`]. The commit is durable; a later commit retries
-    /// the work. [`Self::save`] also reports it.
-    pub fn take_cleanup_error(&mut self) -> Option<std::io::Error> {
-        self.cleanup_error.take()
     }
 
     /// Execute one statement and discard its collected result rows.
@@ -848,9 +793,8 @@ impl Session {
     }
 
     /// Checkpoints the private WAL, durably publishes only database pages, and consumes the session.
-    /// Ok confirms durable publication. Inspect SaveReport::cleanup_error: Some
-    /// means committed with pending cleanup, retried on open. Err/cancellation
-    /// may have an unknown publication outcome: settle requests and reopen.
+    /// Ok confirms durable publication. Err/cancellation may have an unknown
+    /// publication outcome: settle requests and reopen.
     /// With [`Durability::Commit`] every SQL transaction is already durable, so
     /// this only ends the session.
     pub async fn save(mut self) -> Result<SaveReport> {
@@ -860,11 +804,7 @@ impl Session {
         if !self.connection.as_ref().unwrap().get_auto_commit() {
             return Err("cannot save an open SQL transaction".into());
         }
-        let mut report = self.publish().await?;
-        report.cleanup_error = report.cleanup_error.or(self.cleanup_error.take());
-        if let Some(ordered) = &self.ordered {
-            ordered.confirm().await?;
-        }
+        let report = self.publish().await?;
         self.park();
         Ok(report)
     }
@@ -872,11 +812,6 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Writes not confirmed by a save may be lost (before the engine, which
-        // holds the store, is parked).
-        if let Some(ordered) = &self.ordered {
-            ordered.settle(false);
-        }
         // A clean read-only session leaves its engine for the next one.
         self.park();
         if !self.parked {

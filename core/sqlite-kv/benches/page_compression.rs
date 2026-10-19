@@ -1,4 +1,5 @@
-//! Paired raw/LZ4 SQL traffic and isolated codec CPU measurements.
+//! Paired raw/compressed SQL traffic (the default codec, zstd) and isolated codec
+//! CPU measurements of every codec.
 //! All payloads are deterministic synthetic data; no network or replication model.
 use sqlite_kv::{
     PageCompression, Result, Session, StorageOptions,
@@ -14,6 +15,9 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+
+/// The codec compared with raw pages in SQL traffic: the default.
+const COMPRESSED: PageCompression = PageCompression::Zstd;
 
 #[derive(Clone, Copy, Debug)]
 enum Payload {
@@ -105,7 +109,7 @@ async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
         db.execute(&sql).await?;
     }
     db.execute("COMMIT").await?;
-    assert!(db.save().await?.cleanup_error.is_none());
+    db.save().await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
     let all = StorageOptions {
         checkpoint_after: 0,
@@ -113,8 +117,8 @@ async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     };
     let mut db = Session::open_with_options(Arc::new(store.clone()), all).await?;
     db.execute("CREATE TABLE other(x)").await?;
-    assert!(db.save().await?.cleanup_error.is_none());
-    store.crash(&[]);
+    db.save().await?;
+    store.crash();
     Ok(store)
 }
 
@@ -158,7 +162,7 @@ impl Sample {
             stats.bytes_written,
             page.bytes_written,
             stats.kind("log").bytes_written,
-            stats.kind("meta").bytes_written,
+            stats.kind("commit").bytes_written,
             page.gets,
             page.puts,
             store.stored_bytes(),
@@ -223,7 +227,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
             }
             db.execute("COMMIT").await?;
         }
-        assert!(db.save().await?.cleanup_error.is_none());
+        db.save().await?;
         let elapsed = start.elapsed().as_nanos();
         sample.emit(
             &store.stats(),
@@ -232,10 +236,10 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
             changed.len() * case.bytes,
             elapsed,
         );
-        store.crash(&[]);
+        store.crash();
         // Read with the opposite write policy: stored codec tags must decide.
         let other = if sample.codec == PageCompression::Raw {
-            PageCompression::Lz4
+            COMPRESSED
         } else {
             PageCompression::Raw
         };
@@ -262,7 +266,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
 
 async fn pages(store: &MemoryKv) -> Result<Vec<Vec<u8>>> {
     let mut pages = Vec::new();
-    for key in store.keys().iter().filter(|k| k.starts_with("v13/page/")) {
+    for key in store.keys().iter().filter(|k| k.starts_with("v14/page/")) {
         pages.push(page_codec::decode(&store.get(key).await?.unwrap())?);
     }
     Ok(pages)
@@ -276,11 +280,12 @@ fn codec_bench(out: &mut impl Write, case: Case, pages: &[Vec<u8>], run: usize) 
         .collect();
     let iterations = 200;
     // Reverse order on alternate runs to reduce consistent ordering bias.
-    let policies = if run.is_multiple_of(2) {
-        [PageCompression::Raw, PageCompression::Lz4]
-    } else {
-        [PageCompression::Lz4, PageCompression::Raw]
-    };
+    let mut policies = [
+        PageCompression::Raw,
+        PageCompression::Lz4,
+        PageCompression::Zstd,
+    ];
+    policies.rotate_left(run % 3);
     for policy in policies {
         let encoded: Vec<_> = selected
             .iter()
@@ -342,7 +347,7 @@ fn main() -> Result<()> {
         "rows,payload_bytes,payload,codec,run,sample_pages,iterations,encoded_bytes,compressed_pages,encode_ns,decode_ns"
     )?;
     println!(
-        "rows,payload_bytes,payload,codec,run,operation,db_pages,gets,puts,deletes,read_key_value_bytes,mutation_key_value_bytes,put_value_bytes,page_write_bytes,log_write_bytes,meta_write_bytes,page_gets,page_puts,stored_value_bytes,stored_key_bytes,app_read_bytes,app_write_bytes,elapsed_ns,page_read_bytes"
+        "rows,payload_bytes,payload,codec,run,operation,db_pages,gets,puts,deletes,read_key_value_bytes,mutation_key_value_bytes,put_value_bytes,page_write_bytes,log_write_bytes,commit_write_bytes,page_gets,page_puts,stored_value_bytes,stored_key_bytes,app_read_bytes,app_write_bytes,elapsed_ns,page_read_bytes"
     );
     futures::executor::block_on(async {
         for (rows, bytes) in [(100, 64), (100, 512), (100, 9000), (10_000, 256)] {
@@ -354,7 +359,7 @@ fn main() -> Result<()> {
                 };
                 eprintln!("compression: {rows} rows / {bytes} bytes / {kind:?}");
                 let raw = baseline(case, PageCompression::Raw).await?;
-                let compressed = baseline(case, PageCompression::Lz4).await?;
+                let compressed = baseline(case, COMPRESSED).await?;
                 let raw_pages = pages(&raw).await?;
                 assert_eq!(
                     raw_pages,
@@ -364,9 +369,9 @@ fn main() -> Result<()> {
                 for run in 0..repeats {
                     codec_bench(&mut cpu, case, &raw_pages, run)?;
                     let policies = if run.is_multiple_of(2) {
-                        [PageCompression::Raw, PageCompression::Lz4]
+                        [PageCompression::Raw, COMPRESSED]
                     } else {
-                        [PageCompression::Lz4, PageCompression::Raw]
+                        [COMPRESSED, PageCompression::Raw]
                     };
                     for codec in policies {
                         let base = if codec == PageCompression::Raw {

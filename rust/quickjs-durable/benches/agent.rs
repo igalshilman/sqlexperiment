@@ -9,8 +9,9 @@
 //! model's answer in, the tool's result in), and what the step stored.
 use anyhow::{Result, bail, ensure};
 use futures_executor::block_on as block;
-use quickjs_durable::{MemoryStore, Operation, Outcome, Programs, Run, Runtime, Status};
+use quickjs_durable::{Operation, Outcome, Programs, Run, Runtime, Scope, Status};
 use serde_json::{Value, json};
+use sqlite_kv::simulation::MemoryKv;
 use std::{sync::Arc, time::Instant};
 
 const STEPS: usize = 300;
@@ -24,16 +25,17 @@ fn main() -> Result<()> {
     let source = include_str!("../programs/coder.js");
     let runtime = Arc::new(Runtime::new()?);
     let programs = Arc::new(Programs::new(runtime).compile("coder", source)?);
-    let store = MemoryStore::default();
+    let store = MemoryKv::default();
+    let scope = Scope::new(Arc::new(store.clone()));
     let start = |now| {
         let task = json!({"task": "Refactor the parser"});
         block(Run::start(
-            &programs, &store, "bench", "run", "coder", task, now,
+            &programs, &scope, "bench", "run", "coder", task, now,
         ))
     };
     let mut run = start(1000)?;
     let mut session = Session::default();
-    let (mut journaled, mut stored) = (0, store.bytes_written());
+    let (mut journaled, mut stored) = (0, store.stats().bytes_written as usize);
     let mut rows = Vec::new();
     let mut ended = None;
     println!("step  request KiB  model ms  tool ms  stored B/step  journaled MiB  stored MiB");
@@ -61,12 +63,12 @@ fn main() -> Result<()> {
                 _ => session.tool(&target.handler),
             };
             let started = Instant::now();
-            block(run.deliver(&store, id, Outcome::success(answer), view.state.now + 1))?;
+            block(run.deliver(id, Outcome::success(answer), view.state.now + 1))?;
             *turn = started.elapsed().as_secs_f64() * 1000.0;
         }
         journaled += request;
-        let written = store.bytes_written() - stored;
-        stored = store.bytes_written();
+        let written = store.stats().bytes_written as usize - stored;
+        stored = store.stats().bytes_written as usize;
         let mut restore_ms = None;
         if step.is_multiple_of(RESTORE_EVERY) {
             let started = Instant::now();
@@ -98,7 +100,7 @@ fn main() -> Result<()> {
         let done =
             json!({"content": [{"type": "text", "text": "Done."}], "stop_reason": "end_turn"});
         let id = view.state.pending[0].id();
-        let view = block(run.deliver(&store, id, Outcome::success(done), view.state.now + 1))?;
+        let view = block(run.deliver(id, Outcome::success(done), view.state.now + 1))?;
         ensure!(
             view.state.status == Status::Completed,
             "The session did not complete: {:?}",
@@ -107,7 +109,7 @@ fn main() -> Result<()> {
     }
     let output = json!({"steps": STEPS, "ended": ended, "notes": [
         "request_bytes: the step's request to the model, the whole conversation so far; journaled_bytes, their sum.",
-        "stored_bytes: what the step's two turns stored (batches, commits); MemoryStore, no network.",
+        "stored_bytes: what the step's two turns stored (batches, commits); Scope, no network.",
         "restore_ms: a new attempt after the step, reading the commit and its batches into a new VM."],
         "rows": rows});
     std::fs::write("bench-agent.json", serde_json::to_string_pretty(&output)?)?;
@@ -180,7 +182,11 @@ impl Session {
         let mut text = String::new();
         while text.len() < bytes {
             text.push_str(WORDS[(self.next() % 16) as usize]);
-            text.push(if self.next().is_multiple_of(12) { '\n' } else { ' ' });
+            text.push(if self.next().is_multiple_of(12) {
+                '\n'
+            } else {
+                ' '
+            });
         }
         text
     }

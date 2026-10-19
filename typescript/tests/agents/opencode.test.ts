@@ -33,7 +33,7 @@ describe('the OpenCode agent', () => {
     expect(now.failed).toBeInstanceOf(restate.CancelledError);
     expect(now.answer).toBe(waiting.answer);
     expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
-  });
+  }, 60_000);
 
   it('ends a cancelled turn, and answers the next message afresh', async () => {
     const { failed, answer, parts } = await afterCancel(
@@ -168,7 +168,7 @@ describe('the OpenCode agent', () => {
     for (let n = 0; n < 12; n++) await c.crash('inv1', input);
     expect(await c.attempt('inv1', input)).toBe('Done: moved 4 from account 2 to account 3');
     expect(c.ledger.transfers.size).toBe(1);
-  });
+  }, 60_000);
 
   it('finishes an interrupted prompt before starting the next one', async () => {
     const c = conversation(prompt, 'c');

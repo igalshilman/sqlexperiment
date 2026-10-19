@@ -1,5 +1,11 @@
 # Protocol specification
 
+> **Out of date.** This models the earlier protocol, for a store that keeps
+> any subset of the writes not yet acknowledged (seals named one commit
+> late, checkpoints waiting for their pages). The protocol now relies on
+> Restate keeping writes in issue order ([DESIGN.md](../docs/DESIGN.md)); the
+> simulator's campaigns and monitor check that one.
+
 `Protocol.tla` is the storage protocol of [DESIGN.md](../docs/DESIGN.md) as a
 TLA+ state machine, and TLC checks every reachable state within small bounds.
 It is the mathematical counterpart of the simulator campaigns: those sample
@@ -7,23 +13,32 @@ fault schedules at random, while this enumerates all of them up to a size.
 
 ## What is modelled
 
-- **The store.** Each key has a visible and a durable value. Every put or
-  delete ends one of four ways: durable and acknowledged, durable with the
-  acknowledgement lost, visible but not durable (weak backends), or no effect.
-  A store loss drops what is visible but not durable.
+- **The store.** One value per key, and reads return it: what is durable.
+  Every put or delete ends one of three ways, independently and in any order:
+  durable and acknowledged, durable with the acknowledgement lost, or no
+  effect. Nothing orders two writes.
 - **Processes.** Two processes take turns owning the namespace; ownership
-  moves only after every request settles. Each keeps an owner cache across
-  its sessions (the `meta` it saw, a claim, its last commit and cached pages)
-  and loses it when it crashes.
-- **Save.** One transaction of one or two segments; the commit part is sent
-  once the first part is acknowledged. In the same round trip: a checkpoint
-  slice (any prefix of whole transactions, a superset of the real policy),
-  garbage deletes behind the durable `meta`, and with a cache the claimed
-  `meta`. Without a cache `meta` follows in a second round trip. Cleanup
-  failures keep what was durable.
-- **Open.** Read `meta`, validate it against the cache, refresh cached pages
-  from the log after another writer (or drop them), replay, and on a weak
-  backend confirm the tail and `meta` this owner did not write.
+  moves only after every request settles. Those in `Cached` keep an owner
+  cache across their sessions (the record they saw, its epoch, their last
+  commit and the epoch's pages) and lose it when they crash.
+- **Save.** One transaction, inline in the record or in a stored value put
+  first; the record goes out once the value is acknowledged, with the
+  garbage's deletes in the same round trip. One writer: a cached process
+  commits only on its own last record.
+- **Seal.** A save may seal the record's inline transactions into a stored
+  value. A cached process puts it with its record, which lists it as garbage,
+  and keeps the acknowledged seal in its cache: its next commit names it (if
+  the record still lists it) and drops it from the garbage. A process without
+  a cache puts it first, and names it in that record if acknowledged.
+- **Checkpoint.** At any time a ready session's log is not empty: each page's
+  latest image, then, once all are acknowledged, a record with an empty log at
+  the next epoch, then the deletes of the stored segments no record names any
+  more. A failed page put keeps the log; a record put of unknown outcome keeps
+  the session on its log, and forgets the record (so a cached process commits
+  no more in that session).
+- **Open.** Read the record, replay its log (every stored segment it names
+  must hold its transaction), keep cached pages of the same epoch, and drop
+  them for another.
 - **Sessions.** A ready session reads its log, then its cache, then the page
   key; reads populate the cache.
 
@@ -31,87 +46,96 @@ Page values are transaction ids, so a state names which transaction last
 wrote each page. A ghost history records the acknowledged transactions and at
 most one whose outcome is unknown (a failed commit).
 
-Not modelled: the SQL engine, page encodings, the working-set hint, prefetch
-and readahead (they change which reads happen, not their values), large
-self-checkpointing saves, overlapping sessions within one process (reader
-marks), and deleted pages.
+Not modelled: the SQL engine, page encodings, effects (they ride in the
+record), the working-set hint, prefetch and readahead (they change which
+reads happen, not their values), transactions of several stored segments,
+overlapping sessions within one process (reader marks), and deleted pages.
 
 ## Properties
 
 - `OpensReadTheHistory`: every open reads exactly the acknowledged
-  transactions in order, plus the unknown one or not. Never part of a
-  transaction, never one acknowledged but lost, never one an earlier open
-  decided was not committed.
+  transactions in order, plus the unknown one or not, and replays without a
+  missing segment. Never part of a transaction, never one acknowledged but
+  lost, never one an earlier open decided was not committed.
 - `ReadyReadsTheHistory`: a ready session reads the history at every moment,
   through its log, its cache and the page keys; no checkpoint, garbage
   collection or other owner exposes a stale page.
+- `NothingLeaks`: every stored value present is named by the durable record,
+  listed as its garbage, or at a number it has not allocated.
 
 ## Running
 
 ```sh
-spec/check.sh                 # MC.cfg, MCNoCache.cfg, MCStrong.cfg
-spec/check.sh MCDeep.cfg      # three transactions
+spec/check.sh                 # MC.cfg, MCNoCache.cfg, MCMixed.cfg, MCSeal.cfg
+spec/check.sh MCDeep.cfg      # three transactions, three values, two pages
 ```
 
 The script downloads `tla2tools.jar` (TLA+ tools 1.8.0) on first use and
 needs Java 11 or later.
 
-| Configuration   | Bounds                                                                          | Distinct states | Result                                  |
-| --------------- | ------------------------------------------------------------------------------- | --------------- | --------------------------------------- |
-| `MC.cfg`        | cache, weak backend; 2 pages, 2 processes, 2 transactions, 4 sequences, 1 crash | 3,972,016       | No violation                            |
-| `MCNoCache.cfg` | as `MC.cfg`, no cache                                                           | 417,252         | No violation                            |
-| `MCStrong.cfg`  | as `MC.cfg`, strong backend (no confirmation)                                   | 267,532         | No violation                            |
-| `MCDeep.cfg`    | as `MC.cfg`, 3 transactions, 5 sequences                                        | 91,795,185      | No violation (34 minutes on four cores) |
+| Configuration   | Bounds                                                                              | Distinct states                      | Result                |
+| --------------- | ----------------------------------------------------------------------------------- | ------------------------------------ | --------------------- |
+| `MC.cfg`        | both processes cached; 2 pages, 2 processes, 2 transactions, 2 values, 1 crash      | 2,292,239                            | No violation          |
+| `MCNoCache.cfg` | as `MC.cfg`, no cache                                                               | 115,430                              | No violation          |
+| `MCMixed.cfg`   | as `MC.cfg`, one process cached and one not                                         | 1,091,830                            | No violation          |
+| `MCSeal.cfg`    | as `MCMixed.cfg`, 1 page, 3 transactions, 3 values: a seal and the commit naming it | 896,406                              | No violation          |
+| `MCDeep.cfg`    | as `MCMixed.cfg`, 3 transactions, 3 values                                          | 79,532,399 (before deferred deletes) | No violation (31 min) |
 
-The two processes are symmetric, so TLC checks one of each pair of mirrored
-states (`Symmetry`). Bounds are small by design: a cache's `meta` moves only
-at a third save (commit, checkpoint into a claim, record the claim), so
-garbage collection and refreshing another owner's changes first appear in
-`MCDeep.cfg`. Dropping every cached page because the changed segments are
-already collected needs at least four transactions and is outside these
-bounds; the simulator's handover campaign covers it.
+The two processes of `MC.cfg` and `MCNoCache.cfg` are symmetric, so TLC
+checks one of each pair of mirrored states (`Symmetry`).
 
 ## Mutations
 
 Each deliberately broken protocol must fail a property, or the model is too
 weak to trust:
 
-| Broken rule                                                                | Found by               |
-| -------------------------------------------------------------------------- | ---------------------- |
-| Open skips confirming what it did not write (weak backend)                 | `OpensReadTheHistory`  |
-| `meta` passes a checkpoint whose page puts failed                          | `ReadyReadsTheHistory` |
-| The commit part is sent before the first part is acknowledged              | `OpensReadTheHistory`  |
-| Garbage is deleted up to the claim, not the durable `meta` (`MCDeep.cfg`)  | `OpensReadTheHistory`  |
-| Open keeps cached pages another owner's checkpoint replaced (`MCDeep.cfg`) | `OpensReadTheHistory`  |
+| Broken rule                                                          | Found by               |
+| -------------------------------------------------------------------- | ---------------------- |
+| A record names a stored segment before its put is acknowledged       | `OpensReadTheHistory`  |
+| The checkpoint record goes out before its pages are acknowledged     | `OpensReadTheHistory`  |
+| The garbage is deleted with the checkpoint record, not after it      | `OpensReadTheHistory`  |
+| Open keeps cached pages of another epoch                             | `OpensReadTheHistory`  |
+| This owner's checkpoint keeps cached pages without writing its log's | `ReadyReadsTheHistory` |
+| A cached process names its seal though the put was not acknowledged  | `OpensReadTheHistory`  |
+| A commit deletes the seal it names                                   | `OpensReadTheHistory`  |
+| A process without a cache names a seal whose put failed              | `OpensReadTheHistory`  |
+| A seal is put without listing it as garbage                          | `NothingLeaks`         |
+
+Three rules no bounded run breaks: the one-writer check guards sessions that
+overlap within one process, which the model leaves out; a session may go on
+committing after a checkpoint record of unknown outcome, since ownership moves
+only once its sessions end, so no other process can have seen the epoch it
+might put again; and keeping a seal across another owner's record is masked by
+the check that the record still lists it as garbage (the code also drops the
+seal when the record is not the one this owner wrote).
 
 ## The code against the model
 
 TLC checks the protocol, not the Rust code. `MonitorKv` (in
 `src/simulation/monitor.rs`) connects the two. It wraps the store in the
 simulator's fault campaigns and checks every request the code issues against
-the model's invariants:
+the model's rules:
 
-1. A commit part is sent only once the transaction's earlier parts are known
-   (durable).
-2. A transaction starts where a known commit ends.
-3. `meta` passes a transaction only when every page it changed holds, in
-   every possible outcome of the requests so far, that image or a newer
-   committed one.
-4. A segment is deleted only below the known log start.
-5. A page key gets only an image of a known committed transaction the log
-   still covers.
+1. A record names only stored segments known to hold their segment.
+2. A record holds the known record's log plus one transaction, at the next
+   version, or is that record again.
+3. A record that empties the log (the next epoch) comes only when every page
+   the known log changed is known at its page key, with the log's latest
+   image of it.
+4. A page key gets only an image of a transaction in the known record's log.
+5. A stored segment is put only at a number the known record has not
+   allocated, and deleted only if it names it no more.
+6. Every record decodes, its log against the segments it names.
 
-"Known" is what an observer can rely on: acknowledged requests, or values
-read from a store whose visible values are durable. An unknown outcome makes a
-log key unknown and adds a possible value to a page key.
+"Known" is what an observer can rely on: acknowledged requests, and values
+read. An unknown outcome makes a segment key unknown and adds a possible
+value to a page key; a record of unknown outcome leaves the known one, the
+older, in place until a read learns which landed.
 
-It runs in the save campaign (984 interrupted saves, about 71,000 requests),
-the handover campaign (400 tenures of two owners) and the per-commit campaign
-(621 cases), with no violation. Deliberately broken code is caught with the
-exact request:
+It runs in the save, handover and per-commit campaigns with no violation.
+Deliberately broken code is caught with the exact request:
 
-| Broken code                                             | Monitor reports                                  |
-| ------------------------------------------------------- | ------------------------------------------------ |
-| Garbage deleted up to the claim, not the durable `meta` | Segments deleted at or after the known log start |
-| The commit part sent with the earlier parts             | A commit part whose earlier part is not known    |
-| A failed checkpoint treated as done                     | `meta` passing a page not known at its key       |
+| Broken code                                         | Monitor reports                               |
+| --------------------------------------------------- | --------------------------------------------- |
+| The checkpoint record put with the pages, not after | A checkpoint with a page not known at its key |
+| A large transaction's record put with its segments  | A record naming an unknown segment            |

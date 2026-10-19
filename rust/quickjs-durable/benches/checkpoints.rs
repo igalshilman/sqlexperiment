@@ -3,8 +3,9 @@
 //! with its VM live from turn to turn, and once restoring it at every turn, as
 //! a new attempt would. Results go to bench-<mode>.json.
 use anyhow::{Result, ensure};
-use quickjs_durable::{MemoryStore, Outcome, Program, Programs, Run, Runtime, Status};
+use quickjs_durable::{Outcome, Program, Programs, Run, Runtime, Scope, Status};
 use serde_json::{Value, json};
+use sqlite_kv::simulation::MemoryKv;
 use std::{sync::Arc, time::Instant};
 
 fn main() -> Result<()> {
@@ -68,11 +69,12 @@ fn main() -> Result<()> {
             let program_ms = before.elapsed().as_secs_f64() * 1000.0;
             let programs = Arc::new(Programs::new(runtime.clone()).with(program)?);
             for restored in [false, true] {
-                let store = MemoryStore::default();
+                let store = MemoryKv::default();
+                let scope = Scope::new(Arc::new(store.clone()));
                 let started = Instant::now();
                 let mut run = futures_executor::block_on(Run::start(
                     &programs,
-                    &store,
+                    &scope,
                     "scope",
                     "bench",
                     name,
@@ -80,8 +82,8 @@ fn main() -> Result<()> {
                     1000,
                 ))?;
                 let mut turn_ms = started.elapsed().as_secs_f64() * 1000.0;
-                let mut written = store.bytes_written();
-                let mut writes = store.writes();
+                let mut written = store.stats().bytes_written as usize;
+                let mut writes = (store.stats().puts + store.stats().deletes) as usize;
                 loop {
                     let view = run.view();
                     if repeat != 0 {
@@ -101,12 +103,15 @@ fn main() -> Result<()> {
                         break;
                     }
                     let operation = view.state.pending[0].id().to_owned();
-                    let (bytes, count) = (store.bytes_written(), store.writes());
+                    let (bytes, count) = (
+                        store.stats().bytes_written as usize,
+                        (store.stats().puts + store.stats().deletes) as usize,
+                    );
                     let started = Instant::now();
                     if restored {
                         run = futures_executor::block_on(Run::start(
                             &programs,
-                            &store,
+                            &scope,
                             "scope",
                             "bench",
                             name,
@@ -115,14 +120,13 @@ fn main() -> Result<()> {
                         ))?;
                     }
                     futures_executor::block_on(run.deliver(
-                        &store,
                         &operation,
                         Outcome::success(Value::Null),
                         1001 + view.turns,
                     ))?;
                     turn_ms = started.elapsed().as_secs_f64() * 1000.0;
-                    written = store.bytes_written() - bytes;
-                    writes = store.writes() - count;
+                    written = store.stats().bytes_written as usize - bytes;
+                    writes = (store.stats().puts + store.stats().deletes) as usize - count;
                 }
             }
         }

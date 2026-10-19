@@ -1,6 +1,7 @@
-//! In-memory visibility/durability model and exact logical traffic counters.
+//! In-memory model of a Restate object's state, as [`crate::kv`] describes
+//! it, with exact logical traffic counters.
 use crate::{
-    format::{HINT, LOG_PREFIX, META, PAGE_PREFIX},
+    format::{COMMIT, HINT, LOG_PREFIX, PAGE_PREFIX},
     kv::KvStore,
     yield_now,
 };
@@ -29,14 +30,14 @@ pub struct Traffic {
     pub delete_key_bytes: u64,
 }
 
-/// Class of a key, used to split traffic counters: `page`, `log`, `meta` or `other`.
+/// Class of a key, used to split traffic counters: `page`, `log`, `commit`, `hint` or `other`.
 pub fn object_kind(key: &str) -> &'static str {
     if key.starts_with(PAGE_PREFIX) {
         "page"
     } else if key.starts_with(LOG_PREFIX) {
         "log"
-    } else if key == META {
-        "meta"
+    } else if key == COMMIT {
+        "commit"
     } else if key == HINT {
         "hint"
     } else {
@@ -49,6 +50,7 @@ pub struct Stats {
     pub gets: u64,
     pub puts: u64,
     pub deletes: u64,
+    pub syncs: u64,
     pub bytes_read: u64,
     pub bytes_written: u64,
     pub read_keys: BTreeSet<String>,
@@ -66,14 +68,18 @@ impl Stats {
 
 #[derive(Default)]
 struct Inner {
+    /// Every write issued, applied: what reads see.
     values: BTreeMap<String, Bytes>,
+    /// What a crash keeps: the writes synced.
     durable: BTreeMap<String, Bytes>,
+    /// The writes issued since the last sync, in order.
+    unsynced: Vec<(String, Option<Bytes>)>,
     stats: Stats,
 }
 
-/// Memory simulator with separate visible/durable maps. Successful mutations
-/// update both maps for that key. Only explicit failure-simulation hooks can
-/// create visible-only changes. Both maps are process memory, not disk storage.
+/// Memory simulator of a store that keeps writes in issue order: reads see
+/// every write issued, a sync makes them durable, and a crash keeps a prefix
+/// of the writes since the last sync. Process memory, not disk storage.
 #[derive(Clone, Default)]
 pub struct MemoryKv {
     inner: Arc<Mutex<Inner>>,
@@ -87,39 +93,33 @@ impl MemoryKv {
             inner: Arc::new(Mutex::new(Inner {
                 values: inner.values.clone(),
                 durable: inner.durable.clone(),
+                unsynced: inner.unsynced.clone(),
                 stats: Stats::default(),
             })),
         }
     }
-    /// Simulate a crash, optionally allowing specified unacknowledged keys to reach
-    /// durable storage first. Each selected mutation persists in its entirety.
-    pub fn crash(&self, persist_unacknowledged: &[String]) {
+    /// Simulate a crash that loses every write since the last sync.
+    pub fn crash(&self) {
+        self.crash_keeping(0);
+    }
+    /// Simulate a crash that keeps the first `kept` writes since the last
+    /// sync, and loses the others.
+    pub fn crash_keeping(&self, kept: usize) {
         let mut inner = self.inner.lock().unwrap();
-        for key in persist_unacknowledged {
-            match inner.values.get(key).cloned() {
-                Some(value) => {
-                    inner.durable.insert(key.clone(), value);
-                }
-                None => {
-                    inner.durable.remove(key);
-                }
-            }
+        let unsynced = std::mem::take(&mut inner.unsynced);
+        assert!(
+            kept <= unsynced.len(),
+            "only {} writes since the sync",
+            unsynced.len()
+        );
+        for (key, value) in unsynced.into_iter().take(kept) {
+            inner.apply_durable(key, value);
         }
         inner.values = inner.durable.clone();
     }
-    /// Fault-injection hook, NOT a successful KvStore operation. Stage an atomic
-    /// visible-only put, then have the test backend return an error or cancel.
-    pub fn simulate_unacknowledged_put(&self, key: &str, value: impl Into<Bytes>) {
-        self.inner
-            .lock()
-            .unwrap()
-            .values
-            .insert(key.to_owned(), value.into());
-    }
-    /// Fault-injection hook, NOT a successful KvStore operation. Stage an atomic
-    /// visible-only delete, then have the test backend return an error or cancel.
-    pub fn simulate_unacknowledged_delete(&self, key: &str) {
-        self.inner.lock().unwrap().values.remove(key);
+    /// The writes issued since the last sync, in order: what a crash may lose.
+    pub fn unsynced(&self) -> Vec<(String, Option<Bytes>)> {
+        self.inner.lock().unwrap().unsynced.clone()
     }
     pub fn stats(&self) -> Stats {
         self.inner.lock().unwrap().stats.clone()
@@ -127,13 +127,11 @@ impl MemoryKv {
     pub fn reset_stats(&self) {
         self.inner.lock().unwrap().stats = Stats::default();
     }
-    /// Diagnostic view of the simulator; not part of the raw K/V interface.
-    /// The durable values, for seeding a [`super::MonitorKv`].
-    pub fn durable_values(&self) -> Vec<(String, Bytes)> {
+    /// Every key and its value, as reads see them: for seeding a
+    /// [`super::MonitorKv`].
+    pub fn values(&self) -> Vec<(String, Bytes)> {
         let inner = self.inner.lock().unwrap();
-        inner
-            .durable
-            .iter()
+        (inner.values.iter())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
@@ -171,6 +169,15 @@ impl MemoryKv {
     }
 }
 
+impl Inner {
+    fn apply_durable(&mut self, key: String, value: Option<Bytes>) {
+        match value {
+            Some(value) => self.durable.insert(key, value),
+            None => self.durable.remove(&key),
+        };
+    }
+}
+
 impl KvStore for MemoryKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
@@ -189,35 +196,40 @@ impl KvStore for MemoryKv {
             Ok(value)
         })
     }
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            yield_now().await;
-            let mut inner = self.inner.lock().unwrap();
-            let bytes = value.len() as u64;
-            inner.stats.puts += 1;
-            inner.stats.bytes_written += bytes;
-            inner.stats.write_keys.insert(key.to_owned());
-            let traffic = inner.stats.by_kind.entry(object_kind(key)).or_default();
-            traffic.puts += 1;
-            traffic.bytes_written += bytes;
-            traffic.put_key_bytes += key.len() as u64;
-            inner.durable.insert(key.to_owned(), value.clone());
-            inner.values.insert(key.to_owned(), value);
-            Ok(())
-        })
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let bytes = value.len() as u64;
+        inner.stats.puts += 1;
+        inner.stats.bytes_written += bytes;
+        inner.stats.write_keys.insert(key.to_owned());
+        let traffic = inner.stats.by_kind.entry(object_kind(key)).or_default();
+        traffic.puts += 1;
+        traffic.bytes_written += bytes;
+        traffic.put_key_bytes += key.len() as u64;
+        inner.values.insert(key.to_owned(), value.clone());
+        inner.unsynced.push((key.to_owned(), Some(value)));
+        Ok(())
     }
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
+    fn delete(&self, key: &str) -> io::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.stats.deletes += 1;
+        let removed = inner.values.remove(key);
+        inner.stats.delete_keys.insert(key.to_owned());
+        let traffic = inner.stats.by_kind.entry(object_kind(key)).or_default();
+        traffic.deletes += 1;
+        traffic.bytes_deleted += removed.map_or(0, |v| v.len() as u64);
+        traffic.delete_key_bytes += key.len() as u64;
+        inner.unsynced.push((key.to_owned(), None));
+        Ok(())
+    }
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move {
             yield_now().await;
             let mut inner = self.inner.lock().unwrap();
-            inner.stats.deletes += 1;
-            inner.durable.remove(key);
-            let removed = inner.values.remove(key);
-            inner.stats.delete_keys.insert(key.to_owned());
-            let traffic = inner.stats.by_kind.entry(object_kind(key)).or_default();
-            traffic.deletes += 1;
-            traffic.bytes_deleted += removed.map_or(0, |v| v.len() as u64);
-            traffic.delete_key_bytes += key.len() as u64;
+            inner.stats.syncs += 1;
+            for (key, value) in std::mem::take(&mut inner.unsynced) {
+                inner.apply_durable(key, value);
+            }
             Ok(())
         })
     }

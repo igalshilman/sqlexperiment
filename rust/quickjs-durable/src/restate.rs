@@ -7,8 +7,9 @@
 //! `<program>/<key>/run` runs `main(input)` in its handler, exclusive and
 //! without journal replay, and returns its outcome. The JavaScript runs until
 //! it waits; the handler commits the run's changed pages, its KV writes and
-//! its requests (a turn), then waits on Restate itself for the first request
-//! to complete, and delivers it in the next turn, to the same live VM:
+//! its requests (a turn), in one write of the scope's database, then waits on
+//! Restate itself for the first request to complete, and delivers it in the
+//! next turn, to the same live VM:
 //!
 //! | `ctx` request             | The handler waits on                                        |
 //! | ------------------------- | ----------------------------------------------------------- |
@@ -21,7 +22,7 @@
 //! made before the crash is attached to, not made again. The run ends when
 //! `main` settles: requests still outstanding (a race's loser) are dropped,
 //! and their continuations never run.
-use crate::{Operation, Outcome, Programs, Run, Runtime, vm};
+use crate::{Operation, Outcome, Programs, Run, Runtime, Scope, vm};
 use restate_sdk::{
     context::{DurableFuture, RequestTarget},
     prelude::*,
@@ -35,7 +36,8 @@ use std::{
 };
 
 mod store;
-use store::ObjectStore;
+use sqlite_kv::{PageCache, PageCacheConfig};
+use store::StateQueue;
 
 /// Fault injection, for tests.
 #[doc(hidden)]
@@ -74,6 +76,8 @@ pub mod faults {
 pub struct JsObject {
     program: String,
     programs: Arc<Programs>,
+    /// The scopes' databases this process owned, kept between attempts.
+    cache: PageCache,
 }
 
 /// A request the handler waits on: its outcome, and the time to deliver it at.
@@ -106,10 +110,12 @@ impl JsObject {
     ) -> HandlerResult<Outcome> {
         // One store for the whole attempt: its handler is the object's only
         // writer meanwhile, so what it read or wrote stays true.
-        let store = ObjectStore::new(ctx.raw_state());
+        let store = Arc::new(StateQueue::new(ctx.raw_state()));
+        let namespace = format!("{}/{}", self.program, ctx.key());
+        let scope = Scope::new(store.clone()).cached(self.cache.namespace(&namespace));
         let started = Run::start(
             &self.programs,
-            &store,
+            &scope,
             ctx.key(),
             run,
             &self.program,
@@ -175,7 +181,7 @@ impl JsObject {
                     (outcomes, at)
                 }
             };
-            let delivered = run.deliver_all(&store, outcomes, now().max(at)).await;
+            let delivered = run.deliver_all(outcomes, now().max(at)).await;
             committed(&store, delivered)?;
         }
     }
@@ -184,7 +190,7 @@ impl JsObject {
 /// A turn's result. Once it committed, the crash a test injects, if any. A
 /// storage failure is the attempt's, and retried; anything else would fail
 /// again, the same way.
-fn committed<T>(store: &ObjectStore, result: anyhow::Result<T>) -> HandlerResult<T> {
+fn committed<T>(store: &StateQueue, result: anyhow::Result<T>) -> HandlerResult<T> {
     match result {
         Ok(value) => {
             faults::after_commit()?;
@@ -259,16 +265,19 @@ mod shipped {
 
 /// Bind each program as a virtual object of its name: `run` without journal
 /// replay (a retried attempt restores the last image instead), its state
-/// loaded lazily (an attempt reads only the batches it needs), and no journal
-/// kept once an invocation is done (it holds every page it wrote).
+/// loaded lazily (an attempt reads only what its database needs), and no
+/// journal kept once an invocation is done (it holds every page it wrote).
+/// The objects share `cache`, which keeps the scopes this process owns.
 pub fn bind(
     mut builder: restate_sdk::endpoint::Builder,
     programs: &Arc<Programs>,
+    cache: &PageCache,
 ) -> restate_sdk::endpoint::Builder {
     for name in programs.names() {
         let object = JsObject {
             program: name.to_owned(),
             programs: programs.clone(),
+            cache: cache.clone(),
         };
         builder = builder.bind(
             object.into_service_definition().options(
@@ -285,11 +294,22 @@ pub fn bind(
 
 /// An endpoint serving `programs`, and [`crate::Claude`] and
 /// [`crate::Workspace`] for them to call.
-pub fn endpoint(programs: &Arc<Programs>) -> Endpoint {
-    bind(Endpoint::builder(), programs)
+pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
+    Ok(bind(Endpoint::builder(), programs, &page_cache().await?)
         .bind(crate::Claude::from_env())
         .bind(crate::Workspace::from_env())
-        .build()
+        .build())
+}
+
+/// A cache of the scopes' databases for this process: 64 MiB in memory, and
+/// 256 MiB in a file that goes away with the process.
+pub async fn page_cache() -> anyhow::Result<PageCache> {
+    let file = std::env::temp_dir().join(format!("quickjs-durable-{}.cache", std::process::id()));
+    let cache = PageCache::open(PageCacheConfig::new(&file, 64 << 20, 256 << 20)).await?;
+    // The cache keeps the file open: unlinked now, it goes away with the
+    // process however it ends.
+    let _ = std::fs::remove_file(&file);
+    Ok(cache)
 }
 
 /// Milliseconds since the epoch: a turn's logical time never runs backwards.

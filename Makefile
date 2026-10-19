@@ -35,15 +35,22 @@ OXFMT := typescript/node_modules/.bin/oxfmt
 # Lints the TypeScript of every part, as .oxlintrc.json says; its type-aware
 # rules run tsgolint, from the pnpm workspace too.
 OXLINT := OXLINT_TSGOLINT_PATH=$(CURDIR)/typescript/node_modules/.bin/tsgolint typescript/node_modules/.bin/oxlint
-# The tests against a Restate server run a released restate-server: by default
-# RESTATE_VERSION's, downloaded from its GitHub release for this platform. Or
-# RESTATE_FROM=image takes it out of RESTATE_IMAGE with docker (Linux only), or
-# set RESTATE_SERVER to a restate-server binary.
-RESTATE_VERSION ?= 1.7.13
-RESTATE_FROM ?= release
-RESTATE_IMAGE ?= ghcr.io/restatedev/restate:$(RESTATE_VERSION)
-RESTATE_SERVER ?= $(CARGO_TARGET_DIR)/restate/restate-server
+# The tests against a Restate server need service protocol v8 (state reads
+# left out of the journal), which no release has yet: by default they run the
+# restate-server of RESTATE_IMAGE, Restate's service-protocol-v8 branch, taken
+# out of the image without docker (Linux only), with v8 enabled. Or
+# RESTATE_FROM=release downloads RESTATE_VERSION's GitHub release for this
+# platform, or set RESTATE_SERVER to a restate-server binary.
+RESTATE_FROM ?= image
+RESTATE_IMAGE ?= ghcr.io/restatedev/restate:service-protocol-v8
+RESTATE_VERSION ?= 1.8.0
+ifeq ($(RESTATE_FROM),image)
+RESTATE_SERVER ?= $(CARGO_TARGET_DIR)/restate/$(lastword $(subst :, ,$(RESTATE_IMAGE)))/restate-server
+else
+RESTATE_SERVER ?= $(CARGO_TARGET_DIR)/restate/$(RESTATE_VERSION)/restate-server
+endif
 export RESTATE_SERVER
+export RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8 ?= true
 RESTATE_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
 ifeq ($(shell uname -s),Darwin)
 RESTATE_TARGET := $(RESTATE_ARCH)-apple-darwin
@@ -53,7 +60,7 @@ endif
 
 .PHONY: all help core qjs addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
 	test-sdk-py test-sdk-rs test-sql-py test-agents-py test-qjs lint lint-core lint-ts lint-py lint-qjs format crash-test concurrency-test tools-test \
-	crash-test-py concurrency-test-py restate-server wheels clean
+	crash-test-py concurrency-test-py wheels clean
 
 # --- Build
 
@@ -198,17 +205,13 @@ test-qjs: $(SDK_RS) $(RESTATE_SERVER) ## Durable JavaScript in Restate objects: 
 	cd $(QJS) && $(CARGO) test --locked --release --features full-scan --lib --test runs --test crashes
 	cd $(QJS) && $(CARGO) test --locked --release --test restate -- --include-ignored --test-threads 1
 
-restate-server: ## Get restate-server again: RESTATE_VERSION's release, or from RESTATE_IMAGE (docker), per RESTATE_FROM
-	rm -f $(RESTATE_SERVER) && $(MAKE) $(RESTATE_SERVER)
-
 # Into a temporary file, moved into place once it runs: a failed download or
 # copy leaves no binary that make would take as up to date.
 $(RESTATE_SERVER):
 	mkdir -p $(dir $@)
 	rm -f $@.tmp
 ifeq ($(RESTATE_FROM),image)
-	docker pull -q $(RESTATE_IMAGE)
-	id=$$(docker create $(RESTATE_IMAGE)) && { docker cp -q $$id:/usr/local/bin/restate-server $@.tmp; status=$$?; docker rm $$id > /dev/null; exit $$status; }
+	scripts/restate-server-from-image.py $(RESTATE_IMAGE) $@.tmp
 else
 	curl -fsSL https://github.com/restatedev/restate/releases/download/v$(RESTATE_VERSION)/restate-server-$(RESTATE_TARGET).tar.xz \
 		| tar -xJ -O restate-server-$(RESTATE_TARGET)/restate-server > $@.tmp

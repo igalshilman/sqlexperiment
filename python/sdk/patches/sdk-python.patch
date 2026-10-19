@@ -118,6 +118,16 @@ index feb0086..94e0475 100644
  
  class ObjectSharedContext(Context):
      """
+diff --git a/python/restate/discovery.py b/python/restate/discovery.py
+index 0bd22dc..7837be7 100644
+--- a/python/restate/discovery.py
++++ b/python/restate/discovery.py
+@@ -433,4 +433,4 @@ def compute_discovery(endpoint: RestateEndpoint, discovered_as: typing.Literal["
+         protocol_mode = PROTOCOL_MODES[endpoint.protocol]
+     else:
+         protocol_mode = PROTOCOL_MODES[discovered_as]
+-    return Endpoint(protocolMode=protocol_mode, minProtocolVersion=5, maxProtocolVersion=7, services=services)
++    return Endpoint(protocolMode=protocol_mode, minProtocolVersion=5, maxProtocolVersion=8, services=services)
 diff --git a/python/restate/handler.py b/python/restate/handler.py
 index 91a55a7..60b128e 100644
 --- a/python/restate/handler.py
@@ -220,10 +230,10 @@ index 14d5ef5..3ba219a 100644
              return wrapped
 diff --git a/python/restate/selector.py b/python/restate/selector.py
 new file mode 100644
-index 0000000..96e4a00
+index 0000000..3d51ac5
 --- /dev/null
 +++ b/python/restate/selector.py
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,266 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -243,7 +253,9 @@ index 0000000..96e4a00
 +invocation, though: a suspension, the awaiting-on hint and a cancellation each
 +take one unresolved future. So every wait is registered with the selector,
 +which asks the VM for progress on the first of all of them to complete, and is
-+the only one reading the invocation's input.
++the only one reading the invocation's input. So is an ephemeral command (a
++state get left out of the journal), by its completion id: the VM reports its
++result ahead of any future.
 +"""
 +
 +from __future__ import annotations
@@ -257,6 +269,7 @@ index 0000000..96e4a00
 +    AllCompletedUnresolvedFuture,
 +    DoProgressAnyCompleted,
 +    DoProgressCancelSignalReceived,
++    DoProgressEphemeralNotificationReady,
 +    DoProgressExecuteRun,
 +    DoProgressWaitExternalProgress,
 +    FirstCompletedUnresolvedFuture,
@@ -277,6 +290,10 @@ index 0000000..96e4a00
 +
 +    def is_completed(self, handle: int) -> bool:
 +        """Whether the VM has the result of ``handle``."""
++        ...
++
++    def take_ephemeral(self, completion_id: int) -> Any:
++        """The result of a ready ephemeral command."""
 +        ...
 +
 +    async def flush_output(self) -> None:
@@ -328,13 +345,17 @@ index 0000000..96e4a00
 +    to complete: so a suspension waits for any of them, a pending run starts
 +    whichever wait reaches it first, and a cancellation reaches all of them. A
 +    wait registered while the loop reads the input wakes it, so it is part of
-+    the next check. The loop runs while something is pending.
++    the next check. An ephemeral command is waited for by its completion id,
++    and keeps the loop going with no future pending; a cancellation does not
++    reach it. The loop runs while something is pending.
 +    """
 +
 +    def __init__(self, driver: SelectorDriver, disconnected: Callable[[], BaseException]) -> None:
 +        self._driver = driver
 +        self._disconnected = disconnected
 +        self._waits: Dict[asyncio.Future, UnresolvedFuture] = {}
++        # The ephemeral commands in flight, by completion id.
++        self._ephemeral: Dict[int, asyncio.Future] = {}
 +        self._task: Optional[asyncio.Task] = None
 +        # Between the VM's WaitExternalProgress and the next input.
 +        self._waiting = False
@@ -349,7 +370,7 @@ index 0000000..96e4a00
 +    @property
 +    def size(self) -> int:
 +        """The waits still pending, for tests."""
-+        return len(self._waits)
++        return len(self._waits) + len(self._ephemeral)
 +
 +    async def wait(self, future: UnresolvedFuture) -> None:
 +        """Returns once ``future`` is ready; raises if the attempt ends first, or is cancelled."""
@@ -359,6 +380,25 @@ index 0000000..96e4a00
 +            return
 +        waiter = asyncio.get_running_loop().create_future()
 +        self._waits[waiter] = future
++        self._start()
++        try:
++            await waiter
++        finally:
++            self._waits.pop(waiter, None)
++
++    async def wait_ephemeral(self, completion_id: int) -> Any:
++        """The result of the ephemeral command ``completion_id``; raises if the attempt ends first."""
++        if self._end is not None:
++            raise self._end()
++        waiter = asyncio.get_running_loop().create_future()
++        self._ephemeral[completion_id] = waiter
++        self._start()
++        try:
++            return await waiter
++        finally:
++            self._ephemeral.pop(completion_id, None)
++
++    def _start(self) -> None:
 +        if self._task is None:
 +            self._task = asyncio.create_task(self._loop())
 +            self._driver.track(self._task)
@@ -367,18 +407,17 @@ index 0000000..96e4a00
 +            # up the new wait on its next pass.
 +            self._waiting = False
 +            self._driver.wake()
-+        try:
-+            await waiter
-+        finally:
-+            self._waits.pop(waiter, None)
 +
 +    def _settle(self) -> None:
 +        for waiter, future in self._waits.items():
 +            if not waiter.done() and is_ready(future, self._driver.is_completed):
 +                waiter.set_result(None)
 +
-+    def _fail_all(self, error: Callable[[], BaseException]) -> None:
-+        for waiter in self._waits:
++    def _fail_all(self, error: Callable[[], BaseException], ephemeral: bool = True) -> None:
++        waiters = list(self._waits)
++        if ephemeral:
++            waiters += self._ephemeral.values()
++        for waiter in waiters:
 +            if not waiter.done():
 +                waiter.set_exception(error())
 +
@@ -398,9 +437,12 @@ index 0000000..96e4a00
 +                # registers later wakes the loop anyway.
 +                await asyncio.sleep(0)
 +                pending = [future for waiter, future in self._waits.items() if not waiter.done()]
-+                if not pending:
++                ephemeral = any(not waiter.done() for waiter in self._ephemeral.values())
++                if not pending and not ephemeral:
 +                    return
 +                await driver.flush_output()
++                # With only ephemeral commands in flight, no future: the VM
++                # reports their results, or waits for input.
 +                response = driver.do_progress(
 +                    pending[0] if len(pending) == 1 else FirstCompletedUnresolvedFuture(pending)
 +                )
@@ -413,9 +455,15 @@ index 0000000..96e4a00
 +                    return
 +                if isinstance(response, DoProgressAnyCompleted):
 +                    continue
++                if isinstance(response, DoProgressEphemeralNotificationReady):
++                    waiter = self._ephemeral.get(response.completion_id)
++                    result = driver.take_ephemeral(response.completion_id)
++                    if waiter is not None and not waiter.done():
++                        waiter.set_result(result)
++                    continue
 +                if isinstance(response, DoProgressCancelSignalReceived):
 +                    # Reaches every pending wait; what waits after it is not cancelled.
-+                    self._fail_all(lambda: TerminalError("cancelled", 409))
++                    self._fail_all(lambda: TerminalError("cancelled", 409), ephemeral=False)
 +                    continue
 +                if isinstance(response, DoProgressExecuteRun):
 +                    driver.execute_run(response.handle)
@@ -470,7 +518,7 @@ index c5e233f..66d5478 100644
                      dict(request_headers),
                      receive_channel,
 diff --git a/python/restate/server_context.py b/python/restate/server_context.py
-index 80fbec3..b195422 100644
+index 80fbec3..151c85a 100644
 --- a/python/restate/server_context.py
 +++ b/python/restate/server_context.py
 @@ -56,7 +56,9 @@ from restate.exceptions import (
@@ -649,7 +697,7 @@ index 80fbec3..b195422 100644
          if isinstance(serde, DefaultSerde):
              serde = serde.with_maybe_type(type_hint)
          name, handle = self.vm.sys_awakeable()
-@@ -1258,6 +1322,89 @@ class ServerInvocationContext(ObjectContext):
+@@ -1258,6 +1322,101 @@ class ServerInvocationContext(ObjectContext):
      def key(self) -> str:
          return self.invocation.key
  
@@ -682,8 +730,20 @@ index 80fbec3..b195422 100644
 +        return f"{self.handler.service_tag.name}/{self.invocation.key}"
 +
 +    def sql_get(self, key: str) -> Awaitable[Optional[bytes]]:
-+        """A state read, issued now."""
-+        return self.get(key, serde=BytesSerde())
++        """A state read, issued now and left out of the journal (protocol V8)."""
++        completion_id = self.vm.ephemeral_state_get(key)
++        assert self.selector is not None, "ctx.db runs without journal replay"
++        selector = self.selector
++
++        async def read() -> Optional[bytes]:
++            value = await selector.wait_ephemeral(completion_id)
++            if isinstance(value, Failure):
++                raise TerminalError(value.message, value.code)
++            if isinstance(value, BaseException):
++                raise SdkInternalException() from value
++            return value
++
++        return read()
 +
 +    def sql_set(self, key: str, value: bytes) -> None:
 +        """A state write."""
@@ -739,7 +799,7 @@ index 80fbec3..b195422 100644
      def cancel_invocation(self, invocation_id: str):
          """cancel an existing invocation by id."""
          if invocation_id is None:
-@@ -1283,3 +1430,70 @@ class ServerInvocationContext(ObjectContext):
+@@ -1283,3 +1442,73 @@ class ServerInvocationContext(ObjectContext):
      def set_extension_data(self, key: str, value: Any) -> None:
          """Set extension data by key."""
          self.extension_data[key] = value
@@ -775,6 +835,9 @@ index 80fbec3..b195422 100644
 +
 +    def is_completed(self, handle: int) -> bool:
 +        return self.context.vm.is_completed(handle)
++
++    def take_ephemeral(self, completion_id: int) -> Any:
++        return self.context.vm.take_ephemeral_notification(completion_id)
 +
 +    async def flush_output(self) -> None:
 +        await self.context.take_and_send_output()
@@ -895,10 +958,10 @@ index cecd90f..26736b9 100644
              return wrapped
 diff --git a/python/restate/sql.py b/python/restate/sql.py
 new file mode 100644
-index 0000000..0e8c5a3
+index 0000000..b0788bb
 --- /dev/null
 +++ b/python/restate/sql.py
-@@ -0,0 +1,601 @@
+@@ -0,0 +1,616 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -926,7 +989,7 @@ index 0000000..0e8c5a3
 +import uuid
 +from contextlib import asynccontextmanager
 +from datetime import timedelta
-+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
++from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
 +
 +from restate.context import HandlerType, SendHandle
 +from restate.exceptions import TerminalError
@@ -1146,11 +1209,11 @@ index 0000000..0e8c5a3
 +
 +class ObjectStore:
 +    """
-+    The object's state as an ordered store: ``set`` and ``clear`` are state
-+    writes, which return at once and which the runtime stores in order;
-+    ``sync`` is an empty run, done after the commands before it. A ``get`` or
-+    ``sync`` that the attempt's end leaves waiting raises, so the session that
-+    made it ends instead of holding its lock.
++    The object's state as a store: ``set`` and ``clear`` are state writes,
++    which return at once; ``sync`` is an empty run, done once the commands
++    before it are stored. A ``get`` or ``sync`` that the attempt's end leaves
++    waiting raises, so the session that made it ends instead of holding its
++    lock.
 +    """
 +
 +    def __init__(self, host: SqlHost) -> None:
@@ -1169,14 +1232,24 @@ index 0000000..0e8c5a3
 +        return self._host.sql_sync()
 +
 +
-+# A transaction's sends wait in the object's state, under PENDING, while it
-+# commits: written before its COMMIT, with the database's version then, and
-+# cleared once they are made. The state writes are stored in order, so a later
-+# open finds them if the commit may have landed, and the version tells whether
-+# it did (it grew: the commit is recorded even if the transaction changed
-+# nothing). Each send's idempotency key is `transaction/<id>/<index>`, with a
-+# random id of the transaction, so making them again is dropped.
-+PENDING = "_restate_sql_sends"
++# A transaction's sends commit with it, in the database's commit record (its
++# effects): the outbox, which holds each committed transaction's sends until
++# they are stored. They are made once the transaction commits; a later open
++# makes again those still in the outbox, with the same idempotency keys
++# (`transaction/<id>/<index>`, with a random id of the transaction), so making
++# them again is dropped. Restate keeps an attempt's commands in the order they
++# were made, so a send made before a commit is stored whenever the commit is:
++# the next commit leaves the sends this attempt made out of the outbox, and so
++# does the end of the attempt.
++
++
++def _encode_outbox(outbox: List[Dict[str, Any]]) -> bytes:
++    """The outbox as effects: none is empty, as the record's effects start."""
++    return json.dumps(outbox).encode() if outbox else b""
++
++
++def _decode_outbox(effects: bytes) -> List[Dict[str, Any]]:
++    return json.loads(bytes(effects).decode()) if effects else []
 +
 +
 +class _NoInvocationId(SendHandle):
@@ -1314,6 +1387,8 @@ index 0000000..0e8c5a3
 +        self._db: Any = None
 +        self._ended = False
 +        self._cancel: Callable[[], None] = lambda: None
++        # The ids of the outbox's transactions this attempt made the sends of.
++        self._made: Set[str] = set()
 +        self.db: SqlSession = _Session(self)
 +        """``ctx.db``."""
 +
@@ -1359,42 +1434,33 @@ index 0000000..0e8c5a3
 +    async def transaction(self) -> AsyncIterator[SqlTransaction]:
 +        """
 +        ``ctx.transaction()``: one transaction of the session, whose sends are
-+        made once it commits, and kept in the object's state until they are.
++        made once it commits, and kept in the outbox until they are stored.
 +        """
 +        db = await self.open()
 +        sends = _Sends()
-+        pending: Optional[Dict[str, Any]] = None
++        outgoing: Optional[Dict[str, Any]] = None
 +        try:
 +            async with self.transaction_of(db) as (sql, tx):
 +                yield SqlTransaction(db=sql, tx=sends)
 +                sends.open = False
++                # The outbox as committed, but the sends stored since, and this
++                # transaction's: unchanged, it is not written again.
++                outbox = await self._unstored(db)
 +                if sends.recorded:
-+                    # Before the COMMIT's writes, so stored if they are.
-+                    pending = {"version": await db.version(), "id": uuid.uuid4().hex, "sends": sends.recorded}
-+                    self._host.sql_set(PENDING, json.dumps(pending).encode())
-+                    # So that the version grows even if the transaction changed
-+                    # nothing: otherwise a later open could not tell that it
-+                    # committed.
-+                    tx.record_commit()
-+        except BaseException:
-+            # A COMMIT refused with the session usable did not land; one that
-+            # ended the session may have, which the next open tells.
-+            if pending is not None and db.is_usable():
-+                self._host.sql_clear(PENDING)
-+            raise
++                    outgoing = {"id": uuid.uuid4().hex, "sends": sends.recorded}
++                    outbox.append(outgoing)
++                tx.commit_effects(_encode_outbox(outbox))
 +        finally:
 +            sends.open = False
-+        # Made right after the commit, before anything else runs: the next
-+        # transaction writes PENDING only after this one has cleared it.
-+        if pending is not None:
-+            self._emit(pending)
++        if outgoing is not None:
++            self._make(outgoing)
 +
-+    def _emit(self, pending: Dict[str, Any]) -> None:
++    def _make(self, outgoing: Dict[str, Any]) -> None:
 +        """
-+        Make the sends of ``pending``, committed: each with an idempotency key
++        Make the sends of a committed transaction: each with an idempotency key
 +        of the transaction (or its own), so that making them again is dropped.
 +        """
-+        for index, send in enumerate(pending["sends"]):
++        for index, send in enumerate(outgoing["sends"]):
 +            delay = send.get("delay")
 +            self._host.sql_send(
 +                send["service"],
@@ -1402,22 +1468,28 @@ index 0000000..0e8c5a3
 +                base64.b64decode(send["parameter"]),
 +                send.get("key"),
 +                None if delay is None else timedelta(milliseconds=delay),
-+                send.get("idempotency_key") or f"transaction/{pending['id']}/{index}",
++                send.get("idempotency_key") or f"transaction/{outgoing['id']}/{index}",
 +                send.get("headers"),
 +            )
-+        # After the sends: once this is stored, so are they.
-+        self._host.sql_clear(PENDING)
++        self._made.add(outgoing["id"])
 +
-+    async def _recover(self, db: Any, store: SqlStore) -> None:
-+        """The sends a crashed attempt left pending: made again if their transaction committed, else dropped."""
-+        stored = await store.get(PENDING)
-+        if stored is None:
++    async def _unstored(self, db: Any) -> List[Dict[str, Any]]:
++        """
++        The outbox as committed, but the transactions this attempt made the
++        sends of: a commit made after them stores them first.
++        """
++        return [outgoing for outgoing in _decode_outbox(await db.effects()) if outgoing["id"] not in self._made]
++
++    async def _flush(self, db: Any) -> None:
++        """
++        Empty the outbox, so that a later open does not make its sends again:
++        a commit after them, which stores them first.
++        """
++        if not await db.effects():
 +            return
-+        pending = json.loads(bytes(stored).decode())
-+        if await db.version() > pending["version"]:
-+            self._emit(pending)
-+        else:
-+            self._host.sql_clear(PENDING)
++        outbox = _encode_outbox(await self._unstored(db))
++        async with db.transaction() as tx:
++            tx.commit_effects(outbox)
 +
 +    async def open(self) -> Any:
 +        """The session, opened on the first call."""
@@ -1455,7 +1527,9 @@ index 0000000..0e8c5a3
 +        # no statement runs, and the handler's later calls fail.
 +        self._cancel = host.sql_on_attempt_end(lambda: _close_soon(db))
 +        try:
-+            await self._recover(db, store)
++            # What a crash may have left unmade.
++            for outgoing in _decode_outbox(await db.effects()):
++                self._make(outgoing)
 +        except BaseException:
 +            await db.close()
 +            raise
@@ -1463,10 +1537,9 @@ index 0000000..0e8c5a3
 +
 +    async def end(self, failed: bool) -> None:
 +        """
-+        The handler ended (``failed``, or not): the session is saved. Saving
-+        confirms its writes (an empty run, if it wrote), so that the page
-+        cache may trust them; a session that is not saved makes the next one
-+        in this process start cold. One that a storage error ended closes now.
++        The handler ended (``failed``, or not): the outbox is emptied, and the
++        session is saved. One that a storage error
++        ended closes now.
 +        """
 +        self._ended = True
 +        if self._session is None:
@@ -1478,10 +1551,14 @@ index 0000000..0e8c5a3
 +            return
 +        self._cancel()
 +        if failed:
-+            # The handler's error stands: its writes are stored in order before
-+            # the result, whether or not the save confirms them for the cache.
++            # The handler's error stands: what it committed is stored, and an
++            # outbox left full is made again by the next open.
 +            try:
-+                await (db.save() if db.is_usable() else db.close())
++                if db.is_usable():
++                    await self._flush(db)
++                    await db.save()
++                else:
++                    await db.close()
 +            except BaseException:  # pylint: disable=broad-exception-caught
 +                try:
 +                    await db.close()
@@ -1490,6 +1567,7 @@ index 0000000..0e8c5a3
 +            return
 +        try:
 +            if db.is_usable():
++                await self._flush(db)
 +                await db.save()
 +            else:
 +                await db.close()
@@ -1501,10 +1579,45 @@ index 0000000..0e8c5a3
 +    task = asyncio.ensure_future(db.close())
 +    task.add_done_callback(lambda f: f.cancelled() or f.exception())
 diff --git a/python/restate/vm.py b/python/restate/vm.py
-index 7b7b91f..e652181 100644
+index 7b7b91f..17999a6 100644
 --- a/python/restate/vm.py
 +++ b/python/restate/vm.py
-@@ -205,8 +205,13 @@ class VMWrapper:
+@@ -33,6 +33,7 @@ from restate._internal import (
+     PyDoProgressWaitExternalProgress,
+     PyDoProgressExecuteRun,
+     PyDoProgressCancelSignalReceived,
++    PyDoProgressEphemeralNotificationReady,
+     PyUnresolvedFuture,
+     PyRun,
+     CANCEL_NOTIFICATION_HANDLE,
+@@ -147,6 +148,18 @@ class Run:
+     handle: int
+ 
+ 
++class DoProgressEphemeralNotificationReady:
++    """
++    Represents a notification that an ephemeral command's result is ready:
++    it comes ahead of any other progress.
++    """
++
++    completion_id: int
++
++    def __init__(self, completion_id):
++        self.completion_id = completion_id
++
++
+ DO_PROGRESS_ANY_COMPLETED = DoProgressAnyCompleted()
+ DO_PROGRESS_WAIT_EXTERNAL_PROGRESS = DoProgressWaitExternalProgress()
+ DO_PROGRESS_CANCEL_SIGNAL_RECEIVED = DoProgressCancelSignalReceived()
+@@ -156,6 +169,7 @@ DoProgressResult = typing.Union[
+     DoProgressWaitExternalProgress,
+     DoProgressExecuteRun,
+     DoProgressCancelSignalReceived,
++    DoProgressEphemeralNotificationReady,
+ ]
+ 
+ 
+@@ -205,8 +219,13 @@ class VMWrapper:
      It provides a type-friendly interface to our shared vm.
      """
  
@@ -1520,6 +1633,48 @@ index 7b7b91f..e652181 100644
  
      def get_response_head(self) -> typing.Tuple[int, typing.Iterable[typing.Tuple[str, str]]]:
          """
+@@ -261,6 +280,8 @@ class VMWrapper:
+             return DoProgressExecuteRun(result.handle)
+         if isinstance(result, PyDoProgressCancelSignalReceived):
+             return DO_PROGRESS_CANCEL_SIGNAL_RECEIVED
++        if isinstance(result, PyDoProgressEphemeralNotificationReady):
++            return DoProgressEphemeralNotificationReady(result.completion_id)
+         return ValueError(f"Unknown progress type: {result}")
+ 
+     def take_notification(self, handle: int) -> typing.Union[NotificationType, Exception, Suspended]:
+@@ -357,6 +378,32 @@ class VMWrapper:
+         """
+         return self.vm.sys_get_state(name)
+ 
++    def ephemeral_state_get(self, name: str) -> int:
++        """
++        Gets a state value without recording it in the journal (protocol V8).
++
++        Returns:
++            The completion id of the ephemeral command.
++        """
++        return self.vm.ephemeral_state_get(name)
++
++    def take_ephemeral_notification(self, completion_id: int) -> typing.Union[NotificationType, Exception]:
++        """The value of an ephemeral state get: bytes, None (no value), a Failure, or NOT_READY."""
++        try:
++            result = self.vm.take_ephemeral_notification(completion_id)
++        except VMException as e:
++            return e
++        if result is None:
++            return NOT_READY
++        if isinstance(result, PyVoid):
++            return None
++        if isinstance(result, bytes):
++            return result
++        if isinstance(result, PyFailure):
++            metadata = dict(result.metadata) if result.metadata else None
++            return Failure(result.code, result.message, metadata=metadata)
++        return ValueError(f"Unknown result type: {result}")
++
+     def sys_get_state_keys(self) -> int:
+         """
+         Retrieves all keys.
 diff --git a/python/restate/workflow.py b/python/restate/workflow.py
 index b87a996..331153d 100644
 --- a/python/restate/workflow.py
@@ -1629,7 +1784,7 @@ index b87a996..331153d 100644
              self.handlers[handler.name] = handler
              return wrapped
 diff --git a/src/lib.rs b/src/lib.rs
-index 319281a..2058711 100644
+index 319281a..e7fb7f2 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -4,9 +4,9 @@ use pyo3::types::{PyBytes, PyNone, PyString};
@@ -1653,7 +1808,20 @@ index 319281a..2058711 100644
  type PyNotificationHandle = u32;
  
  #[pyclass]
-@@ -371,10 +370,11 @@ struct PyVM {
+@@ -268,6 +267,12 @@ struct PyDoProgressExecuteRun {
+ #[pyclass]
+ struct PyDoProgressCancelSignalReceived;
+ 
++#[pyclass]
++struct PyDoProgressEphemeralNotificationReady {
++    #[pyo3(get)]
++    completion_id: u32,
++}
++
+ #[pyclass]
+ #[derive(Clone)]
+ pub struct PyUnresolvedFuture {
+@@ -371,10 +376,11 @@ struct PyVM {
  #[pymethods]
  impl PyVM {
      #[new]
@@ -1666,7 +1834,7 @@ index 319281a..2058711 100644
      ) -> Result<Self, PyVMError> {
          // When a journal value codec is configured, the serialized payloads written to the journal
          // may legitimately differ between attempts (e.g. encryption with a random nonce), so we
-@@ -385,6 +385,13 @@ impl PyVM {
+@@ -385,6 +391,13 @@ impl PyVM {
              } else {
                  NonDeterministicChecksOption::Enabled
              },
@@ -1680,18 +1848,64 @@ index 319281a..2058711 100644
              ..Default::default()
          };
          Ok(Self {
-@@ -468,6 +475,11 @@ impl PyVM {
+@@ -468,6 +481,13 @@ impl PyVM {
              Ok(AwaitResponse::CancelSignalReceived) => {
                  Ok(Bound::new(py, PyDoProgressCancelSignalReceived)?.into_any())
              }
-+            // Of protocol V8's ephemeral commands, which this SDK does not make.
-+            Ok(AwaitResponse::EphemeralNotificationReady(_)) => Err(PyVMError::from(Error::new(
-+                restate_sdk_shared_core::error::codes::INTERNAL,
-+                "unexpected ephemeral notification: this SDK makes no ephemeral commands",
-+            )))?,
++            Ok(AwaitResponse::EphemeralNotificationReady(id)) => Ok(Bound::new(
++                py,
++                PyDoProgressEphemeralNotificationReady {
++                    completion_id: id.into(),
++                },
++            )?
++            .into_any()),
          }
      }
  
+@@ -521,6 +541,35 @@ impl PyVM {
+             .map_err(Into::into)
+     }
+ 
++    /// A state get left out of the journal (protocol V8): its completion id.
++    fn ephemeral_state_get(mut self_: PyRefMut<'_, Self>, key: String) -> Result<u32, PyVMError> {
++        self_
++            .vm
++            .ephemeral_state_get(key)
++            .map(Into::into)
++            .map_err(Into::into)
++    }
++
++    /// The value of an ephemeral state get: `PyBytes`, `PyVoid`, `PyFailure`,
++    /// or `None` while it is not ready.
++    fn take_ephemeral_notification(
++        mut self_: PyRefMut<'_, Self>,
++        completion_id: u32,
++    ) -> PyResult<Bound<'_, PyAny>> {
++        let res = self_.vm.take_ephemeral_notification(completion_id.into());
++        let py = self_.py();
++        match res.map_err(PyVMError::from)? {
++            None => Ok(PyNone::get(py).to_owned().into_any()),
++            Some(Value::Void) => Ok(Bound::new(py, PyVoid)?.into_any()),
++            Some(Value::Success(b)) => Ok(PyBytes::new(py, &b).into_any()),
++            Some(Value::Failure(f)) => Ok(Bound::new(py, PyFailure::from(f))?.into_any()),
++            Some(other) => Err(PyVMError::from(Error::new(
++                restate_sdk_shared_core::error::codes::INTERNAL,
++                format!("unexpected value of an ephemeral state get: {other:?}"),
++            )))?,
++        }
++    }
++
+     fn sys_get_state_keys(
+         mut self_: PyRefMut<'_, Self>,
+     ) -> Result<PyNotificationHandle, PyVMError> {
+@@ -1018,6 +1067,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+     m.add_class::<PyDoProgressWaitExternalProgress>()?;
+     m.add_class::<PyDoProgressExecuteRun>()?;
+     m.add_class::<PyDoProgressCancelSignalReceived>()?;
++    m.add_class::<PyDoProgressEphemeralNotificationReady>()?;
+     m.add_class::<PyUnresolvedFuture>()?;
+     m.add_class::<PyCallHandle>()?;
+     m.add_class::<PyRun>()?;
 diff --git a/tests/journal_replay.py b/tests/journal_replay.py
 new file mode 100644
 index 0000000..dc02582
@@ -1758,10 +1972,10 @@ index 0000000..dc02582
 +    VMWrapper(headers)
 diff --git a/tests/selector.py b/tests/selector.py
 new file mode 100644
-index 0000000..3a26ae3
+index 0000000..7f2296c
 --- /dev/null
 +++ b/tests/selector.py
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,283 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -1785,6 +1999,7 @@ index 0000000..3a26ae3
 +    AllCompletedUnresolvedFuture,
 +    DoProgressAnyCompleted,
 +    DoProgressCancelSignalReceived,
++    DoProgressEphemeralNotificationReady,
 +    DoProgressExecuteRun,
 +    DoProgressWaitExternalProgress,
 +    FirstCompletedUnresolvedFuture,
@@ -1807,7 +2022,10 @@ index 0000000..3a26ae3
 +
 +
 +class FakeVm:
-+    """A VM whose handles complete as input names them: a body chunk b"3" completes handle 3."""
++    """
++    A VM whose handles complete as input names them: a body chunk b"3" completes
++    handle 3, and b"e3" the ephemeral command 3 (reported ahead of the rest).
++    """
 +
 +    def __init__(self) -> None:
 +        self.completed: Set[int] = set()
@@ -1819,9 +2037,13 @@ index 0000000..3a26ae3
 +        self.wakes = 0
 +        self.ended = 0
 +        self.tasks: List[asyncio.Future] = []
++        self.ephemeral: Dict[int, Any] = {}
++        self.ephemeral_ready: List[int] = []
 +
 +    def do_progress(self, future: UnresolvedFuture) -> Any:
 +        self.checks.append(future)
++        if self.ephemeral_ready:
++            return DoProgressEphemeralNotificationReady(self.ephemeral_ready.pop(0))
 +        if self.script:
 +            return self.script.pop(0)
 +        if is_ready(future, self.is_completed):
@@ -1830,6 +2052,9 @@ index 0000000..3a26ae3
 +
 +    def is_completed(self, handle: int) -> bool:
 +        return handle in self.completed
++
++    def take_ephemeral(self, completion_id: int) -> Any:
++        return self.ephemeral.pop(completion_id)
 +
 +    async def flush_output(self) -> None:
 +        pass
@@ -1847,7 +2072,11 @@ index 0000000..3a26ae3
 +        self.input.put_nowait({"type": "restate.run_completed"})
 +
 +    def notify_input(self, chunk: Dict[str, Any]) -> None:
-+        self.completed.add(int(chunk["body"]))
++        body = chunk["body"]
++        if body.startswith(b"e"):
++            self.ephemeral_ready.append(int(body[1:]))
++        else:
++            self.completed.add(int(body))
 +
 +    def track(self, task: asyncio.Future) -> None:
 +        self.tasks.append(task)
@@ -1857,6 +2086,10 @@ index 0000000..3a26ae3
 +
 +    def complete(self, handle: int) -> None:
 +        self.input.put_nowait({"type": "http.request", "body": str(handle).encode(), "more_body": True})
++
++    def complete_ephemeral(self, completion_id: int, value: Any) -> None:
++        self.ephemeral[completion_id] = value
++        self.input.put_nowait({"type": "http.request", "body": f"e{completion_id}".encode(), "more_body": True})
 +
 +
 +def single(handle: int) -> SingleUnresolvedFuture:
@@ -1874,6 +2107,43 @@ index 0000000..3a26ae3
 +    selector = FutureSelector(vm, Disconnected)
 +    await selector.wait(single(1))
 +    assert vm.checks == []
++
++
++async def test_an_ephemeral_command_keeps_the_loop_going_with_no_future():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    value = asyncio.ensure_future(selector.wait_ephemeral(7))
++    await settle()
++    assert vm.checks == [FirstCompletedUnresolvedFuture([])]
++    vm.complete_ephemeral(7, b"v")
++    assert await value == b"v"
++    await settle()
++    assert selector.size == 0
++    assert vm.tasks[0].done()
++
++
++async def test_an_ephemeral_command_completes_alongside_the_waits():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    wait = asyncio.ensure_future(selector.wait(single(1)))
++    value = asyncio.ensure_future(selector.wait_ephemeral(2))
++    await settle()
++    vm.complete_ephemeral(2, None)
++    assert await value is None
++    assert not wait.done()
++    vm.complete(1)
++    await wait
++    assert selector.size == 0
++
++
++async def test_the_end_of_the_attempt_fails_an_ephemeral_command():
++    vm = FakeVm()
++    selector = FutureSelector(vm, Disconnected)
++    value = asyncio.ensure_future(selector.wait_ephemeral(1))
++    await settle()
++    vm.input.put_nowait({"type": "http.disconnect"})
++    with pytest.raises(Disconnected):
++        await value
 +
 +
 +async def test_concurrent_waits_share_one_await_point():
@@ -1991,10 +2261,10 @@ index 0000000..3a26ae3
 +    assert len(vm.tasks) == 2
 diff --git a/tests/sql_attempt.py b/tests/sql_attempt.py
 new file mode 100644
-index 0000000..3a402a9
+index 0000000..4da0efe
 --- /dev/null
 +++ b/tests/sql_attempt.py
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,324 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -2017,9 +2287,9 @@ index 0000000..3a402a9
 +
 +from restate import VirtualObject, ObjectContext
 +from restate.exceptions import TerminalError
-+from restate.sql import PENDING, SqlAttempt
++from restate.sql import SqlAttempt
 +
-+pytest.importorskip("sqlite_kv")
++sqlite_kv = pytest.importorskip("sqlite_kv")
 +
 +
 +@pytest.fixture(scope="session")
@@ -2042,8 +2312,8 @@ index 0000000..3a402a9
 +class FakeHost:
 +    """
 +    An attempt over an object's state: reads see the stored state and this
-+    attempt's writes; writes and sends are recorded in order, as the runtime
-+    stores them, and stored by ``store(n)`` up to the n-th.
++    attempt's writes; writes, sends and syncs are recorded in order, and
++    ``store`` stores the ones a crash keeps.
 +    """
 +
 +    def __init__(self, state: Dict[str, bytes], name: str, kind: Optional[str] = "exclusive", replay=False) -> None:
@@ -2051,7 +2321,8 @@ index 0000000..3a402a9
 +        self.name = name
 +        self.kind = kind
 +        self.replay = replay
-+        # ("set", key, value), ("clear", key, None) or ("send", idempotency key, (target, parameter, delay)).
++        # ("set", key, value), ("clear", key, None), ("sync", "", None) or
++        # ("send", idempotency key, (target, parameter, delay)).
 +        self.log: List[Tuple[str, str, Any]] = []
 +        self.fail_reads = False
 +
@@ -2086,7 +2357,7 @@ index 0000000..3a402a9
 +        self.log.append(("clear", key, None))
 +
 +    async def sql_sync(self) -> None:
-+        pass
++        self.log.append(("sync", "", None))
 +
 +    def sql_send(self, service, handler, parameter, key, send_delay, idempotency_key, headers) -> None:
 +        self.log.append(("send", idempotency_key, (f"{service}/{key}/{handler}", parameter, send_delay)))
@@ -2097,10 +2368,17 @@ index 0000000..3a402a9
 +    def sql_on_attempt_end(self, listener: Callable[[], None]) -> Callable[[], None]:
 +        return lambda: None
 +
++    def kept(self, n: Optional[int] = None) -> List[Tuple[str, str, Any]]:
++        """
++        The commands a crash after the first n keeps: Restate keeps an
++        attempt's commands in order, so a crash keeps a prefix of them.
++        """
++        return self.log[:n]
++
 +    def store(self, n: Optional[int] = None) -> Dict[str, bytes]:
-+        """The state once the first n commands are stored."""
++        """The state once the commands a crash after the first n keeps are stored."""
 +        state = dict(self.state)
-+        for op, key, value in self.log[:n]:
++        for op, key, value in self.kept(n):
 +            if op == "set":
 +                state[key] = value
 +            elif op == "clear":
@@ -2108,12 +2386,41 @@ index 0000000..3a402a9
 +        return state
 +
 +    def sends(self, n: Optional[int] = None) -> List[Tuple[str, Any]]:
-+        return [(key, value) for op, key, value in self.log[:n] if op == "send"]
++        return [(key, value) for op, key, value in self.kept(n) if op == "send"]
 +
 +
 +def fresh() -> str:
 +    """A namespace no session of this process has used: as another process sees the state."""
 +    return f"object-{next(_objects)}"
++
++
++class _Stored:
++    """A store over stored state, for reading it."""
++
++    def __init__(self, state: Dict[str, bytes]) -> None:
++        self.state = state
++
++    def get(self, key: str):
++        future = asyncio.get_running_loop().create_future()
++        future.set_result(self.state.get(key))
++        return future
++
++    def set(self, key: str, value: bytes) -> None:
++        raise RuntimeError("read only")
++
++    def clear(self, key: str) -> None:
++        raise RuntimeError("read only")
++
++    def sync(self) -> None:
++        pass
++
++
++async def outbox(state: Dict[str, bytes]) -> List[Any]:
++    """The transactions in the outbox of the database in ``state``."""
++    db = await sqlite_kv.open(fresh(), _Stored(state))
++    effects = await db.effects()
++    await db.close()
++    return json.loads(effects) if effects else []
 +
 +
 +async def run(host: FakeHost, body) -> Any:
@@ -2183,7 +2490,7 @@ index 0000000..3a402a9
 +
 +    assert await run(host, body) == [[0]]
 +    assert host.sends() == []
-+    assert PENDING not in host.store()
++    assert await outbox(host.store()) == []
 +
 +
 +async def test_a_transactions_sends_are_made_once_it_commits():
@@ -2204,7 +2511,7 @@ index 0000000..3a402a9
 +    assert first.startswith("transaction/") and first.endswith("/0")
 +    assert (target, parameter, delay) == ("shop/a/ship", b'"apple"', timedelta(seconds=1))
 +    assert second == ("mine", ("shop/b/ship", b'"pear"', None))
-+    assert PENDING not in host.store()
++    assert await outbox(host.store()) == []
 +
 +
 +async def test_a_send_after_the_transaction_has_ended_is_refused():
@@ -2221,9 +2528,10 @@ index 0000000..3a402a9
 +
 +async def test_the_sends_of_a_commit_are_made_once_wherever_the_attempt_crashed():
 +    """
-+    For every prefix of an attempt's commands that a crash may leave stored,
-+    the next attempt makes the transaction's sends if, and only if, its commit
-+    landed: with the same keys, so that each is made once.
++    For every point an attempt may crash at, keeping the commands before it,
++    the next attempt makes the transaction's sends if, and only if, its
++    commit landed: with the same keys, so that each is made once, and empties
++    the outbox.
 +    """
 +    base = FakeHost({}, fresh())
 +    await run(base, lambda a: a.db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)"))
@@ -2245,22 +2553,23 @@ index 0000000..3a402a9
 +
 +        [[rows]] = await run(after, recover)
 +        made = {key for key, _ in crashed.sends(n) + after.sends()}
-+        assert len(made) == rows, f"{n} commands stored: {rows} rows, sends made with keys {made}"
-+        assert PENDING not in after.store(), f"{n} commands stored"
++        assert len(made) == rows, f"{n} commands: {rows} rows, sends made with keys {made}"
++        assert await outbox(after.store()) == [], f"{n} commands"
 +
 +
-+async def test_a_pending_record_is_the_transactions_own():
++async def test_the_outbox_holds_the_transactions_sends_until_they_are_stored():
 +    host = FakeHost({}, fresh())
 +
 +    async def body(attempt: SqlAttempt):
 +        async with attempt.transaction() as t:
 +            await t.db.execute("CREATE TABLE t(id INTEGER)")
 +            t.tx.object_send(ship, "a", "apple")
++        [outgoing] = await outbox(host.store())
++        assert outgoing["sends"][0]["service"] == "shop"
++        assert outgoing["sends"][0]["key"] == "a"
 +
 +    await run(host, body)
-+    [pending] = [json.loads(value) for op, key, value in host.log if op == "set" and key == PENDING]
-+    assert pending["sends"][0]["service"] == "shop"
-+    assert pending["sends"][0]["key"] == "a"
++    assert await outbox(host.store()) == []
 +
 +
 +async def test_ctx_db_is_for_exclusive_handlers_without_journal_replay():

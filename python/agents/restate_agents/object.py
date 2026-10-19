@@ -29,11 +29,11 @@ from restate_agents.signals import resolve as resolve_signal
 from restate_agents.signals import steer as steer_signal
 
 # Restate's UI hides the SQL storage from the journal view: the database's
-# pages, log and header in the object's state (v13/...), the sends pending
-# with a transaction, and the `sync` run before an attempt ends.
+# commit record, log, pages and hint in the object's state (v14/...), and the
+# `sync` runs after its writes.
 METADATA = {
-    "dev.restate.tooling.journal.hidden.names": "sync,_restate_sql_sends",
-    "dev.restate.tooling.journal.hidden.name.prefix": "v13/",
+    "dev.restate.tooling.journal.hidden.names": "sync",
+    "dev.restate.tooling.journal.hidden.name.prefix": "v14/",
 }
 
 # Each attempt resumes from the database, so a failed one is retried soon, and without end.

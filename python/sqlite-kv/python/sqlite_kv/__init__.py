@@ -1,11 +1,11 @@
 """SQL over a key/value store implemented in Python.
 
-A session of a namespace's database, over a store with ordered writes::
+A session of a namespace's database, over a key/value store::
 
     db = await sqlite_kv.open("Ledger/a", store)
     async with db.transaction() as tx:
         await tx.execute("INSERT INTO transfers VALUES(?, ?, ?, ?)", [id, src, dst, amount])
-    await db.save()  # confirms the session's writes for the page cache
+    await db.save()  # ends the session, leaving its engine to the next one
 
 See ``Store`` for the store, and README.md.
 """
@@ -33,11 +33,13 @@ Rows = list[list[SqlValue]]
 
 
 class Store(Protocol):
-    """A key/value store with ordered writes.
+    """A key/value store.
 
-    ``set`` and ``clear`` return at once, and the store keeps writes in the
-    order they were issued; ``sync`` completes once every write so far is
-    stored. ``get`` issues its read when called, and returns the stored value
+    ``set`` and ``clear`` return at once, and ``sync`` completes once every
+    write before it is stored. Writes are stored in the order they were made:
+    until a sync completes, a crash may lose the last of them, never one
+    without the ones after it. ``get`` issues its read when
+    called, and returns the stored value
     or this request's own latest write (``None`` when absent), or an awaitable
     of it: so a plain ``async def get`` does not do, as its read would be
     issued only when it first runs.
@@ -52,13 +54,13 @@ class Store(Protocol):
 async def open(namespace: str, store: Store) -> Database:  # pylint: disable=redefined-builtin
     """Open the database of ``namespace`` over ``store``.
 
-    One process-wide page cache serves every namespace. Each SQL commit is
-    durable once the store has stored its writes: a statement completes once
-    they reached the store, in order, and ``save()`` waits until they are stored.
+    One process-wide page cache serves every namespace. A statement that
+    commits completes once the store has stored its writes (a ``sync`` after
+    them completed).
     """
     loop = asyncio.get_running_loop()
     # A failed write cannot fail its caller, which has moved on: the next sync
-    # reports it, so the session's writes are not confirmed.
+    # reports it.
     failure: list[BaseException] = []
 
     def answer(reply, awaitable) -> None:
@@ -165,10 +167,10 @@ class Database:
                 raise
             finally:
                 _running.reset(token)
-            record = tx._recorded  # pylint: disable=protected-access
+            effects = tx._effects  # pylint: disable=protected-access
             tx._end()  # pylint: disable=protected-access
             try:
-                await native.commit(record)
+                await native.commit(effects)
             except BaseException:
                 # A COMMIT that fails (a deferred constraint) leaves the
                 # transaction open: without the rollback, the calls after it
@@ -176,31 +178,26 @@ class Database:
                 await _rollback(native)
                 raise
 
-    async def version(self) -> int:
-        """The database's version.
+    async def effects(self) -> bytes:
+        """The effects of the last commit that set them (see ``Transaction.commit_effects``).
 
-        It grows with each commit that changes the database, or whose
-        transaction called ``record_commit()``, and only then. It does not
-        wait for queued calls, so a transaction's body may read it: before the
-        COMMIT, it is the version that the commit would advance. It waits for a
-        statement that is running, and fails once the session has ended.
+        Empty if none did. It does not wait for queued calls, so a
+        transaction's body may read them. It waits for a statement that is
+        running, and fails once the session has ended.
         """
-        return await self._native.version()
+        return await self._native.effects()
 
     def is_usable(self) -> bool:
         """Whether SQL can still run: an SQL error leaves the session usable, a storage error ends it."""
         return self._native.is_usable()
 
     async def save(self) -> None:
-        """End the session, after the calls before it, confirming its writes so that the page cache may trust them."""
+        """End the session, after the calls before it."""
         async with self._serial():
             await self._native.save()
 
     async def close(self) -> None:
-        """End the session without confirming: the next one in this process starts cold.
-
-        It does not wait for queued calls, which then fail.
-        """
+        """End the session now: queued calls fail."""
         await self._native.close()
 
 
@@ -226,7 +223,7 @@ class Transaction:
         # The transaction whose body this one's runs in, if any: of another
         # session, since a session's own are refused.
         self._outer = outer
-        self._recorded = False
+        self._effects: bytes | None = None
 
     def holds(self, database: Database) -> bool:
         """Whether this transaction, or one it runs inside, is open and holds ``database``."""
@@ -242,14 +239,14 @@ class Transaction:
     def _end(self) -> None:
         self._native = None
 
-    def record_commit(self) -> None:
-        """Log this transaction's commit even if it changes nothing.
+    def commit_effects(self, effects: bytes) -> None:
+        """Commit ``effects`` with this transaction, in the same write.
 
-        For a body that only reads, or whose writes match no rows: the version
-        then grows when it commits.
+        They are stored exactly when it is, even if it changes nothing, and
+        stay until a later transaction commits others (see ``Database.effects``).
         """
         self._check()
-        self._recorded = True
+        self._effects = bytes(effects)
 
     async def query(self, sql: str, params: Sequence[SqlParam] | None = None) -> Rows:
         """Run SQL and return its rows; parameters bind to a single statement."""

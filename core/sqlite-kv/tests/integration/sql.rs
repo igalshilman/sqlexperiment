@@ -15,7 +15,7 @@ fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {
         assert_eq!(store.stats().puts, 0, "local WAL must not reach backend");
         db.save().await?;
         assert_eq!(store.stats().puts, 1, "a save is one log append");
-        store.crash(&[]); // every acknowledged put survives
+        store.crash(); // every acknowledged put survives
 
         let mut reopened = Session::open(store.clone()).await?;
         assert_eq!(reopened.io_stats().private_wal_len, 0);
@@ -145,7 +145,7 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
         assert_eq!(stats.puts, 1);
         assert!(database_len.div_ceil(4096) >= 2);
         assert!(stats.bytes_written < wal / 10);
-        store.crash(&[]);
+        store.crash();
         let mut db = Session::open(store).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "100");
         assert_eq!(

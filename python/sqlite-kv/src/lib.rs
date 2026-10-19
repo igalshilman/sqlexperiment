@@ -4,15 +4,13 @@
 //! `dispatch(op, key, value, reply)`, which `sqlite_kv/__init__.py` builds from
 //! a store object (`get`, `set`, `clear`, `sync`). Every request is scheduled
 //! on the loop with `call_soon_threadsafe`, which runs callbacks in the order
-//! they were scheduled: the store sees requests in the order they were issued,
-//! a write before a later read of its key, and every write before a `sync`.
+//! they were scheduled, so a read sees the writes before it.
 //!
-//! The store is ordered ([`KvStore::ordered`]): `set` and `clear` return
-//! nothing, and are acknowledged once scheduled; `sync` resolves once every
-//! write so far is stored. A statement's result reaches Python through the
-//! same loop, scheduled after its writes, so what its caller does next comes
-//! after them. A process-wide page cache is built in, and [`Database::save`]
-//! confirms a session's writes before the cache trusts them.
+//! `set` and `clear` queue a write; `sync` resolves once every write before it
+//! is stored. The object's state keeps writes in issue order, so a crash
+//! loses only a suffix of them (see [`sqlite_kv::kv`]): a statement that
+//! commits queues its writes, then completes at one `sync`. A process-wide
+//! page cache is built in.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
@@ -90,11 +88,6 @@ impl PyStore {
         .map_err(failed)
     }
 
-    /// Schedule a write; it is acknowledged once scheduled.
-    fn write(&self, op: u32, key: &str, value: Option<Bytes>) -> io::Result<()> {
-        self.schedule(op, key, value, None)
-    }
-
     async fn request(&self, op: u32, key: &str) -> io::Result<Option<Bytes>> {
         let (sender, receiver) = oneshot::channel();
         let reply = Reply {
@@ -114,23 +107,12 @@ impl KvStore for PyStore {
         Box::pin(self.request(GET, key))
     }
 
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        let result = self.write(SET, key, Some(value));
-        Box::pin(std::future::ready(result))
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.schedule(SET, key, Some(value), None)
     }
 
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        let result = self.write(CLEAR, key, None);
-        Box::pin(std::future::ready(result))
-    }
-
-    /// A read returns stored values, or this request's own writes.
-    fn durable_when_visible(&self) -> bool {
-        true
-    }
-
-    fn ordered(&self) -> bool {
-        true
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.schedule(CLEAR, key, None, None)
     }
 
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
@@ -199,11 +181,6 @@ fn open<'py>(
         let options = StorageOptions {
             cache: Some(page_cache().await?.namespace(&namespace)),
             durability: Durability::Commit,
-            // As the Node.js addon: commits only append, compressed against
-            // the pages' previous images, until the log holds 60 transactions
-            // or 256 KiB: then a commit writes each changed page once.
-            checkpoint_after: 60,
-            checkpoint_log_bytes: 256 * 1024,
             ..StorageOptions::default()
         };
         let session = Session::open_with_options(store, options)
@@ -219,8 +196,8 @@ fn open<'py>(
 #[pymethods]
 impl Database {
     /// Run SQL (one or more statements; parameters bind to a single one) and
-    /// return the result rows. Each commit is durable once ordered: its writes
-    /// have reached the store when this resolves.
+    /// return the result rows. A statement that commits completes once its
+    /// writes are stored.
     #[pyo3(signature = (sql, params=None))]
     fn query<'py>(
         &self,
@@ -272,15 +249,23 @@ impl Database {
         })
     }
 
-    /// `COMMIT` the open transaction; with `record`, log it even if it changed
-    /// nothing, so that the version grows (see `Session::commit`).
-    fn commit<'py>(&self, py: Python<'py>, record: bool) -> PyResult<Bound<'py, PyAny>> {
+    /// `COMMIT` the open transaction; with `effects`, they commit with it
+    /// (see `Session::commit_with`).
+    #[pyo3(signature = (effects=None))]
+    fn commit<'py>(
+        &self,
+        py: Python<'py>,
+        effects: Option<Vec<u8>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let session = self.session.clone();
         let usable = self.usable.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut session = session.lock().await;
             let session = session.as_mut().ok_or_else(closed)?;
-            let result = session.commit(record).await;
+            let result = match effects {
+                Some(effects) => session.commit_with(Bytes::from(effects)).await,
+                None => session.execute("COMMIT").await,
+            };
             usable.store(session.is_usable(), Ordering::Release);
             result.map_err(sql_error)
         })
@@ -293,18 +278,17 @@ impl Database {
         self.usable.load(Ordering::Acquire)
     }
 
-    /// The database's version: it grows with each commit that changes the
-    /// database or is recorded, and only then (see `Session::version`).
-    fn version<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// The effects of the last commit that set them (see `Session::effects`).
+    fn effects<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let session = self.session.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let session = session.lock().await;
-            Ok(session.as_ref().ok_or_else(closed)?.version())
+            let effects = session.as_ref().ok_or_else(closed)?.effects();
+            Python::attach(|py| Ok(PyBytes::new(py, &effects).unbind()))
         })
     }
 
-    /// End the session, confirming its writes (one `sync` if it wrote) so that
-    /// the page cache may trust them.
+    /// End the session, leaving its engine to the next one.
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let session = self.session.clone();
         let usable = self.usable.clone();
@@ -316,8 +300,7 @@ impl Database {
         })
     }
 
-    /// End the session without confirming its writes: the next session in
-    /// this process starts cold.
+    /// End the session.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let session = self.session.clone();
         let usable = self.usable.clone();

@@ -43,8 +43,6 @@ curl localhost:8080/assistant/alice/messages           # the conversation so far
 
 Without the CLI, register through the admin API:
 `curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'`.
-`make restate-server`, at the repository's root, downloads the server's
-binary to `target/restate/restate-server`.
 
 With Restate in Docker, the agent is at the host's address, as the
 container sees it:

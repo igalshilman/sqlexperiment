@@ -2,10 +2,11 @@
 export type SqlValue = null | number | bigint | string | Uint8Array | boolean;
 
 /**
- * A key/value store with ordered writes: `set` and `clear` return at once, the
- * store keeps writes in the order they were issued, and `sync` resolves once
- * every write so far is stored. `get` returns the stored value, or this
- * request's own latest write; `undefined` or `null` when absent.
+ * A key/value store: `set` and `clear` return at once, and `sync` resolves
+ * once every write before it is stored. Writes are stored in no particular
+ * order: until a sync resolves, any of them may be lost. `get` returns the
+ * stored value, or this request's own latest write; `undefined` or `null`
+ * when absent.
  */
 export interface Store {
   get(key: string): Promise<Uint8Array | null | undefined> | Uint8Array | null | undefined;
@@ -24,10 +25,11 @@ export interface Transaction {
 /** The handle a transaction's body gets. */
 export interface TransactionHandle extends Transaction {
   /**
-   * Log this transaction's commit even if it changes nothing (it only reads,
-   * or its writes match no rows), so that `version()` grows when it commits.
+   * Commit `effects` with this transaction, in the same write: they are
+   * stored exactly when it is, even if it changes nothing, and stay until a
+   * later transaction commits others (see `Database.effects`).
    */
-  recordCommit(): void;
+  commitEffects(effects: Uint8Array): void;
 }
 
 /**
@@ -42,13 +44,12 @@ export declare class Database implements Transaction {
   execute(sql: string, params?: SqlValue[]): Promise<void>;
   transaction<T>(body: (tx: TransactionHandle) => Promise<T>): Promise<T>;
   /**
-   * The database's version: it grows with each commit that changes the
-   * database, or whose transaction called `recordCommit()`, and only then. It
-   * does not wait for queued calls, so a transaction's body may read it; it
-   * waits for a statement that is running, and rejects once the session has
-   * ended.
+   * The effects the last commit that set them committed (see
+   * `TransactionHandle.commitEffects`); empty if none did. It does not wait
+   * for queued calls, so a transaction's body may read them; it waits for a
+   * statement that is running, and rejects once the session has ended.
    */
-  version(): Promise<number>;
+  effects(): Promise<Uint8Array>;
   isUsable(): boolean;
   /**
    * A reader's: whether the store still holds the state it opened on (no
@@ -62,9 +63,8 @@ export declare class Database implements Transaction {
 
 /**
  * Open the database of `namespace` over `store`. One process-wide page cache
- * serves every namespace. Each SQL commit is durable once the store has stored
- * its writes: a statement resolves once they reach the store, in order, and
- * `save()` waits until they are stored.
+ * serves every namespace. A statement that commits resolves once the store
+ * has stored its writes (a `sync` after them resolved).
  */
 export declare function open(namespace: string, store: Store, options?: OpenOptions): Promise<Database>;
 

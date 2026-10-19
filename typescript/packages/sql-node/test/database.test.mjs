@@ -1,4 +1,4 @@
-// The addon over an in-memory ordered store: SQL, values, and lost writes.
+// The addon over an in-memory store: SQL, values, effects, and lost writes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -6,10 +6,16 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { open } = require('../index.js');
 
-/** Stored values, and writes acknowledged but not yet confirmed. */
+/** Stored values, and writes issued but not yet synced. */
 class Backend {
   stored = new Map();
   unconfirmed = [];
+  // Which unsynced writes a failure keeps: none, or a pseudo-random subset.
+  #seed = 0;
+
+  constructor({ seed = 0 } = {}) {
+    this.#seed = seed;
+  }
 
   confirm() {
     for (const [key, value] of this.unconfirmed.splice(0)) {
@@ -18,8 +24,15 @@ class Backend {
     }
   }
 
+  /** A failure: the store keeps some of the unsynced writes, in no order. */
   lose() {
-    this.unconfirmed.length = 0;
+    for (const [key, value] of this.unconfirmed.splice(0)) {
+      if (this.#seed === 0) continue;
+      this.#seed = (this.#seed * 1103515245 + 12345) % 2 ** 31;
+      if (this.#seed % 2 === 0) continue;
+      if (value === undefined) this.stored.delete(key);
+      else this.stored.set(key, value);
+    }
   }
 
   /** A request's view: its own writes over the stored values. */
@@ -93,45 +106,45 @@ test('an SQL error leaves the session usable; a transaction rolls back', async (
 });
 
 /**
- * Requests insert a row each and save; request `lost` fails and loses its
- * writes, its confirmation failing or the session closed first. The owner and
- * a process without cached state must then read exactly the stored rows.
+ * Requests insert a row each; request `lost` fails, its sync losing some of
+ * its writes (none kept, or a subset by `seed`). The owner and a process
+ * without cached state must then read the rows of the other requests, and
+ * the lost one's only if both do.
  */
-async function consistentAfterLoss(lost, closeFirst) {
-  const backend = new Backend();
+async function consistentAfterLoss(lost, seed) {
+  const backend = new Backend({ seed });
   const ns = fresh();
   let db = await open(ns, backend.request());
   await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)');
   await db.save();
-  let expected = 0;
   for (let id = 0; id < 20; id++) {
     const fails = id === lost;
     db = await open(ns, backend.request({ fails }));
-    await db.execute('INSERT INTO t VALUES(?, randomblob(3000))', [id]);
-    if (!fails) {
-      await db.save();
-      expected++;
-    } else if (closeFirst) {
+    const insert = db.execute('INSERT INTO t VALUES(?, randomblob(3000))', [id]);
+    if (fails) {
+      await assert.rejects(insert, /the request failed/);
       await db.close();
-      backend.lose();
     } else {
-      await assert.rejects(db.save(), /the request failed/);
+      await insert;
+      await db.save();
     }
   }
+  const seen = [];
   for (const name of [ns, fresh()]) {
     const view = await open(name, backend.request());
-    const [[rows]] = await view.query('SELECT count(*) FROM t');
+    const [[rows, landed]] = await view.query('SELECT count(*), count(*) FILTER (WHERE id = ?) FROM t', [lost]);
     const [[integrity]] = await view.query('PRAGMA integrity_check');
     await view.save();
-    if (rows !== expected || integrity !== 'ok') return false;
+    if (rows !== 19 + landed || integrity !== 'ok') return false;
+    seen.push(landed);
   }
-  return true;
+  return seen[0] === seen[1];
 }
 
 test('lost writes leave every reader consistent', async () => {
-  for (const closeFirst of [false, true]) {
+  for (const seed of [0, 1, 2, 3, 4, 5]) {
     for (let lost = 1; lost < 15; lost++) {
-      assert.ok(await consistentAfterLoss(lost, closeFirst), `lost request ${lost}, closed first: ${closeFirst}`);
+      assert.ok(await consistentAfterLoss(lost, seed), `lost request ${lost}, seed ${seed}`);
     }
   }
 });
@@ -143,8 +156,9 @@ test('a write the store rejects is reported by the next sync', async () => {
     throw new Error('state is closed');
   };
   const db = await open(fresh(), store);
-  await db.execute('CREATE TABLE t(id INTEGER)');
-  await assert.rejects(db.save(), /state is closed/);
+  await assert.rejects(db.execute('CREATE TABLE t(id INTEGER)'), /state is closed/);
+  assert.equal(db.isUsable(), false);
+  await db.close();
 });
 
 test('a transaction holds the session: other calls wait until it ends', async () => {
@@ -190,11 +204,11 @@ test('a call running meanwhile does not make the session look unusable', async (
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER)');
   for (let i = 0; i < 50; i++) {
-    // The body fails while version() holds the session: the rollback still runs.
+    // The body fails while effects() holds the session: the rollback still runs.
     await assert.rejects(
       db.transaction(async (tx) => {
         await tx.execute('INSERT INTO t VALUES(1)');
-        for (let j = 0; j < 4; j++) void db.version();
+        for (let j = 0; j < 4; j++) void db.effects();
         throw new Error('no');
       }),
       /no/,
@@ -212,45 +226,41 @@ test('a call running meanwhile does not make the session look unusable', async (
   assert.equal(db.isUsable(), false);
 });
 
-test('the version grows with each commit, and only then', async () => {
+/** A session's effects, as text. */
+const text = async (session) => new TextDecoder().decode(await session.effects());
+
+test('effects commit with their transaction, and only then', async () => {
   const backend = new Backend();
   const namespace = fresh();
   const db = await open(namespace, backend.request());
-  const v0 = await db.version();
   await db.execute('CREATE TABLE t(id INTEGER)');
-  const v1 = await db.version();
-  assert.ok(v1 > v0);
-  await db.query('SELECT * FROM t');
-  assert.equal(await db.version(), v1);
+  assert.equal(await text(db), '');
+  // Even with a transaction that changes nothing.
   let inside;
   await db.transaction(async (tx) => {
-    await tx.execute('INSERT INTO t VALUES(1)');
-    inside = await db.version();
+    await tx.query('SELECT * FROM t');
+    tx.commitEffects(new TextEncoder().encode('sends 1'));
+    inside = await text(db);
   });
-  assert.equal(inside, v1);
-  const v2 = await db.version();
-  assert.ok(v2 > v1);
+  assert.equal(inside, '');
+  assert.equal(await text(db), 'sends 1');
+  // A rollback commits none; nor does a commit without effects change them.
   await assert.rejects(
     db.transaction(async (tx) => {
       await tx.execute('INSERT INTO t VALUES(2)');
+      tx.commitEffects(new TextEncoder().encode('sends 2'));
       throw new Error('no');
     }),
     /no/,
   );
-  assert.equal(await db.version(), v2);
-  // A commit that changes nothing grows it only when recorded.
-  await db.transaction((tx) => tx.query('SELECT * FROM t'));
-  assert.equal(await db.version(), v2);
-  await db.transaction(async (tx) => {
-    await tx.execute('UPDATE t SET id = 5 WHERE id = 99');
-    tx.recordCommit();
-  });
-  const v3 = await db.version();
-  assert.ok(v3 > v2);
+  await db.transaction((tx) => tx.execute('INSERT INTO t VALUES(3)'));
+  assert.equal(await text(db), 'sends 1');
   await db.save();
-  // A later session opens at the same version.
+  // A later session opens with them; an empty transaction clears them.
   const again = await open(namespace, backend.request());
-  assert.equal(await again.version(), v3);
+  assert.equal(await text(again), 'sends 1');
+  await again.transaction(async (tx) => tx.commitEffects(new Uint8Array()));
+  assert.equal(await text(again), '');
   await again.save();
 });
 
@@ -290,7 +300,7 @@ test('a call to a session inside a transaction of another, inside its own, is re
   await b.save();
 });
 
-test('a statement resolves after its writes reached the store, however many', async () => {
+test('a statement that commits resolves once its writes are stored, however many', async () => {
   const backend = new Backend();
   const db = await open(fresh(), backend.request());
   await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)');
@@ -298,10 +308,8 @@ test('a statement resolves after its writes reached the store, however many', as
   await db.execute(
     'INSERT INTO t(b) SELECT randomblob(3000) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c)',
   );
-  const atResolve = backend.unconfirmed.length;
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.ok(atResolve > 1000);
-  assert.equal(atResolve, backend.unconfirmed.length);
+  assert.equal(backend.unconfirmed.length, 0);
+  assert.ok(backend.stored.size > 1000, `${backend.stored.size} keys stored`);
   await db.save();
 });
 

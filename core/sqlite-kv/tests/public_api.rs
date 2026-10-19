@@ -16,17 +16,16 @@ impl KvStore for Store {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move { Ok(self.0.lock().unwrap().get(key).cloned()) })
     }
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            self.0.lock().unwrap().insert(key.into(), value);
-            Ok(())
-        })
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.0.lock().unwrap().insert(key.into(), value);
+        Ok(())
     }
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            self.0.lock().unwrap().remove(key);
-            Ok(())
-        })
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.0.lock().unwrap().remove(key);
+        Ok(())
+    }
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -41,7 +40,7 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
-        assert!(db.save().await?.cleanup_error.is_none());
+        db.save().await?;
         let mut db = Session::open(store.clone()).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
