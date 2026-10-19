@@ -261,8 +261,8 @@ fn programs_are_checked_and_failures_end_runs() -> Result<()> {
 }
 
 /// A synchronous job longer than a turn allows traps, and would trap again:
-/// the run ends instead. The KV writes before the trap stand, as for a thrown
-/// error; its requests still outstanding are dropped.
+/// the call fails instead, and its turn is undone, KV writes included. What
+/// earlier turns committed stands; its requests still outstanding are dropped.
 #[test]
 fn a_trap_ends_the_run() -> Result<()> {
     let source = "export async function main(_,ctx){await ctx.kv.set('before',1);ctx.rpc.call({service:'S',handler:'h'});await durable.call('observe');await ctx.kv.set('after',1);while(true){}}";
@@ -278,8 +278,8 @@ fn a_trap_ends_the_run() -> Result<()> {
     };
     assert_eq!(error.name, "Trap");
     assert!(error.message.contains("Out of time"), "{}", error.message);
-    assert_eq!(kv(&store, "after"), Some(json!(1)));
-    assert_eq!(store.batches(), 0);
+    assert_eq!(kv(&store, "before"), Some(json!(1)));
+    assert_eq!(kv(&store, "after"), None);
     let late = block(run.deliver(pending[0].id(), Outcome::success(1), 3))?;
     assert_eq!(late.turns, failed.turns);
     // A trap in the first turn ends the run too.
@@ -403,8 +403,8 @@ fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
     }
     assert_eq!(value(&run.view()), json!("60:59"));
     assert!((2..=32).contains(&most), "{most} batches");
-    // A settled run keeps its outcome, not its image.
-    assert_eq!(store.batches(), 0);
+    // The object keeps its memory for its next call.
+    assert!(store.batches() > 0);
     Ok(())
 }
 
@@ -497,44 +497,6 @@ fn a_losing_request_may_fail_later() -> Result<()> {
     let failed = Outcome::failure("Error", "too late");
     block(run.deliver(call, failed, deadline + 1))?;
     assert_eq!(value(&finish(&mut run)?), json!("timer"));
-    Ok(())
-}
-
-/// A scope's KV: a turn's reads see its own writes, the scope's runs share
-/// it, and a new run replaces the scope's last one, collecting its batches.
-#[test]
-fn a_scope_shares_its_kv_between_runs() -> Result<()> {
-    let first = r#"export async function main(_,ctx){
-      const v={n:1};const set=ctx.kv.set('x',v);v.n=99;
-      await set;const seen=await ctx.kv.get('x');
-      await ctx.kv.set('temporary',true);await ctx.kv.delete('temporary');
-      await durable.call('forever');
-    }"#;
-    let store = Store::default();
-    let run = start(&store, first, Value::Null, 1)?;
-    assert_eq!(run.view().state.status, Status::Waiting);
-    assert_eq!(kv(&store, "x"), Some(json!({"n":1})));
-    assert_eq!(kv(&store, "temporary"), None);
-    assert!(store.batches() > 0);
-    // Its attempt is gone (say, cancelled): another run takes the scope.
-    let second = "export async function main(_,ctx){return await ctx.kv.get('x');}";
-    let programs = Arc::new(
-        Programs::new(runtime())
-            .compile("v1", first)?
-            .compile("v2", second)?,
-    );
-    let next = block(Run::start(
-        &programs,
-        &store.scope(),
-        "s",
-        "next",
-        "v2",
-        "main",
-        Value::Null,
-        2,
-    ))?;
-    assert_eq!(value(&next.view()), json!({"n":1}));
-    assert_eq!(store.batches(), 0);
     Ok(())
 }
 

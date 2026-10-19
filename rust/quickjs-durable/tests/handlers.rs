@@ -29,15 +29,14 @@ const COUNTER: &str = r#"
   }
 "#;
 
-/// Each call starts from the module as evaluated: its variables last for the
-/// call. What lasts between calls is the scope's KV and SQL.
+/// The module's variables live on from call to call, beside the scope's KV.
 #[test]
-fn each_call_starts_afresh_and_shares_the_scope() -> Result<()> {
+fn calls_share_the_scope_and_its_memory() -> Result<()> {
     let store = Store::default();
     let first = ended(&mut call(&store, COUNTER, "a", "add", json!(2))?)?;
     assert_eq!(first, json!({"count": 2, "calls": 1}));
     let second = ended(&mut call(&store, COUNTER, "b", "add", json!(3))?)?;
-    assert_eq!(second, json!({"count": 5, "calls": 1}));
+    assert_eq!(second, json!({"count": 5, "calls": 2}));
     assert_eq!(
         ended(&mut call(&store, COUNTER, "c", "get", Value::Null)?)?,
         json!(5)

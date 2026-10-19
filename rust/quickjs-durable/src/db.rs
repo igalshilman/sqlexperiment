@@ -70,14 +70,16 @@ impl Db {
         .map_err(sql)
     }
 
-    /// The guest trapped: what its open `ctx.db.transaction` did is undone,
-    /// as if it had thrown. What the turn did before stands.
-    pub async fn abandon_transactions(&mut self) -> Result<()> {
-        if self.savepoints > 0 {
-            self.internal("ROLLBACK TO qjs_1").await?;
-            self.internal("RELEASE qjs_1").await?;
-            self.savepoints = 0;
+    /// The guest trapped, and its memory goes back to the last commit: so
+    /// does its SQL. The turn's transaction is undone.
+    pub async fn rollback_turn(&mut self) -> Result<()> {
+        if self.began {
+            self.internal("ROLLBACK").await?;
         }
+        self.began = false;
+        self.savepoints = 0;
+        // The turn may have created it.
+        self.kv_table = false;
         Ok(())
     }
 

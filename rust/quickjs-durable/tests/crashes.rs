@@ -16,7 +16,11 @@ use std::sync::Arc;
 
 mod common;
 
-const FLOW: &str = r#"export async function main(input, ctx){
+const FLOW: &str = r#"
+  let calls = 0;
+  export function count() { return calls; }
+  export async function main(input, ctx){
+    calls++;
     // The heap counts the rows it inserted; the database must agree, whatever
     // a crash kept: a turn's SQL commits with the turn.
     ctx.db.sql`CREATE TABLE IF NOT EXISTS log(n INTEGER)`;
@@ -115,15 +119,27 @@ fn reference() -> Result<View> {
         (kv(&store, "n"), kv(&store, "echoed")),
         (None, Some(json!(5)))
     );
-    assert_eq!(store.batches(), 0);
+    assert_eq!(
+        expected.live_pages,
+        store.commit()["livePages"].as_u64().unwrap() as usize
+    );
     Ok(expected)
 }
 
 fn assert_ended_as(store: &Store, done: &View, expected: &View, case: &str) {
+    // The object's next call finds the memory the run left.
+    let mut next = call(store, FLOW, "next", "count", Value::Null).unwrap();
+    assert_eq!(value(&finish(&mut next).unwrap()), json!(1), "{case}");
     assert_eq!(done.state, expected.state, "{case}");
     assert_eq!(kv(store, "n"), None::<Value>, "{case}");
     assert_eq!(kv(store, "echoed"), Some(json!(5)), "{case}");
-    assert_eq!(store.batches(), 0, "{case}");
+    // The object's memory is the same, page for page.
+    assert_eq!(done.live_pages, expected.live_pages, "{case}");
+    assert_eq!(
+        store.commit()["memoryLen"],
+        json!(expected.memory_bytes),
+        "{case}"
+    );
 }
 
 #[test]

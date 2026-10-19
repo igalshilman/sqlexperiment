@@ -301,10 +301,15 @@ async fn the_shipped_programs_do_what_they_say() {
     let (_, counted) = call("counter/alice/add", json!(20)).await;
     assert_eq!(counted, json!(20));
     assert_eq!(call("counter/alice/get", Value::Null).await.1, json!(20));
-    let (_, memory) = call("memory/alice/run", json!(3)).await;
+    let mut words = Vec::new();
+    for _ in 0..3 {
+        words.push(call("memory/alice/next", Value::Null).await.1);
+    }
+    assert_eq!(words, [json!("durable"), json!("javascript"), json!("is")]);
+    let (_, tally) = call("memory/alice/tally", Value::Null).await;
     assert_eq!(
-        memory,
-        json!({"tally": {"durable": 1, "javascript": 1, "is": 1}, "calls": 3})
+        tally,
+        json!({"counts": {"durable": 1, "javascript": 1, "is": 1}, "calls": 3})
     );
     let (_, fanned) = call("fanout/alice/run", json!(["bob", "carol", "alice"])).await;
     assert_eq!(fanned, json!({"bob": 1, "carol": 1, "alice": 21}));

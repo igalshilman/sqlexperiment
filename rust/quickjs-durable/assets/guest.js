@@ -3,16 +3,18 @@
   // host(operation, request) answers a JSON string, synchronously.
   const host = globalThis.__host;
   delete globalThis.__host;
-  let runId,
-    scope,
-    nextOperation = 0,
-    now = 0,
-    maxTime = 0,
+  // The object's state lives on from call to call: its scope, its random
+  // generator and the program's module. The rest is the current call's.
+  let scope,
+    seeded = false,
     random = 1,
-    rootOutcome,
-    // The program's module, once evaluated: its exported functions.
+    maxTime = 0,
     program,
     programError;
+  let runId,
+    nextOperation = 0,
+    now = 0,
+    rootOutcome;
   // Each request's promise, by ID, until delivered. The request itself goes
   // to the host at the next report, and is forgotten here.
   const pending = new Map();
@@ -202,23 +204,30 @@
       if (!program) throw new Error('The program did not finish evaluating');
       return JSON.stringify(Object.keys(program).filter((name) => typeof program[name] === 'function'));
     },
+    // The object, at each call: its key, and its generator's seed once.
     init(json) {
-      if (runId !== undefined) throw new Error('Invocation is already initialized');
       const config = JSON.parse(json);
-      runId = config.runId;
       scope = config.scope;
-      now = config.now;
       maxTime = config.maxTime;
-      random = config.seed || 1;
+      if (!seeded) random = config.seed || 1;
+      seeded = true;
     },
+    // A call: handler(input, ctx). What the previous call left pending
+    // never resolves.
     start(json) {
-      const { handler, input } = JSON.parse(json);
-      const exported = program[handler];
+      const call = JSON.parse(json);
+      runId = call.runId;
+      now = call.now;
+      nextOperation = 0;
+      rootOutcome = undefined;
+      pending.clear();
+      issued = [];
+      const handler = program[call.handler];
       // The handler runs in the microtask pump, including synchronous exceptions.
       Promise.resolve()
         .then(() => {
-          if (typeof exported !== 'function') throw new TypeError(`No exported function ${handler}`);
-          return exported(input, durable);
+          if (typeof handler !== 'function') throw new TypeError(`No exported function ${call.handler}`);
+          return handler(call.input, durable);
         })
         .then(
           (value) => {
@@ -248,7 +257,7 @@
     },
     inspect() {
       if (!rootOutcome && pending.size === 0) rootOutcome = failure(new Error('Execution stalled: no durable wakeup'));
-      // The run ends when its handler settles: requests still pending are
+      // The call ends when its handler settles: requests still pending are
       // dropped, and their continuations never run.
       if (rootOutcome) {
         pending.clear();

@@ -129,31 +129,23 @@ fn kv_and_sql_see_each_other() -> Result<()> {
     Ok(())
 }
 
-/// A trap inside a transaction undoes it, as a throw would; what the turn
-/// did before stands.
+/// A trap inside a transaction undoes its turn, as it undoes the object's
+/// memory; what earlier turns committed stands.
 #[test]
 fn a_trap_in_a_transaction_undoes_it() -> Result<()> {
-    let source = r#"export async function main(_,ctx){
-      ctx.db.sql`CREATE TABLE t(n INTEGER)`;
-      ctx.db.sql`INSERT INTO t VALUES(1)`;
-      ctx.db.transaction(()=>{ctx.db.sql`INSERT INTO t VALUES(2)`;while(true){}});
-    }"#;
+    let source = r#"
+      export async function fill(_,ctx){
+        ctx.db.sql`CREATE TABLE t(n INTEGER)`;
+        ctx.db.sql`INSERT INTO t VALUES(1)`;
+        await ctx.sleep(1);
+        ctx.db.sql`INSERT INTO t VALUES(2)`;
+        ctx.db.transaction(()=>{ctx.db.sql`INSERT INTO t VALUES(3)`;while(true){}});
+      }
+      export function read(_,ctx){return ctx.db.sql`SELECT n FROM t`.map(r=>r.n);}"#;
     let store = Store::default();
-    let run = start(&store, source, Value::Null, 1)?;
-    assert_eq!(run.view().state.status, Status::Failed);
-    // Another run in the scope reads what stood.
-    let probe =
-        "export async function main(_,ctx){return ctx.db.sql`SELECT n FROM t`.map(r=>r.n);}";
-    let mut run = block(quickjs_durable::Run::start(
-        &programs(probe),
-        &store.scope(),
-        "s",
-        "probe",
-        "v1",
-        "main",
-        Value::Null,
-        2,
-    ))?;
+    let mut run = call(&store, source, "fill", "fill", Value::Null)?;
+    assert_eq!(finish(&mut run)?.state.status, Status::Failed);
+    let mut run = call(&store, source, "read", "read", Value::Null)?;
     assert_eq!(outcome(&mut run)?, json!([1]));
     Ok(())
 }

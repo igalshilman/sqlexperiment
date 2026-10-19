@@ -1,8 +1,8 @@
 // A coding agent: Claude, with a shell and the files of a workspace as its
 // tools, working on a task until it is done. The object's key names the
 // workspace: a directory of the `workspace` service (under QJS_WORKSPACES),
-// so the next task finds the last one's files; the tasks done so far are
-// in its KV.
+// so the next task finds the last one's files, and the tasks done so far
+// stay in memory.
 //
 // The agent loop is plain JavaScript, and runs for as long as the task
 // takes. At each wait, on Claude or on a tool, the conversation and the loop
@@ -86,8 +86,10 @@ function workspace(ctx) {
   };
 }
 
-export async function history(_, ctx) {
-  return (await ctx.kv.get('history')) ?? [];
+const done = [];
+
+export function history() {
+  return done;
 }
 
 export async function work({ task }, ctx) {
@@ -110,8 +112,7 @@ export async function work({ task }, ctx) {
     if (response.stop_reason !== 'tool_use') {
       const text = response.content.filter((block) => block.type === 'text');
       const answer = text.map((block) => block.text).join('\n');
-      const history = (await ctx.kv.get('history')) ?? [];
-      await ctx.kv.set('history', [...history, { task, answer, steps: step }]);
+      done.push({ task, answer, steps: step });
       return { answer, steps: step };
     }
     // Every tool the model asked for, in order: commands may depend on the

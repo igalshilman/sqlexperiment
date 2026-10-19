@@ -1,6 +1,6 @@
 // A shop assistant: Claude, with the shop's functions as its tools. It looks
 // up stock and the customer's balance, and buys through `checkout`. The key
-// is the customer, and the conversation is in its KV: each message
+// is the customer, and the conversation is a plain array: each message
 // continues it.
 //
 // The agent loop is plain JavaScript. While it waits on Claude or on a tool,
@@ -50,6 +50,9 @@ const TOOLS = [
   },
 ];
 
+const messages = [];
+let orders = 0;
+
 // The tools, as calls to the shop's functions.
 function shop(customer, ctx) {
   const call = (service, handler, key, input) => ctx.rpc.call({ service, handler, key }, input);
@@ -63,11 +66,9 @@ function shop(customer, ctx) {
         })),
       ),
     balance: () => call('payments', 'current', customer),
-    async buy({ items }) {
+    buy({ items }) {
       for (const { sku } of items) if (!(sku in PRICES)) throw new Error(`No such product: ${sku}`);
-      const orders = ((await ctx.kv.get('orders')) ?? 0) + 1;
-      await ctx.kv.set('orders', orders);
-      return call('checkout', 'pay', `${customer}-${orders}`, {
+      return call('checkout', 'pay', `${customer}-${++orders}`, {
         customer,
         items: items.map(({ sku, qty }) => ({ sku, qty, price: PRICES[sku] })),
       });
@@ -78,7 +79,6 @@ function shop(customer, ctx) {
 export async function chat(message, ctx) {
   const customer = ctx.key;
   const tools = shop(customer, ctx);
-  const messages = (await ctx.kv.get('messages')) ?? [];
   messages.push({ role: 'user', content: message });
   for (let step = 0; step < 10; step++) {
     const response = await ctx.rpc.call(
@@ -95,7 +95,6 @@ export async function chat(message, ctx) {
     if (response.stop_reason === 'refusal') return { answer: 'Sorry, I cannot help with that.' };
     messages.push({ role: 'assistant', content: response.content });
     if (response.stop_reason !== 'tool_use') {
-      await ctx.kv.set('messages', messages);
       const answer = response.content.filter((block) => block.type === 'text');
       return { answer: answer.map((block) => block.text).join('\n') };
     }
