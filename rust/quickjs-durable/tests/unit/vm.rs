@@ -79,3 +79,40 @@ async fn verification_oracle_detects_an_untracked_write() -> Result<()> {
     }
     Ok(())
 }
+
+/// A VM started from a golden image leaves its slot as Wasmtime gave it: the
+/// next VM there sees none of its writes, neither over golden nor in memory it
+/// grew past golden.
+#[tokio::test]
+async fn a_vm_from_golden_leaves_nothing_behind() -> Result<()> {
+    for runtime in runtimes()? {
+        let (image, _) = runtime.golden(
+            Language::JavaScript,
+            "hygiene",
+            "export async function main() { return 1; }",
+        )?;
+        let golden = image.golden_memory().bytes().to_vec();
+        let fresh = |vm: Vm| vm.memory.data(&vm.store).to_vec();
+        let before = fresh(Vm::new(&runtime, Language::JavaScript, "fresh", 1).await?);
+        for _ in 0..3 {
+            let mut vm =
+                Vm::for_image(&runtime, Language::JavaScript, &image, "hygiene", 1).await?;
+            vm.restore(&image).await?;
+            assert_eq!(&vm.memory.data(&vm.store)[..golden.len()], &golden[..]);
+            assert!(
+                vm.memory.data(&vm.store)[golden.len()..]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+            // Write over golden, and past it.
+            vm.write(PAGE, &[0xAB; 64])?;
+            vm.memory.grow(&mut vm.store, 2)?;
+            let end = vm.memory.data_size(&vm.store);
+            vm.write(end - PAGE, &[0xCD; 64])?;
+        }
+        // A VM of the module as built, in any slot, starts as before.
+        let after = fresh(Vm::new(&runtime, Language::JavaScript, "fresh", 1).await?);
+        assert!(after == before, "A fresh VM saw an earlier VM's memory");
+    }
+    Ok(())
+}

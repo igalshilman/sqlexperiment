@@ -1,3 +1,4 @@
+use crate::cow::Golden;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
@@ -175,17 +176,17 @@ pub(crate) struct Capture {
 #[derive(Clone)]
 pub(crate) struct Image {
     pub meta: VmMeta,
-    golden: Arc<Vec<u8>>,
+    golden: Arc<Golden>,
     len: usize,
     changed: BTreeMap<u32, Box<[u8]>>,
 }
 
 impl Image {
-    pub fn golden(meta: VmMeta, memory: Arc<Vec<u8>>) -> Self {
+    pub fn golden(meta: VmMeta, memory: Vec<u8>) -> Self {
         let len = memory.len();
         Self {
             meta,
-            golden: memory,
+            golden: Arc::new(Golden::new(memory)),
             len,
             changed: BTreeMap::new(),
         }
@@ -204,7 +205,7 @@ impl Image {
             Some(page) => page,
             None => {
                 let at = index as usize * PAGE;
-                self.golden.get(at..at + PAGE).unwrap_or(&ZERO)
+                self.golden.bytes().get(at..at + PAGE).unwrap_or(&ZERO)
             }
         }
     }
@@ -212,7 +213,7 @@ impl Image {
     pub fn original(&self, index: u32) -> &[u8] {
         static ZERO: [u8; PAGE] = [0; PAGE];
         let at = index as usize * PAGE;
-        self.golden.get(at..at + PAGE).unwrap_or(&ZERO)
+        self.golden.bytes().get(at..at + PAGE).unwrap_or(&ZERO)
     }
     pub fn set(&mut self, index: u32, page: &[u8]) {
         if page == self.original(index) {
@@ -227,7 +228,7 @@ impl Image {
     }
     /// The golden memory this image is relative to, shared by every image of
     /// the program.
-    pub fn golden_memory(&self) -> &Arc<Vec<u8>> {
+    pub fn golden_memory(&self) -> &Arc<Golden> {
         &self.golden
     }
     /// Write only the pages that differ from golden over `memory`, which
@@ -240,8 +241,9 @@ impl Image {
     }
     /// Write the image over `memory`, of its length.
     pub fn write(&self, memory: &mut [u8]) {
-        memory[..self.golden.len()].copy_from_slice(&self.golden);
-        memory[self.golden.len()..].fill(0);
+        let golden = self.golden.bytes();
+        memory[..golden.len()].copy_from_slice(golden);
+        memory[golden.len()..].fill(0);
         for (index, page) in &self.changed {
             let at = *index as usize * PAGE;
             memory[at..at + PAGE].copy_from_slice(page);
