@@ -32,6 +32,7 @@ wasmtime = { version = "=49.0.3", default-features = false, features = [
   "runtime",
   "std",
   "anyhow",
+  "async",
   "pooling-allocator",
 ] }
 zstd = "0.13"
