@@ -543,6 +543,9 @@ pub(crate) struct Vm {
     /// The golden memory mapped over this VM's memory, if it is: a restore
     /// relative to it writes only the pages that differ.
     golden: Option<Arc<Golden>>,
+    /// The heap's chunks as of the last capture or restore, if known: the
+    /// next capture walks only around the pages written since.
+    chunks: Option<heap::Chunks>,
 }
 
 impl Drop for Vm {
@@ -772,6 +775,7 @@ impl Vm {
             guest,
             heap,
             golden,
+            chunks: None,
         })
     }
     /// Let the guest's host calls reach `db`.
@@ -838,9 +842,18 @@ impl Vm {
             .as_ref()
             .is_some_and(|golden| Arc::ptr_eq(golden, image.golden_memory()))
         {
-            image.write_changed(self.memory.data_mut(&mut self.store));
+            let memory = self.memory.data_mut(&mut self.store);
+            image.write_changed(memory);
+            // Golden's chunks, as the pages restored over it changed them.
+            let changed: Vec<usize> = image.changed().map(|index| index as usize).collect();
+            self.chunks = image
+                .golden_memory()
+                .chunks(self.heap)
+                .and_then(|chunks| chunks.update(memory, &changed))
+                .map(|(chunks, _)| chunks);
         } else {
             image.write(self.memory.data_mut(&mut self.store));
+            self.chunks = None;
         }
         // Committed restore bytes are not new writes. Begin tracking before
         // re-binding runtime pointers and limits, which may modify memory.
@@ -920,7 +933,30 @@ impl Vm {
         for &index in &candidates {
             compared[index] = true;
         }
-        let dead = std::iter::once(0..stack).chain(heap::dead(memory, heap).unwrap_or_default());
+        // The heap's chunks and its dead bytes: walked only around the pages
+        // written, where the chunks before are known.
+        let walked = match self
+            .chunks
+            .as_ref()
+            .and_then(|chunks| chunks.update(memory, &candidates))
+        {
+            Some(walked) => Some(walked),
+            None => heap::walk(memory, heap),
+        };
+        #[cfg(feature = "verify-dirty")]
+        if let Some((chunks, dead)) = &walked {
+            let (all, everywhere) = heap::walk(memory, heap).context("Heap walked only in part")?;
+            ensure!(*chunks == all, "Partial heap walk missed chunks");
+            let near = |range: &std::ops::Range<usize>| {
+                (range.start / PAGE..range.end.div_ceil(PAGE)).any(|index| compared[index])
+            };
+            let partial: Vec<_> = dead.iter().filter(|range| near(range)).collect();
+            let whole: Vec<_> = everywhere.iter().filter(|range| near(range)).collect();
+            ensure!(partial == whole, "Partial heap walk missed dead bytes");
+        }
+        let (chunks, dead) = walked.unzip();
+        self.chunks = chunks;
+        let dead = std::iter::once(0..stack).chain(dead.unwrap_or_default());
         for range in dead {
             let pages = range.start / PAGE..range.end.div_ceil(PAGE);
             for index in pages.filter(|&index| compared[index]) {

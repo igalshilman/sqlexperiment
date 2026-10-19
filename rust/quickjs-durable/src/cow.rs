@@ -13,6 +13,7 @@
 //! zeros) serves every program, and the runtime maps the image itself. The
 //! mapping is Wasmtime's memory, so the VM must put fresh zeros back before
 //! Wasmtime reuses it ([`unmap`]), as its slot would hold after any VM.
+use crate::heap::{self, Chunks};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::OnceLock;
@@ -22,6 +23,8 @@ use std::sync::OnceLock;
 pub(crate) struct Golden {
     bytes: Vec<u8>,
     file: OnceLock<Result<OwnedFd, String>>,
+    /// Its heap's chunks, walked once for every VM of the program.
+    chunks: OnceLock<Option<Chunks>>,
 }
 
 impl Golden {
@@ -29,7 +32,15 @@ impl Golden {
         Self {
             bytes,
             file: OnceLock::new(),
+            chunks: OnceLock::new(),
         }
+    }
+
+    /// The heap's chunks, its first at `start`.
+    pub(crate) fn chunks(&self, start: usize) -> Option<&Chunks> {
+        self.chunks
+            .get_or_init(|| heap::walk(&self.bytes, start).map(|(chunks, _)| chunks))
+            .as_ref()
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
