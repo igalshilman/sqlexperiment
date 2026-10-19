@@ -187,6 +187,11 @@ One at a time, a Python call is within ~15% of a JavaScript one; under load,
 where the CPU is shared, Python serves ~55–60% as many, as its turns cost 2–3
 times the CPU. The process stayed at ~400 MiB through both.
 
+800 Python runs held open at once peak at ~3 GB, ~3.5 MB a run. The server
+gives the freed memory back to the system within 5 s of such a burst
+(`malloc_trim`, `src/main.rs`): it falls to ~150 MB, where glibc's allocator
+alone kept 1.3–1.4 GB for reuse.
+
 From the first build, these brought Python's figures down:
 
 - **Bytecode for the standard library.** Without it, every program's
