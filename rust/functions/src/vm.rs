@@ -212,9 +212,9 @@ pub(crate) struct Host {
 
 impl Runtime {
     /// The runtime, tracking writes natively where the kernel can, else with
-    /// instrumented stores (or always, with `QJS_TRACKING=barriers`).
+    /// instrumented stores (or always, with `FUNCTIONS_TRACKING=barriers`).
     pub fn new() -> Result<Self> {
-        Self::tracked(std::env::var("QJS_TRACKING").as_deref() != Ok("barriers"))
+        Self::tracked(std::env::var("FUNCTIONS_TRACKING").as_deref() != Ok("barriers"))
     }
 
     pub(crate) fn tracked(native: bool) -> Result<Self> {
@@ -271,7 +271,7 @@ impl Runtime {
         // The epoch's ticker, for as long as the engine lives.
         let weak = engine.weak();
         std::thread::Builder::new()
-            .name("qjs-epoch".into())
+            .name("epoch".into())
             .spawn(move || {
                 while let Some(engine) = weak.upgrade() {
                     engine.increment_epoch();
@@ -461,17 +461,17 @@ fn cached(engine: &Engine, tracking: &Tracking, name: &str, wasm: &[u8]) -> Resu
     Ok(module)
 }
 
-/// Where compiled modules are kept between processes: `QJS_CACHE`, or else
-/// `quickjs-durable` in the user's cache directory.
+/// Where compiled modules are kept between processes: `FUNCTIONS_CACHE`, or else
+/// `functions` in the user's cache directory.
 fn cache_dir() -> std::path::PathBuf {
-    if let Some(dir) = std::env::var_os("QJS_CACHE") {
+    if let Some(dir) = std::env::var_os("FUNCTIONS_CACHE") {
         return dir.into();
     }
     std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".cache")))
         .unwrap_or_else(std::env::temp_dir)
-        .join("quickjs-durable")
+        .join("functions")
 }
 
 /// `wasm` split in two: the module without its data segments, whose memory

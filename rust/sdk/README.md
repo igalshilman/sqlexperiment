@@ -3,7 +3,7 @@
 The Rust counterpart of [the patched Python SDK](../../python/sdk/README.md):
 the Restate Rust SDK with handlers that do not replay their journal, over
 [the patched shared core](../../core/sdk-shared-core/README.md). It is what
-[the durable JavaScript objects](../quickjs-durable/README.md) run on.
+[the durable JavaScript objects](../functions/README.md) run on.
 
 |          | What                                             | Version                                                                                                                                                                                                                              | Form                                           |
 | -------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |

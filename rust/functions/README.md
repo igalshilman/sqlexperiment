@@ -98,4 +98,4 @@ are QuickJS's, and which engines could replace it:
 [docs/ENGINES.md](docs/ENGINES.md).
 
 Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md). Tests:
-`make test-qjs` (with a Restate server), `make lint-qjs`.
+`make test-functions` (with a Restate server), `make lint-functions`.

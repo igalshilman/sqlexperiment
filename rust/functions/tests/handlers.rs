@@ -1,13 +1,13 @@
 //! A program's exported functions, each a handler of its object.
 use anyhow::Result;
 use common::*;
-use quickjs_durable::{Outcome, Programs};
+use functions::{Outcome, Programs};
 use serde_json::{Value, json};
 
 mod common;
 
 /// What a call ended with: its value, or its error's name.
-fn ended(run: &mut quickjs_durable::Run) -> Result<Value> {
+fn ended(run: &mut functions::Run) -> Result<Value> {
     Ok(match finish(run)?.state.outcome {
         Some(Outcome::Success { value, .. }) => value,
         Some(Outcome::Failure { error, .. }) => json!({"error": error.name}),

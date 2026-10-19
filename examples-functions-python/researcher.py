@@ -7,7 +7,7 @@ interpreter's memory: a crash resumes them, and a model call already
 answered is not made again. Each angle has a deadline, as durable as the
 calls (asyncio's timers are Restate timers here).
 
-    ANTHROPIC_API_KEY=... target/release/quickjs-durable
+    ANTHROPIC_API_KEY=... target/release/functions
     curl localhost:8080/researcher/alice/research --json \\
       '"Why do tomatoes split after rain?"'
 """

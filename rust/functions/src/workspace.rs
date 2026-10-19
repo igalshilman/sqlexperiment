@@ -1,6 +1,6 @@
 //! `workspace/<name>`: a directory and a shell, as a Restate virtual object,
 //! for coding agents to work in. Each key is a directory under the root
-//! (`QJS_WORKSPACES`, by default `workspaces/`), made on first use:
+//! (`FUNCTIONS_WORKSPACES`, by default `workspaces/`), made on first use:
 //!
 //! | Handler | Input                       | Output                          |
 //! | ------- | --------------------------- | ------------------------------- |
@@ -76,9 +76,9 @@ impl Workspace {
         Self { root: root.into() }
     }
 
-    /// Workspaces under `QJS_WORKSPACES`, by default `workspaces/`.
+    /// Workspaces under `FUNCTIONS_WORKSPACES`, by default `workspaces/`.
     pub fn from_env() -> Self {
-        Self::new(std::env::var_os("QJS_WORKSPACES").unwrap_or_else(|| "workspaces".into()))
+        Self::new(std::env::var_os("FUNCTIONS_WORKSPACES").unwrap_or_else(|| "workspaces".into()))
     }
 
     /// The workspace's directory, made if new.

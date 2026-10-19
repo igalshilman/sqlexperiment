@@ -8,8 +8,8 @@
 //! journals, whole, at every call), the time of the step's two turns (the
 //! model's answer in, the tool's result in), and what the step stored.
 use anyhow::{Result, bail, ensure};
+use functions::{Operation, Outcome, Programs, Run, Runtime, Scope, Status};
 use futures_executor::block_on as block;
-use quickjs_durable::{Operation, Outcome, Programs, Run, Runtime, Scope, Status};
 use serde_json::{Value, json};
 use sqlite_kv::simulation::MemoryKv;
 use std::{sync::Arc, time::Instant};

@@ -4,5 +4,5 @@ node_modules/
 .venv/
 __pycache__/
 /dist/
-/rust/quickjs-durable/bench-*.json
-/rust/quickjs-durable/workspaces/
+/rust/functions/bench-*.json
+/rust/functions/workspaces/

@@ -1,9 +1,9 @@
-//! The services against a real Restate server: `make test-qjs`, which
+//! The services against a real Restate server: `make test-functions`, which
 //! downloads one to RESTATE_SERVER. Ignored by a plain
 //! `cargo test`, which has no server.
 mod fakes;
 
-use quickjs_durable::{Programs, Runtime};
+use functions::{Programs, Runtime};
 use restate_sdk::prelude::*;
 use serde_json::{Value, json};
 use std::{
@@ -76,7 +76,7 @@ async fn server() -> Server {
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
-        .unwrap_or_else(|e| panic!("{}: {e} (make test-qjs gets it)", binary.display()));
+        .unwrap_or_else(|e| panic!("{}: {e} (make test-functions gets it)", binary.display()));
     let server = Server { process, _dir: dir };
     let client = reqwest::Client::new();
     wait(|| async {
@@ -143,12 +143,12 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .local_addr()
         .unwrap()
         .port();
-    let cache = quickjs_durable::page_cache().await.unwrap();
-    let endpoint = quickjs_durable::bind(Endpoint::builder(), programs, &cache)
+    let cache = functions::page_cache().await.unwrap();
+    let endpoint = functions::bind(Endpoint::builder(), programs, &cache)
         .unwrap()
         .bind(Doubler)
         .bind(fakes::Claude)
-        .bind(quickjs_durable::Workspace::new(workspaces()))
+        .bind(functions::Workspace::new(workspaces()))
         .build();
     tokio::spawn(
         HttpServer::new(endpoint).listen_and_serve(format!("127.0.0.1:{port}").parse().unwrap()),
@@ -228,7 +228,7 @@ const RACE: &str = r#"export async function run(input, ctx) {
 }"#;
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs"]
+#[ignore = "needs restate-server: make test-functions"]
 async fn runs_wait_on_rpcs_and_timers_and_share_their_scope() {
     let _server = server().await;
     serve().await;
@@ -256,7 +256,7 @@ async fn runs_wait_on_rpcs_and_timers_and_share_their_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs"]
+#[ignore = "needs restate-server: make test-functions"]
 async fn a_retried_attempt_attaches_to_its_calls() {
     let _server = server().await;
     serve().await;
@@ -265,10 +265,10 @@ async fn a_retried_attempt_attaches_to_its_calls() {
     // its attempt crashes while the call is still running. The retry restores
     // the timer's image and calls again, under the same idempotency key.
     let before = SLOW_RUNS.load(Ordering::SeqCst);
-    quickjs_durable::faults::crash_after_commit(1, 1);
+    functions::faults::crash_after_commit(1, 1);
     let (status, doubled) = call("attach/carol/run", json!(5)).await;
     assert_eq!((status, doubled), (200, json!(10)));
-    assert_eq!(quickjs_durable::faults::pending(), 0);
+    assert_eq!(functions::faults::pending(), 0);
     assert_eq!(
         SLOW_RUNS.load(Ordering::SeqCst) - before,
         1,
@@ -277,7 +277,7 @@ async fn a_retried_attempt_attaches_to_its_calls() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs"]
+#[ignore = "needs restate-server: make test-functions"]
 async fn a_run_ends_when_main_settles() {
     let _server = server().await;
     serve().await;
@@ -291,10 +291,10 @@ async fn a_run_ends_when_main_settles() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs"]
+#[ignore = "needs restate-server: make test-functions"]
 async fn the_shipped_programs_do_what_they_say() {
     let _server = server().await;
-    serve_programs(&quickjs_durable::embedded().unwrap()).await;
+    serve_programs(&functions::embedded().unwrap()).await;
 
     let (_, counted) = call("counter/alice/add", json!(20)).await;
     assert_eq!(counted, json!(20));
@@ -327,10 +327,10 @@ async fn the_shipped_programs_do_what_they_say() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs"]
+#[ignore = "needs restate-server: make test-functions"]
 async fn the_shop_programs_compose() {
     let _server = server().await;
-    serve_programs(&quickjs_durable::embedded().unwrap()).await;
+    serve_programs(&functions::embedded().unwrap()).await;
     let order = |customer: &str, items: Value| json!({"customer": customer, "items": items});
     call("inventory/widget/restock", json!(5)).await;
     call("inventory/gadget/restock", json!(1)).await;
@@ -386,10 +386,10 @@ async fn the_shop_programs_compose() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs"]
+#[ignore = "needs restate-server: make test-functions"]
 async fn the_assistant_shops_with_tools() {
     let _server = server().await;
-    serve_programs(&quickjs_durable::embedded().unwrap()).await;
+    serve_programs(&functions::embedded().unwrap()).await;
     fakes::REQUESTS.lock().unwrap().clear();
     call("inventory/widget/restock", json!(5)).await;
     call("payments/dana/deposit", json!(100)).await;
@@ -435,10 +435,10 @@ async fn the_assistant_shops_with_tools() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs"]
+#[ignore = "needs restate-server: make test-functions"]
 async fn the_coder_works_in_its_workspace() {
     let _server = server().await;
-    serve_programs(&quickjs_durable::embedded().unwrap()).await;
+    serve_programs(&functions::embedded().unwrap()).await;
     fakes::REQUESTS.lock().unwrap().clear();
 
     let (status, done) = call("coder/hello/work", json!({"task": "Say goodbye"})).await;
@@ -499,7 +499,7 @@ async fn the_coder_works_in_its_workspace() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs restate-server: make test-qjs"]
+#[ignore = "needs restate-server: make test-functions"]
 async fn a_workspace_command_sees_no_secrets_and_times_out() {
     let _server = server().await;
     serve_programs(&programs()).await;

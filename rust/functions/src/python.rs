@@ -25,10 +25,10 @@ pub(crate) struct Build {
 }
 
 impl Build {
-    /// The build in `QJS_PYTHON`, by default `target/pywasm/out`, where
+    /// The build in `FUNCTIONS_PYTHON`, by default `target/pywasm/out`, where
     /// `make python-engine` puts it.
     pub(crate) fn load() -> Result<Self> {
-        let dir = std::env::var_os("QJS_PYTHON")
+        let dir = std::env::var_os("FUNCTIONS_PYTHON")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/pywasm/out")

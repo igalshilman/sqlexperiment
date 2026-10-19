@@ -2,13 +2,13 @@
 //! over the scope's database.
 use anyhow::Result;
 use common::*;
-use quickjs_durable::{Outcome, Status};
+use functions::{Outcome, Status};
 use serde_json::{Value, json};
 
 mod common;
 
 /// The run's outcome: its value, or its error's name and message.
-fn outcome(run: &mut quickjs_durable::Run) -> Result<Value> {
+fn outcome(run: &mut functions::Run) -> Result<Value> {
     let view = finish(run)?;
     Ok(match view.state.outcome {
         Some(Outcome::Success { value, .. }) => value,
@@ -144,7 +144,7 @@ fn a_trap_in_a_transaction_undoes_it() -> Result<()> {
     // Another run in the scope reads what stood.
     let probe =
         "export async function main(_,ctx){return ctx.db.sql`SELECT n FROM t`.map(r=>r.n);}";
-    let mut run = block(quickjs_durable::Run::start(
+    let mut run = block(functions::Run::start(
         &programs(probe),
         &store.scope(),
         "s",

@@ -4,7 +4,7 @@
 //! Restate:
 //!
 //! ```sh
-//! target/release/quickjs-durable
+//! target/release/functions
 //! curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
 //! curl localhost:8080/counter/alice/run --json 20
 //! ```
@@ -15,12 +15,12 @@ use std::time::Duration;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     give_back_freed_memory()?;
-    let programs = quickjs_durable::embedded()?;
+    let programs = functions::embedded()?;
     let mut names: Vec<&str> = programs.names().collect();
     names.sort();
     let port = std::env::var("PORT").unwrap_or_else(|_| "9080".into());
     println!("Serving {} on port {port}", names.join(", "));
-    HttpServer::new(quickjs_durable::endpoint(&programs).await?)
+    HttpServer::new(functions::endpoint(&programs).await?)
         .listen_and_serve(format!("0.0.0.0:{port}").parse()?)
         .await;
     Ok(())

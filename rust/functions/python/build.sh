@@ -2,11 +2,11 @@
 # Build the Python engine: CPython for WASI, as a reactor the runtime drives
 # (reactor.c), and its standard library with bytecode already compiled.
 #
-#   rust/quickjs-durable/python/build.sh     (or: make python-engine)
+#   rust/functions/python/build.sh     (or: make python-engine)
 #
 # Into $CARGO_TARGET_DIR/pywasm (by default target/pywasm): the toolchain
 # (wasi-sdk, a Wasmtime CLI that CPython's configure runs), CPython's source
-# and build, and out/ — python.wasm and lib/, the runtime's QJS_PYTHON.
+# and build, and out/ — python.wasm and lib/, the runtime's FUNCTIONS_PYTHON.
 # CPython's build takes some minutes, once; relinking the reactor, seconds.
 set -euo pipefail
 

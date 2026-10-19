@@ -310,18 +310,19 @@ fn wait<'ctx>(ctx: &'ctx ObjectContext<'ctx>, operation: &Operation) -> Option<W
     }
 }
 
-/// The programs built into this binary (`examples-functions/`, or `QJS_PROGRAMS` at
-/// build time: `examples-functions-python/` for `make qjs-python`), each evaluated now into its golden image: in milliseconds
+/// The programs built into this binary (`examples-functions/`, or `FUNCTIONS_PROGRAMS` at
+/// build time: `examples-functions-python/` for `make functions-python`), each evaluated now into its golden image: in milliseconds
 /// (JavaScript) or a tenth of a second (Python), and the same bytes on every
 /// start, as a golden image depends on nothing but the program and the
-/// runtime. Python programs need the engine `make python-engine` builds. `QJS_TURN_TIMEOUT` (`90s`, `10m`, `1h`)
+/// runtime. Python programs need the engine `make python-engine` builds. `FUNCTIONS_TURN_TIMEOUT` (`90s`, `10m`, `1h`)
 /// changes how long one turn may run, 10 minutes by default.
 pub fn embedded() -> anyhow::Result<Arc<Programs>> {
     use anyhow::Context as _;
     let mut runtime = Runtime::new()?;
-    if let Ok(timeout) = std::env::var("QJS_TURN_TIMEOUT") {
-        let turn = duration(&timeout)
-            .with_context(|| format!("QJS_TURN_TIMEOUT={timeout}: expected e.g. 90s, 10m, 1h"))?;
+    if let Ok(timeout) = std::env::var("FUNCTIONS_TURN_TIMEOUT") {
+        let turn = duration(&timeout).with_context(|| {
+            format!("FUNCTIONS_TURN_TIMEOUT={timeout}: expected e.g. 90s, 10m, 1h")
+        })?;
         let limits = crate::Limits {
             turn,
             ..runtime.limits()
@@ -396,7 +397,7 @@ pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
 /// A cache of the scopes' databases for this process: 64 MiB in memory, and
 /// 256 MiB in a file that goes away with the process.
 pub async fn page_cache() -> anyhow::Result<PageCache> {
-    let file = std::env::temp_dir().join(format!("quickjs-durable-{}.cache", std::process::id()));
+    let file = std::env::temp_dir().join(format!("functions-{}.cache", std::process::id()));
     let cache = PageCache::open(PageCacheConfig::new(&file, 64 << 20, 256 << 20)).await?;
     // The cache keeps the file open: unlinked now, it goes away with the
     // process however it ends.

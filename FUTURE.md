@@ -39,7 +39,7 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
 
 1. set `RESTATE_VERSION` to it in the Makefile, and export
    `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true` there;
-2. set the variable on the server `rust/quickjs-durable/tests/restate.rs`
+2. set the variable on the server `rust/functions/tests/restate.rs`
    starts, and in the READMEs' commands that start Restate;
 3. switch the three reads above to the ephemeral ones, and regenerate the
    patches (`patches/regenerate.sh` in each SDK).

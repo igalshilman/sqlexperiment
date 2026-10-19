@@ -2,7 +2,7 @@
 //! a driver that answers a run's requests until it settles.
 #![allow(dead_code)]
 use anyhow::Result;
-use quickjs_durable::{Language, Limits, Operation, Outcome, Programs, Run, Runtime, Scope, View};
+use functions::{Language, Limits, Operation, Outcome, Programs, Run, Runtime, Scope, View};
 use serde_json::{Value, json};
 use sqlite_kv::{Session, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
 use std::{
