@@ -1,6 +1,6 @@
-//! Ship the durable functions: the binary embeds each `<name>.js` in
-//! `QJS_PROGRAMS` (by default the repository's `examples-functions/`), and
-//! evaluates it when it starts.
+//! Ship the durable functions: the binary embeds each `<name>.js` and
+//! `<name>.py` in `QJS_PROGRAMS` (by default the repository's
+//! `examples-functions/`), and evaluates it when it starts.
 use std::{fmt::Write, path::PathBuf};
 
 fn main() {
@@ -14,17 +14,21 @@ fn main() {
     let mut sources: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|e| e == "js"))
+        .filter(|path| path.extension().is_some_and(|e| e == "js" || e == "py"))
         .collect();
     sources.sort();
-    let mut table = String::from("pub const PROGRAMS: &[(&str, &str)] = &[\n");
+    let mut table = String::from("pub const PROGRAMS: &[(&str, crate::Language, &str)] = &[\n");
     for source in sources {
         println!("cargo:rerun-if-changed={}", source.display());
         let source = source.canonicalize().unwrap();
         let name = source.file_stem().unwrap().to_str().unwrap();
+        let language = match source.extension().unwrap().to_str().unwrap() {
+            "js" => "JavaScript",
+            _ => "Python",
+        };
         writeln!(
             table,
-            "    ({name:?}, include_str!({:?})),",
+            "    ({name:?}, crate::Language::{language}, include_str!({:?})),",
             source.display().to_string()
         )
         .unwrap();

@@ -311,9 +311,10 @@ fn wait<'ctx>(ctx: &'ctx ObjectContext<'ctx>, operation: &Operation) -> Option<W
 }
 
 /// The programs built into this binary (`examples-functions/`, or `QJS_PROGRAMS` at
-/// build time), each evaluated now into its golden image: in milliseconds,
-/// and the same bytes on every start, as a golden image depends on nothing
-/// but the program and the runtime. `QJS_TURN_TIMEOUT` (`90s`, `10m`, `1h`)
+/// build time: `examples-functions-python/` for `make qjs-python`), each evaluated now into its golden image: in milliseconds
+/// (JavaScript) or a tenth of a second (Python), and the same bytes on every
+/// start, as a golden image depends on nothing but the program and the
+/// runtime. Python programs need the engine `make python-engine` builds. `QJS_TURN_TIMEOUT` (`90s`, `10m`, `1h`)
 /// changes how long one turn may run, 10 minutes by default.
 pub fn embedded() -> anyhow::Result<Arc<Programs>> {
     use anyhow::Context as _;
@@ -328,8 +329,10 @@ pub fn embedded() -> anyhow::Result<Arc<Programs>> {
         runtime = runtime.limited(limits);
     }
     let mut programs = Programs::new(Arc::new(runtime));
-    for (name, source) in shipped::PROGRAMS {
-        programs = programs.compile(name, source)?;
+    for (name, language, source) in shipped::PROGRAMS {
+        let program = crate::Program::compile_in(programs.runtime(), *language, name, source)
+            .with_context(|| format!("Program {name}"))?;
+        programs = programs.with(program)?;
     }
     Ok(Arc::new(programs))
 }

@@ -17,6 +17,7 @@ verify-dirty = []
 anyhow = "1"
 bytes = "1"
 futures = "0.3"
+getrandom = "0.3"
 libc = "0.2"
 reqwest = { version = "0.13", features = ["json"] }
 restate-sdk = { path = "../sdk/.build/sdk-rust" }
@@ -53,4 +54,8 @@ restate-sdk-shared-core = { path = "../sdk/.build/sdk-shared-core" }
 
 [[bench]]
 name = "agent"
+harness = false
+
+[[bench]]
+name = "languages"
 harness = false

@@ -2622,6 +2622,7 @@ dependencies = [
  "bytes",
  "futures",
  "futures-executor",
+ "getrandom 0.3.4",
  "libc",
  "reqwest",
  "restate-sdk",

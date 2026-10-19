@@ -1,12 +1,13 @@
-//! Programs: static JavaScript, each evaluated once into a golden memory image
-//! that every run of it starts from and every checkpoint is relative to.
+//! Programs: static JavaScript or Python, each evaluated once into a golden
+//! memory image that every run of it starts from and every checkpoint is
+//! relative to.
 //!
 //! Evaluation is deterministic (a fixed identity, clock and seed): the same
 //! source on the same runtime gives the same image, byte for byte, on every
 //! start of every process, so checkpoints written by one restore in another.
 use crate::{
     model::{Image, MAX_INPUT, fingerprint},
-    vm::Runtime,
+    vm::{Language, Runtime},
 };
 use anyhow::{Context, Result, ensure};
 use std::{collections::HashMap, sync::Arc};
@@ -15,18 +16,35 @@ use std::{collections::HashMap, sync::Arc};
 /// functions it exports, each a handler of its object.
 pub struct Program {
     name: String,
+    language: Language,
     version: u64,
     image: Image,
     handlers: Vec<String>,
 }
 
 impl Program {
-    /// Evaluate `source`, a module exporting functions `(input, ctx)`.
+    /// Evaluate JavaScript `source`, a module exporting functions
+    /// `(input, ctx)`.
     pub fn compile(runtime: &Runtime, name: &str, source: &str) -> Result<Self> {
+        Self::compile_in(runtime, Language::JavaScript, name, source)
+    }
+
+    /// Evaluate Python `source`, a module defining functions
+    /// `async def handler(input, ctx)`.
+    pub fn compile_python(runtime: &Runtime, name: &str, source: &str) -> Result<Self> {
+        Self::compile_in(runtime, Language::Python, name, source)
+    }
+
+    pub fn compile_in(
+        runtime: &Runtime,
+        language: Language,
+        name: &str,
+        source: &str,
+    ) -> Result<Self> {
         identifier(name)?;
         ensure!(source.len() <= MAX_INPUT, "Program source exceeds limit");
         let (image, handlers) = runtime
-            .golden(name, source)
+            .golden(language, name, source)
             .map_err(|error| anyhow::anyhow!("Program {name}: {error:#}"))?;
         for handler in &handlers {
             ensure!(
@@ -39,6 +57,7 @@ impl Program {
         }
         Ok(Self {
             name: name.into(),
+            language,
             version: fingerprint(source.as_bytes()),
             image,
             handlers,
@@ -52,6 +71,10 @@ impl Program {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn language(&self) -> Language {
+        self.language
     }
 
     /// The version of the program: its source's fingerprint. A run's
@@ -80,9 +103,15 @@ impl Programs {
         }
     }
 
-    /// Add a program compiled from `source`.
+    /// Add a program compiled from JavaScript `source`.
     pub fn compile(self, name: &str, source: &str) -> Result<Self> {
         let program = Program::compile(&self.runtime, name, source)?;
+        self.with(program)
+    }
+
+    /// Add a program compiled from Python `source`.
+    pub fn compile_python(self, name: &str, source: &str) -> Result<Self> {
+        let program = Program::compile_python(&self.runtime, name, source)?;
         self.with(program)
     }
 

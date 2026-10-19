@@ -1,0 +1,210 @@
+//! Python programs: CPython in Wasm, saved and restored like JavaScript.
+//! Needs the engine built by `make python-engine`.
+use anyhow::Result;
+use common::*;
+use quickjs_durable::{Outcome, Status};
+use serde_json::{Value, json};
+
+mod common;
+
+const COUNTER: &str = r#"
+async def main(input, ctx):
+    state = {"n": 40}
+    state["self"] = state
+    state["n"] += await ctx.call("increment", {"by": 2})
+    await ctx.call("observe")
+    return {"n": state["n"], "identity": state["self"] is state}
+"#;
+
+#[test]
+fn a_new_attempt_restores_python_objects() -> Result<()> {
+    let store = Store::default();
+    let mut run = start_python(&store, COUNTER, Value::Null, 1000)?;
+    assert_eq!(run.view().state.status, Status::Waiting);
+    let first = run.view().state.pending[0].id().to_owned();
+    block(run.deliver(&first, Outcome::success(2), 1001))?;
+    // Another attempt: the VM is restored from the commit.
+    let mut run = start_python(&store, COUNTER, Value::Null, 1002)?;
+    let second = run.view().state.pending[0].id().to_owned();
+    let done = block(run.deliver(&second, Outcome::success(Value::Null), 1002))?;
+    assert_eq!(value(&done), json!({"n": 42, "identity": true}));
+    Ok(())
+}
+
+/// A live VM, kept from turn to turn, and one restored at every turn end
+/// alike, down to the bytes they store.
+#[test]
+fn a_live_python_run_and_a_restored_one_end_alike() -> Result<()> {
+    let source = r#"
+import asyncio
+
+async def main(input, ctx):
+    log = []
+    for i in range(5):
+        log.append(await ctx.rpc.call("S", "h", i))
+        await ctx.kv.set("i", i)
+    await ctx.sleep(0.01)
+    both = await asyncio.gather(ctx.kv.get("i"), ctx.rpc.call("S", "h", "x"))
+    return [x["input"] for x in log] + [both[1]["input"]]
+"#;
+    let live = Store::default();
+    let mut run = start_python(&live, source, Value::Null, 1)?;
+    let expected = finish(&mut run)?;
+    let restored = Store::default();
+    start_python(&restored, source, Value::Null, 1)?;
+    loop {
+        let mut run = start_python(&restored, source, Value::Null, 1)?;
+        if run.view().state.outcome.is_some() {
+            assert_eq!(run.view().state, expected.state);
+            break;
+        }
+        step(&mut run)?;
+    }
+    assert_eq!(value(&expected), json!([0, 1, 2, 3, 4, "x"]));
+    assert_eq!(restored.values(), live.values());
+    Ok(())
+}
+
+#[test]
+fn python_sql_commits_with_the_turn() -> Result<()> {
+    let source = r#"
+async def main(input, ctx):
+    ctx.db.sql("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, text TEXT)")
+    text = input["add"]
+    ctx.db.sql(t"INSERT INTO notes (text) VALUES ({text})")
+    await ctx.sleep(1)
+    with ctx.db.transaction():
+        ctx.db.sql("INSERT INTO notes (text) VALUES (?)", "second")
+    return ctx.db.sql("SELECT id, text FROM notes ORDER BY id")
+"#;
+    let store = Store::default();
+    let mut run = start_python(&store, source, json!({"add": "milk"}), 1)?;
+    assert_eq!(
+        value(&finish(&mut run)?),
+        json!([{"id": 1, "text": "milk"}, {"id": 2, "text": "second"}])
+    );
+    Ok(())
+}
+
+#[test]
+fn a_python_exception_fails_the_run() -> Result<()> {
+    let source = r#"
+async def main(input, ctx):
+    await ctx.sleep(1)
+    raise ValueError("no such thing")
+"#;
+    let store = Store::default();
+    let mut run = start_python(&store, source, Value::Null, 1)?;
+    let view = finish(&mut run)?;
+    assert_eq!(view.state.status, Status::Failed);
+    let error = format!("{:?}", view.state.outcome);
+    assert!(
+        error.contains("ValueError") && error.contains("no such thing"),
+        "{error}"
+    );
+    Ok(())
+}
+
+/// A Python program evaluates to the same golden image on every runtime: a
+/// run started in one process carries on in another.
+#[test]
+fn every_runtime_evaluates_a_python_program_alike() -> Result<()> {
+    use quickjs_durable::{Program, Programs, Run, Runtime};
+    use std::sync::Arc;
+    let compiled = Program::compile_python(&runtime(), "v1", COUNTER)?;
+    let again = Program::compile_python(&Arc::new(Runtime::new()?), "v1", COUNTER)?;
+    let again = Arc::new(Programs::new(runtime()).with(again)?);
+    let compiled = Arc::new(Programs::new(runtime()).with(compiled)?);
+    let run = |catalogs: [&Arc<Programs>; 3]| -> Result<Store> {
+        let store = Store::default();
+        for catalog in catalogs {
+            let scope = store.scope();
+            let mut run = block(Run::start(
+                catalog,
+                &scope,
+                "s",
+                "r",
+                "v1",
+                "main",
+                Value::Null,
+                1,
+            ))?;
+            if run.view().state.outcome.is_none() {
+                let operation = run.view().state.pending[0].id().to_owned();
+                block(run.deliver(&operation, Outcome::success(2), 2))?;
+            }
+        }
+        Ok(store)
+    };
+    let expected = run([&compiled; 3])?;
+    for catalogs in [[&again; 3], [&compiled, &again, &compiled]] {
+        assert_eq!(run(catalogs)?.values(), expected.values());
+    }
+    Ok(())
+}
+
+/// asyncio's timers are durable sleeps: a deadline with `asyncio.timeout`
+/// races a call, and the timer that loses is dropped.
+#[test]
+fn asyncio_timeouts_are_durable() -> Result<()> {
+    let source = r#"
+import asyncio
+
+async def main(input, ctx):
+    try:
+        async with asyncio.timeout(5):
+            await ctx.rpc.call("Slow", "never")
+    except TimeoutError:
+        late = True
+    fast = await asyncio.wait_for(ctx.rpc.call("Fast", "now", 1), timeout=60)
+    return {"late": late, "fast": fast["input"]}
+"#;
+    let store = Store::default();
+    let run = start_python(&store, source, Value::Null, 1000)?;
+    let pending = run.view().state.pending;
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    // The timer fires first; the slow call is never answered.
+    let timer = pending
+        .iter()
+        .find(|operation| matches!(operation, quickjs_durable::Operation::Sleep { .. }))
+        .expect("a timer")
+        .clone();
+    let quickjs_durable::Operation::Sleep { deadline, .. } = &timer else {
+        unreachable!()
+    };
+    assert_eq!(*deadline, 6000);
+    // Restored in another attempt, the deadline still holds.
+    let mut run = start_python(&store, source, Value::Null, 6000)?;
+    let view = block(run.deliver(timer.id(), Outcome::success(Value::Null), 6000))?;
+    let call = view
+        .state
+        .pending
+        .iter()
+        .find(|operation| matches!(operation, quickjs_durable::Operation::Rpc { target, .. } if target.service == "Fast"))
+        .expect("the fast call")
+        .clone();
+    let done = block(run.deliver(call.id(), answer(&call), 6001))?;
+    assert_eq!(value(&done), json!({"late": true, "fast": 1}));
+    Ok(())
+}
+
+/// What Python cannot send as JSON fails the call that sends it, in the
+/// program, where it can be caught.
+#[test]
+fn python_values_cross_as_json() -> Result<()> {
+    let source = r#"
+async def main(input, ctx):
+    try:
+        await ctx.kv.set("bad", {1, 2})
+    except TypeError as error:
+        refused = str(error)
+    await ctx.kv.set("tuple", (1, "two"))
+    return {"refused": refused.startswith("Expected JSON data"), "tuple": await ctx.kv.get("tuple")}
+"#;
+    let store = Store::default();
+    let mut run = start_python(&store, source, Value::Null, 1)?;
+    let done = finish(&mut run)?;
+    assert_eq!(value(&done), json!({"refused": true, "tuple": [1, "two"]}));
+    assert_eq!(kv(&store, "tuple"), Some(json!([1, "two"])));
+    Ok(())
+}
