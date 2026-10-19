@@ -250,13 +250,38 @@ fn wait<'ctx>(ctx: &'ctx ObjectContext<'ctx>, operation: &Operation) -> Option<W
 /// The programs built into this binary (`programs/`, or `QJS_PROGRAMS` at
 /// build time), each evaluated now into its golden image: in milliseconds,
 /// and the same bytes on every start, as a golden image depends on nothing
-/// but the program and the runtime.
+/// but the program and the runtime. `QJS_TURN_TIMEOUT` (`90s`, `10m`, `1h`)
+/// changes how long one turn may run, 10 minutes by default.
 pub fn embedded() -> anyhow::Result<Arc<Programs>> {
-    let mut programs = Programs::new(Arc::new(Runtime::new()?));
+    use anyhow::Context as _;
+    let mut runtime = Runtime::new()?;
+    if let Ok(timeout) = std::env::var("QJS_TURN_TIMEOUT") {
+        let turn = duration(&timeout)
+            .with_context(|| format!("QJS_TURN_TIMEOUT={timeout}: expected e.g. 90s, 10m, 1h"))?;
+        let limits = crate::Limits {
+            turn,
+            ..runtime.limits()
+        };
+        runtime = runtime.limited(limits);
+    }
+    let mut programs = Programs::new(Arc::new(runtime));
     for (name, source) in shipped::PROGRAMS {
         programs = programs.compile(name, source)?;
     }
     Ok(Arc::new(programs))
+}
+
+/// `90s`, `10m` or `1h`.
+fn duration(text: &str) -> Option<Duration> {
+    let split = text.find(|c: char| !c.is_ascii_digit())?;
+    let n: u64 = text[..split].parse().ok()?;
+    let unit = match &text[split..] {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => return None,
+    };
+    Some(Duration::from_secs(n * unit))
 }
 
 mod shipped {
@@ -265,8 +290,9 @@ mod shipped {
 
 /// Bind each program as a virtual object of its name: `run` without journal
 /// replay (a retried attempt restores the last image instead), its state
-/// loaded lazily (an attempt reads only what its database needs), and no
-/// journal kept once an invocation is done (it holds every page it wrote).
+/// loaded lazily (an attempt reads only what its database needs), no
+/// journal kept once an invocation is done (it holds every page it wrote),
+/// and Restate's inactivity timeout as long as a turn may run.
 /// The objects share `cache`, which keeps the scopes this process owns.
 pub fn bind(
     mut builder: restate_sdk::endpoint::Builder,
@@ -285,7 +311,8 @@ pub fn bind(
                     .name(name)
                     .journal_replay(false)
                     .enable_lazy_state(true)
-                    .journal_retention(Duration::ZERO),
+                    .journal_retention(Duration::ZERO)
+                    .inactivity_timeout(programs.runtime().limits().turn),
             ),
         );
     }
@@ -317,4 +344,18 @@ fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn durations_read_as_written() {
+        use std::time::Duration;
+        assert_eq!(super::duration("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(super::duration("10m"), Some(Duration::from_secs(600)));
+        assert_eq!(super::duration("1h"), Some(Duration::from_secs(3600)));
+        for bad in ["", "10", "m", "1.5m", "10min"] {
+            assert_eq!(super::duration(bad), None, "{bad}");
+        }
+    }
 }

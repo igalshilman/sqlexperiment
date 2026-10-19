@@ -52,6 +52,10 @@ JSON state, `ctx.rpc.call({ service, handler, key? }, input)` for any Restate se
 - The run ends when `main` settles: unlike Node.js, promises still pending are
   dropped. Await what must happen.
 - A scope runs one run at a time.
+- Compute as long as you need: a turn may run 10 minutes of JavaScript
+  without awaiting (`QJS_TURN_TIMEOUT`, which the endpoint also gives Restate
+  as its inactivity timeout). Work that awaits has no limit at all: it
+  commits every second and carries on.
 - A changed program is a new program: runs restore only with their source.
 
 ## How it works
