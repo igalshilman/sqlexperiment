@@ -41,20 +41,45 @@ The same agent runs on pi, OpenCode, LangGraph, Claude (the Anthropic SDK)
 or the DeepSeek Harness: see [`restate-agents`](typescript/packages/integrations/README.md)
 and [the examples](examples-typescript/README.md).
 
-## How it works
+## SQL in an object
 
-- **The database is the object's state.** [`sqlite-kv`](core/sqlite-kv/README.md)
-  runs SQLite over the object's state. A commit is one write of a record
-  holding the recent transactions; once there are enough of them, the commit
-  also checkpoints the data into pages.
-- **No journal replay.** A retried attempt runs from the top against the
-  state as stored, so a handler sees exactly what earlier attempts
-  committed.
-- **Sends commit with the data.** A transaction's sends are stored in the
-  same commit and made once it is durable, so a crash keeps both or
-  neither.
+Each key of a virtual object has a SQLite database of its own, kept in the
+object's state: no database to run
+([`examples-typescript/notes.ts`](examples-typescript/notes.ts)):
 
-[The storage design](core/sqlite-kv/docs/DESIGN.md) has the details.
+```ts
+import { object, serve } from 'restate-agents';
+
+const SCHEMA = 'CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)';
+
+const notes = object({
+  name: 'notes',
+  handlers: {
+    add: async (ctx, note: string) => {
+      await ctx.db.execute(SCHEMA);
+      await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
+    },
+
+    list: async (ctx) => {
+      await ctx.db.execute(SCHEMA);
+      const rows = await ctx.db.query('SELECT text FROM notes ORDER BY rowid');
+      return rows.map(([text]) => text);
+    },
+  },
+});
+
+await serve(notes);
+```
+
+```sh
+curl localhost:8080/notes/alice/add --json '"Buy milk"'
+curl localhost:8080/notes/alice/list
+```
+
+A statement is durable when it returns. `ctx.transaction` groups
+statements, and the sends made in it, into one commit. See
+[SQL in virtual objects](typescript/packages/sdk-typescript/SQL.md), and
+[`examples-python/notes.py`](examples-python/notes.py) for the same in Python.
 
 ## Layout
 
