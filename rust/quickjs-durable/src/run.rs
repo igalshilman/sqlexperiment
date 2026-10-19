@@ -15,6 +15,7 @@
 //! it from the commit, once, when a delivery needs it.
 use crate::{
     Scope, codec,
+    db::Db,
     model::*,
     program::{Program, Programs},
     vm::{self, Vm},
@@ -22,8 +23,9 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use serde_json::{Value, json};
-use sqlite_kv::{ChainUpdate, Session, Value as SqlValue};
+use sqlite_kv::ChainUpdate;
 use std::{collections::HashSet, sync::Arc};
+use tokio::sync::Mutex;
 
 /// Most batches in an image's chain. Restoring reads them all at once and
 /// applies them in order; past this many, or once the later batches outweigh
@@ -32,8 +34,6 @@ use std::{collections::HashSet, sync::Arc};
 /// size rule keeps rewriting to a third of what a run writes; this one only
 /// bounds the reads, as each new first batch costs a whole image.
 const MAX_CHAIN: usize = 256;
-/// The scope's KV, a table of its database: values are JSON.
-const KV_TABLE: &str = "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL)";
 
 /// The pages at `indexes`, back to back.
 fn pages<'a>(page: impl Fn(u32) -> &'a [u8], indexes: &[u32]) -> Vec<u8> {
@@ -46,9 +46,6 @@ fn pages<'a>(page: impl Fn(u32) -> &'a [u8], indexes: &[u32]) -> Vec<u8> {
 fn input_size<T: serde::Serialize>(input: &T) -> Result<()> {
     ensure!(json_bytes(input)?.len() <= MAX_INPUT, "Input exceeds limit");
     Ok(())
-}
-fn sql(error: Box<dyn std::error::Error + Send + Sync>) -> anyhow::Error {
-    anyhow::anyhow!(error)
 }
 
 /// The pages a turn changed, and what they held before it.
@@ -63,10 +60,9 @@ struct Changed {
 /// unusable: the attempt starts again, from the store.
 pub struct Run {
     programs: Arc<Programs>,
-    /// The scope's database, this attempt's session of it.
-    db: Session,
-    /// Whether this session made sure the KV table exists.
-    kv_table: bool,
+    /// The scope's database, this attempt's session of it, which the VM's
+    /// host calls share.
+    db: Arc<Mutex<Db>>,
     commit: Commit,
     /// The VM, and its memory as of the last commit: restored when a delivery
     /// needs it, and dropped once the run has settled.
@@ -117,8 +113,9 @@ impl Run {
         );
         validate_time(now)?;
         input_size(&input)?;
-        let db = scope.open().await?;
+        let db = Db::new(scope.open().await?);
         let previous = load(&db)?;
+        let db = Arc::new(Mutex::new(db));
         if let Some(commit) = previous.filter(|commit| commit.run == run) {
             ensure!(
                 commit.program == program,
@@ -129,7 +126,6 @@ impl Run {
             return Ok(Self {
                 programs: programs.clone(),
                 db,
-                kv_table: false,
                 commit,
                 live: None,
                 last: Written::default(),
@@ -139,6 +135,7 @@ impl Run {
         let golden = programs.get(program)?.image();
         let mut vm = Vm::new(programs.runtime(), run, now).await?;
         vm.restore(&golden).await?;
+        vm.attach(db.clone());
         let commit = Commit {
             run: run.into(),
             program: program.into(),
@@ -162,7 +159,6 @@ impl Run {
         let mut this = Self {
             programs: programs.clone(),
             db,
-            kv_table: false,
             commit,
             live: Some(Live { vm, base: golden }),
             last: Written::default(),
@@ -264,7 +260,7 @@ impl Run {
         base.grow(commit.memory_len);
         // Read with the record at open: the chain is this run's since its
         // first turn restarted it.
-        let batches = self.db.chain();
+        let batches = self.db.lock().await.session().chain();
         ensure!(batches.len() == commit.batches, "Missing page batch");
         for bytes in batches {
             let (indexes, frame) = codec::page_indexes(&bytes)?;
@@ -281,18 +277,15 @@ impl Run {
         }
         let mut vm = Vm::new(self.programs.runtime(), &commit.run, now).await?;
         vm.restore(&base).await?;
+        vm.attach(self.db.clone());
         Ok(Live { vm, base })
     }
 
     /// Run the JavaScript on `delivery`, capture what changed, and commit.
     async fn turn(&mut self, delivery: Delivery, now: u64) -> Result<()> {
         let live = self.live.as_mut().context("No live VM")?;
-        let mut kv = Kv {
-            db: &mut self.db,
-            table: &mut self.kv_table,
-            began: false,
-        };
-        let ran = run(&mut live.vm, &mut kv, &self.commit, delivery, now).await;
+        let ran = run(&mut live.vm, &self.db, &self.commit, delivery, now).await;
+        let mut db = self.db.lock().await;
         let mut written = Written::default();
         let mut live_pages = self.commit.live_pages;
         let (state, meta, memory_len, changed) = match ran {
@@ -319,6 +312,7 @@ impl Run {
             Err(error) => match vm::trap(&error) {
                 Some(message) => {
                     self.live = None;
+                    db.abandon_transactions().await?;
                     let state = State {
                         pending: Vec::new(),
                         next_operation: self.commit.state.next_operation,
@@ -341,7 +335,7 @@ impl Run {
         let (mut base_bytes, mut delta_bytes) = (previous.base_bytes, previous.delta_bytes);
         let mut batches = previous.batches;
         let settled = state.status != Status::Waiting;
-        let empty = self.db.chain().is_empty();
+        let empty = db.session().chain().is_empty();
         let update = if settled || (batches == 0 && changed.indexes.is_empty()) {
             // A settled run never restores again: it keeps its outcome, not
             // its image. A run that has changed no page yet keeps none of the
@@ -397,11 +391,8 @@ impl Run {
         };
         let effects = Bytes::from(json_bytes(&commit)?);
         written.commit_bytes = effects.len();
-        match update {
-            Some(update) => self.db.commit_turn(effects, update).await,
-            None => self.db.commit_with(effects).await,
-        }
-        .map_err(sql)?;
+        db.commit_turn(effects, update).await?;
+        drop(db);
         self.commit = commit;
         self.last = written;
         match &mut self.live {
@@ -416,10 +407,10 @@ impl Run {
 /// Deliver to the VM, and run the JavaScript until it waits on what the host
 /// answers (RPCs, timers, wakeups), settles, or spends half its fuel. KV
 /// requests are answered here, in the turn's SQL transaction: a read sees the
-/// turn's own writes.
+/// turn's own writes, and its SQL statements'.
 async fn run(
     vm: &mut Vm,
-    kv: &mut Kv<'_>,
+    db: &Mutex<Db>,
     commit: &Commit,
     delivery: Delivery,
     now: u64,
@@ -455,9 +446,11 @@ async fn run(
         let mut answered = false;
         for operation in report.issued.iter().cloned() {
             let kv = match &operation {
-                Operation::KvGet { key, .. } => kv.read(key).await,
-                Operation::KvSet { key, value, .. } => kv.write(key, Some(value)).await,
-                Operation::KvDelete { key, .. } => kv.write(key, None).await,
+                Operation::KvGet { key, .. } => db.lock().await.kv_read(key).await,
+                Operation::KvSet { key, value, .. } => {
+                    db.lock().await.kv_write(key, Some(value)).await
+                }
+                Operation::KvDelete { key, .. } => db.lock().await.kv_write(key, None).await,
                 _ => {
                     pending.push(operation);
                     continue;
@@ -507,65 +500,9 @@ fn completion(operation: &str, outcome: Outcome, now: u64) -> Value {
     json!({"kind": "complete", "operationId": operation, "outcome": outcome, "now": now})
 }
 
-/// The scope's KV, in the turn's SQL transaction: begun at the first request,
-/// so a turn without KV commits its pages and state alone. The turn's commit
-/// ends it.
-struct Kv<'a> {
-    db: &'a mut Session,
-    /// Whether the session made sure the table exists.
-    table: &'a mut bool,
-    began: bool,
-}
-
-impl Kv<'_> {
-    async fn begin(&mut self) -> Result<()> {
-        if self.began {
-            return Ok(());
-        }
-        self.db.execute("BEGIN").await.map_err(sql)?;
-        self.began = true;
-        if !*self.table {
-            self.db.execute(KV_TABLE).await.map_err(sql)?;
-            *self.table = true;
-        }
-        Ok(())
-    }
-
-    /// The value of `key`, as this turn sees it.
-    async fn read(&mut self, key: &str) -> Result<Value> {
-        self.begin().await?;
-        let select = "SELECT value FROM kv WHERE key = ?";
-        let key = SqlValue::build_text(key.to_owned());
-        let rows = self.db.query_with(select, [key]).await.map_err(sql)?;
-        let text = match rows.first().and_then(|row| row.first()) {
-            None => return Ok(Value::Null),
-            Some(SqlValue::Text(text)) => text.as_str(),
-            Some(_) => anyhow::bail!("KV value is not text"),
-        };
-        ensure!(text.len() <= MAX_INPUT, "KV value exceeds limit");
-        Ok(serde_json::from_str(text)?)
-    }
-
-    /// Set `key` to `value`, or with `None` delete it, in this turn.
-    async fn write(&mut self, key: &str, value: Option<&Value>) -> Result<Value> {
-        self.begin().await?;
-        let key = SqlValue::build_text(key.to_owned());
-        match value {
-            Some(value) => {
-                let value = SqlValue::build_text(serde_json::to_string(value)?);
-                let set = "INSERT INTO kv VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value";
-                self.db.execute_with(set, [key, value]).await
-            }
-            None => self.db.execute_with("DELETE FROM kv WHERE key = ?", [key]).await,
-        }
-        .map_err(sql)?;
-        Ok(Value::Null)
-    }
-}
-
 /// The scope's current run, as its database's last commit holds it.
-fn load(db: &Session) -> Result<Option<Commit>> {
-    let effects = db.effects();
+fn load(db: &Db) -> Result<Option<Commit>> {
+    let effects = db.session().effects();
     if effects.is_empty() {
         return Ok(None);
     }

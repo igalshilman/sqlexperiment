@@ -16,6 +16,7 @@
 
 mod claude;
 mod codec;
+mod db;
 mod heap;
 mod instrument;
 mod model;

@@ -337,17 +337,18 @@ The host's `now` stays fixed during a turn. On completion use
 `0..=18_446_744_073_709`, allowing conversion to unsigned 64-bit nanoseconds.
 Sleep requires a nonnegative safe-integer duration and an in-range sum.
 
-| Import                                                                                             | Binding                                                                                                                    |
-| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `clock_time_get(i32 clock, i64 precision, i32 out) -> i32`                                         | Clock 0 or 1: write `now * 1_000_000` as little-endian u64; unsupported clocks return errno 52                             |
-| `random_get(i32 ptr, i32 len) -> i32`                                                              | Write repeated bytes of the 64-bit FNV-1a fingerprint of the host identity; deterministic bootstrap input, not randomness  |
-| `fd_write(i32 fd, i32 iov, i32 count, i32 written) -> i32`                                         | For fd 1/2, validate at most 1,024 vectors and bounds, discard output and write total byte count; other fds return errno 8 |
-| `fd_fdstat_get(i32 fd, i32 out) -> i32`                                                            | For fd 1/2, write the 24-byte zeroed character-device descriptor with byte zero set to 2; other fds return errno 8         |
-| `fd_close(i32) -> i32`, `fd_seek(i32, i64, i32, i32) -> i32`                                       | Unsupported, errno 52                                                                                                      |
-| `env.host_get_timezone_offset(i32 hi, i32 lo) -> i32`                                              | Return zero: UTC                                                                                                           |
-| `env.host_interrupt() -> i32`                                                                      | Return zero; Wasmtime fuel bounds execution                                                                                |
-| `env.host_module_normalize(i32, i32) -> i32`, `env.host_module_load(i32, i32) -> i32`              | Return null/zero: no external module loader                                                                                |
-| `env.host_call(i32, i32, i32, i32, i32) -> i32`, `env.host_promise_rejection(i32, i32, i32) -> ()` | Unexpected use traps; no native callback registry is enabled                                                               |
+| Import                                                                                | Binding                                                                                                                                                      |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `clock_time_get(i32 clock, i64 precision, i32 out) -> i32`                            | Clock 0 or 1: write `now * 1_000_000` as little-endian u64; unsupported clocks return errno 52                                                               |
+| `random_get(i32 ptr, i32 len) -> i32`                                                 | Write repeated bytes of the 64-bit FNV-1a fingerprint of the host identity; deterministic bootstrap input, not randomness                                    |
+| `fd_write(i32 fd, i32 iov, i32 count, i32 written) -> i32`                            | For fd 1/2, validate at most 1,024 vectors and bounds, discard output and write total byte count; other fds return errno 8                                   |
+| `fd_fdstat_get(i32 fd, i32 out) -> i32`                                               | For fd 1/2, write the 24-byte zeroed character-device descriptor with byte zero set to 2; other fds return errno 8                                           |
+| `fd_close(i32) -> i32`, `fd_seek(i32, i64, i32, i32) -> i32`                          | Unsupported, errno 52                                                                                                                                        |
+| `env.host_get_timezone_offset(i32 hi, i32 lo) -> i32`                                 | Return zero: UTC                                                                                                                                             |
+| `env.host_interrupt() -> i32`                                                         | Return zero; Wasmtime fuel bounds execution                                                                                                                  |
+| `env.host_module_normalize(i32, i32) -> i32`, `env.host_module_load(i32, i32) -> i32` | Return null/zero: no external module loader                                                                                                                  |
+| `env.host_call(i32 name, i32 name_len, i32 this, i32 argc, i32 argv) -> i32`          | The guest's `__host(operation, request)`: two strings in, a JSON string handle out, from the scope's database ([HOST.md](HOST.md)); awaits on the Wasm fiber |
+| `env.host_promise_rejection(i32, i32, i32) -> ()`                                     | Unexpected use traps                                                                                                                                         |
 
 Unprefixed imports in the table belong to `wasi_snapshot_preview1`; successful
 WASI calls return zero. An I/O vector is a little-endian u32 pointer and u32 length;

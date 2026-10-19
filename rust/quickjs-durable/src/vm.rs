@@ -1,6 +1,8 @@
+use crate::db::Db;
 use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, Report, VmMeta, fingerprint};
 use crate::{heap, instrument::instrument, tracking::Tracker};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use wasmtime::error::Context;
 use wasmtime::{
     Caller, Config, Engine, Global, Instance, InstanceAllocationStrategy, InstancePre, Linker,
@@ -32,7 +34,7 @@ const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
 /// The runtime's version: an image restores only on the runtime that made it.
 /// Bump it with anything an image depends on: the Wasm, the bridge
 /// (`guest.js`), the limits above, the imports' behavior, the VM metadata.
-pub(crate) const VERSION: u64 = 5;
+pub(crate) const VERSION: u64 = 6;
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.
@@ -121,6 +123,8 @@ struct Host {
     now: u64,
     seed: [u8; 8],
     limits: StoreLimits,
+    /// The scope's database, which the guest's host calls reach.
+    db: Option<Arc<Mutex<Db>>>,
 }
 
 impl Runtime {
@@ -213,6 +217,7 @@ impl Runtime {
             "QuickJS initialization failed"
         );
         vm.limits().await?;
+        vm.host_function().await?;
         vm.eval(BOOTSTRAP, false).await?;
         vm.eval(source, false).await?;
         vm.drain().await?;
@@ -324,6 +329,92 @@ fn mark_host_range(bitmap: &mut [u8], offset: usize, len: usize) -> Result<()> {
     Ok(())
 }
 
+/// One of the module's exports, from inside a host function.
+fn export<P: wasmtime::WasmParams, R: wasmtime::WasmResults>(
+    c: &mut Caller<'_, Host>,
+    name: &str,
+) -> Result<TypedFunc<P, R>> {
+    c.get_export(name)
+        .and_then(|e| e.into_func())
+        .with_context(|| format!("Missing export {name}"))?
+        .typed(&*c)
+}
+
+/// A guest value as a string, from inside a host function.
+async fn guest_string(c: &mut Caller<'_, Host>, value: i32) -> Result<String> {
+    let malloc = export::<i32, i32>(c, "wasm_malloc")?;
+    let free = export::<i32, ()>(c, "wasm_free")?;
+    let len_ptr = malloc.call_async(&mut *c, 4).await?;
+    ensure!(len_ptr != 0, "Guest allocation failed");
+    let ptr = export::<(i32, i32), i32>(c, "qjs_get_string_len")?
+        .call_async(&mut *c, (value, len_ptr))
+        .await?;
+    ensure!(ptr != 0, "String conversion failed");
+    let memory = caller_memory(c)?;
+    let mut len = [0; 4];
+    memory.read(&*c, len_ptr as u32 as usize, &mut len)?;
+    let len = u32::from_le_bytes(len) as usize;
+    ensure!(len <= MAX_INPUT, "Host call exceeds limit");
+    let mut bytes = vec![0; len];
+    memory.read(&*c, ptr as u32 as usize, &mut bytes)?;
+    export::<i32, ()>(c, "qjs_free_cstring")?
+        .call_async(&mut *c, ptr)
+        .await?;
+    free.call_async(&mut *c, len_ptr).await?;
+    Ok(String::from_utf8(bytes)?)
+}
+
+/// A new guest string, from inside a host function.
+async fn new_guest_string(c: &mut Caller<'_, Host>, text: &str) -> Result<i32> {
+    let ptr = export::<i32, i32>(c, "wasm_malloc")?
+        .call_async(&mut *c, (text.len() + 1).try_into()?)
+        .await?;
+    ensure!(ptr != 0, "Guest allocation failed");
+    caller_write(c, ptr as u32 as usize, text.as_bytes())?;
+    caller_write(c, ptr as u32 as usize + text.len(), &[0])?;
+    let value = export::<(i32, i32), i32>(c, "qjs_new_string")?
+        .call_async(&mut *c, (ptr, text.len().try_into()?))
+        .await?;
+    export::<i32, ()>(c, "wasm_free")?
+        .call_async(&mut *c, ptr)
+        .await?;
+    ensure!(value != 0, "Guest string allocation failed");
+    Ok(value)
+}
+
+/// The guest's one host function, `__host(operation, request)`: two strings
+/// in, a JSON string out, answered from the scope's database (see
+/// [`crate::db`]). It may await storage; the guest waits on its fiber. The
+/// returned value is the caller's to free.
+async fn host_call(
+    c: &mut Caller<'_, Host>,
+    name: (i32, i32),
+    argc: i32,
+    argv: i32,
+) -> Result<i32> {
+    let memory = caller_memory(c)?;
+    let mut function = [0; 4];
+    ensure!(name.1 == 4, "Unknown host function");
+    memory.read(&*c, name.0 as u32 as usize, &mut function)?;
+    ensure!(&function == b"host", "Unknown host function");
+    ensure!(argc == 2, "A host call takes an operation and a request");
+    let mut handles = [0; 8];
+    memory.read(&*c, argv as u32 as usize, &mut handles)?;
+    let operation = i32::from_le_bytes(handles[..4].try_into()?);
+    let request = i32::from_le_bytes(handles[4..].try_into()?);
+    let operation = guest_string(c, operation).await?;
+    let request = serde_json::from_str(&guest_string(c, request).await?)?;
+    let db = c.data().db.clone().context("No database for host calls")?;
+    let answer =
+        (db.lock().await.call(&operation, request).await).map_err(wasmtime::Error::from_anyhow)?;
+    let mut text = serde_json::to_string(&answer)?;
+    if text.len() > MAX_INPUT {
+        let error = serde_json::json!({"ok": false, "error": {"name": "RangeError", "message": "The result exceeds the limit"}});
+        text = error.to_string();
+    }
+    new_guest_string(c, &text).await
+}
+
 /// The host functions the module imports: a clock, randomness and logs, all
 /// fixed by the VM's identity and logical time; nothing else.
 fn linker(engine: &Engine) -> Result<Linker<Host>> {
@@ -336,11 +427,11 @@ fn linker(engine: &Engine) -> Result<Linker<Host>> {
         0_i32
     })?;
     linker.func_wrap("env", "host_module_load", |_name: i32, _len: i32| 0_i32)?;
-    linker.func_wrap(
+    linker.func_wrap_async(
         "env",
         "host_call",
-        |_: i32, _: i32, _: i32, _: i32, _: i32| -> Result<i32> {
-            bail!("Host callbacks are not enabled")
+        |mut c: Caller<'_, Host>, (name, len, _this, argc, argv): (i32, i32, i32, i32, i32)| {
+            Box::new(async move { host_call(&mut c, (name, len), argc, argv).await })
         },
     )?;
     linker.func_wrap(
@@ -435,6 +526,7 @@ impl Vm {
                 .memory_size(MAX_MEMORY)
                 .instances(1)
                 .build(),
+            db: None,
         };
         let mut store = Store::new(&runtime.engine, host);
         store.limiter(|h| &mut h.limits);
@@ -484,6 +576,35 @@ impl Vm {
             stack,
             writes,
         })
+    }
+    /// Let the guest's host calls reach `db`.
+    pub(crate) fn attach(&mut self, db: Arc<Mutex<Db>>) {
+        self.store.data_mut().db = Some(db);
+    }
+    /// Define the global `__host`, the guest's one host function, which the
+    /// bridge takes for itself. The function holds only its name, so a
+    /// restored heap calls the same import.
+    async fn host_function(&mut self) -> Result<()> {
+        let name = self.alloc(b"host").await?;
+        let function = self
+            .instance
+            .get_typed_func::<(i32, i32, i32), i32>(&mut self.store, "qjs_new_host_function")?
+            .call_async(&mut self.store, (name, 4, 2))
+            .await?;
+        self.free.call_async(&mut self.store, name).await?;
+        ensure!(function != 0, "Host function creation failed");
+        let global = self.global.call_async(&mut self.store, ()).await?;
+        let key = self.alloc(b"__host").await?;
+        self.instance
+            .get_typed_func::<(i32, i32, i32), i32>(&mut self.store, "qjs_set_prop_string")?
+            .call_async(&mut self.store, (global, key, function))
+            .await?;
+        self.free.call_async(&mut self.store, key).await?;
+        self.free_value
+            .call_async(&mut self.store, function)
+            .await?;
+        self.free_value.call_async(&mut self.store, global).await?;
+        Ok(())
     }
     /// Begin a turn at logical time `now`, with a full fuel budget.
     pub(crate) fn begin_turn(&mut self, now: u64) -> Result<()> {

@@ -312,6 +312,14 @@ async fn the_shipped_programs_do_what_they_say() {
     assert_eq!(timed_out, json!("timed out"));
     let (_, primes) = call("primes/alice/run", json!(20000)).await;
     assert_eq!(primes, json!(2262));
+    call("notes/alice/run", json!({"add": "Buy milk"})).await;
+    call("notes/alice/run", json!({"add": "Call mum"})).await;
+    call("notes/bob/run", json!({"add": "Bob's own"})).await;
+    let (_, notes) = call("notes/alice/run", json!({"done": 1})).await;
+    assert_eq!(
+        notes,
+        json!([{"id": 1, "text": "Buy milk", "done": 1}, {"id": 2, "text": "Call mum", "done": 0}])
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

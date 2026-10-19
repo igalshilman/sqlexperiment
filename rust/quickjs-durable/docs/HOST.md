@@ -223,8 +223,9 @@ On branches, a PR each:
    `commit_turn`; `batch/<n>`, `commit` and `kv/<key>` are gone, and
    `ctx.kv` is a table. Done in #143, measured in DESIGN.md §7.
 3. **`ctx.db.sql` and `ctx.db.transaction`**, as Calls over `host_call`
-   (§2), sharing the turn's session.
-4. **Epochs instead of fuel**, with async Wasm.
+   (§2), sharing the turn's session. Done: the Wasm runs async (#150), and
+   one host function, `__host`, answers from `src/db.rs`.
+4. **Epochs instead of fuel.** Async Wasm is done (#150).
 5. **A registry of Calls and Waits**, for the remaining bindings.
 
 ## Open questions
