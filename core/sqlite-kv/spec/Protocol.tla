@@ -4,25 +4,31 @@
 (*                                                                         *)
 (* A key/value store holds one commit record (the log since the last       *)
 (* checkpoint, each transaction inline or in a stored value), stored      *)
-(* values and pages checkpointed in place. A commit may seal the record's *)
-(* inline transactions into a stored value: a process with a cache puts   *)
-(* it with its record, which lists it as garbage, and its next commit     *)
-(* names it; one without puts it first, and names it in that record. Writes are not ordered: each *)
-(* is acknowledged and durable, durable without the acknowledgement, or   *)
-(* lost, independently, and reads return durable values. Processes take   *)
-(* turns owning the namespace; some keep an owner cache across their      *)
-(* sessions (the record they saw, its epoch's pages, their last commit,   *)
-(* garbage they deleted since) and lose it when they crash. A ghost history records the acknowledged  *)
-(* transactions, plus at most one whose outcome is unknown.               *)
+(* values and pages checkpointed in place. The store is a Restate         *)
+(* object's state: puts and deletes are queued in issue order, a sync     *)
+(* waits until every write before it is durable, and a failure (or a      *)
+(* crash) keeps a prefix of the writes not yet synced, never a later one. *)
+(*                                                                         *)
+(* A save queues, in order: the deletes of the durable record's garbage,  *)
+(* a large transaction's stored value, a seal of the record's inline      *)
+(* transactions, the record naming both, and, if the log is long, a       *)
+(* checkpoint (each page's latest image, then a record with an empty log  *)
+(* at the next epoch). Then one sync.                                      *)
+(*                                                                         *)
+(* Processes take turns owning the namespace; some keep an owner cache    *)
+(* across their sessions (the record they saw, their last commit, its     *)
+(* epoch's pages and the stored values it names) and lose it when they    *)
+(* crash. A ghost history records the acknowledged transactions, plus at  *)
+(* most one whose outcome is unknown.                                      *)
 (*                                                                         *)
 (* Page values are transaction ids, so a page's value names the            *)
 (* transaction that last wrote it, and a database state is a function      *)
 (* Pages -> Nat (0: never written).                                        *)
 (*                                                                         *)
-(* Not modelled: the SQL engine, compression, effects (they ride in the   *)
-(* record), the hint, prefetch and readahead (they change which reads     *)
-(* happen, not their values), transactions of several stored values,      *)
-(* overlapping sessions of one process, and deleted pages (holes).        *)
+(* Not modelled: the SQL engine, compression, effects and the host's chain *)
+(* (they ride in the record), the hint, prefetch and readahead (they       *)
+(* change which reads happen, not their values), transactions of several  *)
+(* stored values, overlapping sessions of one process, and deleted pages. *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -31,13 +37,10 @@ CONSTANTS
     Procs,       \* processes that take turns owning the namespace
     Cached,      \* the processes that keep an owner cache
     MaxTx,       \* transactions attempted
-    MaxSeg,      \* highest stored segment number
+    MaxSeg,      \* highest stored value number
     MaxCrashes,  \* process crashes
     Nil,         \* an absent stored value (model value)
     None         \* no value (model value)
-
-\* A request's outcome: acknowledged, durable but not acknowledged, or none.
-Outcomes == {"ack", "lost", "none"}
 
 \* The record of an empty namespace, never committed.
 Empty == [version |-> 0, epoch |-> 0, log |-> <<>>, next |-> 1, garbage |-> {}]
@@ -47,8 +50,7 @@ VARIABLES
     commitS,        \* the commit record, or Nil
     segS,           \* stored values, by number: sets of transactions
     pageS,          \* page keys
-    pending,        \* requests in flight: [key, val]; at most one per key
-    results,        \* key -> acknowledged?, for the current operation
+    queue,          \* writes not yet durable, in issue order: [key, val]
     owner,          \* the process that owns the namespace
     ps,             \* per-process state
     truth,          \* ghost: committed transactions, in order
@@ -56,7 +58,7 @@ VARIABLES
     txCount, crashes,
     violation       \* an open read a state the history does not allow
 
-vars == <<commitS, segS, pageS, pending, results, owner, ps, truth, unknown,
+vars == <<commitS, segS, pageS, queue, owner, ps, truth, unknown,
           txCount, crashes, violation>>
 
 store == <<commitS, segS, pageS>>
@@ -84,24 +86,29 @@ Named(r) == {r.log[i].seg : i \in DOMAIN r.log} \ {0}
 
 Tx(t) == [tx |-> t.tx, pages |-> t.pages]
 
-\* Replay reads each stored value the log names: it must hold that
-\* transaction.
-Replays(r) == \A i \in DOMAIN r.log :
-    r.log[i].seg = 0 \/ (segS[r.log[i].seg] # Nil /\ Tx(r.log[i]) \in segS[r.log[i].seg])
-
 \* The record's inline transactions.
 InlineTx(r) == {Tx(r.log[i]) : i \in {j \in DOMAIN r.log : r.log[j].seg = 0}}
 
-\* Name the acknowledged seal `s` in place of its inline transactions.
-Rename(r, s) ==
+\* Name the seal `n`, holding `txs`, in place of those inline transactions.
+Rename(r, n, txs) ==
     [r EXCEPT !.log = [i \in DOMAIN r.log |->
-                         IF r.log[i].seg = 0 /\ Tx(r.log[i]) \in s.txs
-                         THEN [r.log[i] EXCEPT !.seg = s.n] ELSE r.log[i]],
-              !.garbage = @ \ {s.n}]
+                         IF r.log[i].seg = 0 /\ Tx(r.log[i]) \in txs
+                         THEN [r.log[i] EXCEPT !.seg = n] ELSE r.log[i]]]
+
+\* A set of numbers as a sequence, ascending.
+RECURSIVE Ascending(_)
+Ascending(s) ==
+    IF s = {} THEN <<>>
+    ELSE LET x == CHOOSE x \in s : \A y \in s : x <= y
+         IN <<x>> \o Ascending(s \ {x})
+
+Put(key, val) == [key |-> key, val |-> val]
 
 (*************************************************************************)
 (* Processes.                                                            *)
 (*************************************************************************)
+
+NoValues == [n \in 1..MaxSeg |-> None]
 
 Down == [pc |-> "down",
          \* the session's view: the record it holds
@@ -109,11 +116,8 @@ Down == [pc |-> "down",
          op |-> [none |-> TRUE],
          \* the owner cache, which survives sessions but not a crash
          cRec |-> None, cEpoch |-> None, cCommitted |-> None,
-         \* this owner's last seal, acknowledged, for its next commit to name
-         cSealed |-> None,
-         \* garbage the record lists that this owner deleted since, acknowledged
-         cCollected |-> {},
-         cPages |-> [p \in Pages |-> None]]
+         cPages |-> [p \in Pages |-> None],
+         cValues |-> NoValues]
 
 \* A ready session reads its log, then its cache, then the page key.
 ReadPage(pr, st, p) ==
@@ -123,37 +127,39 @@ ReadPage(pr, st, p) ==
 
 View(pr, st) == [p \in Pages |-> ReadPage(pr, st, p)]
 
-\* Forget the record: an outcome is unknown.
-Forget(st) == [st EXCEPT !.cRec = None, !.cCommitted = None, !.cSealed = None, !.cCollected = {}]
+\* A stored value, as this process reads it: from its cache, else the store.
+Value(pr, st, n) ==
+    IF pr \in Cached /\ st.cValues[n] # None THEN st.cValues[n] ELSE segS[n]
+
+\* Replay reads each stored value the log names: it must hold that
+\* transaction.
+Replays(pr, st, r) == \A i \in DOMAIN r.log :
+    r.log[i].seg = 0 \/ (Value(pr, st, r.log[i].seg) # Nil
+                         /\ Tx(r.log[i]) \in Value(pr, st, r.log[i].seg))
+
+\* The values the cache keeps: those the durable record `r` names.
+Keep(values, r) == [n \in 1..MaxSeg |-> IF n \in Named(r) THEN values[n] ELSE None]
+
+\* A commit's outcome is unknown: forget the record. Pages and values stay:
+\* a checkpoint that landed moved the epoch, which the next open sees, and a
+\* value a durable record named is never written again.
+Forget(st) == [st EXCEPT !.cRec = None, !.cCommitted = None]
 
 (*************************************************************************)
-(* The store.                                                            *)
+(* The store: the queue's head lands, at any time.                       *)
 (*************************************************************************)
-
-Keys(reqs) == {r.key : r \in reqs}
-Settled(keys) == keys \subseteq DOMAIN results
-Acked(keys) == \A k \in keys : results[k]
-NoResults == [k \in {} |-> TRUE]
-
-\* Issue requests ([key, val]); forget earlier results for their keys.
-Issue(reqs) ==
-    /\ pending' = pending \cup reqs
-    /\ results' = [k \in DOMAIN results \ Keys(reqs) |-> results[k]]
 
 Write(f, k, v) == [f EXCEPT ![k] = v]
 
-\* Any request, in any order, ends one of three ways.
-Resolve ==
-    \E r \in pending, out \in Outcomes :
-        LET k == r.key
-            v == r.val
-            dur == out \in {"ack", "lost"}
-        IN /\ pending' = pending \ {r}
-           /\ results' = [x \in DOMAIN results \cup {k} |-> IF x = k THEN out = "ack" ELSE results[x]]
-           /\ commitS' = IF k[1] = "commit" /\ dur THEN v ELSE commitS
-           /\ segS' = IF k[1] = "seg" /\ dur THEN Write(segS, k[2], v) ELSE segS
-           /\ pageS' = IF k[1] = "page" /\ dur THEN Write(pageS, k[2], v) ELSE pageS
-           /\ UNCHANGED <<owner, ps, truth, unknown, txCount, crashes, violation>>
+Land ==
+    /\ queue # <<>>
+    /\ LET k == Head(queue).key
+           v == Head(queue).val
+       IN /\ commitS' = IF k[1] = "commit" THEN v ELSE commitS
+          /\ segS' = IF k[1] = "seg" THEN Write(segS, k[2], v) ELSE segS
+          /\ pageS' = IF k[1] = "page" THEN Write(pageS, k[2], v) ELSE pageS
+    /\ queue' = Tail(queue)
+    /\ UNCHANGED <<owner, ps, truth, unknown, txCount, crashes, violation>>
 
 (*************************************************************************)
 (* Open: read the record and replay its log; keep cached pages of its    *)
@@ -162,218 +168,128 @@ Resolve ==
 
 Open(pr) ==
     /\ owner = pr
-    /\ pending = {}
+    /\ queue = <<>>
     /\ ps[pr].pc \in {"down", "idle", "failed"}
     /\ LET st == ps[pr]
            r == ReadRecord(commitS)
            cached == pr \in Cached
            known == cached /\ st.cRec = r
            sameEpoch == cached /\ st.cEpoch = r.epoch
-           \* garbage this owner deleted since: the next record leaves it out
            opened == [st EXCEPT !.pc = "ready",
-                                !.rec = IF known THEN [r EXCEPT !.garbage = @ \ st.cCollected] ELSE r,
+                                !.rec = r,
                                 !.cRec = IF cached THEN r ELSE None,
                                 !.cEpoch = IF cached THEN r.epoch ELSE None,
                                 !.cCommitted = IF ~cached THEN None
                                                ELSE IF known THEN st.cCommitted
                                                ELSE r.version,
-                                !.cSealed = IF known THEN st.cSealed ELSE None,
-                                !.cCollected = IF known THEN st.cCollected ELSE {},
                                 !.cPages = IF sameEpoch THEN st.cPages
-                                           ELSE [p \in Pages |-> None]]
+                                           ELSE [p \in Pages |-> None],
+                                !.cValues = IF cached
+                                            THEN Keep([n \in 1..MaxSeg |-> Value(pr, st, n)], r)
+                                            ELSE NoValues]
            view == View(pr, opened)
            with == IF unknown = None THEN truth ELSE Append(truth, unknown)
        IN /\ ps' = [ps EXCEPT ![pr] = opened]
-          \* replay reads every stored segment the record names, and the
+          \* replay reads every stored value the record names, and the
           \* session then reads the history
-          /\ IF Replays(r) /\ view = Expected(truth) THEN UNCHANGED <<truth, violation>>
-             ELSE IF Replays(r) /\ unknown # None /\ view = Expected(with)
+          /\ IF Replays(pr, st, r) /\ view = Expected(truth) THEN UNCHANGED <<truth, violation>>
+             ELSE IF Replays(pr, st, r) /\ unknown # None /\ view = Expected(with)
              THEN truth' = with /\ UNCHANGED violation
              ELSE violation' = TRUE /\ UNCHANGED truth
           /\ unknown' = None
-    /\ UNCHANGED <<store, pending, results, owner, txCount, crashes>>
+    /\ UNCHANGED <<store, queue, owner, txCount, crashes>>
 
 (*************************************************************************)
-(* Save: one transaction, inline or in a stored segment put first; the   *)
-(* record in one put, with the garbage's deletes.                        *)
+(* Save: one transaction, its writes queued in order, then one sync.     *)
 (*************************************************************************)
 
 \* One writer: with a cache, nothing committed since this view was taken.
 MayWrite(pr, st) == pr \in Cached => st.cCommitted = st.rec.version
 
+\* The checkpoint of record r: a record with an empty log at the next epoch,
+\* whose garbage takes the values the log named.
+CheckpointOf(r) == [r EXCEPT !.epoch = @ + 1, !.log = <<>>, !.garbage = @ \cup Named(r)]
+
 Save(pr) ==
     /\ owner = pr
-    /\ pending = {}
+    /\ queue = <<>>
     /\ ps[pr].pc = "ready"
     /\ txCount < MaxTx
     /\ LET st == ps[pr] IN
        /\ MayWrite(pr, st)
-       /\ \E changed \in (SUBSET Pages) \ {{}}, stored \in BOOLEAN, seal \in BOOLEAN :
-          LET tx == txCount + 1
-              n == st.rec.next
+       /\ \E changed \in (SUBSET Pages) \ {{}}, stored \in BOOLEAN, seal \in BOOLEAN,
+             checkpoint \in BOOLEAN :
+          LET old == st.rec
+              tx == txCount + 1
+              \* 1. the durable record's garbage
+              deletes == [i \in DOMAIN Ascending(old.garbage) |->
+                            Put(<<"seg", Ascending(old.garbage)[i]>>, Nil)]
+              \* 2. a large transaction's value, then a seal of the inline ones
+              n == old.next
               t == [tx |-> tx, pages |-> changed, seg |-> IF stored THEN n ELSE 0]
-              segPut == IF stored THEN {[key |-> <<"seg", n>>, val |-> {Tx(t)}]} ELSE {}
+              m == n + (IF stored THEN 1 ELSE 0)
+              sealing == seal /\ InlineTx(old) # {} /\ m <= MaxSeg
+              values == [k \in 1..MaxSeg |->
+                           IF stored /\ k = n THEN {Tx(t)}
+                           ELSE IF sealing /\ k = m THEN InlineTx(old)
+                           ELSE None]
+              puts == (IF stored THEN <<Put(<<"seg", n>>, {Tx(t)})>> ELSE <<>>)
+                      \o (IF sealing THEN <<Put(<<"seg", m>>, InlineTx(old))>> ELSE <<>>)
+              \* 3. the record, listing as garbage what it names no more
+              base == IF sealing THEN Rename(old, m, InlineTx(old)) ELSE old
+              r0 == [base EXCEPT !.version = @ + 1, !.log = Append(@, t),
+                                 !.next = m + (IF sealing THEN 1 ELSE 0)]
+              r == [r0 EXCEPT !.garbage = Named(old) \ Named(r0)]
+              \* 4. a checkpoint: each page's latest image, then its record
+              c == CheckpointOf(r)
+              pages == [i \in DOMAIN Ascending(LogPages(r.log)) |->
+                          LET p == Ascending(LogPages(r.log))[i]
+                          IN Put(<<"page", p>>, LatestIn(r.log, p))]
           IN /\ ~stored \/ n <= MaxSeg
              /\ txCount' = tx
-             /\ Issue(segPut)
-             /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "segment",
-                         !.op = [t |-> t, keys |-> Keys(segPut), seal |-> seal]]]
+             /\ queue' = deletes \o puts \o <<Put(<<"commit">>, r)>>
+                         \o (IF checkpoint THEN pages \o <<Put(<<"commit">>, c)>> ELSE <<>>)
+             /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "syncing",
+                         !.op = [t |-> t, rec |-> r, checkpoint |-> checkpoint,
+                                 final |-> IF checkpoint THEN c ELSE r, values |-> values]]]
     /\ UNCHANGED <<store, owner, truth, unknown, crashes, violation>>
 
-\* The record this commit builds on: the durable one, its acknowledged seal
-\* named.
-Base(pr, st) ==
-    IF pr \in Cached /\ st.cSealed # None /\ st.cSealed.n \in st.rec.garbage
-    THEN Rename(st.rec, st.cSealed) ELSE st.rec
-
-\* The large transaction's value settled: the record names it only once it is
-\* acknowledged. A seal of the base's inline transactions, if chosen, goes
-\* with the record (with a cache) or first (without one).
-Prepare(pr) ==
-    /\ ps[pr].pc = "segment"
-    /\ Settled(ps[pr].op.keys)
-    /\ LET st == ps[pr]
-           t == st.op.t
-           base == Base(pr, st)
-           m == base.next + (IF t.seg = 0 THEN 0 ELSE 1)
-           sealing == st.op.seal /\ InlineTx(base) # {} /\ m <= MaxSeg
-           sealPut == IF sealing THEN {[key |-> <<"seg", m>>, val |-> InlineTx(base)]} ELSE {}
-       IN IF ~Acked(st.op.keys)
-          THEN \* nothing committed: the session fails
-               /\ ps' = [ps EXCEPT ![pr] = [Forget(st) EXCEPT !.pc = "failed", !.op = [none |-> TRUE]]]
-               /\ results' = NoResults
-               /\ UNCHANGED pending
-          ELSE IF sealing /\ pr \notin Cached
-          THEN \* without a cache, the seal first
-               /\ Issue(sealPut)
-               /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "sealing",
-                           !.op = [t |-> t, keys |-> Keys(sealPut), m |-> m, txs |-> InlineTx(base)]]]
-          ELSE /\ results' = NoResults
-               /\ UNCHANGED pending
-               /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "recording",
-                           !.op = [t |-> t, base |-> base, seal |-> IF sealing THEN m ELSE None,
-                                   next |-> m + (IF sealing THEN 1 ELSE 0)]]]
-    /\ UNCHANGED <<store, owner, truth, unknown, txCount, crashes, violation>>
-
-\* Without a cache: the seal settled; named if acknowledged, else garbage.
-Sealed(pr) ==
-    /\ ps[pr].pc = "sealing"
-    /\ Settled(ps[pr].op.keys)
-    /\ results' = NoResults
+\* The sync is acknowledged: every write landed.
+Synced(pr) ==
+    /\ ps[pr].pc = "syncing"
+    /\ queue = <<>>
     /\ LET st == ps[pr]
            op == st.op
-           alloc == [st.rec EXCEPT !.garbage = @ \cup {op.m}]
-           base == IF Acked(op.keys) THEN Rename(alloc, [n |-> op.m, txs |-> op.txs]) ELSE alloc
-       IN ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "recording",
-                   !.op = [t |-> op.t, base |-> base, seal |-> None, next |-> op.m + 1]]]
-    /\ UNCHANGED <<store, pending, owner, truth, unknown, txCount, crashes, violation>>
-
-\* The record, with the previous record's garbage deletes (but the value
-\* named now), and a pipelined seal.
-CommitRecord(pr) ==
-    /\ ps[pr].pc = "recording"
-    /\ LET st == ps[pr]
-           op == st.op
-           t == op.t
-           sealing == op.seal # None
-           withSeal == IF sealing THEN [op.base EXCEPT !.garbage = @ \cup {op.seal}] ELSE op.base
-           r == [withSeal EXCEPT !.version = @ + 1, !.log = Append(@, t), !.next = op.next]
-           puts == {[key |-> <<"commit">>, val |-> r]}
-           \* garbage of the durable record but values the base names
-           old == st.rec.garbage \ Named(op.base)
-           deletes == {[key |-> <<"seg", x>>, val |-> Nil] : x \in old}
-           sealPut == IF sealing THEN {[key |-> <<"seg", op.seal>>, val |-> InlineTx(op.base)]} ELSE {}
-       IN /\ Issue(puts \cup deletes \cup sealPut)
-          /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "commit",
-                      !.op = [t |-> t, rec |-> r, commit |-> Keys(puts), deletes |-> Keys(deletes),
-                              old |-> old, seal |-> Keys(sealPut), sealed |->
-                                  IF sealing THEN [n |-> op.seal, txs |-> InlineTx(op.base)] ELSE None]]]
-    /\ UNCHANGED <<store, owner, truth, unknown, txCount, crashes, violation>>
-
-Committed(pr) ==
-    /\ ps[pr].pc = "commit"
-    /\ LET st == ps[pr]
-           op == st.op
-       IN
-       /\ Settled(op.commit \cup op.deletes \cup op.seal)
-       /\ results' = NoResults
-       /\ IF ~Acked(op.commit)
-          THEN \* the outcome is unknown
-               /\ unknown' = Tx(op.t)
-               /\ ps' = [ps EXCEPT ![pr] = [Forget(st) EXCEPT !.pc = "failed", !.op = [none |-> TRUE]]]
-               /\ UNCHANGED truth
-          ELSE \* durable; acknowledged deletes leave the next record's garbage
-               LET r == [op.rec EXCEPT !.garbage = IF Acked(op.deletes) THEN @ \ op.old ELSE @]
-               IN /\ truth' = Append(truth, Tx(op.t))
-                  /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "ready", !.rec = r,
-                              !.op = [none |-> TRUE],
-                              !.cRec = IF pr \in Cached THEN op.rec ELSE None,
-                              !.cCommitted = IF pr \in Cached THEN r.version ELSE None,
-                              !.cSealed = IF pr \in Cached /\ op.sealed # None /\ Acked(op.seal)
-                                          THEN op.sealed ELSE None,
-                              !.cCollected = IF pr \in Cached /\ Acked(op.deletes) THEN op.old ELSE {}]]
-                  /\ UNCHANGED unknown
-    /\ UNCHANGED <<store, pending, owner, txCount, crashes, violation>>
-
-(*************************************************************************)
-(* Checkpoint: each page's latest image in the log; once all are          *)
-(* acknowledged, a record with an empty log at the next epoch.           *)
-(*************************************************************************)
-
-Checkpoint(pr) ==
-    /\ owner = pr
-    /\ pending = {}
-    /\ ps[pr].pc = "ready"
-    /\ LET st == ps[pr] IN
-       /\ st.rec.log # <<>>
-       /\ MayWrite(pr, st)
-       /\ LET puts == {[key |-> <<"page", p>>, val |-> LatestIn(st.rec.log, p)] : p \in LogPages(st.rec.log)}
-          IN /\ Issue(puts)
-             /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "pages", !.op = [keys |-> Keys(puts)]]]
-    /\ UNCHANGED <<store, owner, truth, unknown, txCount, crashes, violation>>
-
-CheckpointRecord(pr) ==
-    /\ ps[pr].pc = "pages"
-    /\ Settled(ps[pr].op.keys)
-    /\ LET st == ps[pr]
-           r == [st.rec EXCEPT !.epoch = @ + 1, !.log = <<>>, !.garbage = @ \cup Named(st.rec)]
-           puts == {[key |-> <<"commit">>, val |-> r]}
-       IN IF ~Acked(st.op.keys)
-          THEN \* a cleanup error: the log keeps covering the pages
-               /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "ready", !.op = [none |-> TRUE]]]
-               /\ results' = NoResults
-               /\ UNCHANGED pending
-          ELSE /\ Issue(puts)
-               /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "record",
-                           !.op = [keys |-> Keys(puts), rec |-> r]]]
-    /\ UNCHANGED <<store, owner, truth, unknown, txCount, crashes, violation>>
-
-CheckpointRecorded(pr) ==
-    /\ ps[pr].pc = "record"
-    /\ Settled(ps[pr].op.keys)
-    /\ results' = NoResults
-    /\ LET st == ps[pr]
-           r == st.op.rec
+           r == op.final
            cached == pr \in Cached
-       IN IF ~Acked(st.op.keys)
-          THEN \* it may have landed: the session continues on its log, which
-               \* covers the pages either way, and forgets the record
-               ps' = [ps EXCEPT ![pr] = [Forget(st) EXCEPT !.pc = "ready", !.op = [none |-> TRUE]]]
-          ELSE \* the next epoch: the cache keeps the previous one's pages, but
-               \* those of the log, which it writes through. The next commit
-               \* deletes the garbage.
-               ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "ready", !.rec = r,
-                           !.op = [none |-> TRUE],
-                           !.cRec = IF cached THEN r ELSE None,
-                           !.cEpoch = IF cached THEN r.epoch ELSE None,
-                           !.cCommitted = IF cached THEN r.version ELSE None,
-                           !.cSealed = None,
-                           !.cCollected = {},
-                           !.cPages = [p \in Pages |->
-                               IF cached /\ p \in LogPages(st.rec.log) THEN LatestIn(st.rec.log, p)
-                               ELSE IF cached /\ st.cEpoch = st.rec.epoch THEN st.cPages[p]
-                               ELSE None]]]
-    /\ UNCHANGED <<store, pending, owner, truth, unknown, txCount, crashes, violation>>
+           \* the cache keeps the epoch's pages; a checkpoint moves them to
+           \* the next epoch and replaces those of its log
+           keepPages == cached /\ st.cEpoch = st.rec.epoch
+           held == [n \in 1..MaxSeg |-> IF op.values[n] # None THEN op.values[n]
+                                        ELSE st.cValues[n]]
+       IN /\ truth' = Append(truth, Tx(op.t))
+          /\ ps' = [ps EXCEPT ![pr] = [st EXCEPT !.pc = "ready", !.rec = r,
+                      !.op = [none |-> TRUE],
+                      !.cRec = IF cached THEN r ELSE None,
+                      !.cEpoch = IF cached THEN r.epoch ELSE None,
+                      !.cCommitted = IF cached THEN r.version ELSE None,
+                      !.cPages = [p \in Pages |->
+                          IF cached /\ op.checkpoint /\ p \in LogPages(op.rec.log)
+                          THEN LatestIn(op.rec.log, p)
+                          ELSE IF keepPages THEN st.cPages[p]
+                          ELSE None],
+                      !.cValues = IF cached THEN Keep(held, r) ELSE NoValues]]
+    /\ UNCHANGED <<store, queue, owner, unknown, txCount, crashes, violation>>
+
+\* The sync fails, or the process dies during it: the writes still queued are
+\* lost (Restate never applies an abandoned attempt's commands later), so a
+\* prefix landed. The outcome is unknown.
+Failed(pr) ==
+    /\ ps[pr].pc = "syncing"
+    /\ queue' = <<>>
+    /\ unknown' = Tx(ps[pr].op.t)
+    /\ ps' = [ps EXCEPT ![pr] = [Forget(ps[pr]) EXCEPT !.pc = "failed", !.op = [none |-> TRUE]]]
+    /\ UNCHANGED <<store, owner, truth, txCount, crashes, violation>>
 
 (*************************************************************************)
 (* Reads, session ends, handover and crashes.                            *)
@@ -388,33 +304,34 @@ Read(pr) ==
         /\ ~InSeq(ps[pr].rec.log, p)
         /\ ps[pr].cPages[p] = None
         /\ ps' = [ps EXCEPT ![pr].cPages[p] = pageS[p]]
-    /\ UNCHANGED <<store, pending, results, owner, truth, unknown, txCount, crashes, violation>>
+    /\ UNCHANGED <<store, queue, owner, truth, unknown, txCount, crashes, violation>>
 
 EndSession(pr) ==
     /\ ps[pr].pc = "ready"
     /\ ps' = [ps EXCEPT ![pr].pc = "idle"]
-    /\ UNCHANGED <<store, pending, results, owner, truth, unknown, txCount, crashes, violation>>
+    /\ UNCHANGED <<store, queue, owner, truth, unknown, txCount, crashes, violation>>
 
-\* Between operations: nothing in flight, no result unprocessed.
-Stable == pending = {} /\ \A pr \in Procs : ps[pr].pc \in {"down", "idle", "ready", "failed"}
+\* Between operations: nothing queued, no sync waiting.
+Stable == queue = <<>> /\ \A pr \in Procs : ps[pr].pc \in {"down", "idle", "ready", "failed"}
 
 EndSessions == [pr \in Procs |-> IF ps[pr].pc \in {"ready", "failed"}
                                  THEN [ps[pr] EXCEPT !.pc = "idle"] ELSE ps[pr]]
 
-\* Ownership moves only after every request settled.
+\* Ownership moves only once the owner's attempt is over.
 Handover ==
     /\ Stable
     /\ \E q \in Procs \ {owner} : owner' = q
     /\ ps' = EndSessions
-    /\ UNCHANGED <<store, pending, results, truth, unknown, txCount, crashes, violation>>
+    /\ UNCHANGED <<store, queue, truth, unknown, txCount, crashes, violation>>
 
-\* A process crashes and loses its cache.
+\* A process crashes and loses its cache (a crash during a sync is a
+\* failure first).
 CrashProc ==
     /\ crashes < MaxCrashes
     /\ Stable
     /\ \E pr \in Procs : ps[pr].pc # "down" /\ ps' = [ps EXCEPT ![pr] = Down]
     /\ crashes' = crashes + 1
-    /\ UNCHANGED <<store, pending, results, owner, truth, unknown, txCount, violation>>
+    /\ UNCHANGED <<store, queue, owner, truth, unknown, txCount, violation>>
 
 (*************************************************************************)
 (* Specification and properties.                                         *)
@@ -424,16 +341,15 @@ Init ==
     /\ commitS = Nil
     /\ segS = [s \in 1..MaxSeg |-> Nil]
     /\ pageS = [p \in Pages |-> 0]
-    /\ pending = {} /\ results = NoResults
+    /\ queue = <<>>
     /\ owner \in Procs
     /\ ps = [pr \in Procs |-> Down]
     /\ truth = <<>> /\ unknown = None
     /\ txCount = 0 /\ crashes = 0 /\ violation = FALSE
 
 Next ==
-    \/ Resolve
-    \/ \E pr \in Procs : Open(pr) \/ Save(pr) \/ Prepare(pr) \/ Sealed(pr) \/ CommitRecord(pr) \/ Committed(pr)
-                         \/ Checkpoint(pr) \/ CheckpointRecord(pr) \/ CheckpointRecorded(pr)
+    \/ Land
+    \/ \E pr \in Procs : Open(pr) \/ Save(pr) \/ Synced(pr) \/ Failed(pr)
                          \/ Read(pr) \/ EndSession(pr)
     \/ Handover \/ CrashProc
 
@@ -442,7 +358,7 @@ Spec == Init /\ [][Next]_vars
 (* Every open reads the history: each acknowledged transaction, in order, *)
 (* and the one with an unknown outcome or not; never part of one, never  *)
 (* one that a previous open decided was not committed; and replay finds   *)
-(* every stored segment the record names.                                 *)
+(* every stored value the record names.                                   *)
 OpensReadTheHistory == ~violation
 
 (* No stored value leaks: each one present is named by the durable record, *)
