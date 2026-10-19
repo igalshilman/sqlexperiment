@@ -22,13 +22,13 @@ async def get(_, ctx):
 
 These are the [JavaScript functions](../examples-functions/README.md)' twins,
 on the same runtime: CPython 3.15 in WebAssembly instead of QuickJS
-([how](../rust/quickjs-durable/docs/PYTHON.md)).
+([how](../rust/functions/docs/PYTHON.md)).
 
 ## Run them
 
 ```sh
-make qjs-python                                                              # from the repository's root; builds CPython for WASI the first time (minutes)
-ANTHROPIC_API_KEY=... target/release/quickjs-durable                         # every function here, on port 9080
+make functions-python                                                              # from the repository's root; builds CPython for WASI the first time (minutes)
+ANTHROPIC_API_KEY=... target/release/functions                         # every function here, on port 9080
 npx @restatedev/restate-server                                               # Restate, in another terminal
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
 curl localhost:8080/counter/alice/add --json 20                              # 20, a second later

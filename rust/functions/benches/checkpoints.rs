@@ -3,7 +3,7 @@
 //! with its VM live from turn to turn, and once restoring it at every turn, as
 //! a new attempt would. Results go to bench-<mode>.json.
 use anyhow::{Result, ensure};
-use quickjs_durable::{Outcome, Program, Programs, Run, Runtime, Scope, Status};
+use functions::{Outcome, Program, Programs, Run, Runtime, Scope, Status};
 use serde_json::{Value, json};
 use sqlite_kv::simulation::MemoryKv;
 use std::{sync::Arc, time::Instant};

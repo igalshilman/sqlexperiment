@@ -2,7 +2,7 @@
 //! turn commits, and what a new attempt restores.
 use anyhow::Result;
 use common::*;
-use quickjs_durable::{Limits, Operation, Outcome, Program, Programs, Run, Runtime, Status};
+use functions::{Limits, Operation, Outcome, Program, Programs, Run, Runtime, Status};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 

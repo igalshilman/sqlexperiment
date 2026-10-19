@@ -7,7 +7,7 @@
 // the loop and the conversation are saved with the rest of memory: a crash
 // resumes them, and a model call already answered is not made again.
 //
-//   ANTHROPIC_API_KEY=... target/release/quickjs-durable
+//   ANTHROPIC_API_KEY=... target/release/functions
 //   curl localhost:8080/inventory/widget/restock --json 5
 //   curl localhost:8080/payments/alice/deposit --json 100
 //   curl localhost:8080/assistant/alice/chat --json '"Buy two widgets, if I can afford them"'

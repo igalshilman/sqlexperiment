@@ -1,6 +1,6 @@
 // A coding agent: Claude, with a shell and the files of a workspace as its
 // tools, working on a task until it is done. The object's key names the
-// workspace: a directory of the `workspace` service (under QJS_WORKSPACES),
+// workspace: a directory of the `workspace` service (under FUNCTIONS_WORKSPACES),
 // so the next task finds the last one's files; the tasks done so far are
 // in its KV.
 //
@@ -9,7 +9,7 @@
 // are saved with the rest of the heap: a crash resumes the task where it
 // was, and a model call or a command already answered is not made again.
 //
-//   ANTHROPIC_API_KEY=... target/release/quickjs-durable
+//   ANTHROPIC_API_KEY=... target/release/functions
 //   curl localhost:8080/coder/primes/work --json \
 //     '{"task": "Write primes.py, printing the primes below 100, with a test, and run both"}'
 //   curl localhost:8080/coder/primes/history

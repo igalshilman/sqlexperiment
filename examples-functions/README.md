@@ -24,8 +24,8 @@ export async function get(_, ctx) {
 ## Run them
 
 ```sh
-make qjs                                                                     # from the repository's root
-ANTHROPIC_API_KEY=... target/release/quickjs-durable                         # every function here, on port 9080
+make functions                                                                     # from the repository's root
+ANTHROPIC_API_KEY=... target/release/functions                         # every function here, on port 9080
 npx @restatedev/restate-server  # Restate, in another terminal
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
 curl localhost:8080/counter/alice/add --json 20                              # 20, a second later
@@ -75,9 +75,9 @@ are JSON (no input is null). `ctx` is all it needs from outside:
 - A call ends when its function settles: unlike Node.js, promises still
   pending are dropped. Await what must happen.
 - Compute as long as you need. Work that awaits has no limit; one stretch
-  without an await may run 10 minutes (`QJS_TURN_TIMEOUT`).
+  without an await may run 10 minutes (`FUNCTIONS_TURN_TIMEOUT`).
 - A changed file is a new function: a call still waiting when its file
   changes cannot carry on, since its memory belongs to the old source.
 
-Another directory of functions: `QJS_PROGRAMS=path/to/dir make qjs`. How
-they are made durable: [rust/quickjs-durable](../rust/quickjs-durable/README.md).
+Another directory of functions: `FUNCTIONS_PROGRAMS=path/to/dir make functions`. How
+they are made durable: [rust/functions](../rust/functions/README.md).

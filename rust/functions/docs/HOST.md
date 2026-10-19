@@ -219,14 +219,14 @@ On branches, a PR each:
 
 1. **sqlite-kv: the host's page chain in the record** (§4), with tests.
    Done in #142.
-2. **quickjs-durable on sqlite-kv:** a turn commits through
+2. **The functions runtime on sqlite-kv:** a turn commits through
    `commit_turn`; `batch/<n>`, `commit` and `kv/<key>` are gone, and
    `ctx.kv` is a table. Done in #143, measured in DESIGN.md §7.
 3. **`ctx.db.sql` and `ctx.db.transaction`**, as Calls over `host_call`
    (§2), sharing the turn's session. Done: the Wasm runs async (#150), and
    one host function, `__host`, answers from `src/db.rs`.
 4. **Epochs instead of fuel.** Done: async Wasm (#150), then a wall-clock
-   `Limits` (10 min a turn, `QJS_TURN_TIMEOUT`, declared to Restate as the
+   `Limits` (10 min a turn, `FUNCTIONS_TURN_TIMEOUT`, declared to Restate as the
    inactivity timeout; commit after 1 s) checked at a 10 ms epoch tick,
    where a long job also yields its thread. A compute-bound job ran ~10%
    faster without fuel (116 ms against 127 ms), and the coding session of

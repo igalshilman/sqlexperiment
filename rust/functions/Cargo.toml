@@ -1,5 +1,5 @@
 [package]
-name = "quickjs-durable"
+name = "functions"
 version = "0.1.0"
 edition = "2024"
 description = "Durable JavaScript in Restate virtual objects: QuickJS memory images, no journal replay"

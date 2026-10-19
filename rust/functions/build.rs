@@ -1,11 +1,11 @@
 //! Ship the durable functions: the binary embeds each `<name>.js` and
-//! `<name>.py` in `QJS_PROGRAMS` (by default the repository's
+//! `<name>.py` in `FUNCTIONS_PROGRAMS` (by default the repository's
 //! `examples-functions/`), and evaluates it when it starts.
 use std::{fmt::Write, path::PathBuf};
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=QJS_PROGRAMS");
-    let dir = std::env::var_os("QJS_PROGRAMS")
+    println!("cargo:rerun-if-env-changed=FUNCTIONS_PROGRAMS");
+    let dir = std::env::var_os("FUNCTIONS_PROGRAMS")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples-functions")

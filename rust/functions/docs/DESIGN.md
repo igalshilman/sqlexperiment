@@ -256,7 +256,7 @@ Compile each engine's module once, without its data segments, and share it:
 every VM maps a golden image over its memory (below). A fresh VM maps the
 memory the segments lay out, as instantiating the module as built would; the
 module must have no start function, which would run before it. The compiled
-module is cached on disk (`QJS_CACHE`, by default `~/.cache/quickjs-durable`),
+module is cached on disk (`FUNCTIONS_CACHE`, by default `~/.cache/functions`),
 keyed by the engine's configuration, the tracking mode and the Wasm: a restart
 loads it in milliseconds instead of compiling QuickJS (~1 s) and CPython
 (~8 s) again. A run's Wasmtime
@@ -445,7 +445,7 @@ runs as compiled, without barriers.
   file mapping as on anonymous memory.
 - The startup probe creates a VM and scans it: a kernel or sandbox without
   either feature (`ENOSYS`, `EPERM`, a seccomp filter) falls back to barriers.
-  `QJS_TRACKING=barriers` forces them.
+  `FUNCTIONS_TRACKING=barriers` forces them.
 
 The cost moves from every store to the first write of each page in a turn: a
 fault of ~1.5 µs. Measured on 18 October 2026, with the block encoding (§5.2)
@@ -994,7 +994,7 @@ Required acceptance cases:
 | Identities   | Another program version or runtime rejected; canonical duplicate IDs are no-ops; unknown IDs fail                                                                                 |
 | Completions  | Early/out-of-range timer result rejected; a late result after the run settled changes nothing                                                                                     |
 
-`make test-qjs` runs the runtime's tests with `verify-dirty` (every changed page
+`make test-functions` runs the runtime's tests with `verify-dirty` (every changed page
 must have been marked) and again with `full-scan`, then the programs against a
 Restate server, including a crash between a call's commit and its answer.
 

@@ -2615,7 +2615,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "quickjs-durable"
+name = "functions"
 version = "0.1.0"
 dependencies = [
  "anyhow",

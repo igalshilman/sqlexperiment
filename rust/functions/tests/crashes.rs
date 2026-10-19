@@ -6,7 +6,7 @@
 //! behind.
 use anyhow::Result;
 use common::*;
-use quickjs_durable::{Language, Run, Scope, View};
+use functions::{Language, Run, Scope, View};
 use serde_json::{Value, json};
 use sqlite_kv::{
     NamespaceCache,

@@ -2,7 +2,7 @@
 //! Needs the engine built by `make python-engine`.
 use anyhow::Result;
 use common::*;
-use quickjs_durable::{Outcome, Status};
+use functions::{Outcome, Status};
 use serde_json::{Value, json};
 
 mod common;
@@ -109,7 +109,7 @@ async def main(input, ctx):
 /// run started in one process carries on in another.
 #[test]
 fn every_runtime_evaluates_a_python_program_alike() -> Result<()> {
-    use quickjs_durable::{Program, Programs, Run, Runtime};
+    use functions::{Program, Programs, Run, Runtime};
     use std::sync::Arc;
     let compiled = Program::compile_python(&runtime(), "v1", COUNTER)?;
     let again = Program::compile_python(&Arc::new(Runtime::new()?), "v1", COUNTER)?;
@@ -166,10 +166,10 @@ async def main(input, ctx):
     // The timer fires first; the slow call is never answered.
     let timer = pending
         .iter()
-        .find(|operation| matches!(operation, quickjs_durable::Operation::Sleep { .. }))
+        .find(|operation| matches!(operation, functions::Operation::Sleep { .. }))
         .expect("a timer")
         .clone();
-    let quickjs_durable::Operation::Sleep { deadline, .. } = &timer else {
+    let functions::Operation::Sleep { deadline, .. } = &timer else {
         unreachable!()
     };
     assert_eq!(*deadline, 6000);
@@ -180,7 +180,7 @@ async def main(input, ctx):
         .state
         .pending
         .iter()
-        .find(|operation| matches!(operation, quickjs_durable::Operation::Rpc { target, .. } if target.service == "Fast"))
+        .find(|operation| matches!(operation, functions::Operation::Rpc { target, .. } if target.service == "Fast"))
         .expect("the fast call")
         .clone();
     let done = block(run.deliver(call.id(), answer(&call), 6001))?;
@@ -210,13 +210,13 @@ async def main(input, ctx):
 }
 
 /// The outcome of Python `source`, run to its end.
-fn outcome(source: &str) -> Result<quickjs_durable::View> {
+fn outcome(source: &str) -> Result<functions::View> {
     let store = Store::default();
     let mut run = start_python(&store, source, Value::Null, 1000)?;
     finish(&mut run)
 }
 
-fn failure(view: &quickjs_durable::View) -> (String, String) {
+fn failure(view: &functions::View) -> (String, String) {
     match &view.state.outcome {
         Some(Outcome::Failure { error, .. }) => (error.name.clone(), error.message.clone()),
         other => panic!("Expected a failure, not {other:?}"),

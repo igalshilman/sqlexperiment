@@ -4,7 +4,7 @@
 //! would. Prints a table: the cost of a language is its golden image, its
 //! VM starts and the pages its turns change.
 use anyhow::{Result, ensure};
-use quickjs_durable::{Language, Outcome, Program, Programs, Run, Runtime, Scope, Status};
+use functions::{Language, Outcome, Program, Programs, Run, Runtime, Scope, Status};
 use serde_json::{Value, json};
 use sqlite_kv::simulation::MemoryKv;
 use std::{sync::Arc, time::Instant};
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
             let programs = Arc::new(Programs::new(runtime.clone()).with(program)?);
             for restored in [false, true] {
                 // Per turn: its times, and the view after it.
-                let mut turns: Vec<(Vec<f64>, quickjs_durable::View)> = Vec::new();
+                let mut turns: Vec<(Vec<f64>, functions::View)> = Vec::new();
                 for repeat in 0..=REPEAT {
                     let store = MemoryKv::default();
                     let scope = Scope::new(Arc::new(store.clone()));
