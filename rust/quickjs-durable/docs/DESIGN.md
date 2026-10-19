@@ -300,11 +300,14 @@ Any trap/error during this process discards the instance.
 
 Restore in this order:
 
-1. Reconstruct memory from storage as specified in section 5. Instantiate the same
-   compiled module with fresh host imports, logical time and memory limits.
+1. Reconstruct memory from storage as specified in section 5. Instantiate the
+   engine's module without data segments (its memory starts as zeros), with
+   fresh host imports, logical time and memory limits.
 2. Require image length at least initial module memory, a multiple of 64 KiB and
    no more than the configured maximum; grow memory to that exact length.
-3. Copy reconstructed bytes into linear memory zero. Clear the transient tracker.
+3. Map the program's golden image copy-on-write over the start of linear memory
+   zero, then write only the pages that differ from golden. Clear the transient
+   tracker.
 4. Restore `__stack_pointer`; call `qjs_set_runtime_and_context` with saved offsets.
 5. Reapply allocator/stack limits. These rebinding writes belong to the new dirty
    epoch. Do not call `_initialize`, `qjs_init2`, bridge initialization or top-level
@@ -315,23 +318,41 @@ Starting a VM is most of what a short run costs, so the runtime keeps it cheap:
 - **Imports resolved once.** The runtime links the module's imports once
   (`InstancePre`); each VM only instantiates it.
 - **A pool of instance slots.** Wasmtime's pooling allocator reuses memory
-  slots from VM to VM and keeps each slot's first 2 MiB mapped, so copying
-  golden in writes memory already resident instead of faulting in every page.
-  The pool holds 1,000 VMs at once; past that, starting one fails, and the
-  binding retries the attempt, as for a storage failure. Its 2,000 memory
-  slots reserve ~8 TiB of address space (4 GiB each, so that Wasm needs no
-  bounds checks), not memory: the process ran at ~150 MiB resident under load.
-- **Golden shared.** An image is the program's golden memory, shared, and the
-  pages that differ from it; a new run copies nothing but into the VM.
+  slots from VM to VM. The pool holds 1,000 VMs at once; past that, starting
+  one fails, and the binding retries the attempt, as for a storage failure.
+  Its 2,000 memory slots reserve ~8 TiB of address space (4 GiB each, so that
+  Wasm needs no bounds checks), not memory: the process ran at ~150 MiB
+  resident under load.
+- **Golden mapped, not copied** (`cow.rs`). A program's golden image is a
+  sealed memory file, made on first use. A VM maps it privately over the start
+  of its memory: the kernel shares its pages between every VM of the program
+  and copies a page only when a VM writes it, so a VM costs the pages it
+  touches, not the image's size. A restore then writes only the pages that
+  differ from golden. Wasmtime could map an image itself, but only from a
+  module's data segments, which would mean compiling a module per program
+  (seconds for CPython); the runtime maps it instead, into a module without
+  data segments, one per engine. The memory is Wasmtime's: when a VM ends it
+  maps fresh zeros back before Wasmtime has the memory again, as its slot
+  would hold after any VM (a unit test checks that nothing a VM wrote, over
+  golden or past it, reaches the next).
 
 Measured on 18 October 2026, a run that settles in its first turn (a KV read
 and write) took 1,755 µs in `MemoryStore`, of which 1,112 µs restoring golden
 (mostly page faults) and 253 µs copying it; the pool made it 1,073 µs, the
 linked imports 924 µs, the shared golden 771 µs. Against a server, one-turn
 runs went from ~298/s to ~340/s and `Promise.all` of 10 calls from ~24/s to
-~28/s; runs of 5 waits stayed at ~130/s. 6. Bind run state on first start, or deliver one completion, then run jobs.
-Each later turn reuses the instance: it restarts the turn's clock, sets logical time,
-delivers, runs, captures, and clears the tracker once the commit is stored.
+~28/s; runs of 5 waits stayed at ~130/s.
+
+Measured on 19 October 2026 (`benches/languages.rs`, medians of 15 runs),
+mapping golden instead of writing it: starting a VM and restoring it took
+29 + 23 µs instead of 56 + 140 µs for QuickJS, and 30 + 26 µs instead of
+1,700 + 3,900 µs for CPython's 11 MB image; a turn on a restored VM 1.0 ms
+instead of 1.6-2.2 ms (JavaScript), 2.3 ms instead of 7.8-8.8 ms (Python, with
+§5.6's partial walk).
+
+6. Bind run state on first start, or deliver one completion, then run jobs.
+   Each later turn reuses the instance: it restarts the turn's clock, sets logical time,
+   delivers, runs, captures, and clears the tracker once the commit is stored.
 
 Before capture, call the runtime/context getters and read the stack global, then
 select/copy pages. If metadata getters touch memory, those writes must be included.
@@ -410,8 +431,9 @@ runs as compiled, without barriers.
   ~13 µs for scanning and protecting what was written.
 - Host writes into the memory are user-mode writes: the kernel sees them too.
 - Each VM registers its pool slot's first 64 MiB, the most memory can grow
-  to; registering a slot again is harmless. The engine maps memory without
-  copy-on-write data images, which would replace a registered mapping.
+  to, after mapping golden over it (a new mapping drops a registration);
+  registering a slot again is harmless. Write protection works on the private
+  file mapping as on anonymous memory.
 - The startup probe creates a VM and scans it: a kernel or sandbox without
   either feature (`ENOSYS`, `EPERM`, a seccomp filter) falls back to barriers.
   `QJS_TRACKING=barriers` forces them.
@@ -714,9 +736,10 @@ program's version and the runtime's; a run restores only with both.
 
 ### 5.6. Dead heap bytes
 
-The pinned binary allocates with wasi-libc's dlmalloc (32-bit). Its heap is
-chunks back to back from the first, at a fixed address after the binary's
-static data (`heap::START`), to the end of memory: each a 4-byte footer slot
+Both engines allocate with wasi-libc's dlmalloc (32-bit). Its heap is
+chunks back to back from the first, after the binary's static data
+(`heap::QUICKJS`, or found from CPython's `__heap_base`), to the end of
+memory: each a 4-byte footer slot
 and a 4-byte head (the size, with bit 1 set when the chunk is in use and bit 0
 when the one before it is), the last the allocator's top foot. A free chunk
 holds its links in its first 32 bytes (footer slot, head, list or tree
@@ -725,7 +748,7 @@ what it returns.
 
 ```text
 dead(memory):
-    at = heap::START; previous_in_use = true
+    at = first chunk; previous_in_use = true
     loop:
         size, in_use, flag = head at at
         require size >= 16, a multiple of 8, within memory; flag == previous_in_use
@@ -739,6 +762,18 @@ dead(memory):
 A walk that fails any check finds nothing dead, and capture zeroes only the
 stack; golden registration requires the walk to succeed, so a binary with
 another heap layout fails at startup.
+
+In CPython, without pymalloc, every object is a chunk: a whole walk reads
+~100,000 of them, 0.5-1.5 ms a turn. So a VM keeps the chunks its last walk
+found (`heap::Chunks`), and the next walk takes them as they were wherever no
+page was written: a chunk whose head is on a page not written has its size
+still, so the chunk after it starts where it did. The walk reads the heap
+only from the last chunk that starts before each run of written pages to the
+first one after it whose head was not written, which must have been a chunk
+before. Golden's chunks are walked once per program; a restore updates them
+with its pages. Memory that grew, or a heap that does not walk as before, is
+walked whole. With `verify-dirty`, every partial walk is checked against a
+whole one.
 
 ## 6. Run algorithms and turn boundaries
 
@@ -1035,7 +1070,7 @@ build; the package does not supply a complete toolchain/submodule manifest.
 Retain `assets/quickjs-wasi-LICENSE`, `quickjs-ng-LICENSE`, `wasi-libc-LICENSE`
 and component notices in `assets/licenses/`. Replacing the binary requires
 ABI review, cold-restore validation, a new runtime version, and its heap's
-first chunk as `heap::START` (§5.6).
+first chunk as `heap::QUICKJS` (§5.6).
 Which parts are QuickJS's, what another engine must provide, and the
 candidates: [ENGINES.md](ENGINES.md).
 
