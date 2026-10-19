@@ -1,12 +1,15 @@
-//! Ship the programs: the binary embeds each `<name>.js` in `QJS_PROGRAMS` (by
-//! default `programs/`), and evaluates it when it starts.
+//! Ship the durable functions: the binary embeds each `<name>.js` in
+//! `QJS_PROGRAMS` (by default the repository's `examples-functions/`), and
+//! evaluates it when it starts.
 use std::{fmt::Write, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=QJS_PROGRAMS");
     let dir = std::env::var_os("QJS_PROGRAMS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("programs"));
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples-functions")
+        });
     println!("cargo:rerun-if-changed={}", dir.display());
     let mut sources: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))

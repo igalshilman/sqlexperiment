@@ -247,7 +247,7 @@ fn wait<'ctx>(ctx: &'ctx ObjectContext<'ctx>, operation: &Operation) -> Option<W
     }
 }
 
-/// The programs built into this binary (`programs/`, or `QJS_PROGRAMS` at
+/// The programs built into this binary (`examples-functions/`, or `QJS_PROGRAMS` at
 /// build time), each evaluated now into its golden image: in milliseconds,
 /// and the same bytes on every start, as a golden image depends on nothing
 /// but the program and the runtime. `QJS_TURN_TIMEOUT` (`90s`, `10m`, `1h`)

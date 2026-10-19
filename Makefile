@@ -10,7 +10,8 @@
 #                examples (examples-python/, a project of their own)
 #   rust/        the patched Rust SDK (rust/sdk), and durable JavaScript in
 #                Restate objects on it (rust/quickjs-durable; its own
-#                targets: qjs, test-qjs, lint-qjs)
+#                targets: qjs, test-qjs, lint-qjs), which serves the
+#                durable functions (examples-functions/)
 #
 #   make              build everything
 #   make test         unit and integration tests (no Restate server needed)
@@ -72,7 +73,7 @@ help: ## List the targets
 core: ## The sqlite-kv crate
 	cd $(CORE) && $(CARGO) build --locked --release
 
-qjs: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/quickjs-durable): a binary serving its programs (programs/, or QJS_PROGRAMS)
+qjs: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/quickjs-durable): a binary serving the durable functions of examples-functions/ (or QJS_PROGRAMS)
 	cd $(QJS) && $(CARGO) build --locked --release
 
 addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)

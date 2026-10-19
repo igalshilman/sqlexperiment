@@ -1,6 +1,6 @@
 // A long computation: count the primes below `n`, recording progress in
-// ctx.kv as it goes. A turn has a CPU budget; past half of it, the run is
-// saved at its next wait and carries on in the next turn.
+// ctx.kv as it goes. Past a second of work, the run is saved at its next
+// wait and carries on in the next turn.
 //
 //   curl localhost:8080/primes/alice/run --json 100000
 async function main(n, ctx) {

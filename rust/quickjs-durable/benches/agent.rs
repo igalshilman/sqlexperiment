@@ -22,7 +22,7 @@ fn main() -> Result<()> {
         println!("Use cargo bench --bench agent for optimized measurements");
         return Ok(());
     }
-    let source = include_str!("../programs/coder.js");
+    let source = include_str!("../../../examples-functions/coder.js");
     let runtime = Arc::new(Runtime::new()?);
     let programs = Arc::new(Programs::new(runtime).compile("coder", source)?);
     let store = MemoryKv::default();
