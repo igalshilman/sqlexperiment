@@ -115,16 +115,16 @@ its examples in `examples-<part>/`.
 
 ## Requirements
 
-|                | Version                                                                                                                           |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Restate server | 1.8 with service protocol v8 (state reads left out of the journal): the `service-protocol-v8` image, until a release has it       |
-| TypeScript SDK | 1.17.3 with [the patches](typescript/packages/sdk-typescript/README.md), over the shared core's unreleased main; `make` builds it |
-| Python SDK     | 1.0.5 with [the patches](python/sdk/README.md), over the same shared core; `make` builds it                                       |
-| Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), over the same shared core; `make sdk-rs` builds it                                 |
+|                | Version                                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Restate server | 1.8 or later, with service protocol v8 (state reads left out of the journal) enabled: `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true` |
+| TypeScript SDK | 1.17.3 with [the patches](typescript/packages/sdk-typescript/README.md), over the shared core's unreleased main; `make` builds it    |
+| Python SDK     | 1.0.5 with [the patches](python/sdk/README.md), over the same shared core; `make` builds it                                          |
+| Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), over the same shared core; `make sdk-rs` builds it                                    |
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway \
-  -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true ghcr.io/restatedev/restate:service-protocol-v8
+  -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true ghcr.io/restatedev/restate:1.8.0
 ```
 
 ## Build and test
@@ -154,6 +154,6 @@ The Python parts need Python 3.13 and [uv](https://docs.astral.sh/uv/), which
 installs [their workspace](python/README.md) into `python/.venv` (`make py`),
 building the patched SDK and the extension with maturin.
 
-The tests against a Restate server take its binary out of that image on first
-use, without docker (Linux only; see the [`Makefile`](Makefile): `RESTATE_FROM`,
-`RESTATE_IMAGE`, `RESTATE_VERSION`, `RESTATE_SERVER`), and enable v8.
+The tests against a Restate server download its 1.8.0 release on first use,
+and enable v8 (see the [`Makefile`](Makefile): `RESTATE_VERSION`,
+`RESTATE_FROM`, `RESTATE_IMAGE`, `RESTATE_SERVER`).

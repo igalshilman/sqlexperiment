@@ -20,11 +20,11 @@ async function main(input, ctx) {
 ## Run them
 
 ```sh
-make qjs                                              # from the repository's root
-ANTHROPIC_API_KEY=... target/release/quickjs-durable  # every function here, on port 9080
-npx @restatedev/restate-server                        # Restate, in another terminal
+make qjs                                                                     # from the repository's root
+ANTHROPIC_API_KEY=... target/release/quickjs-durable                         # every function here, on port 9080
+RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true npx @restatedev/restate-server  # Restate, in another terminal
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
-curl localhost:8080/counter/alice/run --json 20       # 20, a second later
+curl localhost:8080/counter/alice/run --json 20                              # 20, a second later
 ```
 
 The object's key (`alice`) names a scope: calls under the same key share its
