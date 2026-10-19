@@ -43,26 +43,18 @@ and [the examples](examples-typescript/README.md).
 
 ## How it works
 
-- **No journal replay.** A handler's state reads are left out of the
-  journal (service protocol v8), and a retried attempt runs from the top
-  against the state as stored, not against a replay of the last attempt.
 - **The database is the object's state.** [`sqlite-kv`](core/sqlite-kv/README.md)
-  runs SQLite over the object's state keys. Each commit rewrites one
-  record, `v14/commit`, holding the transactions since the last
-  checkpoint; a checkpoint writes them out as pages. Values that outgrow
-  the record go to stored values the record names.
-- **One round trip per commit.** Restate keeps an object's writes in the
-  order they are issued, and a crash keeps a prefix of them. So a commit
-  queues everything it writes (stored values first, then the record, then
-  any checkpoint) and syncs once. If the record is stored, so is
-  everything before it.
-- **Sends commit with the data.** One-way sends made in a transaction go
-  in the same record (its outbox), so a crash keeps the transaction and its
-  sends, or neither. They are made after the commit; any not yet stored are
-  made again, with the same idempotency keys, by the next attempt.
+  runs SQLite over the object's state. A commit is one write of a record
+  holding the recent transactions; once there are enough of them, the commit
+  also checkpoints the data into pages.
+- **No journal replay.** A retried attempt runs from the top against the
+  state as stored, so a handler sees exactly what earlier attempts
+  committed.
+- **Sends commit with the data.** A transaction's sends are stored in the
+  same commit and made once it is durable, so a crash keeps both or
+  neither.
 
-[The storage design](core/sqlite-kv/docs/DESIGN.md) and
-[its format](core/sqlite-kv/docs/FORMAT.md) have the details.
+[The storage design](core/sqlite-kv/docs/DESIGN.md) has the details.
 
 ## Layout
 
