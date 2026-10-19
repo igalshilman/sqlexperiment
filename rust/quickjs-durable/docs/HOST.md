@@ -131,7 +131,7 @@ running in the host over the object's Restate state. The guest never holds
 pages of it. Only statements go in and only rows come out.
 
 ```js
-async function main({ sku, qty }, ctx) {
+export async function order({ sku, qty }, ctx) {
   ctx.db.sql`CREATE TABLE IF NOT EXISTS stock (sku TEXT PRIMARY KEY, n INTEGER)`;
   const [row] = ctx.db.sql`SELECT n FROM stock WHERE sku = ${sku}`;
   if (!row || row.n < qty) throw new Error(`Out of ${sku}`);

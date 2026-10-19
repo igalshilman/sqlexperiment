@@ -11,23 +11,43 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use std::{collections::HashMap, sync::Arc};
 
-/// A program: its name, and the golden image of its evaluated source.
+/// A program: its name, the golden image of its evaluated module, and the
+/// functions it exports, each a handler of its object.
 pub struct Program {
     name: String,
     version: u64,
     image: Image,
+    handlers: Vec<String>,
 }
 
 impl Program {
-    /// Evaluate `source`, which must define `async function main(input, ctx)`.
+    /// Evaluate `source`, a module exporting functions `(input, ctx)`.
     pub fn compile(runtime: &Runtime, name: &str, source: &str) -> Result<Self> {
         identifier(name)?;
         ensure!(source.len() <= MAX_INPUT, "Program source exceeds limit");
+        let (image, handlers) = runtime
+            .golden(name, source)
+            .map_err(|error| anyhow::anyhow!("Program {name}: {error:#}"))?;
+        for handler in &handlers {
+            ensure!(
+                handler.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && handler
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "Program {name}: the export {handler} is not a handler name (letters, digits and _)"
+            );
+        }
         Ok(Self {
             name: name.into(),
             version: fingerprint(source.as_bytes()),
-            image: runtime.golden(name, source)?,
+            image,
+            handlers,
         })
+    }
+
+    /// The functions the program exports: its object's handlers.
+    pub fn handlers(&self) -> &[String] {
+        &self.handlers
     }
 
     pub fn name(&self) -> &str {

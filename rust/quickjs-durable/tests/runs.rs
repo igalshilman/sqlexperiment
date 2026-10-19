@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 mod common;
 
-const PROGRAM: &str = r#"async function main() {
+const PROGRAM: &str = r#"export async function main() {
   const state={n:40}; state.self=state;
   const map=new Map([['state',state]]);
   state.n+=await durable.call('increment',{by:2});
@@ -38,7 +38,7 @@ fn a_new_attempt_restores_closures_cycles_and_maps() -> Result<()> {
 /// `ctx.key` is the scope the run started in, and stays it on another attempt.
 #[test]
 fn a_run_knows_its_scope() -> Result<()> {
-    let source = r#"async function main(_,ctx){
+    let source = r#"export async function main(_,ctx){
       const before=ctx.key;await ctx.sleep(1);return [before,ctx.key];}"#;
     let store = Store::default();
     start(&store, source, Value::Null, 1)?;
@@ -51,7 +51,7 @@ fn a_run_knows_its_scope() -> Result<()> {
 /// alike, down to the bytes they store.
 #[test]
 fn a_live_run_and_a_restored_one_end_alike() -> Result<()> {
-    let source = r#"async function main(_,ctx){
+    let source = r#"export async function main(_,ctx){
       const log=[];
       for(let i=0;i<5;i++){log.push(await ctx.rpc.call({service:'S',handler:'h'},i));await ctx.kv.set('i',i);}
       await ctx.sleep(10);
@@ -94,6 +94,7 @@ fn every_runtime_evaluates_a_program_alike() -> Result<()> {
                 "s",
                 "r",
                 "v1",
+                "main",
                 Value::Null,
                 1,
             ))?;
@@ -114,10 +115,10 @@ fn every_runtime_evaluates_a_program_alike() -> Result<()> {
 /// the version of the runtime.
 #[test]
 fn a_run_refuses_another_version_of_its_program_or_runtime() -> Result<()> {
-    let source = "async function main(){await durable.call('observe');return 1}";
+    let source = "export async function main(){await durable.call('observe');return 1}";
     let store = Store::default();
     start(&store, source, Value::Null, 1)?;
-    let changed = "async function main(){await durable.call('observe');return 2}";
+    let changed = "export async function main(){await durable.call('observe');return 2}";
     let error = start(&store, changed, Value::Null, 1).err().unwrap();
     assert!(
         format!("{error:#}").contains("another version of program v1"),
@@ -131,6 +132,7 @@ fn a_run_refuses_another_version_of_its_program_or_runtime() -> Result<()> {
             "s",
             "r",
             "v1",
+            "main",
             Value::Null,
             1
         ))
@@ -149,7 +151,7 @@ fn a_run_refuses_another_version_of_its_program_or_runtime() -> Result<()> {
 
 #[test]
 fn promise_race_all_any_settled_and_errors() -> Result<()> {
-    let source = r#"async function main(){
+    let source = r#"export async function main(){
       const a=durable.call('a'), b=durable.call('b');
       const winner=await Promise.race([a,b]);
       const all=await Promise.all([a,b]);
@@ -174,7 +176,7 @@ fn promise_race_all_any_settled_and_errors() -> Result<()> {
 
 #[test]
 fn a_run_ends_when_main_settles() -> Result<()> {
-    let source = "async function main(_,ctx){const a=durable.call('a'), b=durable.call('b').catch(()=>ctx.kv.set('late',1));return await Promise.race([a,b]);}";
+    let source = "export async function main(_,ctx){const a=durable.call('a'), b=durable.call('b').catch(()=>ctx.kv.set('late',1));return await Promise.race([a,b]);}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let pending = run.view().state.pending;
@@ -192,7 +194,7 @@ fn a_run_ends_when_main_settles() -> Result<()> {
 
 #[test]
 fn logical_time_seeded_random_and_timers() -> Result<()> {
-    let source = "async function main(){ const a=[Date.now(),new Date().getTimezoneOffset(),Math.random()]; await durable.sleep(50); return [a,Date.now(),Math.random()]; }";
+    let source = "export async function main(){ const a=[Date.now(),new Date().getTimezoneOffset(),Math.random()]; await durable.sleep(50); return [a,Date.now(),Math.random()]; }";
     let (a, b) = (Store::default(), Store::default());
     let mut x = start(&a, source, Value::Null, 1000)?;
     let mut y = start(&b, source, Value::Null, 1000)?;
@@ -210,7 +212,7 @@ fn logical_time_seeded_random_and_timers() -> Result<()> {
 
 #[test]
 fn memory_growth_survives_a_restore() -> Result<()> {
-    let source = "async function main(){await durable.call('observe'); const b=new Uint8Array(3*1024*1024); b[0]=7;b[b.length-1]=9;await durable.call('observe');b[0]=0;await durable.call('observe');return [b[0],b[b.length-1],b[4096]];}";
+    let source = "export async function main(){await durable.call('observe'); const b=new Uint8Array(3*1024*1024); b[0]=7;b[b.length-1]=9;await durable.call('observe');b[0]=0;await durable.call('observe');return [b[0],b[b.length-1],b[4096]];}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let initial = run.view().memory_bytes;
@@ -226,13 +228,13 @@ fn memory_growth_survives_a_restore() -> Result<()> {
 #[test]
 fn programs_are_checked_and_failures_end_runs() -> Result<()> {
     for source in [
-        "durable.call('forbidden');async function main(){}",
-        "async function main( {",
+        "durable.call('forbidden');export async function main(){}",
+        "export async function main( {",
         "async function notMain(){}",
     ] {
         assert!(Programs::new(runtime()).compile("bad", source).is_err());
     }
-    let main = "async function main(){}";
+    let main = "export async function main(){}";
     assert!(Program::compile(&runtime(), "not a name", main).is_err());
     assert!(
         Programs::new(runtime())
@@ -241,14 +243,19 @@ fn programs_are_checked_and_failures_end_runs() -> Result<()> {
             .is_err()
     );
     for source in [
-        "async function main(){throw new Error('boom')}",
-        "async function main(){return ()=>1}",
-        "async function main(){await new Promise(()=>{})}",
+        "export async function main(){throw new Error('boom')}",
+        "export async function main(){return ()=>1}",
+        "export async function main(){await new Promise(()=>{})}",
     ] {
         let run = start(&Store::default(), source, Value::Null, 1)?;
         assert_eq!(run.view().state.status, Status::Failed, "{source}");
     }
-    let run = start(&Store::default(), "async function main(){}", Value::Null, 1)?;
+    let run = start(
+        &Store::default(),
+        "export async function main(){}",
+        Value::Null,
+        1,
+    )?;
     assert_eq!(value(&run.view()), Value::Null);
     Ok(())
 }
@@ -258,7 +265,7 @@ fn programs_are_checked_and_failures_end_runs() -> Result<()> {
 /// error; its requests still outstanding are dropped.
 #[test]
 fn a_trap_ends_the_run() -> Result<()> {
-    let source = "async function main(_,ctx){await ctx.kv.set('before',1);ctx.rpc.call({service:'S',handler:'h'});await durable.call('observe');await ctx.kv.set('after',1);while(true){}}";
+    let source = "export async function main(_,ctx){await ctx.kv.set('before',1);ctx.rpc.call({service:'S',handler:'h'});await durable.call('observe');await ctx.kv.set('after',1);while(true){}}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let pending = run.view().state.pending;
@@ -279,7 +286,7 @@ fn a_trap_ends_the_run() -> Result<()> {
     let store = Store::default();
     let failed = start(
         &store,
-        "async function main(){while(true){}}",
+        "export async function main(){while(true){}}",
         Value::Null,
         1,
     )?;
@@ -293,7 +300,7 @@ fn the_stack_limit_and_unicode_survive_a_restore() -> Result<()> {
         function recurse(){return recurse()+1;}
         try{recurse();return false;}catch(e){return /stack/i.test(e.message);}
     }
-    async function main(){
+    export async function main(){
         const before=overflow();
         const text='nul:\u0000 lone:\ud800 snow:雪';
         await durable.call('observe');
@@ -314,7 +321,7 @@ fn the_stack_limit_and_unicode_survive_a_restore() -> Result<()> {
 
 #[test]
 fn pages_back_to_golden_leave_the_commit() -> Result<()> {
-    let source = "const bytes=new Uint8Array(128*1024).fill(5);async function main(){await durable.call('observe');bytes.fill(0);await durable.call('observe');const wasZero=bytes[65536]===0;bytes.fill(5);await durable.call('observe');return [wasZero,bytes[65536]];}";
+    let source = "const bytes=new Uint8Array(128*1024).fill(5);export async function main(){await durable.call('observe');bytes.fill(0);await durable.call('observe');const wasZero=bytes[65536]===0;bytes.fill(5);await durable.call('observe');return [wasZero,bytes[65536]];}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let a = run.view();
@@ -330,7 +337,7 @@ fn pages_back_to_golden_leave_the_commit() -> Result<()> {
 /// chunks, so the pages the garbage was written to end as they were.
 #[test]
 fn garbage_a_turn_frees_is_not_saved() -> Result<()> {
-    let source = "async function main(){let n=0;for(let i=0;i<5;i++){n+=JSON.stringify(Array.from({length:4000},(_,j)=>j*i+Math.random())).length;await durable.call('tick');}return n>0;}";
+    let source = "export async function main(){let n=0;for(let i=0;i<5;i++){n+=JSON.stringify(Array.from({length:4000},(_,j)=>j*i+Math.random())).length;await durable.call('tick');}return n>0;}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     step(&mut run)?;
@@ -348,7 +355,7 @@ fn garbage_a_turn_frees_is_not_saved() -> Result<()> {
 /// boundary past the checkpoint limit, and a wakeup goes on in the next.
 #[test]
 fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
-    let source = "async function main(_,ctx){for(let i=0;i<2000;i++){await ctx.kv.set('k',i);}return await ctx.kv.get('k');}";
+    let source = "export async function main(_,ctx){for(let i=0;i<2000;i++){await ctx.kv.set('k',i);}return await ctx.kv.get('k');}";
     let limits = Limits {
         checkpoint: Duration::from_millis(5),
         ..Limits::default()
@@ -362,6 +369,7 @@ fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
         "s",
         "r",
         "v1",
+        "main",
         Value::Null,
         1,
     ))?;
@@ -383,7 +391,7 @@ fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
 /// writes every live page into a new first batch, so restoring stays bounded.
 #[test]
 fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
-    let source = "const log=[];async function main(_,ctx){for(let i=0;i<60;i++){log.push('x'.repeat(5000)+i);await durable.call('tick');}return log.length+':'+log[59].slice(-2);}";
+    let source = "const log=[];export async function main(_,ctx){for(let i=0;i<60;i++){log.push('x'.repeat(5000)+i);await durable.call('tick');}return log.length+':'+log[59].slice(-2);}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let mut most = 0;
@@ -404,7 +412,7 @@ fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
 /// written once, not again every few turns. A restore reads the whole chain.
 #[test]
 fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
-    let source = "async function main(){const words=new Uint32Array(8*1024);for(let i=0;i<words.length;i++)words[i]=Math.random()*2**32;for(let i=0;i<40;i++){words[i]=i;await durable.call('tick');}return words[39];}";
+    let source = "export async function main(){const words=new Uint32Array(8*1024);for(let i=0;i<words.length;i++)words[i]=Math.random()*2**32;for(let i=0;i<40;i++){words[i]=i;await durable.call('tick');}return words[39];}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     for _ in 0..39 {
@@ -423,7 +431,7 @@ fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
 /// Outcomes that arrive together go in one turn, in order, and commit once.
 #[test]
 fn outcomes_delivered_together_take_one_turn() -> Result<()> {
-    let source = "async function main(_,ctx){const order=[];await Promise.all([1,2,3].map(async n=>{await ctx.rpc.call({service:'S',handler:'h'},n);order.push(n);}));return order;}";
+    let source = "export async function main(_,ctx){const order=[];await Promise.all([1,2,3].map(async n=>{await ctx.rpc.call({service:'S',handler:'h'},n);order.push(n);}));return order;}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let started = run.view();
@@ -449,7 +457,7 @@ fn outcomes_delivered_together_take_one_turn() -> Result<()> {
 /// a big input, made and sent in one turn, is not saved with the heap.
 #[test]
 fn a_request_input_is_not_kept_in_the_heap() -> Result<()> {
-    let source = "const prompt=()=>JSON.stringify(Array.from({length:8000},(_,i)=>i*7919%10007));async function main(_,ctx){const r=await ctx.rpc.call({service:'S',handler:'h'},{prompt:prompt()});return r.input.prompt.length;}";
+    let source = "const prompt=()=>JSON.stringify(Array.from({length:8000},(_,i)=>i*7919%10007));export async function main(_,ctx){const r=await ctx.rpc.call({service:'S',handler:'h'},{prompt:prompt()});return r.input.prompt.length;}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let issued = run.view();
@@ -471,7 +479,7 @@ fn a_request_input_is_not_kept_in_the_heap() -> Result<()> {
 /// A request that loses a race may fail later, unobserved: the run goes on.
 #[test]
 fn a_losing_request_may_fail_later() -> Result<()> {
-    let source = "async function main(_,ctx){const call=ctx.rpc.call({service:'S',handler:'h'},1);const won=await Promise.race([call,ctx.sleep(1).then(()=>'timer')]);await ctx.sleep(10);return won;}";
+    let source = "export async function main(_,ctx){const call=ctx.rpc.call({service:'S',handler:'h'},1);const won=await Promise.race([call,ctx.sleep(1).then(()=>'timer')]);await ctx.sleep(10);return won;}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let pending = run.view().state.pending;
@@ -496,7 +504,7 @@ fn a_losing_request_may_fail_later() -> Result<()> {
 /// it, and a new run replaces the scope's last one, collecting its batches.
 #[test]
 fn a_scope_shares_its_kv_between_runs() -> Result<()> {
-    let first = r#"async function main(_,ctx){
+    let first = r#"export async function main(_,ctx){
       const v={n:1};const set=ctx.kv.set('x',v);v.n=99;
       await set;const seen=await ctx.kv.get('x');
       await ctx.kv.set('temporary',true);await ctx.kv.delete('temporary');
@@ -509,7 +517,7 @@ fn a_scope_shares_its_kv_between_runs() -> Result<()> {
     assert_eq!(kv(&store, "temporary"), None);
     assert!(store.batches() > 0);
     // Its attempt is gone (say, cancelled): another run takes the scope.
-    let second = "async function main(_,ctx){return await ctx.kv.get('x');}";
+    let second = "export async function main(_,ctx){return await ctx.kv.get('x');}";
     let programs = Arc::new(
         Programs::new(runtime())
             .compile("v1", first)?
@@ -521,6 +529,7 @@ fn a_scope_shares_its_kv_between_runs() -> Result<()> {
         "s",
         "next",
         "v2",
+        "main",
         Value::Null,
         2,
     ))?;
@@ -531,7 +540,7 @@ fn a_scope_shares_its_kv_between_runs() -> Result<()> {
 
 #[test]
 fn delivering_one_request_leaves_the_others_pending() -> Result<()> {
-    let source = r#"async function main(_,ctx){return await Promise.all([
+    let source = r#"export async function main(_,ctx){return await Promise.all([
         ctx.rpc.call({service:'Echo',handler:'echo'},1),
         ctx.rpc.call({service:'Echo',handler:'echo'},2)]);}"#;
     let store = Store::default();
@@ -547,7 +556,7 @@ fn delivering_one_request_leaves_the_others_pending() -> Result<()> {
 
 #[test]
 fn invalid_requests_are_refused_in_the_guest() -> Result<()> {
-    let source = r#"async function main(_,ctx){
+    let source = r#"export async function main(_,ctx){
         let reads=0;
         const value={get text(){return ++reads===1 ? 'valid' : '\ud800';}};
         const bad=[()=>ctx.kv.get(7),()=>ctx.kv.set(null,1),()=>ctx.kv.delete({}),
@@ -565,7 +574,7 @@ fn invalid_requests_are_refused_in_the_guest() -> Result<()> {
     assert_eq!(value(&run.view()), json!(vec![true; 15]));
     assert_eq!(run.view().state.next_operation, 0);
     // A timer past the host clock's range.
-    let source = "async function main(_,ctx){try{await ctx.sleep(1);return false;}catch(e){return e instanceof RangeError;}}";
+    let source = "export async function main(_,ctx){try{await ctx.sleep(1);return false;}catch(e){return e instanceof RangeError;}}";
     let run = start(&Store::default(), source, Value::Null, u64::MAX / 1_000_000)?;
     assert_eq!(value(&run.view()), true);
     Ok(())

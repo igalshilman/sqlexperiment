@@ -242,7 +242,9 @@ impl Image {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Commit {
+    /// The run, and the exported function it calls.
     pub run: String,
+    pub handler: String,
     /// The program, and the version (of its source) this run started on.
     pub program: String,
     pub version: u64,

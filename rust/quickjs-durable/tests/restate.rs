@@ -147,6 +147,7 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .port();
     let cache = quickjs_durable::page_cache().await.unwrap();
     let endpoint = quickjs_durable::bind(Endpoint::builder(), programs, &cache)
+        .unwrap()
         .bind(Doubler)
         .bind(fakes::Claude)
         .bind(quickjs_durable::Workspace::new(workspaces()))
@@ -201,7 +202,7 @@ async fn invocations() -> String {
     }
 }
 
-const COUNTER: &str = r#"async function main(input, ctx) {
+const COUNTER: &str = r#"export async function run(input, ctx) {
   const n = ((await ctx.kv.get('count')) ?? 0) + input;
   await ctx.kv.set('count', n);
   const doubled = await ctx.rpc.call({ service: 'Doubler', handler: 'double' }, n);
@@ -210,18 +211,18 @@ const COUNTER: &str = r#"async function main(input, ctx) {
   return { n, doubled, slept: Date.now() - started >= 200 };
 }"#;
 
-const FAILING: &str = r#"async function main() {
+const FAILING: &str = r#"export async function run() {
   await ctx_free();
 }
 async function ctx_free() { throw new RangeError('no luck'); }"#;
 
-const ATTACH: &str = r#"async function main(n, ctx) {
+const ATTACH: &str = r#"export async function run(n, ctx) {
   const doubled = ctx.rpc.call({ service: 'Doubler', handler: 'slow' }, n);
   await ctx.sleep(50);
   return await doubled;
 }"#;
 
-const RACE: &str = r#"async function main(input, ctx) {
+const RACE: &str = r#"export async function run(input, ctx) {
   if (input === 'late') return await ctx.kv.get('late');
   const slow = ctx.rpc.call({ service: 'Doubler', handler: 'slow' }, 21);
   slow.then((v) => ctx.kv.set('late', v));
@@ -297,8 +298,9 @@ async fn the_shipped_programs_do_what_they_say() {
     let _server = server().await;
     serve_programs(&quickjs_durable::embedded().unwrap()).await;
 
-    let (_, counted) = call("counter/alice/run", json!(20)).await;
+    let (_, counted) = call("counter/alice/add", json!(20)).await;
     assert_eq!(counted, json!(20));
+    assert_eq!(call("counter/alice/get", Value::Null).await.1, json!(20));
     let (_, memory) = call("memory/alice/run", json!(3)).await;
     assert_eq!(
         memory,
@@ -310,12 +312,16 @@ async fn the_shipped_programs_do_what_they_say() {
     assert_eq!(answered, json!("done after 300 ms"));
     let (_, timed_out) = call("timeout/alice/run", json!(3000)).await;
     assert_eq!(timed_out, json!("timed out"));
-    let (_, primes) = call("primes/alice/run", json!(20000)).await;
+    let (_, primes) = call("primes/alice/count", json!(20000)).await;
     assert_eq!(primes, json!(2262));
-    call("notes/alice/run", json!({"add": "Buy milk"})).await;
-    call("notes/alice/run", json!({"add": "Call mum"})).await;
-    call("notes/bob/run", json!({"add": "Bob's own"})).await;
-    let (_, notes) = call("notes/alice/run", json!({"done": 1})).await;
+    assert_eq!(
+        call("primes/alice/progress", Value::Null).await.1,
+        json!(19000)
+    );
+    call("notes/alice/add", json!("Buy milk")).await;
+    call("notes/alice/add", json!("Call mum")).await;
+    call("notes/bob/add", json!("Bob's own")).await;
+    let (_, notes) = call("notes/alice/done", json!(1)).await;
     assert_eq!(
         notes,
         json!([{"id": 1, "text": "Buy milk", "done": 1}, {"id": 2, "text": "Call mum", "done": 0}])
@@ -328,29 +334,38 @@ async fn the_shop_programs_compose() {
     let _server = server().await;
     serve_programs(&quickjs_durable::embedded().unwrap()).await;
     let order = |customer: &str, items: Value| json!({"customer": customer, "items": items});
-    call("inventory/widget/run", json!({"restock": 5})).await;
-    call("inventory/gadget/run", json!({"restock": 1})).await;
-    call("payments/alice/run", json!({"deposit": 100})).await;
+    call("inventory/widget/restock", json!(5)).await;
+    call("inventory/gadget/restock", json!(1)).await;
+    call("payments/alice/deposit", json!(100)).await;
 
     // Reserved, then charged.
     let both =
         json!([{"sku": "widget", "qty": 2, "price": 10}, {"sku": "gadget", "qty": 1, "price": 30}]);
-    let (_, paid) = call("checkout/order-1/run", order("alice", both.clone())).await;
+    let (_, paid) = call("checkout/order-1/pay", order("alice", both.clone())).await;
     assert_eq!(paid, json!({"status": "paid", "total": 50}));
     // The gadget is gone: the widget reserved before it is released.
-    let (_, cancelled) = call("checkout/order-2/run", order("alice", both)).await;
+    let (_, cancelled) = call("checkout/order-2/pay", order("alice", both)).await;
     assert_eq!(cancelled["status"], "cancelled");
     assert_eq!(cancelled["reason"], "Error: Out of stock: 0 left, 1 wanted");
     // Declined: the reservation is released too.
     let one = json!([{"sku": "widget", "qty": 1, "price": 10}]);
-    let (_, declined) = call("checkout/order-3/run", order("bob", one)).await;
+    let (_, declined) = call("checkout/order-3/pay", order("bob", one)).await;
     assert_eq!(declined["reason"], "Error: Declined: balance 0, charge 10");
     // An order checks out once.
-    let (_, again) = call("checkout/order-1/run", order("alice", json!([]))).await;
+    let (_, again) = call("checkout/order-1/pay", order("alice", json!([]))).await;
     assert_eq!(again, paid);
-    assert_eq!(call("inventory/widget/run", json!({})).await.1, json!(3));
-    assert_eq!(call("inventory/gadget/run", json!({})).await.1, json!(0));
-    assert_eq!(call("payments/alice/run", json!({})).await.1, json!(50));
+    assert_eq!(
+        call("inventory/widget/available", Value::Null).await.1,
+        json!(3)
+    );
+    assert_eq!(
+        call("inventory/gadget/available", Value::Null).await.1,
+        json!(0)
+    );
+    assert_eq!(
+        call("payments/alice/current", Value::Null).await.1,
+        json!(50)
+    );
 
     let (_, retried) = call("retry/a/run", json!({"failures": 2, "attempts": 5})).await;
     assert_eq!(retried["answer"], "ok after 3 calls");
@@ -359,9 +374,9 @@ async fn the_shop_programs_compose() {
     assert_eq!(status, 500);
     assert_eq!(gave_up["message"], "Error: Gave up after 2 attempts");
 
-    call("payments/carol/run", json!({"deposit": 25})).await;
-    let plan = json!({"customer": "carol", "price": 10, "periods": 3, "every": 100});
-    let (_, lapsed) = call("subscription/carol/run", plan).await;
+    call("payments/carol/deposit", json!(25)).await;
+    let plan = json!({"price": 10, "periods": 3, "every": 100});
+    let (_, lapsed) = call("subscription/carol/start", plan).await;
     assert_eq!(
         lapsed,
         json!({
@@ -378,14 +393,19 @@ async fn the_assistant_shops_with_tools() {
     let _server = server().await;
     serve_programs(&quickjs_durable::embedded().unwrap()).await;
     fakes::REQUESTS.lock().unwrap().clear();
-    call("inventory/widget/run", json!({"restock": 5})).await;
-    call("payments/dana/run", json!({"deposit": 100})).await;
-    let ask = |message: &str| json!({"customer": "dana", "message": message});
+    call("inventory/widget/restock", json!(5)).await;
+    call("payments/dana/deposit", json!(100)).await;
 
-    let (_, answered) = call("assistant/dana/run", ask("Two widgets, please")).await;
+    let (_, answered) = call("assistant/dana/chat", json!("Two widgets, please")).await;
     assert_eq!(answered, json!({"answer": "Bought 2 widgets."}));
-    assert_eq!(call("inventory/widget/run", json!({})).await.1, json!(3));
-    assert_eq!(call("payments/dana/run", json!({})).await.1, json!(80));
+    assert_eq!(
+        call("inventory/widget/available", Value::Null).await.1,
+        json!(3)
+    );
+    assert_eq!(
+        call("payments/dana/current", Value::Null).await.1,
+        json!(80)
+    );
 
     let requests = fakes::REQUESTS.lock().unwrap().clone();
     let tools: Vec<&str> = requests[0]["tools"]
@@ -407,10 +427,13 @@ async fn the_assistant_shops_with_tools() {
     assert_eq!(bought, r#"{"status":"paid","total":20}"#);
 
     // The next run continues the conversation.
-    call("assistant/dana/run", ask("Two more")).await;
+    call("assistant/dana/chat", json!("Two more")).await;
     let requests = fakes::REQUESTS.lock().unwrap().clone();
     assert_eq!(requests[3]["messages"].as_array().unwrap().len(), 7);
-    assert_eq!(call("payments/dana/run", json!({})).await.1, json!(60));
+    assert_eq!(
+        call("payments/dana/current", Value::Null).await.1,
+        json!(60)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -420,7 +443,7 @@ async fn the_coder_works_in_its_workspace() {
     serve_programs(&quickjs_durable::embedded().unwrap()).await;
     fakes::REQUESTS.lock().unwrap().clear();
 
-    let (status, done) = call("coder/hello/run", json!({"task": "Say goodbye"})).await;
+    let (status, done) = call("coder/hello/work", json!({"task": "Say goodbye"})).await;
     assert_eq!(
         (status, done),
         (200, json!({"answer": "Done.", "steps": 4}))
