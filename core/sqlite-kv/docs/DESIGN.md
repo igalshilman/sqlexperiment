@@ -327,10 +327,13 @@ The next open reuses it if the record is the one it committed, and its I/O
 is clean. This keeps the parsed schema warm, which cuts CPU per
 session several-fold ([cache results](../benches/CACHE_RESULTS.md)). A parked
 engine releases its view of the log (the next open replaces it), so what it
-holds is its parsed schema: measured at 40–110 KiB from one to 50 tables. Parked
-engines share a byte budget (`PageCacheConfig::engine_bytes`, 64 MiB), each
-weighed as 48 KiB plus 16 bytes per byte of schema SQL, measured when an engine
-opens and after a commit that may have changed the schema. Namespace states are
+holds is its database's buffer pool and its parsed schema. The buffer pool is
+a 3 MiB arena that turso maps outside the allocator: resident, ~4 MiB per
+parked engine (a counting allocator saw only the schema's 40–110 KiB, from one
+to 50 tables, and the budget had let ~1,300 engines, ~5 GiB, stay parked).
+Parked engines share a byte budget (`PageCacheConfig::engine_bytes`, 64 MiB),
+each weighed as 4 MiB plus 16 bytes per byte of schema SQL, measured when an
+engine opens and after a commit that may have changed the schema. Namespace states are
 capped by count. Least recently used go first; dropping either only makes a
 namespace cold.
 

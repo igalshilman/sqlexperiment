@@ -223,11 +223,13 @@ pub(crate) struct WarmEngine {
     schema_bytes: usize,
 }
 
-/// Memory of a parked engine besides its schema, measured with one table.
-const ENGINE_BYTES: usize = 48 << 10;
+/// Memory of a parked engine besides its schema: its database's buffer pool,
+/// which turso maps outside the allocator (a 3 MiB arena), and ~48 KiB more.
+/// Measured as resident memory: ~4 MiB per engine parked.
+const ENGINE_BYTES: usize = 4 << 20;
 
 impl WarmEngine {
-    /// Estimated memory: the parsed schema dominates once the view is released.
+    /// Estimated memory: the buffer pool, and the parsed schema.
     pub(crate) fn weight(&self) -> usize {
         ENGINE_BYTES + 16 * self.schema_bytes
     }
