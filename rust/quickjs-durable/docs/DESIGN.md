@@ -369,7 +369,7 @@ Reference limits, not a general resource-management API:
 | Guest linear memory                                       |                          64 MiB |
 | QuickJS allocator                                         |                          32 MiB |
 | QuickJS stack                                             |                          32 KiB |
-| A turn's JavaScript, by the wall clock (`Limits`)         |         10 s; commits after 1 s |
+| A turn's JavaScript, by the wall clock (`Limits`)         |       10 min; commits after 1 s |
 | Tracker memory                                            |    64 KiB, excluded from images |
 | Application source, input, host outcome                   |                      1 MiB each |
 | VM string extraction, including aggregate inspected state |                           1 MiB |
@@ -978,7 +978,7 @@ zeroing dead bytes; the throughput rows did not move with those (an A/B of
 both binaries on one server). Most of what is left is Restate's: a commit
 record and the journal per turn. The Rust
 SDK's server now sets `TCP_NODELAY`, which saved ~40 ms per round trip. One
-synchronous JavaScript job is capped by time (10 s by default), and the
+synchronous JavaScript job is capped by time (10 minutes by default), and the
 interpreter runs compute-bound code ~10x slower than V8.
 
 ### 10.1. A long coding session

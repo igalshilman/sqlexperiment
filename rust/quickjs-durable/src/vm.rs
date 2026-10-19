@@ -113,8 +113,10 @@ pub struct Runtime {
 /// replayed, so a turn needs no deterministic budget.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// Past this, the run fails with a trap: a synchronous job that never
-    /// returns would otherwise hold the handler, and do so on every retry.
+    /// Past this, the run fails with a trap. It is generous: it only ends a
+    /// synchronous job that never returns, which would otherwise hold its
+    /// scope and do so again on every retry. The endpoint declares it to
+    /// Restate as each program's inactivity timeout, so Restate waits as long.
     pub turn: Duration,
     /// Past this, a turn answering local requests stops at the next one and
     /// commits; the work goes on in the next turn.
@@ -124,7 +126,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            turn: Duration::from_secs(10),
+            turn: Duration::from_secs(10 * 60),
             checkpoint: Duration::from_secs(1),
         }
     }
@@ -247,6 +249,10 @@ impl Runtime {
     pub fn limited(mut self, limits: Limits) -> Self {
         self.limits = limits;
         self
+    }
+
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// Whether the kernel tracks writes, instead of instrumented stores.

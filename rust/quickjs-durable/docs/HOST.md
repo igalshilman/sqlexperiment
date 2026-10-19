@@ -226,7 +226,8 @@ On branches, a PR each:
    (§2), sharing the turn's session. Done: the Wasm runs async (#150), and
    one host function, `__host`, answers from `src/db.rs`.
 4. **Epochs instead of fuel.** Done: async Wasm (#150), then a wall-clock
-   `Limits` (10 s a turn, commit after 1 s) checked at a 10 ms epoch tick,
+   `Limits` (10 min a turn, `QJS_TURN_TIMEOUT`, declared to Restate as the
+   inactivity timeout; commit after 1 s) checked at a 10 ms epoch tick,
    where a long job also yields its thread. A compute-bound job ran ~10%
    faster without fuel (116 ms against 127 ms), and the coding session of
    DESIGN.md §10.1 now runs 200 steps instead of failing at 45.
