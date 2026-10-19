@@ -9,7 +9,10 @@
     now = 0,
     maxTime = 0,
     random = 1,
-    rootOutcome;
+    rootOutcome,
+    // The program's module, once evaluated: its exported functions.
+    program,
+    programError;
   // Each request's promise, by ID, until delivered. The request itself goes
   // to the host at the next report, and is forgotten here.
   const pending = new Map();
@@ -58,7 +61,7 @@
   }
   // A host call, in the turn: its answer, or the error it throws.
   function hostCall(operation, request) {
-    if (runId === undefined) throw new Error('The database is unavailable during application initialization');
+    if (runId === undefined) throw new Error('The database is unavailable while the module evaluates');
     const answer = JSON.parse(host(operation, JSON.stringify(request)));
     if (answer.ok) return answer.value;
     const error = new Error(answer.error.message);
@@ -95,7 +98,7 @@
     return rows;
   }
   function request(operation) {
-    if (runId === undefined) throw new Error('Durable operations are unavailable during application initialization');
+    if (runId === undefined) throw new Error('Durable operations are unavailable while the module evaluates');
     const id = runId + '/' + nextOperation++;
     issued.push({ id, ...operation });
     // A losing race may reject later, unobserved: no rejection tracker is
@@ -187,6 +190,18 @@
     pause() {
       request({ kind: 'resume' });
     },
+    // The program's module, as it evaluates: its exports are the handlers.
+    bind(namespace) {
+      namespace.then(
+        (exports) => (program = exports),
+        (error) => (programError = error),
+      );
+    },
+    handlers() {
+      if (programError) throw programError;
+      if (!program) throw new Error('The program did not finish evaluating');
+      return JSON.stringify(Object.keys(program).filter((name) => typeof program[name] === 'function'));
+    },
     init(json) {
       if (runId !== undefined) throw new Error('Invocation is already initialized');
       const config = JSON.parse(json);
@@ -197,10 +212,14 @@
       random = config.seed || 1;
     },
     start(json) {
-      const input = JSON.parse(json);
-      // main runs in the microtask pump, including synchronous exceptions.
+      const { handler, input } = JSON.parse(json);
+      const exported = program[handler];
+      // The handler runs in the microtask pump, including synchronous exceptions.
       Promise.resolve()
-        .then(() => main(input, durable))
+        .then(() => {
+          if (typeof exported !== 'function') throw new TypeError(`No exported function ${handler}`);
+          return exported(input, durable);
+        })
         .then(
           (value) => {
             try {
@@ -229,8 +248,8 @@
     },
     inspect() {
       if (!rootOutcome && pending.size === 0) rootOutcome = failure(new Error('Execution stalled: no durable wakeup'));
-      // The run ends when main settles: requests still pending are dropped,
-      // and their continuations never run.
+      // The run ends when its handler settles: requests still pending are
+      // dropped, and their continuations never run.
       if (rootOutcome) {
         pending.clear();
         issued = [];

@@ -1,4 +1,5 @@
-//! A run: one invocation of a program's `main`, turn by turn. A turn delivers
+//! A run: one call of a function a program exports, turn by turn. Each run
+//! starts from the program's golden image: its memory lasts for the run. A turn delivers
 //! one event to the VM, runs the JavaScript until it waits, and commits.
 //!
 //! A scope's storage is a sqlite-kv database ([`Scope`]). A turn is one
@@ -86,24 +87,30 @@ struct Written {
 }
 
 enum Delivery {
-    /// The run's first turn: `main(input)`, in `scope`.
-    Start { scope: String, input: Value },
+    /// The run's first turn: `handler(input)`, in `scope`.
+    Start {
+        scope: String,
+        handler: String,
+        input: Value,
+    },
     /// Requests' outcomes, delivered in order before the JavaScript runs.
     Complete(Vec<(String, Outcome)>),
 }
 
 impl Run {
-    /// Start run `run` of `program` on `input`, in the scope `key` (the
-    /// program's `ctx.key`), stored in `scope`: its first turn runs `main`
-    /// until it waits or settles, and commits. When the scope's commit is
+    /// Start run `run` of `program`'s `handler` on `input`, in the scope `key`
+    /// (the program's `ctx.key`), stored in `scope`: its first turn runs the
+    /// handler until it waits or settles, and commits. When the scope's commit is
     /// already this run's, this is another attempt at it: the run continues as
     /// committed, and `input` is the one it started with.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         programs: &Arc<Programs>,
         scope: &Scope,
         key: &str,
         run: &str,
         program: &str,
+        handler: &str,
         input: Value,
         now: u64,
     ) -> Result<Self> {
@@ -118,9 +125,10 @@ impl Run {
         let db = Arc::new(Mutex::new(db));
         if let Some(commit) = previous.filter(|commit| commit.run == run) {
             ensure!(
-                commit.program == program,
-                "Run {run} is of program {}",
-                commit.program
+                commit.program == program && commit.handler == handler,
+                "Run {run} is a call of {}.{}",
+                commit.program,
+                commit.handler
             );
             check(programs, &commit)?;
             return Ok(Self {
@@ -138,6 +146,7 @@ impl Run {
         vm.attach(db.clone());
         let commit = Commit {
             run: run.into(),
+            handler: handler.into(),
             program: program.into(),
             version: programs.get(program)?.version(),
             runtime: vm::VERSION,
@@ -166,6 +175,7 @@ impl Run {
         };
         let start = Delivery::Start {
             scope: key.into(),
+            handler: handler.into(),
             input,
         };
         this.turn(start, now).await?;
@@ -377,6 +387,7 @@ impl Run {
         };
         let commit = Commit {
             run: previous.run.clone(),
+            handler: previous.handler.clone(),
             program: previous.program.clone(),
             version: previous.version,
             runtime: previous.runtime,
@@ -420,7 +431,11 @@ async fn run(
     // ones delivered, then those the guest issues, as it reports them.
     let mut pending = commit.state.pending.clone();
     match delivery {
-        Delivery::Start { scope, input } => {
+        Delivery::Start {
+            scope,
+            handler,
+            input,
+        } => {
             let seed = fingerprint(commit.run.as_bytes()) as u32;
             let init = json!({
                 "runId": commit.run,
@@ -430,7 +445,8 @@ async fn run(
                 "seed": seed,
             });
             vm.invoke("init", &init).await?;
-            vm.invoke("start", &input).await?;
+            vm.invoke("start", &json!({"handler": handler, "input": input}))
+                .await?;
         }
         Delivery::Complete(outcomes) => {
             for (operation, outcome) in outcomes {

@@ -33,7 +33,7 @@ const INTRINSICS: i32 = !(1 << 9 | 1 << 10);
 /// The runtime's version: an image restores only on the runtime that made it.
 /// Bump it with anything an image depends on: the Wasm, the bridge
 /// (`guest.js`), the limits above, the imports' behavior, the VM metadata.
-pub(crate) const VERSION: u64 = 7;
+pub(crate) const VERSION: u64 = 8;
 
 /// A memory image cannot restore hidden mutable globals, table mutations or
 /// passive segment lifecycle. Check the original reactor in both build modes.
@@ -260,13 +260,14 @@ impl Runtime {
         matches!(self.tracking, Tracking::Native(_))
     }
 
-    /// Evaluate a program's source into its golden image. No host function
-    /// awaits anything while it runs, so it blocks rather than being async.
-    pub(crate) fn golden(&self, name: &str, source: &str) -> Result<Image> {
+    /// Evaluate a program's module into its golden image, and the names of
+    /// the functions it exports. No host function awaits anything while it
+    /// runs, so it blocks rather than being async.
+    pub(crate) fn golden(&self, name: &str, source: &str) -> Result<(Image, Vec<String>)> {
         futures::executor::block_on(self.evaluate(name, source))
     }
 
-    async fn evaluate(&self, name: &str, source: &str) -> Result<Image> {
+    async fn evaluate(&self, name: &str, source: &str) -> Result<(Image, Vec<String>)> {
         let mut vm = Vm::new(self, &format!("program/{name}"), 0).await?;
         vm.instance
             .get_typed_func::<(), ()>(&mut vm.store, "_initialize")?
@@ -283,16 +284,15 @@ impl Runtime {
         vm.limits().await?;
         vm.host_function().await?;
         vm.eval(BOOTSTRAP, false).await?;
-        vm.eval(source, false).await?;
+        vm.eval_module(source).await?;
         vm.drain().await?;
+        let handlers = vm.call("handlers", None).await?;
+        let handlers: Vec<String> = serde_json::from_str(&handlers)?;
         ensure!(
-            vm.eval("typeof main === 'function'", true)
-                .await?
-                .as_deref()
-                == Some("true"),
-            "A program must define main(input, ctx)"
+            !handlers.is_empty(),
+            "A program exports at least one function"
         );
-        vm.snapshot().await
+        Ok((vm.snapshot().await?, handlers))
     }
 }
 
@@ -794,6 +794,51 @@ impl Vm {
         let result = self.string(ptr).await;
         self.free_value.call_async(&mut self.store, ptr).await?;
         result
+    }
+    /// Evaluate `source` as the program's module, and hand the promise of its
+    /// namespace to the bridge (`__durable.bind`).
+    async fn eval_module(&mut self, source: &str) -> Result<()> {
+        const MODULE: i32 = 1;
+        let code = self.alloc(source.as_bytes()).await?;
+        let filename = self.alloc(b"program.js").await?;
+        let namespace = self
+            .eval_fn
+            .call_async(
+                &mut self.store,
+                (code, source.len().try_into()?, filename, MODULE),
+            )
+            .await?;
+        self.free.call_async(&mut self.store, code).await?;
+        self.free.call_async(&mut self.store, filename).await?;
+        ensure!(namespace != 0, "Missing evaluated module");
+        if self
+            .is_exception
+            .call_async(&mut self.store, namespace)
+            .await?
+            != 0
+        {
+            self.free_value
+                .call_async(&mut self.store, namespace)
+                .await?;
+            bail!("The program does not compile: {}", self.exception().await?)
+        }
+        let global = self.global.call_async(&mut self.store, ()).await?;
+        let key = self.alloc(b"__namespace").await?;
+        self.instance
+            .get_typed_func::<(i32, i32, i32), i32>(&mut self.store, "qjs_set_prop_string")?
+            .call_async(&mut self.store, (global, key, namespace))
+            .await?;
+        self.free.call_async(&mut self.store, key).await?;
+        self.free_value
+            .call_async(&mut self.store, namespace)
+            .await?;
+        self.free_value.call_async(&mut self.store, global).await?;
+        self.eval(
+            "__durable.bind(globalThis.__namespace); delete globalThis.__namespace",
+            false,
+        )
+        .await?;
+        Ok(())
     }
     async fn eval(&mut self, code: &str, stringify: bool) -> Result<Option<String>> {
         let code_ptr = self.alloc(code.as_bytes()).await?;

@@ -3,11 +3,12 @@
 //
 //   curl localhost:8080/memory/alice/run --json 3
 class Tally {
-  constructor() {
-    this.seen = new Map();
-  }
+  #seen = new Map();
   add(word) {
-    this.seen.set(word, (this.seen.get(word) ?? 0) + 1);
+    this.#seen.set(word, (this.#seen.get(word) ?? 0) + 1);
+  }
+  get counts() {
+    return Object.fromEntries(this.#seen);
   }
 }
 
@@ -15,7 +16,7 @@ function* words() {
   yield* ['durable', 'javascript', 'is', 'durable'];
 }
 
-async function main(rounds, ctx) {
+export async function run(rounds, ctx) {
   const tally = new Tally();
   const next = words();
   let calls = 0;
@@ -27,5 +28,5 @@ async function main(rounds, ctx) {
     count();
     await ctx.sleep(100); // the heap is saved here, and restored after
   }
-  return { tally: Object.fromEntries(tally.seen), calls };
+  return { tally: tally.counts, calls };
 }

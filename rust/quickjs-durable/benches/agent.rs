@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     let start = |now| {
         let task = json!({"task": "Refactor the parser"});
         block(Run::start(
-            &programs, &scope, "bench", "run", "coder", task, now,
+            &programs, &scope, "bench", "run", "coder", "work", task, now,
         ))
     };
     let mut run = start(1000)?;

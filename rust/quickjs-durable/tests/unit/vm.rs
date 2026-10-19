@@ -30,7 +30,7 @@ fn runtimes() -> Result<Vec<Runtime>> {
 #[tokio::test]
 async fn host_writes_are_tracked_until_the_next_commit() -> Result<()> {
     for runtime in runtimes()? {
-        let image = runtime.golden("host", "async function main() { return 1; }")?;
+        let (image, _) = runtime.golden("host", "export async function main() { return 1; }")?;
         let mut vm = Vm::new(&runtime, "host", 1).await?;
         vm.restore(&image).await?;
         vm.committed()?;
@@ -54,7 +54,7 @@ async fn host_writes_are_tracked_until_the_next_commit() -> Result<()> {
 #[cfg(feature = "verify-dirty")]
 async fn verification_oracle_detects_an_untracked_write() -> Result<()> {
     for runtime in runtimes()? {
-        let image = runtime.golden("oracle", "async function main() { return 1; }")?;
+        let (image, _) = runtime.golden("oracle", "export async function main() { return 1; }")?;
         let mut vm = Vm::new(&runtime, "oracle", 1).await?;
         vm.restore(&image).await?;
         // A write the tracker then forgets, as if it had missed it.

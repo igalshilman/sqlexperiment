@@ -28,9 +28,10 @@ Reading map: [model](#1-model-ownership-and-durability),
 
 A **program** is a named, immutable source, identified by its name and its
 **version**, a 64-bit fingerprint of the source. Its **golden image** is the VM
-after evaluating it, before any run's input is bound. A **scope** is the unit
+after evaluating it as a module, before any run's input is bound. A **scope** is the unit
 of storage and ownership: in Restate, one virtual object key. A **run** is one
-invocation of `main` in a scope, identified by a run ID. A **turn** starts or
+call of a function the program exports, in a scope, identified by a run ID
+(the invocation's). Each run starts from the golden image. A **turn** starts or
 continues a run and ends at one commit. A **request** is a guest operation; an
 **effect** is a request the host answers in a later turn (an RPC, a timer, a
 wakeup). An **attempt** is one try at a run in one process: a crash ends it,
@@ -61,7 +62,9 @@ Assumptions and invariants:
 
 ### 2.1. JavaScript API and wire values
 
-Application source defines `main(input, ctx)`. `ctx` and global `durable` refer to
+Application source is an ES module: each function it exports is a handler,
+called as `handler(input, ctx)`. Other exports, and functions it does not
+export, are not handlers; it imports nothing. `ctx` and global `durable` refer to
 one frozen API. Its nested KV and RPC objects are frozen too.
 
 | Call                                 | Request fields, in addition to `id` | Result                          |
@@ -150,8 +153,9 @@ The internal bridge exposes five host hooks, not application API methods:
 
 | Hook                 | Behavior                                                                                                             |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `bind(namespace)`    | At golden creation: keep the module's namespace promise; `handlers()` then lists its exported functions              |
 | `init(configJson)`   | Once only: set run ID, time, PRNG seed and time limit                                                                |
-| `start(inputJson)`   | Queue `main(input, durable)` through `Promise.resolve().then(...)`; capture its normalized root outcome              |
+| `start(callJson)`    | Queue `handler(input, durable)` through `Promise.resolve().then(...)`; capture its normalized root outcome           |
 | `deliver(eventJson)` | Advance logical time monotonically; find and remove the pending entry; resolve/reject its promise; do not drain jobs |
 | `pause()`            | Create an internal `{kind:"resume"}` request through the same ID/map mechanism                                       |
 | `inspect()`          | Return the requests issued since the last `inspect()`, then forget them; and where the run stands                    |
@@ -170,8 +174,8 @@ Report = {
 
 After draining jobs, a root still unsettled with no pending request is a failed
 "Execution stalled: no durable wakeup" outcome. Status is waiting until the root
-settles, then follows its success or failure: **the run ends when `main`
-settles**, as a request handler does, not when every promise has (as a Node.js
+settles, then follows its success or failure: **the run ends when its
+handler settles**, as a request handler does, not when every promise has (as a Node.js
 process would). Requests still pending then, such as a losing `Promise.race`
 branch or an ignored promise, are dropped with the pending map: their results
 are never delivered and their continuations never run; the terminal report
@@ -190,7 +194,7 @@ trait Store {
 
 Program::compile(runtime, name, source) -> Result<Program>   // golden creation
 Programs::new(shared_runtime).compile(name, source)?
-Run::start(&programs, &store, run, program, input, now).await -> Result<Run>
+Run::start(&programs, &scope, key, run, program, handler, input, now).await -> Result<Run>
 run.deliver(&store, operation_id, outcome, now).await -> Result<View>
 run.deliver_all(&store, vec![(operation_id, outcome), ...], now).await -> Result<View>
 run.view() -> View
@@ -258,9 +262,11 @@ Golden creation, once per program version, when the process starts (§5.5):
 2. Call `_initialize()`, then `qjs_init2(~((1<<9)|(1<<10)))`; require return zero.
    These flags disable weak references/finalization and the performance intrinsic.
 3. Apply QuickJS allocator and stack limits. Evaluate bridge code, then application
-   source as a global script, and drain all QuickJS jobs.
-4. Require `typeof main === 'function'`. Durable requests during initialization
-   throw because the bridge has no run ID yet.
+   source as a module (`qjs_eval` flag 1), hand its namespace promise to
+   `bind`, and drain all QuickJS jobs.
+4. Require at least one exported function (`handlers()`), each a Restate
+   handler name. Durable requests during evaluation throw because the bridge
+   has no run ID yet.
 5. Free temporary handles/strings, read runtime/context pointers and stack global,
    and copy complete linear memory: the program's golden image.
 
@@ -738,12 +744,12 @@ another heap layout fails at startup.
 
 ### 6.1. Start, delivery and another attempt
 
-`Run::start(run, program, input, now)` validates the run ID, input and time,
+`Run::start(key, run, program, handler, input, now)` validates the run ID, input and time,
 then reads the scope's commit and applies what follows it (§7). If the commit
-is this run's, it is another attempt: require the same program, check its
+is this run's, it is another attempt: require the same program and handler, check its
 version and the runtime's, and return the run as committed, without guest
 execution and without a VM. Otherwise a new run takes the scope: restore
-golden into a new VM, bind run ID, time and seed, queue `main` and run its
+golden into a new VM, bind run ID, time and seed, queue the handler and run its
 first turn. The previous run's batches become garbage of that first commit.
 
 `deliver_all(outcomes, now)` validates each outcome and the time, and
@@ -853,7 +859,7 @@ without KV runs no SQL.
 ### 8.1. KV mutation, RPC and completion
 
 ```js
-async function main(input, ctx) {
+export async function main(input, ctx) {
   const n = await ctx.kv.get('count');
   await ctx.kv.set('count', n + 1);
   const answer = await ctx.rpc.call({ service: 'Worker', handler: 'double' }, n + 1);
@@ -899,7 +905,9 @@ journal replay off:
 - Each program is a virtual object of its name, with no registration: the
   binary embeds its programs and evaluates them when it starts (§5.5). An object key is a
   scope; its exclusive handlers serialize its runs, one writer at a time.
-- A run is one invocation of the object's `run` handler, which drives its
+- Each exported function is an exclusive handler of the object, registered
+  from the program at startup (a manifest of its exports, not a macro). A run
+  is one invocation of a handler, which drives its
   turns itself, on one live VM. Its store is the object's state, remembering
   every key it read or wrote for the attempt: a key is read from Restate at
   most once. After each turn commits, the handler waits on Restate for the
@@ -914,7 +922,7 @@ journal replay off:
   pending requests under the same keys: Restate attaches a re-issued call to
   the original invocation, within the callee's idempotency retention. Nothing
   is replayed, and the host keeps no results.
-- `run` returns once `main` settles, when the run ends (§2.2): requests still
+- A handler returns once its function settles, when the run ends (§2.2): requests still
   outstanding are dropped, and a call already made finishes at its callee
   unobserved.
 

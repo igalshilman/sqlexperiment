@@ -118,6 +118,22 @@ pub fn start_in(scope: &Scope, source: &str, input: Value, now: u64) -> Result<R
         "s",
         "r",
         "v1",
+        "main",
+        input,
+        now,
+    ))
+}
+
+/// The call `run` of `handler` on the scope "s" of `source`'s program "v1".
+pub fn call(store: &Store, source: &str, run: &str, handler: &str, input: Value) -> Result<Run> {
+    let now = 1;
+    block(Run::start(
+        &programs(source),
+        &store.scope(),
+        "s",
+        run,
+        "v1",
+        handler,
         input,
         now,
     ))

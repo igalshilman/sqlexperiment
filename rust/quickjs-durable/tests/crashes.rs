@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 mod common;
 
-const FLOW: &str = r#"async function main(input, ctx){
+const FLOW: &str = r#"export async function main(input, ctx){
     // The heap counts the rows it inserted; the database must agree, whatever
     // a crash kept: a turn's SQL commits with the turn.
     ctx.db.sql`CREATE TABLE IF NOT EXISTS log(n INTEGER)`;
