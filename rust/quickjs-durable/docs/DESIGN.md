@@ -45,9 +45,9 @@ Assumptions and invariants:
 2. One writer owns a scope at a time: in Restate, the object's exclusive
    handler, for the whole run. A scope holds one run's image at a time; its
    KV is shared by its runs, in turn.
-3. Writes land in any order: a write counts once it is acknowledged (in
-   Restate, by a sync after it), and a failure may lose any that was not.
-   Reads within an attempt see its own writes.
+3. Writes are kept in issue order: a sync makes every write before it
+   durable, and a crash keeps a prefix of those not yet synced. Reads within
+   an attempt see its own writes.
 4. A turn happened once its commit, one put of the scope's database record,
    is stored, with its pages and its KV writes (§7). Effects are dispatched
    only after the commit that issued them, in issue order, so a crash that

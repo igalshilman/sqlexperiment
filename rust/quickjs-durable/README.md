@@ -74,8 +74,8 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   not saved.
 - **One commit**: a turn is one put of the scope's
   [sqlite-kv](../../core/sqlite-kv) record: its page batch, its KV writes (a
-  SQL table) and the run's state with its pending requests. Writes may land
-  in any order; the record is the atomic step.
+  SQL table) and the run's state with its pending requests. Restate keeps
+  writes in order, so whatever the record names is stored before it.
 - **No replay**: a retry restores the VM from the last commit and waits
   again on its requests under the same idempotency keys, attaching to calls
   already made.
