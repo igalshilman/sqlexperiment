@@ -13,7 +13,10 @@ nothing in between, the API's own messages stored in the object's database::
     serve(assistant)
 
 The model is ``model`` (``anthropic/model-id``), or else MODEL, or else
-anthropic/claude-sonnet-5-5, with ANTHROPIC_API_KEY.
+anthropic/claude-sonnet-5-5, with ANTHROPIC_API_KEY. Each request is the
+API's own JSON, as the host's ``claude.messages`` binding of the durable
+functions sends it: with ``fallbacks: "default"`` unless ``request`` says
+otherwise, and more of it from ``request``.
 
 It is the SDK tool runner's loop (``client.beta.messages.tool_runner``), of
 its own: the runner gives a tool its input but not its call's id, and cannot
@@ -57,9 +60,18 @@ from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
 
-__all__ = ["CANCELLED", "DEFAULT_MODEL", "agent", "prompt"]
+__all__ = ["CANCELLED", "DECLINED", "DEFAULT_MODEL", "REQUEST", "agent", "prompt"]
 
 DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
+
+# What each request has unless ``request`` says otherwise, as the host's
+# ``claude.messages`` binding sends it: a declined request is retried on
+# another model by the API itself.
+REQUEST: dict[str, Any] = {"max_tokens": 16000, "fallbacks": "default"}
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+# The answer to a request the model declined, on every model it was tried on.
+DECLINED = "Declined: the model would not answer this."
 
 # A tool: a ``tool`` or one of Restate's; an SDK tool (``@beta_async_tool``,
 # ``@beta_tool``), which gets its input only; or a tool the API runs (a dict,
@@ -74,7 +86,7 @@ def agent(
     system: str | Callable[[ObjectContext], str] | None = None,
     tools: Tools | Callable[[ObjectContext], Tools] = (),
     client: AsyncAnthropic | None = None,
-    max_tokens: int = 16000,
+    request: dict[str, Any] | Callable[[ObjectContext], dict[str, Any]] | None = None,
     **options: Any,
 ) -> Object:
     """
@@ -86,11 +98,12 @@ def agent(
     - ``status``, ``stop`` and ``steer``: what it is doing, and the message it
       answers; ``pending`` and ``signal``: what its tools wait for.
 
-    ``model``, ``system`` and ``tools`` may be functions of the invocation's
+    ``model``, ``system``, ``tools`` and ``request`` may be functions of the invocation's
     context (each user's, say); ``client``: the Anthropic client (a base URL
     or a gateway of your own), by default one with ANTHROPIC_API_KEY;
-    ``max_tokens``: the most tokens of each of the model's replies.
-    ``options``: those of ``restate.VirtualObject``. Add handlers of your own
+    ``request``: more of each request, as the API takes it, such as
+    ``{"max_tokens": 4096, "output_config": {"effort": "low"}}`` (over
+    ``REQUEST``). ``options``: those of ``restate.VirtualObject``. Add handlers of your own
     with ``@agent.handler``.
     """
     if not callable(model):
@@ -106,7 +119,7 @@ def agent(
             system=given(system),
             tools=given(tools),
             client=client,
-            max_tokens=max_tokens,
+            request=given(request),
         )
 
     async def messages(ctx: ObjectContext, request: MessagesRequest | None = None) -> Messages:
@@ -135,7 +148,7 @@ async def prompt(
     system: str | None = None,
     tools: Tools = (),
     client: AsyncAnthropic | None = None,
-    max_tokens: int = 16000,
+    request: dict[str, Any] | None = None,
     thread: str | None = None,
 ) -> str:
     """
@@ -154,7 +167,7 @@ async def prompt(
         model=model_id_of(model_of(model, DEFAULT_MODEL), "anthropic"),
         system=system,
         tools=list(tools),
-        max_tokens=max_tokens,
+        request={**REQUEST, **(request or {})},
         conversation=_Conversation(ctx.db, thread or ctx.key()),
     )
     id = turns.prompt_id(ctx)
@@ -266,7 +279,7 @@ class _Run:
     model: str
     system: str | None
     tools: list[Tool | Any]
-    max_tokens: int
+    request: dict[str, Any]
     conversation: _Conversation
 
     async def answer(self, ctx: Any, prompt: str, messages: list[dict[str, Any]]) -> None:
@@ -283,21 +296,25 @@ class _Run:
                 await self.conversation.append(prompt, results, steered=[s.id for s in steered])
                 turns.taken(s.id for s in steered)
                 messages.append(results)
-            reply = await self.request(messages)
+            reply = await self.reply(messages)
             message = {"role": "assistant", "content": [block.model_dump(exclude_none=True) for block in reply.content]}
             messages.append(message)
             # A paused turn (a tool the API runs) goes on with the next request.
             if reply.stop_reason == "pause_turn" or any(b["type"] == "tool_use" for b in message["content"]):
                 await self.conversation.append(prompt, message)
                 continue
-            await self.conversation.append(prompt, message, answer=_text(message["content"]))
+            answer = _text(message["content"]) or (DECLINED if reply.stop_reason == "refusal" else "")
+            await self.conversation.append(prompt, message, answer=answer)
             return
 
-    async def request(self, messages: list[dict[str, Any]]) -> Any:
+    async def reply(self, messages: list[dict[str, Any]]) -> Any:
         """The model's next reply."""
-        return await self.client.messages.create(
+        request = dict(self.request)
+        if request.get("fallbacks"):
+            request["betas"] = [*request.get("betas", []), _FALLBACK_BETA]
+        return await self.client.beta.messages.create(
+            **request,
             model=self.model,
-            max_tokens=self.max_tokens,
             messages=messages,
             **({"system": self.system} if self.system is not None else {}),
             **({"tools": [self.definition(t) for t in self.tools]} if self.tools else {}),

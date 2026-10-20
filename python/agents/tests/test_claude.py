@@ -107,6 +107,34 @@ async def test_the_model_gets_the_system_prompt_model_and_tools():
     assert request["model"] == "claude-opus-5-5" and "tools" not in request
 
 
+async def test_requests_are_the_apis_own_with_fallbacks_unless_given():
+    client = ClaudeClient(Teller())
+    obj = claude.agent("teller", client=client)
+    await Object().invoke(obj.handlers["chat"].fn, "hello")
+    obj = claude.agent("teller", client=client, request={"output_config": {"effort": "low"}, "fallbacks": None})
+    await Object().invoke(obj.handlers["chat"].fn, "hello")
+    fallback, own = client.requests
+    assert (fallback["max_tokens"], fallback["fallbacks"], fallback["betas"]) == (
+        16000,
+        "default",
+        ["server-side-fallback-2026-07-01"],
+    )
+    assert own["output_config"] == {"effort": "low"} and own["fallbacks"] is None and "betas" not in own
+
+
+async def test_a_declined_request_is_answered_so():
+    client = ClaudeClient(Teller())
+    create = client.create
+
+    async def declining(**params):
+        reply = await create(**params)
+        return reply.model_copy(update={"content": [], "stop_reason": "refusal"})
+
+    client.create = declining
+    obj = claude.agent("teller", client=client)
+    assert await Object().invoke(obj.handlers["chat"].fn, "hello") == claude.DECLINED
+
+
 def test_a_model_of_another_provider_fails_when_the_agent_is_defined():
     with pytest.raises(ValueError, match="anthropic/<model-id>"):
         claude.agent("assistant", model="openai/gpt-6-luna")

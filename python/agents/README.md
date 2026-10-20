@@ -45,10 +45,15 @@ Add handlers of your own with `@assistant.handler`.
 | `system`     | The system prompt                                                                                                                                         |
 | `tools`      | `tool`s and [Restate's tools](#restates-tools); the SDK's (`@beta_async_tool`, which get their input only); and tools the API runs, as dicts (web search) |
 | `client`     | The `AsyncAnthropic` client (a base URL or a gateway of your own); by default one with `ANTHROPIC_API_KEY`                                                |
-| `max_tokens` | The most tokens of each of the model's replies (default 16000)                                                                                            |
+| `request`    | More of each request, as the API takes it: `{"max_tokens": 4096, "output_config": {"effort": "low"}}`, over `REQUEST` (16000 tokens, `fallbacks: "default"`) |
 
-`model`, `system` and `tools` may also be functions of the invocation's
-context (each user's system prompt, say). `claude.prompt(ctx, text, ...)`
+`model`, `system`, `tools` and `request` may also be functions of the
+invocation's context (each user's system prompt, say). Each request is the
+API's own JSON, as a durable function's `ctx.call("claude.messages", ...)`
+sends it ([host bindings](../../rust/functions/docs/HOST.md)), and with
+`fallbacks: "default"` by default: a declined request is retried on another
+model by the API itself, and one declined on every model is answered
+`DECLINED`. `claude.prompt(ctx, text, ...)`
 answers a prompt in a handler of your own, with the same options, once,
 however often an attempt crashes (an invocation's first prompt has its id,
 the next `<id>:2`, and so on), in the conversation `thread` (by default, the
