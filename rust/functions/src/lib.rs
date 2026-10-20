@@ -14,6 +14,7 @@
 //!
 //! The design: [docs/DESIGN.md](../docs/DESIGN.md).
 
+mod budget;
 mod claude;
 mod codec;
 mod cow;
@@ -32,6 +33,7 @@ mod vm;
 mod wasi;
 mod workspace;
 
+pub use budget::Budget;
 pub use claude::Claude;
 pub use model::{GuestError, Operation, Outcome, RpcTarget, State, Status, View};
 pub use program::{Program, Programs};

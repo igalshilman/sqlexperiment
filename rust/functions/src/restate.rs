@@ -22,7 +22,7 @@
 //! made before the crash is attached to, not made again. The call ends when
 //! its function settles: requests still outstanding (a race's loser) are
 //! dropped, and their continuations never run.
-use crate::{Operation, Outcome, Programs, Run, Runtime, Scope, vm};
+use crate::{Budget, Operation, Outcome, Programs, Run, Runtime, Scope, vm};
 use restate_sdk::{
     context::{DurableFuture, RequestTarget},
     endpoint::ContextInternal,
@@ -80,6 +80,8 @@ pub struct JsObject {
     programs: Arc<Programs>,
     /// The objects' databases this process owned, kept between attempts.
     cache: PageCache,
+    /// The memory live runs may hold.
+    budget: Arc<Budget>,
 }
 
 /// A request the handler waits on: its outcome, and the time to deliver it at.
@@ -175,6 +177,10 @@ impl JsObject {
         let store = Arc::new(StateQueue::new(ctx.raw_state()));
         let namespace = format!("{}/{}", self.program, ctx.key());
         let scope = Scope::new(store.clone()).cached(self.cache.namespace(&namespace));
+        // Each turn first reserves what it may take; then the run holds its
+        // memory until it parks.
+        let mut lease = self.budget.lease();
+        lease.reserve(self.budget.peak(&self.program)).await;
         let started = Run::start(
             &self.programs,
             &scope,
@@ -187,6 +193,8 @@ impl JsObject {
         )
         .await;
         let mut run = committed(&store, started)?;
+        self.budget.record(&self.program, run.turn_peak());
+        lease.hold(run.resident());
         let mut waiting = DurableFuturesUnordered::<Waiting<'ctx>>::new();
         let mut operations: Vec<String> = Vec::new();
         let mut awaited: HashSet<String> = HashSet::new();
@@ -228,7 +236,19 @@ impl JsObject {
             let (outcomes, at) = match now_ready {
                 Some((operation, outcome, at)) => (vec![(operation, outcome)], at),
                 None => {
-                    let Some((index, (outcome, mut at))) = waiting.next().await? else {
+                    // While it waits, the run may park to free its memory.
+                    let park = lease.wait();
+                    let next = loop {
+                        tokio::select! {
+                            next = waiting.next() => break next,
+                            () = park.notified(), if run.resident() > 0 => {
+                                run.park();
+                                lease.hold(0);
+                            }
+                        }
+                    };
+                    lease.woken();
+                    let Some((index, (outcome, mut at))) = next? else {
                         return Err(TerminalError::new("The run waits on nothing").into());
                     };
                     // What else has arrived goes in the same turn, and commits
@@ -244,7 +264,17 @@ impl JsObject {
                     (outcomes, at)
                 }
             };
+            let peak = self.budget.peak(&self.program).max(run.footprint());
+            if !lease.try_reserve(peak) {
+                // Wait parked: a run that waits to fit holding its memory
+                // could keep the turns before it from ever fitting.
+                run.park();
+                lease.hold(0);
+                lease.reserve(peak).await;
+            }
             let delivered = run.deliver_all(outcomes, now().max(at)).await;
+            self.budget.record(&self.program, run.turn_peak());
+            lease.hold(run.resident());
             committed(&store, delivered)?;
         }
     }
@@ -365,12 +395,14 @@ pub fn bind(
     mut builder: restate_sdk::endpoint::Builder,
     programs: &Arc<Programs>,
     cache: &PageCache,
+    budget: &Arc<Budget>,
 ) -> anyhow::Result<restate_sdk::endpoint::Builder> {
     for name in programs.names() {
         let object = JsObject {
             program: name.to_owned(),
             programs: programs.clone(),
             cache: cache.clone(),
+            budget: budget.clone(),
         };
         builder = builder.bind(
             object.definition()?.options(
@@ -388,10 +420,13 @@ pub fn bind(
 /// An endpoint serving `programs`, and [`crate::Claude`] and
 /// [`crate::Workspace`] for them to call.
 pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
-    Ok(bind(Endpoint::builder(), programs, &page_cache().await?)?
-        .bind(crate::Claude::from_env())
-        .bind(crate::Workspace::from_env())
-        .build())
+    let budget = Budget::from_env()?;
+    Ok(
+        bind(Endpoint::builder(), programs, &page_cache().await?, &budget)?
+            .bind(crate::Claude::from_env())
+            .bind(crate::Workspace::from_env())
+            .build(),
+    )
 }
 
 /// A cache of the scopes' databases for this process: 64 MiB in memory, and

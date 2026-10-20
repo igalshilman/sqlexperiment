@@ -76,6 +76,9 @@ are JSON (no input is null). `ctx` is all it needs from outside:
   pending are dropped. Await what must happen.
 - Compute as long as you need. Work that awaits has no limit; one stretch
   without an await may run 10 minutes (`FUNCTIONS_TURN_TIMEOUT`).
+- `FUNCTIONS_MEMORY=1g` caps the memory calls hold. Past it, the calls that
+  have waited longest let their memory go, and restore it when their wait
+  ends; a call that does not fit waits its turn.
 - A changed file is a new function: a call still waiting when its file
   changes cannot carry on, since its memory belongs to the old source.
 
