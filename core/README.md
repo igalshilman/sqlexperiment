@@ -1,12 +1,11 @@
 # Core
 
-What every SDK here builds on: the storage, and the change to the Restate
-SDKs' shared core that runs a handler without journal replay.
+What every SDK here builds on: the storage. (The Restate SDKs' shared core,
+which runs a handler without journal replay since 8.1.0, is used as released.)
 
-| Path                                            | What                                                                                                                                                                                                                                                |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`sqlite-kv/`](sqlite-kv/README.md)             | **The storage.** SQL over an asynchronous key/value store, for namespaces with one owner at a time: a Rust crate. The [Node.js addon](../typescript/packages/sql-node/README.md) and the [Python extension](../python/sqlite-kv/README.md) wrap it. |
-| [`sdk-shared-core/`](sdk-shared-core/README.md) | **The patched shared core**: the SDKs' VM, with `JournalReplay::Disabled`, as a patch that each SDK's build applies to a fresh clone.                                                                                                               |
+| Path                                | What                                                                                                                                                                                                                                                |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`sqlite-kv/`](sqlite-kv/README.md) | **The storage.** SQL over an asynchronous key/value store, for namespaces with one owner at a time: a Rust crate. The [Node.js addon](../typescript/packages/sql-node/README.md) and the [Python extension](../python/sqlite-kv/README.md) wrap it. |
 
 ## Build and test
 

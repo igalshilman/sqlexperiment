@@ -78,7 +78,7 @@ def main() -> None:
         supervising.clear()
         bank.stop()
         agent.stop()
-        server.kill()
+        server.close()
 
 
 def campaign(server: Server, services: dict[Service, str], supervising: threading.Event) -> None:

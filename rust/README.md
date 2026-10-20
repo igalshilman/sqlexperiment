@@ -4,7 +4,7 @@ The Rust side: the patched Restate Rust SDK, and what is built on it.
 
 | Path                                | What                                                                                                                                                                                                 |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`sdk/`](sdk/README.md)             | **The SDK changes.** Patches to the Restate Rust SDK, over the patched shared core: handlers without journal replay, raw state, concurrent awaits, `TCP_NODELAY`                                     |
+| [`sdk/`](sdk/README.md)             | **The SDK changes.** Patches to the Restate Rust SDK, on the released shared core 8.1.0: handlers without journal replay, raw state, concurrent awaits, `TCP_NODELAY`                                |
 | [`functions/`](functions/README.md) | **Durable JavaScript in Restate objects**: QuickJS in WebAssembly, its memory saved at each wait; a binary serving the durable functions of [`examples-functions/`](../examples-functions/README.md) |
 
 ```sh

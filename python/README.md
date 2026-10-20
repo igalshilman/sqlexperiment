@@ -1,15 +1,15 @@
 # Python
 
-SQL in Restate virtual objects, in Python: the same storage and the same
-patched shared core as the TypeScript side, in a uv workspace of its own
+SQL in Restate virtual objects, in Python: the same storage as the TypeScript
+side, in a uv workspace of its own
 ([`pyproject.toml`](pyproject.toml)).
 
-| Path                                | What                                                                                                                                                                                                               |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`sqlite-kv/`](sqlite-kv/README.md) | **The extension**, the `sqlite-kv` Python package: the crate over a key/value store implemented in Python (PyO3), as the [Node.js addon](../typescript/packages/sql-node/README.md) is for JavaScript.             |
-| [`sdk/`](sdk/README.md)             | **The SDK changes.** Patches to the Restate Python SDK, over [the patched shared core](../core/sdk-shared-core/README.md): handlers without journal replay, and `ctx.db` and `ctx.transaction()` on the extension. |
-| [`agents/`](agents/README.md)       | **The agent integrations**, the `restate-agents` Python package: LangGraph and Pydantic AI agents in virtual objects, their state in the object's database.                                                        |
-| [`tests/`](tests)                   | **The tests** against a real Restate server: the examples, the context without journal replay, Restate's tools for agents, and a bank through crashes.                                                             |
+| Path                                | What                                                                                                                                                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`sqlite-kv/`](sqlite-kv/README.md) | **The extension**, the `sqlite-kv` Python package: the crate over a key/value store implemented in Python (PyO3), as the [Node.js addon](../typescript/packages/sql-node/README.md) is for JavaScript. |
+| [`sdk/`](sdk/README.md)             | **The SDK changes.** Patches to the Restate Python SDK, on the released shared core 8.1.0: handlers without journal replay, and `ctx.db` and `ctx.transaction()` on the extension.                     |
+| [`agents/`](agents/README.md)       | **The agent integrations**, the `restate-agents` Python package: LangGraph and Pydantic AI agents in virtual objects, their state in the object's database.                                            |
+| [`tests/`](tests)                   | **The tests** against a real Restate server: the examples, the context without journal replay, Restate's tools for agents, and a bank through crashes.                                                 |
 
 The examples are beside this directory, in
 [`examples-python/`](../examples-python/README.md): each a small file you run with uv.

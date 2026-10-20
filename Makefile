@@ -1,7 +1,6 @@
 # Build and test everything, part by part:
 #
-#   core/        the sqlite-kv crate, and the patch to the SDKs' shared core
-#                (core/sdk-shared-core) that the SDKs build on
+#   core/        the sqlite-kv crate
 #   typescript/  the pnpm workspace: the patched TypeScript SDK, the Node.js
 #                addon, the integrations and their tests; with the examples
 #                (examples-typescript/, a member of the workspace)
@@ -25,13 +24,12 @@
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
-SDK_TARBALL := typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz
+SDK_TARBALL := typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
 CORE := core/sqlite-kv
 FUNCTIONS := rust/functions
 # CPython for WASI, with its standard library: the engine of durable Python.
 PY_ENGINE := $(CARGO_TARGET_DIR)/pywasm/out/python.wasm
 ADDON := typescript/packages/sql-node/sqlite_kv.node
-CORE_PATCH := core/sdk-shared-core/sdk-shared-core.patch
 SDK_PY := python/sdk/.build/sdk-python/.patched
 SDK_RS := rust/sdk/.build/sdk-rust/.patched
 # Formats the TypeScript, JavaScript and Markdown of every part, as .oxfmtrc.json says.
@@ -92,7 +90,7 @@ $(ADDON): $(wildcard typescript/packages/sql-node/src/*.rs $(CORE)/src/*.rs $(CO
 
 sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK (typescript/packages/sdk-typescript)
 
-$(SDK_TARBALL): $(wildcard typescript/packages/sdk-typescript/patches/*.patch) $(CORE_PATCH) typescript/packages/sdk-typescript/setup.sh typescript/packages/sdk-typescript/inline-wasm.mjs
+$(SDK_TARBALL): $(wildcard typescript/packages/sdk-typescript/patches/*.patch) typescript/packages/sdk-typescript/setup.sh
 	typescript/packages/sdk-typescript/setup.sh
 
 js: $(ADDON) $(SDK_TARBALL) ## The pnpm workspace, installed with the patched SDK and the addon
@@ -100,12 +98,12 @@ js: $(ADDON) $(SDK_TARBALL) ## The pnpm workspace, installed with the patched SD
 
 sdk-py: $(SDK_PY) ## The patched Python SDK's sources (python/sdk), for the uv workspace to build
 
-$(SDK_PY): $(wildcard python/sdk/patches/*.patch) $(CORE_PATCH) python/sdk/setup.sh
+$(SDK_PY): $(wildcard python/sdk/patches/*.patch) python/sdk/setup.sh
 	python/sdk/setup.sh
 
 sdk-rs: $(SDK_RS) ## The patched Rust SDK's sources (rust/sdk)
 
-$(SDK_RS): $(wildcard rust/sdk/patches/*.patch) $(CORE_PATCH) rust/sdk/setup.sh
+$(SDK_RS): $(wildcard rust/sdk/patches/*.patch) rust/sdk/setup.sh
 	rust/sdk/setup.sh
 
 py: $(SDK_PY) ## The uv workspace (python/.venv): the patched Python SDK and the Python extension, rebuilt when their Rust changes
