@@ -8,12 +8,14 @@
 //! - [`Run`], [`Runtime`], [`Programs`]: the runtime. A run keeps its VM live
 //!   from turn to turn, and commits each turn to its [`Scope`]'s database (in
 //!   Restate, kept in the object's state).
-//! - [`Claude`]: the `claude` service, for programs to call models.
+//! - [`Bindings`]: the operations the host makes for programs,
+//!   `ctx.call(name, input)`, such as [`Claude`]'s `claude.messages`.
 //! - [`Workspace`]: the `workspace` object, a directory and a shell for
 //!   coding agents.
 //!
 //! The design: [docs/DESIGN.md](../docs/DESIGN.md).
 
+mod bindings;
 mod budget;
 mod claude;
 mod codec;
@@ -33,6 +35,7 @@ mod vm;
 mod wasi;
 mod workspace;
 
+pub use bindings::{Binding, Bindings, HostCall};
 pub use budget::Budget;
 pub use claude::Claude;
 pub use model::{GuestError, Operation, Outcome, RpcTarget, State, Status, View};

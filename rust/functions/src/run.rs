@@ -273,6 +273,51 @@ impl Run {
         self.live = None;
     }
 
+    /// The input of the pending call `operation` (an RPC, or a binding's
+    /// call), read from the guest's heap, where it stays until the call is
+    /// answered: the host reads it when it makes the call, and again on
+    /// another attempt. A new attempt restores the VM to read it. The inner
+    /// `Err` is the guest's: its input is not JSON, and the call fails.
+    pub async fn input(&mut self, operation: &str) -> Result<Result<Value, GuestError>> {
+        ensure!(
+            self.usable,
+            "This attempt at the run failed: start it again"
+        );
+        let pending = self.commit.state.pending.iter();
+        ensure!(
+            pending
+                .filter(|p| matches!(p, Operation::Rpc { .. } | Operation::Call { .. }))
+                .any(|p| p.id() == operation),
+            "No pending call {operation}"
+        );
+        let now = self.commit.state.now;
+        self.usable = false;
+        if self.live.is_none() {
+            self.live = Some(self.restore(now).await?);
+        }
+        let live = self.live.as_mut().context("No live VM")?;
+        live.vm.begin_turn(now)?;
+        let answer = match live.vm.call("input", Some(operation)).await {
+            Ok(answer) => answer,
+            // The guest ran out of memory or time serializing it: its image is
+            // unusable, and would fail the same way again.
+            Err(error) => match vm::trap(&error) {
+                Some(message) => {
+                    self.live = None;
+                    self.usable = true;
+                    let message = format!("The input could not be read: {message}");
+                    return Ok(Err(GuestError::new("RangeError", message)));
+                }
+                None => return Err(error.into()),
+            },
+        };
+        self.usable = true;
+        Ok(match serde_json::from_str(&answer)? {
+            Outcome::Success { value, .. } => Ok(value),
+            Outcome::Failure { error, .. } => Err(error),
+        })
+    }
+
     /// The run as of its last commit.
     pub fn view(&self) -> View {
         let commit = &self.commit;
@@ -498,9 +543,19 @@ async fn run(
             }
         }
     }
+    // Operation IDs are the run's and numbered in order: an ID, and the
+    // idempotency key made from it, names one request on every attempt.
+    let mut next = commit.state.next_operation;
+    let mut numbered = |operation: &Operation| {
+        let expected = format!("{}/{next}", commit.run);
+        next += 1;
+        wasmtime::ensure!(operation.id() == expected, "Unexpected operation ID");
+        Ok(())
+    };
     let report = loop {
         vm.drain().await?;
         let report = vm.inspect().await?;
+        report.issued.iter().try_for_each(&mut numbered)?;
         let mut answered = false;
         for operation in report.issued.iter().cloned() {
             let kv = match &operation {
@@ -533,6 +588,7 @@ async fn run(
                 matches!(&report.issued[..], [Operation::Resume { .. }]),
                 "Missing resume wakeup"
             );
+            report.issued.iter().try_for_each(&mut numbered)?;
             pending.extend(report.issued.iter().cloned());
             break report;
         }

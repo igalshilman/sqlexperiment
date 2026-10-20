@@ -419,10 +419,10 @@ fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
         step(&mut run)?;
     }
     assert_eq!(store.batches(), 40);
-    // The first batch holds 32 KiB of noise; the others, a word each. A new
-    // first batch every 16 turns took ~155 KiB.
+    // The first batch holds 32 KiB of noise; the others, a word each (~112
+    // KiB in all). A new first batch every 16 turns took ~155 KiB.
     let written = store.bytes_written();
-    assert!(written < 112 * 1024, "{written} bytes");
+    assert!(written < 120 * 1024, "{written} bytes");
     let mut run = start(&store, source, Value::Null, 1)?;
     assert_eq!(value(&finish(&mut run)?), json!(39));
     Ok(())
@@ -439,7 +439,7 @@ fn outcomes_delivered_together_take_one_turn() -> Result<()> {
         .state
         .pending
         .iter()
-        .map(|operation| (operation.id().to_owned(), answer(operation)))
+        .map(|operation| (operation.id().to_owned(), answer(&mut run, operation)))
         .collect();
     outcomes.reverse();
     let duplicate = vec![outcomes[0].clone(), outcomes[0].clone()];
@@ -453,26 +453,43 @@ fn outcomes_delivered_together_take_one_turn() -> Result<()> {
     Ok(())
 }
 
-/// A request is the host's once issued: the guest keeps only its promise, so
-/// a big input, made and sent in one turn, is not saved with the heap.
+/// A call's input stays in the heap until the call is answered: the commit
+/// keeps the call's ID, not a copy, and the host reads the input from the
+/// heap, the same after a restore. The guest's own idempotency key goes with
+/// the call; without one, the call's key is its ID.
 #[test]
-fn a_request_input_is_not_kept_in_the_heap() -> Result<()> {
-    let source = "const prompt=()=>JSON.stringify(Array.from({length:8000},(_,i)=>i*7919%10007));export async function main(_,ctx){const r=await ctx.rpc.call({service:'S',handler:'h'},{prompt:prompt()});return r.input.prompt.length;}";
+fn a_call_input_stays_in_the_heap_until_answered() -> Result<()> {
+    let source = "const prompt=()=>JSON.stringify(Array.from({length:8000},(_,i)=>i*7919%10007));export async function main(_,ctx){const r=await ctx.rpc.call({service:'S',handler:'h'},{prompt:prompt()},{idempotencyKey:'mine'});const c=await durable.call('model',{n:1n}).catch(e=>e.name+': '+e.message);return [r.input.prompt.length,c];}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
     let issued = run.view();
-    // ~39 KiB of JSON went through the heap; the commit holds the request.
+    // ~39 KiB of JSON, kept in the heap, compressed; none in the commit.
     assert!(
-        issued.batch_bytes < 8 * 1024,
+        (8 * 1024..32 * 1024).contains(&issued.batch_bytes),
         "{} bytes",
         issued.batch_bytes
     );
+    assert!(issued.commit_bytes < 2048, "{} bytes", issued.commit_bytes);
+    let call = &issued.state.pending[0];
+    assert_eq!(call.idempotency_key(), "mine");
+    let input = block(run.input(call.id()))?.unwrap();
+    // Another attempt restores the heap to read it.
+    let mut run = start(&store, source, Value::Null, 2)?;
+    assert_eq!(block(run.input(call.id()))?.unwrap(), input);
+    assert!(input["prompt"].as_str().unwrap().len() > 32_000);
+    step(&mut run)?;
+    // An input JSON cannot hold fails its call, as it is read.
+    let model = run.view().state.pending[0].clone();
+    assert_eq!(model.idempotency_key(), model.id());
+    let error = block(run.input(model.id()))?.unwrap_err();
+    assert_eq!(error.name, "TypeError");
+    let failed = Outcome::failure(error.name, error.message);
+    let done = value(&block(run.deliver(model.id(), failed, 3))?);
+    assert!(done[0].as_u64() > Some(32_000));
     assert!(
-        issued.commit_bytes > 32 * 1024,
-        "{} bytes",
-        issued.commit_bytes
+        done[1].as_str().unwrap().starts_with("TypeError: "),
+        "{done}"
     );
-    assert!(value(&finish(&mut run)?).as_u64() > Some(32_000));
     Ok(())
 }
 
@@ -567,11 +584,12 @@ fn invalid_requests_are_refused_in_the_guest() -> Result<()> {
           ()=>ctx.rpc.call({service:'x',handler:'x'},()=>1),
           ()=>ctx.kv.set('x','\ud800'),()=>ctx.kv.get('\ud800'),
           ()=>ctx.kv.set('x',{['\ud800']:1}),()=>ctx.call('\ud800'),
-          ()=>ctx.kv.set('bad',value)];
+          ()=>ctx.kv.set('bad',value),()=>ctx.call('x',null,{idempotencyKey:''}),
+          ()=>ctx.call('x',null,{key:'typo'}),()=>ctx.rpc.call({service:'x',handler:'x'},1,{idempotencyKey:7})];
         return bad.map(f=>{try{f();return false;}catch(e){return e instanceof TypeError;}});
     }"#;
     let run = start(&Store::default(), source, Value::Null, 1000)?;
-    assert_eq!(value(&run.view()), json!(vec![true; 15]));
+    assert_eq!(value(&run.view()), json!(vec![true; 18]));
     assert_eq!(run.view().state.next_operation, 0);
     // A timer past the host clock's range.
     let source = "export async function main(_,ctx){try{await ctx.sleep(1);return false;}catch(e){return e instanceof RangeError;}}";

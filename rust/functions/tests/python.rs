@@ -183,7 +183,8 @@ async def main(input, ctx):
         .find(|operation| matches!(operation, functions::Operation::Rpc { target, .. } if target.service == "Fast"))
         .expect("the fast call")
         .clone();
-    let done = block(run.deliver(call.id(), answer(&call), 6001))?;
+    let answer = answer(&mut run, &call);
+    let done = block(run.deliver(call.id(), answer, 6001))?;
     assert_eq!(value(&done), json!({"late": true, "fast": 1}));
     Ok(())
 }
@@ -206,6 +207,43 @@ async def main(input, ctx):
     let done = finish(&mut run)?;
     assert_eq!(value(&done), json!({"refused": true, "tuple": [1, "two"]}));
     assert_eq!(kv(&store, "tuple"), Some(json!([1, "two"])));
+    Ok(())
+}
+
+/// A call's input stays in the interpreter's memory until the call is
+/// answered: the host reads it there, the same after a restore, and an input
+/// JSON cannot hold fails the call as it is read.
+#[test]
+fn python_call_inputs_are_read_from_the_heap() -> Result<()> {
+    let source = r#"
+async def main(input, ctx):
+    asked = await ctx.call("model", {"messages": ["hi"]}, idempotency_key="mine")
+    try:
+        await ctx.call("model", {1, 2})
+    except Exception as error:
+        refused = f"{type(error).__name__} {error.name}"
+    return {"asked": asked, "refused": refused}
+"#;
+    let store = Store::default();
+    let run = start_python(&store, source, Value::Null, 1)?;
+    let call = run.view().state.pending[0].clone();
+    assert!(matches!(&call, functions::Operation::Call { name, .. } if name == "model"));
+    assert_eq!(call.idempotency_key(), "mine");
+    assert!(run.view().commit_bytes < 1024);
+    // Another attempt restores the heap to read it.
+    let mut run = start_python(&store, source, Value::Null, 2)?;
+    let input = block(run.input(call.id()))?.unwrap();
+    assert_eq!(input, json!({"messages": ["hi"]}));
+    let view = block(run.deliver(call.id(), Outcome::success(7), 3))?;
+    let bad = view.state.pending[0].clone();
+    assert_eq!(bad.idempotency_key(), bad.id());
+    let error = block(run.input(bad.id()))?.unwrap_err();
+    assert_eq!(error.name, "TypeError");
+    let done = block(run.deliver(bad.id(), Outcome::failure(error.name, error.message), 4))?;
+    assert_eq!(
+        value(&done),
+        json!({"asked": 7, "refused": "OperationError TypeError"})
+    );
     Ok(())
 }
 

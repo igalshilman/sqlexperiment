@@ -1184,6 +1184,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
+name = "functions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "futures-executor",
+ "getrandom 0.3.4",
+ "libc",
+ "reqwest",
+ "restate-sdk",
+ "serde",
+ "serde_json",
+ "sqlite-kv",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wasm-encoder",
+ "wasmparser",
+ "wasmtime",
+ "wat",
+ "zstd",
+]
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2612,31 +2638,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "functions"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "futures",
- "futures-executor",
- "getrandom 0.3.4",
- "libc",
- "reqwest",
- "restate-sdk",
- "serde",
- "serde_json",
- "sqlite-kv",
- "tempfile",
- "tokio",
- "tracing-subscriber",
- "wasm-encoder",
- "wasmparser",
- "wasmtime",
- "wat",
- "zstd",
 ]
 
 [[package]]
