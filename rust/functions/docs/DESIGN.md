@@ -75,8 +75,17 @@ one frozen API. Its nested KV and RPC objects are frozen too.
 | `ctx.rpc.call(target, input = null)` | `kind:"rpc", target, input`         | JSON response                   |
 | `ctx.call(name, args = null)`        | `kind:"call", name, args`           | Custom host response            |
 | `ctx.sleep(ms)`                      | `kind:"sleep", deadline: now + ms`  | null at/after deadline          |
+| `ctx.signal(name, input = null)`     | `kind:"signal", name, input`        | The signal's value              |
 
 `ctx.key` is the scope: the key of the object the program is served as.
+
+A `signal` waits in `function_signals`, a journaled object keyed
+`<program>:<key>` (`src/signals.rs`): the handler calls its `wait` under the
+request's idempotency key, so a retried attempt joins the same wait, and the
+run parks as for any call. The object's built-in handlers, `pending` and
+`signal`, list the waits and resolve one (by its id, or the oldest for a
+name; a signal no one waits for is dropped, or kept with `keep`). A run that
+settles first has its waits forgotten.
 
 `target` is `{service: string, handler: string, key?: string}`. Service and handler
 are nonempty; unknown fields are rejected. The optional key selects the remote

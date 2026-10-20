@@ -143,6 +143,8 @@ fn programs() -> Arc<Programs> {
                 .and_then(|p| p.compile("race", RACE))
                 .and_then(|p| p.compile("host", HOST))
                 .and_then(|p| p.compile("keyed", KEYED))
+                .and_then(|p| p.compile("approvals", APPROVALS))
+                .and_then(|p| p.compile_python("approvals_py", APPROVALS_PY))
                 .unwrap();
             Arc::new(programs)
         })
@@ -279,6 +281,178 @@ const KEYED: &str = r#"export async function run(n, ctx) {
   const once = () => ctx.rpc.call({ service: 'Doubler', handler: 'slow' }, n, { idempotencyKey: `slow-${n}` });
   return [await once(), await once()];
 }"#;
+
+const APPROVALS: &str = r#"export async function refund(order, ctx) {
+  const verdict = await ctx.signal('approval', { order });
+  const note = await ctx.signal('note');
+  return { verdict, note };
+}
+export async function race(_, ctx) {
+  return await Promise.race([ctx.signal('never', 'raced'), ctx.sleep(50).then(() => 'timer')]);
+}
+export async function both(_, ctx) {
+  return await Promise.all([ctx.signal('vote', 1), ctx.signal('vote', 2)]);
+}"#;
+
+const APPROVALS_PY: &str = r#"
+async def refund(order, ctx):
+    verdict = await ctx.signal("approval", {"order": order})
+    return {"verdict": verdict}
+"#;
+
+/// Send `body` to `path` without waiting: the invocation's id.
+async fn send(path: &str, body: Value) -> String {
+    let (status, sent) = call(&format!("{path}/send"), body).await;
+    assert_eq!(status, 202, "{sent}");
+    sent["invocationId"].as_str().unwrap().to_owned()
+}
+
+/// The answer of the invocation `id`, once there is one.
+async fn attach(id: &str) -> (u16, Value) {
+    let response = reqwest::Client::new()
+        .get(format!("{INGRESS}/restate/invocation/{id}/attach"))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.json().await.unwrap_or(Value::Null))
+}
+
+/// The waits of `object`, once `done` says they are as expected.
+async fn waits(object: &str, done: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+    let started = Instant::now();
+    loop {
+        let (status, pending) = call(&format!("{object}/pending"), Value::Null).await;
+        assert_eq!(status, 200, "{pending}");
+        let pending = pending.as_array().unwrap().clone();
+        if done(&pending) {
+            return pending;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{object}: {pending:?}\n{}",
+            invocations().await
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-functions"]
+async fn a_run_waits_for_a_signal_from_outside() {
+    let _server = server().await;
+    serve().await;
+
+    // A signal for a name no one waits for is dropped, unless kept.
+    let dropped = json!({"name": "note", "value": "early"});
+    assert_eq!(
+        call("approvals/alice/signal", dropped).await,
+        (200, json!({"resolved": null}))
+    );
+    let kept = json!({"name": "note", "value": "kept", "keep": true});
+    assert_eq!(
+        call("approvals/alice/signal", kept).await,
+        (200, json!({"resolved": null}))
+    );
+
+    let refund = send("approvals/alice/refund", json!("103")).await;
+    let [wait] = &waits("approvals/alice", |w| !w.is_empty()).await[..] else {
+        unreachable!()
+    };
+    assert_eq!(
+        (&wait["name"], &wait["input"]),
+        (&json!("approval"), &json!({"order": "103"}))
+    );
+    assert!(wait["since"].as_u64().unwrap() > 0, "{wait}");
+    let approve = json!({"id": wait["id"], "value": "approved"});
+    assert_eq!(
+        call("approvals/alice/signal", approve).await,
+        (200, json!({"resolved": wait["id"]}))
+    );
+    // The second wait takes the kept signal at once.
+    assert_eq!(
+        attach(&refund).await,
+        (200, json!({"verdict": "approved", "note": "kept"}))
+    );
+    waits("approvals/alice", |w| w.is_empty()).await;
+
+    // A signal by name resolves the oldest wait for it.
+    let both = send("approvals/bob/both", Value::Null).await;
+    waits("approvals/bob", |w| w.len() == 2).await;
+    for value in ["first", "second"] {
+        let (status, resolved) = call(
+            "approvals/bob/signal",
+            json!({"name": "vote", "value": value}),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(resolved["resolved"].is_string(), "{resolved}");
+    }
+    assert_eq!(attach(&both).await, (200, json!(["first", "second"])));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-functions"]
+async fn a_python_run_waits_for_a_signal() {
+    let _server = server().await;
+    serve().await;
+
+    let refund = send("approvals_py/erin/refund", json!("105")).await;
+    let [wait] = &waits("approvals_py/erin", |w| !w.is_empty()).await[..] else {
+        unreachable!()
+    };
+    assert_eq!(wait["input"], json!({"order": "105"}));
+    let approve = json!({"name": "approval", "value": "approved"});
+    assert_eq!(
+        call("approvals_py/erin/signal", approve).await,
+        (200, json!({"resolved": wait["id"]}))
+    );
+    assert_eq!(attach(&refund).await, (200, json!({"verdict": "approved"})));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-functions"]
+async fn a_wait_survives_a_crash_and_one_no_one_answers_is_forgotten() {
+    let _server = server().await;
+    serve().await;
+
+    // The wait's turn commits, then its attempt crashes: the retry waits
+    // again, under the same key, and joins the same wait.
+    functions::faults::crash_after_commit(0, 1);
+    let refund = send("approvals/carol/refund", json!("104")).await;
+    let [wait] = &waits("approvals/carol", |w| !w.is_empty()).await[..] else {
+        unreachable!()
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        waits("approvals/carol", |_| true).await.len(),
+        1,
+        "one wait, after the retry"
+    );
+    assert_eq!(functions::faults::pending(), 0);
+    call(
+        "approvals/carol/signal",
+        json!({"id": wait["id"], "value": "approved"}),
+    )
+    .await;
+    call(
+        "approvals/carol/signal",
+        json!({"name": "note", "value": "thanks"}),
+    )
+    .await;
+    assert_eq!(
+        attach(&refund).await,
+        (200, json!({"verdict": "approved", "note": "thanks"}))
+    );
+
+    // The timer wins the race: the signal's wait is forgotten.
+    assert_eq!(
+        call("approvals/dave/race", Value::Null).await,
+        (200, json!("timer"))
+    );
+    waits("approvals/dave", |w| w.is_empty()).await;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs restate-server: make test-functions"]
@@ -493,6 +667,21 @@ async fn the_shop_programs_compose() {
             "charges": [{"period": 1, "balance": 15}, {"period": 2, "balance": 5}],
             "reason": "Error: Declined: balance 5, charge 10",
         })
+    );
+
+    // A refund waits for a manager's approval, then pays back.
+    call("payments/dana/deposit", json!(100)).await;
+    let refund = send(
+        "refunds/dana/request",
+        json!({"amount": 30, "reason": "broken"}),
+    )
+    .await;
+    waits("refunds/dana", |w| w.len() == 1).await;
+    let approve = json!({"name": "approval", "value": "approved"});
+    call("refunds/dana/signal", approve).await;
+    assert_eq!(
+        attach(&refund).await,
+        (200, json!({"refunded": true, "balance": 130}))
     );
 }
 

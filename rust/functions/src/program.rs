@@ -54,6 +54,10 @@ impl Program {
                         .all(|c| c.is_ascii_alphanumeric() || c == '_'),
                 "Program {name}: the export {handler} is not a handler name (letters, digits and _)"
             );
+            ensure!(
+                !crate::restate::BUILT_IN.contains(&handler.as_str()),
+                "Program {name}: {handler} is a handler every object has (see restate.rs): name the export otherwise"
+            );
         }
         Ok(Self {
             name: name.into(),

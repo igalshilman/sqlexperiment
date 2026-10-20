@@ -85,4 +85,11 @@ fn a_program_must_compile_and_export_a_function() {
     assert!(compile("export function (").contains("does not compile"));
     assert!(compile("throw new Error('at load')").contains("at load"));
     assert!(compile("export function $bad() {}").contains("not a handler name"));
+    for reserved in ["signal", "pending"] {
+        let source = format!("export function {reserved}() {{}}");
+        assert!(
+            compile(&source).contains("a handler every object has"),
+            "{reserved}"
+        );
+    }
 }

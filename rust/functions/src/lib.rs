@@ -10,6 +10,8 @@
 //!   Restate, kept in the object's state).
 //! - [`Bindings`]: the operations the host makes for programs,
 //!   `ctx.call(name, input)`, such as [`Claude`]'s `claude.messages`.
+//! - [`FunctionSignals`]: the `function_signals` object, which keeps the
+//!   programs' waits for signals, `ctx.signal(name, input)`.
 //! - [`Workspace`]: the `workspace` object, a directory and a shell for
 //!   coding agents.
 //!
@@ -29,6 +31,7 @@ mod python;
 mod quickjs;
 pub mod restate;
 mod run;
+mod signals;
 mod store;
 mod tracking;
 mod vm;
@@ -42,6 +45,7 @@ pub use model::{GuestError, Operation, Outcome, RpcTarget, State, Status, View};
 pub use program::{Program, Programs};
 pub use restate::{bind, embedded, endpoint, faults, page_cache};
 pub use run::Run;
+pub use signals::{FunctionSignals, Resolved, SIGNALS, Signal, Waiting, signals_of};
 pub use store::Scope;
 pub use vm::{Language, Limits, Runtime};
 pub use workspace::Workspace;

@@ -37,34 +37,36 @@ SQL database and KV, and run one at a time. Each call starts from the module
 as evaluated: what lasts between calls is in `ctx.db` and `ctx.kv`. Each
 file's header shows how to call it, and Restate's UI lists every handler.
 
-| File                                 | What                                                                                                     |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| [`counter.js`](counter.js)           | **Start here.** A count per key, and a durable one-second timer                                          |
-| [`notes.js`](notes.js)               | Notes in SQL, with `ctx.db.sql`                                                                          |
-| [`memory.js`](memory.js)             | A class instance, a closure and a paused generator, all intact after a wait                              |
-| [`checkout.js`](checkout.js)         | A saga: reserve stock ([`inventory`](inventory.js)), charge ([`payments`](payments.js)), undo on failure |
-| [`subscription.js`](subscription.js) | Charge every period, on durable timers, until a charge is declined                                       |
-| [`retry.js`](retry.js)               | Retries with exponential backoff, against [`flaky`](flaky.js)                                            |
-| [`timeout.js`](timeout.js)           | A deadline: race a [`slow`](slow.js) call against a timer                                                |
-| [`fanout.js`](fanout.js)             | Add to `counter` under several keys at once, and wait for all                                            |
-| [`primes.js`](primes.js)             | A long computation, carried across turns                                                                 |
-| [`assistant.js`](assistant.js)       | An AI agent (Claude) with the shop as its tools                                                          |
-| [`coder.js`](coder.js)               | A coding agent with a shell and files, in a workspace that outlives the run                              |
+| File                                 | What                                                                                                          |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| [`counter.js`](counter.js)           | **Start here.** A count per key, and a durable one-second timer                                               |
+| [`notes.js`](notes.js)               | Notes in SQL, with `ctx.db.sql`                                                                               |
+| [`memory.js`](memory.js)             | A class instance, a closure and a paused generator, all intact after a wait                                   |
+| [`checkout.js`](checkout.js)         | A saga: reserve stock ([`inventory`](inventory.js)), charge ([`payments`](payments.js)), undo on failure      |
+| [`refunds.js`](refunds.js)           | A refund that waits for a manager's approval (`ctx.signal`), then pays back through [`payments`](payments.js) |
+| [`subscription.js`](subscription.js) | Charge every period, on durable timers, until a charge is declined                                            |
+| [`retry.js`](retry.js)               | Retries with exponential backoff, against [`flaky`](flaky.js)                                                 |
+| [`timeout.js`](timeout.js)           | A deadline: race a [`slow`](slow.js) call against a timer                                                     |
+| [`fanout.js`](fanout.js)             | Add to `counter` under several keys at once, and wait for all                                                 |
+| [`primes.js`](primes.js)             | A long computation, carried across turns                                                                      |
+| [`assistant.js`](assistant.js)       | An AI agent (Claude) with the shop as its tools                                                               |
+| [`coder.js`](coder.js)               | A coding agent with a shell and files, in a workspace that outlives the run                                   |
 
 ## Writing a function
 
 Export a function `(input, ctx)`; it may be async. The input and the result
 are JSON (no input is null). `ctx` is all it needs from outside:
 
-| Call                                              | What                                                                                                 |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| ``ctx.db.sql`SELECT ... ${value}` ``              | The scope's SQL database: rows as objects. `${}` values are parameters, never SQL text. Synchronous. |
-| `ctx.db.transaction(fn)`                          | Run `fn`'s statements together, or undo them if it throws                                            |
-| `ctx.kv.get/set/delete(key)`                      | The scope's JSON values                                                                              |
-| `ctx.rpc.call({ service, handler, key? }, input)` | Any Restate service, including the other functions here                                              |
-| `ctx.call('claude.messages', request)`            | Claude: a [Messages API](https://platform.claude.com/docs/en/api/messages) request, sent by the host |
-| `ctx.sleep(ms)`                                   | A durable timer, however long                                                                        |
-| `ctx.key`                                         | The object's key                                                                                     |
+| Call                                              | What                                                                                                             |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| ``ctx.db.sql`SELECT ... ${value}` ``              | The scope's SQL database: rows as objects. `${}` values are parameters, never SQL text. Synchronous.             |
+| `ctx.db.transaction(fn)`                          | Run `fn`'s statements together, or undo them if it throws                                                        |
+| `ctx.kv.get/set/delete(key)`                      | The scope's JSON values                                                                                          |
+| `ctx.rpc.call({ service, handler, key? }, input)` | Any Restate service, including the other functions here                                                          |
+| `ctx.call('claude.messages', request)`            | Claude: a [Messages API](https://platform.claude.com/docs/en/api/messages) request, sent by the host             |
+| `ctx.sleep(ms)`                                   | A durable timer, however long                                                                                    |
+| `ctx.signal(name, input)`                         | A value from outside, such as a person's approval: the object's `signal` handler gives it, however long it takes |
+| `ctx.key`                                         | The object's key                                                                                                 |
 
 - It is standard JavaScript, without Node.js APIs or imports: all I/O goes
   through `ctx`, and values crossing it are JSON.
@@ -82,6 +84,13 @@ are JSON (no input is null). `ctx` is all it needs from outside:
 - Each call has an idempotency key, the same after a crash. To set your own,
   pass `{ idempotencyKey }` as the last argument: the service called runs
   once for every call with that key.
+- Every object also has `pending`, the signals its calls wait for (each
+  with its `id`, `name`, `input` and `since`), and `signal`, which gives one:
+  `{"id": ..., "value": ...}` for one wait, or `{"name": ..., "value": ...}`
+  for the oldest waiting for that name. A signal no one waits for is
+  dropped, unless `"keep": true` keeps it for the next wait for its name.
+  While a call waits, nothing runs; a crash or a restart changes nothing.
+  Exports cannot be named `pending` or `signal`.
 - Compute as long as you need. Work that awaits has no limit; one stretch
   without an await may run 10 minutes (`FUNCTIONS_TURN_TIMEOUT`).
 - `FUNCTIONS_MEMORY=1g` caps the memory calls hold. Past it, the calls that

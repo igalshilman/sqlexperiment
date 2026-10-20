@@ -88,6 +88,7 @@ also gives the program an asyncio event loop that the host drains each turn:
 | `ctx.kv.get/set/delete(key)`                      | `await ctx.kv.get/set/delete(key)`                                                |
 | `ctx.rpc.call({ service, handler, key? }, input)` | `await ctx.rpc.call(service, handler, input, key=...)`                            |
 | `ctx.sleep(ms)`                                   | `await ctx.sleep(seconds)`, or `asyncio.sleep(seconds)`                           |
+| `ctx.signal(name, input)`                         | `await ctx.signal(name, input)`                                                   |
 | `Promise.all`, `Promise.race`                     | `asyncio.gather`, `asyncio.wait`, `asyncio.timeout`                               |
 
 ## Its WASI

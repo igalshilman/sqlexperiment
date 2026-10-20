@@ -44,6 +44,7 @@ file's header shows how to call it.
 | -------------------------------- | --------------------------------------------------------------------------------------------- |
 | [`counter.py`](counter.py)       | **Start here.** A count per key, and a durable one-second timer                               |
 | [`notes.py`](notes.py)           | Notes in SQL, with t-strings: `ctx.db.sql(t"... {value}")`                                    |
+| [`refunds.py`](refunds.py)       | A refund that waits for a manager's approval (`ctx.signal`), and the refunds granted in SQL   |
 | [`researcher.py`](researcher.py) | An AI agent (Claude) that studies a question from three angles at once, with `asyncio.gather` |
 
 ## Writing a function
@@ -63,6 +64,7 @@ durable here (`asyncio.sleep`, `asyncio.timeout`, `asyncio.wait_for`).
 | `await ctx.rpc.call(service, handler, input, key=...)` | Any Restate service                                                                            |
 | `await ctx.call("claude.messages", request)`           | Claude: a Messages API request, sent by the host                                               |
 | `await ctx.sleep(seconds)`                             | A durable timer, however long                                                                  |
+| `await ctx.signal(name, input)`                        | A value from outside, such as a person's approval: the object's `signal` handler gives it      |
 | `ctx.key`                                              | The object's key                                                                               |
 
 - It is Python 3.15 with its standard library, and no other packages. All
@@ -77,6 +79,10 @@ durable here (`asyncio.sleep`, `asyncio.timeout`, `asyncio.wait_for`).
   and again after a crash: nothing else stores it. Do not change it until
   then. To set a call's idempotency key, pass `idempotency_key=...`: the
   service called runs once for every call with that key.
+- Every object also has `pending`, the signals its calls wait for, and
+  `signal`, which gives one, by its wait's `id` or to the oldest wait for its
+  `name` (as for [the JavaScript functions](../examples-functions/README.md#writing-a-function)).
+  Handlers cannot be named `pending` or `signal`.
 - A failed operation raises `OperationError`; an exception a handler raises
   fails the call, with its type and message.
 - A changed file is a new function: a call still waiting when its file
