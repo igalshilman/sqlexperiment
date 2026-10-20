@@ -181,6 +181,21 @@ support = langgraph.agent("support", model=Teller(), tools=SUPPORT_TOOLS)
 pydantic_support = pydantic_ai.agent("pydantic_support", model=pydantic_ai_model(Teller()), tools=SUPPORT_TOOLS)
 claude_support = claude.agent("claude_support", client=ClaudeClient(Teller()), tools=SUPPORT_TOOLS)
 
+# A Claude assistant that compacts and resets its conversation, by handlers of its own.
+notebook_client = ClaudeClient(Teller())
+notebook = claude.agent("notebook", client=notebook_client)
+
+
+@notebook.handler(message=True)
+async def compact(ctx: ObjectContext, instructions: str) -> str:
+    return await claude.compact(ctx, instructions, client=notebook_client)
+
+
+@notebook.handler(message=True)
+async def reset(ctx: ObjectContext, handoff: str) -> None:
+    await claude.reset(ctx, handoff)
+
+
 # A desk of your own, which sends each message to the helper (ask).
 desk = Object("desk")
 
@@ -235,5 +250,6 @@ if __name__ == "__main__":
         pydantic_support,
         claude_support,
         desk,
+        notebook,
         refunds,
     )

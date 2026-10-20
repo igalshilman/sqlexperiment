@@ -7,6 +7,7 @@ support agents of services.py, on LangGraph, on Pydantic AI and on Claude.
 """
 
 import json
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -157,3 +158,19 @@ def test_a_desk_of_your_own_asks_an_agent_once():
     assert sent == again == (200, "You said: hello")
     status, page = call(f"helper/{k}/messages")
     assert status == 200 and [m["parts"][0]["text"] for m in page["messages"]] == ["hello", "You said: hello"]
+
+
+def test_compact_and_reset_take_their_input_as_text_or_nothing():
+    k = key()
+    assert call(f"notebook/{k}/chat", "hello") == (200, "You said: hello")
+    status, summary = request("POST", f"{INGRESS}/notebook/{k}/compact", None)
+    assert status == 200 and summary.startswith("You said: Summarize our conversation"), summary
+    status, page = call(f"notebook/{k}/messages")
+    assert [m["parts"][0]["text"] for m in page["messages"]][1] == "Understood: I will carry on from there."
+    plain = urllib.request.Request(f"{INGRESS}/notebook/{k}/reset", b"Alice likes short answers", method="POST")
+    with urllib.request.urlopen(plain, timeout=30) as response:
+        assert response.status == 200
+    status, page = call(f"notebook/{k}/messages")
+    assert page["messages"][0]["parts"][0]["text"] == "Before this conversation: Alice likes short answers"
+    assert request("POST", f"{INGRESS}/notebook/{k}/reset", None)[0] == 200
+    assert call(f"notebook/{k}/messages") == (200, {"messages": [], "more": False})

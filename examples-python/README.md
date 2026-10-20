@@ -7,15 +7,17 @@ after `make py` at the repository's root. See [Run an example](#run-an-example).
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | [`chat.py`](chat.py)                     | **Start here.** A durable chat agent on Claude (the Anthropic SDK), with a tool                                                      |
 | [`chat_langgraph.py`](chat_langgraph.py) | The same agent on LangGraph                                                                                                          |
-| [`notes.py`](notes.py)                   | SQL in a virtual object, with `ctx.db`                                                                                               |
 | [`memory.py`](memory.py)                 | An assistant that remembers facts about you in its own SQL table, through its tools, with handlers of your own                       |
-| [`on_modal.py`](on_modal.py)             | The support agent on [Modal](https://modal.com), as a Modal Server                                                                   |
 | [`support.py`](support.py)               | A support agent whose tools are Restate itself: a service, a manager's approval (a signal), a workflow                               |
+| [`followup.py`](followup.py)             | An agent that schedules a check-in for a day later: `send` with a delay                                                              |
+| [`harness.py`](harness.py)               | An agent each user configures: its model and persona from the object's database, and `compact` and `reset` handlers                  |
+| [`team.py`](team.py)                     | A team on three frameworks: an editor (Claude) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI)     |
+| [`router.py`](router.py)                 | A front desk of your own: a handler asks a model which team handles a message (`claude.prompt`), then asks that team's agent (`ask`) |
 | [`trips.py`](trips.py)                   | A travel agent on Pydantic AI: an Agent of your own, an approval before booking, and its plan as typed output                        |
 | [`triage.py`](triage.py)                 | A LangGraph graph of your own: a router hands each message to the billing or the tech team, each with its tools                      |
 | [`writer.py`](writer.py)                 | A LangGraph graph of your own: a writer drafts and a model edits, a person approves (a signal), a workflow publishes                 |
-| [`team.py`](team.py)                     | A team on three frameworks: an editor (Claude) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI)     |
-| [`router.py`](router.py)                 | A front desk of your own: a handler asks a model which team handles a message (`claude.prompt`), then asks that team's agent (`ask`) |
+| [`notes.py`](notes.py)                   | SQL in a virtual object, with `ctx.db`                                                                                               |
+| [`on_modal.py`](on_modal.py)             | The support agent on [Modal](https://modal.com), as a Modal Server                                                                   |
 
 They are built from [`restate_agents`](../python/agents/README.md): an agent
 is a virtual object per conversation, and its tools are plain functions.

@@ -285,3 +285,70 @@ async def test_prompts_of_a_handler_of_your_own_are_answered_once_each():
     assert teller.calls == 2
     # Each thread is a conversation of its own: the second prompt's request has only its own message.
     assert [len(r["messages"]) for r in client.requests] == [1, 1]
+
+
+async def test_options_may_be_async_functions_of_the_context():
+    teller = Teller()
+
+    async def persona(ctx) -> str:
+        return f"You serve {ctx.key()}."
+
+    obj = claude.agent("teller", system=persona, client=ClaudeClient(teller))
+    await Object("bob").invoke(obj.handlers["chat"].fn, "hello")
+    assert teller.systems == ["You serve bob."]
+
+
+def assistant(client: ClaudeClient):
+    """An agent with compact and reset handlers of its own, which take their input as a message."""
+    obj = claude.agent("assistant", client=client)
+
+    @obj.handler(message=True)
+    async def compact(ctx, instructions: str) -> str:
+        return await claude.compact(ctx, instructions, client=client)
+
+    @obj.handler(message=True)
+    async def reset(ctx, handoff: str) -> None:
+        await claude.reset(ctx, handoff)
+
+    return obj
+
+
+async def test_compact_summarizes_the_conversation_in_place_of_it():
+    client = ClaudeClient(Teller())
+    obj = assistant(client)
+    alice = Object()
+    await alice.invoke(obj.handlers["chat"].fn, "hello")
+    summary = await alice.invoke(obj.handlers["compact"].fn, "Keep the greetings", invocation="c1")
+    assert summary.startswith("You said: Summarize our conversation so far") and summary.endswith("Keep the greetings")
+    page = await alice.invoke(obj.handlers["messages"].fn, None)
+    assert [m["parts"][0]["text"] for m in page["messages"]] == [
+        f"Our conversation so far, summarized:\n\n{summary}",
+        "Understood: I will carry on from there.",
+    ]
+    # The same invocation again, such as a retried attempt: the same summary, the model not asked again.
+    asked = len(client.requests)
+    assert await alice.invoke(obj.handlers["compact"].fn, "Keep the greetings", invocation="c1") == summary
+    assert len(client.requests) == asked
+    # The next message carries on from the summary.
+    await alice.invoke(obj.handlers["chat"].fn, "and now?")
+    assert len(client.requests[-1]["messages"]) == 3
+
+
+async def test_reset_starts_over_with_a_handoff_or_without():
+    client = ClaudeClient(Teller())
+    obj = assistant(client)
+    alice = Object()
+    await alice.invoke(obj.handlers["chat"].fn, "hello")
+    await alice.invoke(obj.handlers["reset"].fn, "Alice likes short answers")
+    page = await alice.invoke(obj.handlers["messages"].fn, None)
+    assert page["messages"][0]["parts"][0]["text"] == "Before this conversation: Alice likes short answers"
+    await alice.invoke(obj.handlers["reset"].fn, "")
+    assert (await alice.invoke(obj.handlers["messages"].fn, None))["messages"] == []
+    assert await alice.invoke(obj.handlers["chat"].fn, "hello") == "You said: hello"
+    assert client.requests[-1]["messages"] == [{"role": "user", "content": "hello"}]
+
+
+def test_a_handler_takes_its_input_as_a_message():
+    obj = assistant(ClaudeClient(Teller()))
+    serde = obj.handlers["compact"].handler_io.input_serde
+    assert serde.deserialize(b"Keep it short") == serde.deserialize(b'"Keep it short"') == "Keep it short"

@@ -136,7 +136,9 @@ class Object(restate.VirtualObject):
             self, kind="shared", journal_replay=True, accept="*/*", input_serde=MessageSerde()
         )(steer)
 
-    def handler(self, name: str | Callable | None = None, /, **options: Any) -> Any:  # type: ignore[override]
+    def handler(  # type: ignore[override]
+        self, name: str | Callable | None = None, /, *, message: bool = False, **options: Any
+    ) -> Any:
         """
         A handler, as ``@obj.handler``, ``@obj.handler("name")`` or
         ``@obj.handler(kind="shared")``. It takes ``ctx``, then its input: one
@@ -146,9 +148,14 @@ class Object(restate.VirtualObject):
             async def deposit(ctx, id: str, amount: int) -> int: ...
 
             curl localhost:8080/account/alice/deposit --json '{"id": "d1", "amount": 100}'
+
+        With ``message``, its input is a message, as ``chat``'s is: plain text
+        or a JSON string (``curl -d 'Keep it short'``).
         """
         if callable(name):
-            return self.handler()(name)
+            return self.handler(message=message, **options)(name)
+        if message:
+            options = {"accept": "*/*", "input_serde": MessageSerde(), **options}
 
         def register(fn: Callable) -> Callable:
             if (name or fn.__name__) in self.handlers:
@@ -173,7 +180,7 @@ class Object(restate.VirtualObject):
             @desk.chat
             async def chat(ctx, message: str) -> str: ...
         """
-        return self.handler("chat", accept="*/*", input_serde=MessageSerde())(fn)
+        return self.handler("chat", message=True)(fn)
 
     def _handler(self, fn: Callable) -> Callable:
         """``fn`` as the SDK takes a handler: one input at most."""
