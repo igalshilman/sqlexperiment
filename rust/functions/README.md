@@ -40,11 +40,13 @@ async def get(_, ctx):
 The functions this binary serves, how to run them and how to write one:
 [examples-functions/](../../examples-functions/README.md), and in Python
 [examples-functions-python/](../../examples-functions-python/README.md). The coding agent's
-workspace is the [`workspace`](src/workspace.rs) object, and programs reach
-models with `fetch`: HTTP requests the host sends for them, under a
-[`FetchPolicy`](src/fetch.rs) that says where they may go and which secrets
-the host adds ([docs/FETCH.md](docs/FETCH.md)). It is a host binding, an
-operation the host makes for a program, registered with
+workspace is the [`workspace`](src/workspace.rs) object. Programs reach
+models through the host's gateway, [`Llm`](src/llm.rs): any provider's, in
+one format, with conversations kept in the scope's database
+([docs/LLM.md](docs/LLM.md)); and the web with `fetch`, under a
+[`FetchPolicy`](src/fetch.rs) that says where requests may go and which
+secrets the host adds ([docs/FETCH.md](docs/FETCH.md)). Both are host
+bindings, operations the host makes for a program, registered with
 [`Bindings`](src/bindings.rs) ([docs/HOST.md](docs/HOST.md) §6).
 
 ## How it works

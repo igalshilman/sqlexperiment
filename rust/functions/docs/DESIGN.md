@@ -1064,29 +1064,28 @@ interpreter runs compute-bound code ~10x slower than V8.
 scripted session over an in-memory store, to the program's own limit of 200
 steps. Each step is a few hundred bytes of model text and one tool call: a
 file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
-(~3 KiB). The model is reached with `fetch`, its body `fetch.json(request)`
-([FETCH.md](FETCH.md)); each request is the whole conversation so far.
-Measured on 20 October 2026 (4 vCPUs):
+(~3 KiB). The model is a conversation of the host's gateway
+([LLM.md](LLM.md)): the program sends each step's new messages, which go
+into the scope's database, and the host reads the whole conversation from
+there for each request. Measured on 20 October 2026 (4 vCPUs):
 
-| Step | Request to the model | Stored by the step | Model turn | Tool turn |
-| ---: | -------------------: | -----------------: | ---------: | --------: |
-|    1 |              1.7 KiB |             9.3 KB |    1.06 ms |   0.65 ms |
-|   10 |               31 KiB |              13 KB |    1.36 ms |   0.58 ms |
-|   41 |              136 KiB |              10 KB |    0.65 ms |   0.70 ms |
-|   99 |              328 KiB |              12 KB |    1.11 ms |   0.96 ms |
-|  190 |              636 KiB |              12 KB |    1.32 ms |   1.14 ms |
+| Step | Request to the model | Reading it | Stored by the step | Model turn | Tool turn |
+| ---: | -------------------: | ---------: | -----------------: | ---------: | --------: |
+|    1 |              1.7 KiB |    0.57 ms |             9.3 KB |    1.59 ms |   1.33 ms |
+|   10 |               31 KiB |    0.53 ms |              16 KB |    1.50 ms |   1.22 ms |
+|   41 |              136 KiB |    1.02 ms |             9.7 KB |    1.02 ms |   1.37 ms |
+|   98 |              327 KiB |    1.91 ms |              16 KB |    1.61 ms |   1.03 ms |
+|  190 |              636 KiB |    3.56 ms |              16 KB |    1.76 ms |   1.09 ms |
 
-- **Per step:** 12 KB at the median, 9–34 KB for nine steps in ten, whatever
-  the conversation's length: the request stays in the heap, which holds the
-  conversation anyway, so a step stores the pages its new messages and the
-  model's response take, and a commit record of ~370 B.
-- **New bases:** ten steps (13, 20, 28, 40, 53, 70, 89, 115, 144, 178) write
-  a new base (§5.3), the whole image: 34 KB to 244 KB, growing with the
-  conversation.
-- **The session:** 3.2 MiB stored over 200 steps. Restate journals none of
-  the requests: the host reads each from the heap as it sends it.
-- **Restores:** a new attempt, every 25 steps, restores the run in 0.4–0.8
-  ms.
+- **Per step:** 10 KB at the median, 9–33 KB for nine steps in ten, whatever
+  the conversation's length: the rows of its new messages, a heap batch of
+  2–4 KB (the loop, the latest response) and a commit record of ~365 B.
+- **Checkpoints:** every 16 steps or so, the database writes its pages in
+  place: 31–41 KB, flat. The heap, 1.5 MiB, needs no new base.
+- **The session:** 2.5 MiB stored over 200 steps. Neither the heap nor
+  Restate's journal holds the requests.
+- **Restores:** a new attempt, every 25 steps, restores the run in 1–19 ms,
+  reopening the database.
 
 ## 11. Scope limits, provenance and references
 

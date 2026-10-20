@@ -56,16 +56,18 @@ input is `None`). `ctx` is all it needs from outside. It runs on asyncio: `async
 `asyncio.wait` and task groups work as usual, and so do timers, which are
 durable here (`asyncio.sleep`, `asyncio.timeout`, `asyncio.wait_for`).
 
-| Call                                                   | What                                                                                           |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `ctx.db.sql(t"SELECT ... {value}")`                    | The scope's SQL database: rows as dicts. A t-string's `{}` values are parameters. Synchronous. |
-| `with ctx.db.transaction():`                           | The block's statements together, or none if it raises                                          |
-| `await ctx.kv.get/set/delete(key)`                     | The scope's JSON values                                                                        |
-| `await ctx.rpc.call(service, handler, input, key=...)` | Any Restate service                                                                            |
-| `await ctx.fetch(url, method=, headers=, json=)`       | An HTTP request, sent by the host: only where it allows, with the API keys it adds             |
-| `await ctx.sleep(seconds)`                             | A durable timer, however long                                                                  |
-| `await ctx.signal(name, input)`                        | A value from outside, such as a person's approval: the object's `signal` handler gives it      |
-| `ctx.key`                                              | The object's key                                                                               |
+| Call                                                           | What                                                                                           |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `ctx.db.sql(t"SELECT ... {value}")`                            | The scope's SQL database: rows as dicts. A t-string's `{}` values are parameters. Synchronous. |
+| `with ctx.db.transaction():`                                   | The block's statements together, or none if it raises                                          |
+| `await ctx.kv.get/set/delete(key)`                             | The scope's JSON values                                                                        |
+| `await ctx.rpc.call(service, handler, input, key=...)`         | Any Restate service                                                                            |
+| `await ctx.llm.conversation(name, **defaults).send(*messages)` | A model's answer, any provider's: the conversation is kept in the scope                        |
+| `await ctx.llm.complete(request)`                              | A model's answer to a whole request                                                            |
+| `await ctx.fetch(url, method=, headers=, json=)`               | An HTTP request, sent by the host: only where it allows, with the API keys it adds             |
+| `await ctx.sleep(seconds)`                                     | A durable timer, however long                                                                  |
+| `await ctx.signal(name, input)`                                | A value from outside, such as a person's approval: the object's `signal` handler gives it      |
+| `ctx.key`                                                      | The object's key                                                                               |
 
 - It is Python 3.15 with its standard library, and no other packages. All
   I/O goes through `ctx`: there are no sockets, files to write or

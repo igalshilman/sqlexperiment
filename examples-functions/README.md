@@ -57,16 +57,18 @@ file's header shows how to call it, and Restate's UI lists every handler.
 Export a function `(input, ctx)`; it may be async. The input and the result
 are JSON (no input is null). `ctx` is all it needs from outside:
 
-| Call                                              | What                                                                                                             |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| ``ctx.db.sql`SELECT ... ${value}` ``              | The scope's SQL database: rows as objects. `${}` values are parameters, never SQL text. Synchronous.             |
-| `ctx.db.transaction(fn)`                          | Run `fn`'s statements together, or undo them if it throws                                                        |
-| `ctx.kv.get/set/delete(key)`                      | The scope's JSON values                                                                                          |
-| `ctx.rpc.call({ service, handler, key? }, input)` | Any Restate service, including the other functions here                                                          |
-| `fetch(url, init)`                                | An HTTP request, sent by the host: only where it allows, with the API keys it adds. `fetch.json(data)` is a body |
-| `ctx.sleep(ms)`                                   | A durable timer, however long                                                                                    |
-| `ctx.signal(name, input)`                         | A value from outside, such as a person's approval: the object's `signal` handler gives it, however long it takes |
-| `ctx.key`                                         | The object's key                                                                                                 |
+| Call                                                      | What                                                                                                               |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| ``ctx.db.sql`SELECT ... ${value}` ``                      | The scope's SQL database: rows as objects. `${}` values are parameters, never SQL text. Synchronous.               |
+| `ctx.db.transaction(fn)`                                  | Run `fn`'s statements together, or undo them if it throws                                                          |
+| `ctx.kv.get/set/delete(key)`                              | The scope's JSON values                                                                                            |
+| `ctx.rpc.call({ service, handler, key? }, input)`         | Any Restate service, including the other functions here                                                            |
+| `ctx.llm.conversation(name, defaults).send({ messages })` | A model's answer, any provider's (`anthropic/...`, `openai/...`, `xai/...`): the conversation is kept in the scope |
+| `ctx.llm.complete(request)`                               | A model's answer to a whole request                                                                                |
+| `fetch(url, init)`                                        | An HTTP request, sent by the host: only where it allows, with the API keys it adds. `fetch.json(data)` is a body   |
+| `ctx.sleep(ms)`                                           | A durable timer, however long                                                                                      |
+| `ctx.signal(name, input)`                                 | A value from outside, such as a person's approval: the object's `signal` handler gives it, however long it takes   |
+| `ctx.key`                                                 | The object's key                                                                                                   |
 
 - It is standard JavaScript, without Node.js APIs or imports: all I/O goes
   through `ctx`, and values crossing it are JSON.

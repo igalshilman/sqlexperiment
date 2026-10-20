@@ -234,9 +234,9 @@ On branches, a PR each:
    faster without fuel (116 ms against 127 ms), and the coding session of
    DESIGN.md §10.1 now runs 200 steps instead of failing at 45.
 5. **A registry of the bindings the host makes itself** (§6). Done:
-   `fetch` is the one a deployment offers ([FETCH.md](FETCH.md)); the
-   coding session stores 3.2 MiB over 200 steps, and Restate journals none
-   of its requests (DESIGN.md §10.1).
+   a deployment offers `llm`, the model gateway ([LLM.md](LLM.md)), and
+   `fetch` ([FETCH.md](FETCH.md)); the coding session stores 2.5 MiB over
+   200 steps, and Restate journals none of its requests (DESIGN.md §10.1).
    The in-turn Calls are still `src/db.rs`'s, and the Restate Waits (RPCs,
    timers) a `match` in `restate.rs`.
 
@@ -245,16 +245,18 @@ On branches, a PR each:
 - **Sync or async `ctx.db.sql`.** Synchronous says honestly that a
   statement never ends a turn. Returning a promise would leave room for a
   remote database later. The proposal is synchronous.
-- **Model calls.** `fetch` (§6, [FETCH.md](FETCH.md)), whose request is read
-  from the heap when it is sent; the host adds the API key.
+- **Model calls.** `ctx.llm` (§6, [LLM.md](LLM.md)): the host's gateway,
+  any provider's models in one format, with a conversation's messages in the
+  scope's database. Whether the gateway belongs on the host, or in a service
+  of its own, is open.
 - **Size of a turn record.** Sealing bounds the inline part at about 1 KiB;
   how large a stored value Restate handles well is to be measured.
 
 ## 6. Bindings the host makes
 
 A binding is an operation the host makes for a program, by name, outside
-Restate, such as `fetch(url, init)` ([FETCH.md](FETCH.md)), or by name,
-`ctx.call(name, input)`. A deployment offers them as
+Restate, such as `ctx.llm` ([LLM.md](LLM.md)) and `fetch(url, init)`
+([FETCH.md](FETCH.md)), or by name, `ctx.call(name, input)`. A deployment offers them as
 a registry, passed to `bind`:
 
 ```rust
