@@ -37,18 +37,14 @@
           packages =
             with pkgs;
             [
-              # The crate, the addon and the Python extension; the shared core,
-              # to WebAssembly.
+              # The crate, the addon and the Python extension.
               (rust-bin.stable."1.98.1".default.override {
                 extensions = [
                   "rust-src"
                   "clippy"
                   "rustfmt"
                 ];
-                targets = [ "wasm32-unknown-unknown" ];
               })
-              # setup.sh needs exactly this version.
-              wasm-bindgen-cli_0_2_121
               # The pnpm workspace: node >= 24 runs its TypeScript, and
               # OpenCode needs it.
               nodejs_24

@@ -1,19 +1,10 @@
 #!/usr/bin/env bash
-# Regenerate the patches from the edited checkouts in .build/ (see setup.sh),
-# including files the edits added. Generated files are left out: the inlined
-# WebAssembly, which setup.sh rebuilds, and lockfiles.
+# Regenerate the patch from the edited checkout in .build/ (see setup.sh),
+# including files the edits added.
 set -euo pipefail
 cd "$(dirname "$0")"
-build=../.build
-
-core=$build/sdk-shared-core
-git -C "$core" add -N -- src
-git -C "$core" diff -- src Cargo.toml > ../../../../core/sdk-shared-core/sdk-shared-core.patch
-
-sdk=$build/sdk-typescript
-git -C "$sdk" add -N -- packages/libs/restate-sdk/src packages/libs/restate-sdk/test sdk-shared-core-wasm-bindings/src
-git -C "$sdk" diff -- packages/libs/restate-sdk/src packages/libs/restate-sdk/test sdk-shared-core-wasm-bindings/Cargo.toml \
-  sdk-shared-core-wasm-bindings/src ':!packages/libs/restate-sdk/src/endpoint/handlers/vm' \
-  > sdk-typescript.patch
-
-grep -h '^diff --git' ../../../../core/sdk-shared-core/sdk-shared-core.patch sdk-typescript.patch | awk '{print $3}'
+sdk=../.build/sdk-typescript
+paths=(packages/libs/restate-sdk/src packages/libs/restate-sdk/test)
+git -C "$sdk" add -N -- "${paths[@]}"
+git -C "$sdk" diff HEAD -- "${paths[@]}" > sdk-typescript.patch
+grep '^diff --git' sdk-typescript.patch | awk '{print $3}'

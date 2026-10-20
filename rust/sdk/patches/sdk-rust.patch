@@ -1,16 +1,16 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index f210e03..1beac88 100644
+index f210e03..07c96e8 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -169,3 +169,8 @@ typify = { version = "0.6" }
- 
- [workspace]
- members = ["macros", "test-services", "testcontainers"]
-+
-+# The patched shared core (core/sdk-shared-core), cloned next to this SDK by
-+# rust/sdk/setup.sh.
-+[patch.crates-io]
-+restate-sdk-shared-core = { path = "../sdk-shared-core" }
+@@ -129,7 +129,7 @@ rand = { version = "0.10", optional = true }
+ regress = "0.10"
+ reqwest = { version = "0.13", optional = true }
+ restate-sdk-macros = { version = "0.12", path = "macros" }
+-restate-sdk-shared-core = { version = "=7.0.3", features = ["request_identity", "sha2_random_seed", "http"] }
++restate-sdk-shared-core = { version = "=8.1.0", features = ["request_identity", "sha2_random_seed", "http"] }
+ rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
+ rustls-native-certs = { version = "0.8", optional = true }
+ schemars = { version = "1.2", optional = true }
 diff --git a/rust-toolchain.toml b/rust-toolchain.toml
 deleted file mode 100644
 index 5dcf242..0000000
@@ -223,7 +223,7 @@ index 1995d07..32a54f9 100644
 +    }
 +}
 diff --git a/src/endpoint/context.rs b/src/endpoint/context.rs
-index dbe2730..da3913a 100644
+index dbe2730..f39b826 100644
 --- a/src/endpoint/context.rs
 +++ b/src/endpoint/context.rs
 @@ -4,6 +4,7 @@ use crate::context::{
@@ -234,12 +234,16 @@ index dbe2730..da3913a 100644
  use crate::endpoint::futures::intercept_error::InterceptErrorFuture;
  use crate::endpoint::futures::select_poll::VmSelectAsyncResultPollFuture;
  use crate::endpoint::futures::trap::TrapFuture;
-@@ -17,7 +18,7 @@ use pin_project_lite::pin_project;
+@@ -15,9 +16,9 @@ use futures::future::{BoxFuture, Either, Shared};
+ use futures::{FutureExt, TryFutureExt};
+ use pin_project_lite::pin_project;
  use restate_sdk_shared_core::{
-     AttachInvocationTarget, AwaitResponse, AwakeableHandle, CoreVM, Error as CoreError, Header,
-     NonEmptyValue, NotificationHandle, OnMaxAttempts, PayloadOptions, RetryPolicy, RunExitResult,
+-    AttachInvocationTarget, AwaitResponse, AwakeableHandle, CoreVM, Error as CoreError, Header,
+-    NonEmptyValue, NotificationHandle, OnMaxAttempts, PayloadOptions, RetryPolicy, RunExitResult,
 -    RunHandle, Target, TerminalFailure, UnresolvedFuture, VM, Value,
-+    EphemeralCompletionId, RunHandle, Target, TerminalFailure, UnresolvedFuture, VM, Value,
++    AttachInvocationTarget, AwaitResponse, AwakeableHandle, CoreVM, EphemeralCompletionId,
++    Error as CoreError, Header, NonEmptyValue, NotificationHandle, OnMaxAttempts, PayloadOptions,
++    RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture, VM, Value,
  };
  use std::borrow::Cow;
  use std::collections::HashMap;
@@ -258,7 +262,7 @@ index dbe2730..da3913a 100644
  }
  
  impl ContextInternalInner {
-@@ -53,7 +62,35 @@ impl ContextInternalInner {
+@@ -53,9 +62,37 @@ impl ContextInternalInner {
              write,
              handler_state,
              span_replaying_field_state: false,
@@ -276,7 +280,7 @@ index dbe2730..da3913a 100644
 +    ) -> Result<Vec<std::task::Waker>, CoreError> {
 +        if let Some(value) = self.vm.take_ephemeral_notification(id)? {
 +            self.ephemeral.insert(id, value);
-         }
++        }
 +        Ok(self.take_input_waiters())
 +    }
 +
@@ -284,17 +288,33 @@ index dbe2730..da3913a 100644
 +    pub(crate) fn wait_input(&mut self, waker: &std::task::Waker) {
 +        if !self.input_waiters.iter().any(|w| w.will_wake(waker)) {
 +            self.input_waiters.push(waker.clone());
-+        }
-+    }
-+
+         }
+     }
+ 
 +    /// The futures to wake once input has been read: wake them after
 +    /// releasing the lock.
 +    pub(crate) fn take_input_waiters(&mut self) -> Vec<std::task::Waker> {
 +        mem::take(&mut self.input_waiters)
-     }
- 
++    }
++
      pub(super) fn fail(&mut self, e: Error) {
-@@ -297,6 +334,28 @@ impl ContextInternal {
+         self.maybe_flip_span_replaying_field();
+         self.vm.notify_error(
+@@ -274,7 +311,12 @@ impl ContextInternal {
+             inner_lock,
+             inner_lock
+                 .vm
+-                .sys_state_get(key.to_owned(), PayloadOptions::default())
++                // Named after its key, so that tooling can hide a SQL database's pages and log.
++                .sys_state_get(
++                    key.to_owned(),
++                    Some(key.to_owned()),
++                    PayloadOptions::default()
++                )
+         );
+         inner_lock.maybe_flip_span_replaying_field();
+ 
+@@ -297,9 +339,34 @@ impl ContextInternal {
          Either::Left(InterceptErrorFuture::new(self.clone(), poll_future))
      }
  
@@ -305,7 +325,10 @@ index dbe2730..da3913a 100644
 +        key: &str,
 +    ) -> impl Future<Output = Result<Option<bytes::Bytes>, TerminalError>> + Send {
 +        let mut inner_lock = must_lock!(self.inner);
-+        let id = unwrap_or_trap!(inner_lock, inner_lock.vm.ephemeral_state_get(key.to_owned()));
++        let id = unwrap_or_trap!(
++            inner_lock,
++            inner_lock.vm.ephemeral_state_get(key.to_owned())
++        );
 +        let poll_future =
 +            EphemeralGetFuture::new(Arc::clone(&self.inner), id).map(|res| match res {
 +                Ok(Value::Void) => Ok(Ok(None)),
@@ -322,7 +345,45 @@ index dbe2730..da3913a 100644
 +
      pub fn get_keys(&self) -> impl Future<Output = Result<Vec<String>, TerminalError>> + Send {
          let mut inner_lock = must_lock!(self.inner);
-         let handle = unwrap_or_trap!(inner_lock, inner_lock.vm.sys_state_get_keys());
+-        let handle = unwrap_or_trap!(inner_lock, inner_lock.vm.sys_state_get_keys());
++        let handle = unwrap_or_trap!(inner_lock, inner_lock.vm.sys_state_get_keys(None));
+         inner_lock.maybe_flip_span_replaying_field();
+ 
+         let poll_future = get_async_result(Arc::clone(&self.inner), handle).map(|res| match res {
+@@ -320,9 +387,12 @@ impl ContextInternal {
+         let mut inner_lock = must_lock!(self.inner);
+         match t.serialize() {
+             Ok(b) => {
+-                let _ = inner_lock
+-                    .vm
+-                    .sys_state_set(key.to_owned(), b, PayloadOptions::default());
++                let _ = inner_lock.vm.sys_state_set(
++                    key.to_owned(),
++                    b,
++                    Some(key.to_owned()),
++                    PayloadOptions::default(),
++                );
+                 inner_lock.maybe_flip_span_replaying_field();
+             }
+             Err(e) => {
+@@ -333,13 +403,15 @@ impl ContextInternal {
+ 
+     pub fn clear(&self, key: &str) {
+         let mut inner_lock = must_lock!(self.inner);
+-        let _ = inner_lock.vm.sys_state_clear(key.to_string());
++        let _ = inner_lock
++            .vm
++            .sys_state_clear(key.to_owned(), Some(key.to_owned()));
+         inner_lock.maybe_flip_span_replaying_field();
+     }
+ 
+     pub fn clear_all(&self) {
+         let mut inner_lock = must_lock!(self.inner);
+-        let _ = inner_lock.vm.sys_state_clear_all();
++        let _ = inner_lock.vm.sys_state_clear_all(None);
+         inner_lock.maybe_flip_span_replaying_field();
+     }
+ 
 diff --git a/src/endpoint/futures/async_result_poll.rs b/src/endpoint/futures/async_result_poll.rs
 index 1aa276a..21207f2 100644
 --- a/src/endpoint/futures/async_result_poll.rs
@@ -477,17 +538,18 @@ index 0000000..82b835e
 +    }
 +}
 diff --git a/src/endpoint/futures/mod.rs b/src/endpoint/futures/mod.rs
-index a9d7946..3fee835 100644
+index a9d7946..b83e72e 100644
 --- a/src/endpoint/futures/mod.rs
 +++ b/src/endpoint/futures/mod.rs
-@@ -1,4 +1,5 @@
+@@ -1,5 +1,6 @@
  pub mod async_result_poll;
-+pub mod ephemeral_poll;
  pub mod durable_future_impl;
++pub mod ephemeral_poll;
  pub mod handler_state_aware;
  pub mod intercept_error;
+ pub mod select_poll;
 diff --git a/src/endpoint/futures/select_poll.rs b/src/endpoint/futures/select_poll.rs
-index 493ae59..fb7e7e8 100644
+index 493ae59..c1601d0 100644
 --- a/src/endpoint/futures/select_poll.rs
 +++ b/src/endpoint/futures/select_poll.rs
 @@ -72,10 +72,19 @@ impl Future for VmSelectAsyncResultPollFuture {
@@ -522,7 +584,7 @@ index 493ae59..fb7e7e8 100644
                      self.state = Some(VmSelectAsyncResultPollState::PollProgress { ctx, handles });
                  }
                  VmSelectAsyncResultPollState::PollProgress { ctx, handles } => {
-@@ -133,6 +144,17 @@ impl Future for VmSelectAsyncResultPollFuture {
+@@ -133,6 +144,18 @@ impl Future for VmSelectAsyncResultPollFuture {
                              // These two are used by the shared-core to implement async run, which is not supported by the rust sdk currently.
                              unimplemented!()
                          }
@@ -534,7 +596,8 @@ index 493ae59..fb7e7e8 100644
 +                            };
 +                            drop(inner_lock);
 +                            waiters.into_iter().for_each(std::task::Waker::wake);
-+                            self.state = Some(VmSelectAsyncResultPollState::PollProgress { ctx, handles });
++                            self.state =
++                                Some(VmSelectAsyncResultPollState::PollProgress { ctx, handles });
 +                            continue;
 +                        }
                          Ok(AwaitResponse::CancelSignalReceived) => {

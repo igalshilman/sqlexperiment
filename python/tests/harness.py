@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -85,6 +86,11 @@ class Server:
             self.process.send_signal(signal.SIGKILL)
             self.process.wait()
             self.process = None
+
+    def close(self) -> None:
+        """Kill it, and remove its directory."""
+        self.kill()
+        shutil.rmtree(self.dir, ignore_errors=True)
 
 
 class Service:

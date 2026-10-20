@@ -1,17 +1,15 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index ce23f1c..df22f3d 100644
+index ce23f1c..8339993 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -15,3 +15,7 @@ doc = false
+@@ -14,4 +14,4 @@ doc = false
+ [dependencies]
  pyo3 = { version = "0.25.1", features = ["extension-module"] }
  tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
- restate-sdk-shared-core = { version = "7.0.3", features = ["request_identity", "sha2_random_seed", "rust_crypto"] }
-+
-+# The patched shared core, which setup.sh clones next to this one.
-+[patch.crates-io]
-+restate-sdk-shared-core = { path = "../sdk-shared-core" }
+-restate-sdk-shared-core = { version = "7.0.3", features = ["request_identity", "sha2_random_seed", "rust_crypto"] }
++restate-sdk-shared-core = { version = "8.1.0", features = ["request_identity", "sha2_random_seed", "rust_crypto"] }
 diff --git a/pyproject.toml b/pyproject.toml
-index 13b86df..3e2f13e 100644
+index 13b86df..47493be 100644
 --- a/pyproject.toml
 +++ b/pyproject.toml
 @@ -31,6 +31,8 @@ openai = ["openai-agents>=0.6.1"]
@@ -23,17 +21,16 @@ index 13b86df..3e2f13e 100644
  zstd = [
      "backports.zstd ; python_version < '3.14'",
  ]
-@@ -44,6 +46,20 @@ features = ["pyo3/extension-module"]
+@@ -44,6 +46,19 @@ features = ["pyo3/extension-module"]
  module-name = "restate._internal"
  python-source = "python"
  
-+# Rebuilt by uv when the Rust changes, its own or the patched core's (cloned next to it).
++# Rebuilt by uv when the Rust changes.
 +[tool.uv]
 +cache-keys = [
 +    { file = "pyproject.toml" },
 +    { file = "Cargo.toml" },
 +    { file = "src/**/*.rs" },
-+    { file = "../sdk-shared-core/src/**/*.rs" },
 +]
 +
 +# The sql extra's sqlite-kv, from the repository this clone is built in
@@ -1835,7 +1832,7 @@ index b87a996..331153d 100644
              self.handlers[handler.name] = handler
              return wrapped
 diff --git a/src/lib.rs b/src/lib.rs
-index 319281a..e7fb7f2 100644
+index 319281a..8b9b510 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -4,9 +4,9 @@ use pyo3::types::{PyBytes, PyNone, PyString};
@@ -1913,7 +1910,14 @@ index 319281a..e7fb7f2 100644
          }
      }
  
-@@ -521,6 +541,35 @@ impl PyVM {
+@@ -516,17 +536,47 @@ impl PyVM {
+     ) -> Result<PyNotificationHandle, PyVMError> {
+         self_
+             .vm
+-            .sys_state_get(key, Default::default())
++            // Named after its key, so that tooling can hide a SQL database's pages and log.
++            .sys_state_get(key.clone(), Some(key), Default::default())
+             .map(Into::into)
              .map_err(Into::into)
      }
  
@@ -1949,7 +1953,42 @@ index 319281a..e7fb7f2 100644
      fn sys_get_state_keys(
          mut self_: PyRefMut<'_, Self>,
      ) -> Result<PyNotificationHandle, PyVMError> {
-@@ -1018,6 +1067,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+         self_
+             .vm
+-            .sys_state_get_keys()
++            .sys_state_get_keys(None)
+             .map(Into::into)
+             .map_err(Into::into)
+     }
+@@ -538,16 +588,24 @@ impl PyVM {
+     ) -> Result<(), PyVMError> {
+         self_
+             .vm
+-            .sys_state_set(key, buffer.as_bytes().to_vec().into(), Default::default())
++            .sys_state_set(
++                key.clone(),
++                buffer.as_bytes().to_vec().into(),
++                Some(key),
++                Default::default(),
++            )
+             .map_err(Into::into)
+     }
+ 
+     fn sys_clear_state(mut self_: PyRefMut<'_, Self>, key: String) -> Result<(), PyVMError> {
+-        self_.vm.sys_state_clear(key).map_err(Into::into)
++        self_
++            .vm
++            .sys_state_clear(key.clone(), Some(key))
++            .map_err(Into::into)
+     }
+ 
+     fn sys_clear_all_state(mut self_: PyRefMut<'_, Self>) -> Result<(), PyVMError> {
+-        self_.vm.sys_state_clear_all().map_err(Into::into)
++        self_.vm.sys_state_clear_all(None).map_err(Into::into)
+     }
+ 
+     fn sys_sleep(
+@@ -1018,6 +1076,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
      m.add_class::<PyDoProgressWaitExternalProgress>()?;
      m.add_class::<PyDoProgressExecuteRun>()?;
      m.add_class::<PyDoProgressCancelSignalReceived>()?;

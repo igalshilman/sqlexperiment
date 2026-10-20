@@ -21,4 +21,4 @@ def restate_server(tmp_path_factory) -> Iterator[None]:
         yield
     finally:
         service.stop()
-        server.kill()
+        server.close()

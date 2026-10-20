@@ -471,8 +471,7 @@ message being answered.
 `restate-agents` is not published: it runs on a Restate SDK with
 [patches](../sdk-typescript/README.md) (SQL in virtual objects), which this
 repository builds. Build it once, at the repository's root, with `make js`:
-it needs Rust (with the `wasm32-unknown-unknown` target and `wasm-bindgen`
-0.2.121), Node 24 or later, and pnpm; `nix develop` has them all (see
+it needs Rust (for the Node.js addon), Node 24 or later, and pnpm; `nix develop` has them all (see
 [Build and test](../../../README.md#build-and-test)).
 
 Then the quickest start is a file in [`examples-typescript/`](../../../examples-typescript/README.md),
@@ -483,7 +482,7 @@ in the pnpm workspace: a directory listed in
 ```json
 {
   "type": "module",
-  "dependencies": { "@restatedev/restate-sdk": "1.17.3", "restate-agents": "workspace:*", "zod": "4.6.5" }
+  "dependencies": { "@restatedev/restate-sdk": "1.17.4", "restate-agents": "workspace:*", "zod": "4.6.5" }
 }
 ```
 

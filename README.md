@@ -201,8 +201,8 @@ in WebAssembly. How it works: [`rust/functions`](rust/functions/README.md).
 Each part is a directory with its README, a workspace of its own; the
 [`Makefile`](Makefile) builds and tests them all.
 
-- [`core/`](core): the storage ([`sqlite-kv`](core/sqlite-kv/README.md)) and the
-  [patched shared core](core/sdk-shared-core/README.md) every SDK builds on.
+- [`core/`](core): the storage ([`sqlite-kv`](core/sqlite-kv/README.md)) every
+  SDK builds on.
 - [`typescript/`](typescript/README.md): the Node.js addon, the patched SDK
   and the [`restate-agents`](typescript/packages/integrations/README.md) integrations.
 - [`python/`](python/README.md): the same for Python.
@@ -215,12 +215,12 @@ Each part is a directory with its README, a workspace of its own; the
 
 ## Requirements
 
-|                | Version                                                                                                                           |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Restate server | 1.8 or later                                                                                                                      |
-| TypeScript SDK | 1.17.3 with [the patches](typescript/packages/sdk-typescript/README.md), over the shared core's unreleased main; `make` builds it |
-| Python SDK     | 1.0.5 with [the patches](python/sdk/README.md), over the same shared core; `make` builds it                                       |
-| Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), over the same shared core; `make sdk-rs` builds it                                 |
+|                | Version                                                                                                   |
+| -------------- | --------------------------------------------------------------------------------------------------------- |
+| Restate server | 1.8 or later                                                                                              |
+| TypeScript SDK | 1.17.4 with [the patches](typescript/packages/sdk-typescript/README.md); `make` builds it                 |
+| Python SDK     | 1.0.5 with [the patches](python/sdk/README.md), on the released shared core 8.1.0; `make` builds it       |
+| Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), on the released shared core 8.1.0; `make sdk-rs` builds it |
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway \
@@ -247,9 +247,7 @@ make help
 ```
 
 Without Nix: besides Rust, the Node.js parts need node 24 or later (the
-examples and tests are TypeScript that node runs as it is, and OpenCode needs 24) and pnpm, which installs [their workspace](typescript/README.md) (`make js`); the patched TypeScript
-SDK also needs the `wasm32-unknown-unknown` target and
-`wasm-bindgen` 0.2.121 (`cargo install wasm-bindgen-cli --version 0.2.121`).
+examples and tests are TypeScript that node runs as it is, and OpenCode needs 24) and pnpm, which installs [their workspace](typescript/README.md) (`make js`).
 The Python parts need Python 3.13 and [uv](https://docs.astral.sh/uv/), which
 installs [their workspace](python/README.md) into `python/.venv` (`make py`),
 building the patched SDK and the extension with maturin.

@@ -1,13 +1,13 @@
 # The patched Rust SDK
 
 The Rust counterpart of [the patched Python SDK](../../python/sdk/README.md):
-the Restate Rust SDK with handlers that do not replay their journal, over
-[the patched shared core](../../core/sdk-shared-core/README.md). It is what
+the Restate Rust SDK with handlers that do not replay their journal, over the
+released [shared core 8.1.0](https://github.com/restatedev/sdk-shared-core/releases/tag/v8.1.0) (`JournalReplay::Disabled`). It is what
 [the durable JavaScript objects](../functions/README.md) run on.
 
-|          | What                                             | Version                                                                                                                                                                                                                              | Form                                           |
-| -------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
-| [`.`](.) | `restate-sdk` (Rust) and the shared core it uses | 0.12.1 ([`5cd9a3d`](https://github.com/restatedev/sdk-rust/commit/5cd9a3d24d7ddc21f29c8c43074d3d67ca67c163)), shared core [`382649d`](https://github.com/restatedev/sdk-shared-core/commit/382649d0652aa6d971ec16e788d24b4b2c8c8b45) | Patches, applied to fresh clones by `setup.sh` |
+|          | What                                             | Version                                                                                                                                     | Form                                            |
+| -------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [`.`](.) | `restate-sdk` (Rust) and the shared core it uses | 0.12.1 ([`5cd9a3d`](https://github.com/restatedev/sdk-rust/commit/5cd9a3d24d7ddc21f29c8c43074d3d67ca67c163)), shared core 8.1.0 (crates.io) | Patches, applied to a fresh clone by `setup.sh` |
 
 ```rust
 let endpoint = Endpoint::builder()
@@ -43,24 +43,20 @@ such as [a database in the state](../../core/sqlite-kv/README.md).
 
 ## Build
 
-[`setup.sh`](setup.sh) (`make sdk-rs`) clones both repositories at the pinned
-revisions into `.build/` (ignored), and applies [`patches/`](patches) and
-[the shared core's patch](../../core/sdk-shared-core/sdk-shared-core.patch).
-The SDK's `Cargo.toml` takes the core from the clone next to it, and so must a
-crate that depends on the SDK (a `[patch.crates-io]` of its own). After
-editing the clones, [`patches/regenerate.sh`](patches/regenerate.sh) writes
-the patches back; `setup.sh` refuses to clone again over edits that the
-patches do not have. `make test-sdk-rs` runs the SDK's unit tests.
+[`setup.sh`](setup.sh) (`make sdk-rs`) clones the SDK at the pinned revision
+into `.build/` (ignored), and applies [`patches/`](patches). After editing the
+clone, [`patches/regenerate.sh`](patches/regenerate.sh) writes the patch back;
+`setup.sh` refuses to clone again over edits that the patch does not have. `make test-sdk-rs` runs the SDK's unit tests.
 
 ## Changes
 
 | Change                                                                                                                                                                                                            | Why                                                                                                                                     | Where                                                                                                                                      |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `JournalReplay::Disabled`, and state commands named after their key                                                                                                                                               | See [the shared core](../../core/sdk-shared-core/README.md)                                                                             | `sdk-shared-core.patch`                                                                                                                    |
+| The released shared core 8.1.0, whose `JournalReplay::Disabled` runs a retried attempt again from the start; state commands named after their key                                                                 | So that tooling can hide a SQL database's pages and log by name (`dev.restate.tooling.journal.hidden.name.prefix`)                      | `Cargo.toml`, `endpoint/context.rs`                                                                                                        |
 | `ServiceOptions::journal_replay` and `HandlerOptions::journal_replay`, passed to the VM's constructor                                                                                                             | Turns replay off per service, or per handler; an SDK-side option, not in the discovery                                                  | `endpoint/builder.rs`, `endpoint/mod.rs`, `service.rs`                                                                                     |
 | `ObjectContext::raw_state()` and `RawState`: `get`, `set` and `clear` on bytes, and `sync` (an empty `ctx.run`)                                                                                                   | A store that owns its storage (`'static`), such as sqlite-kv's ordered `KvStore`                                                        | `context/mod.rs`, `lib.rs`                                                                                                                 |
 | `ServiceOptions::name`                                                                                                                                                                                            | Bind one type as several services, each with state of its own: one object per program                                                   | `endpoint/builder.rs`                                                                                                                      |
 | Futures waiting for input wake each other once one has read it, and check their result before reading more                                                                                                        | Concurrent awaits, such as sqlite-kv's concurrent reads: the input channel wakes only the last waiter                                   | `endpoint/context.rs`, `endpoint/futures/async_result_poll.rs`, `select_poll.rs`                                                           |
 | `TCP_NODELAY` on each connection of the HTTP server                                                                                                                                                               | Nagle's algorithm delays each small message by the peer's delayed ACK (~40 ms)                                                          | `http_server.rs`                                                                                                                           |
 | `RawState::get` is a journaled get for now; protocol V8's unjournaled get (`get_ephemeral`, `EphemeralGetFuture`) is in place for when V8 ships (TODO, [FUTURE.md](../../FUTURE.md)); the discovery advertises V8 | Unjournaled reads would add nothing to the journal: on replay they would read the state again anyway. Restate 1.8 negotiates V7 at most | `context/mod.rs`, `endpoint/context.rs`, `endpoint/futures/ephemeral_poll.rs`, `async_result_poll.rs`, `select_poll.rs`, `endpoint/mod.rs` |
-| Build: the core from the clone next to the SDK (`[patch.crates-io]`); no `rust-toolchain.toml`                                                                                                                    | The patched core; the toolchain is the repository's (`flake.nix`), not a second pinned one                                              | `Cargo.toml`, `rust-toolchain.toml`                                                                                                        |
+| Build: no `rust-toolchain.toml`                                                                                                                                                                                   | The toolchain is the repository's (`flake.nix`), not a second pinned one                                                                | `rust-toolchain.toml`                                                                                                                      |
