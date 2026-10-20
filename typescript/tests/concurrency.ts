@@ -6,8 +6,7 @@
 // them. With lazy state, every state read of the database goes to the server.
 //
 //   RESTATE_SERVER=/path/to/restate-server node concurrency.ts   (or make concurrency-test)
-import * as restate from '@restatedev/restate-sdk';
-import * as sql from 'restate-sql';
+import * as restate from 'restate-sql';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,7 +25,7 @@ const PORT = 9184;
 const INACTIVITY = 1000; // the server's inactivity timeout: a handler idle this long suspends
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-type Ctx = sql.ObjectContext;
+type Ctx = restate.ObjectContext;
 /** What the slow helper does: wait `ms`, then return `value` or fail with `fail`. */
 interface Slow {
   ms: number;
@@ -51,16 +50,19 @@ const firstTwo = <T>(promises: PromiseLike<T>[]) =>
     /* oxlint-enable promise/always-return, promise/no-callback-in-promise */
   });
 
-// A handler that replays its journal (the default): a slow, keyed helper.
+// A slow, keyed helper, whose handler replays its journal.
 const helper = restate.object({
   name: 'Helper',
   handlers: {
-    slow: async (ctx: restate.ObjectContext, { ms, value, fail }: Slow) => {
-      reached.add(ctx.key);
-      await ctx.sleep(ms);
-      if (fail) throw new restate.TerminalError(fail);
-      return value;
-    },
+    slow: restate.handlers.object.exclusive(
+      { journalReplay: true },
+      async (ctx: restate.JournaledObjectContext, { ms, value, fail }: Slow) => {
+        reached.add(ctx.key);
+        await ctx.sleep(ms);
+        if (fail) throw new restate.TerminalError(fail);
+        return value;
+      },
+    ),
   },
 });
 
@@ -82,7 +84,7 @@ const decoded = (b: Uint8Array | null | undefined) =>
   b === null || b === undefined ? null : new TextDecoder().decode(b);
 const page = (i: number) => `p${i}`;
 
-const conc = sql.object({
+const conc = restate.object({
   name: 'Concurrency',
   handlers: {
     all: async (ctx: Ctx) => {
@@ -123,7 +125,7 @@ const conc = sql.object({
     },
 
     awakeable: async (ctx: Ctx) => {
-      (ctx as unknown as restate.ObjectContext).awakeable();
+      (ctx as unknown as restate.JournaledObjectContext).awakeable();
     },
 
     lateRegistration: async (ctx: Ctx) => {
@@ -186,7 +188,7 @@ const conc = sql.object({
       };
       return Promise.all(Array.from({ length: 8 }, (_, c) => chain(c)));
     },
-    sharedGets: sql.shared(async (ctx: sql.ObjectSharedContext, n: number) =>
+    sharedGets: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext, n: number) =>
       (await Promise.all(Array.from({ length: n }, (_, i) => ctx.get(page(i), bytes)))).map(decoded),
     ),
     // A retried attempt starts over, and reads what the one before wrote.
@@ -204,7 +206,7 @@ const conc = sql.object({
   },
 });
 
-const database = sql.object({
+const database = restate.object({
   name: 'Db',
   handlers: {
     concurrent: async (ctx: Ctx) => {

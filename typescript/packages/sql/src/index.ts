@@ -1,16 +1,19 @@
 // SQL in Restate virtual objects: each key of an object has a database of its
-// own, kept in the object's state, `ctx.db`.
+// own, kept in the object's state, `ctx.db`. It is the Restate SDK, with
+// `object`, `handlers.object` and the object contexts of SQL:
 //
-//   import * as sql from 'restate-sql';
+//   import * as restate from 'restate-sql';
 //
-//   const notes = sql.object({
+//   const notes = restate.object({
 //     name: 'notes',
 //     handlers: {
-//       add: async (ctx: sql.ObjectContext, note: string) => {
+//       add: async (ctx: restate.ObjectContext, note: string) => {
 //         await ctx.db.execute('CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)');
 //         await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
 //       },
-//       list: sql.shared(async (ctx: sql.ObjectSharedContext) => ctx.db.query('SELECT text FROM notes')),
+//       list: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) =>
+//         ctx.db.query('SELECT text FROM notes'),
+//       ),
 //     },
 //   });
 //
@@ -18,7 +21,14 @@
 import * as restate from '@restatedev/restate-sdk';
 import { SqlAttempt, type SqlHost, type SqlSession, type SqlTransaction, withSql } from './session.ts';
 
+// The SDK, but what this module declares in its place.
+export * from '@restatedev/restate-sdk';
 export type { SqlDatabase, SqlSession, SqlTransaction, SqlTransactionSends, SqlValue } from './session.ts';
+
+/** The SDK's context of an object's handler that replays its journal (`journalReplay: true`): no `ctx.db`. */
+export type JournaledObjectContext = restate.ObjectContext;
+/** The SDK's context of an object's shared handler that replays its journal (`journalReplay: true`): no `ctx.db`. */
+export type JournaledObjectSharedContext = restate.ObjectSharedContext;
 
 /**
  * The context of an object's handler with SQL: the object's context, with its
@@ -26,7 +36,7 @@ export type { SqlDatabase, SqlSession, SqlTransaction, SqlTransactionSends, SqlV
  * it again from the start, against the state as stored (at least once), and
  * its operations can be awaited concurrently (`Promise.all`, `Promise.race`,
  * several async functions). Awakeables need journal replay, so there are
- * none: wait in a handler of `restate.handlers.object`.
+ * none: wait in a handler with `journalReplay: true`.
  */
 export interface ObjectContext extends Omit<restate.ObjectContext, 'awakeable'> {
   /**
@@ -74,14 +84,14 @@ export interface ObjectSharedContext extends Omit<restate.ObjectSharedContext, '
  * loading every page; and no journal kept after an invocation completes,
  * since it holds every page it read.
  */
-export const options = { enableLazyState: true, journalRetention: 0 } satisfies restate.ObjectOptions;
+export const sqlOptions = { enableLazyState: true, journalRetention: 0 } satisfies restate.ObjectOptions;
 
 /**
  * The metadata `object` sets: Restate's UI hides the database from the
  * journal view (its commit record, log, pages and hint in the object's
  * state, `v14/...`; and the `sync` runs after its writes).
  */
-export const metadata = {
+export const sqlMetadata = {
   'dev.restate.tooling.journal.hidden.names': 'sync',
   'dev.restate.tooling.journal.hidden.name.prefix': 'v14/',
 };
@@ -113,7 +123,7 @@ function host(ctx: restate.ObjectContext | restate.ObjectSharedContext, shared: 
 
 const refusedAwakeable = () => {
   throw new restate.TerminalError(
-    'awakeables need journal replay: wait in a handler of restate.handlers.object, which has no ctx.db',
+    'awakeables need journal replay: wait in a handler with journalReplay: true, which has no ctx.db',
   );
 };
 
@@ -146,45 +156,68 @@ function withDatabase(fn: Fn<never>, shared: boolean) {
 // than a replayed journal would have.
 const recovery = () => restate.internal.explicitRecovery();
 
+/**
+ * The options of an object's handler: the SDK's, and `journalReplay`. With
+ * `journalReplay: true` the handler is the SDK's own, which replays its
+ * journal and has no `ctx.db` (its context is {@link JournaledObjectContext}),
+ * such as one that waits on an awakeable.
+ */
 // oxlint-disable-next-line typescript/no-explicit-any
-type HandlerOptions = restate.ObjectHandlerOpts<any, any>;
+export type SqlHandlerOpts = restate.ObjectHandlerOpts<any, any> & { journalReplay?: boolean };
+
+/** `fn` as a handler of `kind`, with `options`. */
+function handler(kind: 'exclusive' | 'shared', optionsOrFn: SqlHandlerOpts | Fn<never>, fn?: Fn<never>) {
+  const [{ journalReplay = false, ...opts }, body] =
+    typeof optionsOrFn === 'function' ? [{}, optionsOrFn] : [optionsOrFn, fn!];
+  const make = (o: typeof opts, f: Fn<never>) =>
+    kind === 'shared'
+      ? restate.handlers.object.shared(o, f as never)
+      : restate.handlers.object.exclusive(o, f as never);
+  if (journalReplay) return make(opts, body);
+  return Object.defineProperty(make({ ...opts, ...recovery() }, withDatabase(body, kind === 'shared')), SQL, {
+    value: true,
+  });
+}
+
+/** An exclusive handler with SQL (see {@link ObjectContext}), with `options`; one with `journalReplay: true` is the SDK's. */
+function exclusive<F extends Fn<ObjectContext>>(fn: F): F;
+function exclusive<F extends Fn<JournaledObjectContext>>(options: SqlHandlerOpts & { journalReplay: true }, fn: F): F;
+function exclusive<F extends Fn<ObjectContext>>(options: SqlHandlerOpts, fn: F): F;
+function exclusive(optionsOrFn: SqlHandlerOpts | Fn<never>, fn?: Fn<never>) {
+  return handler('exclusive', optionsOrFn, fn);
+}
+
+/** A shared handler with SQL (see {@link ObjectSharedContext}), with `options`; one with `journalReplay: true` is the SDK's. */
+function shared<F extends Fn<ObjectSharedContext>>(fn: F): F;
+function shared<F extends Fn<JournaledObjectSharedContext>>(
+  options: SqlHandlerOpts & { journalReplay: true },
+  fn: F,
+): F;
+function shared<F extends Fn<ObjectSharedContext>>(options: SqlHandlerOpts, fn: F): F;
+function shared(optionsOrFn: SqlHandlerOpts | Fn<never>, fn?: Fn<never>) {
+  return handler('shared', optionsOrFn, fn);
+}
 
 /**
- * An exclusive handler with SQL, with `options` (such as `input`, or
- * `explicitCancellation`). `object` makes one of each function in its
- * `handlers`; this is for options.
+ * The SDK's handler wrappers, but an object's: its `exclusive` and `shared`
+ * handlers have SQL, unless their options say `journalReplay: true`.
  */
-export function exclusive<F extends Fn<ObjectContext>>(fn: F): F;
-export function exclusive<F extends Fn<ObjectContext>>(options: HandlerOptions, fn: F): F;
-export function exclusive<F extends Fn<ObjectContext>>(optionsOrFn: HandlerOptions | F, fn?: F): F {
-  const [opts, body] = typeof optionsOrFn === 'function' ? [{}, optionsOrFn] : [optionsOrFn, fn!];
-  const handler = restate.handlers.object.exclusive({ ...opts, ...recovery() }, withDatabase(body, false) as never);
-  return Object.defineProperty(handler, SQL, { value: true }) as unknown as F;
-}
+export const handlers = { ...restate.handlers, object: { exclusive, shared } };
 
-/** A shared handler with SQL (see {@link ObjectSharedContext}), with `options`. */
-export function shared<F extends Fn<ObjectSharedContext>>(fn: F): F;
-export function shared<F extends Fn<ObjectSharedContext>>(options: HandlerOptions, fn: F): F;
-export function shared<F extends Fn<ObjectSharedContext>>(optionsOrFn: HandlerOptions | F, fn?: F): F {
-  const [opts, body] = typeof optionsOrFn === 'function' ? [{}, optionsOrFn] : [optionsOrFn, fn!];
-  const handler = restate.handlers.object.shared({ ...opts, ...recovery() }, withDatabase(body, true) as never);
-  return Object.defineProperty(handler, SQL, { value: true }) as unknown as F;
-}
-
-/** Whether `value` is a handler already: one of {@link exclusive} or {@link shared}, or of `restate.handlers.object`. */
+/** Whether `value` is a handler already: one of {@link handlers}, or the SDK's. */
 const isHandler = (value: object) =>
   SQL in value || Object.getOwnPropertySymbols(value).some((s) => s.description === 'Handler');
 
 /**
  * A Restate virtual object whose handlers have SQL, `ctx.db`: a database per
  * key, stored with the object's state. Each function in `handlers` is an
- * exclusive handler with SQL; {@link shared} makes a shared one, and
- * {@link exclusive} one with options. A handler of `restate.handlers.object`
- * keeps its journal replay, and has no `ctx.db`.
+ * exclusive handler with SQL; `handlers.object.shared` makes a shared one,
+ * `handlers.object.exclusive` one with options, and either one with
+ * `journalReplay: true` one that replays its journal, without `ctx.db`.
  *
- * `options` and `metadata` add to (or replace) {@link options} and
- * {@link metadata}, such as `options: { journalRetention: { hours: 1 } }` to
- * look at journals in the UI.
+ * `options` and `metadata` add to (or replace) {@link sqlOptions} and
+ * {@link sqlMetadata}, such as `options: { journalRetention: { hours: 1 } }`
+ * to look at journals in the UI.
  */
 export function object<P extends string, H extends Record<string, unknown>>(definition: {
   name: P;
@@ -194,15 +227,15 @@ export function object<P extends string, H extends Record<string, unknown>>(defi
   options?: restate.ObjectOptions;
 }): restate.VirtualObjectDefinition<P, H> {
   // The handlers as the SDK takes them.
-  const handlers: Record<string, (ctx: restate.ObjectContext, input?: unknown) => Promise<unknown>> = {};
-  for (const [name, handler] of Object.entries(definition.handlers)) {
-    if (typeof handler !== 'function') throw new TypeError(`${definition.name}.${name} is not a handler`);
-    handlers[name] = (isHandler(handler) ? handler : exclusive(handler as Fn<ObjectContext>)) as never;
+  const sdkHandlers: Record<string, (ctx: restate.ObjectContext, input?: unknown) => Promise<unknown>> = {};
+  for (const [name, fn] of Object.entries(definition.handlers)) {
+    if (typeof fn !== 'function') throw new TypeError(`${definition.name}.${name} is not a handler`);
+    sdkHandlers[name] = (isHandler(fn) ? fn : exclusive(fn as Fn<ObjectContext>)) as never;
   }
   return restate.object({
     ...definition,
-    handlers,
-    metadata: { ...metadata, ...definition.metadata },
-    options: { ...options, ...definition.options },
+    handlers: sdkHandlers,
+    metadata: { ...sqlMetadata, ...definition.metadata },
+    options: { ...sqlOptions, ...definition.options },
   });
 }

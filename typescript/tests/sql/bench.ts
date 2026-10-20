@@ -14,8 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ChildProcess } from 'node:child_process';
-import * as restate from '@restatedev/restate-sdk';
-import * as sql from 'restate-sql';
+import * as restate from 'restate-sql';
 import { row } from './sql.ts';
 
 const SCHEMA = `CREATE TABLE IF NOT EXISTS rows(id INTEGER PRIMARY KEY, v TEXT);
@@ -23,16 +22,16 @@ const SCHEMA = `CREATE TABLE IF NOT EXISTS rows(id INTEGER PRIMARY KEY, v TEXT);
   CREATE TABLE IF NOT EXISTS history(at INTEGER PRIMARY KEY, n INTEGER)`;
 
 /** The benchmark's object: each key a database. */
-export const bench = sql.object({
+export const bench = restate.object({
   name: 'SqlBench',
   handlers: {
     /** Insert one row of `bytes` bytes, an autocommit statement. */
-    insert: async (ctx: sql.ObjectContext, bytes: number) => {
+    insert: async (ctx: restate.ObjectContext, bytes: number) => {
       await ctx.db.execute(SCHEMA);
       await ctx.db.execute('INSERT INTO rows(v) VALUES(?)', ['x'.repeat(bytes)]);
     },
     /** Increment a counter and record it, in one transaction; returns it. */
-    count: (ctx: sql.ObjectContext) =>
+    count: (ctx: restate.ObjectContext) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
         await db.execute('INSERT INTO counter VALUES(0, 0) ON CONFLICT(id) DO UPDATE SET n = n + 1');
@@ -41,13 +40,13 @@ export const bench = sql.object({
         return n;
       }),
     /** Insert `rows` rows of `bytes` bytes each, in one transaction. */
-    bulk: (ctx: sql.ObjectContext, [rows, bytes]: [number, number]) =>
+    bulk: (ctx: restate.ObjectContext, [rows, bytes]: [number, number]) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
         for (let i = 0; i < rows; i++) await db.execute('INSERT INTO rows(v) VALUES(?)', [`${i}`.padEnd(bytes, 'y')]);
       }),
     /** The rows' count and total length, from a shared handler. */
-    read: sql.shared((ctx: sql.ObjectSharedContext) =>
+    read: restate.handlers.object.shared((ctx: restate.ObjectSharedContext) =>
       row<[number, number]>(ctx.db, 'SELECT count(*), coalesce(sum(length(v)), 0) FROM rows'),
     ),
   },

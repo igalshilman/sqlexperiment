@@ -14,7 +14,7 @@
  *   curl localhost:8080/coder/fizzbuzz/chat -d 'Also write a README at the top'   # refused: not in src/
  *   curl localhost:8080/coder/fizzbuzz/messages
  */
-import type * as sql from 'restate-sql';
+import type * as restate from 'restate-sql';
 import type { Plugin } from '@opencode/plugin';
 import { chatHandler, object, serve } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
@@ -40,7 +40,7 @@ const onlySrc: Plugin.Plugin = {
 };
 
 /** The options of a project's invocations: its directory, and the plugin. */
-const options = (ctx: sql.ObjectContext): opencode.Options => ({
+const options = (ctx: restate.ObjectContext): opencode.Options => ({
   workspace: `${workspace}/${ctx.key}`,
   plugins: [onlySrc],
 });
