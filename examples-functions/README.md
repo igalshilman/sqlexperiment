@@ -56,14 +56,15 @@ file's header shows how to call it, and Restate's UI lists every handler.
 Export a function `(input, ctx)`; it may be async. The input and the result
 are JSON (no input is null). `ctx` is all it needs from outside:
 
-| Call                                              | What                                                                                                                                                                    |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ``ctx.db.sql`SELECT ... ${value}` ``              | The scope's SQL database: rows as objects. `${}` values are parameters, never SQL text. Synchronous.                                                                    |
-| `ctx.db.transaction(fn)`                          | Run `fn`'s statements together, or undo them if it throws                                                                                                               |
-| `ctx.kv.get/set/delete(key)`                      | The scope's JSON values                                                                                                                                                 |
-| `ctx.rpc.call({ service, handler, key? }, input)` | Any Restate service, including the other functions here. Models too: `claude/messages` takes a [Messages API](https://platform.claude.com/docs/en/api/messages) request |
-| `ctx.sleep(ms)`                                   | A durable timer, however long                                                                                                                                           |
-| `ctx.key`                                         | The object's key                                                                                                                                                        |
+| Call                                              | What                                                                                                 |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| ``ctx.db.sql`SELECT ... ${value}` ``              | The scope's SQL database: rows as objects. `${}` values are parameters, never SQL text. Synchronous. |
+| `ctx.db.transaction(fn)`                          | Run `fn`'s statements together, or undo them if it throws                                            |
+| `ctx.kv.get/set/delete(key)`                      | The scope's JSON values                                                                              |
+| `ctx.rpc.call({ service, handler, key? }, input)` | Any Restate service, including the other functions here                                              |
+| `ctx.call('claude.messages', request)`            | Claude: a [Messages API](https://platform.claude.com/docs/en/api/messages) request, sent by the host |
+| `ctx.sleep(ms)`                                   | A durable timer, however long                                                                        |
+| `ctx.key`                                         | The object's key                                                                                     |
 
 - It is standard JavaScript, without Node.js APIs or imports: all I/O goes
   through `ctx`, and values crossing it are JSON.
@@ -74,6 +75,13 @@ are JSON (no input is null). `ctx` is all it needs from outside:
   await.
 - A call ends when its function settles: unlike Node.js, promises still
   pending are dropped. Await what must happen.
+- The input of `ctx.rpc.call` or `ctx.call` stays in the function's memory
+  until the call is answered, and is read from there when the call is made,
+  and again after a crash: nothing else stores it. Do not change it until
+  then.
+- Each call has an idempotency key, the same after a crash. To set your own,
+  pass `{ idempotencyKey }` as the last argument: the service called runs
+  once for every call with that key.
 - Compute as long as you need. Work that awaits has no limit; one stretch
   without an await may run 10 minutes (`FUNCTIONS_TURN_TIMEOUT`).
 - `FUNCTIONS_MEMORY=1g` caps the memory calls hold. Past it, the calls that

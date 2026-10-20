@@ -60,7 +60,8 @@ durable here (`asyncio.sleep`, `asyncio.timeout`, `asyncio.wait_for`).
 | `ctx.db.sql(t"SELECT ... {value}")`                    | The scope's SQL database: rows as dicts. A t-string's `{}` values are parameters. Synchronous. |
 | `with ctx.db.transaction():`                           | The block's statements together, or none if it raises                                          |
 | `await ctx.kv.get/set/delete(key)`                     | The scope's JSON values                                                                        |
-| `await ctx.rpc.call(service, handler, input, key=...)` | Any Restate service; `ctx.rpc.call("claude", "messages", request)` for Claude                  |
+| `await ctx.rpc.call(service, handler, input, key=...)` | Any Restate service                                                                            |
+| `await ctx.call("claude.messages", request)`           | Claude: a Messages API request, sent by the host                                               |
 | `await ctx.sleep(seconds)`                             | A durable timer, however long                                                                  |
 | `ctx.key`                                              | The object's key                                                                               |
 
@@ -71,6 +72,11 @@ durable here (`asyncio.sleep`, `asyncio.timeout`, `asyncio.wait_for`).
   to stay consistent. `ctx.db.transaction()` is for undoing.
 - The call ends when its handler returns: tasks still pending are dropped.
   Await what must happen.
+- The input of `ctx.rpc.call` or `ctx.call` stays in the handler's memory
+  until the call is answered, and is read from there when the call is made,
+  and again after a crash: nothing else stores it. Do not change it until
+  then. To set a call's idempotency key, pass `idempotency_key=...`: the
+  service called runs once for every call with that key.
 - A failed operation raises `OperationError`; an exception a handler raises
   fails the call, with its type and message.
 - A changed file is a new function: a call still waiting when its file

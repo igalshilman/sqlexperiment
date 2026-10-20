@@ -1,13 +1,15 @@
 # Host bindings, SQL and one commit per turn
 
-A proposal; §4 and the first two steps of the plan (§5) are built. It
-covers four things:
+A proposal, built but for the registry of in-turn Calls (§5). It covers
+five things:
 
 - how a turn's time is bounded, instead of fuel;
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
 - one record that commits a turn's SQL, pages and effects together:
-  sqlite-kv v14's commit record, with the VM's chain beside the SQL log.
+  sqlite-kv v14's commit record, with the VM's chain beside the SQL log;
+- host bindings: operations the host makes itself, such as a model call,
+  whose input nothing but the guest's heap keeps (§6).
 
 ## 1. Fuel, and what replaces it
 
@@ -65,8 +67,8 @@ promise. Adding an operation touches three places:
 2. **Model (`model.rs`):** a variant of `Operation`.
 3. **Host:** either answered in the turn by the run loop (`run.rs`; KV
    works this way), or left pending and turned into a durable future by the
-   binding (`restate.rs`; RPC and timers). `ctx.call(name, args)` exists as
-   a generic kind, but the binding fails it with "No host operation".
+   binding (`restate.rs`; RPC and timers). `ctx.call(name, input)` is a
+   host binding, made by the handler (§6).
 
 Even a request answered in the turn round-trips through the job queue. The
 guest reports it as JSON, the host answers, the guest's promise settles, and
@@ -231,16 +233,75 @@ On branches, a PR each:
    where a long job also yields its thread. A compute-bound job ran ~10%
    faster without fuel (116 ms against 127 ms), and the coding session of
    DESIGN.md §10.1 now runs 200 steps instead of failing at 45.
-5. **A registry of Calls and Waits**, for the remaining bindings.
+5. **A registry of the bindings the host makes itself** (§6). Done:
+   `claude.messages` is the first; the coding session stores 2.5 MiB over
+   200 steps instead of 70 MiB, and Restate journals none of its requests.
+   The in-turn Calls are still `src/db.rs`'s, and the Restate Waits (RPCs,
+   timers) a `match` in `restate.rs`.
 
 ## Open questions
 
 - **Sync or async `ctx.db.sql`.** Synchronous says honestly that a
   statement never ends a turn. Returning a promise would leave room for a
   remote database later. The proposal is synchronous.
-- **Model calls.** Not here. With Calls and Waits in place, a model call is
-  a Wait whose request is read from the heap when it is made. That was the
-  experiment on `quickjs-host-model`, but here it would be a registered
-  binding, not a special case.
+- **Model calls.** A binding (§6), `claude.messages`, whose request is read
+  from the heap when it is made.
 - **Size of a turn record.** Sealing bounds the inline part at about 1 KiB;
   how large a stored value Restate handles well is to be measured.
+
+## 6. Bindings the host makes
+
+A binding is an operation the host makes for a program, by name, outside
+Restate: `ctx.call('claude.messages', request)`. A deployment offers them as
+a registry, passed to `bind`:
+
+```rust
+/// An operation the host makes for a program.
+pub trait Binding: Send + Sync + 'static {
+    /// Make `call`: its result, or the error its promise rejects with.
+    fn call(&self, call: HostCall) -> BoxFuture<'static, Result<Value, GuestError>>;
+    /// Whether a call made again under the same idempotency key is answered
+    /// as the first was. Only then may the guest set a key of its own.
+    fn deduplicates(&self) -> bool { false }
+}
+
+let bindings = Bindings::new().with("claude.messages", Claude::from_env());
+functions::bind(Endpoint::builder(), &programs, &cache, &bindings)?
+```
+
+A call is a pending request like an RPC: the handler makes it after the
+commit that issued it, races it with Restate's futures, and delivers its
+outcome in the next turn. Adding one is a registration in Rust; the bridges
+need nothing new.
+
+**One copy.** A call's input stays in the guest's heap until the call is
+answered; the commit keeps the call's ID, name and key. The host reads the
+input there (the bridge's `input(id)` hook, one `JSON.stringify` in C) when
+it makes the call, and again on a retried attempt, from the restored heap.
+The result is delivered to the guest and saved with its heap. So a request
+lives once, in pages the program mostly holds anyway: the model's request is
+the conversation, plus a few new messages. RPCs work the same way, but
+Restate journals their input as well, since it delivers the call.
+
+| A request's bytes        | RPC, before  | RPC, now            | Binding             |
+| ------------------------ | ------------ | ------------------- | ------------------- |
+| The guest's heap (pages) | What it kept | Kept until answered | Kept until answered |
+| The turn's commit record | A copy       | ID, target, key     | ID, name, key       |
+| Restate's journal        | A copy       | A copy              | Nothing             |
+
+**Keys.** A call's idempotency key is the program's own, if it set one
+(`{ idempotencyKey }`), or else its operation ID, `<invocation>/<n>`. The
+host checks that the guest numbers its requests in order, and makes none
+before the commit that issued it, so the key names the same request on every
+attempt: a crash after a call is made makes it again under the same key and
+with the same input. RPCs pass the key to Restate, which attaches a call
+made again to the first. A binding gets it in `HostCall`; one that does not
+deduplicate (the model) is called at least once, and refuses a key of the
+program's own rather than seem to promise what it does not keep.
+
+**What belongs in a binding.** A call whose input comes from the heap,
+whose result is this run's alone, that may be made twice, and that finishes
+well within an attempt (the turn limit, 10 minutes). What must happen once,
+is shared, or runs for hours belongs in a Restate service: a payment, a
+workspace, a human's approval. A binding's call is not in Restate's UI;
+its key names it in the binding's own logs.

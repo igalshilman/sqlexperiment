@@ -41,7 +41,9 @@ The functions this binary serves, how to run them and how to write one:
 [examples-functions/](../../examples-functions/README.md), and in Python
 [examples-functions-python/](../../examples-functions-python/README.md). The coding agent's
 workspace is the [`workspace`](src/workspace.rs) object, and models are
-[`claude`](src/claude.rs).
+the host binding [`claude.messages`](src/claude.rs): an operation the host
+makes for a program, `ctx.call(name, input)`, registered with
+[`Bindings`](src/bindings.rs) ([docs/HOST.md](docs/HOST.md) §6).
 
 ## How it works
 
