@@ -82,6 +82,17 @@ the heap, for the rows they write.
 One conversation has one call at a time: a second `send` before the first is
 answered fails.
 
+## How long a conversation lasts
+
+A conversation is the scope's, not the run's: it begins with its first
+`send`, and stays, through the end of the run, crashes and new versions of
+the program, until the program clears it (`clear()`). There is no expiry.
+`ctx.llm.conversations()` lists the scope's conversations, in the order they
+began.
+
+The coding agent keeps one per task (`task-1`, `task-2`, ...): its
+`history` handler reads them back, each from its task to its answer.
+
 ## What this is not, yet
 
 - **Streaming.** An answer arrives whole. The gateway is where streaming

@@ -491,8 +491,14 @@
       return request({ kind: 'signal', name, input: copy(input) });
     },
     // Models, through the host's gateway: `complete(request)` sends a whole
-    // request; a `conversation(name)` keeps its messages in the scope.
-    llm: Object.freeze({ complete, conversation }),
+    // request; a `conversation(name)` keeps its messages in the scope, until
+    // it is cleared.
+    llm: Object.freeze({
+      complete,
+      conversation,
+      // The scope's conversations' names, in the order they began.
+      conversations: () => hostCall('llm.list', null),
+    }),
     sleep(ms) {
       if (!Number.isSafeInteger(ms) || ms < 0 || !Number.isSafeInteger(now + ms) || now + ms > maxTime)
         throw new RangeError('Invalid sleep duration');

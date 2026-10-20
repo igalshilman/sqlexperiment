@@ -383,6 +383,10 @@ class Llm:
             raise TypeError("A model request is a dict: {model, messages, ...}")
         return await self._bridge.request({"kind": "call", "name": "llm"}, request)
 
+    def conversations(self):
+        """The scope's conversations' names, in the order they began."""
+        return self._bridge.host("llm.list", None)
+
     def conversation(self, name, **defaults):
         """The conversation `name` of this scope; `defaults` (model, system,
         tools...) go with each request."""

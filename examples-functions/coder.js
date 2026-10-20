@@ -1,8 +1,8 @@
 // A coding agent: Claude, with a shell and the files of a workspace as its
 // tools, working on a task until it is done. The object's key names the
 // workspace: a directory of the `workspace` service (under FUNCTIONS_WORKSPACES),
-// so the next task finds the last one's files; the tasks done so far are
-// in its KV.
+// so the next task finds the last one's files; each task's conversation is
+// kept, in its database.
 //
 // The agent loop is plain JavaScript, and runs for as long as the task
 // takes. The conversation is in the scope's database, and the loop in the
@@ -87,33 +87,34 @@ function workspace(ctx) {
   };
 }
 
+// The tasks so far: each one's conversation, from the task to the answer.
 export async function history(_, ctx) {
-  return (await ctx.kv.get('history')) ?? [];
+  return ctx.llm.conversations().map((name) => {
+    const messages = ctx.llm.conversation(name).history();
+    const last = messages[messages.length - 1];
+    const done = last.role === 'assistant' && !last.content.some((block) => block.type === 'tool_use');
+    const steps = messages.filter((message) => message.role === 'assistant').length;
+    return { task: messages[0].content, answer: done ? text(last.content) : null, steps };
+  });
 }
 
 export async function work({ task }, ctx) {
   const tools = workspace(ctx);
-  // The task's conversation, in the scope's database: each step sends only
-  // what it adds, and the host sends Claude the whole conversation.
-  const chat = ctx.llm.conversation('task', {
+  // The task's own conversation, kept in the scope's database: each step
+  // sends only what it adds, and the host sends Claude the whole
+  // conversation. It stays after the task, for `history`.
+  const chat = ctx.llm.conversation(`task-${ctx.llm.conversations().length + 1}`, {
     model: MODEL,
     max_tokens: 32000,
     system: SYSTEM,
     tools: TOOLS,
     options: { output_config: { effort: 'medium' } },
   });
-  chat.clear();
   let message = { role: 'user', content: task };
   for (let step = 1; step <= MAX_STEPS; step++) {
     const response = await chat.send({ messages: [message] });
     if (response.stop_reason === 'refusal') throw new Error('Claude declined the task');
-    if (response.stop_reason !== 'tool_use') {
-      const text = response.content.filter((block) => block.type === 'text');
-      const answer = text.map((block) => block.text).join('\n');
-      const history = (await ctx.kv.get('history')) ?? [];
-      await ctx.kv.set('history', [...history, { task, answer, steps: step }]);
-      return { answer, steps: step };
-    }
+    if (response.stop_reason !== 'tool_use') return { answer: text(response.content), steps: step };
     // Every tool the model asked for, in order: commands may depend on the
     // files written before them. The results go back in one message.
     const results = [];
@@ -128,4 +129,12 @@ export async function work({ task }, ctx) {
     message = { role: 'user', content: results };
   }
   throw new Error(`The task took more than ${MAX_STEPS} steps`);
+}
+
+// A message's text, without its tool calls.
+function text(content) {
+  return content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n');
 }

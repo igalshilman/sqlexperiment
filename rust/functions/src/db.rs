@@ -230,6 +230,19 @@ impl Db {
                     .context("Missing conversation")?;
                 Ok(Value::Array(self.conversation(conversation).await?))
             }
+            "llm.list" => {
+                self.llm_table().await?;
+                // In the order they began.
+                let select = "SELECT conversation FROM llm_messages \
+                    GROUP BY conversation ORDER BY MIN(rowid)";
+                let rows = self.session.query(select).await.map_err(sql)?;
+                Ok(Value::Array(
+                    rows.into_iter()
+                        .filter_map(|row| row.into_iter().next())
+                        .map(from_sql)
+                        .collect(),
+                ))
+            }
             "llm.clear" => {
                 let conversation = request["conversation"]
                     .as_str()

@@ -217,7 +217,9 @@ fn memory_growth_survives_a_restore() -> Result<()> {
     let mut run = start(&store, source, Value::Null, 1)?;
     let initial = run.view().memory_bytes;
     let grown = step(&mut run)?;
-    assert!(grown.memory_bytes >= initial + 3 * 1024 * 1024);
+    // The 3 MiB buffer is mostly new memory: some of it may fit in the
+    // heap's free space.
+    assert!(grown.memory_bytes > initial + 2 * 1024 * 1024);
     assert!(grown.batch_bytes < 100_000);
     step(&mut run)?;
     let mut run = start(&store, source, Value::Null, 1)?;

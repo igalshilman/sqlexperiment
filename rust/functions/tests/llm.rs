@@ -411,3 +411,28 @@ async def main(input, ctx):
     let done = drive(&Store::default(), &catalog, input, &fake.llm()).await;
     assert_eq!(done, json!({"answer": "It is 5.", "history": 4}));
 }
+
+#[tokio::test]
+async fn conversations_stay_and_are_listed_in_the_order_they_began() {
+    let fake = Fake::start().await;
+    let source = r#"
+export async function main({ model }, ctx) {
+  for (const name of ['task-2', 'task-10', 'scratch']) {
+    await ctx.llm.conversation(name, { model }).send({ messages: [{ role: 'user', content: name }] });
+  }
+  const before = ctx.llm.conversations();
+  ctx.llm.conversation('scratch').clear();
+  return { before, after: ctx.llm.conversations(), kept: ctx.llm.conversation('task-10').history().length };
+}
+"#;
+    let input = json!({"model": "anthropic/claude-test"});
+    let done = drive(&Store::default(), &programs(source), input, &fake.llm()).await;
+    assert_eq!(
+        done,
+        json!({
+            "before": ["task-2", "task-10", "scratch"],
+            "after": ["task-2", "task-10"],
+            "kept": 2,
+        })
+    );
+}

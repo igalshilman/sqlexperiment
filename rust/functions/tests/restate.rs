@@ -789,6 +789,12 @@ async fn the_coder_works_in_its_workspace() {
             ("exit 3\ngoodbye from world\noops\n".into(), false),
         ]
     );
+    // The task's conversation stays: `history` reads it.
+    let (_, history) = call("coder/hello/history", Value::Null).await;
+    assert_eq!(
+        history,
+        json!([{"task": "Say goodbye", "answer": "Done.", "steps": 4}])
+    );
     // The whole conversation, from the scope's database, at each step.
     let lengths: Vec<usize> = (requests.iter())
         .map(|request| request["messages"].as_array().unwrap().len())
