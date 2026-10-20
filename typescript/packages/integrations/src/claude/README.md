@@ -5,7 +5,7 @@ The Anthropic SDK's tool runner (`client.beta.messages.toolRunner` in
 is a light agent harness: the tool-calling loop, in the process, with nothing
 stored. It keeps the conversation in its params, so an agent built on it is
 durable when the conversation is: here it is in the agent's SQL database
-([SQL in Restate virtual objects](../../../sdk-typescript/SQL.md)).
+([SQL in Restate virtual objects](../../../sql/README.md)).
 
 It is lighter than the Claude Agent SDK, which runs Claude Code as a
 subprocess. Claude Code's own tools (bash, read, write, edit, glob, grep)

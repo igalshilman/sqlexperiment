@@ -1,9 +1,9 @@
 // withPi over a sqlite-kv database in memory, without a Restate server: the
 // coding tools of a workspace write to the local file system.
+import type * as sql from 'restate-sql';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type * as restate from '@restatedev/restate-sdk';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { open } from 'sqlite-kv';
 import { describe, expect, it } from 'vitest';
@@ -25,7 +25,7 @@ describe('withPi', () => {
       }),
     );
     try {
-      const ctx = { db } as unknown as restate.SqlObjectContext;
+      const ctx = { db } as unknown as sql.ObjectContext;
       const { answer, agent } = await withPi(ctx, { models, model: 'scribe/scribe', workspace }, async (pi) => ({
         answer: await pi.prompt('take a note', 'p1'),
         agent: await (await pi.harness.root(pi.context)).agent(pi.context),

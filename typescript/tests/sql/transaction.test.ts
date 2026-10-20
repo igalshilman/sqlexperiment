@@ -3,6 +3,7 @@
 // records the sends it makes. A crash is an attempt whose later writes and
 // sends are lost: what it stored before stays.
 import * as restate from '@restatedev/restate-sdk';
+import type * as sql from 'restate-sql';
 import { open } from 'sqlite-kv';
 import { describe, expect, it } from 'vitest';
 import { memoryStore, sqlAttempt } from '../testing.ts';
@@ -246,7 +247,7 @@ describe('the sends of ctx.transaction', () => {
   it('refuses a send after the body, and has no invocation id', async () => {
     const o = object();
     const a = o.attempt();
-    let late: restate.SqlTransactionSends | undefined;
+    let late: sql.SqlTransactionSends | undefined;
     await a.end(() =>
       a.transaction(async ({ tx }) => {
         late = tx;

@@ -4,6 +4,8 @@
 import { expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
+import type { ObjectContext as SqlObjectContext, SqlTransaction } from 'restate-sql';
+import { SqlAttempt, type SqlHost, withSql } from 'restate-sql/internal';
 import { type Steer, tool, type Tool } from 'restate-agents';
 import type { Store } from 'sqlite-kv';
 import { z } from 'zod';
@@ -87,9 +89,9 @@ export interface AttemptOptions {
 }
 
 /**
- * `ctx.db` and `ctx.transaction` of an attempt, the SDK's own, over `map`, and
- * `end`, which runs the handler and ends the attempt's session as the SDK
- * does. Each attempt is a database of its own in this process (a namespace
+ * `ctx.db` and `ctx.transaction` of an attempt, restate-sql's own, over `map`, and
+ * `end`, which runs the handler and ends the attempt's session as a
+ * handler of `sql.object` does. Each attempt is a database of its own in this process (a namespace
  * of its own), so that one a crash abandoned does not share the page cache.
  */
 export function sqlAttempt({
@@ -109,18 +111,12 @@ export function sqlAttempt({
   end.promise.catch(() => {});
   const target = { service: `test-${randomUUID()}` };
   const ctx = {
-    handlerKind: shared ? 2 : 1, // shared, or exclusive
-    journalReplay: false,
+    shared,
     key,
     request: () => ({ id, target }),
     invocationEndPromise: end,
     defaultSerde: restate.serde.json,
     get: async (k: string) => {
-      onRequest();
-      return map.get(k) ?? null;
-    },
-    // The store's reads, left out of the journal.
-    ephemeralStateGet: async (k: string) => {
       onRequest();
       return map.get(k) ?? null;
     },
@@ -137,8 +133,8 @@ export function sqlAttempt({
       check();
       send(s);
     },
-  };
-  const attempt = new restate.internal.SqlAttempt(ctx);
+  } satisfies SqlHost;
+  const attempt = new SqlAttempt(ctx);
   const cancelled = Promise.withResolvers<void>();
   const steering = steeringOf(map);
   return {
@@ -172,9 +168,9 @@ export function sqlAttempt({
     },
     set: (name: string, value: unknown) => ctx.set(name, new TextEncoder().encode(JSON.stringify(value))),
     clear: (name: string) => ctx.clear(name),
-    transaction: <T>(body: (t: restate.SqlTransaction) => Promise<T>) => attempt.transaction(body),
+    transaction: <T>(body: (t: SqlTransaction) => Promise<T>) => attempt.transaction(body),
     /** `handler`'s result, once its session ended. */
-    end: <T>(handler: () => Promise<T>) => restate.internal.withSql(handler, () => attempt),
+    end: <T>(handler: () => Promise<T>) => withSql(handler, attempt),
     /** The attempt ends, as when Restate fences or suspends it. */
     abort: () => end.reject(new Error('the attempt ended')),
   };
@@ -182,7 +178,7 @@ export function sqlAttempt({
 
 /** A prompt to an agent, and its answer. */
 /** A chat handler, such as an integration's `chat()`: a message in, the answer out. */
-export type PromptHandler = (ctx: restate.SqlObjectContext, message: string) => Promise<string>;
+export type PromptHandler = (ctx: SqlObjectContext, message: string) => Promise<string>;
 
 /** The fake ledger of a conversation. */
 export interface FakeLedger {
@@ -272,7 +268,7 @@ export function conversation(
         objectClient: (definition: { name: string }) =>
           definition.name === 'signals' ? sql.objectClient(definition) : booksOf(current),
       };
-      const answer = sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, prompt));
+      const answer = sql.end(() => handler(ctx as unknown as SqlObjectContext, prompt));
       if (crashAt === undefined) return answer;
       answer.catch(() => {});
       return Promise.race([crashed.promise, answer]);
@@ -281,10 +277,10 @@ export function conversation(
      * A shared handler of the object (such as `messages`), with `input`, in an
      * attempt of its own: it reads beside an attempt that runs, if any.
      */
-    async read<T, I>(other: (ctx: restate.SqlObjectContext, input: I) => Promise<T>, input?: I, requestId = 'read') {
+    async read<T, I>(other: (ctx: SqlObjectContext, input: I) => Promise<T>, input?: I, requestId = 'read') {
       const sql = sqlAttempt({ map, key, id: requestId, shared: true });
       const ctx = { key, ...sql };
-      return sql.end(() => other(ctx as unknown as restate.SqlObjectContext, input as I));
+      return sql.end(() => other(ctx as unknown as SqlObjectContext, input as I));
     },
     /** An attempt that crashes in its next transfer. */
     async crash(requestId: string, prompt: string) {
@@ -340,7 +336,7 @@ export const SAID = [
 export async function crashedAnywhere(
   prompt: PromptHandler,
   messages: (
-    ctx: restate.SqlObjectContext,
+    ctx: SqlObjectContext,
     request: object,
   ) => Promise<{ messages: { role: string; parts: { type: string; text?: string }[] }[] }>,
   {
@@ -405,18 +401,18 @@ export const cancelledTransfer = tool({
  */
 export async function afterCancel(
   chat: PromptHandler,
-  messages: (ctx: restate.SqlObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+  messages: (ctx: SqlObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
 ) {
   const map = new Map<string, Uint8Array>();
   const invoke = <I, O>(
-    handler: (ctx: restate.SqlObjectContext, input: I) => Promise<O>,
+    handler: (ctx: SqlObjectContext, input: I) => Promise<O>,
     id: string,
     input: I,
     shared = false,
   ) => {
     const sql = sqlAttempt({ map, key: 'cancel', id, shared });
     const ctx = { key: 'cancel', ...sql };
-    return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, input));
+    return sql.end(() => handler(ctx as unknown as SqlObjectContext, input));
   };
   const failed = await invoke(chat, 'inv1', 'Please move 5 from 1 to 2').then(
     () => undefined,
@@ -434,7 +430,7 @@ export async function afterCancel(
  */
 export async function cancelledWhileWorking(
   chat: (tools: Tool[]) => PromptHandler,
-  messages: (ctx: restate.SqlObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+  messages: (ctx: SqlObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
 ) {
   const map = new Map<string, Uint8Array>();
   const started = Promise.withResolvers<void>();
@@ -450,7 +446,7 @@ export async function cancelledWhileWorking(
   const handler = chat([transfer]);
   const attempt = (id: string, shared = false) => {
     const sql = sqlAttempt({ map, key: 'cancel', id, shared });
-    return { sql, ctx: { key: 'cancel', ...sql } as unknown as restate.SqlObjectContext };
+    return { sql, ctx: { key: 'cancel', ...sql } as unknown as SqlObjectContext };
   };
   const first = attempt('inv1');
   const answering = first.sql.end(() => handler(first.ctx, 'Please move 5 from 1 to 2'));
@@ -479,7 +475,7 @@ export const STEERED = 'Only from account 1, please';
  */
 export async function steeredWhileWorking(
   chat: (tools: Tool[]) => PromptHandler,
-  messages: (ctx: restate.SqlObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+  messages: (ctx: SqlObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
 ) {
   const map = new Map<string, Uint8Array>();
   const steering = steeringOf(map);
@@ -494,7 +490,7 @@ export async function steeredWhileWorking(
   });
   const attempt = (id: string, shared = false) => {
     const sql = sqlAttempt({ map, key: 'steer', id, shared });
-    return { sql, ctx: { key: 'steer', ...sql } as unknown as restate.SqlObjectContext };
+    return { sql, ctx: { key: 'steer', ...sql } as unknown as SqlObjectContext };
   };
   const turn = attempt('inv1');
   const answer = await turn.sql.end(() => chat([transfer])(turn.ctx, 'Please move 5 from 1 to 2'));

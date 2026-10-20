@@ -25,9 +25,5 @@ mkdir -p "$build"
 checkout https://github.com/restatedev/sdk-typescript.git $SDK_TYPESCRIPT_REV "$build/sdk-typescript"
 git -C "$build/sdk-typescript" apply "$here/patches/sdk-typescript.patch"
 
-# The SDK package; ctx.sql loads the addon, an optional peer dependency (added
-# after installing, which would otherwise fetch it).
 (cd "$build/sdk-typescript" && pnpm install --frozen-lockfile && pnpm --filter @restatedev/restate-sdk run build)
-(cd "$build/sdk-typescript/packages/libs/restate-sdk" &&
-  npm pkg set 'peerDependencies.sqlite-kv="*"' 'peerDependenciesMeta.sqlite-kv.optional=true' --json &&
-  pnpm pack --pack-destination "$build")
+(cd "$build/sdk-typescript/packages/libs/restate-sdk" && pnpm pack --pack-destination "$build")

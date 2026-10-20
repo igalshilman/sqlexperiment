@@ -2,7 +2,7 @@
 // as examples/memory.ts does, without a Restate server: the facts and the
 // conversation share the object's database, and a retried attempt stores a
 // fact once.
-import type * as restate from '@restatedev/restate-sdk';
+import type { ObjectContext as SqlObjectContext } from 'restate-sql';
 import { tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
@@ -46,7 +46,7 @@ const recall = tool({
   },
 });
 
-type Handler = (ctx: restate.SqlObjectContext, input: string) => Promise<unknown>;
+type Handler = (ctx: SqlObjectContext, input: string) => Promise<unknown>;
 
 /** The object with key `key`: its database lives across invocations. */
 function store(key: string) {
@@ -54,7 +54,7 @@ function store(key: string) {
   return (handler: Handler, id: string, input = '') => {
     const sql = sqlAttempt({ map, key, id });
     const ctx = { key, ...sql };
-    return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, input));
+    return sql.end(() => handler(ctx as unknown as SqlObjectContext, input));
   };
 }
 

@@ -55,6 +55,7 @@
     "@standard-schema/spec": "1.1.0",
     "effect": "4.0.1",
     "restate-agents": "workspace:*",
+    "restate-sql": "workspace:*",
     "sqlite-kv": "workspace:*",
     "zod": "4.6.5"
   },

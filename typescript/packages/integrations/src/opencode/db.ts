@@ -25,7 +25,7 @@ import { ServerWorkerd } from '@opencode/server/workerd';
 import { fromPromise } from '@opencode/core/plugin/promise';
 import { OpenCode } from '@opencode/sdk/effect';
 import type { Plugin } from '@opencode/plugin';
-import type { SqlDatabase, SqlSession, SqlValue } from '@restatedev/restate-sdk';
+import type { SqlDatabase, SqlSession, SqlValue } from 'restate-sql';
 
 /** Closed: every later statement fails. */
 export interface Fence {

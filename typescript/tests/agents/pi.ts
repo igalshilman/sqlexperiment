@@ -10,6 +10,7 @@
 // Environment: PORT (default 9080), MODEL with its provider's API key,
 // and ABORT_PER_MILLE (see ../faults.ts).
 import * as restate from '@restatedev/restate-sdk';
+import type * as sql from 'restate-sql';
 import { object, signals } from 'restate-agents';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
@@ -18,7 +19,7 @@ import { ledger } from '../sql/ledger.ts';
 import * as pi from 'restate-agents/pi';
 
 /** The bank tools of an invocation: they reach the ledger through `ctx`. */
-const transfer = (ctx: restate.SqlObjectContext) =>
+const transfer = (ctx: sql.ObjectContext) =>
   defineTool({
     name: 'transfer',
     description: 'Move an amount of money from one account to another.',
@@ -43,7 +44,7 @@ const transfer = (ctx: restate.SqlObjectContext) =>
     },
   });
 
-const audit = (ctx: restate.SqlObjectContext) =>
+const audit = (ctx: sql.ObjectContext) =>
   defineTool({
     name: 'audit',
     description: 'Check the books: accounts, total money, transfers, and inconsistent accounts.',

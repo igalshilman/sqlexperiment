@@ -25,6 +25,7 @@
 // - A message is answered once per invocation: the graph records each answer
 //   in its state, and a retried attempt returns it.
 import * as restate from '@restatedev/restate-sdk';
+import type * as sql from 'restate-sql';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -71,7 +72,7 @@ const State = Annotation.Root({
  * is published as it starts and ends, for the clients that follow the
  * conversation.
  */
-function toolsNode(ctx: restate.SqlObjectContext, tools: StructuredToolInterface[]) {
+function toolsNode(ctx: sql.ObjectContext, tools: StructuredToolInterface[]) {
   const run = runTools(tools);
   return async (state: typeof MessagesAnnotation.State, config: RunnableConfig) => {
     await toolCallStarted(ctx);
@@ -120,7 +121,7 @@ function runTools(tools: StructuredToolInterface[]) {
 }
 
 /** The agent's graph: `model`, calling `tools`. */
-function graph(ctx: restate.SqlObjectContext, model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
+function graph(ctx: sql.ObjectContext, model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
   if (!model.bindTools) throw new Error(`${model.getName()} does not call tools`);
   const withTools = model.bindTools(tools);
   return new StateGraph(State)
@@ -136,7 +137,7 @@ function graph(ctx: restate.SqlObjectContext, model: BaseChatModel, tools: Struc
 }
 
 /** `t` as a LangChain tool. */
-const native = (t: AnyTool, ctx: restate.SqlObjectContext): StructuredToolInterface =>
+const native = (t: AnyTool, ctx: sql.ObjectContext): StructuredToolInterface =>
   tool(
     async (input, { toolCall }) => {
       if (!toolCall?.id) throw new Error('a tool call without an id');
@@ -160,7 +161,7 @@ export interface Options {
  * of an invocation is a prompt of its own. The thread is the object's key.
  */
 export const prompt = async (
-  ctx: restate.SqlObjectContext,
+  ctx: sql.ObjectContext,
   text: string,
   { model, system, tools = [] }: Options = {},
 ): Promise<string> => {

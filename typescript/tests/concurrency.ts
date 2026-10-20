@@ -1,11 +1,13 @@
-// The context without journal replay, against a real Restate server: its
-// operations are plain promises, awaited at once and combined with native or
-// hand-written combinators; an operation starts when it is made; a suspension
-// waits for any of them, and a cancellation reaches all of them; there is no
-// ctx.run. A handler that replays its journal keeps RestatePromises.
+// Handlers with SQL (restate-sql), against a real Restate server: they run
+// with explicit recovery (a retried attempt starts over, against the state as
+// stored), and their operations are awaited concurrently, with native or
+// hand-written combinators (the patched SDK's promise selector drives them
+// all); a suspension waits for any of them, and a cancellation reaches all of
+// them. With lazy state, every state read of the database goes to the server.
 //
 //   RESTATE_SERVER=/path/to/restate-server node concurrency.ts   (or make concurrency-test)
 import * as restate from '@restatedev/restate-sdk';
+import * as sql from 'restate-sql';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,10 +26,7 @@ const PORT = 9184;
 const INACTIVITY = 1000; // the server's inactivity timeout: a handler idle this long suspends
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** The runtime type of `value`'s member `name`, which its static type may not have. */
-const member = (value: unknown, name: string) => typeof (value as Record<string, unknown>)[name];
-
-type Ctx = restate.SqlObjectContext;
+type Ctx = sql.ObjectContext;
 /** What the slow helper does: wait `ms`, then return `value` or fail with `fail`. */
 interface Slow {
   ms: number;
@@ -38,7 +37,7 @@ interface Slow {
 // --- Services
 
 /** A hand-written combinator: the first two of `promises` to finish, in order. */
-const firstTwo = <T>(promises: Promise<T>[]) =>
+const firstTwo = <T>(promises: PromiseLike<T>[]) =>
   new Promise<T[]>((resolve, reject) => {
     const done: T[] = [];
     // Built on then(), on purpose.
@@ -65,17 +64,6 @@ const helper = restate.object({
   },
 });
 
-const replayed = restate.service({
-  name: 'Replayed',
-  handlers: {
-    combine: async (ctx: restate.Context) => {
-      const p = ctx.sleep(10);
-      await restate.RestatePromise.all([p, ctx.sleep(20)]);
-      return { map: member(p, 'map') };
-    },
-  },
-});
-
 const attempts = new Map<string, number>();
 // The keys of the helpers reached: the services run in this process.
 const reached = new Set<string>();
@@ -89,22 +77,14 @@ const attempt = (ctx: Ctx) => {
 const slow = (ctx: Ctx, key: string, args: Slow) =>
   ctx.objectClient(helper, key).slow(args, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${key}` }));
 
-const conc = restate.object({
+const bytes = restate.serde.binary;
+const decoded = (b: Uint8Array | null | undefined) =>
+  b === null || b === undefined ? null : new TextDecoder().decode(b);
+const page = (i: number) => `p${i}`;
+
+const conc = sql.object({
   name: 'Concurrency',
   handlers: {
-    plain: async (ctx: Ctx) => {
-      const p = ctx.sleep(10);
-      const helperCall = slow(ctx, 'plain', { ms: 10, value: 1 });
-      await Promise.all([p, helperCall]);
-      return {
-        promise: p instanceof Promise,
-        map: member(p, 'map'),
-        orTimeout: member(helperCall, 'orTimeout'),
-        date: typeof (await ctx.date.now()),
-        journalReplay: ctx.journalReplay,
-      };
-    },
-
     all: async (ctx: Ctx) => {
       const n = attempt(ctx);
       const [, , h] = await Promise.all([ctx.sleep(300), ctx.sleep(500), slow(ctx, 'all', { ms: 400, value: 'h' })]);
@@ -120,12 +100,19 @@ const conc = restate.object({
       return { winner, attempts: n() };
     },
 
-    custom: async (ctx: Ctx) => {
-      return firstTwo([
+    custom: async (ctx: Ctx) =>
+      firstTwo([
         slow(ctx, 'c1', { ms: 900, value: 'c' }),
         slow(ctx, 'c2', { ms: 100, value: 'a' }),
         slow(ctx, 'c3', { ms: 400, value: 'b' }),
-      ]);
+      ]),
+
+    chains: async (ctx: Ctx) => {
+      const after = async (ms: number, value: string) => {
+        await ctx.sleep(ms);
+        return value;
+      };
+      return Promise.all([after(100, 'a'), after(150, 'b')]);
     },
 
     eagerCall: async (ctx: Ctx) => {
@@ -135,17 +122,9 @@ const conc = restate.object({
       return reached.has(key);
     },
 
-    noRun: async (ctx: Ctx) => {
-      // The context's type has no `run`: the runtime refuses it too.
-      try {
-        void (ctx as unknown as restate.Context).run('r', () => 1);
-        return 'ran';
-      } catch (e) {
-        return { terminal: e instanceof restate.TerminalError, message: (e as Error).message };
-      }
+    awakeable: async (ctx: Ctx) => {
+      (ctx as unknown as restate.ObjectContext).awakeable();
     },
-
-    uncaughtRun: async (ctx: Ctx) => (ctx as unknown as restate.Context).run('r', () => 1),
 
     lateRegistration: async (ctx: Ctx) => {
       const n = attempt(ctx);
@@ -190,27 +169,42 @@ const conc = restate.object({
       ]);
       return results.map((r) => (r.status === 'rejected' ? `rejected:${r.reason?.code}` : r.status));
     },
+
+    // --- The object's state, read as the database reads it: lazily, each read
+    // a request to the server.
+    seed: async (ctx: Ctx, n: number) => {
+      for (let i = 0; i < n; i++) ctx.set(page(i), new TextEncoder().encode(`v${i}`), bytes);
+    },
+    gets: async (ctx: Ctx, n: number) =>
+      (await Promise.all(Array.from({ length: n }, (_, i) => ctx.get(page(i), bytes)))).map(decoded),
+    getChains: async (ctx: Ctx) => {
+      // 8 async functions of 10 reads each, at once.
+      const chain = async (c: number) => {
+        const values: (string | null)[] = [];
+        for (let i = 0; i < 10; i++) values.push(decoded(await ctx.get(page(c * 10 + i), bytes)));
+        return values.join(',');
+      };
+      return Promise.all(Array.from({ length: 8 }, (_, c) => chain(c)));
+    },
+    sharedGets: sql.shared(async (ctx: sql.ObjectSharedContext, n: number) =>
+      (await Promise.all(Array.from({ length: n }, (_, i) => ctx.get(page(i), bytes)))).map(decoded),
+    ),
+    // A retried attempt starts over, and reads what the one before wrote.
+    recovers: async (ctx: Ctx) => {
+      const n = attempt(ctx);
+      const reads = await Promise.all(Array.from({ length: 20 }, (_, i) => ctx.get(page(i), bytes)));
+      const seen = decoded(await ctx.get('written', bytes));
+      if (n() === 1) {
+        ctx.set('written', new TextEncoder().encode('first'), bytes);
+        await ctx.run('sync', () => {});
+        throw new Error('retry me');
+      }
+      return { first: decoded(reads[0]), seen, attempts: n() };
+    },
   },
-  options: { journalReplay: false },
 });
 
-const flow = restate.workflow({
-  name: 'Flow',
-  handlers: {
-    run: async (ctx: restate.SqlWorkflowContext) => {
-      const got = ctx.promise<string>('approval').get();
-      return { promise: got instanceof Promise, map: member(got, 'map'), value: await got };
-    },
-    approve: async (ctx: restate.SqlWorkflowSharedContext, value: string) => {
-      const resolved = ctx.promise<string>('approval').resolve(value);
-      await resolved;
-      return member(resolved, 'map');
-    },
-  },
-  options: { journalReplay: false },
-});
-
-const database = restate.object({
+const database = sql.object({
   name: 'Db',
   handlers: {
     concurrent: async (ctx: Ctx) => {
@@ -273,7 +267,6 @@ const database = restate.object({
         return (await db.query('SELECT i FROM marks ORDER BY i')).map(([i]) => i);
       }),
   },
-  options: { ...restate.sqlOptions },
 });
 
 // --- Harness
@@ -313,7 +306,7 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
     break;
   if (Date.now() > deadline) throw new Error('restate-server did not start');
 }
-const endpoint = await restate.endpoint().bind(helper).bind(replayed).bind(conc).bind(flow).bind(database).listen(PORT);
+const endpoint = await restate.endpoint().bind(helper).bind(conc).bind(database).listen(PORT);
 void endpoint;
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   const registered = await fetch(`${ADMIN}/deployments`, {
@@ -338,7 +331,7 @@ async function call(path: string, body: unknown = null): Promise<{ value: unknow
   });
   const text = await r.text();
   if (!r.ok) throw new Error(`${path}: ${r.status} ${text}`);
-  return { value: JSON.parse(text), ms: Date.now() - started };
+  return { value: text ? JSON.parse(text) : undefined, ms: Date.now() - started };
 }
 
 /** Start `path` without waiting for its result: its invocation id. */
@@ -362,18 +355,6 @@ async function check(name: string, body: () => Promise<void>) {
   }
 }
 
-await check('operations are plain promises; replayed handlers keep RestatePromises', async () => {
-  const { value } = await call('Concurrency/plain/plain');
-  assert.deepEqual(value, {
-    promise: true,
-    map: 'undefined',
-    orTimeout: 'undefined',
-    date: 'number',
-    journalReplay: false,
-  });
-  assert.deepEqual((await call('Replayed/combine')).value, { map: 'function' });
-});
-
 await check('Promise.all over sleeps and a call, in one attempt', async () => {
   const { value, ms } = await call('Concurrency/all/all');
   assert.deepEqual(value, { h: 'h', attempts: 1 });
@@ -390,17 +371,17 @@ await check('a hand-written combinator', async () => {
   assert.deepEqual((await call('Concurrency/custom/custom')).value, ['a', 'b']);
 });
 
+await check('two async functions, each awaiting a sleep', async () => {
+  assert.deepEqual((await call('Concurrency/chains/chains')).value, ['a', 'b']);
+});
+
 await check('an operation starts without an await', async () => {
   assert.equal((await call('Concurrency/eager/eagerCall')).value, true);
 });
 
-await check('ctx.run is refused, with a terminal error', async () => {
-  assert.deepEqual((await call('Concurrency/norun/noRun')).value, {
-    terminal: true,
-    message: 'ctx.run is not available without journal replay: call the function directly',
-  });
+await check('an awakeable is refused, with a terminal error', async () => {
   const started = Date.now();
-  await assert.rejects(call('Concurrency/uncaught/uncaughtRun'), /not available without journal replay/);
+  await assert.rejects(call('Concurrency/awakeable/awakeable'), /awakeables need journal replay/);
   assert.ok(Date.now() - started < 5000, 'retried'); // terminal: not retried
 });
 
@@ -437,14 +418,29 @@ await check('a cancellation reaches every pending operation', async () => {
   assert.deepEqual(output, ['rejected:409', 'rejected:409', 'rejected:409']);
 });
 
-await check("a workflow's durable promise is a plain promise", async () => {
-  const invocationId = await start('Flow/f/run');
-  await sleep(200);
-  assert.equal((await call('Flow/f/approve', 'yes')).value, 'undefined');
-  const output = await fetch(`${INGRESS}/restate/invocation/${invocationId}/attach`, {
-    signal: AbortSignal.timeout(30_000),
-  }).then((r) => r.json());
-  assert.deepEqual(output, { promise: true, map: 'undefined', value: 'yes' });
+const values = (n: number) => Array.from({ length: n }, (_, i) => `v${i}`);
+await call('Concurrency/state/seed', 80);
+
+await check('40 lazy state reads at once', async () => {
+  assert.deepEqual((await call('Concurrency/state/gets', 40)).value, values(40));
+});
+
+await check('8 async functions of 10 lazy state reads each, at once', async () => {
+  const chains = (await call('Concurrency/state/getChains')).value as string[];
+  const expected = Array.from({ length: 8 }, (_, c) =>
+    values(80)
+      .slice(c * 10, c * 10 + 10)
+      .join(','),
+  );
+  assert.deepEqual(chains, expected);
+});
+
+await check('a shared handler: 40 lazy state reads at once', async () => {
+  assert.deepEqual((await call('Concurrency/state/sharedGets', 40)).value, values(40));
+});
+
+await check('a retried attempt starts over, and reads what the one before wrote', async () => {
+  assert.deepEqual((await call('Concurrency/state/recovers')).value, { first: 'v0', seen: 'first', attempts: 2 });
 });
 
 await check('ctx.db with statements, a call and a sleep at once', async () => {

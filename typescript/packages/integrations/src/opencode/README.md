@@ -4,7 +4,7 @@
 the whole OpenCode server in your process, with no HTTP listener. Here it
 runs in the agent's virtual object, and OpenCode's database (sessions,
 messages, the inbox, durable events) is the object's SQL database
-([SQL in Restate virtual objects](../../../sdk-typescript/SQL.md)). The integration
+([SQL in Restate virtual objects](../../../sql/README.md)). The integration
 pins OpenCode 2.0.27 exactly, with the Effect release it is built on (4.0.1);
 OpenCode needs Node 24.
 

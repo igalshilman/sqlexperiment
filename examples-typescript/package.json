@@ -11,9 +11,10 @@
     "@langchain/anthropic": "1.5.11",
     "@langchain/core": "1.2.12",
     "@opencode/plugin": "2.0.32",
-    "@restatedev/restate-sdk": "1.17.3",
-    "@restatedev/restate-sdk-clients": "1.17.3",
+    "@restatedev/restate-sdk": "1.17.4",
+    "@restatedev/restate-sdk-clients": "1.17.4",
     "restate-agents": "workspace:*",
+    "restate-sql": "workspace:*",
     "sqlite-kv": "workspace:*",
     "zod": "4.6.5"
   },

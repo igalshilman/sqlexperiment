@@ -404,12 +404,12 @@ own: here, an assistant whose tools keep facts in its own table
 ([`examples-typescript/memory.ts`](../../../examples-typescript/memory.ts)):
 
 ```ts
-import type * as restate from '@restatedev/restate-sdk';
+import type * as sql from 'restate-sql';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
-const facts = async (ctx: restate.SqlObjectContext) => {
+const facts = async (ctx: sql.ObjectContext) => {
   await ctx.db.execute('CREATE TABLE IF NOT EXISTS facts (fact TEXT PRIMARY KEY)');
   return ctx.db;
 };
