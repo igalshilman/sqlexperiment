@@ -1,5 +1,6 @@
 // What the integrations share.
 import * as restate from '@restatedev/restate-sdk';
+import * as sql from 'restate-sql';
 import { type Steer, signals, signalsOf } from './signals.ts';
 
 /**
@@ -9,11 +10,11 @@ import { type Steer, signals, signalsOf } from './signals.ts';
  *   pi.chat({ model: 'anthropic/claude-sonnet-5-5' })
  *   pi.chat(async (ctx) => ({ model: await modelOf(ctx) }))
  */
-export type Configure<T> = T | ((ctx: restate.SqlObjectContext) => T | Promise<T>);
+export type Configure<T> = T | ((ctx: sql.ObjectContext) => T | Promise<T>);
 
 /** `value` for the invocation of `ctx`. */
-export const configured = async <T>(value: Configure<T>, ctx: restate.SqlObjectContext): Promise<T> =>
-  typeof value === 'function' ? (value as (ctx: restate.SqlObjectContext) => T | Promise<T>)(ctx) : value;
+export const configured = async <T>(value: Configure<T>, ctx: sql.ObjectContext): Promise<T> =>
+  typeof value === 'function' ? (value as (ctx: sql.ObjectContext) => T | Promise<T>)(ctx) : value;
 
 /** The prompts each invocation made so far, by its context. */
 const prompts = new WeakMap<object, number>();
@@ -23,7 +24,7 @@ const prompts = new WeakMap<object, number>();
  * then `<id>:2`, `<id>:3`... A retried attempt makes its prompts in the same
  * order, so each gets the same id again, and its answer.
  */
-export const nextPromptId = (ctx: restate.SqlObjectContext) => {
+export const nextPromptId = (ctx: sql.ObjectContext) => {
   const n = (prompts.get(ctx) ?? 0) + 1;
   prompts.set(ctx, n);
   return n === 1 ? ctx.request().id : `${ctx.request().id}:${n}`;
@@ -119,7 +120,7 @@ export interface Steerable {
 }
 
 /** The `signals` object of the agent of `ctx`. */
-const signalsOfAgent = (ctx: restate.SqlObjectContext) =>
+const signalsOfAgent = (ctx: sql.ObjectContext) =>
   ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key));
 
 /**
@@ -127,12 +128,12 @@ const signalsOfAgent = (ctx: restate.SqlObjectContext) =>
  * increases, and the clients that follow it read it again. It is a call to
  * Restate, so it also sends what the handler wrote before, for them to read.
  */
-export const publish = async (ctx: restate.SqlObjectContext) => {
+export const publish = async (ctx: sql.ObjectContext) => {
   await signalsOfAgent(ctx).publish();
 };
 
 /** A tool call of the turn of `ctx` starts: {@link publish} it (its call is stored). */
-export const toolCallStarted = (ctx: restate.SqlObjectContext) => publish(ctx);
+export const toolCallStarted = (ctx: sql.ObjectContext) => publish(ctx);
 
 /**
  * A tool call of the turn of `ctx` (a `chat` handler's) ended: {@link publish}
@@ -140,7 +141,7 @@ export const toolCallStarted = (ctx: restate.SqlObjectContext) => publish(ctx);
  * does not have yet: its next step takes them. Without a conversation (a
  * framework that takes no steering), they wait for the turn's end.
  */
-export async function toolCallEnded(ctx: restate.SqlObjectContext, conversation?: Steerable) {
+export async function toolCallEnded(ctx: sql.ObjectContext, conversation?: Steerable) {
   const messages = await signalsOfAgent(ctx).progress(ctx.request().id);
   const taken = steerings.get(ctx);
   if (!taken || !conversation) return;
@@ -156,7 +157,7 @@ export async function toolCallEnded(ctx: restate.SqlObjectContext, conversation?
  * prompt is answered; the turn's other messages are answered as messages of
  * their own, when it ends.
  */
-export async function settleSteering(ctx: restate.SqlObjectContext, conversation: Pick<Steerable, 'has'>) {
+export async function settleSteering(ctx: sql.ObjectContext, conversation: Pick<Steerable, 'has'>) {
   const taken = steerings.get(ctx);
   if (!taken) return;
   for (const message of await signalsOfAgent(ctx).steering(ctx.request().id)) {
@@ -190,10 +191,10 @@ export const aborted = (signal: AbortSignal) =>
  * when it starts and ends ({@link publish}), for the clients that follow the
  * conversation.
  */
-export const chatHandler = (answer: (ctx: restate.SqlObjectContext, message: string) => Promise<string>) =>
-  restate.handlers.object.exclusive(
-    { input: messageSerde, accept: '*/*', journalReplay: false, explicitCancellation: true },
-    async (ctx: restate.SqlObjectContext, text: string) => {
+export const chatHandler = (answer: (ctx: sql.ObjectContext, message: string) => Promise<string>) =>
+  sql.exclusive(
+    { input: messageSerde, accept: '*/*', explicitCancellation: true },
+    async (ctx: sql.ObjectContext, text: string) => {
       const invocationId = ctx.request().id;
       if ((await ctx.get<Turn>(TURN))?.invocationId !== invocationId) {
         ctx.set(TURN, { invocationId, since: new Date().toISOString() } satisfies Turn);
@@ -345,12 +346,9 @@ export class Transcript {
  * message is answered, from the database as stored (the tool calls made so
  * far, say), and stores nothing.
  */
-export const messagesHandler = (read: (ctx: restate.SqlObjectSharedContext, transcript: Transcript) => Promise<void>) =>
-  restate.handlers.object.shared(
-    { journalReplay: false },
-    async (ctx: restate.SqlObjectSharedContext, request?: MessagesRequest) => {
-      const transcript = new Transcript();
-      await read(ctx, transcript);
-      return transcript.page(request ?? {});
-    },
-  );
+export const messagesHandler = (read: (ctx: sql.ObjectSharedContext, transcript: Transcript) => Promise<void>) =>
+  sql.shared(async (ctx: sql.ObjectSharedContext, request?: MessagesRequest) => {
+    const transcript = new Transcript();
+    await read(ctx, transcript);
+    return transcript.page(request ?? {});
+  });

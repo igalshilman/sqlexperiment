@@ -23,12 +23,13 @@
 // Environment: PORT (default 9080), SHOP_EXPIRY_MS (how long an unpaid order
 // holds its stock, default 5000) and ABORT_PER_MILLE (see faults.ts).
 import * as restate from '@restatedev/restate-sdk';
+import * as sql from 'restate-sql';
 import { serveIfMain } from '../faults.ts';
 import { row } from './sql.ts';
 
 const EXPIRY_MS = Number(process.env.SHOP_EXPIRY_MS ?? 5000);
 
-type Ctx = restate.SqlObjectContext;
+type Ctx = sql.ObjectContext;
 
 /** A reservation: the order, its quantity, and its state (held, sold, released or rejected). */
 export type Reservation = [order: string, qty: number, state: string];
@@ -45,11 +46,10 @@ const WAREHOUSE = `
 // end, as an invocation the server pauses after its default attempts (70)
 // would wait for a person.
 const OPTIONS = {
-  ...restate.sqlOptions,
   retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
 };
 
-export const warehouse = restate.object({
+export const warehouse = sql.object({
   name: 'Warehouse',
   handlers: {
     /** Add `qty` units, once per restock `id`. */
@@ -115,14 +115,14 @@ export interface Order {
   status: string;
 }
 
-async function readOrder(db: restate.SqlDatabase): Promise<Order | null> {
+async function readOrder(db: sql.SqlDatabase): Promise<Order | null> {
   await db.execute(ORDER);
   const [stored] = await db.query('SELECT sku, qty, status FROM orders');
   return stored ? { sku: String(stored[0]), qty: Number(stored[1]), status: String(stored[2]) } : null;
 }
 
 /** One order (the object key): placed, then paid, or expired. */
-export const orders = restate.object({
+export const orders = sql.object({
   name: 'Orders',
   handlers: {
     /** Reserve the stock; an unpaid order expires after SHOP_EXPIRY_MS. */

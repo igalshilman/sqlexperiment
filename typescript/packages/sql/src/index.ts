@@ -1,0 +1,208 @@
+// SQL in Restate virtual objects: each key of an object has a database of its
+// own, kept in the object's state, `ctx.db`.
+//
+//   import * as sql from 'restate-sql';
+//
+//   const notes = sql.object({
+//     name: 'notes',
+//     handlers: {
+//       add: async (ctx: sql.ObjectContext, note: string) => {
+//         await ctx.db.execute('CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)');
+//         await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
+//       },
+//       list: sql.shared(async (ctx: sql.ObjectSharedContext) => ctx.db.query('SELECT text FROM notes')),
+//     },
+//   });
+//
+// See README.md.
+import * as restate from '@restatedev/restate-sdk';
+import { SqlAttempt, type SqlHost, type SqlSession, type SqlTransaction, withSql } from './session.ts';
+
+export type { SqlDatabase, SqlSession, SqlTransaction, SqlTransactionSends, SqlValue } from './session.ts';
+
+/**
+ * The context of an object's handler with SQL: the object's context, with its
+ * database. The handler runs without journal replay: a retried attempt runs
+ * it again from the start, against the state as stored (at least once), and
+ * its operations can be awaited concurrently (`Promise.all`, `Promise.race`,
+ * several async functions). Awakeables need journal replay, so there are
+ * none: wait in a handler of `restate.handlers.object`.
+ */
+export interface ObjectContext extends Omit<restate.ObjectContext, 'awakeable'> {
+  /**
+   * The object's SQL database, for the whole handler: each statement is its
+   * own transaction, and `db.transaction` groups several. Calls run one at a
+   * time, in call order, and a transaction holds the database until it ends.
+   * Hand it to a library that wants a database for the handler's work.
+   *
+   * An attempt has one session: it opens on the first call to `ctx.db` or
+   * `ctx.transaction`, and is saved when the handler ends. A commit is
+   * durable once its writes are stored, which Restate does in order: a lost
+   * commit takes everything after it, including calls and the response.
+   *
+   * An SQL error rejects as a `TerminalError` (its `cause` the SQL error),
+   * since a retry would repeat it; a storage error, which ends the session,
+   * is retried. The handler's own errors are as in any handler.
+   */
+  readonly db: SqlSession;
+
+  /**
+   * Run `body` as one transaction of {@link db}, with the sends it makes:
+   * `body` gets `{ db, tx }`, the transaction's SQL and its send clients. It
+   * commits when `body` resolves, and rolls back when it rejects; its sends
+   * are made once it commits, and only then. So a committed transaction's
+   * sends are made, even if the attempt then crashes, and those of one rolled
+   * back are not. A call, whose result the body would wait for, cannot be
+   * part of it: make calls before it, and record their outcome in it.
+   */
+  transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T>;
+}
+
+/**
+ * The context of an object's shared handler with SQL: it reads the object's
+ * database while an exclusive handler runs (or not), as of its first call to
+ * it. What it writes stays in its session, and is never stored. If an
+ * exclusive handler commits while it reads, the attempt fails when it ends,
+ * and Restate retries it: what it returns was the stored state.
+ */
+export interface ObjectSharedContext extends Omit<restate.ObjectSharedContext, 'awakeable'> {
+  readonly db: SqlSession;
+}
+
+/**
+ * The options `object` sets: lazy state, so an invocation does not start by
+ * loading every page; and no journal kept after an invocation completes,
+ * since it holds every page it read.
+ */
+export const options = { enableLazyState: true, journalRetention: 0 } satisfies restate.ObjectOptions;
+
+/**
+ * The metadata `object` sets: Restate's UI hides the database from the
+ * journal view (its commit record, log, pages and hint in the object's
+ * state, `v14/...`; and the `sync` runs after its writes).
+ */
+export const metadata = {
+  'dev.restate.tooling.journal.hidden.names': 'sync',
+  'dev.restate.tooling.journal.hidden.name.prefix': 'v14/',
+};
+
+// Marks the handlers made here.
+const SQL = Symbol('restate-sql handler');
+
+type Fn<C> = (ctx: C, input: never) => Promise<unknown>;
+
+/** The SDK's runtime context, as far as the session needs it beyond its public type. */
+type Runtime = { invocationEndPromise: SqlHost['invocationEndPromise']; defaultSerde: SqlHost['defaultSerde'] };
+
+function host(ctx: restate.ObjectContext | restate.ObjectSharedContext, shared: boolean): SqlHost {
+  const runtime = ctx as unknown as Runtime;
+  const exclusive = ctx as restate.ObjectContext;
+  return {
+    shared,
+    key: ctx.key,
+    invocationEndPromise: runtime.invocationEndPromise,
+    defaultSerde: runtime.defaultSerde,
+    request: () => ctx.request(),
+    get: (name, serde, entry) => ctx.get(name, serde, entry),
+    set: (name, value, serde, entry) => exclusive.set(name, value, serde, entry),
+    clear: (name, entry) => exclusive.clear(name, entry),
+    run: (name, action) => exclusive.run(name, action),
+    genericSend: (send) => ctx.genericSend(send),
+  };
+}
+
+const refusedAwakeable = () => {
+  throw new restate.TerminalError(
+    'awakeables need journal replay: wait in a handler of restate.handlers.object, which has no ctx.db',
+  );
+};
+
+/** `ctx`, with `db` and `transaction` of `attempt`: its other members are the context's own. */
+function sqlContext<C extends object>(ctx: C, attempt: SqlAttempt): C {
+  const transaction = <T>(body: (t: SqlTransaction) => Promise<T>) => attempt.transaction(body);
+  return new Proxy(ctx, {
+    get(target, prop) {
+      if (prop === 'db') return attempt.db;
+      if (prop === 'transaction') return transaction;
+      if (prop === 'awakeable') return refusedAwakeable;
+      const value: unknown = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/** `fn`, run with the context of {@link sqlContext}, its session saved when it ends. */
+function withDatabase(fn: Fn<never>, shared: boolean) {
+  return (ctx: restate.ObjectContext | restate.ObjectSharedContext, input: never) => {
+    // A context with a database already, such as a test's: the handler uses it.
+    if ('db' in ctx) return fn(ctx as never, input);
+    const attempt = new SqlAttempt(host(ctx, shared));
+    return withSql(() => fn(sqlContext(ctx, attempt) as never, input), attempt);
+  };
+}
+
+// The handler options the SQL handlers have: explicit recovery, which runs a
+// retried attempt from the start, since a later attempt makes different reads
+// than a replayed journal would have.
+const recovery = () => restate.internal.explicitRecovery();
+
+// oxlint-disable-next-line typescript/no-explicit-any
+type HandlerOptions = restate.ObjectHandlerOpts<any, any>;
+
+/**
+ * An exclusive handler with SQL, with `options` (such as `input`, or
+ * `explicitCancellation`). `object` makes one of each function in its
+ * `handlers`; this is for options.
+ */
+export function exclusive<F extends Fn<ObjectContext>>(fn: F): F;
+export function exclusive<F extends Fn<ObjectContext>>(options: HandlerOptions, fn: F): F;
+export function exclusive<F extends Fn<ObjectContext>>(optionsOrFn: HandlerOptions | F, fn?: F): F {
+  const [opts, body] = typeof optionsOrFn === 'function' ? [{}, optionsOrFn] : [optionsOrFn, fn!];
+  const handler = restate.handlers.object.exclusive({ ...opts, ...recovery() }, withDatabase(body, false) as never);
+  return Object.defineProperty(handler, SQL, { value: true }) as unknown as F;
+}
+
+/** A shared handler with SQL (see {@link ObjectSharedContext}), with `options`. */
+export function shared<F extends Fn<ObjectSharedContext>>(fn: F): F;
+export function shared<F extends Fn<ObjectSharedContext>>(options: HandlerOptions, fn: F): F;
+export function shared<F extends Fn<ObjectSharedContext>>(optionsOrFn: HandlerOptions | F, fn?: F): F {
+  const [opts, body] = typeof optionsOrFn === 'function' ? [{}, optionsOrFn] : [optionsOrFn, fn!];
+  const handler = restate.handlers.object.shared({ ...opts, ...recovery() }, withDatabase(body, true) as never);
+  return Object.defineProperty(handler, SQL, { value: true }) as unknown as F;
+}
+
+/** Whether `value` is a handler already: one of {@link exclusive} or {@link shared}, or of `restate.handlers.object`. */
+const isHandler = (value: object) =>
+  SQL in value || Object.getOwnPropertySymbols(value).some((s) => s.description === 'Handler');
+
+/**
+ * A Restate virtual object whose handlers have SQL, `ctx.db`: a database per
+ * key, stored with the object's state. Each function in `handlers` is an
+ * exclusive handler with SQL; {@link shared} makes a shared one, and
+ * {@link exclusive} one with options. A handler of `restate.handlers.object`
+ * keeps its journal replay, and has no `ctx.db`.
+ *
+ * `options` and `metadata` add to (or replace) {@link options} and
+ * {@link metadata}, such as `options: { journalRetention: { hours: 1 } }` to
+ * look at journals in the UI.
+ */
+export function object<P extends string, H extends Record<string, unknown>>(definition: {
+  name: P;
+  handlers: H;
+  description?: string;
+  metadata?: Record<string, string>;
+  options?: restate.ObjectOptions;
+}): restate.VirtualObjectDefinition<P, H> {
+  // The handlers as the SDK takes them.
+  const handlers: Record<string, (ctx: restate.ObjectContext, input?: unknown) => Promise<unknown>> = {};
+  for (const [name, handler] of Object.entries(definition.handlers)) {
+    if (typeof handler !== 'function') throw new TypeError(`${definition.name}.${name} is not a handler`);
+    handlers[name] = (isHandler(handler) ? handler : exclusive(handler as Fn<ObjectContext>)) as never;
+  }
+  return restate.object({
+    ...definition,
+    handlers,
+    metadata: { ...metadata, ...definition.metadata },
+    options: { ...options, ...definition.options },
+  });
+}

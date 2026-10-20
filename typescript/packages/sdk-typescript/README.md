@@ -1,12 +1,11 @@
 # The patched TypeScript SDK
 
-The Restate integration needs SDK changes that are not released: SQL in a
-virtual object, and a context for handlers without journal replay (see
-[the requirements](../../../README.md#requirements)). This package holds those
-changes to the TypeScript SDK 1.17.4, whose released shared core (8.1.0, as
-WebAssembly in the package) has the explicit recovery they run on.
-
-How SQL in a virtual object works, and how to use it: [`SQL.md`](SQL.md).
+The TypeScript SDK 1.17.4 with one change that is not released: with
+explicit recovery (`restate.internal.explicitRecovery()`), a handler's
+promises can be awaited concurrently. [`restate-sql`](../sql/README.md) needs
+it: a database's reads are concurrent, and so are a handler's own awaits
+beside them. Everything else (SQL in a virtual object, its contexts) is that
+library, on the SDK's public API.
 
 |                                 | What                      | Version                                                                                                            | Form                                            |
 | ------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
@@ -22,19 +21,34 @@ wherever `@restatedev/restate-sdk` is used (an override in
 pnpm. After editing the clone, [`patches/regenerate.sh`](patches/regenerate.sh)
 writes the patch back.
 
-| Change                                                                                                                                                                                                                                                | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Where                                                                                                                                      |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| A `journalReplay` service and handler option; `journalReplay: false` turns on the SDK's explicit recovery (`restate.internal.explicitRecovery()`)                                                                                                     | Picks the context below, by type and at runtime                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `types/rpc.ts`, `endpoint/components.ts`, `endpoint/handlers/generic.ts`                                                                   |
-| `ObjectContext.db` and `ObjectContext.transaction(body)` (SQL and the sends it commits with, pending in the object's state while it commits), `restate.sqlOptions`, the `SqlDatabase`, `SqlSession`, `SqlTransaction` and `SqlTransactionSends` types | SQL in a virtual object: the database over the object's state, through the sqlite-kv addon (an optional peer dependency, loaded on first use)                                                                                                                                                                                                                                                                                                                                                                                                                            | `sql.ts`, `context.ts`, `context_impl.ts`                                                                                                  |
-| A shared handler's `ctx.db`: a reader of the object's database, which fails its attempt (for a retry) if the exclusive handler commits while it reads                                                                                                 | Read an object's database while its exclusive handler runs, such as an agent's conversation while it waits for an approval                                                                                                                                                                                                                                                                                                                                                                                                                                               | `sql.ts`, `context.ts`                                                                                                                     |
-| `restate.internal.setSqlStoreWrapper`                                                                                                                                                                                                                 | Fault injection in the crash tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `sql.ts`, `internal.ts`                                                                                                                    |
-| Without journal replay, the handler's context has plain promises, driven by one loop                                                                                                                                                                  | Concurrency is safe once nothing is replayed, but the protocol has one await point per invocation: a suspension, the awaiting-on hint and a cancellation each take one future. So each operation's promise is registered, when it is made, with a `PromiseSelector`, which asks the VM about all pending promises at once (one `FirstCompleted` future) and is the only one waiting for external progress, as the published SDK expects; user code gets a plain `Promise` to await and combine as it likes. See [the context](SQL.md#the-context-without-journal-replay) | `promise_selector.ts`, `sql_context.ts`, `promises.ts`, `context_impl.ts`, `endpoint/handlers/generic.ts`, `test/promise_selector.test.ts` |
-| Without journal replay, the handler's context has its own type                                                                                                                                                                                        | Its operations return `Promise`s, not `RestatePromise`s, and it has no `awakeable` and no `run` (with nothing replayed, a run's result would not be kept; at runtime a call to it is a terminal error). `restate.service`, `object` and `workflow` take the options as a type parameter and pick the context from `journalReplay: false` (unknown option keys stay an error); handler wrappers have overloads for it; `journalReplay: false` is a member of the type, so the two contexts are not interchangeable                                                        | `context.ts`, `types/rpc.ts`, `common_api.ts`, `test/sql_context.test-d.ts`                                                                |
-| A SQL store's state commands are named after their key (`{ name: key }`)                                                                                                                                                                              | Tooling can hide them by name, such as a SQL database's pages and log (`dev.restate.tooling.journal.hidden.name.prefix`)                                                                                                                                                                                                                                                                                                                                                                                                                                                 | `sql.ts`                                                                                                                                   |
-| A SQL store's state reads are journaled gets for now. Protocol V8's ephemeral gets (`ephemeralStateGet`, public), which the selector drives by completion id, are in place for when V8 ships (TODO, [FUTURE.md](../../../FUTURE.md))                  | Ephemeral reads would add nothing to the journal: without replay, nothing reads them back. Restate 1.8 negotiates V7 at most                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+## The change
 
-The TypeScript SDK's tests pass with the patch (73: 22 of the selector,
-against a fake VM and the published single-waiter progress channel, 6 of the
-classification of SQL errors, 3 of the end of an attempt in a session, and
-the release's own, such as its 4 of explicit recovery), and so do its type
-tests (`test/sql_context.test-d.ts`, checked by `tsc`).
+The published SDK drives each awaited `RestatePromise` with a loop of its
+own, and only one of them may wait for progress from the server at a time
+(`ExternalProgressChannel`: "At most one `awaitNext` may be pending at a
+time; a concurrent second call rejects"). So two promises awaited at once
+that both need the server, such as `Promise.all([ctx.sleep(10), call])` or
+two state reads with lazy state, fail the attempt with `awaitNext already
+pending`, and it is retried, forever. `RestatePromise.all` and
+`RestatePromise.race` avoid it by making one promise of many; a library's
+promises cannot join them.
+
+With journal replay, that order of awaits is part of what a replay must
+match. With explicit recovery nothing is replayed, so the patch drives every
+awaited promise of the invocation from one loop, `PromiseSelector`: each
+promise registers with it when it is awaited, and it asks the VM about all of
+them at once (one `FirstCompleted` future), as the only one waiting for
+external progress. A suspension then resumes on the first of them to
+complete, and a cancellation reaches all of them. Without explicit recovery
+nothing changes.
+
+| Change                                                                                                          | Where                                                            |
+| --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| The selector                                                                                                    | `promise_selector.ts`, `test/promise_selector.test.ts`           |
+| With explicit recovery, `PromisesExecutor` hands each awaited promise to it, and closes it at the attempt's end | `promises.ts`, `context_impl.ts`, `endpoint/handlers/generic.ts` |
+| An ephemeral state get (protocol v8, `getProject`) registers with it, so that its notification is driven        | `context_impl.ts`                                                |
+
+The SDK's tests pass with the patch (64, of which 22 are the selector's,
+against a fake VM and the published single-waiter progress channel).
+[`tests/concurrency.ts`](../../tests/concurrency.ts) checks it against a
+real server; without the patch, its concurrent awaits fail as above.

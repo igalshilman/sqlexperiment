@@ -1,6 +1,7 @@
 // pi's chat without a Restate server or an API key: Anthropic's provider is a
 // fake model (../fakes/pi.ts).
 import * as restate from '@restatedev/restate-sdk';
+import type { ObjectContext as SqlObjectContext } from 'restate-sql';
 import { subagent, tool } from 'restate-agents';
 import { z } from 'zod';
 import * as pi from 'restate-agents/pi';
@@ -70,7 +71,7 @@ function object(key: string) {
   return {
     calls,
     /** Invocation `id` of `handler`. */
-    invoke<I, O>(handler: (ctx: restate.SqlObjectContext, input: I) => Promise<O>, id: string, input: I) {
+    invoke<I, O>(handler: (ctx: SqlObjectContext, input: I) => Promise<O>, id: string, input: I) {
       const sql = sqlAttempt({ map, key, id });
       const ctx = {
         key,
@@ -80,7 +81,7 @@ function object(key: string) {
           return `${call.key}: done`;
         },
       };
-      return sql.end(() => handler(ctx as unknown as restate.SqlObjectContext, input));
+      return sql.end(() => handler(ctx as unknown as SqlObjectContext, input));
     },
   };
 }
@@ -138,7 +139,7 @@ describe('pi.messages', () => {
 });
 
 /** A handler that prompts twice. */
-const twice = async (ctx: restate.SqlObjectContext) => [
+const twice = async (ctx: SqlObjectContext) => [
   await pi.prompt(ctx, 'One'),
   await pi.withPi(ctx, {}, (session) => session.prompt('Two')),
 ];
@@ -247,7 +248,7 @@ describe('pi.chat', () => {
 /** A sub-agent with a `code` handler. */
 const coder = { name: 'coder' } as restate.VirtualObjectDefinition<
   'coder',
-  { code: (ctx: restate.SqlObjectContext, task: string) => Promise<string> }
+  { code: (ctx: SqlObjectContext, task: string) => Promise<string> }
 >;
 
 describe('subagent', () => {

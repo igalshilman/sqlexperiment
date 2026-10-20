@@ -1,0 +1,19 @@
+{
+  "name": "restate-sql",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SQL in Restate virtual objects: a database per key, kept in the object's state (ctx.db)",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./internal": "./src/internal.ts"
+  },
+  "dependencies": {
+    "@restatedev/restate-sdk": "1.17.4",
+    "@restatedev/restate-sdk-core": "1.17.4",
+    "sqlite-kv": "workspace:*"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

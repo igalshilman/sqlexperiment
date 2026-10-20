@@ -22,6 +22,7 @@
 // - A message is answered once per invocation: its answer is stored with the
 //   model's last reply, and a retried attempt returns it.
 import * as restate from '@restatedev/restate-sdk';
+import type * as sql from 'restate-sql';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import {
@@ -97,7 +98,7 @@ interface Agent {
  * the clients that follow the conversation).
  */
 async function run(
-  ctx: restate.SqlObjectContext,
+  ctx: sql.ObjectContext,
   { client, model, maxTokens, system, tools: all }: Agent,
   conversation: Conversation,
   id: string,
@@ -140,7 +141,7 @@ async function run(
 }
 
 /** `t` as a tool of the Anthropic SDK's tool runner. */
-const native = (t: AnyTool, ctx: restate.SqlObjectContext): BetaRunnableTool =>
+const native = (t: AnyTool, ctx: sql.ObjectContext): BetaRunnableTool =>
   betaZodTool({
     name: t.name,
     description: t.description,
@@ -170,7 +171,7 @@ let shared: Anthropic | undefined;
  * of an invocation is a prompt of its own.
  */
 export const prompt = async (
-  ctx: restate.SqlObjectContext,
+  ctx: sql.ObjectContext,
   text: string,
   { model: named, system, tools = [], client, maxTokens = 4096 }: Options = {},
 ): Promise<string> => {

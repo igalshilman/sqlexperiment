@@ -18,9 +18,9 @@
  * A model of another provider takes its API key, such as
  * `{"model": "openai/gpt-6-luna"}` with OPENAI_API_KEY.
  */
+import type * as sql from 'restate-sql';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
-import type * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
 
 /** What a user sets up: the model, as `provider/model-id`, and a persona, the system prompt. */
@@ -31,7 +31,7 @@ interface Settings {
 
 const SCHEMA = 'CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT NOT NULL)';
 
-async function settingsOf(ctx: restate.SqlObjectContext): Promise<Settings> {
+async function settingsOf(ctx: sql.ObjectContext): Promise<Settings> {
   await ctx.db.execute(SCHEMA);
   const [row] = await ctx.db.query('SELECT json FROM settings');
   return row ? (JSON.parse(String(row[0])) as Settings) : {};
@@ -45,7 +45,7 @@ const clock = tool({
 });
 
 /** pi's options for the user of `ctx`: its model and persona, and the tools. */
-const options = async (ctx: restate.SqlObjectContext): Promise<pi.Options> => {
+const options = async (ctx: sql.ObjectContext): Promise<pi.Options> => {
   const { model, persona } = await settingsOf(ctx);
   return { model, system: persona ?? 'You are a helpful assistant.', tools: [clock] };
 };

@@ -1,38 +1,43 @@
-# SQL in Restate virtual objects, without a journal
+# restate-sql: SQL in Restate virtual objects
 
-An experiment: a Restate virtual object whose handlers keep a SQL database in
-the object's state, with journal-based recovery turned off. The storage
-protocol of this repository provides durability and recovery; Restate provides
-the state, single-writer execution per key, and retries. It uses the
-[sqlite-kv addon](../sql-node/README.md) and a patched Restate TypeScript SDK
-([`packages/sdk-typescript`](README.md#typescript)).
+Each key of a Restate virtual object gets a SQL database of its own, `ctx.db`,
+kept in the object's state. The handlers that use it run with the SDK's
+explicit recovery instead of journal replay: the storage protocol of this
+repository provides durability and recovery, and Restate provides the state,
+single-writer execution per key, and retries. It uses the
+[sqlite-kv addon](../sql-node/README.md), and the Restate TypeScript SDK with
+[one patch](../sdk-typescript/README.md): concurrent awaits.
 
 It runs on a released Restate server: see [the requirements](../../../README.md#requirements).
 
-```js
-import * as restate from '@restatedev/restate-sdk';
+```ts
+import * as sql from 'restate-sql';
 
-const ledger = restate.object({
+const ledger = sql.object({
   name: 'Ledger',
   handlers: {
-    init: (ctx) =>
+    init: (ctx: sql.ObjectContext) =>
       ctx.transaction(async ({ db }) => {
         await db.execute('CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, balance INTEGER)');
       }),
-    deposit: (ctx, { id, amount }) =>
+    deposit: (ctx: sql.ObjectContext, { id, amount }: { id: number; amount: number }) =>
       ctx.transaction(async ({ db }) => {
         await db.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, id]);
       }), // one transaction: durable as a whole once ctx.transaction resolves
+    balance: sql.shared(async (ctx: sql.ObjectSharedContext, id: number) =>
+      ctx.db.query('SELECT balance FROM accounts WHERE id = ?', [id]),
+    ),
   },
-  options: restate.sqlOptions, // journalReplay: false, lazy state, no journal retention
 });
 ```
 
-`journalReplay` is a handler option, as well as a service option that its
-handlers inherit: the examples set it for the whole object, but a single
-handler may take it (`restate.handlers.object.exclusive({ ...restate.sqlOptions },
-handler)`), and the object's other handlers keep replaying their journals.
-`ctx.db` needs it off in the handler that uses it.
+`sql.object` is `restate.object` with SQL: each function in `handlers` is an
+exclusive handler with `ctx.db`; `sql.shared(fn)` makes a shared one, and
+`sql.exclusive(options, fn)` an exclusive one with handler options (such as
+`input`). A handler of `restate.handlers.object` keeps journal replay, and has
+no `ctx.db`: the object's other handlers may wait on awakeables, say. The
+object's options are `sql.options` (lazy state, no journal kept), and its
+metadata hides the database's state commands in Restate's UI.
 
 `ctx.db`, on the context of an exclusive object handler, is the object's
 database (namespace `service/key`) over the object's state, with the
@@ -99,9 +104,9 @@ not the transaction commits, while holding it open. Make calls before the
 transaction, with an idempotency key of their own, and record their outcome
 in it, as the shop's `Orders` does; its `expire` is a send of `tx`.
 
-The store is internal to the SDK: `get` is `ctx.get`, `set` and `clear` are
-`ctx.set` and `ctx.clear`, and `sync` is an empty `ctx.run`. The SDK loads
-the sqlite-kv addon, an optional peer dependency, on first use.
+The store is the object's state: `get` is `ctx.get`, `set` and `clear` are
+`ctx.set` and `ctx.clear` (each named after its key), and `sync` is an empty
+`ctx.run`.
 
 **The database is the object's state.** Its keys (`v14/commit`, `v14/log/…`,
 `v14/page/…`, `v14/hint`) sit next to the object's other state keys, so
@@ -144,9 +149,10 @@ another process wrote, makes it read the pages again.
 **No journal replay.** On a retry or a resume, the SDK normally replays the
 journal: each operation returns its recorded result and must match it. That
 cannot work here, since a later attempt makes different reads (the page cache,
-the log length and the other owners' checkpoints all differ). With
-`journalReplay: false` the SDK skips the recorded journal: the handler runs
-again from the start against the state as it is. Recovery is then the storage
+the log length and the other owners' checkpoints all differ). With explicit
+recovery (`restate.internal.explicitRecovery()`, which the handlers here
+have) the SDK skips the recorded journal: the handler runs again from the
+start against the state as it is. Recovery is then the storage
 protocol's: open reads the commit record, so a lost commit or checkpoint from
 the crashed attempt is as if it never started.
 
@@ -155,7 +161,7 @@ exclusive invocation per object key at a time, and one attempt of it at a
 time, so the namespace is `service/key` and only exclusive handlers may open
 it.
 
-## The context without journal replay
+## The context with explicit recovery
 
 A retried attempt runs the handler again from the start, so every context
 operation it reaches happens again. What each one does then:
@@ -166,10 +172,10 @@ operation it reaches happens again. What each one does then:
 | Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result.                                                   |
 | Sends, delayed sends                                                     | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer.                                                                                                                      |
 | `ctx.get`, `ctx.set`, `ctx.clear`                                        | Read the state as stored; a write is stored once an empty `ctx.run` after it resolves, and a crash before that may lose it.                                                                                                   |
-| `ctx.run`                                                                | Not available: its result would not be kept, and a retried attempt runs the handler again anyway, so call the function directly. A call to it is a terminal error. (The SDK uses an empty run itself, to sync the store.)     |
+| `ctx.run`                                                                | Runs its action again: its result is not kept from one attempt to the next. (The store uses an empty run, to sync.)                                                                                                           |
 | `ctx.sleep`                                                              | Starts over.                                                                                                                                                                                                                  |
 | `attach`, `cancel`                                                       | Idempotent already.                                                                                                                                                                                                           |
-| Awakeables                                                               | Refused.                                                                                                                                                                                                                      |
+| Awakeables                                                               | Refused, a terminal error (their signal ids would collide): wait in a handler of `restate.handlers.object`.                                                                                                                   |
 
 The SDK does not make up keys: a call is idempotent when the code says so,
 with `rpc.opts({ idempotencyKey })` (`rpc.sendOpts` for a send). The examples
@@ -190,54 +196,40 @@ the attempt read needs that in its key, or none. A key holds while Restate
 keeps the invocation: a day by default (the target's idempotency
 retention).
 
-### Plain promises, one await point
+### Concurrent awaits, one await point
 
-Without journal replay the handler's `ctx` returns plain promises: `ctx.get`,
-`ctx.sleep`, calls, `invocationId`, and the rest. Await them,
-combine them with `Promise.all`, `Promise.race` or your own combinators, or
-leave them; a library that takes promises takes these. There is no
-`RestatePromise` (no `map`, `orTimeout` or `RestatePromise.all`): with nothing
-replayed, the order things happen in needs no recording.
+The context's operations are the SDK's `RestatePromise`s, and they can be
+awaited concurrently: `Promise.all`, `Promise.race`, your own combinators,
+several async functions at once, or a library's (the database's own reads
+are concurrent). The published SDK lets one awaited promise wait for the
+server at a time, so this needs [the patched SDK](../sdk-typescript/README.md):
+with explicit recovery, one loop per invocation drives every awaited promise.
 
-- **An operation starts when it is made.** Its promise is registered then, and
-  driven to completion whether or not anything awaits it: a call is made
-  without an `await`. A failure nobody awaits is dropped, not an unhandled
-  rejection.
-- **One await point.** One loop per invocation drives every pending promise,
-  and asks the server about all of them at once. So a suspension (after the
-  server's inactivity timeout) resumes on the first of them to complete, and an
-  operation made while the loop waits joins the next check: a call awaited
-  late is not held up by a long sleep made earlier.
-- **A cancellation reaches every pending promise** (each rejects with
-  `CancelledError`); what is made after it runs normally.
-
-In TypeScript this context has its own type, `SqlContext`, with
-`SqlObjectContext`, `SqlObjectSharedContext` and the workflow
-ones: their operations return `Promise`s, there is no `awakeable` and no
-`run`, and `ctx.journalReplay` is `false`. `restate.service`, `restate.object` and
-`restate.workflow` pick it from the options: an unannotated `ctx` gets it
-when they set `journalReplay: false` (`restate.sqlOptions` does), and a
-handler annotated with the other context is a type error, in either
-direction. A handler wrapper (`restate.handlers.object.exclusive` and the
-others) takes it when its own options say `journalReplay: false`.
+- **One await point.** The loop asks the server about every awaited promise
+  at once. So a suspension (after the server's inactivity timeout) resumes on
+  the first of them to complete, and a promise awaited while the loop waits
+  joins the next check: a call awaited late is not held up by a long sleep
+  made earlier.
+- **An operation starts when it is made**: a call is made without an `await`,
+  and a failure nobody awaits is not an unhandled rejection.
+- **A cancellation reaches every awaited promise** (each rejects with
+  `CancelledError`).
 
 ```ts
-const counter = restate.object({
+const counter = sql.object({
   name: 'counter',
   handlers: {
-    add: async (ctx: restate.SqlObjectContext, n: number) => {
+    add: async (ctx: sql.ObjectContext, n: number) => {
       const [, total] = await Promise.all([ctx.sleep(10), ctx.get<number>('total')]);
       ctx.set('total', (total ?? 0) + n);
       return (total ?? 0) + n;
     },
   },
-  options: { ...restate.sqlOptions },
 });
 ```
 
-A handler that replays its journal keeps the published SDK's context and
-`RestatePromise`s. [`tests/concurrency.ts`](../../tests/concurrency.ts) tests all of
-this against a real server.
+[`tests/concurrency.ts`](../../tests/concurrency.ts) tests all of this against
+a real server.
 
 ## The examples
 
@@ -274,7 +266,7 @@ transfers take 18.8 ms each on one local node.
 
 - **Every read is journaled with its value.** A state read appends the value
   to the invocation's journal, so reading pages costs log writes, and the
-  page cache matters more than it does elsewhere. `sqlOptions` sets journal
+  page cache matters more than it does elsewhere. `sql.options` sets journal
   retention to zero so completed journals are not kept.
 - **The journal grows across attempts.** Skipped entries stay; each attempt
   appends its own.
@@ -302,13 +294,21 @@ returns was the stored state ([the reader](../../../core/sqlite-kv/docs/DESIGN.m
 `ctx.transaction` is the exclusive handlers'.
 
 ```ts
-count: restate.handlers.object.shared({ journalReplay: false }, async (ctx: restate.SqlObjectSharedContext) =>
-  ctx.db.query('SELECT count(*) FROM accounts'),
-),
+count: sql.shared(async (ctx: sql.ObjectSharedContext) => ctx.db.query('SELECT count(*) FROM accounts')),
 ```
 
 ## Not supported
 
-Writes from shared handlers, awakeables, `ctx.db` in a handler that replays its journal,
+Writes from shared handlers, awakeables in a handler with `ctx.db`,
 and request/response deployments (such as Lambda), which suspend at every await,
 since a suspension is a restart.
+
+## Tests
+
+The library's own: [`tests/sql`](../../tests/sql) (sessions, transactions
+and their sends, readers, SQL errors) without a server, and
+[`tests/concurrency.ts`](../../tests/concurrency.ts) and
+[`tests/crash.ts`](../../tests/crash.ts) against one. `restate-sql/internal`
+has what the tests take apart: an attempt's session over a context of their
+own (`SqlAttempt`, `withSql`), and the store's fault injection
+(`setStoreWrapper`).

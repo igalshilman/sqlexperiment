@@ -4,7 +4,7 @@
 durable agent harness: it commits conversations, model turns and tool calls
 to storage, and resumes unfinished work when the storage is opened again.
 Here its storage is the agent's SQL database, in the Restate virtual object
-([SQL in Restate virtual objects](../../../sdk-typescript/SQL.md)).
+([SQL in Restate virtual objects](../../../sql/README.md)).
 
 ## Use
 
@@ -34,7 +34,7 @@ answers a prompt once, and `conversation()` is the object's conversation, on
 the model, for pi-durable's own API (`reset`, `compact`, `entries`...):
 
 ```ts
-const options = async (ctx: restate.SqlObjectContext): Promise<pi.Options> => ({
+const options = async (ctx: sql.ObjectContext): Promise<pi.Options> => ({
   model: (await settingsOf(ctx)).model,
   tools: [clock],
 });

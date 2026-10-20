@@ -7,7 +7,7 @@
 // every other: the session does that, and a transaction's handle is invalid
 // once its body settles. A statement outside a transaction is its own
 // transaction.
-import type { SqlDatabase, SqlSession } from '@restatedev/restate-sdk';
+import type { SqlDatabase, SqlSession } from 'restate-sql';
 import {
   SqliteStorage,
   type SqliteDatabase,

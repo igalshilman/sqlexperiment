@@ -80,7 +80,7 @@ curl localhost:8080/notes/alice/list
 
 A statement is durable when it returns. `ctx.transaction` groups
 statements, and the sends made in it, into one commit. See
-[SQL in virtual objects](typescript/packages/sdk-typescript/SQL.md), and
+[SQL in virtual objects](typescript/packages/sql/README.md), and
 [`examples-python/notes.py`](examples-python/notes.py) for the same in Python.
 
 ## An agent with tools of its own

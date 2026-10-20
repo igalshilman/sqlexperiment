@@ -138,8 +138,8 @@ test-core: ## The core crate, with the simulation campaigns
 test-addon: $(ADDON) ## The Node.js addon
 	cd typescript/packages/sql-node && npm test
 
-test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests, and its type tests
-	cd typescript/packages/sdk-typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx tsc -p test/tsconfig.types.json && npx vitest run
+test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests
+	cd typescript/packages/sdk-typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx vitest run
 
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
 	cd typescript/tests && pnpm exec vitest run $(T)

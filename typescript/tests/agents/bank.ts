@@ -9,14 +9,15 @@
 // the DeepSeek Harness) has the model retry it with `retryOf`, the id of the
 // call it retries.
 import * as restate from '@restatedev/restate-sdk';
+import type * as sql from 'restate-sql';
 import { tool } from 'restate-agents';
 import { z } from 'zod';
 import { ledger } from '../sql/ledger.ts';
 
 /** The ledger. */
-const books = (ctx: restate.SqlObjectContext) => ctx.objectClient(ledger, 'bank');
+const books = (ctx: sql.ObjectContext) => ctx.objectClient(ledger, 'bank');
 /** One idempotency key per tool call: a prompt makes several. */
-const key = (ctx: restate.SqlObjectContext, id: string) => `${ctx.request().id}:${id}`;
+const key = (ctx: sql.ObjectContext, id: string) => `${ctx.request().id}:${id}`;
 
 /** The bank tools of the agent `agent`. */
 export const bank = (agent: string) => [

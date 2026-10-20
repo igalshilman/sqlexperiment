@@ -52,13 +52,16 @@ importers:
         version: 2.0.32(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.5.17(typescript@7.0.2)(web-tree-sitter@0.25.10))(redis@6.3.0(@opentelemetry/api@1.9.0))
       '@restatedev/restate-sdk':
         specifier: file:../typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
-        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz(sqlite-kv@packages+sql-node)
+        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
       '@restatedev/restate-sdk-clients':
-        specifier: 1.17.3
-        version: 1.17.3
+        specifier: 1.17.4
+        version: 1.17.4
       restate-agents:
         specifier: workspace:*
         version: link:../typescript/packages/integrations
+      restate-sql:
+        specifier: workspace:*
+        version: link:../typescript/packages/sql
       sqlite-kv:
         specifier: workspace:*
         version: link:../typescript/packages/sql-node
@@ -191,7 +194,7 @@ importers:
         version: 2.0.32(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.5.17(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.4)(graphql@16.14.2)(redis@6.3.0(@opentelemetry/api@1.9.0))(typebox@1.3.27)(typescript@7.0.2)(web-tree-sitter@0.25.10)(ws@8.22.0)
       '@restatedev/restate-sdk':
         specifier: file:../sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
-        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz(sqlite-kv@packages+sql-node)
+        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
       '@restatedev/restate-sdk-clients':
         specifier: 1.17.4
         version: 1.17.4
@@ -204,6 +207,9 @@ importers:
       effect:
         specifier: 4.0.1
         version: 4.0.1
+      restate-sql:
+        specifier: workspace:*
+        version: link:../sql
       sqlite-kv:
         specifier: workspace:*
         version: link:../sql-node
@@ -212,6 +218,18 @@ importers:
         version: 4.6.5
 
   packages/sdk-typescript: {}
+
+  packages/sql:
+    dependencies:
+      '@restatedev/restate-sdk':
+        specifier: file:../sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
+        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
+      '@restatedev/restate-sdk-core':
+        specifier: 1.17.4
+        version: 1.17.4
+      sqlite-kv:
+        specifier: workspace:*
+        version: link:../sql-node
 
   packages/sql-node: {}
 
@@ -336,7 +354,7 @@ importers:
         version: 2.0.32(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.5.17(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.4)(graphql@16.14.2)(redis@6.3.0(@opentelemetry/api@1.9.0))(typebox@1.3.27)(typescript@7.0.2)(web-tree-sitter@0.25.10)(ws@8.22.0)
       '@restatedev/restate-sdk':
         specifier: file:../packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
-        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz(sqlite-kv@packages+sql-node)
+        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
       '@restatedev/restate-sdk-clients':
         specifier: 1.17.4
         version: 1.17.4
@@ -349,6 +367,9 @@ importers:
       restate-agents:
         specifier: workspace:*
         version: link:../packages/integrations
+      restate-sql:
+        specifier: workspace:*
+        version: link:../packages/sql
       sqlite-kv:
         specifier: workspace:*
         version: link:../packages/sql-node
@@ -1909,26 +1930,15 @@ packages:
     peerDependencies:
       '@redis/client': ^6.3.0
 
-  '@restatedev/restate-sdk-clients@1.17.3':
-    resolution: {integrity: sha512-h3uepEAVRIs4mhBqDyGUG23M0QzmQZ05UTogu3PlTQga9jNnlrf4fK+l5DNR4IDE5PMyN7AIu+l0csgK+bxMzQ==}
-
   '@restatedev/restate-sdk-clients@1.17.4':
     resolution: {integrity: sha512-rJi3cBJx2z80c3XW9Kt4ZMAzloerp+ffusyj+Uc1uQ4jPAQq98FCNIVU1J3z9N5Gt/1Cu9Piiu4rtR/wB075PQ==}
-
-  '@restatedev/restate-sdk-core@1.17.3':
-    resolution: {integrity: sha512-KZxRF7eitdb/QgTiPLbFifwLtk0AeqQPzWV8be7rOjaQ8jdXjiaCQIszDh4BuyJb+4KMaDd8/muSWbAY+A3XhA==}
 
   '@restatedev/restate-sdk-core@1.17.4':
     resolution: {integrity: sha512-CEuffSwTiaa5FWGcoWCx15wpgnLvA2pxULaMLYrHfqWLZSC/yAKSlPD5DG1Sya2DDkomK3GTq32gmU0GPciZKw==}
 
   '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz':
-    resolution: {integrity: sha512-x8MLqXv96VkRSzLq01u0W3HvaoR7YsP2mhs5HwCrPiJx/28xoCD5b4MNV4SoLRtESk6J1MQKox7emGQ0eXaBQQ==, tarball: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz}
+    resolution: {integrity: sha512-tgnxaSZJ4bvhOgyguxce8F97IzTo8UMYAPCa1ovkO3bUVflOf2cR9IpSPGrs7s/s09PXt2vAw+Sha9ZzO7kibA==, tarball: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz}
     version: 1.17.4
-    peerDependencies:
-      sqlite-kv: '*'
-    peerDependenciesMeta:
-      sqlite-kv:
-        optional: true
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     resolution: {integrity: sha512-aWR+XKH9+rW7m5fWq/5360J3mHycrx/o6xZM2DQFdJnTMdyP7/WzxPjhtLbVWdKo2y612/4U1bWqb3HQhiF7vg==}
@@ -6031,23 +6041,15 @@ snapshots:
     dependencies:
       '@redis/client': 6.3.0(@opentelemetry/api@1.9.0)
 
-  '@restatedev/restate-sdk-clients@1.17.3':
-    dependencies:
-      '@restatedev/restate-sdk-core': 1.17.3
-
   '@restatedev/restate-sdk-clients@1.17.4':
     dependencies:
       '@restatedev/restate-sdk-core': 1.17.4
 
-  '@restatedev/restate-sdk-core@1.17.3': {}
-
   '@restatedev/restate-sdk-core@1.17.4': {}
 
-  '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz(sqlite-kv@packages+sql-node)':
+  '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz':
     dependencies:
       '@restatedev/restate-sdk-core': 1.17.4
-    optionalDependencies:
-      sqlite-kv: link:packages/sql-node
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     optional: true

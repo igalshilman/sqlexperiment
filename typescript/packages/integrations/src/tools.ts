@@ -7,6 +7,7 @@
 // call: Restate calls carry an idempotency key made of the invocation id and
 // that id, so a tool call run again after a crash makes the same call, once.
 import * as restate from '@restatedev/restate-sdk';
+import type * as sql from 'restate-sql';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { cancellationOf, type Configure, configured, ToolError } from './common.ts';
@@ -17,7 +18,7 @@ const TOOL = Symbol.for('restate-agents.tool');
 /** A tool call: the agent's context, and the id of the model's call. */
 export interface ToolCall {
   /** The agent's context: Restate calls, `ctx.key`, `ctx.db`... */
-  ctx: restate.SqlObjectContext;
+  ctx: sql.ObjectContext;
   /** The id of the model's tool call: the same when a crash runs the call again. */
   callId: string;
 }
@@ -202,7 +203,7 @@ async function split(
   target: Target,
   options: TargetOptions<z.ZodObject | undefined>,
   all: Record<string, unknown>,
-  ctx: restate.SqlObjectContext,
+  ctx: sql.ObjectContext,
 ) {
   if (!keyed(target)) return { key: undefined, parameter: options.input ? all : undefined };
   if (options.key !== undefined) {

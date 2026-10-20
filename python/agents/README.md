@@ -40,13 +40,13 @@ as plain text, `-d 'Hi'`, or a JSON string, `--json '"Hi"'`) and `messages`
 and `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
 Add handlers of your own with `@assistant.handler`.
 
-| Option       | What                                                                                                                                                      |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`      | `anthropic/model-id`; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)                                                        |
-| `system`     | The system prompt                                                                                                                                         |
-| `tools`      | `tool`s and [Restate's tools](#restates-tools); the SDK's (`@beta_async_tool`, which get their input only); and tools the API runs, as dicts (web search) |
-| `client`     | The `AsyncAnthropic` client (a base URL or a gateway of your own); by default one with `ANTHROPIC_API_KEY`                                                |
-| `request`    | More of each request, as the API takes it: `{"max_tokens": 4096, "output_config": {"effort": "low"}}`, over `REQUEST` (16000 tokens, `fallbacks: "default"`) |
+| Option    | What                                                                                                                                                         |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `model`   | `anthropic/model-id`; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)                                                           |
+| `system`  | The system prompt                                                                                                                                            |
+| `tools`   | `tool`s and [Restate's tools](#restates-tools); the SDK's (`@beta_async_tool`, which get their input only); and tools the API runs, as dicts (web search)    |
+| `client`  | The `AsyncAnthropic` client (a base URL or a gateway of your own); by default one with `ANTHROPIC_API_KEY`                                                   |
+| `request` | More of each request, as the API takes it: `{"max_tokens": 4096, "output_config": {"effort": "low"}}`, over `REQUEST` (16000 tokens, `fallbacks: "default"`) |
 
 `model`, `system`, `tools` and `request` may also be functions of the
 invocation's context, or async ones (each user's system prompt, from

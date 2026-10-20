@@ -6,6 +6,7 @@
 // random state requests, for crash tests; see faults.ts) and
 // SQLITE_KV_CACHE_FILE.
 import * as restate from '@restatedev/restate-sdk';
+import * as sql from 'restate-sql';
 import { serveIfMain } from '../faults.ts';
 import { row } from './sql.ts';
 
@@ -28,7 +29,7 @@ export interface Audit {
 /** The ledger's handlers. */
 export const handlers = {
   /** Create the tables, and open `count` accounts with `balance` each, once. */
-  init: (ctx: restate.SqlObjectContext, [count, balance]: [number, number]) =>
+  init: (ctx: sql.ObjectContext, [count, balance]: [number, number]) =>
     ctx.transaction(async ({ db }) => {
       await db.execute(
         `CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, opening INTEGER, balance INTEGER);
@@ -46,7 +47,7 @@ export const handlers = {
    * A transfer that would create or destroy money is refused: an account that
    * does not exist, or an amount that is not a positive integer.
    */
-  transfer: (ctx: restate.SqlObjectContext, t: Transfer) =>
+  transfer: (ctx: sql.ObjectContext, t: Transfer) =>
     ctx.transaction(async ({ db }): Promise<Transfer> => {
       const [seen] = await db.query('SELECT src, dst, amount FROM transfers WHERE id = ?', [t.id]);
       if (seen) {
@@ -66,7 +67,7 @@ export const handlers = {
     }),
 
   /** Totals, and accounts that disagree with the recorded transfers. */
-  audit: (ctx: restate.SqlObjectContext) =>
+  audit: (ctx: sql.ObjectContext) =>
     ctx.transaction(async ({ db }): Promise<Audit> => {
       const [integrity] = await row<[string]>(db, 'PRAGMA integrity_check');
       if (integrity !== 'ok') throw new restate.TerminalError('integrity check failed');
@@ -82,11 +83,10 @@ export const handlers = {
     }),
 };
 
-export const ledger = restate.object({
+export const ledger = sql.object({
   name: 'Ledger',
   handlers,
   options: {
-    ...restate.sqlOptions,
     // Without end: the server pauses an invocation after its default attempts.
     retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },
   },
