@@ -259,6 +259,8 @@ class Object:
         self.values: dict[str, Any] = {}
         self.sends: list[tuple[str, Any]] = []
         self.steered: list[dict[str, str]] = []
+        # How often the agents published a change of the conversation (for its watches).
+        self.published = 0
         # The calls made (service, handler, key, idempotency key, request), and how a call answers its request.
         self.calls: list[tuple[str, str, str | None, str | None, bytes]] = []
         self.answer: Callable[[str, bytes], bytes] = lambda handler, request: request
@@ -356,7 +358,10 @@ class Context:
         return self.obj.answer(handler, arg)
 
     async def object_call(self, handler: Callable[..., Any], key: str, arg: Any, **options: Any) -> Any:
-        assert handler.__name__ == "steering", f"the agents call {handler.__name__} here"
+        assert handler.__name__ in ("steering", "publish"), f"the agents call {handler.__name__} here"
+        if handler.__name__ == "publish":
+            self.obj.published += 1
+            return {"revision": self.obj.published}
         return list(self.obj.steered)
 
     # --- the SqlHost of restate.sql

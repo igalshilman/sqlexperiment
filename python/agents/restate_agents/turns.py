@@ -18,9 +18,10 @@ from typing import Any
 import restate
 
 from restate_agents.common import CHECK_MODEL, MessageSerde, refused
-from restate_agents.object import TURN, Object, Turn, service
+from restate_agents.object import TURN, Object, Turn, context, service
 from restate_agents.signals import Agent, CloseRequest, Steer, signals_of
 from restate_agents.signals import close as close_turn
+from restate_agents.signals import publish as publish_change
 from restate_agents.signals import steering as steering_of
 
 # A cancelled turn's answer, as its conversation records it.
@@ -62,6 +63,20 @@ async def steering(ctx: Any) -> list[Steer]:
     return [Steer(**m) for m in messages if m["id"] not in turn.taken]
 
 
+async def publish() -> None:
+    """
+    The conversation changed (a framework stored a message, say): the clients
+    that follow it (``watch``) read it again. It is a call, so what the
+    handler stored before is stored before they read it. Outside an agent's
+    handler (a checkpointer's test, say), it does nothing.
+    """
+    try:
+        ctx, name = context(), service()
+    except RuntimeError:
+        return
+    await ctx.object_call(publish_change, key=signals_of(name, ctx.key()), arg=None)
+
+
 def taken(ids: Iterable[str]) -> None:
     """The conversation has the steered messages ``ids``: the turn does not answer them as messages of their own."""
     if (turn := _answering.get()) is not None:
@@ -86,6 +101,7 @@ def chat(obj: Object, answer: Callable[[Any, str], Awaitable[str]]) -> None:
             ctx.set(TURN, Turn(invocationId=id, since=datetime.now(UTC).isoformat()).model_dump())
         answering = _Answering(id)
         _answering.set(answering)
+        await publish()
 
         def end(cancelled: bool = False) -> None:
             ctx.clear(TURN)

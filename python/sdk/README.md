@@ -41,10 +41,13 @@ with the same storage, page cache and pending sends:
 - `restate.sql_options` is `journal_replay=False`, `enable_lazy_state=True`
   and `journal_retention=timedelta(0)`. `journal_replay` is also a handler
   option, and `ctx.db` needs it off in the handler that uses it.
-- `ctx.db` is the object's database (namespace `service/key`), for exclusive
-  handlers. Each statement is its own transaction, and
-  `async with ctx.db.transaction() as db` groups several. Calls run one at a
-  time, in the order they start.
+- `ctx.db` is the object's database (namespace `service/key`). Each
+  statement is its own transaction, and `async with ctx.db.transaction() as
+  db` groups several. Calls run one at a time, in the order they start.
+- In a shared handler, `ctx.db` reads the database as stored, beside the
+  exclusive handler that writes it (a chat page reads the conversation while
+  an agent answers), and writes nothing: a write statement raises. If a
+  commit came while it read, the attempt fails, and Restate retries it.
 - `async with ctx.transaction() as t` is one transaction, `t.db`, with its
   sends, `t.tx` (`service_send`, `object_send`, `workflow_send`,
   `generic_send`): they are made once it commits, exactly once, even if the

@@ -166,26 +166,38 @@ struct Database {
 /// Open the database of `namespace` over the store behind `dispatch`, which
 /// runs on `event_loop`; see `sqlite_kv/__init__.py` for the store object it
 /// is built from.
+///
+/// A `reader` reads the namespace beside its owner (see `Session::open_reader`):
+/// it writes nothing to the store, and `is_current` says whether what it read
+/// is still the stored state.
 #[pyfunction]
+#[pyo3(signature = (namespace, dispatch, event_loop, reader = false))]
 fn open<'py>(
     py: Python<'py>,
     namespace: String,
     dispatch: Py<PyAny>,
     event_loop: Py<PyAny>,
+    reader: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let store = Arc::new(PyStore {
         event_loop,
         dispatch,
     });
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let cache = match reader {
+            true => None,
+            false => Some(page_cache().await?.namespace(&namespace)),
+        };
         let options = StorageOptions {
-            cache: Some(page_cache().await?.namespace(&namespace)),
+            cache,
             durability: Durability::Commit,
             ..StorageOptions::default()
         };
-        let session = Session::open_with_options(store, options)
-            .await
-            .map_err(sql_error)?;
+        let session = match reader {
+            true => Session::open_reader(store, options).await,
+            false => Session::open_with_options(store, options).await,
+        }
+        .map_err(sql_error)?;
         Ok(Database {
             session: Arc::new(Mutex::new(Some(session))),
             usable: Arc::new(AtomicBool::new(true)),
@@ -285,6 +297,22 @@ impl Database {
             let session = session.lock().await;
             let effects = session.as_ref().ok_or_else(closed)?.effects();
             Python::attach(|py| Ok(PyBytes::new(py, &effects).unbind()))
+        })
+    }
+
+    /// Whether the store still holds the state this reader opened on, so
+    /// that what it read is: if not, read again in a new session (see
+    /// `Session::is_current`).
+    fn is_current<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let session = self.session.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let session = session.lock().await;
+            session
+                .as_ref()
+                .ok_or_else(closed)?
+                .is_current()
+                .await
+                .map_err(sql_error)
         })
     }
 

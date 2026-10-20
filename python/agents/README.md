@@ -36,7 +36,8 @@ object's database. It has the handlers `chat` (a message in, the answer out;
 as plain text, `-d 'Hi'`, or a JSON string, `--json '"Hi"'`) and `messages`
 (the conversation so far, with the tool calls, a page at a time:
 `{"limit": 50, "before": id, "after": id}`); `status`, `stop` and `steer`
-([Turns](#turns)); and `pending` and `signal` ([Restate's tools](#restates-tools)).
+([Turns](#turns)); `pending` and `signal` ([Restate's tools](#restates-tools));
+and `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
 Add handlers of your own with `@assistant.handler`.
 
 | Option       | What                                                                                                                                                      |
@@ -98,7 +99,8 @@ key (its thread), with the handlers `chat` (a message in, the answer out; as
 plain text, `-d 'Hi'`, or a JSON string, `--json '"Hi"'`) and `messages` (the
 conversation so far, with the tool calls, a page at a time:
 `{"limit": 50, "before": id, "after": id}`); `status`, `stop` and `steer`
-([Turns](#turns)); and `pending` and `signal` ([Restate's tools](#restates-tools)).
+([Turns](#turns)); `pending` and `signal` ([Restate's tools](#restates-tools));
+and `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
 Add handlers of your own with `@assistant.handler`.
 
 | Option   | What                                                                                                                                                                                                                        |
@@ -326,6 +328,48 @@ curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invoca
   steered messages wait in the agent's `signals` object, and go into the
   thread by their ids: a retried attempt neither loses nor repeats one.
 
+## Follow a conversation
+
+A chat page, a backend or a script follows a conversation as it changes,
+without polling: `notifications` is its revision, which each change
+increases (a message or tool call stored, a wait, a turn's start and end),
+and `watch` answers once the revision is past the one given, or at its
+timeout (50 s by default, at most 60). It waits in Restate, holding no
+process. `messages` and `status` answer at once, also while a message is
+answered: the tool calls show up as the agent makes them.
+
+```sh
+curl localhost:8080/support/alice/notifications                          # {"revision": 7}
+curl localhost:8080/support/alice/watch --json '{"afterRevision": 7}'     # {"revision": 8}, once something changed
+```
+
+`restate_agents.client` does the reading and the waiting, from any Python
+code, with nothing of the agent's: `AgentClient(url, agent, key)` sends
+messages (`chat`, `send`), reads (`messages`, `status`, `pending`), approves,
+steers and stops; and `follow()` gives the conversation as it changes: what
+the agent is doing, and the messages new or changed since the last time (a
+message may come again, changed, such as a tool call with its output: keep
+them by `id`). A network failure does not end it, and a wait it retries
+joins the one already parked in Restate
+([`examples-python/follow.py`](../../examples-python/follow.py)):
+
+```python
+from restate_agents.client import AgentClient
+
+async with AgentClient("http://localhost:8080", "support", "alice") as alice:
+    await alice.send("Order 103 arrived broken, can I get my $30 back?")
+    async for change in alice.follow():
+        for wait in change.status["waiting"]:
+            await alice.signal("approved", id=wait["id"])
+        for message in change.messages:
+            print(message)
+```
+
+The handlers are those of the TypeScript agents, so the chat page of
+[`examples-typescript/ui`](../../examples-typescript/ui/app.ts) serves the
+Python `support.py` as it is: its conversation as the agent works, Approve
+and Reject, Steer and Stop.
+
 ## Handlers of your own
 
 An agent is a virtual object with a SQL database of its own, `ctx.db`, one
@@ -336,7 +380,11 @@ and the SQL storage hidden from the journal in Restate's UI.
 parameter, or several, which a JSON object gives by name
 ([`examples-python/memory.py`](../../examples-python/memory.py)). With
 `@assistant.handler(message=True)`, its input is a message, as `chat`'s is:
-plain text or a JSON string (`curl -d 'Keep it short'`), or nothing. `serve(*services)`
+plain text or a JSON string (`curl -d 'Keep it short'`), or nothing. A
+shared handler (`@assistant.handler(kind="shared")`) runs beside the message
+being answered, and reads `ctx.db` as stored: it writes nothing. A handler
+without input also takes an empty request, or one with a JSON body, as
+TypeScript's do, so any Restate client calls it. `serve(*services)`
 serves them on `PORT`, or 9080; with `background=True`, on a thread of its
 own, returning at once, as in a Modal Server
 ([`examples-python/on_modal.py`](../../examples-python/on_modal.py)).

@@ -41,6 +41,8 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from restate import SqlDatabase, SqlSession
 
+from restate_agents.common import has_table
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS checkpoints (
   thread_id TEXT NOT NULL,
@@ -106,7 +108,9 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
 
     async def _setup(self) -> None:
         if not self._ready:
-            await self.db.execute(SCHEMA)
+            # Created only if missing: a shared handler's ctx.db reads, and creates nothing.
+            if not await has_table(self.db, "writes"):
+                await self.db.execute(SCHEMA)
             self._ready = True
 
     async def _channel_values(self, thread_id: str, ns: str, checkpoint: Checkpoint) -> dict[str, Any]:

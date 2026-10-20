@@ -349,3 +349,35 @@ async def test_an_awaitable_get_is_read_when_issued():
         again = await sqlite_kv.open(name, AwaitableGets(backend, False))
         assert await again.query("SELECT * FROM t") == [[1]]
         await again.save()
+
+
+class ReadOnly(Request):
+    """A request that refuses writes, as a shared handler's store does."""
+
+    def set(self, key, value):
+        raise AssertionError("a reader writes nothing")
+
+    def clear(self, key):
+        raise AssertionError("a reader writes nothing")
+
+
+async def test_a_reader_reads_beside_the_writer_and_knows_when_it_is_stale():
+    backend = Backend()
+    ns = fresh()
+    writer = await sqlite_kv.open(ns, backend.request())
+    await writer.execute("CREATE TABLE t(n INTEGER)")
+    await writer.execute("INSERT INTO t VALUES (1)")
+
+    reader = await sqlite_kv.open(ns, ReadOnly(backend, False), reader=True)
+    assert await reader.query("SELECT n FROM t") == [[1]]
+    assert await reader.is_current()
+    # The writer commits again: what the reader read is no longer the stored state.
+    await writer.execute("INSERT INTO t VALUES (2)")
+    assert not await reader.is_current()
+    await reader.close()
+
+    again = await sqlite_kv.open(ns, ReadOnly(backend, False), reader=True)
+    assert await again.query("SELECT n FROM t ORDER BY n") == [[1], [2]]
+    assert await again.is_current()
+    await again.close()
+    await writer.save()

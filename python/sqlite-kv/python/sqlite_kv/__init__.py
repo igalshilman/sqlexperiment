@@ -51,12 +51,17 @@ class Store(Protocol):
     def sync(self) -> None | Awaitable[None]: ...
 
 
-async def open(namespace: str, store: Store) -> Database:  # pylint: disable=redefined-builtin
+async def open(namespace: str, store: Store, *, reader: bool = False) -> Database:  # pylint: disable=redefined-builtin
     """Open the database of ``namespace`` over ``store``.
 
     One process-wide page cache serves every namespace. A statement that
     commits completes once the store has stored its writes (a ``sync`` after
     them completed).
+
+    A ``reader`` reads the database beside the session that writes it (a
+    shared handler's, beside the exclusive one's): it writes nothing to the
+    store, and ``is_current`` says whether what it read is still the stored
+    state.
     """
     loop = asyncio.get_running_loop()
     # A failed write cannot fail its caller, which has moved on: the next sync
@@ -100,7 +105,7 @@ async def open(namespace: str, store: Store) -> Database:  # pylint: disable=red
             if reply is not None:
                 reply(None, str(error))
 
-    return Database(await _native.open(namespace, dispatch, loop))
+    return Database(await _native.open(namespace, dispatch, loop, reader))
 
 
 # The transaction whose body is running, in that body's context (and the
@@ -190,6 +195,11 @@ class Database:
     def is_usable(self) -> bool:
         """Whether SQL can still run: an SQL error leaves the session usable, a storage error ends it."""
         return self._native.is_usable()
+
+    async def is_current(self) -> bool:
+        """Whether the store still holds the state this reader opened on: if not, read again in a new session."""
+        async with self._serial():
+            return await self._native.is_current()
 
     async def save(self) -> None:
         """End the session, after the calls before it."""
