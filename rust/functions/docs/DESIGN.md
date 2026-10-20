@@ -73,7 +73,8 @@ one frozen API. Its nested KV and RPC objects are frozen too.
 | `ctx.kv.set(key, value)`             | `kind:"kv.set", key, value`         | null, the write in the turn     |
 | `ctx.kv.delete(key)`                 | `kind:"kv.delete", key`             | null, the delete in the turn    |
 | `ctx.rpc.call(target, input = null)` | `kind:"rpc", target, input`         | JSON response                   |
-| `ctx.call(name, args = null)`        | `kind:"call", name, args`           | Custom host response            |
+| `ctx.call(name, input = null)`       | `kind:"call", name`                 | The host binding's response     |
+| `fetch(url, init)`                   | `kind:"call", name:"fetch"`         | A `Response`                    |
 | `ctx.sleep(ms)`                      | `kind:"sleep", deadline: now + ms`  | null at/after deadline          |
 | `ctx.signal(name, input = null)`     | `kind:"signal", name, input`        | The signal's value              |
 
@@ -1063,27 +1064,28 @@ interpreter runs compute-bound code ~10x slower than V8.
 scripted session over an in-memory store, to the program's own limit of 200
 steps. Each step is a few hundred bytes of model text and one tool call: a
 file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
-(~3 KiB). The model is the host binding `claude.messages`; each request is
-the whole conversation so far. Measured on 20 October 2026 (4 vCPUs):
+(~3 KiB). The model is reached with `fetch`, its body `fetch.json(request)`
+([FETCH.md](FETCH.md)); each request is the whole conversation so far.
+Measured on 20 October 2026 (4 vCPUs):
 
 | Step | Request to the model | Stored by the step | Model turn | Tool turn |
 | ---: | -------------------: | -----------------: | ---------: | --------: |
-|    1 |              1.7 KiB |             7.8 KB |    0.86 ms |   0.63 ms |
-|   10 |               31 KiB |             6.3 KB |    0.69 ms |   0.38 ms |
-|   40 |              130 KiB |             8.2 KB |    0.79 ms |   0.69 ms |
-|   99 |              328 KiB |             8.7 KB |    0.96 ms |   0.65 ms |
-|  190 |              636 KiB |             9.7 KB |    1.23 ms |   0.89 ms |
+|    1 |              1.7 KiB |             9.3 KB |    1.06 ms |   0.65 ms |
+|   10 |               31 KiB |              13 KB |    1.36 ms |   0.58 ms |
+|   41 |              136 KiB |              10 KB |    0.65 ms |   0.70 ms |
+|   99 |              328 KiB |              12 KB |    1.11 ms |   0.96 ms |
+|  190 |              636 KiB |              12 KB |    1.32 ms |   1.14 ms |
 
-- **Per step:** 9 KB at the median, 7–12 KB for nine steps in ten, whatever
+- **Per step:** 12 KB at the median, 9–34 KB for nine steps in ten, whatever
   the conversation's length: the request stays in the heap, which holds the
-  conversation anyway, so a step stores the pages its new messages take, and
-  a commit record of ~380 B.
-- **New bases:** seven steps (23, 34, 50, 70, 96, 128, 168) write a new
-  base (§5.3), the whole image: 42 KB to 235 KB, growing with the
+  conversation anyway, so a step stores the pages its new messages and the
+  model's response take, and a commit record of ~370 B.
+- **New bases:** ten steps (13, 20, 28, 40, 53, 70, 89, 115, 144, 178) write
+  a new base (§5.3), the whole image: 34 KB to 244 KB, growing with the
   conversation.
-- **The session:** 2.5 MiB stored over 200 steps. Restate journals none of
+- **The session:** 3.2 MiB stored over 200 steps. Restate journals none of
   the requests: the host reads each from the heap as it sends it.
-- **Restores:** a new attempt, every 25 steps, restores the run in 0.5–1.9
+- **Restores:** a new attempt, every 25 steps, restores the run in 0.4–0.8
   ms.
 
 ## 11. Scope limits, provenance and references
@@ -1095,8 +1097,9 @@ limits. Nothing preempts a single long JavaScript job but the turn's time
 limit; meanwhile it yields its thread to the executor at every 10 ms tick.
 
 Applications are cooperative: the internal bridge and JavaScript built-ins are
-not hardened against tampering. There is no guest filesystem/network/module-loader
-API; RPC routing and authorization belong to the embedding. A non-idempotent remote
+not hardened against tampering. There is no guest filesystem or module-loader
+API, and the network is `fetch`, under the deployment's policy
+([FETCH.md](FETCH.md)); RPC routing and authorization belong to the embedding. A non-idempotent remote
 provider still needs a transport recovery/deduplication contract.
 
 The pinned QuickJS binary's SHA-256 is

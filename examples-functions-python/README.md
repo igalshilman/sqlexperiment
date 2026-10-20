@@ -62,7 +62,7 @@ durable here (`asyncio.sleep`, `asyncio.timeout`, `asyncio.wait_for`).
 | `with ctx.db.transaction():`                           | The block's statements together, or none if it raises                                          |
 | `await ctx.kv.get/set/delete(key)`                     | The scope's JSON values                                                                        |
 | `await ctx.rpc.call(service, handler, input, key=...)` | Any Restate service                                                                            |
-| `await ctx.call("claude.messages", request)`           | Claude: a Messages API request, sent by the host                                               |
+| `await ctx.fetch(url, method=, headers=, json=)`       | An HTTP request, sent by the host: only where it allows, with the API keys it adds             |
 | `await ctx.sleep(seconds)`                             | A durable timer, however long                                                                  |
 | `await ctx.signal(name, input)`                        | A value from outside, such as a person's approval: the object's `signal` handler gives it      |
 | `ctx.key`                                              | The object's key                                                                               |
