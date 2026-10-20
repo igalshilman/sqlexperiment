@@ -48,7 +48,8 @@ Add handlers of your own with `@assistant.handler`.
 | `request`    | More of each request, as the API takes it: `{"max_tokens": 4096, "output_config": {"effort": "low"}}`, over `REQUEST` (16000 tokens, `fallbacks: "default"`) |
 
 `model`, `system`, `tools` and `request` may also be functions of the
-invocation's context (each user's system prompt, say). Each request is the
+invocation's context, or async ones (each user's system prompt, from
+`ctx.db`, say). Each request is the
 API's own JSON, as a durable function's `ctx.call("claude.messages", ...)`
 sends it ([host bindings](../../rust/functions/docs/HOST.md)), and with
 `fallbacks: "default"` by default: a declined request is retried on another
@@ -63,6 +64,19 @@ object's key):
 @assistant.handler
 async def summarize(ctx, topic: str) -> str:
     return await claude.prompt(ctx, f"Summarize what we said about {topic}")
+```
+
+`claude.compact(ctx, instructions)` summarizes the conversation in place of
+it, to keep the model's context short, and returns the summary; and
+`claude.reset(ctx, handoff)` starts it over, with a note to carry on from,
+if given. Each takes effect once per invocation, and refuses while a message
+is still being answered
+([`examples-python/harness.py`](../../examples-python/harness.py)):
+
+```python
+@assistant.handler(message=True)
+async def compact(ctx, instructions: str) -> str:
+    return await claude.compact(ctx, instructions)
 ```
 
 Through crashes: the conversation is the API's messages in the
@@ -320,7 +334,9 @@ per key: `restate.VirtualObject` with `restate.sql_options`, retries up to
 and the SQL storage hidden from the journal in Restate's UI.
 `@assistant.handler` adds a handler, which takes `ctx`, then its input: one
 parameter, or several, which a JSON object gives by name
-([`examples-python/memory.py`](../../examples-python/memory.py)). `serve(*services)`
+([`examples-python/memory.py`](../../examples-python/memory.py)). With
+`@assistant.handler(message=True)`, its input is a message, as `chat`'s is:
+plain text or a JSON string (`curl -d 'Keep it short'`), or nothing. `serve(*services)`
 serves them on `PORT`, or 9080; with `background=True`, on a thread of its
 own, returning at once, as in a Modal Server
 ([`examples-python/on_modal.py`](../../examples-python/on_modal.py)).

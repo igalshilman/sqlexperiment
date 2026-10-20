@@ -60,7 +60,7 @@ from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
 
-__all__ = ["CANCELLED", "DECLINED", "DEFAULT_MODEL", "REQUEST", "agent", "prompt"]
+__all__ = ["CANCELLED", "DECLINED", "DEFAULT_MODEL", "REQUEST", "agent", "compact", "prompt", "reset"]
 
 DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
 
@@ -98,8 +98,9 @@ def agent(
     - ``status``, ``stop`` and ``steer``: what it is doing, and the message it
       answers; ``pending`` and ``signal``: what its tools wait for.
 
-    ``model``, ``system``, ``tools`` and ``request`` may be functions of the invocation's
-    context (each user's, say); ``client``: the Anthropic client (a base URL
+    ``model``, ``system``, ``tools`` and ``request`` may be functions of the
+    invocation's context, or async ones (each user's, from ``ctx.db``, say);
+    ``client``: the Anthropic client (a base URL
     or a gateway of your own), by default one with ANTHROPIC_API_KEY;
     ``request``: more of each request, as the API takes it, such as
     ``{"max_tokens": 4096, "output_config": {"effort": "low"}}`` (over
@@ -111,15 +112,18 @@ def agent(
     obj = Object(name, **options)
 
     async def answer(ctx: ObjectContext, message: str) -> str:
-        given = lambda option: option(ctx) if callable(option) else option  # noqa: E731
+        async def given(option: Any) -> Any:
+            value = option(ctx) if callable(option) else option
+            return await value if inspect.isawaitable(value) else value
+
         return await prompt(
             ctx,
             message,
-            model=given(model),
-            system=given(system),
-            tools=given(tools),
+            model=await given(model),
+            system=await given(system),
+            tools=await given(tools),
             client=client,
-            request=given(request),
+            request=await given(request),
         )
 
     async def messages(ctx: ObjectContext, request: MessagesRequest | None = None) -> Messages:
@@ -174,9 +178,7 @@ async def prompt(
     while True:
         rows = await run.conversation.load()
         turns.taken(steered for row in rows if row.prompt == id for steered in row.steered)
-        if (
-            answered := next((row.answer for row in rows if row.prompt == id and row.answer is not None), None)
-        ) is not None:
+        if (answered := _answer(rows, id)) is not None:
             return answered
         # A prompt that a crash cut off (this one's, or an earlier one's) is finished first.
         pending = rows[-1].prompt if rows and rows[-1].answer is None else None
@@ -189,6 +191,82 @@ async def prompt(
             if error.status_code == 409:
                 await run.conversation.cancel(pending)
             raise
+
+
+async def compact(
+    ctx: Any,
+    instructions: str | None = None,
+    *,
+    model: str | None = None,
+    client: AsyncAnthropic | None = None,
+    request: dict[str, Any] | None = None,
+    thread: str | None = None,
+) -> str:
+    """
+    Summarize the conversation ``thread`` (by default, the object's key) in
+    place of it, to keep the model's context short, as ``instructions`` say
+    (such as "Keep the times you were asked"); and return the summary. In a
+    handler of your own::
+
+        @assistant.handler(message=True)
+        async def compact(ctx, instructions: str) -> str:
+            return await claude.compact(ctx, instructions)
+
+    The conversation is then the summary, and the next message carries on
+    from it. It is compacted once per invocation, however often an attempt
+    runs.
+    """
+    conversation = _Conversation(ctx.db, thread or ctx.key())
+    id = turns.prompt_id(ctx)
+    rows = await conversation.load()
+    if (done := _answer(rows, id)) is not None:
+        return done
+    if not rows:
+        return ""
+    _idle(rows)
+    asking = (
+        "Summarize our conversation so far, in place of it: what was asked and answered, and what to carry on with."
+    )
+    run = _Run(
+        client=client or _client(),
+        model=model_id_of(model_of(model, DEFAULT_MODEL), "anthropic"),
+        system=None,
+        tools=[],
+        request={**REQUEST, **(request or {})},
+        conversation=conversation,
+    )
+    ask = {"role": "user", "content": f"{asking} {instructions or ''}".strip()}
+    reply = await run.reply([*(row.message for row in rows), ask])
+    summary = _text([block.model_dump(exclude_none=True) for block in reply.content])
+    await conversation.replace(id, f"Our conversation so far, summarized:\n\n{summary}", answer=summary)
+    return summary
+
+
+async def reset(ctx: Any, handoff: str | None = None, *, thread: str | None = None) -> None:
+    """
+    Start the conversation ``thread`` (by default, the object's key) over,
+    with ``handoff`` as what to carry on with, if given (such as "Alice likes
+    short answers"). In a handler of your own::
+
+        @assistant.handler(message=True)
+        async def reset(ctx, handoff: str) -> None:
+            await claude.reset(ctx, handoff)
+    """
+    conversation = _Conversation(ctx.db, thread or ctx.key())
+    _idle(await conversation.load())
+    note = f"Before this conversation: {handoff}" if handoff else ""
+    await conversation.replace(turns.prompt_id(ctx), note, answer=handoff or "")
+
+
+def _answer(rows: list[_Row], prompt: str) -> str | None:
+    """The answer to ``prompt``, if it was answered."""
+    return next((row.answer for row in rows if row.prompt == prompt and row.answer is not None), None)
+
+
+def _idle(rows: list[_Row]) -> None:
+    """Refuse to change a conversation whose last message is still being answered."""
+    if rows and rows[-1].answer is None:
+        raise restate.TerminalError("a message is being answered: change the conversation once it is")
 
 
 @dataclass
@@ -251,6 +329,22 @@ class _Conversation:
                     ],
                 )
                 self.length += 1
+
+    async def replace(self, prompt: str, note: str, *, answer: str) -> None:
+        """
+        The conversation, in place of all it was, in one transaction: ``note``
+        and its acknowledgment, as ``prompt``'s, answered ``answer``; or
+        nothing, without a note.
+        """
+        messages = [{"role": "user", "content": note}, {"role": "assistant", "content": _CARRY_ON}] if note else []
+        async with self.db.transaction() as tx:
+            await tx.execute("DELETE FROM claude_messages WHERE thread = ?", [self.thread])
+            for n, message in enumerate(messages):
+                await tx.execute(
+                    "INSERT INTO claude_messages VALUES (?, ?, ?, ?, ?, NULL)",
+                    [self.thread, n, prompt, json.dumps(message), answer if n == len(messages) - 1 else None],
+                )
+        self.length = len(messages)
 
     async def cancel(self, prompt: str) -> None:
         """
@@ -360,6 +454,9 @@ def _text(content: str | list[dict[str, Any]]) -> str:
         return content
     return "".join(block.get("text", "") for block in content if block.get("type") == "text")
 
+
+# The model's acknowledgment of a summary or a handoff, which the conversation then carries on from.
+_CARRY_ON = "Understood: I will carry on from there."
 
 # The client of the agents without one of their own, made when first used.
 _shared: AsyncAnthropic | None = None
