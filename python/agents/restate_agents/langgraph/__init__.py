@@ -58,7 +58,7 @@ from pydantic import create_model
 from restate import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import Messages, MessagesRequest, Transcript, model_id_of, model_of
+from restate_agents.common import Messages, MessagesRequest, Transcript, has_table, model_id_of, model_of
 from restate_agents.langgraph.checkpointer import SqlCheckpointSaver
 from restate_agents.object import Object, context
 from restate_agents.tools import Tool
@@ -116,8 +116,10 @@ def agent(
 
     async def messages(ctx: ObjectContext, request: MessagesRequest | None = None) -> Messages:
         """The conversation so far, with the tool calls, from the thread's last checkpoint."""
-        saved = await SqlCheckpointSaver(ctx.db).aget_tuple({"configurable": {"thread_id": ctx.key()}})
         transcript = Transcript()
+        if not await has_table(ctx.db, "writes"):
+            return transcript.page(request)
+        saved = await SqlCheckpointSaver(ctx.db).aget_tuple({"configurable": {"thread_id": ctx.key()}})
         for m in saved.checkpoint["channel_values"].get("messages", []) if saved else []:
             if isinstance(m, HumanMessage):
                 transcript.say("user", _text(m))
@@ -126,11 +128,11 @@ def agent(
                 for call in m.tool_calls:
                     transcript.call(call["id"] or "", call["name"], call["args"])
             elif isinstance(m, ToolMessage):
-                transcript.result(m.tool_call_id, _text(m))
+                transcript.result(m.tool_call_id, _text(m), m.status == "error")
         return transcript.page(request)
 
     turns.chat(obj, answer)
-    obj.handler("messages")(messages)
+    obj.handler("messages", kind="shared")(messages)
     return obj
 
 
@@ -147,7 +149,7 @@ async def prompt(ctx: Any, graph: StateGraph, text: str, *, thread: str | None =
     Each prompt is answered once, however often an attempt crashes: the
     invocation's first prompt has its id, the next ``<id>:2``, and so on.
     """
-    app = graph.compile(checkpointer=SqlCheckpointSaver(ctx.db))
+    app = graph.compile(checkpointer=_Published(ctx.db))
     config: RunnableConfig = {"configurable": {"thread_id": thread or ctx.key()}}
     id = turns.prompt_id(ctx)
     while True:
@@ -220,6 +222,15 @@ def _usual(model: Model | Callable[[ObjectContext], Model] | None, system: str |
     graph.add_conditional_edges("model", tools_condition)
     graph.add_edge("tools", "model")
     return graph
+
+
+class _Published(SqlCheckpointSaver):
+    """The checkpointer of an agent's graph: each checkpoint stored is published, for the clients that follow it."""
+
+    async def aput(self, *args: Any, **kwargs: Any) -> RunnableConfig:
+        stored = await super().aput(*args, **kwargs)
+        await turns.publish()
+        return stored
 
 
 async def _run(app: Any, input: dict[str, Any] | None, config: RunnableConfig) -> None:

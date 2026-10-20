@@ -24,7 +24,21 @@ from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL
 from restate.serde import Serde
 
 from restate_agents.common import MessageSerde
-from restate_agents.signals import Agent, Resolved, Signal, Steered, SteerRequest, signals, signals_of
+from restate_agents.signals import (
+    Agent,
+    Notifications,
+    Resolved,
+    Signal,
+    Steered,
+    SteerRequest,
+    Subscription,
+    Watch,
+    signals,
+    signals_of,
+    subscribe,
+    unsubscribe,
+)
+from restate_agents.signals import notifications as notifications_of
 from restate_agents.signals import pending as pending_signals
 from restate_agents.signals import resolve as resolve_signal
 from restate_agents.signals import steer as steer_signal
@@ -83,9 +97,11 @@ class Object(restate.VirtualObject):
     Besides its own handlers, each has ``status``, what it is doing (the
     message it answers, and what its tools wait for), ``stop``, which stops
     that message, ``steer``, which adds to it, ``pending``, the waits of its
-    tools (``signal`` in tools.py), and ``signal``, which resolves one. They
-    are shared, so they run while the object's handler works, and journaled:
-    they use no ``ctx.db``.
+    tools (``signal`` in tools.py), and ``signal``, which resolves one; and
+    ``notifications``, the revision of its conversation, which each change
+    increases, and ``watch``, which waits for a newer one, for a client that
+    follows it. They are shared, so they run while the object's handler
+    works, and journaled: they use no ``ctx.db``.
     """
 
     def __init__(self, name: str, *, metadata: dict[str, str] | None = None, **options):
@@ -99,11 +115,11 @@ class Object(restate.VirtualObject):
             """Resolve a wait of this object's tools: by its id, or else the oldest for its name."""
             return await ctx.object_call(resolve_signal, key=signals_of(name, ctx.key()), arg=signal)
 
-        async def pending(ctx: restate.ObjectSharedContext) -> list[dict[str, Any]]:
+        async def pending(ctx: restate.ObjectSharedContext, _: None = None) -> list[dict[str, Any]]:
             """The waits of this object's tools, oldest first, as ``Waiting``."""
             return await ctx.object_call(pending_signals, key=signals_of(name, ctx.key()), arg=None)
 
-        async def status(ctx: restate.ObjectSharedContext) -> Status:
+        async def status(ctx: restate.ObjectSharedContext, _: None = None) -> Status:
             """What this object is doing: the message it answers, if any, and what its tools wait for."""
             turn = await ctx.get(TURN)
             return Status(
@@ -111,7 +127,7 @@ class Object(restate.VirtualObject):
                 waiting=await ctx.object_call(pending_signals, key=signals_of(name, ctx.key()), arg=None),
             )
 
-        async def stop(ctx: restate.ObjectSharedContext) -> Stopped:
+        async def stop(ctx: restate.ObjectSharedContext, _: None = None) -> Stopped:
             """Cancel the invocation of the message being answered (``status``'s), as Restate's admin API does."""
             turn = await ctx.get(TURN)
             if turn:
@@ -130,7 +146,31 @@ class Object(restate.VirtualObject):
             request = SteerRequest(agent=agent, turn=turn["invocationId"] if turn else None, text=text)
             return await ctx.object_call(steer_signal, key=signals_of(name, ctx.key()), arg=request)
 
-        for handler in (signal, pending, status, stop):
+        async def notifications(ctx: restate.ObjectSharedContext, _: None = None) -> Notifications:
+            """The revision of the conversation: each change of what ``messages`` and ``status`` give increases it."""
+            return await ctx.object_call(notifications_of, key=signals_of(name, ctx.key()), arg=None)
+
+        async def watch(ctx: restate.ObjectSharedContext, watch: Watch) -> Notifications:
+            """
+            The revision, once it is past ``afterRevision``, or at the timeout
+            (``timeoutSeconds``, 50 by default, at most 60), whichever comes
+            first: a client then reads what changed. It waits in Restate,
+            holding no process; a client that sends it again with the same
+            idempotency key joins the same wait.
+            """
+            key = signals_of(name, ctx.key())
+            awakeable, changed = ctx.awakeable()
+            ctx.object_send(
+                subscribe, key=key, arg=Subscription(afterRevision=watch.afterRevision, awakeable=awakeable)
+            )
+            timeout = ctx.sleep(timedelta(seconds=min(max(watch.timeoutSeconds, 0), 60)))
+            match await restate.select(changed=changed, timeout=timeout):
+                case ["changed", revision]:
+                    return Notifications(**revision)
+            ctx.object_send(unsubscribe, key=key, arg=awakeable)
+            return await ctx.object_call(notifications_of, key=key, arg=None)
+
+        for handler in (signal, pending, status, stop, notifications, watch):
             restate.VirtualObject.handler(self, kind="shared", journal_replay=True)(handler)
         restate.VirtualObject.handler(
             self, kind="shared", journal_replay=True, accept="*/*", input_serde=MessageSerde()
@@ -187,13 +227,25 @@ class Object(restate.VirtualObject):
         signature = inspect.signature(fn, eval_str=True)
         ctx, *params = signature.parameters.values()
 
-        if len(params) <= 1:
+        if len(params) == 1:
 
             async def handler(context: Any, *input: Any) -> Any:
                 _service.set(self.name)
                 return await fn(context, *input)
 
             handler.__signature__ = signature  # type: ignore[attr-defined]
+        elif not params:
+            # No input, but a body is taken (and left unread), as TypeScript's handlers take one: any client calls it.
+            async def handler(context: Any, _: None = None) -> Any:  # type: ignore[misc]
+                _service.set(self.name)
+                return await fn(context)
+
+            handler.__signature__ = signature.replace(  # type: ignore[attr-defined]
+                parameters=[
+                    ctx,
+                    inspect.Parameter("_", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=None, annotation=Any),
+                ]
+            )
         else:
             fields: dict[str, Any] = {
                 p.name: (

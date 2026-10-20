@@ -25,6 +25,14 @@ class MessageSerde(Serde[str]):
         return json.dumps(obj).encode()
 
 
+async def has_table(db: Any, name: str) -> bool:
+    """
+    Whether ``db`` has the table ``name``. A shared handler's ``ctx.db`` only
+    reads: it creates no table, and one that is not there yet is empty.
+    """
+    return bool(await db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?", [name]))
+
+
 def model_of(model: str | None, fallback: str) -> str:
     """The model, as ``provider/model-id``: ``model``, or else MODEL, or else the framework's default."""
     return model or os.environ.get("MODEL") or fallback
@@ -71,6 +79,8 @@ class ToolPart(TypedDict):
     name: str
     input: Any
     output: NotRequired[str]
+    error: NotRequired[bool]
+    """Whether ``output`` is the tool's error, for a UI to show it as one."""
 
 
 class ChatMessage(TypedDict):
@@ -121,10 +131,12 @@ class Transcript:
         self._messages[-1]["parts"].append(part)
         self._calls[id] = part
 
-    def result(self, id: str, output: str) -> None:
-        """The output of tool call ``id``."""
+    def result(self, id: str, output: str, error: bool = False) -> None:
+        """The output of tool call ``id``; with ``error``, the tool's error."""
         if id in self._calls:
             self._calls[id]["output"] = output
+            if error:
+                self._calls[id]["error"] = True
 
     def page(self, request: MessagesRequest | None = None) -> Messages:
         """The page of ``request``."""

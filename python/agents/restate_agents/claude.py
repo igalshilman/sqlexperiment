@@ -55,7 +55,7 @@ from pydantic import ValidationError
 from restate import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import Messages, MessagesRequest, Transcript, model_id_of, model_of
+from restate_agents.common import Messages, MessagesRequest, Transcript, has_table, model_id_of, model_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
@@ -129,6 +129,8 @@ def agent(
     async def messages(ctx: ObjectContext, request: MessagesRequest | None = None) -> Messages:
         """The conversation so far, with the tool calls."""
         transcript = Transcript()
+        if not await has_table(ctx.db, "claude_messages"):
+            return transcript.page(request)
         for row in await _Conversation(ctx.db, ctx.key()).load():
             content = row.message["content"]
             transcript.say(row.message["role"], _text(content))
@@ -136,11 +138,13 @@ def agent(
                 if block["type"] == "tool_use":
                     transcript.call(block["id"], block["name"], block["input"])
                 elif block["type"] == "tool_result":
-                    transcript.result(block["tool_use_id"], _text(block.get("content", "")))
+                    transcript.result(
+                        block["tool_use_id"], _text(block.get("content", "")), block.get("is_error", False)
+                    )
         return transcript.page(request)
 
     turns.chat(obj, answer)
-    obj.handler("messages")(messages)
+    obj.handler("messages", kind="shared")(messages)
     return obj
 
 
@@ -300,7 +304,8 @@ class _Conversation:
         self.length = 0
 
     async def load(self) -> list[_Row]:
-        await self.db.execute(self.SCHEMA)
+        if not await has_table(self.db, "claude_messages"):
+            await self.db.execute(self.SCHEMA)
         rows = await self.db.query(
             "SELECT prompt, message, answer, steered FROM claude_messages WHERE thread = ? ORDER BY n", [self.thread]
         )
@@ -329,6 +334,7 @@ class _Conversation:
                     ],
                 )
                 self.length += 1
+        await turns.publish()
 
     async def replace(self, prompt: str, note: str, *, answer: str) -> None:
         """
@@ -345,6 +351,7 @@ class _Conversation:
                     [self.thread, n, prompt, json.dumps(message), answer if n == len(messages) - 1 else None],
                 )
         self.length = len(messages)
+        await turns.publish()
 
     async def cancel(self, prompt: str) -> None:
         """

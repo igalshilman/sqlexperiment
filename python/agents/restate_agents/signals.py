@@ -1,7 +1,8 @@
 """
 Signals to agents: a virtual object per agent, keyed ``<agent>:<key>`` (such
 as ``support:alice``), whose ``wait`` returns once ``resolve`` gives the wait
-its value; and the messages steered to the turn the agent is answering.
+its value; the messages steered to the turn the agent is answering; and the
+revision of the agent's conversation, which its ``watch`` waits on.
 
 An agent's own handler cannot wait on an awakeable (it has no journal to
 replay one from), so it calls ``wait``, which can: a journaled handler of
@@ -76,6 +77,24 @@ class Steer(BaseModel):
     text: str
 
 
+class Notifications(BaseModel):
+    """The revision of an agent's conversation: each change of what a client reads increases it."""
+
+    revision: int
+
+
+class Watch(BaseModel):
+    """What ``watch`` waits for: a revision past ``afterRevision``, for at most ``timeoutSeconds`` (at most 60)."""
+
+    afterRevision: int = 0  # noqa: N815 (as the TypeScript agents name it)
+    timeoutSeconds: float = 50  # noqa: N815
+
+
+class Subscription(BaseModel):
+    afterRevision: int  # noqa: N815
+    awakeable: str
+
+
 class Agent(BaseModel):
     """An agent: its object's name, and key."""
 
@@ -98,6 +117,16 @@ class CloseRequest(BaseModel):
 
 # The turns closed last, newest last: a message steered to one of them is a message of its own.
 CLOSED = 16
+
+
+async def _changed(ctx: ObjectContext) -> Notifications:
+    """The conversation changed: increase its revision, and answer each ``watch`` waiting for it."""
+    changed = Notifications(revision=(await ctx.get("revision") or 0) + 1)
+    ctx.set("revision", changed.revision)
+    for watching in await ctx.get("watching") or []:
+        ctx.resolve_awakeable(watching["awakeable"], changed.model_dump())
+    ctx.clear("watching")
+    return changed
 
 
 async def _send(ctx: ObjectContext, agent: Agent, text: str) -> str:
@@ -142,6 +171,7 @@ async def resolve(ctx: ObjectContext, signal: Signal) -> Resolved:
     found = waiting.pop(at)
     ctx.resolve_awakeable(found["awakeable"], signal.value)
     ctx.set("waiting", waiting)
+    await _changed(ctx)
     return Resolved(resolved=found["id"])
 
 
@@ -161,6 +191,7 @@ async def listen(ctx: ObjectContext, request: _Listening) -> None:
         ctx.set("kept", {**kept, request.name: rest})
         return
     ctx.set("waiting", [*(await ctx.get("waiting") or []), request.model_dump()])
+    await _changed(ctx)
 
 
 @signals.handler(ingress_private=True)
@@ -177,6 +208,7 @@ async def steer(ctx: ObjectContext, request: SteerRequest) -> Steered:
     messages = steering["messages"] if steering and steering["turn"] == turn else []
     steer = Steer(id=f"{turn}:steer:{len(messages) + 1}", text=request.text)
     ctx.set("steering", {"turn": turn, "messages": [*messages, steer.model_dump()]})
+    await _changed(ctx)
     return Steered(invocationId=turn, steered=True)
 
 
@@ -185,6 +217,12 @@ async def steering(ctx: ObjectSharedContext, turn: str) -> list[dict[str, Any]]:
     """The messages steered to ``turn``, in order, as ``Steer``."""
     steering = await ctx.get("steering")
     return steering["messages"] if steering and steering["turn"] == turn else []
+
+
+@signals.handler(ingress_private=True)
+async def publish(ctx: ObjectContext) -> Notifications:
+    """The agent's conversation changed (a message stored, say): its revision increases."""
+    return await _changed(ctx)
 
 
 @signals.handler(ingress_private=True)
@@ -198,6 +236,7 @@ async def close(ctx: ObjectContext, request: CloseRequest) -> None:
     if request.turn in closed:
         return
     ctx.set("closed", [*closed, request.turn][-CLOSED:])
+    await _changed(ctx)
     steering = await ctx.get("steering")
     if not steering or steering["turn"] != request.turn:
         return
@@ -213,3 +252,26 @@ async def close(ctx: ObjectContext, request: CloseRequest) -> None:
 async def forget(ctx: ObjectContext, id: str) -> None:
     """Forget the wait ``id``, whose agent no longer waits."""
     ctx.set("waiting", [w for w in await ctx.get("waiting") or [] if w["id"] != id])
+    await _changed(ctx)
+
+
+@signals.handler(kind="shared")
+async def notifications(ctx: ObjectSharedContext) -> Notifications:
+    """The conversation's revision."""
+    return Notifications(revision=await ctx.get("revision") or 0)
+
+
+@signals.handler(ingress_private=True)
+async def subscribe(ctx: ObjectContext, subscription: Subscription) -> None:
+    """Answer ``subscription.awakeable`` once the revision is past ``afterRevision``: at once, if it is."""
+    revision = await ctx.get("revision") or 0
+    if revision > subscription.afterRevision:
+        ctx.resolve_awakeable(subscription.awakeable, Notifications(revision=revision).model_dump())
+        return
+    ctx.set("watching", [*(await ctx.get("watching") or []), subscription.model_dump()])
+
+
+@signals.handler(ingress_private=True)
+async def unsubscribe(ctx: ObjectContext, awakeable: str) -> None:
+    """Forget the ``watch`` of ``awakeable``, which no longer waits."""
+    ctx.set("watching", [w for w in await ctx.get("watching") or [] if w["awakeable"] != awakeable])

@@ -65,7 +65,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from restate import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import Messages, MessagesRequest, Transcript, model_of
+from restate_agents.common import Messages, MessagesRequest, Transcript, has_table, model_of
 from restate_agents.object import Object, context
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
@@ -128,6 +128,8 @@ def agent(
     async def messages(ctx: ObjectContext, request: MessagesRequest | None = None) -> Messages:
         """The conversation so far, with the tool calls."""
         transcript = Transcript()
+        if not await has_table(ctx.db, "pydantic_ai_messages"):
+            return transcript.page(request)
         for m in await _Conversation(ctx.db, ctx.key()).load():
             for part in m.parts:
                 if isinstance(part, UserPromptPart):
@@ -137,11 +139,11 @@ def agent(
                 elif isinstance(part, ToolCallPart):
                     transcript.call(part.tool_call_id, part.tool_name, part.args_as_dict())
                 elif isinstance(part, ToolReturnPart | RetryPromptPart) and part.tool_call_id:
-                    transcript.result(part.tool_call_id, part.model_response_str())
+                    transcript.result(part.tool_call_id, part.model_response_str(), isinstance(part, RetryPromptPart))
         return transcript.page(request)
 
     turns.chat(obj, answer)
-    obj.handler("messages")(messages)
+    obj.handler("messages", kind="shared")(messages)
     return obj
 
 
@@ -211,7 +213,8 @@ class _Conversation:
         self._saved: list[str] = []
 
     async def load(self) -> list[ModelMessage]:
-        await self.db.execute(self.SCHEMA)
+        if not await has_table(self.db, "pydantic_ai_messages"):
+            await self.db.execute(self.SCHEMA)
         rows = await self.db.query(
             "SELECT message FROM pydantic_ai_messages WHERE thread = ? ORDER BY n", [self.thread]
         )
@@ -229,6 +232,7 @@ class _Conversation:
             for n in range(first, len(dumped)):
                 await tx.execute("INSERT INTO pydantic_ai_messages VALUES (?, ?, ?)", [self.thread, n, dumped[n]])
         self._saved = dumped
+        await turns.publish()
 
 
 _MESSAGE: TypeAdapter[ModelMessage] = TypeAdapter(ModelMessage)

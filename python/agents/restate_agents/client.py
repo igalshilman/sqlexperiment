@@ -1,0 +1,194 @@
+"""
+An agent's conversation, from any Python code (a web app's backend, a
+script, a notebook), through Restate's ingress: send it messages, read what
+it said and is doing, approve what it waits for, steer or stop it, and
+``follow`` it as it changes. It needs nothing of the agent's code: only
+Restate's URL, and the agent's name and key::
+
+    from restate_agents.client import AgentClient
+
+    async with AgentClient("http://localhost:8080", "support", "alice") as alice:
+        print(await alice.chat("Order 103 arrived broken, can I get my $30 back?"))
+        async for change in alice.follow():
+            for message in change.messages:
+                print(message)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any
+
+import httpx
+
+from restate_agents.common import ChatMessage, Messages
+
+__all__ = ["AgentClient", "AgentError", "Followed"]
+
+log = logging.getLogger(__name__)
+
+
+class AgentError(Exception):
+    """A request the agent answered with an error: its HTTP status, and Restate's message."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(f"{status}: {message}")
+        self.status = status
+        self.message = message
+
+
+@dataclass
+class Followed:
+    """What ``follow`` gives each time the conversation changes."""
+
+    status: dict[str, Any]
+    """What the agent is doing now: ``{"answering": ..., "waiting": [...]}``."""
+    messages: list[ChatMessage]
+    """
+    The messages new or changed since the last time, oldest first: a message
+    may come again, changed (a tool call with its output, say), with its
+    ``id``, which a UI keeps them by.
+    """
+
+
+class AgentClient:
+    """The conversation of the agent ``agent`` (an object's name) with key ``key``, at Restate's ingress ``url``."""
+
+    def __init__(self, url: str, agent: str, key: str, *, http: httpx.AsyncClient | None = None) -> None:
+        self.url = f"{url.rstrip('/')}/{agent}/{key}"
+        self.ingress = url.rstrip("/")
+        self._http = http or httpx.AsyncClient()
+        self._own = http is None
+
+    async def __aenter__(self) -> AgentClient:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        if self._own:
+            await self._http.aclose()
+
+    async def chat(self, message: str, *, idempotency_key: str | None = None) -> str:
+        """The agent's answer to ``message``. With an idempotency key, sending it again is the same message."""
+        return await self._post("chat", message, idempotency_key=idempotency_key, timeout=None)
+
+    async def send(self, message: str, *, idempotency_key: str | None = None, delay: timedelta | None = None) -> str:
+        """Send ``message`` without waiting for the answer (after ``delay``, if given): its invocation's id."""
+        query = f"?delay={int(delay.total_seconds() * 1000)}ms" if delay else ""
+        sent = await self._post(f"chat/send{query}", message, idempotency_key=idempotency_key)
+        return sent["invocationId"]
+
+    async def answer(self, invocation_id: str) -> str:
+        """The answer to the message sent as ``invocation_id``, once there is one."""
+        return await self._request("GET", f"{self.ingress}/restate/invocation/{invocation_id}/attach", timeout=None)
+
+    async def messages(self, *, limit: int = 50, before: int | None = None, after: int | None = None) -> Messages:
+        """A page of the conversation: the latest ``limit`` messages, or those ``before`` or ``after`` an ``id``."""
+        request: dict[str, int] = {"limit": limit}
+        if before is not None:
+            request["before"] = before
+        if after is not None:
+            request["after"] = after
+        return await self._post("messages", request)
+
+    async def status(self) -> dict[str, Any]:
+        """What the agent is doing: the message it answers, if any, and what its tools wait for."""
+        return await self._post("status")
+
+    async def stop(self) -> str | None:
+        """Stop the message the agent answers: the invocation stopped, or None if it answered none."""
+        return (await self._post("stop"))["stopped"]
+
+    async def steer(self, message: str) -> dict[str, Any]:
+        """Add ``message`` to the message the agent answers, at its next tool call (or send it as one of its own)."""
+        return await self._post("steer", message)
+
+    async def pending(self) -> list[dict[str, Any]]:
+        """What the agent's tools wait for, oldest first."""
+        return await self._post("pending")
+
+    async def signal(
+        self, value: Any, *, id: str | None = None, name: str | None = None, keep: bool = False
+    ) -> str | None:
+        """Resolve the wait ``id``, or the oldest for the signal ``name``, with ``value``: the wait it resolved."""
+        signal = {"id": id, "name": name, "value": value, "keep": keep}
+        return (await self._post("signal", signal))["resolved"]
+
+    async def notifications(self) -> int:
+        """The revision of the conversation, which each change increases."""
+        return (await self._post("notifications"))["revision"]
+
+    async def watch(
+        self, after_revision: int, *, timeout_seconds: float = 50, idempotency_key: str | None = None
+    ) -> int:
+        """The revision, once it is past ``after_revision``, or at the timeout."""
+        watch = {"afterRevision": after_revision, "timeoutSeconds": timeout_seconds}
+        changed = await self._post("watch", watch, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
+        return changed["revision"]
+
+    async def follow(self, *, after: int = -1, timeout_seconds: float = 50) -> AsyncIterator[Followed]:
+        """
+        The conversation as it changes: what the agent is doing and the
+        messages after ``after`` (an ``id``; by default all of them), then each
+        change, for as long as you read it.
+
+        It reads the revision, then the status and the messages since the last
+        it gave, then waits for a newer revision, which waits in Restate. A
+        network failure does not end it: it tries again, and a wait it retries
+        keeps its idempotency key, so it joins the wait already there.
+        """
+        # The last message given: it is read again, as it may have changed.
+        last = after
+        while True:
+            try:
+                # The revision first: a change after it ends the wait below.
+                revision = await self.notifications()
+                status = await self.status()
+                messages: list[ChatMessage] = []
+                more = True
+                while more:
+                    page = await self.messages(after=messages[-1]["id"] if messages else max(last - 1, -1), limit=100)
+                    messages += page["messages"]
+                    more = page["more"]
+            except httpx.TransportError as error:
+                log.warning("follow: retrying after %s", error)
+                await asyncio.sleep(1)
+                continue
+            last = messages[-1]["id"] if messages else last
+            yield Followed(status=status, messages=messages)
+            # One wait, retried with the same idempotency key.
+            window = uuid.uuid4().hex
+            while True:
+                try:
+                    await self.watch(revision, timeout_seconds=timeout_seconds, idempotency_key=window)
+                    break
+                except httpx.TransportError as error:
+                    log.warning("follow: retrying after %s", error)
+                    await asyncio.sleep(1)
+
+    async def _post(
+        self, handler: str, body: Any = None, *, idempotency_key: str | None = None, timeout: float | None = 30
+    ) -> Any:
+        headers = {"idempotency-key": idempotency_key} if idempotency_key else {}
+        return await self._request("POST", f"{self.url}/{handler}", body, headers, timeout)
+
+    async def _request(
+        self, method: str, url: str, body: Any = None, headers: dict[str, str] | None = None, timeout: float | None = 30
+    ) -> Any:
+        response = await self._http.request(
+            method, url, json=body, headers=headers or {}, timeout=httpx.Timeout(timeout, connect=10)
+        )
+        if response.is_error:
+            try:
+                message = response.json().get("message", response.text)
+            except ValueError:
+                message = response.text
+            raise AgentError(response.status_code, message)
+        return response.json() if response.content else None
