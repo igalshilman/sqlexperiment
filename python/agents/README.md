@@ -325,6 +325,29 @@ serves them on `PORT`, or 9080; with `background=True`, on a thread of its
 own, returning at once, as in a Modal Server
 ([`examples-python/on_modal.py`](../../examples-python/on_modal.py)).
 
+An object of your own, without an agent of its own, is an `Object`: the same
+virtual object, with `ctx.db`, its handlers yours. `@obj.chat` makes its
+`chat` handler, which takes its message as an agent's does (plain text, or a
+JSON string). `ask(ctx, agent, message)` sends a message to an agent's
+`chat` (keyed `key`, by default this object's key) and returns the answer:
+once per invocation, however often an attempt runs, as its call has an
+idempotency key (the invocation's id, the agent's name and how many messages
+the attempt sent before, unless given one). Here, a front desk asks a model
+which team handles a message, then hands it to that team
+([`examples-python/router.py`](../../examples-python/router.py)):
+
+```python
+from restate_agents import Object, ask, claude
+
+desk = Object("desk")
+
+
+@desk.chat
+async def chat(ctx, message: str) -> str:
+    team = await claude.prompt(ctx, f"Which team handles this message, billing or tech? One word.\n\n{message}")
+    return await ask(ctx, billing if "billing" in team.lower() else tech, message)
+```
+
 ## Tests
 
 `make test-agents-py`, from the repository's root:
@@ -344,6 +367,8 @@ own, returning at once, as in a Modal Server
 - [`tests/test_pydantic_ai.py`](tests/test_pydantic_ai.py): the same, for
   the Pydantic AI agent (the teller as a Pydantic AI model), and agents of
   your own, prompts of your own and a structured output, each answered once.
+- [`tests/test_object.py`](tests/test_object.py): a `chat` handler of your
+  own, and `ask`, its idempotency keys through a retried attempt.
 - [`tests/test_tools.py`](tests/test_tools.py): Restate's tools on a fake
   context: their names, the model's input, and the calls they make.
 

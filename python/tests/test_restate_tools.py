@@ -148,3 +148,12 @@ def test_restate_steps_of_a_graph():
     # A handler's terminal error fails the turn.
     status, body = call(f"refunds/{key()}/chat", "999")
     assert status == 500 and "no order 999" in str(body), body
+
+
+def test_a_desk_of_your_own_asks_an_agent_once():
+    k = key()
+    sent = call(f"desk/{k}/chat", "hello", {"idempotency-key": f"desk-{k}"})
+    again = call(f"desk/{k}/chat", "hello", {"idempotency-key": f"desk-{k}"})
+    assert sent == again == (200, "You said: hello")
+    status, page = call(f"helper/{k}/messages")
+    assert status == 200 and [m["parts"][0]["text"] for m in page["messages"]] == ["hello", "You said: hello"]
