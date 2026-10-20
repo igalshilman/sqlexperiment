@@ -138,11 +138,11 @@ def pydantic_ai_model(teller: Teller) -> FunctionModel:
 
 
 class ClaudeClient:
-    """The teller, as an Anthropic client: ``client.messages.create`` reads the conversation as LangChain messages."""
+    """The teller, as an Anthropic client: ``client.beta.messages.create`` reads the messages as LangChain's."""
 
     def __init__(self, teller: Teller) -> None:
         self.teller = teller
-        self.messages = self
+        self.beta = self.messages = self
         self.requests: list[dict[str, Any]] = []
 
     async def create(self, *, messages: list[dict[str, Any]], system: str | None = None, **params: Any) -> Message:
