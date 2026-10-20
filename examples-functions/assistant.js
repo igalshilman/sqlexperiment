@@ -75,13 +75,32 @@ function shop(customer, ctx) {
   };
 }
 
+// One request to the Claude Messages API. The host adds the API key: the
+// program never holds it. Rate limits and overloads are retried, after a
+// durable sleep.
+async function claude(ctx, request) {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'anthropic-version': '2023-06-01' },
+      body: fetch.json(request),
+    });
+    if (response.ok) return response.json();
+    if (attempt < 8 && [408, 409, 429, 500, 502, 503, 504, 529].includes(response.status)) {
+      await ctx.sleep(Math.min(30_000, 500 * 2 ** attempt));
+      continue;
+    }
+    throw new Error(`Claude API ${response.status}: ${await response.text()}`);
+  }
+}
+
 export async function chat(message, ctx) {
   const customer = ctx.key;
   const tools = shop(customer, ctx);
   const messages = (await ctx.kv.get('messages')) ?? [];
   messages.push({ role: 'user', content: message });
   for (let step = 0; step < 10; step++) {
-    const response = await ctx.call('claude.messages', {
+    const response = await claude(ctx, {
       model: MODEL,
       max_tokens: 16000,
       output_config: { effort: 'low' },

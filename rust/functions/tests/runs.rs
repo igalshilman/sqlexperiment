@@ -344,8 +344,10 @@ fn garbage_a_turn_frees_is_not_saved() -> Result<()> {
     for _ in 0..3 {
         let turn = step(&mut run)?;
         // ~100 KiB of strings and arrays went through the heap: without
-        // zeroing, ~60 pages changed and the batch took ~70 KiB.
-        assert!(turn.batch_bytes < 4096, "{} bytes", turn.batch_bytes);
+        // zeroing, ~60 pages changed and the batch took ~70 KiB. With it, a
+        // few KiB: how much depends on when the GC runs, which moves with the
+        // size of the bridge's heap.
+        assert!(turn.batch_bytes < 8192, "{} bytes", turn.batch_bytes);
     }
     assert_eq!(value(&finish(&mut run)?), json!(true));
     Ok(())

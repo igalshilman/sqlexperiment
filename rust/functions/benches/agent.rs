@@ -54,11 +54,20 @@ fn main() -> Result<()> {
             }
             let operation = view.state.pending[0].clone();
             let answer = match &operation {
-                Operation::Call { id, name, .. } if name == "claude.messages" => {
-                    let input = block(run.input(id))?;
-                    request =
-                        serde_json::to_vec(&input.map_err(|e| anyhow::anyhow!(e.message))?)?.len();
-                    session.model(step)
+                Operation::Call { id, name, .. } if name == "fetch" => {
+                    let input = block(run.input(id))?.map_err(|e| anyhow::anyhow!(e.message))?;
+                    request = match input.get("json") {
+                        Some(json) => serde_json::to_vec(json)?.len(),
+                        None => input["body"].as_str().map_or(0, str::len),
+                    };
+                    json!({
+                        "status": 200,
+                        "statusText": "OK",
+                        "url": "https://api.anthropic.com/v1/messages",
+                        "redirected": false,
+                        "headers": [["content-type", "application/json"]],
+                        "body": session.model(step).to_string(),
+                    })
                 }
                 Operation::Rpc { target, .. } => session.tool(&target.handler),
                 _ => bail!("Step {step}: unexpected request {operation:?}"),

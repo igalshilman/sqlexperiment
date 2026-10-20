@@ -17,10 +17,28 @@ import asyncio
 MODEL = "claude-opus-5-5"
 
 
+async def _claude(ctx, request):
+    """One request to the Claude Messages API. The host adds the API key: the
+    program never holds it. Rate limits and overloads are retried, after a
+    durable sleep."""
+    for attempt in range(9):
+        response = await ctx.fetch(
+            "https://api.anthropic.com/v1/messages",
+            method="POST",
+            headers={"anthropic-version": "2023-06-01"},
+            json=request,
+        )
+        if response.is_success:
+            return response.json()
+        if attempt == 8 or response.status_code not in (408, 409, 429, 500, 502, 503, 504, 529):
+            raise RuntimeError(f"Claude API {response.status_code}: {response.text}")
+        await ctx.sleep(min(30, 0.5 * 2**attempt))
+
+
 async def _ask(ctx, prompt):
     """Claude's answer to `prompt`, as text."""
-    response = await ctx.call(
-        "claude.messages",
+    response = await _claude(
+        ctx,
         {
             "model": MODEL,
             "max_tokens": 16000,
