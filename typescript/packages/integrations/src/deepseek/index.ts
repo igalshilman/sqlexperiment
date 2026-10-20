@@ -25,8 +25,7 @@
 // - A message is answered once per invocation: its message carries the
 //   invocation id, and a retried attempt returns the answer of the turn that
 //   finished it.
-import * as restate from '@restatedev/restate-sdk';
-import type * as sql from 'restate-sql';
+import * as restate from 'restate-sql';
 import { Context } from '@deepseek-ai/cordis';
 import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import { AgentLoop } from '@deepseek-ai/dsh-agent-loop';
@@ -97,7 +96,7 @@ async function guard<T>(fail: (error: unknown) => void, body: () => Promise<T>):
 }
 
 /** The harness, its session in `db`: the services an agent loop needs, the persistence and its checkpoints. */
-async function boot(db: sql.SqlSession, system?: string): Promise<Context> {
+async function boot(db: restate.SqlSession, system?: string): Promise<Context> {
   const harness = new Context();
   await harness.plugin(LlmRuntime);
   await harness.plugin(SessionStore);
@@ -204,7 +203,7 @@ function parameterSpec(node: Record<string, unknown>): ParameterSchemaSpec {
 }
 
 /** `t` as a harness tool. */
-const native = (t: AnyTool, ctx: sql.ObjectContext): ToolDefinition =>
+const native = (t: AnyTool, ctx: restate.ObjectContext): ToolDefinition =>
   textTool({
     name: t.name,
     description: t.description,
@@ -235,7 +234,7 @@ export interface Options {
  * of an invocation is a prompt of its own. The session is the object's key.
  */
 export const prompt = async (
-  ctx: sql.ObjectContext,
+  ctx: restate.ObjectContext,
   text: string,
   { model: named, system, tools = [] }: Options = {},
 ): Promise<string> => {

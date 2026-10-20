@@ -1,17 +1,16 @@
 // The ledger's handlers without a Restate server: each call an attempt with
 // the SDK's `ctx.db` and `ctx.transaction` over the object's state in memory.
-import * as restate from '@restatedev/restate-sdk';
-import type { ObjectContext as SqlObjectContext } from 'restate-sql';
+import * as restate from 'restate-sql';
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from '../testing.ts';
 import { handlers, type Transfer } from './ledger.ts';
 
 async function books() {
   const map = new Map<string, Uint8Array>();
-  const call = <A, R>(handler: (ctx: SqlObjectContext, arg: A) => Promise<R>, arg: A) => {
+  const call = <A, R>(handler: (ctx: restate.ObjectContext, arg: A) => Promise<R>, arg: A) => {
     const sql = sqlAttempt({ map });
     const ctx = { db: sql.db, transaction: sql.transaction };
-    return sql.end(() => handler(ctx as unknown as SqlObjectContext, arg));
+    return sql.end(() => handler(ctx as unknown as restate.ObjectContext, arg));
   };
   await call(handlers.init, [4, 100] as [number, number]);
   return {

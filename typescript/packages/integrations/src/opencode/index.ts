@@ -32,8 +32,7 @@
 // argument). A tool that throws fails the attempt rather than hand the error
 // to the model: from then on the attempt stores nothing (its fence closes),
 // and the next attempt finds the call interrupted.
-import * as restate from '@restatedev/restate-sdk';
-import type * as sql from 'restate-sql';
+import * as restate from 'restate-sql';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
@@ -81,7 +80,7 @@ export interface OpenCodeTool<Input = unknown> {
 }
 
 /** `t` as an OpenCode tool. */
-const native = (t: AnyTool, ctx: sql.ObjectContext): OpenCodeTool => ({
+const native = (t: AnyTool, ctx: restate.ObjectContext): OpenCodeTool => ({
   name: t.name,
   description: t.description,
   input: t.input,
@@ -165,7 +164,7 @@ function toolsPlugin(tools: OpenCodeTool[], fail: (error: unknown) => Promise<ne
  * steering, which its next step takes.
  */
 const steeringPlugin = (
-  ctx: sql.ObjectContext,
+  ctx: restate.ObjectContext,
   steerable: Steerable,
   fail: (error: unknown) => Promise<never>,
 ): Plugin.Plugin => ({
@@ -306,7 +305,7 @@ async function startInbox(host: Host) {
  * OpenCode `host` for anything else.
  */
 export const withOpenCode = async <T>(
-  ctx: sql.ObjectContext,
+  ctx: restate.ObjectContext,
   { plugins = [], model: named, system, tools = [], workspace }: Options,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
@@ -436,7 +435,7 @@ export const withOpenCode = async <T>(
  * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
  * of an invocation is a prompt of its own.
  */
-export const prompt = (ctx: sql.ObjectContext, text: string, options: Options = {}) =>
+export const prompt = (ctx: restate.ObjectContext, text: string, options: Options = {}) =>
   withOpenCode(ctx, options, (session) => session.prompt(text));
 
 /**

@@ -34,7 +34,7 @@ answers a prompt once, and `conversation()` is the object's conversation, on
 the model, for pi-durable's own API (`reset`, `compact`, `entries`...):
 
 ```ts
-const options = async (ctx: sql.ObjectContext): Promise<pi.Options> => ({
+const options = async (ctx: restate.ObjectContext): Promise<pi.Options> => ({
   model: (await settingsOf(ctx)).model,
   tools: [clock],
 });

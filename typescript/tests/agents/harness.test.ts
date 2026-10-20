@@ -1,7 +1,7 @@
 // pi's Harness configured as it runs, as examples/harness.ts does, without a
 // Restate server: each user's model and persona from its database, and the
 // conversation compacted and reset.
-import type { ObjectContext as SqlObjectContext } from 'restate-sql';
+import type * as restate from 'restate-sql';
 import { tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
@@ -37,31 +37,31 @@ interface Settings {
   persona?: string;
 }
 const SCHEMA = 'CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT NOT NULL)';
-async function settingsOf(ctx: SqlObjectContext): Promise<Settings> {
+async function settingsOf(ctx: restate.ObjectContext): Promise<Settings> {
   await ctx.db.execute(SCHEMA);
   const [row] = await ctx.db.query('SELECT json FROM settings');
   return row ? (JSON.parse(String(row[0])) as Settings) : {};
 }
 const clock = tool({ name: 'clock', description: 'The time.', input: z.object({}), run: async () => '12:00' });
-const options = async (ctx: SqlObjectContext): Promise<pi.Options> => {
+const options = async (ctx: restate.ObjectContext): Promise<pi.Options> => {
   const { model, persona } = await settingsOf(ctx);
   return { model, system: persona ?? 'You are a helpful assistant.', tools: [clock] };
 };
 
 // The handlers of examples/harness.ts.
 const chat = pi.chat(options);
-const configure = async (ctx: SqlObjectContext, settings: Settings) => {
+const configure = async (ctx: restate.ObjectContext, settings: Settings) => {
   const next = { ...(await settingsOf(ctx)), ...settings };
   await ctx.db.execute('INSERT OR REPLACE INTO settings (id, json) VALUES (0, ?)', [JSON.stringify(next)]);
   return next;
 };
-const compact = async (ctx: SqlObjectContext, instructions?: string) =>
+const compact = async (ctx: restate.ObjectContext, instructions?: string) =>
   pi.withPi(ctx, await options(ctx), async ({ conversation, context }) => {
     const root = await conversation();
     await root.compact(instructions || undefined, context);
     await root.waitForIdle(context);
   });
-const reset = async (ctx: SqlObjectContext, handoff?: string) =>
+const reset = async (ctx: restate.ObjectContext, handoff?: string) =>
   pi.withPi(ctx, await options(ctx), async ({ conversation, context }) =>
     (await conversation()).reset(handoff || undefined, context),
   );
@@ -69,10 +69,10 @@ const reset = async (ctx: SqlObjectContext, handoff?: string) =>
 /** The object with key `key`: its database lives across invocations. */
 function store(key: string) {
   const map = new Map<string, Uint8Array>();
-  return <I, O>(handler: (ctx: SqlObjectContext, input: I) => Promise<O>, id: string, input: I) => {
+  return <I, O>(handler: (ctx: restate.ObjectContext, input: I) => Promise<O>, id: string, input: I) => {
     const sql = sqlAttempt({ map, key, id });
     const ctx = { key, ...sql };
-    return sql.end(() => handler(ctx as unknown as SqlObjectContext, input));
+    return sql.end(() => handler(ctx as unknown as restate.ObjectContext, input));
   };
 }
 

@@ -1,7 +1,6 @@
 // Restate's own tools (restate-agents' call, send, workflow and signal), run
 // with a fake context that records the calls they make.
-import * as restate from '@restatedev/restate-sdk';
-import type * as sql from 'restate-sql';
+import * as restate from 'restate-sql';
 import { call, object, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -33,7 +32,7 @@ function context(state = new Map<string, unknown>()) {
       },
     }),
   };
-  return { made, ctx: ctx as unknown as sql.ObjectContext };
+  return { made, ctx: ctx as unknown as restate.ObjectContext };
 }
 
 /** The tool `t` run as the model's tool call `call_1`, with `input`. */

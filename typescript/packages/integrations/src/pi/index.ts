@@ -31,8 +31,7 @@
 // The files are not in the database: they last as long as the disk does,
 // and a coding tool cut off by a crash is not run again (the model is told
 // it was interrupted).
-import * as restate from '@restatedev/restate-sdk';
-import type * as sql from 'restate-sql';
+import * as restate from 'restate-sql';
 import type { Context } from '@earendil-works/chord';
 import { awaitWithContext, BACKGROUND_CONTEXT, withCancel, withoutAbortSignal } from '@earendil-works/chord/context';
 import { mkdir } from 'node:fs/promises';
@@ -117,7 +116,7 @@ async function modelsOf(provider: string): Promise<MutableModels> {
 }
 
 /** `t` as a pi-durable tool. */
-const native = (t: AnyTool, ctx: sql.ObjectContext): ToolRegistration =>
+const native = (t: AnyTool, ctx: restate.ObjectContext): ToolRegistration =>
   defineTool({
     name: t.name,
     description: t.description,
@@ -136,7 +135,7 @@ const native = (t: AnyTool, ctx: sql.ObjectContext): ToolRegistration =>
  * else.
  */
 export const withPi = async <T>(
-  ctx: sql.ObjectContext,
+  ctx: restate.ObjectContext,
   { model: named, models, system, tools = [], workspace }: Options,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
@@ -259,7 +258,7 @@ export const withPi = async <T>(
  * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
  * of an invocation is a prompt of its own.
  */
-export const prompt = (ctx: sql.ObjectContext, text: string, options: Options = {}) =>
+export const prompt = (ctx: restate.ObjectContext, text: string, options: Options = {}) =>
   withPi(ctx, options, (session) => session.prompt(text));
 
 /**

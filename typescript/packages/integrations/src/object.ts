@@ -1,6 +1,5 @@
 // Virtual objects set up for SQL and agents.
-import * as restate from '@restatedev/restate-sdk';
-import * as sql from 'restate-sql';
+import * as restate from 'restate-sql';
 import { messageSerde, TURN, type Turn } from './common.ts';
 import {
   type Notifications,
@@ -46,18 +45,25 @@ export interface Stopped {
  * works, and replay their journal: they use no `ctx.db`.
  */
 const BUILT_IN = {
-  signal: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext, signal: Signal): Promise<Resolved> =>
-    ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).resolve(signal),
+  signal: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.JournaledObjectSharedContext, signal: Signal): Promise<Resolved> =>
+      ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).resolve(signal),
   ),
-  pending: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext): Promise<Waiting[]> =>
-    ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).pending(),
+  pending: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.JournaledObjectSharedContext): Promise<Waiting[]> =>
+      ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).pending(),
   ),
-  status: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext): Promise<Status> => ({
-    answering: await ctx.get<Turn>(TURN),
-    waiting: await ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).pending(),
-  })),
+  status: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.JournaledObjectSharedContext): Promise<Status> => ({
+      answering: await ctx.get<Turn>(TURN),
+      waiting: await ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).pending(),
+    }),
+  ),
   /** Cancel the invocation of the message being answered (`status`'s), as Restate's admin API cancels one. */
-  stop: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
+  stop: restate.handlers.object.shared({ journalReplay: true }, async (ctx: restate.JournaledObjectSharedContext) => {
     const turn = await ctx.get<Turn>(TURN);
     if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
     return { stopped: turn?.invocationId ?? null } satisfies Stopped;
@@ -69,8 +75,8 @@ const BUILT_IN = {
    * of its own, as `chat` does when no message is answered.
    */
   steer: restate.handlers.object.shared(
-    { input: messageSerde, accept: '*/*' },
-    async (ctx: restate.ObjectSharedContext, text: string): Promise<Steered> => {
+    { journalReplay: true, input: messageSerde, accept: '*/*' },
+    async (ctx: restate.JournaledObjectSharedContext, text: string): Promise<Steered> => {
       const agent = { service: ctx.request().target.service, key: ctx.key };
       const turn = await ctx.get<Turn>(TURN);
       return ctx
@@ -79,8 +85,10 @@ const BUILT_IN = {
     },
   ),
   /** The revision of the conversation: each change of what `messages` and `status` give increases it. */
-  notifications: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext): Promise<Notifications> =>
-    ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).notifications(),
+  notifications: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.JournaledObjectSharedContext): Promise<Notifications> =>
+      ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key)).notifications(),
   ),
   /**
    * The revision, once it is past `afterRevision`, or at the timeout (50 s by
@@ -89,7 +97,11 @@ const BUILT_IN = {
    * it with the same idempotency key joins the same wait.
    */
   watch: restate.handlers.object.shared(
-    async (ctx: restate.ObjectSharedContext, { afterRevision, timeoutSeconds = 50 }: Watch): Promise<Notifications> => {
+    { journalReplay: true },
+    async (
+      ctx: restate.JournaledObjectSharedContext,
+      { afterRevision, timeoutSeconds = 50 }: Watch,
+    ): Promise<Notifications> => {
       const key = signalsOf(ctx.request().target.service, ctx.key);
       const { id, promise } = ctx.awakeable<Notifications>();
       ctx.objectSendClient(signals, key).subscribe({ afterRevision, awakeable: id });
@@ -103,7 +115,7 @@ const BUILT_IN = {
 };
 
 /** A handler: `ctx` is the object's context, with `ctx.db`; the input, if any, is annotated. */
-type Handler = (ctx: sql.ObjectContext, input: never) => unknown;
+type Handler = (ctx: restate.ObjectContext, input: never) => unknown;
 
 /** The names of the handlers every object has, which its own handlers cannot take. */
 type Reserved = { [name in keyof typeof BUILT_IN]?: 'a handler every object has: name yours otherwise' };
@@ -141,7 +153,7 @@ export const object = <P extends string, H extends Record<string, Handler>>(defi
     if (name in definition.handlers)
       throw new Error(`${definition.name}: every object has a \`${name}\` handler already`);
   }
-  return sql.object({
+  return restate.object({
     ...definition,
     handlers: { ...BUILT_IN, ...definition.handlers },
     options: { ...OPTIONS, ...definition.options },

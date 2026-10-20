@@ -11,33 +11,36 @@ single-writer execution per key, and retries. It uses the
 It runs on a released Restate server: see [the requirements](../../../README.md#requirements).
 
 ```ts
-import * as sql from 'restate-sql';
+import * as restate from 'restate-sql';
 
-const ledger = sql.object({
+const ledger = restate.object({
   name: 'Ledger',
   handlers: {
-    init: (ctx: sql.ObjectContext) =>
+    init: (ctx: restate.ObjectContext) =>
       ctx.transaction(async ({ db }) => {
         await db.execute('CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, balance INTEGER)');
       }),
-    deposit: (ctx: sql.ObjectContext, { id, amount }: { id: number; amount: number }) =>
+    deposit: (ctx: restate.ObjectContext, { id, amount }: { id: number; amount: number }) =>
       ctx.transaction(async ({ db }) => {
         await db.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, id]);
       }), // one transaction: durable as a whole once ctx.transaction resolves
-    balance: sql.shared(async (ctx: sql.ObjectSharedContext, id: number) =>
+    balance: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext, id: number) =>
       ctx.db.query('SELECT balance FROM accounts WHERE id = ?', [id]),
     ),
   },
 });
 ```
 
-`sql.object` is `restate.object` with SQL: each function in `handlers` is an
-exclusive handler with `ctx.db`; `sql.shared(fn)` makes a shared one, and
-`sql.exclusive(options, fn)` an exclusive one with handler options (such as
-`input`). A handler of `restate.handlers.object` keeps journal replay, and has
-no `ctx.db`: the object's other handlers may wait on awakeables, say. The
-object's options are `sql.options` (lazy state, no journal kept), and its
-metadata hides the database's state commands in Restate's UI.
+`restate-sql` is the Restate SDK (it re-exports `@restatedev/restate-sdk`),
+with the virtual objects of SQL: in `restate.object`, each function in
+`handlers` is an exclusive handler with `ctx.db`;
+`restate.handlers.object.shared(fn)` makes a shared one, and
+`restate.handlers.object.exclusive(options, fn)` one with handler options
+(such as `input`). With `journalReplay: true` in its options, a handler is
+the SDK's own: it replays its journal and has no `ctx.db` (its context is
+`restate.JournaledObjectContext`), such as one that waits on an awakeable.
+The object's options are `restate.sqlOptions` (lazy state, no journal kept),
+and its metadata hides the database's state commands in Restate's UI.
 
 `ctx.db`, on the context of an exclusive object handler, is the object's
 database (namespace `service/key`) over the object's state, with the
@@ -175,7 +178,7 @@ operation it reaches happens again. What each one does then:
 | `ctx.run`                                                                | Runs its action again: its result is not kept from one attempt to the next. (The store uses an empty run, to sync.)                                                                                                           |
 | `ctx.sleep`                                                              | Starts over.                                                                                                                                                                                                                  |
 | `attach`, `cancel`                                                       | Idempotent already.                                                                                                                                                                                                           |
-| Awakeables                                                               | Refused, a terminal error (their signal ids would collide): wait in a handler of `restate.handlers.object`.                                                                                                                   |
+| Awakeables                                                               | Refused, a terminal error (their signal ids would collide): wait in a handler with `journalReplay: true`.                                                                                                                     |
 
 The SDK does not make up keys: a call is idempotent when the code says so,
 with `rpc.opts({ idempotencyKey })` (`rpc.sendOpts` for a send). The examples
@@ -216,10 +219,10 @@ with explicit recovery, one loop per invocation drives every awaited promise.
   `CancelledError`).
 
 ```ts
-const counter = sql.object({
+const counter = restate.object({
   name: 'counter',
   handlers: {
-    add: async (ctx: sql.ObjectContext, n: number) => {
+    add: async (ctx: restate.ObjectContext, n: number) => {
       const [, total] = await Promise.all([ctx.sleep(10), ctx.get<number>('total')]);
       ctx.set('total', (total ?? 0) + n);
       return (total ?? 0) + n;
@@ -266,7 +269,7 @@ transfers take 18.8 ms each on one local node.
 
 - **Every read is journaled with its value.** A state read appends the value
   to the invocation's journal, so reading pages costs log writes, and the
-  page cache matters more than it does elsewhere. `sql.options` sets journal
+  page cache matters more than it does elsewhere. `restate.sqlOptions` sets journal
   retention to zero so completed journals are not kept.
 - **The journal grows across attempts.** Skipped entries stay; each attempt
   appends its own.
@@ -294,7 +297,9 @@ returns was the stored state ([the reader](../../../core/sqlite-kv/docs/DESIGN.m
 `ctx.transaction` is the exclusive handlers'.
 
 ```ts
-count: sql.shared(async (ctx: sql.ObjectSharedContext) => ctx.db.query('SELECT count(*) FROM accounts')),
+count: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) =>
+  ctx.db.query('SELECT count(*) FROM accounts'),
+),
 ```
 
 ## Not supported

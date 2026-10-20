@@ -22,8 +22,7 @@
 //
 // Environment: PORT, MODEL (see restate-agents/pi) with its provider's
 // API key, and WORKSPACE.
-import * as restate from '@restatedev/restate-sdk';
-import * as sql from 'restate-sql';
+import * as restate from 'restate-sql';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { z } from 'zod';
@@ -76,7 +75,7 @@ const CaseReport = z.object({
  * an idempotency key made from the request id (the same on every attempt)
  * and the tool call id.
  */
-async function gatewayTools(ctx: sql.ObjectContext, tenant: string, user: string) {
+async function gatewayTools(ctx: restate.ObjectContext, tenant: string, user: string) {
   const gw = ctx.objectClient(gateway, tenant);
   return (await gw.tools()).map((tool): ToolRegistration =>
     defineTool({
@@ -103,7 +102,7 @@ const options = { journalRetention: { hours: 1 } };
 export const caseAgent = object({
   name: 'Case',
   handlers: {
-    report: sql.exclusive(
+    report: restate.handlers.object.exclusive(
       {
         description: [
           "Look into a report on the order of the key `<tenant>.<order>` (such as `acme.103`), with the tenant's tools.",
@@ -112,7 +111,7 @@ export const caseAgent = object({
         input: restate.serde.schema(CaseReport),
         output: restate.serde.schema(Answer),
       },
-      async (ctx: sql.ObjectContext, { user, question }: z.infer<typeof CaseReport>) => {
+      async (ctx: restate.ObjectContext, { user, question }: z.infer<typeof CaseReport>) => {
         const [tenant = '', order = ''] = ctx.key.split('.', 2);
         const tools = await gatewayTools(ctx, tenant, user);
         const workspace = workspaceOf('Case', ctx.key);
@@ -126,7 +125,7 @@ export const caseAgent = object({
 });
 
 /** Answer prompt `text`, with the tenant's tools and case agents. */
-export const prompt = async (ctx: sql.ObjectContext, text: z.infer<typeof PROMPT_SCHEMA>) => {
+export const prompt = async (ctx: restate.ObjectContext, text: z.infer<typeof PROMPT_SCHEMA>) => {
   const { tenant, user } = identity(ctx.key);
   const tools = await gatewayTools(ctx, tenant, user);
   tools.push(
@@ -167,7 +166,7 @@ export const prompt = async (ctx: sql.ObjectContext, text: z.infer<typeof PROMPT
 export const assistant = object({
   name: 'Assistant',
   handlers: {
-    prompt: sql.exclusive(
+    prompt: restate.handlers.object.exclusive(
       {
         description: [
           'Answer a prompt, with the tools of the tenant of the key `<tenant>.<user>` (such as `acme.alice`).',
