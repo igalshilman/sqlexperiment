@@ -209,6 +209,14 @@
       validate(name);
       return request(withOptions({ kind: 'call', name }, options), callInput(input));
     },
+    // Wait for the signal `name`, which the object's `signal` handler gives
+    // (by its wait's id, or to the oldest wait for its name), and resolve
+    // with its value. `input` says what it waits for, as `pending` lists it.
+    signal(name, input = null) {
+      if (typeof name !== 'string' || !name) throw new TypeError('A signal name is a nonempty string');
+      validate(name);
+      return request({ kind: 'signal', name, input: copy(input) });
+    },
     sleep(ms) {
       if (!Number.isSafeInteger(ms) || ms < 0 || !Number.isSafeInteger(now + ms) || now + ms > maxTime)
         throw new RangeError('Invalid sleep duration');

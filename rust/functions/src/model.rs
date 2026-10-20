@@ -116,6 +116,15 @@ pub enum Operation {
         #[serde(rename = "idempotencyKey", skip_serializing_if = "Option::is_none")]
         idempotency_key: Option<String>,
     },
+    /// A wait for the signal `name`, `ctx.signal(name, input)`: what the
+    /// object's `signal` handler gives it ([`crate::restate`]). `input` says
+    /// what it waits for, as `pending` lists it.
+    Signal {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: Value,
+    },
     Sleep {
         id: String,
         deadline: u64,
@@ -133,6 +142,7 @@ impl Operation {
             | Self::KvSet { id, .. }
             | Self::KvDelete { id, .. }
             | Self::Rpc { id, .. }
+            | Self::Signal { id, .. }
             | Self::Sleep { id, .. }
             | Self::Resume { id } => id,
         }

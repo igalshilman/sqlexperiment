@@ -445,3 +445,33 @@ async def main(input, ctx):
         step(&mut run)?;
     }
 }
+
+#[test]
+fn python_waits_for_a_signal() -> Result<()> {
+    let source = r#"
+async def main(input, ctx):
+    verdict = await ctx.signal("approval", {"order": input})
+    try:
+        await ctx.signal("")
+    except TypeError as error:
+        refused = str(error)
+    return {"verdict": verdict, "refused": refused}
+"#;
+    let store = Store::default();
+    let mut run = start_python(&store, source, json!("103"), 1)?;
+    let wait = run.view().state.pending[0].clone();
+    assert_eq!(
+        wait,
+        functions::Operation::Signal {
+            id: wait.id().to_owned(),
+            name: "approval".into(),
+            input: json!({"order": "103"}),
+        }
+    );
+    let done = block(run.deliver(wait.id(), Outcome::success("approved"), 2))?;
+    assert_eq!(
+        value(&done),
+        json!({"verdict": "approved", "refused": "A signal name is a nonempty string"})
+    );
+    Ok(())
+}

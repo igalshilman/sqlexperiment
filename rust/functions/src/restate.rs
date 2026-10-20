@@ -16,6 +16,7 @@
 //! | `ctx.rpc.call(target, x)`  | A call to `target`, under the request's idempotency key       |
 //! | `ctx.call(name, x)`        | The host binding `name` ([`crate::Bindings`]), called here    |
 //! | `ctx.sleep(ms)`            | A timer, until the request's deadline                         |
+//! | `ctx.signal(name, x)`      | A wait in `function_signals`, which `signal` resolves         |
 //! | `ctx.kv.*`, `ctx.db.*`     | Nothing: answered in the turn, from the object's database    |
 //!
 //! A call's input stays in the guest's heap until the call is answered: the
@@ -30,14 +31,20 @@
 //! made before the crash is attached to, not made again (a binding that
 //! does not deduplicate is called again). The call ends when
 //! its function settles: requests still outstanding (a race's loser) are
-//! dropped, and their continuations never run.
+//! dropped, and their continuations never run; a signal no one gave is
+//! forgotten.
+//!
+//! Besides its functions, each object has `pending`, the signals its runs
+//! wait for, and `signal`, which gives one: by its wait's id, or else to the
+//! oldest wait for its name ([`crate::Signal`]).
 use crate::{
-    Binding, Bindings, Budget, HostCall, Operation, Outcome, Programs, Run, Runtime, Scope, vm,
+    Binding, Bindings, Budget, FunctionSignals, HostCall, Operation, Outcome, Programs, Run,
+    Runtime, Scope, Signal, Waiting as Wait, signals::FunctionSignalsClient, signals_of, vm,
 };
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use restate_sdk::{
     context::{DurableFuture, RequestTarget},
-    endpoint::ContextInternal,
+    endpoint::{ContextInternal, HandlerOptions},
     prelude::*,
     service::{ServiceDefinition, macro_support},
 };
@@ -107,15 +114,19 @@ impl JsObject {
     /// function, taking and returning JSON.
     fn definition(self) -> anyhow::Result<ServiceDefinition> {
         let handlers = self.programs.get(&self.program)?.handlers();
-        let handlers: Vec<Value> = (handlers.iter())
-            .map(|name| {
-                serde_json::json!({
-                    "name": name,
-                    "input": {"contentType": "application/json", "required": false},
-                    "output": {"contentType": "application/json", "setContentTypeIfEmpty": false},
-                })
+        let handler = |name: &str, ty: &str| {
+            serde_json::json!({
+                "name": name,
+                "ty": ty,
+                "input": {"contentType": "application/json", "required": false},
+                "output": {"contentType": "application/json", "setContentTypeIfEmpty": false},
             })
+        };
+        let mut handlers: Vec<Value> = (handlers.iter())
+            .map(|name| handler(name, "EXCLUSIVE"))
             .collect();
+        // Every object's: what its runs wait for, and a signal to them.
+        handlers.extend(BUILT_IN.iter().map(|name| handler(name, "SHARED")));
         let manifest = serde_json::json!({
             "name": self.program,
             "ty": "VIRTUAL_OBJECT",
@@ -151,7 +162,39 @@ impl JsObject {
     }
 }
 
-/// Routes each of the object's handlers to [`JsObject::call`].
+/// The handlers every object has, besides its program's functions.
+pub const BUILT_IN: [&str; 2] = ["pending", "signal"];
+
+impl JsObject {
+    /// `pending` (the waits of this object's runs, as [`Wait`]) or `signal`
+    /// (give one, [`Signal`]), through `function_signals`.
+    async fn signals(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        handler: &str,
+        input: bytes::Bytes,
+    ) -> HandlerResult<Json<Value>> {
+        let signals =
+            ctx.object_client::<FunctionSignalsClient>(signals_of(&self.program, ctx.key()));
+        if handler == "pending" {
+            return Ok(Json(serde_json::to_value(
+                signals.pending().call().await?.into_inner(),
+            )?));
+        }
+        let signal: Signal = match input.is_empty() {
+            true => Signal::default(),
+            false => serde_json::from_slice(&input).map_err(|error| {
+                TerminalError::new(format!(
+                    "Expected a signal {{id?, name?, value, keep?}}: {error}"
+                ))
+            })?,
+        };
+        let resolved = signals.resolve(Json(signal)).call().await?.into_inner();
+        Ok(Json(serde_json::to_value(resolved)?))
+    }
+}
+
+/// Routes each of the object's handlers to [`JsObject::call`], or a built-in one to [`JsObject::signals`].
 struct Dispatch(Arc<JsObject>);
 
 impl restate_sdk::service::Service for Dispatch {
@@ -161,6 +204,15 @@ impl restate_sdk::service::Service for Dispatch {
         let object = self.0.clone();
         Box::pin(async move {
             let handler = ctx.handler_name().to_owned();
+            if BUILT_IN.contains(&handler.as_str()) {
+                let (input, metadata) = ctx.input::<bytes::Bytes>().await;
+                let result = object
+                    .signals((&ctx, metadata).into(), &handler, input)
+                    .await;
+                ctx.handle_handler_result(result);
+                ctx.end();
+                return Ok(());
+            }
             let program = object.programs.get(&object.program);
             if !program.is_ok_and(|program| program.handlers().contains(&handler)) {
                 return Err(restate_sdk::endpoint::Error::unknown_handler(
@@ -214,9 +266,21 @@ impl JsObject {
         let mut operations: Vec<String> = Vec::new();
         let mut calls = FuturesUnordered::<Calling>::new();
         let mut awaited: HashSet<String> = HashSet::new();
+        // The signals this attempt waits for, until delivered: those left
+        // when the run settles are forgotten.
+        let mut signals: HashSet<String> = HashSet::new();
         loop {
             let state = run.view().state;
             if let Some(outcome) = state.outcome {
+                if !signals.is_empty() {
+                    let ids: Vec<String> = signals.into_iter().collect();
+                    ctx.object_client::<FunctionSignalsClient>(signals_of(
+                        &self.program,
+                        ctx.key(),
+                    ))
+                    .forget(Json(ids))
+                    .send();
+                }
                 return Ok(outcome);
             }
             // Making a call reads its input from the heap: a run that is not
@@ -242,6 +306,11 @@ impl JsObject {
                 let made = match operation {
                     Operation::Resume { .. } => Err(Outcome::success(Value::Null)),
                     Operation::Sleep { deadline, .. } => Ok(Made::Waiting(sleep(ctx, *deadline))),
+                    Operation::Signal { name, input, .. } => {
+                        signals.insert(id.to_owned());
+                        let key = signals_of(&self.program, ctx.key());
+                        Ok(Made::Waiting(signal(ctx, key, operation, name, input)))
+                    }
                     Operation::Rpc { target, .. } => (run.input(id).await)
                         .map_err(|error| failed(&store, error))?
                         .map(|input| Made::Waiting(rpc(ctx, operation, target, input)))
@@ -332,6 +401,9 @@ impl JsObject {
                 lease.hold(0);
                 lease.reserve(peak).await;
             }
+            for (operation, _) in &outcomes {
+                signals.remove(operation);
+            }
             let delivered = run.deliver_all(outcomes, now().max(at)).await;
             self.budget.record(&self.program, run.turn_peak());
             lease.hold(run.resident());
@@ -413,6 +485,37 @@ fn call(binding: &dyn Binding, operation: &Operation, input: Value) -> Calling {
     })
 }
 
+/// A wait for the signal `name`, in `function_signals` under `key`: the
+/// guest's `operation`, attached to on a retried attempt, by its idempotency
+/// key.
+fn signal<'ctx>(
+    ctx: &'ctx ObjectContext<'ctx>,
+    key: String,
+    operation: &Operation,
+    name: &str,
+    input: &Value,
+) -> Waiting<'ctx> {
+    let waiting = Wait {
+        id: operation.id().to_owned(),
+        name: name.to_owned(),
+        input: input.clone(),
+        since: 0,
+    };
+    let wait = ctx
+        .object_client::<FunctionSignalsClient>(key)
+        .wait(Json(waiting))
+        .idempotency_key(operation.idempotency_key().to_owned())
+        .call()
+        .map(|result| {
+            let outcome = match result {
+                Ok(Json(value)) => Outcome::success(value),
+                Err(error) => Outcome::failure("TerminalError", error.message()),
+            };
+            (outcome, 0)
+        });
+    Box::pin(wait)
+}
+
 /// A timer until `deadline`.
 fn sleep<'ctx>(ctx: &'ctx ObjectContext<'ctx>, deadline: u64) -> Waiting<'ctx> {
     let timer = ctx
@@ -476,7 +579,8 @@ mod shipped {
 /// replay (a retried attempt restores the last image instead), its state
 /// loaded lazily (an attempt reads only what its database needs), no
 /// journal kept once an invocation is done (it holds every page it wrote),
-/// and Restate's inactivity timeout as long as a turn may run.
+/// and Restate's inactivity timeout as long as a turn may run; and
+/// `function_signals`, which keeps their waits for signals.
 /// The objects share `cache`, which keeps the scopes this process owns, and
 /// `budget`, the memory their live runs may hold; they offer their programs
 /// `bindings`.
@@ -495,17 +599,18 @@ pub fn bind(
             budget: budget.clone(),
             bindings: bindings.clone(),
         };
-        builder = builder.bind(
-            object.definition()?.options(
-                ServiceOptions::new()
-                    .journal_replay(false)
-                    .enable_lazy_state(true)
-                    .journal_retention(Duration::ZERO)
-                    .inactivity_timeout(programs.runtime().limits().turn),
-            ),
-        );
+        let mut options = ServiceOptions::new()
+            .journal_replay(false)
+            .enable_lazy_state(true)
+            .journal_retention(Duration::ZERO)
+            .inactivity_timeout(programs.runtime().limits().turn);
+        // They call `function_signals`: a retried attempt replays its call.
+        for name in BUILT_IN {
+            options = options.handler(name, HandlerOptions::new().journal_replay(true));
+        }
+        builder = builder.bind(object.definition()?.options(options));
     }
-    Ok(builder)
+    Ok(builder.bind(FunctionSignals))
 }
 
 /// An endpoint serving `programs`, with [`crate::Claude`] as the binding

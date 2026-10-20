@@ -371,6 +371,14 @@ class Context:
         operation = {"kind": "call", "name": name, **_idempotency(idempotency_key)}
         return await self._bridge.request(operation, input)
 
+    async def signal(self, name, input=None):
+        """Wait for the signal `name`, which the object's `signal` handler gives
+        (by its wait's id, or to the oldest wait for its name), and return its
+        value. `input` says what it waits for, as `pending` lists it."""
+        if not isinstance(name, str) or not name:
+            raise TypeError("A signal name is a nonempty string")
+        return await self._bridge.request({"kind": "signal", "name": name, "input": _plain(input)})
+
     async def sleep(self, seconds):
         """Wait `seconds`, durably (as `asyncio.sleep` does here)."""
         await asyncio.sleep(seconds)
