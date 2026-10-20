@@ -146,10 +146,9 @@ on another attempt; nothing else keeps a copy of it, and a binding's call is
 journaled nowhere. An input crosses as `JSON.stringify` makes it, in one pass
 in C: a primitive is checked when the call is issued, an object when it is
 read, and one JSON cannot hold fails the call. A turn sending a 39 KiB request
-saves ~22 KiB of pages and none of it in the commit, where it once saved 6
-KiB of pages and the whole request in the commit; an agent's request, mostly
-the conversation it keeps anyway, costs only the pages its last messages
-take (§10.1). A program must not change an input until its call is answered:
+saves ~22 KiB of pages and none of it in the commit; an agent's request,
+mostly the conversation it keeps anyway, costs only the pages its last
+messages take (§10.1). A program must not change an input until its call is answered:
 it is read when the call is made. A request that loses a race may
 reject later with no handler: no rejection tracker is installed, so that is
 not an error, and no handler is attached to every request (one cost ~230 B a
@@ -1052,31 +1051,31 @@ interpreter runs compute-bound code ~10x slower than V8.
 ### 10.1. A long coding session
 
 `cargo bench --bench agent` runs the shipped `coder` program through a
-scripted session of up to 300 steps over an in-memory store. Each step is a few
-hundred bytes of model text and one tool call: a file read (~6 KiB), a
-command (~1.5 KiB of output), an edit, or a written file (~3 KiB). On
-20 October 2026, with the model a host binding (`claude.messages`), and
-the same session on the same machine calling it as a Restate service, as
-before:
+scripted session over an in-memory store, to the program's own limit of 200
+steps. Each step is a few hundred bytes of model text and one tool call: a
+file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
+(~3 KiB). The model is the host binding `claude.messages`; each request is
+the whole conversation so far. Measured on 20 October 2026 (4 vCPUs):
 
-| Step | Request to the model | Stored by the step, as a service | As a binding | Of it, the commit (service, binding) | Tool turn (service, binding) |
-| ---: | -------------------: | -------------------------------: | -----------: | -----------------------------------: | ---------------------------: |
-|    1 |              1.7 KiB |                          11.8 KB |       7.8 KB |                        4.3 KB, 369 B |               1.9 ms, 0.6 ms |
-|   10 |               31 KiB |                            43 KB |       6.2 KB |                         33 KB, 373 B |               6.1 ms, 0.4 ms |
-|   40 |              130 KiB |                           212 KB |       8.2 KB |                        140 KB, 376 B |                24 ms, 0.7 ms |
-|   99 |              328 KiB |                           362 KB |       8.7 KB |                        340 KB, 379 B |                53 ms, 0.7 ms |
-|  190 |              636 KiB |                           672 KB |       9.7 KB |                        653 KB, 381 B |                97 ms, 0.9 ms |
+| Step | Request to the model | Stored by the step | Model turn | Tool turn |
+| ---: | -------------------: | -----------------: | ---------: | --------: |
+|    1 |              1.7 KiB |             7.8 KB |    0.86 ms |   0.63 ms |
+|   10 |               31 KiB |             6.3 KB |    0.69 ms |   0.38 ms |
+|   40 |              130 KiB |             8.2 KB |    0.79 ms |   0.69 ms |
+|   99 |              328 KiB |             8.7 KB |    0.96 ms |   0.65 ms |
+|  190 |              636 KiB |             9.7 KB |    1.23 ms |   0.89 ms |
 
-The session runs to the program's own limit of 200 steps. Each request is the
-whole conversation so far. As a service call, it was copied, checked and
-serialized in the guest, kept in the commit record as a pending request, and
-journaled by Restate as the call's input: 70 MiB stored and 65 MiB journaled
-over the session, quadratic in its length. As a binding, the request stays in
-the heap, which holds the conversation anyway, and the host reads it there as
-it sends it, in one serialization in C: 2.5 MiB stored over the session, 4–10
-KB a step, and nothing journaled. With fuel, the service version failed at
-step 45 (a request of ~145 KiB): copying the request out of the VM spent the
-turn's budget.
+- **Per step:** 9 KB at the median, 7–12 KB for nine steps in ten, whatever
+  the conversation's length: the request stays in the heap, which holds the
+  conversation anyway, so a step stores the pages its new messages take, and
+  a commit record of ~380 B.
+- **New bases:** seven steps (23, 34, 50, 70, 96, 128, 168) write a new
+  base (§5.3), the whole image: 42 KB to 235 KB, growing with the
+  conversation.
+- **The session:** 2.5 MiB stored over 200 steps. Restate journals none of
+  the requests: the host reads each from the heap as it sends it.
+- **Restores:** a new attempt, every 25 steps, restores the run in 0.5–1.9
+  ms.
 
 ## 11. Scope limits, provenance and references
 

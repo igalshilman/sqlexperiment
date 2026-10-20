@@ -235,7 +235,7 @@ On branches, a PR each:
    DESIGN.md §10.1 now runs 200 steps instead of failing at 45.
 5. **A registry of the bindings the host makes itself** (§6). Done:
    `claude.messages` is the first; the coding session stores 2.5 MiB over
-   200 steps instead of 70 MiB, and Restate journals none of its requests.
+   200 steps, and Restate journals none of its requests (DESIGN.md §10.1).
    The in-turn Calls are still `src/db.rs`'s, and the Restate Waits (RPCs,
    timers) a `match` in `restate.rs`.
 
@@ -283,11 +283,11 @@ lives once, in pages the program mostly holds anyway: the model's request is
 the conversation, plus a few new messages. RPCs work the same way, but
 Restate journals their input as well, since it delivers the call.
 
-| A request's bytes        | RPC, before  | RPC, now            | Binding             |
-| ------------------------ | ------------ | ------------------- | ------------------- |
-| The guest's heap (pages) | What it kept | Kept until answered | Kept until answered |
-| The turn's commit record | A copy       | ID, target, key     | ID, name, key       |
-| Restate's journal        | A copy       | A copy              | Nothing             |
+| A request's bytes        | RPC                 | Binding             |
+| ------------------------ | ------------------- | ------------------- |
+| The guest's heap (pages) | Kept until answered | Kept until answered |
+| The turn's commit record | ID, target, key     | ID, name, key       |
+| Restate's journal        | The input           | Nothing             |
 
 **Keys.** A call's idempotency key is the program's own, if it set one
 (`{ idempotencyKey }`), or else its operation ID, `<invocation>/<n>`. The
