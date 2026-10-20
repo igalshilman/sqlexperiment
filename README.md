@@ -39,7 +39,9 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 
 The same agent runs on pi, OpenCode, LangGraph, Claude (the Anthropic SDK)
 or the DeepSeek Harness: see [`restate-agents`](typescript/packages/integrations/README.md)
-and [the examples](examples-typescript/README.md).
+and [the examples](examples-typescript/README.md). In Python, it runs on
+Claude, LangGraph or Pydantic AI ([`restate_agents`](python/agents/README.md),
+[the examples](examples-python/README.md)).
 
 ## SQL in an object
 

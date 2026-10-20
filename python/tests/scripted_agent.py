@@ -1,10 +1,12 @@
 """
 An agent on the scripted teller (agents/tests/fakes.py): "move 5 from 1 to 2"
 moves money in the bank's accounts (bank.py), once per tool call, and
-"remember <fact>" remembers it with the memory example's tool. Served on
-PORT, alone (as in crash.py), or with the other test services (services.py).
+"remember <fact>" remembers it with the memory example's tool. On
+LangGraph, or with AGENT=claude, on Claude. Served on PORT, alone (as in
+crash.py), or with the other test services (services.py).
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -12,9 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples-python"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests"))
 
 from bank import transfer  # noqa: E402
-from fakes import Teller  # noqa: E402
+from fakes import ClaudeClient, Teller  # noqa: E402
 from memory import facts_table, remember  # noqa: E402
-from restate_agents import langgraph, serve, tool  # noqa: E402
+from restate_agents import claude, langgraph, serve, tool  # noqa: E402
 
 
 @tool(name="transfer")
@@ -25,11 +27,11 @@ async def bank_transfer(ctx, call_id, src: int, dst: int, amount: int) -> str:
     return f"moved {amount} from {src} to {dst}, {left} left"
 
 
-teller = langgraph.agent(
-    "teller",
-    model=Teller(),
-    tools=[bank_transfer, remember],
-)
+TOOLS = [bank_transfer, remember]
+if os.environ.get("AGENT", "langgraph") == "claude":
+    teller = claude.agent("teller", client=ClaudeClient(Teller()), tools=TOOLS)
+else:
+    teller = langgraph.agent("teller", model=Teller(), tools=TOOLS)
 
 
 @teller.handler

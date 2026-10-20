@@ -8,6 +8,7 @@ messages of their own, unless it was cancelled.
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Awaitable, Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -35,6 +36,16 @@ class _Answering:
 
 
 _answering: ContextVar[_Answering | None] = ContextVar("restate_agents.answering", default=None)
+
+# The prompts made in each attempt, by its context.
+_prompts: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
+
+
+def prompt_id(ctx: Any) -> str:
+    """The id of the attempt's next prompt: the invocation's id for its first, then ``<id>:2``, and so on."""
+    count = _prompts[ctx] = _prompts.get(ctx, 0) + 1
+    id = ctx.request().id
+    return id if count == 1 else f"{id}:{count}"
 
 
 async def steering(ctx: Any) -> list[Steer]:

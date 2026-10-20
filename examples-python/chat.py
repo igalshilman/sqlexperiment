@@ -1,7 +1,8 @@
 """
-A durable chat agent on LangGraph, with a tool. Each key is a conversation
-of its own, kept in the object's SQL database; if the process dies
-mid-reply, Restate retries and the agent carries on from its last step.
+Start here: a durable chat agent on Claude, with a tool. Each key is a
+conversation of its own, kept in the object's SQL database; if the process
+dies mid-reply, Restate retries and the agent carries on from the last
+message it stored, without asking the model again.
 
     ANTHROPIC_API_KEY=... uv run chat.py
     restate deployments register http://localhost:9080
@@ -10,7 +11,7 @@ mid-reply, Restate retries and the agent carries on from its last step.
     curl localhost:8080/assistant/alice/messages
 """
 
-from restate_agents import langgraph, serve, tool
+from restate_agents import claude, serve, tool
 
 
 @tool
@@ -19,7 +20,7 @@ def get_weather(city: str) -> str:
     return f"Sunny and 21°C in {city}"  # a stand-in for a real weather API
 
 
-assistant = langgraph.agent("assistant", tools=[get_weather])
+assistant = claude.agent("assistant", system="Answer briefly.", tools=[get_weather])
 
 if __name__ == "__main__":
     serve(assistant)

@@ -5,10 +5,11 @@ key) keeps the agent's state in its SQL database (`ctx.db`, of
 [the patched SDK](../sdk/README.md)), and each message is answered once per
 invocation, however often an attempt crashes. The Python counterpart of
 [`restate-agents`](../../typescript/packages/integrations/README.md), with
-[LangGraph](#langgraph) and [Pydantic AI](#pydantic-ai).
+[Claude](#claude) (the Anthropic SDK), [LangGraph](#langgraph) and
+[Pydantic AI](#pydantic-ai).
 
 ```python
-from restate_agents import langgraph, serve, tool
+from restate_agents import claude, serve, tool
 
 
 @tool
@@ -17,7 +18,7 @@ def get_weather(city: str) -> str:
     return f"Sunny and 21°C in {city}"
 
 
-assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
+assistant = claude.agent("assistant", system="Answer briefly.", tools=[get_weather])
 serve(assistant)
 ```
 
@@ -25,6 +26,51 @@ serve(assistant)
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
 curl localhost:8080/assistant/alice/messages   # the conversation so far
 ```
+
+## Claude
+
+`claude.agent(name, model=, system=, tools=)` is a virtual object, one per
+key (its conversation), on the [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python):
+Claude with nothing in between, the API's own messages stored in the
+object's database. It has the handlers `chat` (a message in, the answer out;
+as plain text, `-d 'Hi'`, or a JSON string, `--json '"Hi"'`) and `messages`
+(the conversation so far, with the tool calls, a page at a time:
+`{"limit": 50, "before": id, "after": id}`); `status`, `stop` and `steer`
+([Turns](#turns)); and `pending` and `signal` ([Restate's tools](#restates-tools)).
+Add handlers of your own with `@assistant.handler`.
+
+| Option       | What                                                                                                                                                      |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`      | `anthropic/model-id`; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)                                                        |
+| `system`     | The system prompt                                                                                                                                         |
+| `tools`      | `tool`s and [Restate's tools](#restates-tools); the SDK's (`@beta_async_tool`, which get their input only); and tools the API runs, as dicts (web search) |
+| `client`     | The `AsyncAnthropic` client (a base URL or a gateway of your own); by default one with `ANTHROPIC_API_KEY`                                                |
+| `max_tokens` | The most tokens of each of the model's replies (default 16000)                                                                                            |
+
+`model`, `system` and `tools` may also be functions of the invocation's
+context (each user's system prompt, say). `claude.prompt(ctx, text, ...)`
+answers a prompt in a handler of your own, with the same options, once,
+however often an attempt crashes (an invocation's first prompt has its id,
+the next `<id>:2`, and so on), in the conversation `thread` (by default, the
+object's key):
+
+```python
+@assistant.handler
+async def summarize(ctx, topic: str) -> str:
+    return await claude.prompt(ctx, f"Summarize what we said about {topic}")
+```
+
+Through crashes: the conversation is the API's messages in the
+`claude_messages` table, a row each, in order. Each reply of the model is
+stored before its tools run, and their results before the next request; so
+a crash during the tools runs them again with the same tool call ids,
+without asking the model again. A message's answer is stored with the
+model's last reply, and a retried attempt returns it. A tool's
+`restate.TerminalError` is its answer to the model (its message); any
+other error fails the attempt. The loop is the SDK tool runner's
+(`client.beta.messages.tool_runner`), of its own: the runner gives a tool
+its input but not its call's id, and cannot start from a stored reply whose
+tools did not run.
 
 ## LangGraph
 
@@ -253,8 +299,8 @@ curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invoca
   (a tool's call or wait, a storage request); during a model request, once
   the request is answered.
 - **`steer`** adds a message to the turn: the agent takes it after its next
-  tool call (LangGraph's `tool_node`; in Pydantic AI, before the next model
-  request), and the model reads it with the tools' results.
+  tool call (Claude's tools; LangGraph's `tool_node`; in Pydantic AI, before
+  the next model request), and the model reads it with the tools' results.
   A turn that ends before (no tool call came) answers it as a message of its
   own; with no turn, `steer` is a message of its own (`"steered": false`, and
   its invocation, to attach to). A stopped turn answers none of them. The
@@ -287,6 +333,9 @@ own, returning at once, as in a Modal Server
   a crash at each state request of a message (with `durability="async"`, it
   moves money twice), an interrupted run, the system prompt, and tools'
   errors.
+- [`tests/test_claude.py`](tests/test_claude.py): the same, for the Claude
+  agent (the teller as an Anthropic client), with options for each
+  invocation, the SDK's tools, and prompts of your own, each answered once.
 - [`tests/test_pydantic_ai.py`](tests/test_pydantic_ai.py): the same, for
   the Pydantic AI agent (the teller as a Pydantic AI model), and agents of
   your own, prompts of your own and a structured output, each answered once.

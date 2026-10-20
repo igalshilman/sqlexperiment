@@ -42,7 +42,6 @@ stored:
 
 from __future__ import annotations
 
-import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any
 
@@ -150,7 +149,7 @@ async def prompt(ctx: Any, graph: StateGraph, text: str, *, thread: str | None =
     """
     app = graph.compile(checkpointer=SqlCheckpointSaver(ctx.db))
     config: RunnableConfig = {"configurable": {"thread_id": thread or ctx.key()}}
-    id = _next_prompt_id(ctx)
+    id = turns.prompt_id(ctx)
     while True:
         state = await app.aget_state(config)
         if any(task.interrupts for task in state.tasks):
@@ -249,16 +248,6 @@ async def _cancel(app: Any, config: RunnableConfig) -> None:
     await app.abulk_update_state(
         config, [[StateUpdate(None, END)], [StateUpdate({"messages": closing}, any_node)], [StateUpdate(None, END)]]
     )
-
-
-# The prompts made in each attempt, by its context: the second prompt of an invocation is its id's ":2".
-_prompts: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
-
-
-def _next_prompt_id(ctx: Any) -> str:
-    count = _prompts[ctx] = _prompts.get(ctx, 0) + 1
-    id = ctx.request().id
-    return id if count == 1 else f"{id}:{count}"
 
 
 def _prompt(message: BaseMessage) -> bool:
