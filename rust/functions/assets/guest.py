@@ -347,6 +347,47 @@ class Rpc:
         return await self._bridge.request(operation, input)
 
 
+class Response:
+    """An HTTP response, as `ctx.fetch` returns it: its status, headers and
+    body, all in memory."""
+
+    def __init__(self, answer):
+        self.status_code = answer["status"]
+        self.reason_phrase = answer["statusText"]
+        self.url = answer["url"]
+        self.redirected = answer["redirected"]
+        # Each header as it came, a name (lowercase) and a value.
+        self.header_list = [(name, value) for name, value in answer["headers"]]
+        if "bodyBase64" in answer:
+            import base64
+
+            self.content = base64.b64decode(answer["bodyBase64"])
+        else:
+            self.content = answer["body"].encode()
+
+    @property
+    def is_success(self):
+        return 200 <= self.status_code <= 299
+
+    @property
+    def headers(self):
+        """The headers as a dict, by lowercase name; repeated ones joined."""
+        headers = {}
+        for name, value in self.header_list:
+            headers[name] = f"{headers[name]}, {value}" if name in headers else value
+        return headers
+
+    @property
+    def text(self):
+        return self.content.decode(errors="replace")
+
+    def json(self):
+        return json.loads(self.content)
+
+    def __repr__(self):
+        return f"<Response [{self.status_code}]>"
+
+
 class Context:
     """What a program's handlers get, as `ctx`: their scope's state, and their
     durable operations. Each is a coroutine: await it, or run several at once
@@ -364,12 +405,50 @@ class Context:
         return self._bridge.scope
 
     async def call(self, name, input=None, *, idempotency_key=None):
-        """The host binding `name`, such as `claude.messages`, with `input`,
+        """The host binding `name`, such as `fetch`, with `input`,
         which is read as an RPC's is."""
         if not isinstance(name, str) or not name:
             raise TypeError("A binding name is a nonempty string")
         operation = {"kind": "call", "name": name, **_idempotency(idempotency_key)}
         return await self._bridge.request(operation, input)
+
+    async def fetch(self, url, *, method="GET", headers=None, body=None, json=None, redirect="follow"):
+        """Send an HTTP request, and return its `Response`. The host sends it,
+        under its policy: only to origins it allows, adding the secrets it
+        keeps (such as an API key), and with no cookies kept between
+        requests. `body` is text or bytes; or `json` is data the host sends
+        as JSON, so that the program keeps no copy of it as text. A request
+        is sent at least once: again after a crash, as it was. Do not change
+        `json` until the response is in."""
+        if not isinstance(url, str):
+            raise TypeError("A URL is a string")
+        method = method.upper() if isinstance(method, str) else method
+        if not isinstance(method, str) or not method:
+            raise TypeError("A method is a nonempty string")
+        request = {"url": url, "method": method, "redirect": redirect}
+        request["headers"] = [[str(name).lower(), str(value)] for name, value in dict(headers or {}).items()]
+        if redirect not in ("follow", "manual", "error"):
+            raise TypeError('redirect is "follow", "manual" or "error"')
+        if body is not None and json is not None:
+            raise TypeError("A request has a body or json, not both")
+        if json is not None:
+            if method in ("GET", "HEAD"):
+                raise TypeError(f"A {method} request has no body")
+            request["json"] = json
+            if not any(name == "content-type" for name, _ in request["headers"]):
+                request["headers"].append(["content-type", "application/json"])
+        if body is not None:
+            if method in ("GET", "HEAD"):
+                raise TypeError(f"A {method} request has no body")
+            if isinstance(body, str):
+                request["body"] = body
+            elif isinstance(body, (bytes, bytearray, memoryview)):
+                import base64
+
+                request["bodyBase64"] = base64.b64encode(body).decode()
+            else:
+                raise TypeError("A request body is text or bytes: json.dumps a dict")
+        return Response(await self._bridge.request({"kind": "call", "name": "fetch"}, request))
 
     async def signal(self, name, input=None):
         """Wait for the signal `name`, which the object's `signal` handler gives

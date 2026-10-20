@@ -613,11 +613,13 @@ pub fn bind(
     Ok(builder.bind(FunctionSignals))
 }
 
-/// An endpoint serving `programs`, with [`crate::Claude`] as the binding
-/// `claude.messages`, and [`crate::Workspace`] for them to call.
+/// An endpoint serving `programs`, with `fetch` under
+/// [`crate::FetchPolicy::from_env`], and [`crate::Workspace`] for them to
+/// call.
 pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
     let budget = Budget::from_env()?;
-    let bindings = Bindings::new().with("claude.messages", crate::Claude::from_env());
+    let fetch = crate::Fetch::new(crate::FetchPolicy::from_env());
+    let bindings = Bindings::new().with("fetch", fetch);
     let cache = page_cache().await?;
     Ok(
         bind(Endpoint::builder(), programs, &cache, &budget, &bindings)?

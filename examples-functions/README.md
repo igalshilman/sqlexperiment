@@ -63,7 +63,7 @@ are JSON (no input is null). `ctx` is all it needs from outside:
 | `ctx.db.transaction(fn)`                          | Run `fn`'s statements together, or undo them if it throws                                                        |
 | `ctx.kv.get/set/delete(key)`                      | The scope's JSON values                                                                                          |
 | `ctx.rpc.call({ service, handler, key? }, input)` | Any Restate service, including the other functions here                                                          |
-| `ctx.call('claude.messages', request)`            | Claude: a [Messages API](https://platform.claude.com/docs/en/api/messages) request, sent by the host             |
+| `fetch(url, init)`                                | An HTTP request, sent by the host: only where it allows, with the API keys it adds. `fetch.json(data)` is a body |
 | `ctx.sleep(ms)`                                   | A durable timer, however long                                                                                    |
 | `ctx.signal(name, input)`                         | A value from outside, such as a person's approval: the object's `signal` handler gives it, however long it takes |
 | `ctx.key`                                         | The object's key                                                                                                 |

@@ -1,7 +1,6 @@
 //! Host bindings: operations a program calls by name, `ctx.call(name,
 //! input)`, that the host makes itself, outside Restate's journal. A
-//! deployment offers them as [`Bindings`]; [`crate::Claude`] is one,
-//! `claude.messages`.
+//! deployment offers them as [`Bindings`]; [`crate::Fetch`] is one, `fetch`.
 //!
 //! Nothing keeps a second copy of a call. Its input stays in the guest's
 //! heap until it is answered, and the turn's commit keeps only the call's ID:

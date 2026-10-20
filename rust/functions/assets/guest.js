@@ -137,6 +137,227 @@
       pending.set(id, input === undefined ? { resolve, reject } : { resolve, reject, input }),
     );
   }
+  // Bytes as base64, and text as UTF-8, which QuickJS lacks: for bodies.
+  const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  function toBase64(bytes) {
+    let text = '';
+    for (let i = 0; i < bytes.length; i += 3) {
+      const n = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+      text += BASE64[n >> 18] + BASE64[(n >> 12) & 63];
+      text += i + 1 < bytes.length ? BASE64[(n >> 6) & 63] : '=';
+      text += i + 2 < bytes.length ? BASE64[n & 63] : '=';
+    }
+    return text;
+  }
+  function fromBase64(text) {
+    text = text.replace(/=+$/, '');
+    const bytes = new Uint8Array((text.length * 3) >> 2);
+    for (let i = 0, j = 0, n = 0, bits = 0; i < text.length; i++) {
+      n = (n << 6) | BASE64.indexOf(text[i]);
+      bits += 6;
+      if (bits >= 8) bytes[j++] = (n >> (bits -= 8)) & 255;
+    }
+    return bytes;
+  }
+  function utf8(text) {
+    const binary = unescape(encodeURIComponent(text));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+  function fromUtf8(bytes) {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    try {
+      return decodeURIComponent(escape(binary));
+    } catch {
+      // Not UTF-8: each byte as its own character, as Latin-1 would.
+      return binary;
+    }
+  }
+  function bodyBytes(body) {
+    if (body instanceof Uint8Array) return body;
+    if (body instanceof ArrayBuffer) return new Uint8Array(body);
+    if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    return undefined;
+  }
+
+  // HTTP headers, as fetch's Headers: names are case-insensitive.
+  class Headers {
+    #fields = [];
+    constructor(init) {
+      if (init === undefined || init === null) return;
+      const pairs =
+        init instanceof Headers || Array.isArray(init) || typeof init[Symbol.iterator] === 'function'
+          ? init
+          : Object.entries(init);
+      for (const pair of pairs) {
+        if (pair.length !== 2) throw new TypeError('A header is a [name, value] pair');
+        this.append(pair[0], pair[1]);
+      }
+    }
+    append(name, value) {
+      name = String(name).toLowerCase();
+      if (!/^[!#$%&'*+\-.^_`|~0-9a-z]+$/.test(name)) throw new TypeError(`Invalid header name ${name}`);
+      value = String(value).trim();
+      if (/[\0\r\n]/.test(value)) throw new TypeError(`Invalid value for header ${name}`);
+      this.#fields.push([name, value]);
+    }
+    set(name, value) {
+      this.delete(name);
+      this.append(name, value);
+    }
+    delete(name) {
+      name = String(name).toLowerCase();
+      this.#fields = this.#fields.filter(([field]) => field !== name);
+    }
+    get(name) {
+      name = String(name).toLowerCase();
+      const values = this.#fields.filter(([field]) => field === name).map(([, value]) => value);
+      return values.length ? values.join(', ') : null;
+    }
+    getSetCookie() {
+      return this.#fields.filter(([field]) => field === 'set-cookie').map(([, value]) => value);
+    }
+    has(name) {
+      return this.get(name) !== null;
+    }
+    *entries() {
+      const names = [...new Set(this.#fields.map(([name]) => name))].sort();
+      for (const name of names) {
+        if (name === 'set-cookie') for (const value of this.getSetCookie()) yield [name, value];
+        else yield [name, this.get(name)];
+      }
+    }
+    *keys() {
+      for (const [name] of this.entries()) yield name;
+    }
+    *values() {
+      for (const [, value] of this.entries()) yield value;
+    }
+    forEach(fn, self) {
+      for (const [name, value] of this.entries()) fn.call(self, value, name, this);
+    }
+    [Symbol.iterator]() {
+      return this.entries();
+    }
+  }
+
+  // A response, as fetch's Response: its body is text, or bytes.
+  const responseInit = Symbol('response');
+  class Response {
+    #body;
+    #used = false;
+    constructor(body = null, init = {}) {
+      const { status = 200, statusText = '', headers } = init;
+      if (!Number.isInteger(status) || status < 200 || status > 599)
+        throw new RangeError('A response status is from 200 to 599');
+      if (body !== null && body !== undefined && typeof body !== 'string' && !bodyBytes(body))
+        throw new TypeError('A response body is a string or bytes');
+      this.#body = body ?? null;
+      this.status = status;
+      this.statusText = String(statusText);
+      this.headers = new Headers(headers);
+      this.url = init[responseInit]?.url ?? '';
+      this.redirected = init[responseInit]?.redirected ?? false;
+      this.type = 'default';
+    }
+    static json(data, init = {}) {
+      const headers = new Headers(init.headers);
+      if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+      return new Response(JSON.stringify(data), { ...init, headers });
+    }
+    get ok() {
+      return this.status >= 200 && this.status <= 299;
+    }
+    get bodyUsed() {
+      return this.#used;
+    }
+    #take() {
+      if (this.#used) throw new TypeError('The body has already been read');
+      this.#used = true;
+      return this.#body;
+    }
+    async text() {
+      const body = this.#take();
+      return body === null ? '' : typeof body === 'string' ? body : fromUtf8(bodyBytes(body));
+    }
+    async json() {
+      return JSON.parse(await this.text());
+    }
+    async bytes() {
+      const body = this.#take();
+      return body === null ? new Uint8Array(0) : typeof body === 'string' ? utf8(body) : bodyBytes(body).slice();
+    }
+    async arrayBuffer() {
+      return (await this.bytes()).buffer;
+    }
+    clone() {
+      if (this.#used) throw new TypeError('The body has already been read');
+      return received(this.#body, this);
+    }
+  }
+  // A response with any status (a 3xx, after a manual redirect), as `from`
+  // describes it.
+  function received(body, from) {
+    const response = new Response(body, {
+      headers: from.headers,
+      [responseInit]: { url: from.url, redirected: from.redirected },
+    });
+    response.status = from.status;
+    response.statusText = from.statusText;
+    return response;
+  }
+
+  // An HTTP request, sent by the host under its policy (the binding `fetch`):
+  // the request stays in the heap until it is answered, and is sent again
+  // after a crash. No cookies are kept: a program sends its own.
+  function fetch(input, init = {}) {
+    try {
+      const url = typeof input === 'string' ? input : (input?.url ?? input?.href ?? String(input));
+      const from = typeof input === 'object' && input !== null && 'url' in input ? input : {};
+      let method = String(init.method ?? from.method ?? 'GET');
+      if (/^(get|head|post|put|delete|options|patch)$/i.test(method)) method = method.toUpperCase();
+      const headers = new Headers(init.headers ?? from.headers);
+      const body = init.body ?? null;
+      const sent = { url: String(url), method, headers: [] };
+      if (body !== null) {
+        if (method === 'GET' || method === 'HEAD') throw new TypeError(`A ${method} request has no body`);
+        if (typeof body === 'string') {
+          sent.body = body;
+          if (!headers.has('content-type')) headers.set('content-type', 'text/plain;charset=UTF-8');
+        } else if (bodyBytes(body)) sent.bodyBase64 = toBase64(bodyBytes(body));
+        else if (body instanceof JsonBody) {
+          sent.json = body.value;
+          if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+        } else throw new TypeError('A request body is a string or bytes: JSON.stringify an object');
+      }
+      for (const pair of headers) sent.headers.push(pair);
+      const redirect = init.redirect ?? 'follow';
+      if (!['follow', 'manual', 'error'].includes(redirect))
+        throw new TypeError('redirect is "follow", "manual" or "error"');
+      sent.redirect = redirect;
+      if (init.signal?.aborted) throw init.signal.reason ?? new Error('The request was aborted');
+      return request({ kind: 'call', name: 'fetch' }, sent).then((answer) => {
+        const body = 'bodyBase64' in answer ? fromBase64(answer.bodyBase64) : answer.body;
+        return received(body, answer);
+      });
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  // A JSON body the host serializes as it sends it: `fetch.json(value)`. The
+  // program keeps `value` as it is, and no copy of it as text.
+  class JsonBody {
+    constructor(value) {
+      this.value = value;
+    }
+  }
+  fetch.json = (value) => new JsonBody(callInput(value));
+  globalThis.fetch = fetch;
+  globalThis.Headers = Headers;
+  globalThis.Response = Response;
+
   globalThis.durable = Object.freeze({
     // The scope: the key of the object this program is served as.
     get key() {
@@ -202,7 +423,7 @@
         return request(withOptions({ kind: 'rpc', target }, options), callInput(input));
       },
     }),
-    // The host binding `name`, such as `claude.messages`; its input is read
+    // The host binding `name`, such as `fetch`; its input is read
     // as an RPC's is.
     call(name, input = null, options) {
       if (typeof name !== 'string' || !name) throw new TypeError('A binding name is a nonempty string');

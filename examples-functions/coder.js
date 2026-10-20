@@ -86,6 +86,25 @@ function workspace(ctx) {
   };
 }
 
+// One request to the Claude Messages API. The host adds the API key: the
+// program never holds it. Rate limits and overloads are retried, after a
+// durable sleep.
+async function claude(ctx, request) {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'anthropic-version': '2023-06-01' },
+      body: fetch.json(request),
+    });
+    if (response.ok) return response.json();
+    if (attempt < 8 && [408, 409, 429, 500, 502, 503, 504, 529].includes(response.status)) {
+      await ctx.sleep(Math.min(30_000, 500 * 2 ** attempt));
+      continue;
+    }
+    throw new Error(`Claude API ${response.status}: ${await response.text()}`);
+  }
+}
+
 export async function history(_, ctx) {
   return (await ctx.kv.get('history')) ?? [];
 }
@@ -94,7 +113,7 @@ export async function work({ task }, ctx) {
   const tools = workspace(ctx);
   const messages = [{ role: 'user', content: task }];
   for (let step = 1; step <= MAX_STEPS; step++) {
-    const response = await ctx.call('claude.messages', {
+    const response = await claude(ctx, {
       model: MODEL,
       max_tokens: 32000,
       output_config: { effort: 'medium' },

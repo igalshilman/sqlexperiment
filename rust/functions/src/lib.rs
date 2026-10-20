@@ -9,7 +9,8 @@
 //!   from turn to turn, and commits each turn to its [`Scope`]'s database (in
 //!   Restate, kept in the object's state).
 //! - [`Bindings`]: the operations the host makes for programs,
-//!   `ctx.call(name, input)`, such as [`Claude`]'s `claude.messages`.
+//!   `ctx.call(name, input)`, such as [`Fetch`]: the HTTP requests of
+//!   `fetch(url, init)`, under a [`FetchPolicy`].
 //! - [`FunctionSignals`]: the `function_signals` object, which keeps the
 //!   programs' waits for signals, `ctx.signal(name, input)`.
 //! - [`Workspace`]: the `workspace` object, a directory and a shell for
@@ -19,10 +20,10 @@
 
 mod bindings;
 mod budget;
-mod claude;
 mod codec;
 mod cow;
 mod db;
+mod fetch;
 mod heap;
 mod instrument;
 mod model;
@@ -40,7 +41,7 @@ mod workspace;
 
 pub use bindings::{Binding, Bindings, HostCall};
 pub use budget::Budget;
-pub use claude::Claude;
+pub use fetch::{Fetch, FetchPolicy};
 pub use model::{GuestError, Operation, Outcome, RpcTarget, State, Status, View};
 pub use program::{Program, Programs};
 pub use restate::{bind, embedded, endpoint, faults, page_cache};

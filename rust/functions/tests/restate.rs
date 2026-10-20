@@ -162,7 +162,7 @@ fn workspaces() -> &'static std::path::Path {
     DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
 }
 
-/// Serve `programs` with a scripted `claude.messages` and `record` as
+/// Serve `programs` with a scripted Claude as `fetch` and `record` as
 /// bindings, and `Doubler` and `workspace`, and register them with the
 /// server.
 async fn serve_programs(programs: &Arc<Programs>) -> u16 {
@@ -177,7 +177,7 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .port();
     let cache = functions::page_cache().await.unwrap();
     let bindings = Bindings::new()
-        .with("claude.messages", fakes::Claude)
+        .with("fetch", fakes::Claude)
         .with("record", Record);
     let budget = functions::Budget::from_env().unwrap();
     let endpoint = functions::bind(Endpoint::builder(), programs, &cache, &budget, &bindings)
@@ -266,7 +266,7 @@ const HOST: &str = r#"export async function run(n, ctx) {
   const call = ctx.call('record', { n });
   await ctx.sleep(50);
   const errors = [];
-  for (const [name, options] of [['missing'], ['claude.messages', { idempotencyKey: 'k' }]]) {
+  for (const [name, options] of [['missing'], ['fetch', { idempotencyKey: 'k' }]]) {
     try {
       await ctx.call(name, {}, options);
     } catch (error) {
@@ -539,7 +539,7 @@ async fn bindings_are_called_with_their_input_and_key() {
             "mine": {"key": "mine-5", "input": {"n": 6}},
             "errors": [
                 "No host binding \"missing\"",
-                "claude.messages does not deduplicate: it takes no idempotency key",
+                "fetch does not deduplicate: it takes no idempotency key",
             ],
         })
     );
