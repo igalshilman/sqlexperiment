@@ -176,6 +176,19 @@ impl Workspace {
 /// Run `command` in `dir` until it exits or `timeout` passes, and then kill
 /// it with everything it started.
 async fn run(dir: &Path, command: &str, timeout: Duration) -> HandlerResult<Json<Ran>> {
+    let (exit, output) = run_command(dir, command, timeout).await?;
+    Ok(Json(Ran { exit, output }))
+}
+
+/// Run `command` with bash in `dir`, with a clean environment, until it
+/// exits or `timeout` passes, and then kill it with everything it started:
+/// its exit code (-1 if killed), and its output, stdout then stderr, cut to
+/// 30 KB.
+pub(crate) async fn run_command(
+    dir: &Path,
+    command: &str,
+    timeout: Duration,
+) -> std::io::Result<(i32, String)> {
     let child = tokio::process::Command::new("bash")
         .arg("-c")
         .arg(command)
@@ -195,21 +208,15 @@ async fn run(dir: &Path, command: &str, timeout: Duration) -> HandlerResult<Json
             let output = output?;
             let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
             text.push_str(&String::from_utf8_lossy(&output.stderr));
-            Ran {
-                exit: output.status.code().unwrap_or(-1),
-                output: clip(&text, MAX_OUTPUT),
-            }
+            (output.status.code().unwrap_or(-1), clip(&text, MAX_OUTPUT))
         }
-        Err(_) => Ran {
-            exit: -1,
-            output: format!("Killed after {} s", timeout.as_secs()),
-        },
+        Err(_) => (-1, format!("Killed after {} s", timeout.as_secs())),
     };
     if let Some(group) = group {
         // What the command left running, in its process group.
         unsafe { libc::kill(-group, libc::SIGKILL) };
     }
-    Ok(Json(ran))
+    Ok(ran)
 }
 
 /// `text`, its middle cut to keep it within `max` bytes.

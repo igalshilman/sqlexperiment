@@ -358,6 +358,12 @@
   globalThis.Headers = Headers;
   globalThis.Response = Response;
 
+  // A string, checked for the host.
+  function text(value) {
+    if (typeof value !== 'string') throw new TypeError('Expected a string');
+    validate(value);
+    return value;
+  }
   // A model call through the host's gateway (the binding `llm`): `params` is
   // a request in its format, with `<provider>/<model>` as its model.
   function complete(params) {
@@ -379,8 +385,9 @@
     const append = (messages) => hostCall('llm.append', { conversation: name, messages });
     return Object.freeze({
       name,
-      // Add `messages`, ask the model with the whole conversation and
-      // `params` (model, system, tools...), and add its answer: its response.
+      // Add `messages`, and ask the model with the whole conversation and
+      // `params` (model, system, tools...): its response, which joins the
+      // conversation.
       async send({ messages = [], ...params } = {}) {
         if (asking.has(name)) throw new Error(`The conversation ${name} is waiting for the model`);
         if (!Array.isArray(messages)) throw new TypeError('messages is an array');
@@ -391,9 +398,8 @@
         asking.add(name);
         try {
           const asked = { ...defaults, ...copy(params), conversation: name };
-          const response = await request({ kind: 'call', name: 'llm' }, asked);
-          append([{ role: 'assistant', content: response.content }]);
-          return response;
+          // The host adds the answer to the conversation as it arrives.
+          return await request({ kind: 'call', name: 'llm' }, asked);
         } finally {
           asking.delete(name);
         }
@@ -498,6 +504,26 @@
       conversation,
       // The scope's conversations' names, in the order they began.
       conversations: () => hostCall('llm.list', null),
+    }),
+    // The scope's files, checkpointed with its commits (the extension `fs`).
+    fs: Object.freeze({
+      // A file's text, or null.
+      read: (path) => hostCall('fs.read', { path: text(path) }),
+      write(path, content) {
+        hostCall('fs.write', { path: text(path), content: text(content) });
+      },
+      // Whether the file was there.
+      remove: (path) => hostCall('fs.remove', { path: text(path) }),
+      // The files' paths under `prefix`.
+      list: (prefix = '') => hostCall('fs.list', { prefix: text(prefix) }),
+      // Run `command` on the files as this turn leaves them: its exit code,
+      // its output, and the paths of the files it changed, which the files
+      // then hold. Until it is done, the files cannot change.
+      exec(command, { timeout } = {}) {
+        const input = { command: text(command) };
+        if (timeout !== undefined) input.timeout = timeout;
+        return request({ kind: 'call', name: 'fs.exec' }, callInput(input));
+      },
     }),
     sleep(ms) {
       if (!Number.isSafeInteger(ms) || ms < 0 || !Number.isSafeInteger(now + ms) || now + ms > maxTime)

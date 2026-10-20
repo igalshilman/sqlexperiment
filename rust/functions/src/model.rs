@@ -85,7 +85,7 @@ pub struct RpcTarget {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Operation {
-    /// A host binding's call, `ctx.call(name, input)` ([`crate::Bindings`]).
+    /// An extension's operation, such as `ctx.call(name, input)` ([`crate::Extensions`]).
     Call {
         id: String,
         name: String,
@@ -324,6 +324,10 @@ pub(crate) struct Commit {
     /// Pages that differ from golden.
     pub live_pages: usize,
     pub state: State,
+    /// What the commit keeps of each extension's state, by name: the
+    /// scope's, carried over from run to run.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extensions: std::collections::BTreeMap<String, Value>,
 }
 
 /// A run as of its last commit, and what that turn wrote.

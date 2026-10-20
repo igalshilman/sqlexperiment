@@ -1,4 +1,4 @@
-//! `llm`: a model gateway on the host, the binding behind `ctx.llm`. A
+//! `llm`: a model gateway on the host, the extension behind `ctx.llm`. A
 //! program asks any provider's models in one format, and the host translates,
 //! adds the provider's key, retries and caches.
 //!
@@ -15,16 +15,25 @@
 //!   output_tokens}, model}`, `stop_reason` one of `end_turn`, `tool_use`,
 //!   `max_tokens`, `refusal`.
 //!
-//! A conversation (`ctx.llm.conversation(name)`) keeps its messages in the
-//! scope's database ([`crate::db`]): the program sends only the new ones, and
-//! the host reads the history when it makes the call ([`crate::Run::input`]).
-//! So the request is in neither the program's heap nor its commit.
+//! A conversation (`ctx.llm.conversation(name)`) keeps its messages in a
+//! table of the scope's database, `llm_messages`. In a turn, the program adds
+//! its new ones (the call `llm.append`). As the host makes the model call, it
+//! reads the conversation as the commit left it; in the turn the answer
+//! arrives, it adds the answer, before the program sees it. So the request is
+//! in neither the program's heap nor its commit.
 //!
 //! A call is made at least once: again after a crash, as it was.
-use crate::{Binding, GuestError, HostCall};
-use futures::future::BoxFuture;
+use crate::{
+    Binding, GuestError, Operation, Outcome,
+    extension::{Attached, Extension, HostCall, Making, Tables},
+};
+use async_trait::async_trait;
 use serde_json::{Map, Value, json};
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 /// The output a request asks for when it does not say.
 const MAX_TOKENS: u64 = 16_000;
@@ -32,13 +41,15 @@ const MAX_TOKENS: u64 = 16_000;
 const ATTEMPTS: u32 = 8;
 
 /// How a provider's API is spoken.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone)]
 enum Api {
     /// The Messages API: `POST /v1/messages`.
     Anthropic,
     /// Chat completions: `POST /chat/completions`, as OpenAI, xAI and many
     /// others serve it.
     OpenAi,
+    /// In this process: a binding, given the request as the program sent it.
+    Local(Arc<dyn Binding>),
 }
 
 /// A model provider: where it is, how it is spoken, and its key.
@@ -71,6 +82,16 @@ impl Provider {
             api: Api::OpenAi,
             base_url: base_url.trim_end_matches('/').into(),
             key,
+        }
+    }
+
+    /// A provider in this process: `binding` answers each request, in the
+    /// gateway's format, as the program sent it (a scripted model, say).
+    pub fn local(binding: impl Binding) -> Self {
+        Self {
+            api: Api::Local(Arc::new(binding)),
+            base_url: String::new(),
+            key: None,
         }
     }
 
@@ -140,18 +161,26 @@ impl Llm {
         })?;
         let provider = (self.providers.get(name))
             .ok_or_else(|| type_error(format!("No provider {name:?}")))?;
+        if let Api::Local(binding) = &provider.api {
+            return binding
+                .call(HostCall {
+                    input: request,
+                    ..call
+                })
+                .await;
+        }
         let key = (provider.key.as_deref())
             .ok_or_else(|| GuestError::new("Error", format!("No API key for {name}")))?;
         let body = match provider.api {
             Api::Anthropic => anthropic::request(model, &request)?,
-            Api::OpenAi => openai::request(model, &request)?,
+            _ => openai::request(model, &request)?,
         };
         let response = self
             .send(provider, key, &body, &call.idempotency_key)
             .await?;
         Ok(match provider.api {
             Api::Anthropic => anthropic::response(response),
-            Api::OpenAi => openai::response(response),
+            _ => openai::response(response),
         })
     }
 
@@ -171,7 +200,7 @@ impl Llm {
                     .post(format!("{}/messages", provider.base_url))
                     .header("x-api-key", key)
                     .header("anthropic-version", "2023-06-01"),
-                Api::OpenAi => (self.http)
+                _ => (self.http)
                     .post(format!("{}/chat/completions", provider.base_url))
                     .bearer_auth(key),
             };
@@ -209,10 +238,154 @@ impl Llm {
     }
 }
 
-impl Binding for Llm {
-    /// One request: its response, in the gateway's format.
-    fn call(&self, call: HostCall) -> BoxFuture<'static, Result<Value, GuestError>> {
-        Box::pin(self.clone().complete(call))
+#[async_trait]
+impl Extension for Llm {
+    async fn attach(
+        &self,
+        _scope: &str,
+        _saved: Option<Value>,
+    ) -> anyhow::Result<Box<dyn Attached>> {
+        Ok(Box::new(Asking {
+            llm: self.clone(),
+            asked: HashMap::new(),
+        }))
+    }
+}
+
+/// The gateway in a run: the conversations its model calls ask for.
+struct Asking {
+    llm: Llm,
+    /// Each model call made in this attempt, by operation: its conversation.
+    asked: HashMap<String, String>,
+}
+
+#[async_trait]
+impl Attached for Asking {
+    /// `llm.append`, `llm.history`, `llm.list` and `llm.clear`, on the
+    /// conversations' table in the turn.
+    async fn call(
+        &mut self,
+        tables: &mut Tables<'_>,
+        op: &str,
+        input: Value,
+    ) -> Result<Value, GuestError> {
+        let named = || match input["conversation"].as_str() {
+            Some(name) if !name.is_empty() => Ok(name.to_owned()),
+            _ => Err(type_error("A conversation has a name")),
+        };
+        let answer = match op {
+            "llm.append" => {
+                let messages = (input["messages"].as_array())
+                    .ok_or_else(|| type_error("messages is an array"))?;
+                conversations::append(tables, &named()?, messages)
+                    .await
+                    .map(|()| Value::Null)
+            }
+            "llm.history" => conversations::history(tables, &named()?)
+                .await
+                .map(Value::Array),
+            "llm.list" => conversations::list(tables).await.map(Value::Array),
+            "llm.clear" => conversations::clear(tables, &named()?)
+                .await
+                .map(|()| Value::Null),
+            _ => return Err(type_error(format!("No call {op}"))),
+        };
+        answer.map_err(|error| GuestError::new("Error", format!("{error:#}")))
+    }
+
+    /// A model call: a conversation's reads its messages, as the commit left
+    /// them.
+    async fn operation(
+        &mut self,
+        mut call: HostCall,
+        tables: &mut Tables<'_>,
+    ) -> Result<Making, GuestError> {
+        if let Some(Value::String(conversation)) = call.input.get("conversation").cloned() {
+            let messages = (conversations::history(tables, &conversation).await)
+                .map_err(|error| GuestError::new("Error", format!("{error:#}")))?;
+            call.input["messages"] = Value::Array(messages);
+            call.input
+                .as_object_mut()
+                .map(|input| input.remove("conversation"));
+            self.asked.insert(call.id.clone(), conversation);
+        }
+        Ok(Box::pin(self.llm.clone().complete(call)))
+    }
+
+    /// A conversation's answer joins it, in the turn it arrives.
+    async fn delivered(
+        &mut self,
+        tables: &mut Tables<'_>,
+        operation: &Operation,
+        outcome: &mut Outcome,
+    ) -> anyhow::Result<()> {
+        let Some(conversation) = self.asked.remove(operation.id()) else {
+            return Ok(());
+        };
+        if let Outcome::Success { value, .. } = outcome {
+            let answer = json!({"role": "assistant", "content": value["content"]});
+            conversations::append(tables, &conversation, &[answer]).await?;
+        }
+        Ok(())
+    }
+}
+
+/// The conversations' table: each message of each, in order.
+mod conversations {
+    use super::*;
+    use anyhow::{Context, Result};
+
+    const TABLE: &str = "CREATE TABLE IF NOT EXISTS llm_messages(\
+        conversation TEXT NOT NULL, seq INTEGER NOT NULL, message TEXT NOT NULL, \
+        PRIMARY KEY (conversation, seq))";
+
+    pub async fn history(tables: &mut Tables<'_>, conversation: &str) -> Result<Vec<Value>> {
+        tables.execute(TABLE, &[]).await?;
+        let select = "SELECT message FROM llm_messages WHERE conversation = ? ORDER BY seq";
+        let rows = tables.query(select, &[conversation.into()]).await?;
+        (rows.iter())
+            .map(|row| {
+                Ok(serde_json::from_str(
+                    row[0].as_str().context("A message is text")?,
+                )?)
+            })
+            .collect()
+    }
+
+    pub async fn append(
+        tables: &mut Tables<'_>,
+        conversation: &str,
+        messages: &[Value],
+    ) -> Result<()> {
+        tables.execute(TABLE, &[]).await?;
+        let next = "SELECT COALESCE(MAX(seq) + 1, 0) FROM llm_messages WHERE conversation = ?";
+        let rows = tables.query(next, &[conversation.into()]).await?;
+        let next = rows[0][0].as_i64().context("No next message")?;
+        for (seq, message) in (next..).zip(messages) {
+            let insert = "INSERT INTO llm_messages VALUES (?, ?, ?)";
+            let row = [conversation.into(), seq.into(), message.to_string().into()];
+            tables.execute(insert, &row).await?;
+        }
+        Ok(())
+    }
+
+    /// The conversations' names, in the order they began.
+    pub async fn list(tables: &mut Tables<'_>) -> Result<Vec<Value>> {
+        tables.execute(TABLE, &[]).await?;
+        let select =
+            "SELECT conversation FROM llm_messages GROUP BY conversation ORDER BY MIN(rowid)";
+        Ok(tables
+            .query(select, &[])
+            .await?
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect())
+    }
+
+    pub async fn clear(tables: &mut Tables<'_>, conversation: &str) -> Result<()> {
+        tables.execute(TABLE, &[]).await?;
+        let delete = "DELETE FROM llm_messages WHERE conversation = ?";
+        tables.execute(delete, &[conversation.into()]).await
     }
 }
 

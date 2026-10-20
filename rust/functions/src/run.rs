@@ -17,6 +17,7 @@
 use crate::{
     Scope, codec,
     db::Db,
+    extension::{Attachments, HostCall, Making, Tables},
     model::*,
     program::{Program, Programs},
     vm::{self, Vm},
@@ -64,6 +65,8 @@ pub struct Run {
     /// The scope's database, this attempt's session of it, which the VM's
     /// host calls share.
     db: Arc<Mutex<Db>>,
+    /// The extensions' parts of this attempt, which the VM's host calls share.
+    extensions: Arc<Mutex<Attachments>>,
     commit: Commit,
     /// The VM, and its memory as of the last commit: restored when a delivery
     /// needs it, and dropped once the run has settled.
@@ -123,6 +126,13 @@ impl Run {
         let db = Db::new(scope.open().await?);
         let previous = load(&db)?;
         let db = Arc::new(Mutex::new(db));
+        // What the scope's last commit kept of each extension, whichever run
+        // made it.
+        let saved = (previous.as_ref())
+            .map(|commit| commit.extensions.clone())
+            .unwrap_or_default();
+        let extensions = Attachments::attach(&scope.extensions, key, &saved).await?;
+        let extensions = Arc::new(Mutex::new(extensions));
         if let Some(commit) = previous.filter(|commit| commit.run == run) {
             ensure!(
                 commit.program == program && commit.handler == handler,
@@ -134,6 +144,7 @@ impl Run {
             return Ok(Self {
                 programs: programs.clone(),
                 db,
+                extensions,
                 commit,
                 live: None,
                 last: Written::default(),
@@ -144,7 +155,7 @@ impl Run {
         let language = programs.get(program)?.language();
         let mut vm = Vm::for_image(programs.runtime(), language, &golden, run, now).await?;
         vm.restore(&golden).await?;
-        vm.attach(db.clone());
+        vm.attach(db.clone(), extensions.clone());
         let commit = Commit {
             run: run.into(),
             handler: handler.into(),
@@ -165,10 +176,12 @@ impl Run {
                 status: Status::Waiting,
                 outcome: None,
             },
+            extensions: saved,
         };
         let mut this = Self {
             programs: programs.clone(),
             db,
+            extensions,
             commit,
             live: Some(Live { vm, base: golden }),
             last: Written::default(),
@@ -271,6 +284,10 @@ impl Run {
     /// committed all the run is.
     pub fn park(&mut self) {
         self.live = None;
+        // Nothing holds the extensions between turns.
+        if let Ok(mut extensions) = self.extensions.try_lock() {
+            extensions.park();
+        }
     }
 
     /// The input of the pending call `operation` (an RPC, or a binding's
@@ -312,25 +329,51 @@ impl Run {
             },
         };
         self.usable = true;
-        let mut input = match serde_json::from_str(&answer)? {
-            Outcome::Success { value, .. } => value,
-            Outcome::Failure { error, .. } => return Ok(Err(error)),
+        Ok(match serde_json::from_str(&answer)? {
+            Outcome::Success { value, .. } => Ok(value),
+            Outcome::Failure { error, .. } => Err(error),
+        })
+    }
+
+    /// Make the pending operation `operation`, an extension's: its input
+    /// read from the heap, and what the extension reads of the commit. The
+    /// inner `Err` fails the operation, as the guest sees it.
+    pub async fn operation(&mut self, operation: &str) -> Result<Result<Making, GuestError>> {
+        let pending = self.commit.state.pending.iter();
+        let call = pending.clone().find(|p| p.id() == operation).cloned();
+        let Some(call @ Operation::Call { .. }) = call else {
+            anyhow::bail!("No pending operation {operation}");
         };
-        // A conversation's call to the model: its messages are in the
-        // scope's database, as the last commit left them.
-        let llm = (self.commit.state.pending.iter()).any(
-            |p| matches!(p, Operation::Call { id, name, .. } if id == operation && name == "llm"),
-        );
-        if let Some(Value::String(conversation)) = input.get("conversation").cloned()
-            && llm
-        {
-            let messages = self.db.lock().await.conversation(&conversation).await?;
-            input["messages"] = Value::Array(messages);
-            input
-                .as_object_mut()
-                .map(|input| input.remove("conversation"));
+        let Operation::Call { id, name, .. } = &call else {
+            unreachable!()
+        };
+        let mut extensions = self.extensions.lock().await;
+        let Some(extension) = extensions.get(name) else {
+            return Ok(Err(GuestError::new(
+                "Error",
+                format!("No extension {name:?}"),
+            )));
+        };
+        if call.idempotency_key() != id && !extension.deduplicates() {
+            let message = format!("{name} does not deduplicate: it takes no idempotency key");
+            return Ok(Err(GuestError::new("TypeError", message)));
         }
-        Ok(Ok(input))
+        drop(extensions);
+        let input = match self.input(operation).await? {
+            Ok(input) => input,
+            Err(error) => return Ok(Err(error)),
+        };
+        let host_call = HostCall {
+            id: id.clone(),
+            name: name.clone(),
+            idempotency_key: call.idempotency_key().to_owned(),
+            input,
+        };
+        let mut extensions = self.extensions.lock().await;
+        let extension = extensions.get(name).context("No extension")?;
+        let mut db = self.db.lock().await;
+        let mut tables = Tables { db: &mut db };
+        Ok(extension.operation(host_call, &mut tables).await)
     }
 
     /// The run as of its last commit.
@@ -383,14 +426,23 @@ impl Run {
         let mut vm =
             Vm::for_image(self.programs.runtime(), language, &base, &commit.run, now).await?;
         vm.restore(&base).await?;
-        vm.attach(self.db.clone());
+        vm.attach(self.db.clone(), self.extensions.clone());
         Ok(Live { vm, base })
     }
 
     /// Run the JavaScript on `delivery`, capture what changed, and commit.
     async fn turn(&mut self, delivery: Delivery, now: u64) -> Result<()> {
         let live = self.live.as_mut().context("No live VM")?;
-        let ran = match run(&mut live.vm, &self.db, &self.commit, delivery, now).await {
+        let ran = match run(
+            &mut live.vm,
+            &self.db,
+            &self.extensions,
+            &self.commit,
+            delivery,
+            now,
+        )
+        .await
+        {
             Ok(state) => live
                 .vm
                 .capture(&live.base)
@@ -398,6 +450,11 @@ impl Run {
                 .map(|capture| (state, capture)),
             Err(error) => Err(error),
         };
+        // Before the commit: each extension makes what changed durable, and
+        // the commit keeps what names it.
+        let mut extensions = self.extensions.lock().await;
+        let mut saved = self.commit.extensions.clone();
+        saved.extend(extensions.prepare().await?);
         let mut db = self.db.lock().await;
         let mut written = Written::default();
         let mut live_pages = self.commit.live_pages;
@@ -501,11 +558,15 @@ impl Run {
             delta_bytes,
             live_pages,
             state,
+            extensions: saved,
         };
         let effects = Bytes::from(json_bytes(&commit)?);
         written.commit_bytes = effects.len();
         db.commit_turn(effects, update).await?;
         drop(db);
+        // After it: what no commit names any more may go.
+        extensions.retain().await;
+        drop(extensions);
         self.commit = commit;
         self.last = written;
         match &mut self.live {
@@ -524,6 +585,7 @@ impl Run {
 async fn run(
     vm: &mut Vm,
     db: &Mutex<Db>,
+    extensions: &Mutex<Attachments>,
     commit: &Commit,
     delivery: Delivery,
     now: u64,
@@ -551,7 +613,20 @@ async fn run(
                 .await?;
         }
         Delivery::Complete(outcomes) => {
-            for (operation, outcome) in outcomes {
+            for (operation, mut outcome) in outcomes {
+                // An extension's operation: it keeps what the outcome
+                // brought, in this turn, before the guest sees it.
+                if let Some(call @ Operation::Call { name, .. }) =
+                    pending.iter().find(|pending| pending.id() == operation)
+                {
+                    let mut extensions = extensions.lock().await;
+                    if let Some(extension) = extensions.get(name) {
+                        let mut db = db.lock().await;
+                        let mut tables = Tables { db: &mut db };
+                        (extension.delivered(&mut tables, call, &mut outcome).await)
+                            .map_err(wasmtime::Error::from_anyhow)?;
+                    }
+                }
                 pending.retain(|pending| pending.id() != operation);
                 vm.invoke("deliver", &completion(&operation, outcome, now))
                     .await?;
@@ -574,18 +649,36 @@ async fn run(
         let mut answered = false;
         for operation in report.issued.iter().cloned() {
             let kv = match &operation {
-                Operation::KvGet { key, .. } => db.lock().await.kv_read(key).await,
+                Operation::KvGet { key, .. } => db.lock().await.kv_read(key).await.map(Ok),
                 Operation::KvSet { key, value, .. } => {
-                    db.lock().await.kv_write(key, Some(value)).await
+                    db.lock().await.kv_write(key, Some(value)).await.map(Ok)
                 }
-                Operation::KvDelete { key, .. } => db.lock().await.kv_write(key, None).await,
+                Operation::KvDelete { key, .. } => {
+                    db.lock().await.kv_write(key, None).await.map(Ok)
+                }
+                // An extension's operation, which it may refuse now.
+                Operation::Call { name, .. } => {
+                    let refused = match extensions.lock().await.get(name) {
+                        Some(extension) => extension.issued(&operation).err(),
+                        None => None,
+                    };
+                    match refused {
+                        Some(error) => Ok(Err(error)),
+                        None => {
+                            pending.push(operation);
+                            continue;
+                        }
+                    }
+                }
                 _ => {
                     pending.push(operation);
                     continue;
                 }
             };
-            let value = kv.map_err(wasmtime::Error::from_anyhow)?;
-            let outcome = Outcome::success(value);
+            let outcome = match kv.map_err(wasmtime::Error::from_anyhow)? {
+                Ok(value) => Outcome::success(value),
+                Err(error) => Outcome::failure(error.name, error.message),
+            };
             vm.invoke("deliver", &completion(operation.id(), outcome, now))
                 .await?;
             answered = true;

@@ -14,7 +14,7 @@
 //! | `ctx` request              | The handler waits on                                          |
 //! | -------------------------- | ------------------------------------------------------------- |
 //! | `ctx.rpc.call(target, x)`  | A call to `target`, under the request's idempotency key       |
-//! | `ctx.call(name, x)`        | The host binding `name` ([`crate::Bindings`]), called here    |
+//! | `ctx.call(name, x)`, ...   | The extension `name`'s operation ([`crate::Extensions`])      |
 //! | `ctx.sleep(ms)`            | A timer, until the request's deadline                         |
 //! | `ctx.signal(name, x)`      | A wait in `function_signals`, which `signal` resolves         |
 //! | `ctx.kv.*`, `ctx.db.*`     | Nothing: answered in the turn, from the object's database    |
@@ -38,8 +38,8 @@
 //! wait for, and `signal`, which gives one: by its wait's id, or else to the
 //! oldest wait for its name ([`crate::Signal`]).
 use crate::{
-    Binding, Bindings, Budget, FunctionSignals, HostCall, Operation, Outcome, Programs, Run,
-    Runtime, Scope, Signal, Waiting as Wait, signals::FunctionSignalsClient, signals_of, vm,
+    Budget, Extensions, FunctionSignals, Making, Operation, Outcome, Programs, Run, Runtime, Scope,
+    Signal, Waiting as Wait, signals::FunctionSignalsClient, signals_of, vm,
 };
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use restate_sdk::{
@@ -101,7 +101,7 @@ pub struct JsObject {
     cache: PageCache,
     /// The memory live runs may hold.
     budget: Arc<Budget>,
-    bindings: Bindings,
+    extensions: Extensions,
 }
 
 /// A request the handler waits on: its outcome, and the time to deliver it at.
@@ -243,7 +243,8 @@ impl JsObject {
         // writer meanwhile, so what it read or wrote stays true.
         let store = Arc::new(StateQueue::new(ctx.raw_state()));
         let namespace = format!("{}/{}", self.program, ctx.key());
-        let scope = Scope::new(store.clone()).cached(self.cache.namespace(&namespace));
+        let scope = (Scope::new(store.clone()).cached(self.cache.namespace(&namespace)))
+            .extended(self.extensions.clone());
         // Each turn first reserves what it may take; then the run holds its
         // memory until it parks.
         let mut lease = self.budget.lease();
@@ -315,23 +316,10 @@ impl JsObject {
                         .map_err(|error| failed(&store, error))?
                         .map(|input| Made::Waiting(rpc(ctx, operation, target, input)))
                         .map_err(|error| Outcome::failure(error.name, error.message)),
-                    Operation::Call { name, .. } => match self.bindings.get(name) {
-                        None => Err(Outcome::failure(
-                            "Error",
-                            format!("No host binding {name:?}"),
-                        )),
-                        Some(binding)
-                            if operation.idempotency_key() != id && !binding.deduplicates() =>
-                        {
-                            let message =
-                                format!("{name} does not deduplicate: it takes no idempotency key");
-                            Err(Outcome::failure("TypeError", message))
-                        }
-                        Some(binding) => (run.input(id).await)
-                            .map_err(|error| failed(&store, error))?
-                            .map(|input| Made::Calling(call(&**binding, operation, input)))
-                            .map_err(|error| Outcome::failure(error.name, error.message)),
-                    },
+                    Operation::Call { .. } => (run.operation(id).await)
+                        .map_err(|error| failed(&store, error))?
+                        .map(|making| Made::Calling(calling(id, making)))
+                        .map_err(|error| Outcome::failure(error.name, error.message)),
                     // Answered in the turn: never pending.
                     Operation::KvGet { .. }
                     | Operation::KvSet { .. }
@@ -467,17 +455,11 @@ fn rpc<'ctx>(
     Box::pin(call)
 }
 
-/// A call of `binding` with `input`, the guest's `operation`: made here, under
-/// the operation's idempotency key.
-fn call(binding: &dyn Binding, operation: &Operation, input: Value) -> Calling {
-    let id = operation.id().to_owned();
-    let call = binding.call(HostCall {
-        id: id.clone(),
-        idempotency_key: operation.idempotency_key().to_owned(),
-        input,
-    });
+/// An extension's operation, made: its outcome, as the guest sees it.
+fn calling(id: &str, making: Making) -> Calling {
+    let id = id.to_owned();
     Box::pin(async move {
-        let outcome = match call.await {
+        let outcome = match making.await {
             Ok(value) => Outcome::success(value),
             Err(error) => Outcome::failure(error.name, error.message),
         };
@@ -583,13 +565,13 @@ mod shipped {
 /// `function_signals`, which keeps their waits for signals.
 /// The objects share `cache`, which keeps the scopes this process owns, and
 /// `budget`, the memory their live runs may hold; they offer their programs
-/// `bindings`.
+/// `extensions`.
 pub fn bind(
     mut builder: restate_sdk::endpoint::Builder,
     programs: &Arc<Programs>,
     cache: &PageCache,
     budget: &Arc<Budget>,
-    bindings: &Bindings,
+    extensions: &Extensions,
 ) -> anyhow::Result<restate_sdk::endpoint::Builder> {
     for name in programs.names() {
         let object = JsObject {
@@ -597,7 +579,7 @@ pub fn bind(
             programs: programs.clone(),
             cache: cache.clone(),
             budget: budget.clone(),
-            bindings: bindings.clone(),
+            extensions: extensions.clone(),
         };
         let mut options = ServiceOptions::new()
             .journal_replay(false)
@@ -613,16 +595,18 @@ pub fn bind(
     Ok(builder.bind(FunctionSignals))
 }
 
-/// An endpoint serving `programs`, with `fetch` under
-/// [`crate::FetchPolicy::from_env`], and [`crate::Workspace`] for them to
-/// call.
+/// An endpoint serving `programs`, with the extensions `fetch` (under
+/// [`crate::FetchPolicy::from_env`]), `llm` and `fs`, and
+/// [`crate::Workspace`] for them to call.
 pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
     let budget = Budget::from_env()?;
     let fetch = crate::Fetch::new(crate::FetchPolicy::from_env());
-    let bindings = (Bindings::new().with("fetch", fetch)).with("llm", crate::Llm::from_env());
+    let extensions = (Extensions::new().with("fetch", fetch))
+        .with("llm", crate::Llm::from_env())
+        .with("fs", crate::Files::from_env()?);
     let cache = page_cache().await?;
     Ok(
-        bind(Endpoint::builder(), programs, &cache, &budget, &bindings)?
+        bind(Endpoint::builder(), programs, &cache, &budget, &extensions)?
             .bind(crate::Workspace::from_env())
             .build(),
     )

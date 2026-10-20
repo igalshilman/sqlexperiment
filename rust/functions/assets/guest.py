@@ -341,9 +341,9 @@ class Conversation:
         return self._bridge.host(operation, {"conversation": self.name, **request})
 
     async def send(self, *messages, **params):
-        """Add `messages`, ask the model with the whole conversation and
-        `params` (over the conversation's defaults), and add its answer:
-        its response."""
+        """Add `messages`, and ask the model with the whole conversation and
+        `params` (over the conversation's defaults): its response, which joins
+        the conversation."""
         if self.name in self._bridge.asking:
             raise RuntimeError(f"The conversation {self.name} is waiting for the model")
         for message in messages:
@@ -353,9 +353,8 @@ class Conversation:
         self._bridge.asking.add(self.name)
         try:
             asked = {**self._defaults, **_plain(params), "conversation": self.name}
-            response = await self._bridge.request({"kind": "call", "name": "llm"}, asked)
-            self._host("llm.append", messages=[{"role": "assistant", "content": response["content"]}])
-            return response
+            # The host adds the answer to the conversation as it arrives.
+            return await self._bridge.request({"kind": "call", "name": "llm"}, asked)
         finally:
             self._bridge.asking.discard(self.name)
 

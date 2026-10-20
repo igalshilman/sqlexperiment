@@ -3,7 +3,7 @@
 //! `cargo test`, which has no server.
 mod fakes;
 
-use functions::{Binding, Bindings, GuestError, HostCall, Programs, Runtime};
+use functions::{Binding, Extensions, GuestError, HostCall, Llm, Programs, Provider, Runtime};
 use futures::future::BoxFuture;
 use restate_sdk::prelude::*;
 use serde_json::{Value, json};
@@ -47,6 +47,7 @@ impl Doubler {
 
 /// A binding that answers each call, after 200 ms, with its key and input,
 /// and records the call.
+#[derive(Clone)]
 struct Record;
 
 /// Every call `Record` was made: its ID, key and input.
@@ -176,9 +177,8 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .unwrap()
         .port();
     let cache = functions::page_cache().await.unwrap();
-    let bindings = Bindings::new()
-        .with("llm", fakes::Claude)
-        .with("record", Record);
+    let llm = Llm::new().provider("anthropic", Provider::local(fakes::Claude));
+    let bindings = Extensions::new().with("llm", llm).with("record", Record);
     let budget = functions::Budget::from_env().unwrap();
     let endpoint = functions::bind(Endpoint::builder(), programs, &cache, &budget, &bindings)
         .unwrap()
@@ -538,7 +538,7 @@ async fn bindings_are_called_with_their_input_and_key() {
             "first": {"key": first, "input": {"n": 5}},
             "mine": {"key": "mine-5", "input": {"n": 6}},
             "errors": [
-                "No host binding \"missing\"",
+                "No extension \"missing\"",
                 "llm does not deduplicate: it takes no idempotency key",
             ],
         })

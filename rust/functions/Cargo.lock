@@ -1188,6 +1188,7 @@ name = "functions"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "bytes",
  "futures",
@@ -1198,6 +1199,7 @@ dependencies = [
  "restate-sdk",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlite-kv",
  "tempfile",
  "tokio",

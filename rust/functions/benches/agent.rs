@@ -10,11 +10,34 @@
 //! to read it, the time of the step's two turns (the model's answer in, the
 //! tool's result in), and what the step stored.
 use anyhow::{Result, bail, ensure};
-use functions::{Operation, Outcome, Programs, Run, Runtime, Scope, Status};
+use functions::{
+    Binding, Extensions, GuestError, HostCall, Llm, Operation, Outcome, Programs, Provider, Run,
+    Runtime, Scope, Status,
+};
+use futures::future::BoxFuture;
 use futures_executor::block_on as block;
 use serde_json::{Value, json};
 use sqlite_kv::simulation::MemoryKv;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
+/// The scripted model, as the gateway's provider `anthropic`: it answers
+/// with `next`, and keeps the size of the request it was sent.
+#[derive(Clone, Default)]
+struct Scripted {
+    next: Arc<Mutex<Value>>,
+    request: Arc<Mutex<usize>>,
+}
+
+impl Binding for Scripted {
+    fn call(&self, call: HostCall) -> BoxFuture<'static, Result<Value, GuestError>> {
+        *self.request.lock().unwrap() = serde_json::to_vec(&call.input).unwrap().len();
+        let answer = self.next.lock().unwrap().clone();
+        Box::pin(async move { Ok(answer) })
+    }
+}
 
 const STEPS: usize = 300;
 const RESTORE_EVERY: usize = 25;
@@ -28,7 +51,9 @@ fn main() -> Result<()> {
     let runtime = Arc::new(Runtime::new()?);
     let programs = Arc::new(Programs::new(runtime).compile("coder", source)?);
     let store = MemoryKv::default();
-    let scope = Scope::new(Arc::new(store.clone()));
+    let model = Scripted::default();
+    let llm = Llm::new().provider("anthropic", Provider::local(model.clone()));
+    let scope = Scope::new(Arc::new(store.clone())).extended(Extensions::new().with("llm", llm));
     let start = |now| {
         let task = json!({"task": "Refactor the parser"});
         block(Run::start(
@@ -57,11 +82,14 @@ fn main() -> Result<()> {
             let operation = view.state.pending[0].clone();
             let answer = match &operation {
                 Operation::Call { id, name, .. } if name == "llm" => {
+                    *model.next.lock().unwrap() = session.model(step);
                     let started = Instant::now();
-                    let input = block(run.input(id))?.map_err(|e| anyhow::anyhow!(e.message))?;
+                    let making =
+                        block(run.operation(id))?.map_err(|e| anyhow::anyhow!(e.message))?;
                     read_ms = started.elapsed().as_secs_f64() * 1000.0;
-                    request = serde_json::to_vec(&input)?.len();
-                    session.model(step)
+                    let answer = block(making).map_err(|e| anyhow::anyhow!(e.message))?;
+                    request = *model.request.lock().unwrap();
+                    answer
                 }
                 Operation::Rpc { target, .. } => session.tool(&target.handler),
                 _ => bail!("Step {step}: unexpected request {operation:?}"),

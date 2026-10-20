@@ -3,6 +3,7 @@
 //! one commit of it: the run's state as the record's effects, the pages the
 //! turn changed as a value of its chain, and the KV writes as SQL, in one put.
 //! Writes may land in any order; a write counts once it is acknowledged.
+use crate::extension::Extensions;
 use anyhow::Result;
 use sqlite_kv::{Durability, NamespaceCache, Session, StorageOptions, kv::KvStore};
 use std::sync::Arc;
@@ -14,11 +15,21 @@ use std::sync::Arc;
 pub struct Scope {
     store: Arc<dyn KvStore>,
     cache: Option<NamespaceCache>,
+    pub(crate) extensions: Extensions,
 }
 
 impl Scope {
     pub fn new(store: Arc<dyn KvStore>) -> Self {
-        Self { store, cache: None }
+        Self {
+            store,
+            cache: None,
+            extensions: Extensions::new(),
+        }
+    }
+
+    /// The same scope, its runs offered `extensions`.
+    pub fn extended(self, extensions: Extensions) -> Self {
+        Self { extensions, ..self }
     }
 
     /// The same scope, kept in `cache` between attempts.

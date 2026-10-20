@@ -2,7 +2,10 @@
 //! a driver that answers a run's requests until it settles.
 #![allow(dead_code)]
 use anyhow::Result;
-use functions::{Language, Limits, Operation, Outcome, Programs, Run, Runtime, Scope, View};
+use functions::{
+    Extensions, GuestError, Language, Limits, Operation, Outcome, Programs, Run, Runtime, Scope,
+    View,
+};
 use serde_json::{Value, json};
 use sqlite_kv::{Session, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
 use std::{
@@ -213,4 +216,62 @@ pub fn finish(run: &mut Run) -> Result<View> {
         step(run)?;
     }
     Ok(run.view())
+}
+
+/// An attempt at run "r" of `catalog`'s program "v1", `main(input)`, in
+/// `store`, offered `extensions`: the run started, or the one its last
+/// commit holds.
+pub async fn attempt(
+    store: &Store,
+    catalog: &Arc<Programs>,
+    input: Value,
+    extensions: &Extensions,
+) -> Run {
+    let scope = store.scope().extended(extensions.clone());
+    Run::start(catalog, &scope, "s", "r", "v1", "main", input, 1)
+        .await
+        .unwrap()
+}
+
+/// Make the extension's operation `id`, as the host would: its outcome.
+pub async fn make(run: &mut Run, id: &str) -> Result<Value, GuestError> {
+    run.operation(id).await.unwrap()?.await
+}
+
+/// Run `main(input)` as [`attempt`] does, making its first pending
+/// operation and delivering it (a timer at its deadline), until the run
+/// settles: its value, or `{"failed": message}`.
+pub async fn drive(
+    store: &Store,
+    catalog: &Arc<Programs>,
+    input: Value,
+    extensions: &Extensions,
+) -> Value {
+    let mut run = attempt(store, catalog, input, extensions).await;
+    settle(&mut run).await
+}
+
+/// Make and deliver `run`'s first pending operation, until it settles.
+pub async fn settle(run: &mut Run) -> Value {
+    loop {
+        let view = run.view();
+        if let Some(outcome) = view.state.outcome {
+            return match outcome {
+                Outcome::Success { value, .. } => value,
+                Outcome::Failure { error, .. } => json!({"failed": error.message}),
+            };
+        }
+        let operation = view.state.pending[0].clone();
+        let (outcome, now) = match &operation {
+            Operation::Sleep { deadline, .. } => (Outcome::success(Value::Null), *deadline),
+            _ => match make(run, operation.id()).await {
+                Ok(value) => (Outcome::success(value), view.state.now + 1),
+                Err(error) => (
+                    Outcome::failure(error.name, error.message),
+                    view.state.now + 1,
+                ),
+            },
+        };
+        run.deliver(operation.id(), outcome, now).await.unwrap();
+    }
 }

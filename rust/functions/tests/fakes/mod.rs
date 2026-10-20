@@ -6,6 +6,7 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Mutex;
 
+#[derive(Clone)]
 pub struct Claude;
 
 /// Every request the fake was sent, in order, its conversation's messages

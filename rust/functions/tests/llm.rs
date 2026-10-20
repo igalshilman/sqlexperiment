@@ -3,10 +3,8 @@
 //! conversations kept in the scope's database.
 mod common;
 
-use common::{Store, catalog, programs};
-use functions::{
-    Binding, GuestError, HostCall, Language, Llm, Operation, Outcome, Programs, Provider, Run,
-};
+use common::{Store, attempt, catalog, make, programs};
+use functions::{Extensions, Language, Llm, Programs, Provider};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -185,53 +183,14 @@ export async function main({ model }, ctx) {
 }
 "#;
 
-/// Run `main(input)` of `catalog`'s program in `store`, making its model
-/// calls with `llm`, until it settles: its outcome.
+/// Run `main(input)` of `catalog`'s program in `store`, with `llm` as its
+/// extension `llm`, until it settles: its outcome.
 async fn drive(store: &Store, catalog: &Arc<Programs>, input: Value, llm: &Llm) -> Value {
-    let mut run = attempt(store, catalog, input).await;
-    loop {
-        let view = run.view();
-        if let Some(outcome) = view.state.outcome {
-            return match outcome {
-                Outcome::Success { value, .. } => value,
-                Outcome::Failure { error, .. } => json!({"failed": error.message}),
-            };
-        }
-        let id = view.state.pending[0].id().to_owned();
-        let outcome = match ask(&mut run, &id, llm).await {
-            Ok(value) => Outcome::success(value),
-            Err(error) => Outcome::failure(error.name, error.message),
-        };
-        run.deliver(&id, outcome, view.state.now + 1).await.unwrap();
-    }
+    common::drive(store, catalog, input, &offered(llm)).await
 }
 
-async fn attempt(store: &Store, catalog: &Arc<Programs>, input: Value) -> Run {
-    Run::start(catalog, &store.scope(), "s", "r", "v1", "main", input, 1)
-        .await
-        .unwrap()
-}
-
-/// Make the model call `id`, as the host would: its input read, then sent.
-async fn ask(run: &mut Run, id: &str, llm: &Llm) -> Result<Value, GuestError> {
-    let operation = run
-        .view()
-        .state
-        .pending
-        .iter()
-        .find(|p| p.id() == id)
-        .cloned();
-    let Some(Operation::Call { name, .. }) = operation else {
-        panic!("Expected a model call, not {operation:?}");
-    };
-    assert_eq!(name, "llm");
-    let input = run.input(id).await.unwrap()?;
-    let call = HostCall {
-        id: id.into(),
-        idempotency_key: id.into(),
-        input,
-    };
-    llm.call(call).await
+fn offered(llm: &Llm) -> Extensions {
+    Extensions::new().with("llm", llm.clone())
 }
 
 #[tokio::test]
@@ -321,9 +280,9 @@ async fn a_call_is_made_again_after_a_crash_from_the_history() {
     let input = json!({"model": "anthropic/claude-test"});
     // The first call is made, and the attempt crashes before its answer
     // commits.
-    let mut run = attempt(&store, &catalog, input.clone()).await;
+    let mut run = attempt(&store, &catalog, input.clone(), &offered(&llm)).await;
     let id = run.view().state.pending[0].id().to_owned();
-    ask(&mut run, &id, &llm).await.unwrap();
+    make(&mut run, &id).await.unwrap();
     drop(run);
 
     let done = drive(&store, &catalog, input, &llm).await;
