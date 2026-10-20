@@ -144,6 +144,7 @@ fn programs() -> Arc<Programs> {
                 .and_then(|p| p.compile("host", HOST))
                 .and_then(|p| p.compile("keyed", KEYED))
                 .and_then(|p| p.compile("approvals", APPROVALS))
+                .and_then(|p| p.compile_python("approvals_py", APPROVALS_PY))
                 .unwrap();
             Arc::new(programs)
         })
@@ -293,6 +294,12 @@ export async function both(_, ctx) {
   return await Promise.all([ctx.signal('vote', 1), ctx.signal('vote', 2)]);
 }"#;
 
+const APPROVALS_PY: &str = r#"
+async def refund(order, ctx):
+    verdict = await ctx.signal("approval", {"order": order})
+    return {"verdict": verdict}
+"#;
+
 /// Send `body` to `path` without waiting: the invocation's id.
 async fn send(path: &str, body: Value) -> String {
     let (status, sent) = call(&format!("{path}/send"), body).await;
@@ -383,6 +390,25 @@ async fn a_run_waits_for_a_signal_from_outside() {
         assert!(resolved["resolved"].is_string(), "{resolved}");
     }
     assert_eq!(attach(&both).await, (200, json!(["first", "second"])));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-functions"]
+async fn a_python_run_waits_for_a_signal() {
+    let _server = server().await;
+    serve().await;
+
+    let refund = send("approvals_py/erin/refund", json!("105")).await;
+    let [wait] = &waits("approvals_py/erin", |w| !w.is_empty()).await[..] else {
+        unreachable!()
+    };
+    assert_eq!(wait["input"], json!({"order": "105"}));
+    let approve = json!({"name": "approval", "value": "approved"});
+    assert_eq!(
+        call("approvals_py/erin/signal", approve).await,
+        (200, json!({"resolved": wait["id"]}))
+    );
+    assert_eq!(attach(&refund).await, (200, json!({"verdict": "approved"})));
 }
 
 #[tokio::test(flavor = "multi_thread")]
