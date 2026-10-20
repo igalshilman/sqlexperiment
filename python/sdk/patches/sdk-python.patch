@@ -965,10 +965,10 @@ index cecd90f..26736b9 100644
              return wrapped
 diff --git a/python/restate/sql.py b/python/restate/sql.py
 new file mode 100644
-index 0000000..b0788bb
+index 0000000..a933e79
 --- /dev/null
 +++ b/python/restate/sql.py
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,660 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -1237,6 +1237,28 @@ index 0000000..b0788bb
 +
 +    def sync(self) -> Awaitable[Any]:
 +        return self._host.sql_sync()
++
++
++class ReaderStore:
++    """
++    The object's state as a shared handler's store: it reads, beside the
++    exclusive handler that writes, and writes nothing.
++    """
++
++    def __init__(self, host: SqlHost) -> None:
++        self._host = host
++
++    def get(self, key: str) -> Awaitable[Optional[bytes]]:
++        return self._host.sql_get(key)
++
++    def set(self, key: str, value: bytes) -> None:
++        raise TerminalError("a shared handler writes no state: ctx.db is read-only here")
++
++    def clear(self, key: str) -> None:
++        raise TerminalError("a shared handler writes no state: ctx.db is read-only here")
++
++    async def sync(self) -> None:
++        pass
 +
 +
 +# A transaction's sends commit with it, in the database's commit record (its
@@ -1508,10 +1530,14 @@ index 0000000..b0788bb
 +            self._session.add_done_callback(lambda f: f.cancelled() or f.exception())
 +        return await asyncio.shield(self._session)
 +
++    def _reader(self) -> bool:
++        """Whether this is a shared handler's session: it reads beside the exclusive one, and stores nothing."""
++        return self._host.sql_handler_kind == "shared"
++
 +    async def _start(self) -> Any:
 +        host = self._host
-+        if host.sql_handler_kind != "exclusive":
-+            raise TerminalError("ctx.db is for exclusive object handlers")
++        if host.sql_handler_kind not in ("exclusive", "shared"):
++            raise TerminalError("ctx.db is for the handlers of objects")
 +        if host.sql_journal_replay:
 +            raise TerminalError(
 +                "ctx.db needs the object's options to include restate.sql_options "
@@ -1521,11 +1547,11 @@ index 0000000..b0788bb
 +            import sqlite_kv  # pylint: disable=import-outside-toplevel
 +        except ImportError as error:
 +            raise TerminalError(f"ctx.db needs the sqlite-kv package installed: {error}") from error
-+        store: SqlStore = ObjectStore(host)
++        store: SqlStore = ReaderStore(host) if self._reader() else ObjectStore(host)
 +        if _wrap_store is not None:
 +            store = _wrap_store(store)
 +        try:
-+            db = await sqlite_kv.open(host.sql_namespace, store)
++            db = await sqlite_kv.open(host.sql_namespace, store, reader=self._reader())
 +        except Exception as error:  # pylint: disable=broad-exception-caught
 +            _reraise(error, self.classify)
 +        self._db = db
@@ -1533,6 +1559,14 @@ index 0000000..b0788bb
 +        # (a model request, say) keeps the session no longer: it closes once
 +        # no statement runs, and the handler's later calls fail.
 +        self._cancel = host.sql_on_attempt_end(lambda: _close_soon(db))
++        if self._reader():
++            # Its writes would stay its own, and vanish: a write statement fails instead.
++            try:
++                await db.execute("PRAGMA query_only = 1")
++            except BaseException:
++                await db.close()
++                raise
++            return db
 +        try:
 +            # What a crash may have left unmade.
 +            for outgoing in _decode_outbox(await db.effects()):
@@ -1557,6 +1591,16 @@ index 0000000..b0788bb
 +            # The open failed, and its error went to the call that made it.
 +            return
 +        self._cancel()
++        if self._reader():
++            # What it read is the stored state only if no commit came since.
++            try:
++                current = await db.is_current()
++            except Exception:  # pylint: disable=broad-exception-caught
++                current = False
++            await db.close()
++            if not current and not failed:
++                raise RuntimeError("the object's database changed while this shared handler read it: retrying")
++            return
 +        if failed:
 +            # The handler's error stands: what it committed is stored, and an
 +            # outbox left full is made again by the next open.
@@ -2268,10 +2312,10 @@ index 0000000..7f2296c
 +    assert len(vm.tasks) == 2
 diff --git a/tests/sql_attempt.py b/tests/sql_attempt.py
 new file mode 100644
-index 0000000..4da0efe
+index 0000000..aec5063
 --- /dev/null
 +++ b/tests/sql_attempt.py
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,353 @@
 +#
 +#  Copyright (c) 2023-2025 - Restate Software, Inc., Restate GmbH
 +#
@@ -2579,14 +2623,43 @@ index 0000000..4da0efe
 +    assert await outbox(host.store()) == []
 +
 +
-+async def test_ctx_db_is_for_exclusive_handlers_without_journal_replay():
++async def test_ctx_db_is_for_object_handlers_without_journal_replay():
 +    for host, message in [
-+        (FakeHost({}, fresh(), kind="shared"), "exclusive object handlers"),
-+        (FakeHost({}, fresh(), kind=None), "exclusive object handlers"),
++        (FakeHost({}, fresh(), kind=None), "the handlers of objects"),
 +        (FakeHost({}, fresh(), replay=True), "restate.sql_options"),
 +    ]:
 +        with pytest.raises(TerminalError, match=message):
 +            await run(host, lambda a: a.db.query("SELECT 1"))
++
++
++async def test_a_shared_handler_reads_the_stored_database_and_writes_nothing():
++    writer = FakeHost({}, fresh())
++
++    async def write(attempt: SqlAttempt) -> None:
++        await attempt.db.execute("CREATE TABLE t(n INTEGER)")
++        await attempt.db.execute("INSERT INTO t VALUES (1)")
++
++    await run(writer, write)
++    reader = FakeHost(writer.store(), fresh(), kind="shared")
++    assert await run(reader, lambda a: a.db.query("SELECT n FROM t")) == [[1]]
++    assert reader.log == []
++    with pytest.raises(TerminalError, match="write statement in query_only mode"):
++        await run(FakeHost(writer.store(), fresh(), kind="shared"), lambda a: a.db.execute("INSERT INTO t VALUES (2)"))
++
++
++async def test_a_shared_handler_that_read_beside_a_commit_is_retried():
++    writer = FakeHost({}, fresh())
++    await run(writer, lambda a: a.db.execute("CREATE TABLE t(n INTEGER)"))
++    state = writer.store()
++    reader = FakeHost(state, fresh(), kind="shared")
++    attempt = SqlAttempt(reader)
++    assert await attempt.db.query("SELECT count(*) FROM t") == [[0]]
++    # An exclusive handler commits meanwhile, to the same stored state.
++    again = FakeHost(state, fresh())
++    await run(again, lambda a: a.db.execute("INSERT INTO t VALUES (1)"))
++    state.update(again.store())
++    with pytest.raises(RuntimeError, match="changed while this shared handler read it"):
++        await attempt.end(failed=False)
 +
 +
 +async def test_the_session_is_closed_once_the_handler_ends():
