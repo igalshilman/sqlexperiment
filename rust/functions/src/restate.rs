@@ -619,7 +619,7 @@ pub fn bind(
 pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
     let budget = Budget::from_env()?;
     let fetch = crate::Fetch::new(crate::FetchPolicy::from_env());
-    let bindings = Bindings::new().with("fetch", fetch);
+    let bindings = (Bindings::new().with("fetch", fetch)).with("llm", crate::Llm::from_env());
     let cache = page_cache().await?;
     Ok(
         bind(Endpoint::builder(), programs, &cache, &budget, &bindings)?

@@ -312,10 +312,25 @@ impl Run {
             },
         };
         self.usable = true;
-        Ok(match serde_json::from_str(&answer)? {
-            Outcome::Success { value, .. } => Ok(value),
-            Outcome::Failure { error, .. } => Err(error),
-        })
+        let mut input = match serde_json::from_str(&answer)? {
+            Outcome::Success { value, .. } => value,
+            Outcome::Failure { error, .. } => return Ok(Err(error)),
+        };
+        // A conversation's call to the model: its messages are in the
+        // scope's database, as the last commit left them.
+        let llm = (self.commit.state.pending.iter()).any(
+            |p| matches!(p, Operation::Call { id, name, .. } if id == operation && name == "llm"),
+        );
+        if let Some(Value::String(conversation)) = input.get("conversation").cloned()
+            && llm
+        {
+            let messages = self.db.lock().await.conversation(&conversation).await?;
+            input["messages"] = Value::Array(messages);
+            input
+                .as_object_mut()
+                .map(|input| input.remove("conversation"));
+        }
+        Ok(Ok(input))
     }
 
     /// The run as of its last commit.

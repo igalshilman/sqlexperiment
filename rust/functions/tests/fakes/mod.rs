@@ -1,6 +1,6 @@
-//! A scripted Claude, as a `fetch` binding for tests: it answers each Messages
-//! API request by the steps the conversation has taken, as the shop
-//! assistant or, offered `bash`, as the coding agent.
+//! A scripted Claude, as the `llm` binding for tests: it answers each request
+//! in the gateway's format by the steps the conversation has taken, as the
+//! shop assistant or, offered `bash`, as the coding agent.
 use functions::{Binding, GuestError, HostCall};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -8,15 +8,14 @@ use std::sync::Mutex;
 
 pub struct Claude;
 
-/// Every Messages API request the fake was sent, in order: its JSON.
+/// Every request the fake was sent, in order, its conversation's messages
+/// read from the scope.
 pub static REQUESTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 
 impl Binding for Claude {
     fn call(&self, call: HostCall) -> BoxFuture<'static, Result<Value, GuestError>> {
-        let fetched = call.input;
-        assert_eq!(fetched["url"], "https://api.anthropic.com/v1/messages");
-        assert_eq!(fetched["method"], "POST");
-        let request = fetched["json"].clone();
+        let request = call.input;
+        assert!(request["model"].as_str().unwrap().starts_with("anthropic/"));
         REQUESTS.lock().unwrap().push(request.clone());
         let messages = request["messages"].as_array().unwrap();
         let codes = request["tools"][0]["name"] == "bash";
@@ -31,14 +30,6 @@ impl Binding for Claude {
             "model": request["model"],
             "content": content,
             "stop_reason": stop_reason,
-        });
-        let response = json!({
-            "status": 200,
-            "statusText": "OK",
-            "url": fetched["url"],
-            "redirected": false,
-            "headers": [["content-type", "application/json"]],
-            "body": response.to_string(),
         });
         Box::pin(async move { Ok(response) })
     }

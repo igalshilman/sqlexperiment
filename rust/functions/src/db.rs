@@ -21,6 +21,10 @@ use sqlite_kv::{Session, Value as SqlValue};
 
 /// The scope's KV, a table of its database: values are JSON.
 const KV_TABLE: &str = "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL)";
+/// The conversations of `ctx.llm` ([`crate::Llm`]): each message, in order.
+const LLM_TABLE: &str = "CREATE TABLE IF NOT EXISTS llm_messages(\
+    conversation TEXT NOT NULL, seq INTEGER NOT NULL, message TEXT NOT NULL, \
+    PRIMARY KEY (conversation, seq))";
 /// Statements that would end or nest the turn's transaction.
 const TRANSACTION_CONTROL: [&str; 6] =
     ["begin", "commit", "end", "rollback", "savepoint", "release"];
@@ -36,6 +40,8 @@ pub struct Db {
     began: bool,
     /// Whether this session made sure the KV table exists.
     kv_table: bool,
+    /// Whether this session made sure the conversations' table exists.
+    llm_table: bool,
     /// Savepoints `ctx.db.transaction` holds open, innermost last.
     savepoints: u32,
 }
@@ -46,6 +52,7 @@ impl Db {
             session,
             began: false,
             kv_table: false,
+            llm_table: false,
             savepoints: 0,
         }
     }
@@ -135,6 +142,53 @@ impl Db {
         Ok(Value::Null)
     }
 
+    async fn llm_table(&mut self) -> Result<()> {
+        self.begin().await?;
+        if !self.llm_table {
+            self.internal(LLM_TABLE).await?;
+            self.llm_table = true;
+        }
+        Ok(())
+    }
+
+    /// The messages of `conversation`, in order, as this turn sees them.
+    pub async fn conversation(&mut self, conversation: &str) -> Result<Vec<Value>> {
+        self.llm_table().await?;
+        let select = "SELECT message FROM llm_messages WHERE conversation = ? ORDER BY seq";
+        let name = SqlValue::build_text(conversation.to_owned());
+        let rows = self.session.query_with(select, [name]).await.map_err(sql)?;
+        (rows.iter())
+            .map(|row| match row.first() {
+                Some(SqlValue::Text(text)) => Ok(serde_json::from_str(text.as_str())?),
+                _ => bail!("A conversation's message is not text"),
+            })
+            .collect()
+    }
+
+    /// Add `messages` to `conversation`, after its last, in this turn.
+    async fn append(&mut self, conversation: &str, messages: &[Value]) -> Result<()> {
+        self.llm_table().await?;
+        let name = || SqlValue::build_text(conversation.to_owned());
+        let next = "SELECT COALESCE(MAX(seq) + 1, 0) FROM llm_messages WHERE conversation = ?";
+        let rows = self.session.query_with(next, [name()]).await.map_err(sql)?;
+        let Some(SqlValue::Numeric(sqlite_kv::Numeric::Integer(mut seq))) =
+            rows.first().and_then(|row| row.first()).cloned()
+        else {
+            bail!("No next message");
+        };
+        for message in messages {
+            let message = SqlValue::build_text(serde_json::to_string(message)?);
+            let insert = "INSERT INTO llm_messages VALUES (?, ?, ?)";
+            let params = [name(), SqlValue::from_i64(seq), message];
+            self.session
+                .execute_with(insert, params)
+                .await
+                .map_err(sql)?;
+            seq += 1;
+        }
+        Ok(())
+    }
+
     /// Answer a guest's host call: `{ok: true, value}`, or `{ok: false,
     /// error}` for an error the guest throws. An `Err` is the host's: it fails
     /// the attempt.
@@ -160,6 +214,33 @@ impl Db {
                 }
                 self.internal(&format!("RELEASE {name}")).await?;
                 self.savepoints -= 1;
+                Ok(Value::Null)
+            }
+            "llm.append" => {
+                let conversation = request["conversation"]
+                    .as_str()
+                    .context("Missing conversation")?;
+                let messages = request["messages"].as_array().context("Missing messages")?;
+                self.append(conversation, messages).await?;
+                Ok(Value::Null)
+            }
+            "llm.history" => {
+                let conversation = request["conversation"]
+                    .as_str()
+                    .context("Missing conversation")?;
+                Ok(Value::Array(self.conversation(conversation).await?))
+            }
+            "llm.clear" => {
+                let conversation = request["conversation"]
+                    .as_str()
+                    .context("Missing conversation")?;
+                self.llm_table().await?;
+                let delete = "DELETE FROM llm_messages WHERE conversation = ?";
+                let name = SqlValue::build_text(conversation.to_owned());
+                self.session
+                    .execute_with(delete, [name])
+                    .await
+                    .map_err(sql)?;
                 Ok(Value::Null)
             }
             _ => bail!("No host call {operation}"),

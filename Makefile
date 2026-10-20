@@ -27,7 +27,7 @@ SDK_RS := rust/sdk/.build/sdk-rust/.patched
 RUST_CRATES := $(CORE) typescript/packages/sql-node python/sqlite-kv
 # The durable functions' runtime tests, and the builds they run in: write
 # barriers checked after every turn (verify-dirty), and full scans.
-FUNCTIONS_TESTS := --lib --test runs --test crashes --test sql --test handlers --test python --test fetch
+FUNCTIONS_TESTS := --lib --test runs --test crashes --test sql --test handlers --test python --test fetch --test llm
 FUNCTIONS_MODES := verify-dirty full-scan
 # Formats the TypeScript, JavaScript and Markdown of every part, as .oxfmtrc.json says.
 OXFMT := typescript/node_modules/.bin/oxfmt
