@@ -117,7 +117,7 @@ def call(
         result = await ctx.generic_call(
             h.service_tag.name, h.name, arg=arg, key=k, idempotency_key=idempotency_key(ctx, call_id)
         )
-        return _text(h.handler_io.output_serde.deserialize(result))
+        return text_of(h.handler_io.output_serde.deserialize(result))
 
     return target.tool(name or f"{h.service_tag.name}_{h.name}", description, run)
 
@@ -173,7 +173,7 @@ def workflow(
             key=k or f"{ctx.key()}-{call_id}",
             idempotency_key=idempotency_key(ctx, call_id),
         )
-        return _text(h.handler_io.output_serde.deserialize(result))
+        return text_of(h.handler_io.output_serde.deserialize(result))
 
     return own.tool(name or target.name, description, run)
 
@@ -201,7 +201,7 @@ def subagent(
             key=f"{ctx.key()}.{name}",
             idempotency_key=idempotency_key(ctx, call_id),
         )
-        return _text(h.handler_io.output_serde.deserialize(result))
+        return text_of(h.handler_io.output_serde.deserialize(result))
 
     return Tool(
         name=name or agent.name,
@@ -253,7 +253,7 @@ def signal(signal: str, *, description: str, input: type[BaseModel] | None = Non
         value = await ctx.object_call(
             wait_for_signal, key=signals_of(service(), ctx.key()), arg=waiting, idempotency_key=id
         )
-        return _text(value)
+        return text_of(value)
 
     return Tool(
         name=name or f"wait_for_{signal}",
@@ -311,7 +311,7 @@ class _Target:
         return key, self.h.handler_io.input_serde.serialize(self.make(input))
 
 
-def _text(value: Any) -> str:
+def text_of(value: Any) -> str:
     """A result, as the model reads it: a string as it is, anything else as JSON, and None as "done"."""
     if value is None:
         return "done"

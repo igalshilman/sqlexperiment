@@ -19,6 +19,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any
 
+from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -134,6 +135,48 @@ def pydantic_ai_model(teller: Teller) -> FunctionModel:
         return ModelResponse(parts=[*([TextPart(str(reply.content))] if reply.content else []), *calls])
 
     return FunctionModel(answer)
+
+
+class ClaudeClient:
+    """The teller, as an Anthropic client: ``client.messages.create`` reads the conversation as LangChain messages."""
+
+    def __init__(self, teller: Teller) -> None:
+        self.teller = teller
+        self.messages = self
+        self.requests: list[dict[str, Any]] = []
+
+    async def create(self, *, messages: list[dict[str, Any]], system: str | None = None, **params: Any) -> Message:
+        self.requests.append({"messages": list(messages), "system": system, **params})
+        said: list[BaseMessage] = [SystemMessage(system)] if system else []
+        for m in messages:
+            content = [{"type": "text", "text": m["content"]}] if isinstance(m["content"], str) else m["content"]
+            if m["role"] == "assistant":
+                text = "".join(b["text"] for b in content if b["type"] == "text")
+                calls = [
+                    {"name": b["name"], "args": b["input"], "id": b["id"]} for b in content if b["type"] == "tool_use"
+                ]
+                said.append(AIMessage(content=text, tool_calls=calls))
+                continue
+            # A message steered to the turn comes after the tool results, in the same message.
+            results = False
+            for b in content:
+                if b["type"] == "tool_result":
+                    said.append(ToolMessage(b["content"], tool_call_id=b["tool_use_id"]))
+                    results = True
+                elif b["type"] == "text":
+                    said.append(HumanMessage(b["text"], id="turn:steer:" if results else None))
+        reply = self.teller._answer(said)
+        calls = [ToolUseBlock(type="tool_use", id=c["id"], name=c["name"], input=c["args"]) for c in reply.tool_calls]
+        text = [TextBlock(type="text", text=str(reply.content))] if reply.content else []
+        return Message(
+            id=uuid.uuid4().hex,
+            type="message",
+            role="assistant",
+            model=params["model"],
+            content=[*text, *calls],
+            stop_reason="tool_use" if calls else "end_turn",
+            usage=Usage(input_tokens=0, output_tokens=0),
+        )
 
 
 class Bank:

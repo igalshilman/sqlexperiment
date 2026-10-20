@@ -41,7 +41,6 @@ runs again from the start, and the run carries on from the last step stored:
 
 from __future__ import annotations
 
-import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Any
@@ -160,7 +159,7 @@ async def prompt(ctx: Any, agent: Agent[Any, Any], text: str, *, thread: str | N
     invocation's first prompt has its id, the next ``<id>:2``, and so on.
     """
     conversation = _Conversation(ctx.db, thread or ctx.key())
-    id = _next_prompt_id(ctx)
+    id = turns.prompt_id(ctx)
     while True:
         history = await conversation.load()
         last = next((i for i in reversed(range(len(history))) if _prompt(history[i])), None)
@@ -326,16 +325,6 @@ def _has_results(message: ModelMessage) -> bool:
     return isinstance(message, ModelRequest) and any(
         isinstance(p, ToolReturnPart | RetryPromptPart) for p in message.parts
     )
-
-
-# The prompts made in each attempt, by its context: the second prompt of an invocation is its id's ":2".
-_prompts: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
-
-
-def _next_prompt_id(ctx: Any) -> str:
-    count = _prompts[ctx] = _prompts.get(ctx, 0) + 1
-    id = ctx.request().id
-    return id if count == 1 else f"{id}:{count}"
 
 
 def _usual(instructions: str | None, tools: Tools) -> Agent[None, str]:

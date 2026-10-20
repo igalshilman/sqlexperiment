@@ -1,6 +1,7 @@
 """
-A bank (bank.py) and a LangGraph agent moving money
-in it (scripted_agent.py, on the scripted teller: "move 5 from 1 to 2"), through
+A bank (bank.py) and an agent moving money in it (scripted_agent.py, on
+LangGraph, or with AGENT=claude on Claude; on the scripted teller: "move 5
+from 1 to 2"), through
 crashes, against a real Restate server: their processes abort at random
 state requests (see faults.py; the bank's at ABORT_PER_MILLE, default 15,
 the agent's at AGENT_ABORT_PER_MILLE, default 3, as a prompt makes some
@@ -16,7 +17,7 @@ one (insufficient funds) moved nothing; every answer to a request sent again
 is the first one; and every agent prompt moved money exactly once (or, refused,
 not at all), and is in its conversation once.
 
-    make crash-test-py   # or, in python/: RESTATE_SERVER=... uv run python tests/crash.py
+    make crash-test-py   # or AGENT=claude; or, in python/: RESTATE_SERVER=... uv run python tests/crash.py
 """
 
 import os

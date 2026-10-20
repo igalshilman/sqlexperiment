@@ -1,7 +1,7 @@
 """
 Restate's tools for agents (``call``, ``send``, ``workflow``, ``subagent`` and
 ``signal``), on the scripted model, against a real Restate server: the
-support agents of services.py, on LangGraph and on Pydantic AI.
+support agents of services.py, on LangGraph, on Pydantic AI and on Claude.
 
     make concurrency-test-py   # gets restate-server first
 """
@@ -27,9 +27,9 @@ REFUND = {"order": "103", "amount": 5}
 SUPPORT = use(("orders_status", {"order": "103"}), ("wait_for_approval", REFUND), ("refund", REFUND))
 
 
-@pytest.fixture(params=["support", "pydantic_support"])
+@pytest.fixture(params=["support", "pydantic_support", "claude_support"])
 def agent(request) -> str:
-    """The support agent: on LangGraph, and on Pydantic AI."""
+    """The support agent: on LangGraph, on Pydantic AI, and on Claude."""
     return request.param
 
 
