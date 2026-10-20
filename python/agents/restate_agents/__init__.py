@@ -15,7 +15,7 @@ often an attempt crashes.
     serve(assistant)
 """
 
-from restate_agents.object import app, context, serve
+from restate_agents.object import Object, app, ask, context, serve
 from restate_agents.tools import Tool, call, send, signal, subagent, tool, workflow
 
-__all__ = ["Tool", "app", "call", "context", "send", "serve", "signal", "subagent", "tool", "workflow"]
+__all__ = ["Object", "Tool", "app", "ask", "call", "context", "send", "serve", "signal", "subagent", "tool", "workflow"]

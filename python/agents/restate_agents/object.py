@@ -1,6 +1,6 @@
 """
-The virtual object under an agent, ``Object``, and ``serve``. ``Object`` is
-internal for now: the agents are built on it, and the tests use it.
+The virtual object under an agent, ``Object``, for objects of your own too;
+``ask``, which sends a message to an agent; and ``serve``.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import os
 import threading
+import weakref
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import timedelta
@@ -162,6 +163,18 @@ class Object(restate.VirtualObject):
 
         return register
 
+    def chat(self, fn: Callable) -> Callable:
+        """
+        ``fn`` as the ``chat`` handler, which takes its message as an agent's
+        does, as plain text or as a JSON string (``curl -d 'Hi'``)::
+
+            desk = Object("desk")
+
+            @desk.chat
+            async def chat(ctx, message: str) -> str: ...
+        """
+        return self.handler("chat", accept="*/*", input_serde=MessageSerde())(fn)
+
     def _handler(self, fn: Callable) -> Callable:
         """``fn`` as the SDK takes a handler: one input at most."""
         signature = inspect.signature(fn, eval_str=True)
@@ -208,6 +221,36 @@ class _ArgumentsSerde(Serde[Any]):
 
     def serialize(self, obj: Any) -> bytes:
         return self.model.model_validate(obj).model_dump_json().encode()
+
+
+# The messages each attempt sent, by its context.
+_asked: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
+
+
+async def ask(
+    ctx: Any, agent: restate.VirtualObject, message: str, *, key: str | None = None, idempotency_key: str | None = None
+) -> str:
+    """
+    Send ``message`` to ``agent`` (its ``chat``), keyed ``key`` (by default,
+    this object's key), and return its answer::
+
+        answer = await ask(ctx, billing, "I was charged twice")
+
+    It is sent once per invocation, however often an attempt runs: a handler
+    is not replayed, so the call has an idempotency key, which a retried
+    attempt's call joins (by default the invocation's id, the agent's name
+    and how many messages the attempt sent before).
+    """
+    count = _asked[ctx] = _asked.get(ctx, 0) + 1
+    h = agent.handlers["chat"]
+    result = await ctx.generic_call(
+        agent.name,
+        h.name,
+        arg=h.handler_io.input_serde.serialize(message),
+        key=key or ctx.key(),
+        idempotency_key=idempotency_key or f"{ctx.request().id}:{agent.name}:{count}",
+    )
+    return h.handler_io.output_serde.deserialize(result)
 
 
 def context() -> Any:
