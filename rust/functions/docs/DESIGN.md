@@ -123,7 +123,7 @@ Keep these values inside the QuickJS heap:
 
 - `runId`, initially unset; `nextOperation`, initially zero; logical `now`.
 - PRNG state and host-supplied maximum time.
-- An insertion-ordered map `pending[id] = {operation, resolve, reject}`.
+- An insertion-ordered map `pending[id] = {resolve, reject, input?}`.
 - An optional `rootOutcome`.
 
 Request creation validates/copies arguments before assigning an ID, then:
@@ -134,14 +134,23 @@ request(fields):
     id = runId + "/" + decimal(nextOperation)
     nextOperation += 1
     issued.append({id, ...fields})
-    return new Promise((resolve, reject) => pending.set(id, {resolve, reject}))
+    return new Promise((resolve, reject) => pending.set(id, {resolve, reject, input}))
 ```
 
-The guest keeps only each request's resolvers. The request itself goes to the
+The guest keeps each request's resolvers and, until it is answered, a call's
+input (an RPC's, or a host binding's). The rest of the request goes to the
 host at the next `inspect()` and is forgotten: the host keeps it pending, in
-the commit, so a big input made and sent in one turn is freed in that turn and
-never saved with the heap (a turn sending a 39 KiB request saved 6 KiB of
-pages, against 23 KiB when the guest kept it). A request that loses a race may
+the commit, as its ID, target and idempotency key. The host reads a call's
+input from the heap when it makes the call (the `input(id)` hook), and again
+on another attempt; nothing else keeps a copy of it, and a binding's call is
+journaled nowhere. An input crosses as `JSON.stringify` makes it, in one pass
+in C: a primitive is checked when the call is issued, an object when it is
+read, and one JSON cannot hold fails the call. A turn sending a 39 KiB request
+saves ~22 KiB of pages and none of it in the commit, where it once saved 6
+KiB of pages and the whole request in the commit; an agent's request, mostly
+the conversation it keeps anyway, costs only the pages its last messages
+take (§10.1). A program must not change an input until its call is answered:
+it is read when the call is made. A request that loses a race may
 reject later with no handler: no rejection tracker is installed, so that is
 not an error, and no handler is attached to every request (one cost ~230 B a
 turn). Creating a request performs no host I/O.
@@ -149,7 +158,7 @@ The operation counter covers local KV requests and internal wakeups as well as
 external effects. IDs are stable across restore. Uncommitted IDs may be reused
 because uncommitted requests must never have dispatched.
 
-The internal bridge exposes five host hooks, not application API methods:
+The internal bridge exposes six host hooks, not application API methods:
 
 | Hook                 | Behavior                                                                                                             |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
@@ -158,6 +167,7 @@ The internal bridge exposes five host hooks, not application API methods:
 | `start(callJson)`    | Queue `handler(input, durable)` through `Promise.resolve().then(...)`; capture its normalized root outcome           |
 | `deliver(eventJson)` | Advance logical time monotonically; find and remove the pending entry; resolve/reject its promise; do not drain jobs |
 | `pause()`            | Create an internal `{kind:"resume"}` request through the same ID/map mechanism                                       |
+| `input(id)`          | The pending call's input, as `JSON.stringify` makes it, or why it has none                                           |
 | `inspect()`          | Return the requests issued since the last `inspect()`, then forget them; and where the run stands                    |
 
 `inspect()` returns:
@@ -809,7 +819,9 @@ refuses an operation listed twice; `deliver` is it with one outcome:
 If the ID is not pending, accept a no-op only for canonical `run/<decimal n>`
 with `n < nextOperation`; return the current View without guest work. This
 includes requests answered in their turn, and those dropped when the run
-settled. Foreign-run, noncanonical and never-issued IDs fail.
+settled. Foreign-run, noncanonical and never-issued IDs fail. The host also
+checks that the guest numbers what it issues `run/<n>`, in order: an ID, and
+the idempotency key made from it, names one request on every attempt.
 
 ### 6.2. Turn
 
@@ -954,18 +966,22 @@ journal replay off:
   is one invocation of a handler, which drives its
   turns itself, on one live VM. Its store is the object's state, remembering
   every key it read or wrote for the attempt: a key is read from Restate at
-  most once. After each turn commits, the handler waits on Restate for the
-  first pending request: an RPC as a call whose idempotency key is the
-  operation ID, a timer as a sleep until the deadline; Resume is delivered at
-  once. The completion is the next turn's event, with every other completion
+  most once. After each turn commits, the handler makes the pending
+  requests and waits for the first to complete: an RPC as a call whose
+  idempotency key is the program's own or else the operation ID, a timer as a
+  sleep until the deadline, and a host binding's call (`ctx.call(name,
+  input)`, [HOST.md](HOST.md) §6) made by the handler itself, raced with
+  Restate's futures; Resume is delivered at once. A call's input is read from
+  the heap as the call is made. The completion is the next turn's event, with every other completion
   already arrived (polled once, without waiting): what arrives together
   commits once. A run of `Promise.all` of 10 calls took 3-10 turns instead
   of 11 against a local server. Uncommitted IDs are never
   waited on, so their reuse is safe (§2.2).
-- A retried attempt restores the last committed image and waits again on its
-  pending requests under the same keys: Restate attaches a re-issued call to
-  the original invocation, within the callee's idempotency retention. Nothing
-  is replayed, and the host keeps no results.
+- A retried attempt restores the last committed image and makes its pending
+  requests again under the same keys, reading their inputs from the restored
+  heap: Restate attaches a re-issued call to the original invocation, within
+  the callee's idempotency retention, and a binding that does not deduplicate
+  is called again. Nothing is replayed, and the host keeps no results.
 - A handler returns once its function settles, when the run ends (§2.2): requests still
   outstanding are dropped, and a call already made finishes at its callee
   unobserved.
@@ -1039,24 +1055,28 @@ interpreter runs compute-bound code ~10x slower than V8.
 scripted session of up to 300 steps over an in-memory store. Each step is a few
 hundred bytes of model text and one tool call: a file read (~6 KiB), a
 command (~1.5 KiB of output), an edit, or a written file (~3 KiB). On
-19 October 2026, with turns bounded by time:
+20 October 2026, with the model a host binding (`claude.messages`), and
+the same session on the same machine calling it as a Restate service, as
+before:
 
-| Step | Request to the model | Stored by the step | Of it, the commit | Tool turn |
-| ---: | -------------------: | -----------------: | ----------------: | --------: |
-|    1 |              1.7 KiB |              12 KB |            4.3 KB |    1.6 ms |
-|   10 |               31 KiB |              47 KB |             33 KB |    5.8 ms |
-|   20 |               62 KiB |              83 KB |             71 KB |     11 ms |
-|   40 |              130 KiB |             157 KB |            140 KB |     21 ms |
-|   99 |              328 KiB |             360 KB |            340 KB |     45 ms |
-|  190 |              636 KiB |             670 KB |            653 KB |     88 ms |
+| Step | Request to the model | Stored by the step, as a service | As a binding | Of it, the commit (service, binding) | Tool turn (service, binding) |
+| ---: | -------------------: | -------------------------------: | -----------: | -----------------------------------: | ---------------------------: |
+|    1 |              1.7 KiB |                          11.8 KB |       7.8 KB |                        4.3 KB, 369 B |               1.9 ms, 0.6 ms |
+|   10 |               31 KiB |                            43 KB |       6.2 KB |                         33 KB, 373 B |               6.1 ms, 0.4 ms |
+|   40 |              130 KiB |                           212 KB |       8.2 KB |                        140 KB, 376 B |                24 ms, 0.7 ms |
+|   99 |              328 KiB |                           362 KB |       8.7 KB |                        340 KB, 379 B |                53 ms, 0.7 ms |
+|  190 |              636 KiB |                           672 KB |       9.7 KB |                        653 KB, 381 B |                97 ms, 0.9 ms |
 
-The session runs to the program's own limit of 200 steps. With fuel, it
-failed at step 45 (a request of ~145 KiB): copying the request out of the VM
-spent the turn's budget. Each request is the whole conversation so far,
-and it is copied, checked and serialized in the guest, then kept in the
-commit record as a pending request. Every step therefore costs time and
-storage in proportion to the conversation, quadratic in total. The page
-batches stay at 4–11 KB a step.
+The session runs to the program's own limit of 200 steps. Each request is the
+whole conversation so far. As a service call, it was copied, checked and
+serialized in the guest, kept in the commit record as a pending request, and
+journaled by Restate as the call's input: 70 MiB stored and 65 MiB journaled
+over the session, quadratic in its length. As a binding, the request stays in
+the heap, which holds the conversation anyway, and the host reads it there as
+it sends it, in one serialization in C: 2.5 MiB stored over the session, 4–10
+KB a step, and nothing journaled. With fuel, the service version failed at
+step 45 (a request of ~145 KiB): copying the request out of the VM spent the
+turn's budget.
 
 ## 11. Scope limits, provenance and references
 

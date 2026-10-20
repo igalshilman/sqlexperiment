@@ -11,18 +11,30 @@
 //! database, then waits on Restate itself for the first request to complete,
 //! and delivers it in the next turn, to the same live VM:
 //!
-//! | `ctx` request             | The handler waits on                                        |
-//! | ------------------------- | ----------------------------------------------------------- |
-//! | `ctx.rpc.call(target, x)` | A call to `target`, its idempotency key the operation's ID |
-//! | `ctx.sleep(ms)`           | A timer, until the request's deadline                       |
-//! | `ctx.kv.*`, `ctx.db.*`    | Nothing: answered in the turn, from the object's database  |
+//! | `ctx` request              | The handler waits on                                          |
+//! | -------------------------- | ------------------------------------------------------------- |
+//! | `ctx.rpc.call(target, x)`  | A call to `target`, under the request's idempotency key       |
+//! | `ctx.call(name, x)`        | The host binding `name` ([`crate::Bindings`]), called here    |
+//! | `ctx.sleep(ms)`            | A timer, until the request's deadline                         |
+//! | `ctx.kv.*`, `ctx.db.*`     | Nothing: answered in the turn, from the object's database    |
+//!
+//! A call's input stays in the guest's heap until the call is answered: the
+//! handler reads it when it makes the call, so the commit holds none, and a
+//! binding's call is journaled nowhere. A request's idempotency key is the
+//! guest's, if it set one, or else its operation ID: the same on every
+//! attempt, since a request is made only once the turn that issued it has
+//! committed.
 //!
 //! A retried attempt replays nothing: it restores the last committed image and
-//! waits again on its requests, under the same idempotency keys, so a call
-//! made before the crash is attached to, not made again. The call ends when
+//! makes its requests again, under the same idempotency keys, so a call
+//! made before the crash is attached to, not made again (a binding that
+//! does not deduplicate is called again). The call ends when
 //! its function settles: requests still outstanding (a race's loser) are
 //! dropped, and their continuations never run.
-use crate::{Budget, Operation, Outcome, Programs, Run, Runtime, Scope, vm};
+use crate::{
+    Binding, Bindings, Budget, HostCall, Operation, Outcome, Programs, Run, Runtime, Scope, vm,
+};
+use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use restate_sdk::{
     context::{DurableFuture, RequestTarget},
     endpoint::ContextInternal,
@@ -82,10 +94,13 @@ pub struct JsObject {
     cache: PageCache,
     /// The memory live runs may hold.
     budget: Arc<Budget>,
+    bindings: Bindings,
 }
 
 /// A request the handler waits on: its outcome, and the time to deliver it at.
 type Waiting<'ctx> = Pin<Box<dyn DurableFuture<Output = (Outcome, u64)> + Send + 'ctx>>;
+/// A binding's call, which the handler makes itself: its operation and outcome.
+type Calling = BoxFuture<'static, (String, Outcome)>;
 
 impl JsObject {
     /// The object as Restate sees it: one exclusive handler per exported
@@ -197,50 +212,95 @@ impl JsObject {
         lease.hold(run.resident());
         let mut waiting = DurableFuturesUnordered::<Waiting<'ctx>>::new();
         let mut operations: Vec<String> = Vec::new();
+        let mut calls = FuturesUnordered::<Calling>::new();
         let mut awaited: HashSet<String> = HashSet::new();
         loop {
             let state = run.view().state;
             if let Some(outcome) = state.outcome {
                 return Ok(outcome);
             }
-            // Answer the requests the host can answer now, one per turn; wait
-            // on the others.
+            // Making a call reads its input from the heap: a run that is not
+            // live restores first, within the budget, as for a delivery.
+            let reads = (state.pending.iter())
+                .filter(|operation| !awaited.contains(operation.id()))
+                .any(|operation| {
+                    matches!(operation, Operation::Rpc { .. } | Operation::Call { .. })
+                });
+            if reads && run.resident() == 0 {
+                lease
+                    .reserve(self.budget.peak(&self.program).max(run.footprint()))
+                    .await;
+            }
+            // Answer the requests the host can answer now, one per turn; make
+            // the others, and wait on them.
             let mut now_ready = None;
             for operation in &state.pending {
                 let id = operation.id();
                 if awaited.contains(id) {
                     continue;
                 }
-                match operation {
-                    Operation::Resume { .. } => {
-                        now_ready.get_or_insert((id.to_owned(), Outcome::success(Value::Null), 0));
-                    }
-                    Operation::Call { name, .. } => {
-                        let message =
-                            format!("No host operation {name:?}: call a service with ctx.rpc.call");
-                        now_ready.get_or_insert((
-                            id.to_owned(),
-                            Outcome::failure("Error", message),
-                            0,
-                        ));
-                    }
-                    _ => {
-                        if let Some(future) = wait(ctx, operation) {
-                            waiting.push(future);
-                            operations.push(id.to_owned());
-                            awaited.insert(id.to_owned());
+                let made = match operation {
+                    Operation::Resume { .. } => Err(Outcome::success(Value::Null)),
+                    Operation::Sleep { deadline, .. } => Ok(Made::Waiting(sleep(ctx, *deadline))),
+                    Operation::Rpc { target, .. } => (run.input(id).await)
+                        .map_err(|error| failed(&store, error))?
+                        .map(|input| Made::Waiting(rpc(ctx, operation, target, input)))
+                        .map_err(|error| Outcome::failure(error.name, error.message)),
+                    Operation::Call { name, .. } => match self.bindings.get(name) {
+                        None => Err(Outcome::failure(
+                            "Error",
+                            format!("No host binding {name:?}"),
+                        )),
+                        Some(binding)
+                            if operation.idempotency_key() != id && !binding.deduplicates() =>
+                        {
+                            let message =
+                                format!("{name} does not deduplicate: it takes no idempotency key");
+                            Err(Outcome::failure("TypeError", message))
                         }
+                        Some(binding) => (run.input(id).await)
+                            .map_err(|error| failed(&store, error))?
+                            .map(|input| Made::Calling(call(&**binding, operation, input)))
+                            .map_err(|error| Outcome::failure(error.name, error.message)),
+                    },
+                    // Answered in the turn: never pending.
+                    Operation::KvGet { .. }
+                    | Operation::KvSet { .. }
+                    | Operation::KvDelete { .. } => {
+                        continue;
+                    }
+                };
+                match made {
+                    Ok(Made::Waiting(future)) => {
+                        waiting.push(future);
+                        operations.push(id.to_owned());
+                        awaited.insert(id.to_owned());
+                    }
+                    Ok(Made::Calling(call)) => {
+                        calls.push(call);
+                        awaited.insert(id.to_owned());
+                    }
+                    Err(outcome) => {
+                        now_ready.get_or_insert((id.to_owned(), outcome, 0));
                     }
                 }
             }
+            lease.hold(run.resident());
             let (outcomes, at) = match now_ready {
                 Some((operation, outcome, at)) => (vec![(operation, outcome)], at),
                 None => {
+                    if waiting.is_empty() && calls.is_empty() {
+                        return Err(TerminalError::new("The run waits on nothing").into());
+                    }
                     // While it waits, the run may park to free its memory.
                     let park = lease.wait();
-                    let next = loop {
+                    let (first, mut at) = loop {
                         tokio::select! {
-                            next = waiting.next() => break next,
+                            ready = waiting.next(), if !waiting.is_empty() => {
+                                let (index, (outcome, at)) = ready?.expect("a request to wait on");
+                                break ((operations[index].clone(), outcome), at);
+                            }
+                            Some(called) = calls.next() => break (called, 0),
                             () = park.notified(), if run.resident() > 0 => {
                                 run.park();
                                 lease.hold(0);
@@ -248,18 +308,18 @@ impl JsObject {
                         }
                     };
                     lease.woken();
-                    let Some((index, (outcome, mut at))) = next? else {
-                        return Err(TerminalError::new("The run waits on nothing").into());
-                    };
                     // What else has arrived goes in the same turn, and commits
                     // with it.
-                    let mut outcomes = vec![(operations[index].clone(), outcome)];
+                    let mut outcomes = vec![first];
                     while let Some(ready) = futures::FutureExt::now_or_never(waiting.next()) {
                         let Some((index, (outcome, ready_at))) = ready? else {
                             break;
                         };
                         outcomes.push((operations[index].clone(), outcome));
                         at = at.max(ready_at);
+                    }
+                    while let Some(Some(called)) = futures::FutureExt::now_or_never(calls.next()) {
+                        outcomes.push(called);
                     }
                     (outcomes, at)
                 }
@@ -280,64 +340,91 @@ impl JsObject {
     }
 }
 
-/// A turn's result. Once it committed, the crash a test injects, if any. A
-/// storage failure is the attempt's, and retried; anything else would fail
-/// again, the same way.
+/// A request, made: a future of Restate's, or a binding's call.
+enum Made<'ctx> {
+    Waiting(Waiting<'ctx>),
+    Calling(Calling),
+}
+
+/// A turn's result. Once it committed, the crash a test injects, if any.
 fn committed<T>(store: &StateQueue, result: anyhow::Result<T>) -> HandlerResult<T> {
-    match result {
-        Ok(value) => {
-            faults::after_commit()?;
-            Ok(value)
-        }
-        Err(error) if store.failed() || vm::exhausted(&error) => Err(error.into()),
-        Err(error) => Err(TerminalError::new(format!("{error:#}")).into()),
+    let value = result.map_err(|error| failed(store, error))?;
+    faults::after_commit()?;
+    Ok(value)
+}
+
+/// A storage failure, or a full pool, is the attempt's, and retried; anything
+/// else would fail again, the same way.
+fn failed(store: &StateQueue, error: anyhow::Error) -> HandlerError {
+    if store.failed() || vm::exhausted(&error) {
+        error.into()
+    } else {
+        TerminalError::new(format!("{error:#}")).into()
     }
 }
 
-/// Wait on Restate for `operation`: an RPC (attached to on a retried attempt,
-/// by its idempotency key), or a timer.
-fn wait<'ctx>(ctx: &'ctx ObjectContext<'ctx>, operation: &Operation) -> Option<Waiting<'ctx>> {
-    match operation {
-        Operation::Rpc { id, target, input } => {
-            let target = match &target.key {
-                Some(key) => RequestTarget::object(&target.service, key, &target.handler),
-                None => RequestTarget::service(&target.service, &target.handler),
+/// A call to `target` with `input`, the guest's `operation`: attached to on a
+/// retried attempt, by its idempotency key.
+fn rpc<'ctx>(
+    ctx: &'ctx ObjectContext<'ctx>,
+    operation: &Operation,
+    target: &crate::RpcTarget,
+    input: Value,
+) -> Waiting<'ctx> {
+    let target = match &target.key {
+        Some(key) => RequestTarget::object(&target.service, key, &target.handler),
+        None => RequestTarget::service(&target.service, &target.handler),
+    };
+    let call = ctx
+        .request::<_, bytes::Bytes>(target, Json(input))
+        .idempotency_key(operation.idempotency_key().to_owned())
+        .call()
+        .map(|result| {
+            let outcome = match result {
+                Ok(body) if body.is_empty() => Outcome::success(Value::Null),
+                Ok(body) => match serde_json::from_slice::<Value>(&body) {
+                    Ok(value) => Outcome::success(value),
+                    Err(error) => {
+                        Outcome::failure("TypeError", format!("Response is not JSON: {error}"))
+                    }
+                },
+                Err(error) => Outcome::failure("TerminalError", error.message()),
             };
-            let call = ctx
-                .request::<_, bytes::Bytes>(target, Json(input.clone()))
-                .idempotency_key(id.clone())
-                .call()
-                .map(|result| {
-                    let outcome = match result {
-                        Ok(body) if body.is_empty() => Outcome::success(Value::Null),
-                        Ok(body) => match serde_json::from_slice::<Value>(&body) {
-                            Ok(value) => Outcome::success(value),
-                            Err(error) => Outcome::failure(
-                                "TypeError",
-                                format!("Response is not JSON: {error}"),
-                            ),
-                        },
-                        Err(error) => Outcome::failure("TerminalError", error.message()),
-                    };
-                    (outcome, 0)
-                });
-            Some(Box::pin(call))
-        }
-        Operation::Sleep { deadline, .. } => {
-            let deadline = *deadline;
-            let timer = ctx
-                .sleep(Duration::from_millis(deadline.saturating_sub(now())))
-                .map(move |result| {
-                    let outcome = match result {
-                        Ok(()) => Outcome::success(Value::Null),
-                        Err(error) => Outcome::failure("TerminalError", error.message()),
-                    };
-                    (outcome, deadline)
-                });
-            Some(Box::pin(timer))
-        }
-        _ => None,
-    }
+            (outcome, 0)
+        });
+    Box::pin(call)
+}
+
+/// A call of `binding` with `input`, the guest's `operation`: made here, under
+/// the operation's idempotency key.
+fn call(binding: &dyn Binding, operation: &Operation, input: Value) -> Calling {
+    let id = operation.id().to_owned();
+    let call = binding.call(HostCall {
+        id: id.clone(),
+        idempotency_key: operation.idempotency_key().to_owned(),
+        input,
+    });
+    Box::pin(async move {
+        let outcome = match call.await {
+            Ok(value) => Outcome::success(value),
+            Err(error) => Outcome::failure(error.name, error.message),
+        };
+        (id, outcome)
+    })
+}
+
+/// A timer until `deadline`.
+fn sleep<'ctx>(ctx: &'ctx ObjectContext<'ctx>, deadline: u64) -> Waiting<'ctx> {
+    let timer = ctx
+        .sleep(Duration::from_millis(deadline.saturating_sub(now())))
+        .map(move |result| {
+            let outcome = match result {
+                Ok(()) => Outcome::success(Value::Null),
+                Err(error) => Outcome::failure("TerminalError", error.message()),
+            };
+            (outcome, deadline)
+        });
+    Box::pin(timer)
 }
 
 /// The programs built into this binary (`examples-functions/`, or `FUNCTIONS_PROGRAMS` at
@@ -390,12 +477,15 @@ mod shipped {
 /// loaded lazily (an attempt reads only what its database needs), no
 /// journal kept once an invocation is done (it holds every page it wrote),
 /// and Restate's inactivity timeout as long as a turn may run.
-/// The objects share `cache`, which keeps the scopes this process owns.
+/// The objects share `cache`, which keeps the scopes this process owns, and
+/// `budget`, the memory their live runs may hold; they offer their programs
+/// `bindings`.
 pub fn bind(
     mut builder: restate_sdk::endpoint::Builder,
     programs: &Arc<Programs>,
     cache: &PageCache,
     budget: &Arc<Budget>,
+    bindings: &Bindings,
 ) -> anyhow::Result<restate_sdk::endpoint::Builder> {
     for name in programs.names() {
         let object = JsObject {
@@ -403,6 +493,7 @@ pub fn bind(
             programs: programs.clone(),
             cache: cache.clone(),
             budget: budget.clone(),
+            bindings: bindings.clone(),
         };
         builder = builder.bind(
             object.definition()?.options(
@@ -417,13 +508,14 @@ pub fn bind(
     Ok(builder)
 }
 
-/// An endpoint serving `programs`, and [`crate::Claude`] and
-/// [`crate::Workspace`] for them to call.
+/// An endpoint serving `programs`, with [`crate::Claude`] as the binding
+/// `claude.messages`, and [`crate::Workspace`] for them to call.
 pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
     let budget = Budget::from_env()?;
+    let bindings = Bindings::new().with("claude.messages", crate::Claude::from_env());
+    let cache = page_cache().await?;
     Ok(
-        bind(Endpoint::builder(), programs, &page_cache().await?, &budget)?
-            .bind(crate::Claude::from_env())
+        bind(Endpoint::builder(), programs, &cache, &budget, &bindings)?
             .bind(crate::Workspace::from_env())
             .build(),
     )

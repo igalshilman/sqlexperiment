@@ -94,17 +94,14 @@ export async function work({ task }, ctx) {
   const tools = workspace(ctx);
   const messages = [{ role: 'user', content: task }];
   for (let step = 1; step <= MAX_STEPS; step++) {
-    const response = await ctx.rpc.call(
-      { service: 'claude', handler: 'messages' },
-      {
-        model: MODEL,
-        max_tokens: 32000,
-        output_config: { effort: 'medium' },
-        system: SYSTEM,
-        tools: TOOLS,
-        messages: cached(messages),
-      },
-    );
+    const response = await ctx.call('claude.messages', {
+      model: MODEL,
+      max_tokens: 32000,
+      output_config: { effort: 'medium' },
+      system: SYSTEM,
+      tools: TOOLS,
+      messages: cached(messages),
+    });
     if (response.stop_reason === 'refusal') throw new Error('Claude declined the task');
     messages.push({ role: 'assistant', content: response.content });
     if (response.stop_reason !== 'tool_use') {

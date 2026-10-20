@@ -13,8 +13,9 @@
     // The program's module, once evaluated: its exported functions.
     program,
     programError;
-  // Each request's promise, by ID, until delivered. The request itself goes
-  // to the host at the next report, and is forgotten here.
+  // Each request's promise, by ID, until delivered. The request goes to the
+  // host at the next report, and is forgotten here, but for a call's input:
+  // it stays, for the host to read when it makes the call (`input`).
   const pending = new Map();
   let issued = [];
   // Rust JSON strings are Unicode scalar values. Arbitrary UTF-16 remains valid
@@ -53,6 +54,34 @@
     // the actual plain data that will cross the boundary, not only the input.
     validate(result);
     return result;
+  }
+  // A call's input as JSON, as JSON.stringify makes it, in one pass in C: a
+  // long conversation costs one serialization, not a walk in JavaScript.
+  // JSON.stringify escapes lone surrogates, which the host's JSON refuses.
+  function toJson(value) {
+    const json = JSON.stringify(value === undefined ? null : value);
+    if (json === undefined) throw new TypeError('Expected JSON data, not a ' + typeof value);
+    if (json.includes('\\ud') && /(?<!\\)(?:\\\\)*\\ud[89a-f][0-9a-f]{2}/.test(json))
+      throw new TypeError('Host JSON strings must not contain lone UTF-16 surrogates');
+    return json;
+  }
+  // A call's input: a primitive is checked now, an object as it is read.
+  function callInput(input) {
+    if (input === null || typeof input !== 'object') validate(input);
+    return input;
+  }
+  // A call's options, added to its `operation`: an idempotency key of the
+  // program's own, if any.
+  function withOptions(operation, options) {
+    if (options === undefined) return operation;
+    if (!options || typeof options !== 'object' || Object.keys(options).some((key) => key !== 'idempotencyKey'))
+      throw new TypeError('Expected call options { idempotencyKey? }');
+    const key = options.idempotencyKey;
+    if (key === undefined) return operation;
+    if (typeof key !== 'string' || !key) throw new TypeError('An idempotency key is a nonempty string');
+    validate(key);
+    operation.idempotencyKey = key;
+    return operation;
   }
   function kvKey(key) {
     if (typeof key !== 'string') throw new TypeError('KV key must be a string');
@@ -97,13 +126,16 @@
     for (const row of rows) for (const column in row) row[column] = sqlValue(row[column]);
     return rows;
   }
-  function request(operation) {
+  // Issue `operation`; a call keeps its `input` here until it is answered.
+  function request(operation, input) {
     if (runId === undefined) throw new Error('Durable operations are unavailable while the module evaluates');
     const id = runId + '/' + nextOperation++;
     issued.push({ id, ...operation });
     // A losing race may reject later, unobserved: no rejection tracker is
     // installed, so that is not an error.
-    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+    return new Promise((resolve, reject) =>
+      pending.set(id, input === undefined ? { resolve, reject } : { resolve, reject, input }),
+    );
   }
   globalThis.durable = Object.freeze({
     // The scope: the key of the object this program is served as.
@@ -150,7 +182,9 @@
       },
     }),
     rpc: Object.freeze({
-      call(target, input = null) {
+      // The input is read when the call is made, and again after a crash:
+      // do not change it until the call is answered.
+      call(target, input = null, options) {
         target = copy(target);
         if (
           !target ||
@@ -165,13 +199,15 @@
         ) {
           throw new TypeError('Expected RPC target { service, handler, key? }');
         }
-        return request({ kind: 'rpc', target, input: copy(input) });
+        return request(withOptions({ kind: 'rpc', target }, options), callInput(input));
       },
     }),
-    call(name, args = null) {
-      if (typeof name !== 'string' || !name) throw new TypeError('Operation name must be nonempty');
+    // The host binding `name`, such as `claude.messages`; its input is read
+    // as an RPC's is.
+    call(name, input = null, options) {
+      if (typeof name !== 'string' || !name) throw new TypeError('A binding name is a nonempty string');
       validate(name);
-      return request({ kind: 'call', name, args: copy(args) });
+      return request(withOptions({ kind: 'call', name }, options), callInput(input));
     },
     sleep(ms) {
       if (!Number.isSafeInteger(ms) || ms < 0 || !Number.isSafeInteger(now + ms) || now + ms > maxTime)
@@ -189,6 +225,18 @@
     // Runtime-only scheduling hook. Application code uses the frozen ctx API.
     pause() {
       request({ kind: 'resume' });
+    },
+    // The input of the pending call `id`, as an outcome: its JSON, or why it
+    // has none.
+    input(id) {
+      try {
+        const entry = pending.get(id);
+        if (!entry || !('input' in entry)) throw new Error('No pending call ' + id);
+        // An object is checked here, as JSON.stringify sees it: in one pass.
+        return '{"ok":true,"value":' + toJson(entry.input) + '}';
+      } catch (error) {
+        return JSON.stringify(failure(error));
+      }
     },
     // The program's module, as it evaluates: its exports are the handlers.
     bind(namespace) {

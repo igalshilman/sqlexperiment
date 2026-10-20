@@ -4,9 +4,10 @@
 //! until the conversation is long. Every 25 steps the run is restored, as a
 //! new attempt after a crash would be. Results go to bench-agent.json.
 //!
-//! Per step it reports the request the run sends the model (which Restate
-//! journals, whole, at every call), the time of the step's two turns (the
-//! model's answer in, the tool's result in), and what the step stored.
+//! Per step it reports the request the run sends the model (the whole
+//! conversation, which the host reads from the run's heap: neither the
+//! commit nor Restate's journal keeps it), the time of the step's two turns
+//! (the model's answer in, the tool's result in), and what the step stored.
 use anyhow::{Result, bail, ensure};
 use functions::{Operation, Outcome, Programs, Run, Runtime, Scope, Status};
 use futures_executor::block_on as block;
@@ -35,10 +36,10 @@ fn main() -> Result<()> {
     };
     let mut run = start(1000)?;
     let mut session = Session::default();
-    let (mut journaled, mut stored) = (0, store.stats().bytes_written as usize);
+    let mut stored = store.stats().bytes_written as usize;
     let mut rows = Vec::new();
     let mut ended = None;
-    println!("step  request KiB  model ms  tool ms  stored B/step  journaled MiB  stored MiB");
+    println!("step  request KiB  model ms  tool ms  stored B/step  of it, commit B  stored MiB");
     'session: for step in 1..=STEPS {
         // The model's answer, then the tool's result.
         let mut turns = [0.0; 2];
@@ -52,21 +53,21 @@ fn main() -> Result<()> {
                 break 'session;
             }
             let operation = view.state.pending[0].clone();
-            let Operation::Rpc { id, target, input } = &operation else {
-                bail!("Step {step}: unexpected request {operation:?}");
-            };
-            let answer = match target.service.as_str() {
-                "claude" => {
-                    request = serde_json::to_vec(input)?.len();
+            let answer = match &operation {
+                Operation::Call { id, name, .. } if name == "claude.messages" => {
+                    let input = block(run.input(id))?;
+                    request =
+                        serde_json::to_vec(&input.map_err(|e| anyhow::anyhow!(e.message))?)?.len();
                     session.model(step)
                 }
-                _ => session.tool(&target.handler),
+                Operation::Rpc { target, .. } => session.tool(&target.handler),
+                _ => bail!("Step {step}: unexpected request {operation:?}"),
             };
+            let id = operation.id();
             let started = Instant::now();
             block(run.deliver(id, Outcome::success(answer), view.state.now + 1))?;
             *turn = started.elapsed().as_secs_f64() * 1000.0;
         }
-        journaled += request;
         let written = store.stats().bytes_written as usize - stored;
         stored = store.stats().bytes_written as usize;
         let mut restore_ms = None;
@@ -79,18 +80,18 @@ fn main() -> Result<()> {
         rows.push(
             json!({"step": step, "request_bytes": request, "model_turn_ms": turns[0],
             "tool_turn_ms": turns[1], "restore_ms": restore_ms, "stored_bytes": written,
-            "journaled_bytes": journaled, "memory_bytes": view.memory_bytes,
+            "memory_bytes": view.memory_bytes,
             "live_pages": view.live_pages, "batch_bytes": view.batch_bytes,
             "commit_bytes": view.commit_bytes}),
         );
         if step.is_multiple_of(10) || step == 1 {
             println!(
-                "{step:>4}  {:>11.0}  {:>8.2}  {:>7.2}  {:>13}  {:>13.1}  {:>10.1}",
+                "{step:>4}  {:>11.0}  {:>8.2}  {:>7.2}  {:>13}  {:>15}  {:>10.1}",
                 request as f64 / 1024.0,
                 turns[0],
                 turns[1],
                 written,
-                journaled as f64 / (1 << 20) as f64,
+                view.commit_bytes,
                 stored as f64 / (1 << 20) as f64,
             );
         }
@@ -108,7 +109,7 @@ fn main() -> Result<()> {
         );
     }
     let output = json!({"steps": STEPS, "ended": ended, "notes": [
-        "request_bytes: the step's request to the model, the whole conversation so far; journaled_bytes, their sum.",
+        "request_bytes: the step's request to the model, the whole conversation so far, read from the heap; nothing stores it but the heap.",
         "stored_bytes: what the step's two turns stored (batches, commits); Scope, no network.",
         "restore_ms: a new attempt after the step, reading the commit and its batches into a new VM."],
         "rows": rows});

@@ -28,6 +28,15 @@ pub struct GuestError {
     pub message: String,
 }
 
+impl GuestError {
+    pub fn new(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            message: message.into(),
+        }
+    }
+}
+
 impl Outcome {
     pub fn success(value: impl Into<Value>) -> Self {
         Self::Success {
@@ -69,13 +78,20 @@ pub struct RpcTarget {
 /// Guest requests and internal resume wakeups. KV requests are answered in the
 /// turn; the others wait in the run's pending list, under stable IDs, for the
 /// host to deliver their outcome. The KV scope is the host's, not the guest's.
+///
+/// A call's input stays in the guest's heap until the call is answered: the
+/// host reads it when it makes the call ([`crate::Run::input`]), so the
+/// commit keeps the call's ID, not a copy of its input.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Operation {
+    /// A host binding's call, `ctx.call(name, input)` ([`crate::Bindings`]).
     Call {
         id: String,
         name: String,
-        args: Value,
+        /// The guest's own idempotency key, if it set one.
+        #[serde(rename = "idempotencyKey", skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
     #[serde(rename = "kv.get")]
     KvGet {
@@ -96,7 +112,9 @@ pub enum Operation {
     Rpc {
         id: String,
         target: RpcTarget,
-        input: Value,
+        /// The guest's own idempotency key, if it set one.
+        #[serde(rename = "idempotencyKey", skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
     Sleep {
         id: String,
@@ -117,6 +135,21 @@ impl Operation {
             | Self::Rpc { id, .. }
             | Self::Sleep { id, .. }
             | Self::Resume { id } => id,
+        }
+    }
+    /// The key a call is made under: the guest's, if it set one, or else the
+    /// operation's ID, `<run>/<n>`, the same on every attempt.
+    pub fn idempotency_key(&self) -> &str {
+        match self {
+            Self::Call {
+                idempotency_key: Some(key),
+                ..
+            }
+            | Self::Rpc {
+                idempotency_key: Some(key),
+                ..
+            } => key,
+            _ => self.id(),
         }
     }
 }
@@ -141,8 +174,8 @@ pub struct State {
 }
 
 /// The guest's report at the end of a step: the requests it issued since its
-/// last report, which it then forgets (the host keeps them pending), and
-/// where the run stands.
+/// last report (the host keeps them pending; the guest keeps only a call's
+/// input), and where the run stands.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Report {

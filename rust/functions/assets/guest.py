@@ -206,8 +206,8 @@ def _checked(value):
     return value
 
 
-def _plain(value):
-    """`value` as plain JSON data, or a TypeError."""
+def _json(value):
+    """`value` as JSON text, or a TypeError."""
     try:
         text = json.dumps(value, allow_nan=False, ensure_ascii=False, cls=_Encoder)
         size = len(text.encode())
@@ -215,7 +215,21 @@ def _plain(value):
         raise TypeError(f"Expected JSON data: {error}") from None
     if size > _MAX_BYTES:
         raise TypeError(f"Expected JSON data of at most 1 MiB, not {size} bytes")
-    return json.loads(text)
+    return text
+
+
+def _plain(value):
+    """`value` as plain JSON data, or a TypeError."""
+    return json.loads(_json(value))
+
+
+def _idempotency(key):
+    """A call's idempotency key of the program's own, if any."""
+    if key is None:
+        return {}
+    if not isinstance(key, str) or not key:
+        raise TypeError("An idempotency key is a nonempty string")
+    return {"idempotencyKey": key}
 
 
 def _failure(error):
@@ -320,15 +334,17 @@ class Rpc:
     def __init__(self, bridge):
         self._bridge = bridge
 
-    async def call(self, service, handler, input=None, *, key=None):
+    async def call(self, service, handler, input=None, *, key=None, idempotency_key=None):
         """Call `service`'s `handler` (on object `key`, if given) with `input`;
-        its answer."""
+        its answer. `input` is read when the call is made, and again after a
+        crash: do not change it until the call is answered."""
         if not (isinstance(service, str) and service and isinstance(handler, str) and handler):
             raise TypeError("A call names a service and a handler")
         target = {"service": service, "handler": handler}
         if key is not None:
             target["key"] = _key(key)
-        return await self._bridge.request({"kind": "rpc", "target": target, "input": _plain(input)})
+        operation = {"kind": "rpc", "target": target, **_idempotency(idempotency_key)}
+        return await self._bridge.request(operation, input)
 
 
 class Context:
@@ -347,11 +363,13 @@ class Context:
         """The scope: the key of the object this program is served as."""
         return self._bridge.scope
 
-    async def call(self, name, args=None):
-        """The host's operation `name` (a model call, a tool), with `args`."""
+    async def call(self, name, input=None, *, idempotency_key=None):
+        """The host binding `name`, such as `claude.messages`, with `input`,
+        which is read as an RPC's is."""
         if not isinstance(name, str) or not name:
-            raise TypeError("An operation name is a nonempty string")
-        return await self._bridge.request({"kind": "call", "name": name, "args": _plain(args)})
+            raise TypeError("A binding name is a nonempty string")
+        operation = {"kind": "call", "name": name, **_idempotency(idempotency_key)}
+        return await self._bridge.request(operation, input)
 
     async def sleep(self, seconds):
         """Wait `seconds`, durably (as `asyncio.sleep` does here)."""
@@ -367,9 +385,11 @@ class _Bridge:
         self.now = 0
         self.max_time = 0
         self.next_operation = 0
-        # Each request's future, by ID, until delivered. The request itself
-        # goes to the host at the next report, and is forgotten here.
+        # Each request's future, by ID, until delivered. The request goes to
+        # the host at the next report, and is forgotten here, but for a call's
+        # input: it stays, for the host to read when it makes the call.
         self.pending = {}
+        self.inputs = {}
         self.issued = []
         self.outcome = None
 
@@ -381,7 +401,7 @@ class _Bridge:
             return answer["value"]
         raise OperationError(answer["error"]["name"], answer["error"]["message"])
 
-    def request(self, operation):
+    def request(self, operation, input=None):
         if self.run_id is None:
             raise RuntimeError("Durable operations are unavailable while the program loads")
         id = f"{self.run_id}/{self.next_operation}"
@@ -389,6 +409,8 @@ class _Bridge:
         self.issued.append({"id": id, **operation})
         future = self.loop.create_future()
         self.pending[id] = future
+        if operation["kind"] in ("rpc", "call"):
+            self.inputs[id] = input
         return future
 
     def sleep_until(self, deadline):
@@ -422,6 +444,16 @@ class _Bridge:
 
     def pause(self):
         self.request({"kind": "resume"})
+
+    def input(self, id):
+        """The input of the pending call `id`, as an outcome: its JSON, or why
+        it has none."""
+        try:
+            if id not in self.inputs:
+                raise RuntimeError(f"No pending call {id}")
+            return '{"ok":true,"value":' + _json(self.inputs[id]) + "}"
+        except Exception as error:
+            return json.dumps(_failure(error), ensure_ascii=False)
 
     def init(self, config):
         if self.run_id is not None:
@@ -466,6 +498,7 @@ class _Bridge:
         event = json.loads(event)
         self.now = max(self.now, event["now"])
         future = self.pending.pop(event["operationId"], None)
+        self.inputs.pop(event["operationId"], None)
         if future is None:
             raise RuntimeError("Completion has no pending future")
         if future.cancelled():
@@ -486,6 +519,7 @@ class _Bridge:
         # dropped, and their continuations never run.
         if self.outcome is not None:
             self.pending.clear()
+            self.inputs.clear()
             self.issued = []
         report = {
             "issued": self.issued,

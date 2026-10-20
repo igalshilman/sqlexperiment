@@ -182,11 +182,15 @@ pub fn kv(store: &Store, key: &str) -> Option<Value> {
     }
 }
 
-/// The answer the tests' host gives each request: an RPC's input back, with
-/// the request's ID; null for anything else.
-pub fn answer(operation: &Operation) -> Outcome {
+/// The answer the tests' host gives each request: an RPC's input back (read
+/// from the guest's heap, as the host reads it to make the call), with the
+/// request's ID; null for anything else.
+pub fn answer(run: &mut Run, operation: &Operation) -> Outcome {
     match operation {
-        Operation::Rpc { id, input, .. } => Outcome::success(json!({"id": id, "input": input})),
+        Operation::Rpc { id, .. } => match block(run.input(id)).expect("the input") {
+            Ok(input) => Outcome::success(json!({"id": id, "input": input})),
+            Err(error) => Outcome::failure(error.name, error.message),
+        },
         _ => Outcome::success(Value::Null),
     }
 }
@@ -199,7 +203,8 @@ pub fn step(run: &mut Run) -> Result<View> {
         Operation::Sleep { deadline, .. } => *deadline,
         _ => state.now + 1,
     };
-    block(run.deliver(operation.id(), answer(&operation), now))
+    let answer = answer(run, &operation);
+    block(run.deliver(operation.id(), answer, now))
 }
 
 /// Answer the run's requests until it settles.

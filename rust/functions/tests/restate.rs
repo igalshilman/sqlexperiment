@@ -3,7 +3,8 @@
 //! `cargo test`, which has no server.
 mod fakes;
 
-use functions::{Programs, Runtime};
+use functions::{Binding, Bindings, GuestError, HostCall, Programs, Runtime};
+use futures::future::BoxFuture;
 use restate_sdk::prelude::*;
 use serde_json::{Value, json};
 use std::{
@@ -11,7 +12,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command},
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU32, Ordering},
     },
     time::{Duration, Instant},
@@ -41,6 +42,31 @@ impl Doubler {
         .await?;
         ctx.sleep(Duration::from_millis(500)).await?;
         Ok(Json(n.into_inner() * 2))
+    }
+}
+
+/// A binding that answers each call, after 200 ms, with its key and input,
+/// and records the call.
+struct Record;
+
+/// Every call `Record` was made: its ID, key and input.
+static RECORDED: Mutex<Vec<(String, String, Value)>> = Mutex::new(Vec::new());
+
+impl Binding for Record {
+    fn call(&self, call: HostCall) -> BoxFuture<'static, Result<Value, GuestError>> {
+        let answer = json!({"key": call.idempotency_key, "input": call.input});
+        RECORDED
+            .lock()
+            .unwrap()
+            .push((call.id, call.idempotency_key, call.input));
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(answer)
+        })
+    }
+
+    fn deduplicates(&self) -> bool {
+        true
     }
 }
 
@@ -103,7 +129,8 @@ where
 }
 
 /// The test programs: `counter` calls `Doubler`, `failing` throws, `attach`
-/// waits on a slow call and a timer, `race` settles before its loser.
+/// waits on a slow call and a timer, `race` settles before its loser, `host`
+/// calls bindings, `keyed` calls under a key of its own.
 fn programs() -> Arc<Programs> {
     static PROGRAMS: OnceLock<Arc<Programs>> = OnceLock::new();
     PROGRAMS
@@ -114,6 +141,8 @@ fn programs() -> Arc<Programs> {
                 .and_then(|p| p.compile("failing", FAILING))
                 .and_then(|p| p.compile("attach", ATTACH))
                 .and_then(|p| p.compile("race", RACE))
+                .and_then(|p| p.compile("host", HOST))
+                .and_then(|p| p.compile("keyed", KEYED))
                 .unwrap();
             Arc::new(programs)
         })
@@ -131,8 +160,9 @@ fn workspaces() -> &'static std::path::Path {
     DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
 }
 
-/// Serve `programs`, `Doubler`, a scripted `claude` and `workspace`, and
-/// register them with the server.
+/// Serve `programs` with a scripted `claude.messages` and `record` as
+/// bindings, and `Doubler` and `workspace`, and register them with the
+/// server.
 async fn serve_programs(programs: &Arc<Programs>) -> u16 {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
@@ -144,17 +174,15 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .unwrap()
         .port();
     let cache = functions::page_cache().await.unwrap();
-    let endpoint = functions::bind(
-        Endpoint::builder(),
-        programs,
-        &cache,
-        &functions::Budget::from_env().unwrap(),
-    )
-    .unwrap()
-    .bind(Doubler)
-    .bind(fakes::Claude)
-    .bind(functions::Workspace::new(workspaces()))
-    .build();
+    let bindings = Bindings::new()
+        .with("claude.messages", fakes::Claude)
+        .with("record", Record);
+    let budget = functions::Budget::from_env().unwrap();
+    let endpoint = functions::bind(Endpoint::builder(), programs, &cache, &budget, &bindings)
+        .unwrap()
+        .bind(Doubler)
+        .bind(functions::Workspace::new(workspaces()))
+        .build();
     tokio::spawn(
         HttpServer::new(endpoint).listen_and_serve(format!("127.0.0.1:{port}").parse().unwrap()),
     );
@@ -232,6 +260,26 @@ const RACE: &str = r#"export async function run(input, ctx) {
   return await Promise.race([ctx.sleep(50).then(() => 'timer'), slow]);
 }"#;
 
+const HOST: &str = r#"export async function run(n, ctx) {
+  const call = ctx.call('record', { n });
+  await ctx.sleep(50);
+  const errors = [];
+  for (const [name, options] of [['missing'], ['claude.messages', { idempotencyKey: 'k' }]]) {
+    try {
+      await ctx.call(name, {}, options);
+    } catch (error) {
+      errors.push(error.message);
+    }
+  }
+  const mine = await ctx.call('record', { n: n + 1 }, { idempotencyKey: `mine-${n}` });
+  return { first: await call, mine, errors };
+}"#;
+
+const KEYED: &str = r#"export async function run(n, ctx) {
+  const once = () => ctx.rpc.call({ service: 'Doubler', handler: 'slow' }, n, { idempotencyKey: `slow-${n}` });
+  return [await once(), await once()];
+}"#;
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs restate-server: make test-functions"]
 async fn runs_wait_on_rpcs_and_timers_and_share_their_scope() {
@@ -274,6 +322,64 @@ async fn a_retried_attempt_attaches_to_its_calls() {
     let (status, doubled) = call("attach/carol/run", json!(5)).await;
     assert_eq!((status, doubled), (200, json!(10)));
     assert_eq!(functions::faults::pending(), 0);
+    assert_eq!(
+        SLOW_RUNS.load(Ordering::SeqCst) - before,
+        1,
+        "slow ran once"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-functions"]
+async fn bindings_are_called_with_their_input_and_key() {
+    let _server = server().await;
+    serve().await;
+    RECORDED.lock().unwrap().clear();
+
+    // The call is made after the first turn commits; the timer's turn
+    // commits, then its attempt crashes while the call is still running. The
+    // retry reads the input from the restored heap, and calls again under
+    // the same key.
+    functions::faults::crash_after_commit(1, 1);
+    let (status, done) = call("host/erin/run", json!(5)).await;
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(functions::faults::pending(), 0);
+    let recorded = RECORDED.lock().unwrap().clone();
+    let [
+        (first, key, input),
+        (again, key_again, input_again),
+        (mine, mine_key, _),
+    ] = &recorded[..]
+    else {
+        panic!("Expected three calls: {recorded:?}");
+    };
+    assert!(first.ends_with("/0"), "{first}");
+    assert_eq!((again, key, key_again), (first, first, first));
+    assert_eq!((input, input_again), (&json!({"n": 5}), &json!({"n": 5})));
+    assert_ne!(mine, first);
+    assert_eq!(mine_key, "mine-5");
+    assert_eq!(
+        done,
+        json!({
+            "first": {"key": first, "input": {"n": 5}},
+            "mine": {"key": "mine-5", "input": {"n": 6}},
+            "errors": [
+                "No host binding \"missing\"",
+                "claude.messages does not deduplicate: it takes no idempotency key",
+            ],
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-functions"]
+async fn a_call_under_the_programs_key_is_made_once() {
+    let _server = server().await;
+    serve().await;
+
+    let before = SLOW_RUNS.load(Ordering::SeqCst);
+    let (status, doubled) = call("keyed/frank/run", json!(4)).await;
+    assert_eq!((status, doubled), (200, json!([8, 8])));
     assert_eq!(
         SLOW_RUNS.load(Ordering::SeqCst) - before,
         1,

@@ -1,7 +1,8 @@
-//! A scripted `claude` service, for tests: it answers each request by the
-//! steps the conversation has taken, as the shop assistant or, offered
-//! `bash`, as the coding agent.
-use restate_sdk::prelude::*;
+//! A scripted `claude.messages` binding, for tests: it answers each request
+//! by the steps the conversation has taken, as the shop assistant or,
+//! offered `bash`, as the coding agent.
+use functions::{Binding, GuestError, HostCall};
+use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Mutex;
 
@@ -10,15 +11,9 @@ pub struct Claude;
 /// Every request the fake was sent, in order.
 pub static REQUESTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 
-#[restate_sdk::service(name = "claude")]
-impl Claude {
-    #[handler]
-    async fn messages(
-        &self,
-        _ctx: Context<'_>,
-        request: Json<Value>,
-    ) -> HandlerResult<Json<Value>> {
-        let request = request.into_inner();
+impl Binding for Claude {
+    fn call(&self, call: HostCall) -> BoxFuture<'static, Result<Value, GuestError>> {
+        let request = call.input;
         REQUESTS.lock().unwrap().push(request.clone());
         let messages = request["messages"].as_array().unwrap();
         let codes = request["tools"][0]["name"] == "bash";
@@ -27,13 +22,14 @@ impl Claude {
         } else {
             shop(messages)
         };
-        Ok(Json(json!({
+        let response = json!({
             "type": "message",
             "role": "assistant",
             "model": request["model"],
             "content": content,
             "stop_reason": stop_reason,
-        })))
+        });
+        Box::pin(async move { Ok(response) })
     }
 }
 

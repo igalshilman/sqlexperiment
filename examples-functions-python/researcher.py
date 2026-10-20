@@ -19,9 +19,8 @@ MODEL = "claude-opus-5-5"
 
 async def _ask(ctx, prompt):
     """Claude's answer to `prompt`, as text."""
-    response = await ctx.rpc.call(
-        "claude",
-        "messages",
+    response = await ctx.call(
+        "claude.messages",
         {
             "model": MODEL,
             "max_tokens": 16000,
