@@ -13,17 +13,20 @@
 //!    segments written before it.
 //! 2. **Build on the record**: a commit record holds the record's log plus
 //!    one transaction, at the next version (its earlier transactions decode to
-//!    the same images, inline or sealed); or is that record again.
+//!    the same images, inline or sealed), and every record the record holds,
+//!    under the same id and name (a value may change); or is that record
+//!    again.
 //! 3. **Checkpoint before recording**: a record that empties the log (the next
 //!    epoch) comes only once every page the log changed is at its page key,
-//!    with the log's latest image of it.
+//!    with the log's latest image of it; its records and chain are the
+//!    record's.
 //! 4. **Overwrite only what the log covers**: a page key gets only an image of
 //!    a transaction in the record's log.
 //! 5. **Fresh segments, deleted unnamed**: a stored segment is put only at a
 //!    number the record has not allocated, and deleted only if it names it no
 //!    more; the record lists as garbage only values the record before named.
 //! 6. **Decodable**: every record put decodes, its log against the segments
-//!    it names.
+//!    it names, and its records' and chain's values are known.
 use crate::{
     format::{COMMIT, LOG_PREFIX, PAGE_PREFIX},
     kv::KvStore,
@@ -92,16 +95,28 @@ impl Known {
         Some(transactions)
     }
 
-    /// The values of `commit`'s chain; `None` when one it names is unknown.
-    fn chain(&self, commit: &Commit) -> Option<Vec<Bytes>> {
-        let value = |part: &Part| match part {
+    /// The value of a chain's or a record's part; `None` when unknown.
+    fn value(&self, part: &Part) -> Option<Bytes> {
+        match part {
             Part::Inline(bytes) => Some(bytes.clone()),
             Part::Stored(n, index) => log::stored_segments(self.segments.get(n)?)
                 .ok()?
                 .get(*index as usize)
                 .cloned(),
-        };
-        commit.chain.iter().map(value).collect()
+        }
+    }
+
+    /// The values of `commit`'s chain; `None` when one it names is unknown.
+    fn chain(&self, commit: &Commit) -> Option<Vec<Bytes>> {
+        commit.chain.iter().map(|part| self.value(part)).collect()
+    }
+
+    /// `commit`'s records by id, with their names and values; `None` when one
+    /// it names is unknown.
+    fn records(&self, commit: &Commit) -> Option<BTreeMap<u32, (String, Bytes)>> {
+        (commit.directory.iter())
+            .map(|(&id, entry)| Some((id, (entry.name.clone(), self.value(&entry.record)?))))
+            .collect()
     }
 
     /// The logical image a page key's value holds; `None` for a hole.
@@ -137,7 +152,10 @@ impl Known {
         };
         let known = self.commit();
         // 1, 6: it names known segments, and its log decodes
-        if self.transactions(&commit).is_none() || self.chain(&commit).is_none() {
+        if self.transactions(&commit).is_none()
+            || self.chain(&commit).is_none()
+            || self.records(&commit).is_none()
+        {
             return self.violation(format!(
                 "commit {}: names an unknown segment, or does not decode",
                 commit.version
@@ -147,7 +165,7 @@ impl Known {
             return;
         }
         let same = |a: &Commit, b: &Commit| {
-            (a.size, a.next_segment, &a.effects) == (b.size, b.next_segment, &b.effects)
+            (a.size, a.next_segment, a.next_file) == (b.size, b.next_segment, b.next_file)
         };
         if commit.version == known.version + 1 {
             // 2: the known log plus one transaction (or none, for a commit
@@ -169,6 +187,14 @@ impl Known {
                 }
                 _ => false,
             };
+            // every known record, under its id and name
+            let keeps_records = commit.next_file >= known.next_file
+                && known.directory.iter().all(|(id, entry)| {
+                    commit
+                        .directory
+                        .get(id)
+                        .is_some_and(|e| e.name == entry.name)
+                });
             let (named, known_named) = (commit.stored_values(), known.stored_values());
             let extends = commit.epoch == known.epoch
                 && (added == Some(1) || (added == Some(0) && commit.size == known.size))
@@ -176,6 +202,7 @@ impl Known {
                 && earlier.is_some()
                 && earlier == self.transactions(&known)
                 && chain_follows
+                && keeps_records
                 // garbage: values the known record named, and this one no more
                 && commit
                     .garbage
@@ -192,6 +219,7 @@ impl Known {
             && commit.log.is_empty()
             && same(&commit, &known)
             && self.chain(&commit) == self.chain(&known)
+            && self.records(&commit) == self.records(&known)
         {
             // 3: every page of the known log is known at its key
             let Some(known_log) = self.transactions(&known) else {

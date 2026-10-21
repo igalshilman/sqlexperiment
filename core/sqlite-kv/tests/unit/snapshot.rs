@@ -608,7 +608,7 @@ fn a_cold_open_fetches_the_working_set_hint() -> io::Result<()> {
         assert_eq!(cold_gets(open(&store, &off).await?, vec![5]).await?, 1);
         store
             .inner
-            .put(HINT, Bytes::from_static(b"SH14\x09\x00garbage"))?;
+            .put(HINT, Bytes::from_static(b"SH15\x09\x00garbage"))?;
         assert_eq!(
             cold_gets(open(&store, &options(4, None)).await?, vec![5]).await?,
             1
@@ -746,7 +746,9 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
             let mut rewrite = Changes::from([(5, Some(page(500)))]);
             for round in 0..12u64 {
                 let size = PREFETCH_PAGES * 4096;
-                let (_, next) = snapshot.commit(rewrite.clone(), size, None, None).await?;
+                let (_, next) = snapshot
+                    .commit(rewrite.clone(), size, Default::default(), None)
+                    .await?;
                 model.apply(&rewrite, size);
                 snapshot = next;
                 rewrite = Changes::from([(round % 3, Some(page(1000 + round)))]);
@@ -779,7 +781,9 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             let mut snapshot = open(&store, &opts).await?;
             for round in 0..12 {
                 let (changes, size) = dirty(round);
-                let (report, after) = snapshot.commit(changes.clone(), size, None, None).await?;
+                let (report, after) = snapshot
+                    .commit(changes.clone(), size, Default::default(), None)
+                    .await?;
                 assert_eq!(report.checkpointed_pages, 0);
                 model.apply(&changes, size);
                 snapshot = after;
@@ -796,7 +800,9 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             let snapshot = open(&store, &checkpointing).await?;
             store.reset_stats();
             let (changes, size) = dirty(12);
-            let (report, after) = snapshot.commit(changes.clone(), size, None, None).await?;
+            let (report, after) = snapshot
+                .commit(changes.clone(), size, Default::default(), None)
+                .await?;
             model.apply(&changes, size);
             let distinct = model.pages.len();
             assert_eq!(report.checkpointed_pages, distinct);

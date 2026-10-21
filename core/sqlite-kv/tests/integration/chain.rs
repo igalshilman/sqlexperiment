@@ -1,5 +1,5 @@
-//! The host's chain: values a turn commits with its SQL and effects, in one
-//! record (`Session::commit_turn`).
+//! The host's chain and records: values a turn commits with its SQL, in one
+//! commit record (`Session::seal`).
 use bytes::Bytes;
 use sqlite_kv::{
     ChainUpdate, Durability, NamespaceCache, Result, Session, StorageOptions,
@@ -46,14 +46,27 @@ fn expected(turns: usize) -> Vec<Bytes> {
 }
 
 /// A turn: a row (every other turn, in a transaction; the others open none),
-/// its state as the effects, its update.
+/// its number as the record `effects`, every third its value as the record
+/// `state` (small, sealed, or stored), its update.
 async fn turn(db: &mut Session, i: usize) -> Result<()> {
     if i.is_multiple_of(2) {
         db.execute("BEGIN").await?;
         db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     }
-    db.commit_turn(Bytes::from(format!("turn {i}")), update(i))
-        .await
+    db.record("effects").set(Bytes::from(format!("turn {i}")));
+    if i.is_multiple_of(3) {
+        db.record("state").set(value(i));
+    }
+    db.seal(Some(update(i))).await
+}
+
+/// The record `state` after turns `0..turns`.
+fn state(turns: usize) -> Bytes {
+    (0..turns)
+        .rev()
+        .find(|i| i.is_multiple_of(3))
+        .map(value)
+        .unwrap_or_default()
 }
 
 async fn rows(db: &mut Session) -> Result<i64> {
@@ -62,7 +75,7 @@ async fn rows(db: &mut Session) -> Result<i64> {
 }
 
 #[test]
-fn a_turn_commits_its_chain_with_its_sql_and_effects() -> Result<()> {
+fn a_turn_commits_its_chain_and_records_with_its_sql() -> Result<()> {
     futures::executor::block_on(async {
         for cached in [false, true] {
             let cache = cached.then(fresh_namespace);
@@ -80,6 +93,7 @@ fn a_turn_commits_its_chain_with_its_sql_and_effects() -> Result<()> {
                         Session::open_with_options(store.clone(), options(None)).await?;
                     assert_eq!(other.chain(), expected(i + 1), "turn {i}, reopened");
                     assert_eq!(other.effects(), format!("turn {i}").as_bytes());
+                    assert_eq!(other.record("state").get(), state(i + 1));
                     assert_eq!(rows(&mut other).await?, (i / 2 + 1) as i64);
                     drop(other);
                     db = Session::open_with_options(store.clone(), options(cache.clone())).await?;
@@ -118,11 +132,8 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
             if i % 3 == 0 {
                 db.execute("BEGIN").await?;
             }
-            db.commit_turn(
-                Bytes::new(),
-                ChainUpdate::Append(Bytes::from(vec![i as u8; 64])),
-            )
-            .await?;
+            let append = ChainUpdate::Append(Bytes::from(vec![i as u8; 64]));
+            db.seal(Some(append)).await?;
         }
         assert_eq!(db.version(), version + 100);
         // Without SQL nothing checkpointed: no page keys beyond the first
@@ -219,6 +230,7 @@ async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
                 "{case}"
             );
         }
+        assert_eq!(db.record("state").get(), state(turns), "{case}");
         assert_eq!(rows(&mut db).await?, turns.div_ceil(2) as i64, "{case}");
         // The namespace takes turns again.
         turn(&mut db, turns).await?;

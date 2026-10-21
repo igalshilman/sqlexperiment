@@ -1,6 +1,6 @@
 # Current storage format
 
-Only this format (v14) is implemented. Use a dedicated namespace. Constants and
+Only this format (v15) is implemented. Use a dedicated namespace. Constants and
 key construction live in `src/format.rs`; there is no migration or format
 discovery. Storage is assumed reliable (a value reads back as written), so
 pages have no checksums; decoding checks structure and the bounds below. A log
@@ -8,47 +8,54 @@ segment's zstd frame carries one.
 
 | Key                                   | Value                                                                                                            |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `v14/commit`                          | Commit record, with the log; absent until the first                                                              |
-| `v14/log/<16-digit hex number>`       | Stored log value: segments, sealed or of a large transaction; immutable, written before the record that names it |
-| `v14/page/<16-digit hex page number>` | Checkpointed page, overwritten in place                                                                          |
-| `v14/hint`                            | Working-set hint; advisory, may be absent or stale                                                               |
+| `v15/commit`                          | Commit record, with the log; absent until the first                                                              |
+| `v15/log/<16-digit hex number>`       | Stored log value: segments, sealed or of a large transaction; immutable, written before the record that names it |
+| `v15/page/<16-digit hex page number>` | Checkpointed page, overwritten in place                                                                          |
+| `v15/hint`                            | Working-set hint; advisory, may be absent or stale                                                               |
 
 The commit record is the only key whose write commits. Integers are LEB128
 varints unless stated otherwise.
 
 ## Commit record
 
-| Field             | Encoding                                                                                                                   |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Magic             | `SC14`                                                                                                                     |
-| Version           | Commits ever made; at most 2^62                                                                                            |
-| Epoch             | Checkpoints ever recorded; at most 2^62                                                                                    |
-| Database length   | In 512-byte units, after the log; at most 2^44 bytes                                                                       |
-| Next segment      | The number the next stored value gets; at most 2^62                                                                        |
-| Garbage           | Count, then ascending numbers, each from the one before: stored values the record does not name, to delete; below the next |
-| Effects           | Length (at most 16 MiB), then the host's bytes, opaque here                                                                |
-| Transaction count | At most the version, and 2^20                                                                                              |
-| Transactions      | Each: its database length in 512-byte units, its part count, then its parts                                                |
-| Chain count       | At most 2^20                                                                                                               |
-| Chain             | The host's values, each a part                                                                                             |
+| Field             | Encoding                                                                                                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Magic             | `SC15`                                                                                                                                                                         |
+| Version           | Commits ever made; at most 2^62                                                                                                                                                |
+| Epoch             | Checkpoints ever recorded; at most 2^62                                                                                                                                        |
+| Database length   | In 512-byte units, after the log; at most 2^44 bytes                                                                                                                           |
+| Next segment      | The number the next stored value gets; at most 2^62                                                                                                                            |
+| Garbage           | Count, then ascending numbers, each from the one before: stored values the record does not name, to delete; below the next                                                     |
+| Next file         | The id the next new record gets; at most 2^16; ids are never reused                                                                                                            |
+| Directory         | Count, then per record: its id (ascending, as the gap after the previous id, less one), its name's length (at most 255) and UTF-8 bytes, its value as a part; names are unique |
+| Transaction count | At most the version, and 2^20                                                                                                                                                  |
+| Transactions      | Each: its database length in 512-byte units, its part count, then its parts                                                                                                    |
+| Chain count       | At most 2^20                                                                                                                                                                   |
+| Chain             | The host's values, each a part                                                                                                                                                 |
 
 A part is `0`, a length and inline bytes (a segment of at most 1 MiB, or a
-chain value of at most 16 MiB), or `1`, the number of a stored value (below the
-next segment, not in the garbage) and the bytes' index in it. The last transaction's length is the database length. Nothing may follow. A
+chain value or record of at most 16 MiB), or `1`, the number of a stored value
+(below the next segment, not in the garbage) and the bytes' index in it. The last transaction's length is the database length. Nothing may follow. A
 missing record means version 0, epoch 0 and an empty database.
 
 The transactions are the log since the last checkpoint, in commit order.
 Pages they change are authoritative from the log; any other page is read at
 `page/<n>`. A commit without SQL changes adds none.
 
-The chain is the host's (`Session::commit_turn`): opaque values in the order
-it appended them since it last restarted the chain. Checkpoints keep it. A
+The records are the host's (`Session::record`): named whole values, each
+replaced whole by a commit that sets it. One of at most the inline budget
+(1 KiB by default) is inline; a larger one is a stored value of its own,
+written by the commit that sets it. Checkpoints keep them. A record never
+set reads as empty.
+
+The chain is the host's (`Session::seal`): opaque values in the order it
+appended them since it last restarted the chain. Checkpoints keep it. A
 stored value may hold log segments and chain values together (a seal).
 
 ## Log segments
 
 A transaction's changed pages, in segments of at most 240 entries. A stored
-value at `log/<n>` is `SL14`, the segment count, then each segment's length
+value at `log/<n>` is `SL15`, the segment count, then each segment's length
 and bytes: one segment of a large transaction, or the segments a commit
 sealed (the record's inline log, in order).
 
@@ -77,7 +84,7 @@ An absent `page/<n>` is a zero-filled hole.
 
 | Field       | Encoding                                                     |
 | ----------- | ------------------------------------------------------------ |
-| Magic       | `SH14`                                                       |
+| Magic       | `SH15`                                                       |
 | Entry count | u16 LE; at most 256                                          |
 | Pages       | Ascending page numbers as LEB128 deltas, the first from zero |
 

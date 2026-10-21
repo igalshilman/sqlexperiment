@@ -27,7 +27,7 @@
 //! ascending page order the gap from the previous entry's page (the page itself
 //! for the first) shifted left once, its low bit the kind (0: a hole, 1: an
 //! image); then one zstd frame, with a checksum, of the images in entry order
-//! (none when every entry is a hole). A value at `log/<n>` is `SL14`, then the
+//! (none when every entry is a hole). A value at `log/<n>` is `SL15`, then the
 //! segment count and each segment's length and bytes.
 use crate::{
     format::{COMMIT_MAGIC, LOG_MAGIC, log_key},
@@ -50,8 +50,12 @@ pub const MAX_SEGMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_SEGMENT_PAGES: usize = 240;
 /// Most transactions, and segments of one, a stored record may hold.
 const MAX_TRANSACTIONS: u64 = 1 << 20;
-/// Bytes of a commit record's effects.
-pub const MAX_EFFECTS_BYTES: usize = 16 * 1024 * 1024;
+/// Bytes of a record's value.
+pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+/// Bytes of a record's name.
+pub const MAX_NAME_BYTES: usize = 255;
+/// Most records a commit record may name.
+pub(crate) const MAX_FILES: u32 = 1 << 16;
 /// Bytes of a value in the host's chain.
 pub const MAX_CHAIN_VALUE_BYTES: usize = 16 * 1024 * 1024;
 const MAGIC: usize = 4;
@@ -292,6 +296,13 @@ pub(crate) enum Part {
     Stored(u64, u32),
 }
 
+/// A named record: a whole value, replaced whole, kept by checkpoints.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Entry {
+    pub name: String,
+    pub record: Part,
+}
+
 /// A committed transaction, as the commit record holds it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Logged {
@@ -302,13 +313,15 @@ pub(crate) struct Logged {
 
 /// The commit record at `commit`.
 ///
-/// Encoding: `SC14`, then LEB128 varints: the version, the epoch, the
+/// Encoding: `SC15`, then LEB128 varints: the version, the epoch, the
 /// database size in 512-byte units, the next segment number, the garbage's
-/// count and its numbers (ascending, each from the one before), the
-/// effects' length and bytes, and the transaction count; per transaction its
-/// size in 512-byte units and its part count; then the chain's part count.
-/// Per part 0 and the bytes' length and bytes (inline), or 1, the stored
-/// value's number and the part's index in it (stored).
+/// count and its numbers (ascending, each from the one before), the next
+/// file id, the directory's count and per record its id (ascending, as the
+/// gap from the one before), its name's length and bytes, and its part; then
+/// the transaction count; per transaction its size in 512-byte units and its
+/// part count; then the chain's part count. Per part 0 and the bytes' length
+/// and bytes (inline), or 1, the stored value's number and the part's index
+/// in it (stored).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Commit {
     /// Transactions ever committed: the database's version.
@@ -322,9 +335,11 @@ pub(crate) struct Commit {
     /// Stored values no transaction in the log names, to delete: those a
     /// checkpoint passed, and a seal not yet named.
     pub garbage: BTreeSet<u64>,
-    /// The host's bytes, committed with the last transaction that set them
-    /// (its outbox, say): opaque here, and kept by checkpoints.
-    pub effects: Bytes,
+    /// The id the next new record takes: ids are never reused.
+    pub next_file: u32,
+    /// The records, by id: the host's values, each committed with the last
+    /// transaction that set it (its outbox, say), and kept by checkpoints.
+    pub directory: BTreeMap<u32, Entry>,
     /// The log since the last checkpoint, in order.
     pub log: Vec<Logged>,
     /// The host's chain: opaque values it appends to, or restarts, with its
@@ -341,7 +356,8 @@ impl Default for Commit {
             size: 0,
             next_segment: 0,
             garbage: BTreeSet::new(),
-            effects: Bytes::new(),
+            next_file: 0,
+            directory: BTreeMap::new(),
             log: Vec::new(),
             chain: Vec::new(),
         }
@@ -357,7 +373,8 @@ impl Commit {
                 Part::Stored(..) => 15,
             })
             .sum();
-        let mut out = Vec::with_capacity(64 + self.effects.len() + 4 * self.log.len() + inline);
+        let names: usize = self.directory.values().map(|e| e.name.len() + 4).sum();
+        let mut out = Vec::with_capacity(64 + names + 4 * self.log.len() + inline);
         out.extend_from_slice(COMMIT_MAGIC);
         for n in [
             self.version,
@@ -373,8 +390,16 @@ impl Commit {
             put_varint(&mut out, n - previous);
             previous = n;
         }
-        put_varint(&mut out, self.effects.len() as u64);
-        out.extend_from_slice(&self.effects);
+        put_varint(&mut out, u64::from(self.next_file));
+        put_varint(&mut out, self.directory.len() as u64);
+        let mut previous = None;
+        for (&id, entry) in &self.directory {
+            put_varint(&mut out, previous.map_or(id, |p: u32| id - p - 1).into());
+            previous = Some(id);
+            put_varint(&mut out, entry.name.len() as u64);
+            out.extend_from_slice(entry.name.as_bytes());
+            put_part(&mut out, &entry.record);
+        }
         put_varint(&mut out, self.log.len() as u64);
         for transaction in &self.log {
             put_varint(&mut out, transaction.size / 512);
@@ -415,13 +440,37 @@ impl Commit {
             garbage.insert(n);
             previous = n;
         }
-        let len = varint(&mut at)? as usize;
-        let end = at.checked_add(len).filter(|&end| end <= bytes.len());
-        let end = end
-            .filter(|_| len <= MAX_EFFECTS_BYTES)
-            .ok_or_else(record)?;
-        let effects = bytes.slice(at..end);
-        at = end;
+        let next_file = varint(&mut at)?;
+        let files = varint(&mut at)?;
+        if next_file > u64::from(MAX_FILES) || files > next_file {
+            return Err(record());
+        }
+        let next_file = next_file as u32;
+        let mut directory_ids = Vec::with_capacity(files as usize);
+        let mut names = Vec::with_capacity(files as usize);
+        let mut record_parts = Vec::with_capacity(files as usize);
+        let mut previous: Option<u64> = None;
+        for _ in 0..files {
+            let gap = varint(&mut at)?;
+            let id = match previous {
+                Some(p) => p.checked_add(gap).and_then(|id| id.checked_add(1)),
+                None => Some(gap),
+            };
+            let id = id
+                .filter(|&id| id < u64::from(next_file))
+                .ok_or_else(record)?;
+            previous = Some(id);
+            let len = varint(&mut at)? as usize;
+            let end = at.checked_add(len).filter(|&end| end <= bytes.len());
+            let end = end.filter(|_| len <= MAX_NAME_BYTES).ok_or_else(record)?;
+            let name = std::str::from_utf8(&bytes[at..end]).map_err(|_| record())?;
+            at = end;
+            directory_ids.push(id as u32);
+            names.push(name.to_owned());
+            // A record's part follows its name; parsed below with the others.
+            record_parts.push(at);
+            at = skip_part(bytes, at).ok_or_else(record)?;
+        }
         let count = varint(&mut at)?;
         let plausible = [version, epoch, next_segment]
             .iter()
@@ -477,26 +526,48 @@ impl Commit {
         if at != bytes.len() || log.last().is_some_and(|last| last.size != size) {
             return Err(record());
         }
+        let mut directory = BTreeMap::new();
+        for ((id, name), mut at) in directory_ids.into_iter().zip(names).zip(record_parts) {
+            let record = part(&mut at, MAX_RECORD_BYTES)?;
+            if directory.values().any(|entry: &Entry| entry.name == name) {
+                return Err(record_error());
+            }
+            directory.insert(id, Entry { name, record });
+        }
         Ok(Self {
             version,
             epoch,
             size,
             next_segment,
             garbage,
-            effects,
+            next_file,
+            directory,
             log,
             chain,
         })
     }
 
-    /// Every part, the log's then the chain's: the order a seal takes them.
-    pub(crate) fn parts(&self) -> impl Iterator<Item = &Part> {
+    /// The parts a seal takes, in order: the log's then the chain's.
+    fn sealable(&self) -> impl Iterator<Item = &Part> {
         self.log.iter().flat_map(|t| &t.parts).chain(&self.chain)
+    }
+
+    /// Every part: the sealable ones, then the records'.
+    pub(crate) fn parts(&self) -> impl Iterator<Item = &Part> {
+        (self.sealable()).chain(self.directory.values().map(|entry| &entry.record))
+    }
+
+    /// The id of the record named `name`.
+    pub(crate) fn record_id(&self, name: &str) -> Option<u32> {
+        let mut entries = self.directory.iter();
+        entries
+            .find(|(_, entry)| entry.name == name)
+            .map(|(&id, _)| id)
     }
 
     /// Bytes of the inline parts, the log's and the chain's.
     pub(crate) fn inline_bytes(&self) -> usize {
-        self.parts()
+        self.sealable()
             .map(|part| match part {
                 Part::Inline(bytes) => bytes.len(),
                 Part::Stored(..) => 0,
@@ -552,6 +623,26 @@ impl Commit {
                 Part::Inline(_) => None,
             })
             .collect()
+    }
+}
+
+fn record_error() -> io::Error {
+    invalid("commit record")
+}
+
+/// The offset after the part at `at`, without reading it.
+fn skip_part(bytes: &[u8], mut at: usize) -> Option<usize> {
+    match get_varint(bytes, &mut at)? {
+        0 => {
+            let len = usize::try_from(get_varint(bytes, &mut at)?).ok()?;
+            at.checked_add(len).filter(|&end| end <= bytes.len())
+        }
+        1 => {
+            get_varint(bytes, &mut at)?;
+            get_varint(bytes, &mut at)?;
+            Some(at)
+        }
+        _ => None,
     }
 }
 
@@ -619,15 +710,19 @@ impl Log {
 /// Stored values by number, as `log/<n>` holds them.
 pub(crate) type Values = BTreeMap<u64, Bytes>;
 
+/// Records' values by name.
+pub(crate) type Records = BTreeMap<String, Bytes>;
+
 /// What a commit record holds, read: the log replayed, the chain's values,
-/// and every stored value the record names.
+/// the records' values, and every stored value the record names.
 pub(crate) struct Replayed {
     pub log: Log,
     pub chain: Vec<Bytes>,
+    pub records: Records,
     pub values: Values,
 }
 
-/// Replay `commit`'s log and read its chain: the inline parts, and the stored
+/// Replay `commit`'s log and read its chain and records: the inline parts, and the stored
 /// values it names, those not in `known` read together.
 pub(crate) async fn replay(
     store: &dyn KvStore,
@@ -676,9 +771,13 @@ pub(crate) async fn replay(
         .iter()
         .map(resolve)
         .collect::<io::Result<_>>()?;
+    let records = (commit.directory.values())
+        .map(|entry| Ok((entry.name.clone(), resolve(&entry.record)?)))
+        .collect::<io::Result<_>>()?;
     Ok(Replayed {
         log,
         chain,
+        records,
         values: known,
     })
 }

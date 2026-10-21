@@ -1,7 +1,7 @@
 use super::*;
 use crate::io::BLOCK_SIZE;
 use bytes::Bytes;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn image(n: u8) -> Page {
     Bytes::from(vec![n; BLOCK_SIZE])
@@ -88,7 +88,23 @@ fn record() -> io::Result<Commit> {
         size: 3 * 4096,
         next_segment: 12,
         garbage: BTreeSet::from([4, 5, 6]),
-        effects: Bytes::from_static(b"out"),
+        next_file: 5,
+        directory: BTreeMap::from([
+            (
+                1,
+                Entry {
+                    name: "out".into(),
+                    record: Part::Inline(Bytes::from_static(b"x")),
+                },
+            ),
+            (
+                4,
+                Entry {
+                    name: "big".into(),
+                    record: Part::Stored(8, 1),
+                },
+            ),
+        ]),
         log: vec![
             Logged {
                 size: 4096,
@@ -117,12 +133,13 @@ fn commit_records_round_trip() -> io::Result<()> {
     );
     let empty = Commit::default();
     assert_eq!(Commit::decode(&empty.encode())?, empty);
-    // `SC14`, version, epoch, units, next segment, garbage {4, 5, 6} (as
-    // deltas), the effects, 3 transactions.
+    // `SC15`, version, epoch, units, next segment, garbage {4, 5, 6} (as
+    // deltas), the next file id, 2 records (id 1 `out`, inline `x`; id 4 as
+    // a gap of 2, `big`, value 8's second), 3 transactions.
     let bytes = commit.encode();
     assert_eq!(
-        bytes[..17],
-        *b"SC14\x09\x02\x18\x0c\x03\x04\x01\x01\x03out\x03"
+        bytes[..31],
+        *b"SC15\x09\x02\x18\x0c\x03\x04\x01\x01\x05\x02\x01\x03out\x00\x01x\x02\x03big\x01\x08\x01\x03"
     );
     // Then the chain: 2 parts, inline `vm0`, and value 8's first.
     assert!(bytes.ends_with(b"\x02\x00\x03vm0\x01\x08\x00"));
@@ -195,8 +212,18 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
         invalid.push(bad.encode().to_vec());
     }
     let mut large = record()?;
-    large.effects = Bytes::from(vec![0; MAX_EFFECTS_BYTES + 1]);
+    large.directory.get_mut(&1).unwrap().record =
+        Part::Inline(Bytes::from(vec![0; MAX_RECORD_BYTES + 1]));
     invalid.push(large.encode().to_vec());
+    let mut twice = record()?;
+    twice.directory.get_mut(&4).unwrap().name = "out".into();
+    invalid.push(twice.encode().to_vec()); // two records of one name
+    let mut unallocated = record()?;
+    unallocated.next_file = 4;
+    invalid.push(unallocated.encode().to_vec()); // an id not yet allocated
+    let mut named = record()?;
+    named.directory.get_mut(&4).unwrap().record = Part::Stored(5, 0);
+    invalid.push(named.encode().to_vec()); // a record naming garbage
     let mut named = record()?;
     named.log[1].parts[0] = Part::Stored(12, 0); // not allocated
     invalid.push(named.encode().to_vec());

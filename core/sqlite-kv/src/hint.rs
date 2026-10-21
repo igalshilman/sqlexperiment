@@ -1,7 +1,7 @@
 //! The working-set hint: which pages a cold open should fetch.
 //!
 //! An owner records the pages its sessions read. Checkpointing saves write the
-//! most useful ones to `v14/hint`; a cold open reads that key together with
+//! most useful ones to `v15/hint`; a cold open reads that key together with
 //! the commit record and fetches the listed pages alongside replay, so its
 //! first queries find them without a round trip per B-tree level.
 //!
@@ -10,7 +10,7 @@
 //! are still read through the normal rules. (A backend error reading it fails
 //! open like any other read.)
 //!
-//! Encoding: `SH14`, entry count u16 LE, then the page numbers in ascending
+//! Encoding: `SH15`, entry count u16 LE, then the page numbers in ascending
 //! order as LEB128 deltas (the first from zero).
 use crate::format::HINT_MAGIC;
 use std::collections::HashMap;

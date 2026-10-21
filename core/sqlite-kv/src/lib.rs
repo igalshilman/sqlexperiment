@@ -105,8 +105,8 @@
 //! # Limits
 //!
 //! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
-//! A commit's effects are capped at [`MAX_EFFECTS_BYTES`], a chain value at
-//! [`MAX_CHAIN_VALUE_BYTES`].
+//! A record's value is capped at [`MAX_RECORD_BYTES`], its name at
+//! [`MAX_NAME_BYTES`], a chain value at [`MAX_CHAIN_VALUE_BYTES`].
 //! A session's private changes and a statement's result rows are capped by
 //! [`StorageOptions::max_private_bytes`] and [`StorageOptions::max_result_bytes`].
 //! The backend is assumed to return what was stored; decoding checks structure
@@ -126,7 +126,7 @@ mod snapshot;
 
 pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
-pub use log::{MAX_CHAIN_VALUE_BYTES, MAX_EFFECTS_BYTES, MAX_SEGMENT_BYTES};
+pub use log::{MAX_CHAIN_VALUE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::PageCompression;
 pub use snapshot::{
     CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, ChainUpdate, Durability, INLINE_LOG_BYTES,
@@ -142,7 +142,7 @@ use bytes::Bytes;
 use std::{
     future::poll_fn,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::Poll,
@@ -182,9 +182,11 @@ pub struct Session {
     durability: Durability,
     /// A [`Self::transaction`] body is running.
     in_body: bool,
-    /// The statement running is a [`Self::commit_with`] or
-    /// [`Self::commit_turn`]: the effects it commits, and its chain update.
-    effects: Option<Bytes>,
+    /// Records set since the last commit, which the next one makes durable.
+    records: Arc<Mutex<log::Records>>,
+    /// The statement running is a [`Self::seal`]: it commits even without
+    /// SQL changes, with this chain update.
+    sealing: bool,
     chain: Option<ChainUpdate>,
     /// Set when a [`Self::transaction`] future is dropped or unwinds before
     /// finishing, which may leave its SQL transaction open.
@@ -311,7 +313,8 @@ impl Session {
                 reusable: true,
                 durability,
                 in_body: false,
-                effects: None,
+                records: Arc::default(),
+                sealing: false,
                 chain: None,
                 abandoned: Arc::default(),
                 schema_bytes: Some(warm.schema_bytes),
@@ -334,7 +337,8 @@ impl Session {
             reusable: true,
             durability,
             in_body: false,
-            effects: None,
+            records: Arc::default(),
+            sealing: false,
             chain: None,
             abandoned: Arc::default(),
             schema_bytes: None,
@@ -461,36 +465,38 @@ impl Session {
         self.query_with(sql, params).await.map(|_| ())
     }
 
-    /// `COMMIT` the open transaction, with [`Durability::Commit`], and make
-    /// `effects` the commit record's: they are durable exactly when the
-    /// transaction is, in the same put, even if it changed nothing. They are
-    /// the host's bytes, opaque here (the sends a transaction makes once it
-    /// commits, say), and stay until a later commit replaces them; see
-    /// [`Self::effects`]. A `COMMIT` that fails changes nothing. With no
-    /// transaction open, the effects commit alone, without the SQL engine.
-    pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
-        self.commit_extras(effects, None).await
-    }
-
-    /// [`Self::commit_with`], also changing the host's chain in the same put:
-    /// a host's turn, committing its SQL, its state (`effects`) and what its
-    /// turn changed (a VM's page batch, say) together. See [`ChainUpdate`]
-    /// and [`Self::chain`].
-    pub async fn commit_turn(&mut self, effects: Bytes, chain: ChainUpdate) -> Result<()> {
-        self.commit_extras(effects, Some(chain)).await
-    }
-
-    async fn commit_extras(&mut self, effects: Bytes, chain: Option<ChainUpdate>) -> Result<()> {
-        if self.durability != Durability::Commit {
-            return Err("effects commit with Durability::Commit".into());
+    /// The record named `name`: a whole value the commit record holds, which
+    /// the next commit makes durable once set (see [`Record`]).
+    pub fn record(&self, name: &str) -> Record {
+        Record {
+            name: name.into(),
+            io: self.io.clone(),
+            pending: self.records.clone(),
         }
-        if effects.len() > log::MAX_EFFECTS_BYTES {
-            return Err(format!(
-                "effects of {} bytes exceed {}",
-                effects.len(),
-                log::MAX_EFFECTS_BYTES
-            )
-            .into());
+    }
+
+    /// `COMMIT` the open transaction, with [`Durability::Commit`], and make
+    /// `effects` the record `effects`: durable exactly when the transaction
+    /// is, in the same put, even if it changed nothing. They are the host's
+    /// bytes (the sends a transaction makes once it commits, say), and stay
+    /// until a later commit replaces them; see [`Self::effects`]. A `COMMIT`
+    /// that fails changes nothing. With no transaction open, the effects
+    /// commit alone, without the SQL engine.
+    pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
+        self.record(EFFECTS).set(effects);
+        self.seal(None).await
+    }
+
+    /// `COMMIT` the open transaction, with [`Durability::Commit`], with every
+    /// record set since the last commit and, with `chain`, a change to the
+    /// host's chain, in one put: a host's turn, committing its SQL, its state
+    /// and what its turn changed (a VM's page batch, say) together. See
+    /// [`ChainUpdate`] and [`Self::chain`]. A `COMMIT` that fails changes
+    /// nothing, and discards the records set since the last commit; with no
+    /// transaction open, the rest commits alone.
+    pub async fn seal(&mut self, chain: Option<ChainUpdate>) -> Result<()> {
+        if self.durability != Durability::Commit {
+            return Err("a seal needs Durability::Commit".into());
         }
         let open =
             (self.connection.as_ref()).is_some_and(|connection| !connection.get_auto_commit());
@@ -501,22 +507,25 @@ impl Session {
             }
             // Until the commit is acknowledged its outcome is unknown.
             self.poisoned = true;
-            self.io.publish_with(Some(effects), chain).await?;
+            let records = std::mem::take(&mut *self.records.lock().unwrap());
+            self.io.publish_with(records, chain).await?;
             self.poisoned = false;
             return Ok(());
         }
-        self.effects = Some(effects);
+        self.sealing = true;
         self.chain = chain;
         let result = self.execute("COMMIT").await;
-        self.effects = None;
+        self.sealing = false;
         self.chain = None;
+        if result.is_err() {
+            self.records.lock().unwrap().clear();
+        }
         result
     }
 
-    /// The effects of the last commit that set them, as this session holds
-    /// the database (opened on, or committed itself); empty if none did.
+    /// The record `effects` (see [`Self::commit_with`]).
     pub fn effects(&self) -> Bytes {
-        self.io.snapshot().effects().clone()
+        self.record(EFFECTS).get()
     }
 
     /// The host's chain, as this session holds the database: each value, in
@@ -615,9 +624,8 @@ impl Session {
         // Until the commit is acknowledged the engine may hold uncommitted pages,
         // so a failure must not leave it for reuse.
         self.poisoned = true;
-        let report = (self.io)
-            .publish_with(self.effects.take(), self.chain.take())
-            .await?;
+        let records = std::mem::take(&mut *self.records.lock().unwrap());
+        let report = self.io.publish_with(records, self.chain.take()).await?;
         // Resident already, unless the page size grew. The commit is durable
         // either way; a failure here only ends the session.
         if self.io.prepare_engine().await.is_ok() {
@@ -743,7 +751,7 @@ impl Session {
             }
             if idle
                 && self.durability == Durability::Commit
-                && (!self.io.is_clean() || self.effects.is_some() || self.chain.is_some())
+                && (!self.io.is_clean() || self.sealing)
             {
                 self.publish().await?;
             }
@@ -809,6 +817,52 @@ impl Session {
         let report = self.publish().await?;
         self.park();
         Ok(report)
+    }
+}
+
+/// The record [`Session::commit_with`] sets.
+const EFFECTS: &str = "effects";
+
+/// A named whole value the commit record holds, replaced whole: the host's
+/// state beside its tables (a run's progress, an outbox), committed with them
+/// in the same put. A cheap handle; clones share the session's pending
+/// changes.
+///
+/// A value of up to [`StorageOptions::inline_log_bytes`] is in the record,
+/// which every commit rewrites; a larger one is a stored value of its own,
+/// written when it changes. Either way, opening the session reads it.
+#[derive(Clone)]
+pub struct Record {
+    name: Arc<str>,
+    io: Arc<KvIo>,
+    pending: Arc<Mutex<log::Records>>,
+}
+
+impl Record {
+    /// The value as the session holds it: set since the last commit, or
+    /// committed; empty if never set.
+    pub fn get(&self) -> Bytes {
+        if let Some(value) = self.pending.lock().unwrap().get(&*self.name) {
+            return value.clone();
+        }
+        let snapshot = self.io.snapshot();
+        snapshot
+            .records()
+            .get(&*self.name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Replace the value with the next commit (see [`Session::seal`]).
+    pub fn set(&self, value: Bytes) {
+        self.pending
+            .lock()
+            .unwrap()
+            .insert(self.name.to_string(), value);
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
