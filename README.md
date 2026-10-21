@@ -1,15 +1,67 @@
 # Durable functions on Restate
 
-An experiment: Restate virtual objects whose handlers run without journal
-replay, so a retried attempt runs again against the state as stored, each
-with its own SQLite-compatible database, stored in the object's state.
+An experiment in three layers, each on the one before:
 
-## What it looks like
+1. **[Objects with SQL](#objects-with-sql)**: Restate virtual objects whose
+   handlers run without journal replay, so a retried attempt runs again
+   against the state as stored, each key with its own SQLite-compatible
+   database, stored in the object's state
+   ([`restate-fns`](typescript/packages/fns/README.md)).
+2. **[AI agents](#ai-agents)** in those objects, their conversation in the
+   object's database: pi, OpenCode, LangGraph, Claude and more
+   ([`restate-agents`](typescript/packages/integrations/README.md)).
+3. **[Durable functions](#durable-functions)**: plain JavaScript or Python,
+   with no SDK, whose memory is saved while they wait
+   ([`rust/functions`](rust/functions/README.md)).
 
-An agent whose tools are Restate itself: it looks an order up with a
-service, waits for a manager's approval, and refunds with a workflow. Its
-conversation is in its own SQL database, and a crash, or a manager who takes
-a day, changes nothing ([`examples-typescript/support.ts`](examples-typescript/support.ts)):
+## Objects with SQL
+
+Each key of a virtual object has a SQLite database of its own, kept in the
+object's state: no database to run. `restate-fns` is the Restate SDK with
+that in its objects ([`examples-typescript/notes.ts`](examples-typescript/notes.ts)):
+
+```ts
+import * as restate from 'restate-fns';
+
+const SCHEMA = 'CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)';
+
+const notes = restate.object({
+  name: 'notes',
+  handlers: {
+    add: async (ctx: restate.ObjectContext, note: string) => {
+      await ctx.db.execute(SCHEMA);
+      await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
+    },
+
+    list: async (ctx: restate.ObjectContext) => {
+      await ctx.db.execute(SCHEMA);
+      const rows = await ctx.db.query('SELECT text FROM notes ORDER BY rowid');
+      return rows.map(([text]) => text);
+    },
+  },
+});
+
+await restate.serve({ services: [notes], port: 9080 });
+```
+
+```sh
+curl localhost:8080/notes/alice/add --json '"Buy milk"'
+curl localhost:8080/notes/alice/list
+```
+
+A statement is durable when it returns. `ctx.transaction` groups
+statements, and the sends made in it, into one commit. See
+[`restate-fns`](typescript/packages/fns/README.md), and
+[`examples-python/notes.py`](examples-python/notes.py) for the same in Python
+([`restate_fns`](python/fns/README.md)).
+
+## AI agents
+
+An agent is an object with SQL: its conversation is in its own database, so
+a crash, or a manager who takes a day, changes nothing. This one's tools are
+Restate itself: it looks an order up with a service, waits for a manager's
+approval, and refunds with a workflow
+([`examples-typescript/support.ts`](examples-typescript/support.ts)):
 
 ```ts
 const support = pi.agent({
@@ -43,47 +95,7 @@ and [the examples](examples-typescript/README.md). In Python, it runs on
 Claude, LangGraph or Pydantic AI ([`restate_agents`](python/agents/README.md),
 [the examples](examples-python/README.md)).
 
-## SQL in an object
-
-Each key of a virtual object has a SQLite database of its own, kept in the
-object's state: no database to run
-([`examples-typescript/notes.ts`](examples-typescript/notes.ts)):
-
-```ts
-import { object, serve } from 'restate-agents';
-
-const SCHEMA = 'CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)';
-
-const notes = object({
-  name: 'notes',
-  handlers: {
-    add: async (ctx, note: string) => {
-      await ctx.db.execute(SCHEMA);
-      await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
-    },
-
-    list: async (ctx) => {
-      await ctx.db.execute(SCHEMA);
-      const rows = await ctx.db.query('SELECT text FROM notes ORDER BY rowid');
-      return rows.map(([text]) => text);
-    },
-  },
-});
-
-await serve(notes);
-```
-
-```sh
-curl localhost:8080/notes/alice/add --json '"Buy milk"'
-curl localhost:8080/notes/alice/list
-```
-
-A statement is durable when it returns. `ctx.transaction` groups
-statements, and the sends made in it, into one commit. See
-[SQL in virtual objects](typescript/packages/fns/README.md), and
-[`examples-python/notes.py`](examples-python/notes.py) for the same in Python.
-
-## An agent with tools of its own
+### Tools of its own
 
 A tool is a function with the object's `ctx`. This assistant keeps what it
 learns about you in a table of its own SQL database, next to its
