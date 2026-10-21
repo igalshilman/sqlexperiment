@@ -35,8 +35,8 @@ Page values are transaction ids, so a state names which transaction last
 wrote each page. A ghost history records the acknowledged transactions and at
 most one whose outcome is unknown (a failed sync).
 
-Not modelled: the SQL engine, page encodings, records and the host's chain
-(they ride in the record), files (a page here is abstract: a page of a paged
+Not modelled: the SQL engine, page encodings and records (they ride in the
+record), files (a page here is abstract: a page of a paged
 file is its file and its number, and nothing in the protocol tells files
 apart), the working-set hint, prefetch and readahead (they
 change which reads happen, not their values), transactions of several stored
@@ -120,7 +120,7 @@ The monitor applies each write as it is issued, since a later one can rely
 on it. A failed write makes its key unknown and adds a possible value to a
 page key; after a crash, a read learns what was kept.
 
-It runs in the durability, chain and per-commit campaigns with no
+It runs in the durability, records and per-commit campaigns with no
 violation. Deliberately broken code fails them:
 
 | Broken code                                   | Reported                                                   |

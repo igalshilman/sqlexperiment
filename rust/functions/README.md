@@ -70,15 +70,16 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   (deterministically, so every process agrees).
 - **Only what changed**: the kernel reports which 4 KiB pages a turn wrote
   (`userfaultfd` write protection and `PAGEMAP_SCAN`, on Linux 6.7 or later;
-  elsewhere, rewritten Wasm marks them); a turn saves the 64-byte blocks of
-  those pages that differ, compressed together against their contents before
-  it, in a chain over a base relative to golden. Dead bytes (the
-  stack between calls, freed heap memory) are zeroed first, so garbage is
-  not saved.
+  elsewhere, rewritten Wasm marks them); a turn writes those pages to the
+  scope's memory file, a file over the golden image: a page equal to
+  golden's is a hole, and a page is compressed against golden's the first
+  time, then against its previous image. Dead bytes (the stack between
+  calls, freed heap memory) are zeroed first, so garbage is not saved.
 - **One commit**: a turn is one put of the scope's
-  [sqlite-kv](../../core/sqlite-kv) record: its page batch, its SQL (`ctx.kv`
-  is a table too) and the run's state with its pending requests. Restate keeps
-  writes in order, so whatever the record names is stored before it.
+  [sqlite-kv](../../core/sqlite-kv) record: its memory pages, its SQL
+  (`ctx.kv` is a table too) and the run's state with its pending requests.
+  Restate keeps writes in order, so whatever the record names is stored
+  before it.
 - **No replay**: a retry restores the VM from the last commit and waits
   again on its requests under the same idempotency keys, attaching to calls
   already made.

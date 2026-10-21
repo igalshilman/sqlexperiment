@@ -578,17 +578,15 @@ impl KvIo {
     /// the committed view.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn publish(&self) -> io::Result<crate::SaveReport> {
-        self.publish_with(Writes::new(), Default::default(), None)
-            .await
+        self.publish_with(Writes::new(), Default::default()).await
     }
 
     /// [`Self::publish`], with `writes` to other paged files, replacing
-    /// `records` and changing the host's chain (see [`Snapshot::commit`]).
+    /// and replacing `records` (see [`Snapshot::commit`]).
     pub(crate) async fn publish_with(
         &self,
         mut writes: Writes,
         records: crate::log::Records,
-        chain: Option<crate::ChainUpdate>,
     ) -> io::Result<crate::SaveReport> {
         if writes.contains_key(SQL_FILE) {
             return Err(invalid(format!("{SQL_FILE:?} is the SQL database's file")));
@@ -617,7 +615,7 @@ impl KvIo {
             (dirty, state.sizes[0])
         };
         writes.insert(SQL_FILE.to_owned(), Written { size, pages: dirty });
-        let (report, after) = self.snapshot().commit(writes, records, chain).await?;
+        let (report, after) = self.snapshot().commit(writes, records).await?;
         *self.version.lock().unwrap() = report.version;
         *self.snapshot.lock().unwrap() = Arc::new(after);
         Ok(report)

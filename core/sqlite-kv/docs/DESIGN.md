@@ -39,7 +39,7 @@ A namespace holds four kinds of keys:
 
 | Key                | Holds                                                                                                                                                                                                                |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v15/commit`       | The commit record: the version, the epoch, the directory of files (records and paged files, with their sizes), the log since the last checkpoint (its tail inline, the rest naming stored values), the host's chain. |
+| `v15/commit`       | The commit record: the version, the epoch, the directory of files (records and paged files, with their sizes), the log since the last checkpoint (its tail inline, the rest naming stored values).                    |
 | `v15/log/<n>`      | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, before the record that names it, deleted once no record names it.                                        |
 | `v15/page/<f>/<n>` | Page _n_ of paged file _f_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                                                          |
 | `v15/hint`         | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                                                                              |
@@ -113,7 +113,7 @@ and commits them:
 each a little changed. A segment's images are one zstd frame whose
 dictionary is the previous image of each of its pages in the log: so a page
 costs about what changed in it. Replay rebuilds those images as it goes, from
-the last checkpoint, where the chain restarts.
+the last checkpoint, where the previous images start empty.
 
 **Bytes.** The record is rewritten whole by each commit, so its inline log is
 the cost of a commit: the seal bounds it, and a transaction's segments are
@@ -125,15 +125,11 @@ checkpoint. Pages are zstd frames by default (`PageCompression::Zstd`).
 (`Session::commit_with`): they ride in the same record put, so they are
 durable exactly when the transaction is, and stay, through checkpoints, until
 a later commit replaces them. The Restate SDKs keep a transaction's sends
-there, as its outbox, and make them once it commits.
-
-**The chain.** A host may also commit a value that applies over its earlier
-ones (`Session::commit_turn`), such as the pages a VM's turn changed: the
-chain, beside the log, in the same put. Values are inline or stored, and
-sealed with the log's segments, under the same rules; a checkpoint keeps the
-chain, and the host restarts it (`ChainUpdate::Restart`) when one value can
-replace it, after which the old values are garbage. A commit with no SQL
-changes adds no log transaction, so a host's turns do not checkpoint SQL.
+there, as its outbox, and make them once it commits. These are the record
+`effects`; a host may set any record (`Session::record`) and write paged
+files of its own (`Session::file`), committed by the next `Session::seal`. A
+commit with no page changes adds no log transaction, so a host's turns do
+not checkpoint SQL.
 
 ## When a save happens
 
@@ -381,7 +377,7 @@ checkpoint. Measurements: [log shipping](../benches/LOG_RESULTS.md),
   segment's zstd frame has a checksum, which also catches a segment decoded
   against the wrong previous images; pages have none.
 - **Format.** Only v15, with no migration.
-- **Compression chain.** The simulator's monitor decodes every record it
+- **Compression.** The simulator's monitor decodes every record it
   sees; the TLA+ specification does not model compression.
 - **Validation.** A monitor checks every write of the simulator's crash
   and handover campaigns against the rules above, and the campaigns crash at

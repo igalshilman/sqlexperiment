@@ -888,7 +888,7 @@ through an earlier sqlite-kv; it cost a turn about 2 ms of CPU and wrote
 every log segment twice, so it gave way to one commit record of its own
 (with `batch/<n>` and `kv/<key>` keys) that relied on ordered writes. With
 the journal off, writes are not ordered, and sqlite-kv's one record per
-commit, with the host's effects and chain in it, is that commit. Measured on
+commit, with the host's records in it, is that commit. Measured on
 18 October 2026 (`cargo bench --bench checkpoints`, medians), against that
 record of its own:
 

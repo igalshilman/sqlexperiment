@@ -25,7 +25,7 @@
 (* transaction that last wrote it, and a database state is a function      *)
 (* Pages -> Nat (0: never written).                                        *)
 (*                                                                         *)
-(* Not modelled: the SQL engine, compression, effects and the host's chain *)
+(* Not modelled: the SQL engine, compression and records                   *)
 (* (they ride in the record), the hint, prefetch and readahead (they       *)
 (* change which reads happen, not their values), transactions of several  *)
 (* stored values, overlapping sessions of one process, and deleted pages. *)

@@ -81,7 +81,7 @@ async fn turn(db: &mut Session, i: usize) -> Result<()> {
         6 => b.set_len(0)?,
         _ => b.write((i % 3) as u64, Some(page(i as u8)))?,
     }
-    db.seal(None).await.map(drop)
+    db.seal().await.map(drop)
 }
 
 /// File `name`'s pages after turns `0..turns`: each page's first byte,

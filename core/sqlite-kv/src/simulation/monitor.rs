@@ -18,15 +18,14 @@
 //!    again.
 //! 3. **Checkpoint before recording**: a record that empties the log (the next
 //!    epoch) comes only once every page the log changed is at its page key,
-//!    with the log's latest image of it; its records and chain are the
-//!    record's.
+//!    with the log's latest image of it; its files are the record's.
 //! 4. **Overwrite only what the log covers**: a page key gets only an image of
 //!    a transaction in the record's log.
 //! 5. **Fresh segments, deleted unnamed**: a stored segment is put only at a
 //!    number the record has not allocated, and deleted only if it names it no
 //!    more; the record lists as garbage only values the record before named.
 //! 6. **Decodable**: every record put decodes, its log against the segments
-//!    it names, and its records' and chain's values are known.
+//!    it names, and its records' values are known.
 use crate::{
     format::{COMMIT, LOG_PREFIX, parse_page_key},
     kv::KvStore,
@@ -109,7 +108,7 @@ impl Known {
         Some(transactions)
     }
 
-    /// The value of a chain's or a record's part; `None` when unknown.
+    /// The value of a record's part; `None` when unknown.
     fn value(&self, part: &Part) -> Option<Bytes> {
         match part {
             Part::Inline(bytes) => Some(bytes.clone()),
@@ -118,11 +117,6 @@ impl Known {
                 .get(*index as usize)
                 .cloned(),
         }
-    }
-
-    /// The values of `commit`'s chain; `None` when one it names is unknown.
-    fn chain(&self, commit: &Commit) -> Option<Vec<Bytes>> {
-        commit.chain.iter().map(|part| self.value(part)).collect()
     }
 
     /// `commit`'s files by id, with their names, and a record's value or a
@@ -176,10 +170,7 @@ impl Known {
         };
         let known = self.commit();
         // 1, 6: it names known segments, and its log decodes
-        if self.transactions(&commit).is_none()
-            || self.chain(&commit).is_none()
-            || self.files(&commit).is_none()
-        {
+        if self.transactions(&commit).is_none() || self.files(&commit).is_none() {
             return self.violation(format!(
                 "commit {}: names an unknown segment, or does not decode",
                 commit.version
@@ -193,8 +184,7 @@ impl Known {
         if commit.version == known.version + 1 {
             // 2: the known log plus one transaction (or none, for a commit
             // without SQL changes), whether its earlier transactions stay
-            // inline or are sealed into a stored value; the known chain, plus
-            // a value, restarted with one, or cleared
+            // inline or are sealed into a stored value
             let sizes = |c: &Commit| {
                 let sizes = |t: &log::Logged| t.changes.iter().map(|c| (c.file, c.size)).collect();
                 c.log.iter().map(sizes).collect::<Vec<Vec<_>>>()
@@ -205,15 +195,6 @@ impl Known {
                 t
             });
             let added = commit.log.len().checked_sub(known.log.len());
-            let (chain, known_chain) = (self.chain(&commit), self.chain(&known));
-            let chain_follows = match (chain, known_chain) {
-                (Some(chain), Some(known)) => {
-                    chain == known
-                        || chain.len() <= 1
-                        || (chain.len() == known.len() + 1 && chain[..known.len()] == known[..])
-                }
-                _ => false,
-            };
             // every known file, under its id and name, of its kind
             let kind = |entry: &log::Entry| matches!(entry.kind, Kind::Record(_));
             let keeps_records = commit.next_file >= known.next_file
@@ -227,7 +208,6 @@ impl Known {
                 && sizes(&commit)[..known.log.len()] == sizes(&known)[..]
                 && earlier.is_some()
                 && earlier == self.transactions(&known)
-                && chain_follows
                 && keeps_records
                 // garbage: values the known record named, and this one no more
                 && commit
@@ -244,7 +224,6 @@ impl Known {
             && commit.epoch == known.epoch + 1
             && commit.log.is_empty()
             && same(&commit, &known)
-            && self.chain(&commit) == self.chain(&known)
             && self.files(&commit) == self.files(&known)
         {
             // 3: every page of the known log is known at its key

@@ -1,7 +1,8 @@
 //! Where a scope's runs and KV live: a sqlite-kv database in a key/value
 //! store (in Restate, the object's state; in tests, a `MemoryKv`). A turn is
-//! one commit of it: the run's state as the record's effects, the pages the
-//! turn changed as a value of its chain, and the KV writes as SQL, in one put.
+//! one commit of it: the run's state and each participant's in records, the
+//! pages the turn changed in the memory file, and the KV writes as SQL, in
+//! one put.
 //! Writes may land in any order; a write counts once it is acknowledged.
 use crate::extension::Extensions;
 use anyhow::Result;
