@@ -225,6 +225,11 @@ impl Attached for Checkpointed {
         }))
     }
 
+    /// A command still running never delivers: the files may change again.
+    fn ended(&mut self) {
+        self.running = None;
+    }
+
     /// The command's changes join the files; the program sees their paths.
     async fn delivered(
         &mut self,

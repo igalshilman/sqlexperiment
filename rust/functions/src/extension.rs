@@ -77,6 +77,10 @@ pub trait Extension: Send + Sync + 'static {
 
 /// An extension's part of one attempt at a run: a participant in each of
 /// its turns' transactions.
+///
+/// Its records and files are in the journal it was attached with; an
+/// [`Sql`](sql::Sql) it opens there flushes in its `prepare`, as the
+/// run's own tables do.
 #[async_trait]
 pub trait Attached: Participant {
     /// In the turn: the host call `op`, `<name>.<op>`.
@@ -123,6 +127,9 @@ pub trait Attached: Participant {
     ) -> Result<()> {
         Ok(())
     }
+
+    /// In the turn: the run settled, and no operation it issued delivers.
+    fn ended(&mut self) {}
 
     /// The run waits, and may move: release what is live.
     fn park(&mut self) {}
@@ -192,6 +199,11 @@ impl Attachments {
             part.prepare().await?;
         }
         Ok(())
+    }
+
+    /// The run settled: each extension's operations never deliver.
+    pub fn ended(&mut self) {
+        self.0.values_mut().for_each(|part| part.ended());
     }
 
     pub fn committed(&mut self) {

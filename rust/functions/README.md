@@ -46,8 +46,9 @@ one format, with conversations kept in the scope's database
 ([docs/LLM.md](docs/LLM.md)); and the web with `fetch`, under a
 [`FetchPolicy`](src/fetch.rs) that says where requests may go and which
 secrets the host adds ([docs/FETCH.md](docs/FETCH.md)). Both are host
-bindings, operations the host makes for a program, registered with
-[`Bindings`](src/bindings.rs) ([docs/HOST.md](docs/HOST.md) §6).
+bindings, operations the host makes for a program ([`Binding`](src/bindings.rs),
+[docs/HOST.md](docs/HOST.md) §6), among the deployment's
+[`Extensions`](src/extension.rs).
 
 ## How it works
 
@@ -78,8 +79,8 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
 - **One commit**: a turn is one put of the scope's
   [journal](../../core/journal) record: its memory pages, its SQL
   (`ctx.kv` is a table too) and the run's state with its pending requests.
-  Restate keeps writes in order, so whatever the record names is stored
-  before it.
+  The journal syncs the pages it names before it puts the record, so a
+  crash never leaves a record naming pages that are not stored.
 - **No replay**: a retry restores the VM from the last commit and waits
   again on its requests under the same idempotency keys, attaching to calls
   already made.

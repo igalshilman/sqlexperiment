@@ -243,8 +243,9 @@ impl Run {
         let db = Db::new(Sql::open(&journal).await.map_err(|error| anyhow!(error))?);
         let [stored_run, stored_memory] = BUILT_IN_RECORDS.map(|name| journal.record(name));
         // What the scope's last seal kept of each extension, whichever run
-        // made it.
-        let blobs = ScopeBlobs::new(scope.extensions.blobs.clone(), key);
+        // made it. The scope is the program's object key, as its journal
+        // is: another program's objects of the same key keep their own.
+        let blobs = ScopeBlobs::new(scope.extensions.blobs.clone(), &format!("{program}/{key}"));
         let extensions = Attachments::attach(&scope.extensions, &blobs, &db).await?;
         let sealed: Option<RunRecord> = json_record(&stored_run)?;
         let sealed_memory: Option<MemoryRecord> = json_record(&stored_memory)?;
@@ -633,6 +634,9 @@ impl Run {
                 None => return Err(error.into()),
             },
         };
+        if state.status != Status::Waiting {
+            self.extensions.lock().await.ended();
+        }
         self.state.record.state = state;
         self.state.record.turns += 1;
 
@@ -675,8 +679,11 @@ impl Run {
             tracing::warn!("Collecting blobs failed: {error:#}");
         }
         drop(extensions);
-        if let Some(live) = &mut self.memory.live {
-            live.vm.committed()?;
+        // The turn is sealed: a VM that cannot follow is dropped, and the
+        // next turn restores the run from the seal.
+        if let Some(Err(error)) = self.memory.live.as_mut().map(|live| live.vm.committed()) {
+            tracing::warn!("Dropping the live VM: {error:#}");
+            self.memory.live = None;
         }
         Ok(())
     }

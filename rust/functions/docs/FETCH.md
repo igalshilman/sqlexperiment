@@ -58,7 +58,7 @@ let policy = FetchPolicy::new()
     .secret("https://api.anthropic.com", "x-api-key", &key) // allows it too
     .max_response(10 << 20)
     .timeout(Duration::from_secs(300));
-Bindings::new().with("fetch", Fetch::new(policy))
+Extensions::new().with("fetch", Fetch::new(policy))
 ```
 
 `FetchPolicy::new()` allows nothing. The binary's policy

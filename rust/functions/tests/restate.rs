@@ -178,9 +178,9 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .port();
     let cache = functions::page_cache().await.unwrap();
     let llm = Llm::new().provider("anthropic", Provider::local(fakes::Claude));
-    let bindings = Extensions::new().with("llm", llm).with("record", Record);
+    let extensions = Extensions::new().with("llm", llm).with("record", Record);
     let budget = functions::Budget::from_env().unwrap();
-    let endpoint = functions::bind(Endpoint::builder(), programs, &cache, &budget, &bindings)
+    let endpoint = functions::bind(Endpoint::builder(), programs, &cache, &budget, &extensions)
         .unwrap()
         .bind(Doubler)
         .bind(functions::Workspace::new(workspaces()))
