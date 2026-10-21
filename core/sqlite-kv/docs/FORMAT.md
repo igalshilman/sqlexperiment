@@ -18,19 +18,19 @@ varints unless stated otherwise.
 
 ## Commit record
 
-| Field             | Encoding                                                                                                                                                                                                                                                                         |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Magic             | `SC15`                                                                                                                                                                                                                                                                           |
-| Version           | Commits ever made; at most 2^62                                                                                                                                                                                                                                                  |
-| Epoch             | Checkpoints ever recorded; at most 2^62                                                                                                                                                                                                                                          |
-| Next segment      | The number the next stored value gets; at most 2^62                                                                                                                                                                                                                              |
-| Garbage           | Count, then ascending numbers, each from the one before: stored values the record does not name, to delete; below the next                                                                                                                                                       |
-| Next file         | The id the next new file gets; at most 2^16; ids are never reused                                                                                                                                                                                                                |
-| Directory         | Count, then per file: its id (ascending, as the gap after the previous id, less one), its name's length (at most 255) and UTF-8 bytes, then `0` and its value as a part (a record), or `1` and its length in 512-byte units, at most 2^44 bytes (a paged file); names are unique |
-| Transaction count | At most the version, and 2^20                                                                                                                                                                                                                                                    |
-| Transactions      | Each: its change count, then per paged file it changed (ascending ids, each once): the file's id, its length after the transaction in 512-byte units, its part count and its parts (segments of that file's pages)                                                               |
-| Chain count       | At most 2^20                                                                                                                                                                                                                                                                     |
-| Chain             | The host's values, each a part                                                                                                                                                                                                                                                   |
+| Field             | Encoding                                                                                                                                                                                                                                                                                                                                           |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Magic             | `SC15`                                                                                                                                                                                                                                                                                                                                             |
+| Version           | Commits ever made; at most 2^62                                                                                                                                                                                                                                                                                                                    |
+| Epoch             | Checkpoints ever recorded; at most 2^62                                                                                                                                                                                                                                                                                                            |
+| Next segment      | The number the next stored value gets; at most 2^62                                                                                                                                                                                                                                                                                                |
+| Garbage           | Count, then ascending numbers, each from the one before: stored values the record does not name, to delete; below the next                                                                                                                                                                                                                         |
+| Next file         | The id the next new file gets; at most 2^16; ids are never reused                                                                                                                                                                                                                                                                                  |
+| Directory         | Count, then per file: its id (ascending, as the gap after the previous id, less one), its name's length (at most 255) and UTF-8 bytes, then `0` and its value as a part (a record), `1` and its length in 512-byte units, at most 2^44 bytes (a paged file), or `2`, its length so, and its base's id (a paged file with a base); names are unique |
+| Transaction count | At most the version, and 2^20                                                                                                                                                                                                                                                                                                                      |
+| Transactions      | Each: its change count, then per paged file it changed (ascending ids, each once): the file's id, its length after the transaction in 512-byte units, its part count and its parts (segments of that file's pages)                                                                                                                                 |
+| Chain count       | At most 2^20                                                                                                                                                                                                                                                                                                                                       |
+| Chain             | The host's values, each a part                                                                                                                                                                                                                                                                                                                     |
 
 A part is `0`, a length and inline bytes (a segment of at most 1 MiB, or a
 chain value or record of at most 16 MiB), or `1`, the number of a stored value
@@ -42,6 +42,16 @@ version 0, epoch 0 and no files.
 The files are records and paged files. The SQL database is the paged file
 `db`; others are the host's (`Session::file`). A file is never deleted, only
 emptied, and its id is never reused.
+
+A paged file with a base (`Session::file_with_base`) is over a golden image
+the host holds, named by the base's id: a hole, or a page absent from the
+store, reads as the base's page (zeros past its end); a page equal to its
+base's page is written as a hole; and a page's first image in the log is
+compressed against its base's page, as is its value in place (tag 3). Its
+segments therefore decode only with its base: a reader without it may read
+the record and other files, and write the file's holes and length, but not
+its images; a checkpoint waits until every such file's logged images are
+decoded, or replaced by holes.
 
 The transactions are the log since the last checkpoint, in commit order.
 Pages they change are authoritative from the log; any other page of a file is
@@ -78,8 +88,9 @@ same file: replay rebuilds them from an empty chain. A segment is at most 1 MiB.
 
 ## Pages
 
-Tag u8 (0 raw, 1 LZ4 block, 2 zstd frame), logical length u16 LE (4096), then
-payload. Raw payloads are exactly 4096 bytes. Compressed payloads must be
+Tag u8 (0 raw, 1 LZ4 block, 2 zstd frame, 3 zstd frame against the page of
+its file's base, as a raw-prefix dictionary), logical length u16 LE (4096),
+then payload. Raw payloads are exactly 4096 bytes. Compressed payloads must be
 nonempty and smaller than 4096 bytes; decoding must produce exactly 4096 bytes.
 The encoder (zstd level 3 by default) uses raw storage when compression does
 not shrink the payload. Maximum value: 4099 bytes.

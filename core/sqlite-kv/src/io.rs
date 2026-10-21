@@ -228,6 +228,13 @@ impl KvIo {
         self.snapshot.lock().unwrap().clone()
     }
 
+    /// Open the file `name` with `base` (see [`Snapshot::with_base`]).
+    pub(crate) fn with_base(&self, name: &str, base: Arc<dyn crate::Base>) -> io::Result<()> {
+        let mut snapshot = self.snapshot.lock().unwrap();
+        *snapshot = Arc::new(snapshot.with_base(name, base)?);
+        Ok(())
+    }
+
     /// No private changes, no private WAL and no outstanding I/O: the engine's
     /// view equals the committed state it was opened or saved at.
     pub(crate) fn is_clean(&self) -> bool {

@@ -82,17 +82,43 @@ pub(crate) struct Chain {
 
 impl Chain {
     /// The dictionary of a segment of `file`'s `pages`: the previous image of
-    /// each one with an image, in order.
-    fn dictionary<'a>(&self, file: u32, pages: impl Iterator<Item = &'a (u64, bool)>) -> Vec<u8> {
+    /// each one with an image, in order; where the log has none, the page of
+    /// the file's `base`, if any.
+    fn dictionary<'a>(
+        &self,
+        file: u32,
+        pages: impl Iterator<Item = &'a (u64, bool)>,
+        base: Option<&dyn Base>,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         for (index, _) in pages.filter(|(_, image)| *image) {
-            if let Some(Some(previous)) = self.images.get(&page_id(file, *index)) {
-                out.extend_from_slice(previous);
+            match self.images.get(&page_id(file, *index)) {
+                Some(Some(previous)) => out.extend_from_slice(previous),
+                // A hole of a file with a base is its base's page.
+                Some(None) | None => {
+                    if let Some(page) = base.and_then(|base| base.page(*index)) {
+                        out.extend_from_slice(page);
+                    }
+                }
             }
         }
         out
     }
 }
+
+/// What a paged file's absent pages hold: a golden image it diverges from (a
+/// VM's memory, say). An absent page, or a hole, of a file with a base reads
+/// as the base's page (zeros past it), and a page is compressed against it
+/// the first time it is logged, and in place.
+pub trait Base: Send + Sync {
+    /// Names the base: a file made with one is opened only with it again.
+    fn id(&self) -> u64;
+    /// Page `index` (4096 bytes); `None` past the base's end.
+    fn page(&self, index: u64) -> Option<&[u8]>;
+}
+
+/// The bases of files, by id.
+pub(crate) type Bases = BTreeMap<u32, std::sync::Arc<dyn Base>>;
 
 fn put_varint(out: &mut Vec<u8>, mut n: u64) {
     while n >= 0x80 {
@@ -116,10 +142,12 @@ fn get_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
 }
 
 /// Encode a transaction's images as segments, each of one file's pages,
-/// compressed against `chain`: each file's segments, by file.
+/// compressed against `chain` (and a file's base): each file's segments, by
+/// file.
 pub(crate) fn encode_transaction(
     images: &Images,
     chain: &Chain,
+    bases: &Bases,
 ) -> io::Result<BTreeMap<u32, Vec<Bytes>>> {
     let mut files: BTreeMap<u32, Vec<(u64, &Option<Page>)>> = BTreeMap::new();
     for (&id, image) in images {
@@ -130,8 +158,9 @@ pub(crate) fn encode_transaction(
     }
     let mut segments = BTreeMap::new();
     for (file, entries) in files {
+        let base = bases.get(&file).map(|base| &**base);
         let encoded = (entries.chunks(MAX_SEGMENT_PAGES))
-            .map(|entries| encode_segment(file, entries, chain).map(Bytes::from))
+            .map(|entries| encode_segment(file, entries, chain, base).map(Bytes::from))
             .collect::<io::Result<_>>()?;
         segments.insert(file, encoded);
     }
@@ -143,6 +172,7 @@ pub(crate) fn encode_segment(
     file: u32,
     entries: &[(u64, &Option<Page>)],
     chain: &Chain,
+    base: Option<&dyn Base>,
 ) -> io::Result<Vec<u8>> {
     let zstd = |e: zstd_safe::ErrorCode| io::Error::other(zstd_safe::get_error_name(e));
     let pages: Vec<(u64, bool)> = entries
@@ -164,7 +194,7 @@ pub(crate) fn encode_segment(
         .copied()
         .collect();
     if !raw.is_empty() {
-        let dictionary = chain.dictionary(file, pages.iter());
+        let dictionary = chain.dictionary(file, pages.iter(), base);
         let mut frame = Vec::with_capacity(zstd_safe::compress_bound(raw.len()));
         let mut cctx = CCtx::create();
         cctx.set_parameter(CParameter::CompressionLevel(ZSTD_LEVEL))
@@ -212,7 +242,12 @@ pub(crate) fn entries(bytes: &[u8]) -> io::Result<(Vec<(u64, bool)>, usize)> {
 
 /// Decode a segment of `file`'s pages that follows `chain`: images by page
 /// id.
-pub(crate) fn decode_segment(bytes: &[u8], chain: &Chain, file: u32) -> io::Result<Images> {
+pub(crate) fn decode_segment(
+    bytes: &[u8],
+    chain: &Chain,
+    file: u32,
+    base: Option<&dyn Base>,
+) -> io::Result<Images> {
     let (pages, at) = entries(bytes)?;
     let count = pages.iter().filter(|(_, image)| *image).count();
     let mut images = Images::new();
@@ -220,7 +255,7 @@ pub(crate) fn decode_segment(bytes: &[u8], chain: &Chain, file: u32) -> io::Resu
         images.extend(pages.iter().map(|&(index, _)| (page_id(file, index), None)));
         return Ok(images);
     }
-    let dictionary = chain.dictionary(file, pages.iter());
+    let dictionary = chain.dictionary(file, pages.iter(), base);
     let mut raw = Vec::with_capacity(count * BLOCK_SIZE);
     let mut dctx = DCtx::create();
     dctx.ref_prefix(&dictionary)
@@ -332,8 +367,9 @@ pub(crate) enum Kind {
     /// A whole value, replaced whole, kept by checkpoints.
     Record(Part),
     /// 4 KiB pages: the log since the last checkpoint holds its changed
-    /// pages, its page keys the rest. Its size after the log.
-    Paged { size: u64 },
+    /// pages, its page keys the rest. Its size after the log, and the id of
+    /// its base (see [`Base`]), if it has one.
+    Paged { size: u64, base: Option<u64> },
 }
 
 /// One file's part of a committed transaction.
@@ -480,9 +516,17 @@ impl Commit {
                     put_varint(&mut out, 0);
                     put_part(&mut out, part);
                 }
-                Kind::Paged { size } => {
+                Kind::Paged { size, base: None } => {
                     put_varint(&mut out, 1);
                     put_varint(&mut out, size / 512);
+                }
+                Kind::Paged {
+                    size,
+                    base: Some(base),
+                } => {
+                    put_varint(&mut out, 2);
+                    put_varint(&mut out, size / 512);
+                    put_varint(&mut out, *base);
                 }
             }
         }
@@ -542,7 +586,14 @@ impl Commit {
             let name = String::from_utf8(name.to_vec()).map_err(|_| record_error())?;
             let kind = match r.varint()? {
                 0 => Kind::Record(r.part(MAX_RECORD_BYTES, next_segment, &garbage)?),
-                1 => Kind::Paged { size: r.size()? },
+                1 => Kind::Paged {
+                    size: r.size()?,
+                    base: None,
+                },
+                2 => Kind::Paged {
+                    size: r.size()?,
+                    base: Some(r.varint()?),
+                },
                 _ => return Err(record_error()),
             };
             if directory.values().any(|entry: &Entry| entry.name == name) {
@@ -590,7 +641,7 @@ impl Commit {
             chain.push(r.part(MAX_CHAIN_VALUE_BYTES, next_segment, &garbage)?);
         }
         let sized = sizes.iter().all(|(file, size)| {
-            matches!(&directory[file].kind, Kind::Paged { size: held } if held == size)
+            matches!(&directory[file].kind, Kind::Paged { size: held, .. } if held == size)
         });
         if r.at != bytes.len() || !sized {
             return Err(record_error());
@@ -642,7 +693,7 @@ impl Commit {
     /// The size of the paged file `file`; 0 for any other.
     pub(crate) fn size(&self, file: u32) -> u64 {
         match self.directory.get(&file).map(|entry| &entry.kind) {
-            Some(Kind::Paged { size }) => *size,
+            Some(Kind::Paged { size, .. }) => *size,
             _ => 0,
         }
     }
@@ -650,7 +701,7 @@ impl Commit {
     /// The paged files, and their sizes.
     pub(crate) fn paged(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
         (self.directory.iter()).filter_map(|(&id, entry)| match entry.kind {
-            Kind::Paged { size } => Some((id, size)),
+            Kind::Paged { size, .. } => Some((id, size)),
             Kind::Record(_) => None,
         })
     }
@@ -754,6 +805,9 @@ pub(crate) struct Log {
     pub bytes: usize,
     /// What the next transaction is compressed against.
     pub chain: Chain,
+    /// The segments of each file with a base not yet given, in log order:
+    /// they decode against it, once it is (see [`Self::decode_file`]).
+    pub undecoded: BTreeMap<u32, Vec<Bytes>>,
 }
 
 impl Log {
@@ -763,7 +817,48 @@ impl Log {
             images: Images::new(),
             bytes: 0,
             chain: Chain::default(),
+            undecoded: BTreeMap::new(),
         }
+    }
+
+    /// Whether `file` has undecoded segments whose images the log still
+    /// holds: a later hole of every one of their pages would make them moot.
+    pub(crate) fn needs_base(&self, file: u32) -> bool {
+        let Some(segments) = self.undecoded.get(&file) else {
+            return false;
+        };
+        segments.iter().any(|segment| {
+            entries(segment).is_ok_and(|(pages, _)| {
+                (pages.iter())
+                    .any(|&(page, image)| image && !self.images.contains_key(&page_id(file, page)))
+            })
+        })
+    }
+
+    /// Whether some file's segments wait for their base: a checkpoint, which
+    /// writes every page's latest image, waits too.
+    pub(crate) fn waits_for_bases(&self) -> bool {
+        self.undecoded.keys().any(|&file| self.needs_base(file))
+    }
+
+    /// Decode `file`'s segments against `base`, now given. Pages a later
+    /// transaction changed keep that change.
+    pub(crate) fn decode_file(&mut self, file: u32, base: &dyn Base) -> io::Result<()> {
+        let Some(segments) = self.undecoded.remove(&file) else {
+            return Ok(());
+        };
+        let mut chain = Chain::default();
+        for segment in &segments {
+            let images = decode_segment(segment, &chain, file, Some(base))?;
+            chain.images.extend(images);
+        }
+        for (page, image) in chain.images {
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.images.entry(page) {
+                entry.insert(image.clone());
+                self.chain.images.insert(page, image);
+            }
+        }
+        Ok(())
     }
 
     /// Add a committed transaction.
@@ -828,18 +923,33 @@ pub(crate) async fn replay(
             .ok_or_else(|| invalid("log segment")),
     };
     let mut log = Log::new();
+    // A file with a base decodes once it is opened with it.
+    let based: BTreeSet<u32> = (commit.directory.iter())
+        .filter(|(_, entry)| matches!(entry.kind, Kind::Paged { base: Some(_), .. }))
+        .map(|(&id, _)| id)
+        .collect();
     for transaction in &commit.log {
         let mut images = Images::new();
+        let mut undecoded = Vec::new();
         let mut bytes = 0;
         for change in &transaction.changes {
             for part in &change.parts {
                 let segment = resolve(part)?;
                 bytes += segment.len();
+                if based.contains(&change.file) {
+                    let (pages, _) = entries(&segment)?;
+                    undecoded.extend(pages.iter().map(|&(page, _)| page_id(change.file, page)));
+                    log.undecoded.entry(change.file).or_default().push(segment);
+                    continue;
+                }
                 // The parts of a transaction decode against the log before it.
-                images.extend(decode_segment(&segment, &log.chain, change.file)?);
+                images.extend(decode_segment(&segment, &log.chain, change.file, None)?);
             }
         }
         log.append(images, bytes);
+        if let Some(last) = log.transactions.last_mut() {
+            last.pages.extend(undecoded);
+        }
     }
     let chain = commit
         .chain

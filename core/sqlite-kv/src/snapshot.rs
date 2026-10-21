@@ -47,8 +47,8 @@ use crate::{
     hint::{self, Usage},
     kv::KvStore,
     log::{
-        self, Change, Commit, Entry, Images, Kind, Log, Logged, Part, Records, Sealed, file_of,
-        page_id,
+        self, Base, Bases, Change, Commit, Entry, Images, Kind, Log, Logged, Part, Records, Sealed,
+        file_of, page_id, page_of,
     },
     page_codec::{self, Page, PageCompression},
 };
@@ -204,6 +204,8 @@ pub(crate) struct Snapshot {
     chain: Vec<Bytes>,
     /// The records' values, by name.
     records: Records,
+    /// The bases files were opened with, by name.
+    bases: BTreeMap<String, Arc<dyn Base>>,
     /// Nothing changed since this owner last saw the namespace: the cache
     /// saw the same record, at this owner's last commit.
     pub(crate) unchanged: bool,
@@ -327,6 +329,7 @@ impl Snapshot {
             log,
             chain,
             records,
+            bases: BTreeMap::new(),
             unchanged,
             page: Mutex::default(),
             fetched: Mutex::default(),
@@ -415,9 +418,41 @@ impl Snapshot {
         &self.chain
     }
 
+    /// The base the file `file` was opened with; `Err` for a file made with
+    /// a base it was not opened with.
+    fn base_of(&self, file: u32) -> io::Result<Option<&Arc<dyn Base>>> {
+        let Some(entry) = self.commit.directory.get(&file) else {
+            return Ok(None);
+        };
+        match (&entry.kind, self.bases.get(&entry.name)) {
+            (Kind::Paged { base: Some(_), .. }, None) => Err(io::Error::other(format!(
+                "{:?} has a base: open it with it",
+                entry.name
+            ))),
+            (_, base) => Ok(base),
+        }
+    }
+
+    /// The bases of the files opened with one, by id.
+    fn bases(&self, commit: &Commit) -> Bases {
+        (self.bases.iter())
+            .filter_map(|(name, base)| Some((commit.file_id(name)?, base.clone())))
+            .collect()
+    }
+
+    /// What a hole of the page `index` reads as: its file's base page, if it
+    /// has a base.
+    fn hole(&self, index: u64) -> io::Result<Option<Page>> {
+        let base = self.base_of(file_of(index))?;
+        Ok(base
+            .and_then(|base| base.page(page_of(index)))
+            .map(Page::copy_from_slice))
+    }
+
     /// Decode the page `index` (a page id, see [`log::page_id`]); `None` means
-    /// a hole. The log's latest image wins, then the cache, then the
-    /// checkpointed value at its page key.
+    /// zeros. The log's latest image wins, then the cache, then the
+    /// checkpointed value at its page key. A hole, or a page absent from the
+    /// store, of a file with a base reads as the base's page.
     pub async fn block(&self, index: u64) -> io::Result<Option<Page>> {
         if let Some((cached, page)) = &*self.page.lock().unwrap()
             && *cached == index
@@ -425,8 +460,12 @@ impl Snapshot {
             return Ok(Some(page.clone()));
         }
         let cache = self.options.cache.as_ref();
+        let base = self.base_of(file_of(index))?;
+        let base_page = base.and_then(|base| base.page(page_of(index)));
         let page = if let Some(image) = self.log.images.get(&index) {
-            let Some(image) = image else { return Ok(None) };
+            let Some(image) = image else {
+                return self.hole(index);
+            };
             image.clone()
         } else if let Some((cache, value)) = match cache {
             Some(cache) => cache.get(index).await.map(|value| (cache, value)),
@@ -434,13 +473,13 @@ impl Snapshot {
         } {
             match cache.is_decoded() {
                 true => value,
-                false => page_codec::decode_bytes(&value)?,
+                false => page_codec::decode_against(&value, base_page)?,
             }
         } else {
             let (token, Some(image)) = self.fetch(index).await? else {
-                return Ok(None);
+                return self.hole(index);
             };
-            let page = page_codec::decode_bytes(&image)?;
+            let page = page_codec::decode_against(&image, base_page)?;
             if let (Some(cache), Some(token)) = (cache, token) {
                 let value = if cache.is_decoded() {
                     page.clone()
@@ -506,7 +545,7 @@ impl Snapshot {
 
     /// Whether the log is long enough to checkpoint.
     fn wants_checkpoint(&self) -> bool {
-        !self.log.transactions.is_empty() && self.too_long(0, 0)
+        !self.log.transactions.is_empty() && self.too_long(0, 0) && !self.log.waits_for_bases()
     }
 
     /// Whether the log, with `transactions` more of `bytes`, passes a
@@ -625,13 +664,31 @@ impl Snapshot {
         let mut images = Images::new();
         let mut sizes = BTreeMap::new();
         for (name, written) in writes {
-            let id = allocate(&mut commit, &name, Kind::Paged { size: 0 })?;
-            images.extend(
-                (written.pages.into_iter()).map(|(page, image)| (page_id(id, page), image)),
+            let base = self.bases.get(&name);
+            let kind = Kind::Paged {
+                size: 0,
+                base: base.map(|base| base.id()),
+            };
+            let id = allocate(&mut commit, &name, kind)?;
+            let based = matches!(
+                commit.directory[&id].kind,
+                Kind::Paged { base: Some(_), .. }
             );
+            for (page, image) in written.pages {
+                let image = match (based, base) {
+                    (true, None) if image.is_some() => {
+                        return refuse(format!("{name:?} has a base: open it with it"));
+                    }
+                    // A page of the base is a hole.
+                    (true, Some(base)) if image.as_deref() == base.page(page) => None,
+                    _ => image,
+                };
+                images.insert(page_id(id, page), image);
+            }
             sizes.insert(id, written.size);
         }
-        let mut segments = log::encode_transaction(&images, &self.log.chain)?;
+        let bases = self.bases(&commit);
+        let mut segments = log::encode_transaction(&images, &self.log.chain, &bases)?;
         let logged_bytes = segments.values().flatten().map(Bytes::len).sum::<usize>();
         // Stored values this record names, for the cache.
         let mut named = log::Values::new();
@@ -672,8 +729,12 @@ impl Snapshot {
                     .collect::<io::Result<_>>()?,
                 false => segments.into_iter().map(Part::Inline).collect(),
             };
-            if let Some(entry) = commit.directory.get_mut(&file) {
-                entry.kind = Kind::Paged { size };
+            if let Some(Entry {
+                kind: Kind::Paged { size: held, .. },
+                ..
+            }) = commit.directory.get_mut(&file)
+            {
+                *held = size;
             }
             changes.push(Change { file, size, parts });
         }
@@ -807,7 +868,8 @@ impl Snapshot {
         &mut self,
         write: &impl Fn(&str, Option<Bytes>) -> io::Result<()>,
     ) -> io::Result<Checkpoint> {
-        let checkpoint = Checkpoint::new(&self.log.images, self.options.page_compression)?;
+        let bases = self.bases(&self.commit);
+        let checkpoint = Checkpoint::new(&self.log.images, self.options.page_compression, &bases)?;
         for (index, image) in &checkpoint.images {
             write(&page_key(*index), image.clone())?;
         }
@@ -850,6 +912,7 @@ impl Snapshot {
             images: self.log.images.clone(),
             bytes: self.log.bytes,
             chain: self.log.chain.clone(),
+            undecoded: self.log.undecoded.clone(),
         };
         Self {
             store: self.store.clone(),
@@ -859,6 +922,7 @@ impl Snapshot {
             log,
             chain: self.chain.clone(),
             records: self.records.clone(),
+            bases: self.bases.clone(),
             unchanged: false,
             page: Mutex::default(),
             fetched: Mutex::new(std::mem::take(&mut *self.fetched.lock().unwrap())),
@@ -867,6 +931,26 @@ impl Snapshot {
             usage: Mutex::new(std::mem::take(&mut *self.usage.lock().unwrap())),
             reader: Mutex::default(),
         }
+    }
+
+    /// This view, with the file `name` opened with `base`: a file made with
+    /// another base, or without one, refuses it. Its log decodes now.
+    pub(crate) fn with_base(&self, name: &str, base: Arc<dyn Base>) -> io::Result<Self> {
+        let id = self.commit.file_id(name);
+        if let Some(id) = id {
+            match &self.commit.directory[&id].kind {
+                Kind::Paged {
+                    base: Some(held), ..
+                } if *held == base.id() => {}
+                _ => return refuse(format!("{name:?} was made with another base, or none")),
+            }
+        }
+        let mut with = self.continued(self.commit.clone(), self.commit_bytes.clone());
+        if let Some(id) = id {
+            with.log.decode_file(id, &*base)?;
+        }
+        with.bases.insert(name.to_owned(), base);
+        Ok(with.registered())
     }
 
     /// An empty view at the same version, for a parked engine: no log images,
@@ -921,13 +1005,23 @@ struct Checkpoint {
 }
 
 impl Checkpoint {
-    fn new(images: &Images, compression: PageCompression) -> io::Result<Self> {
+    /// A page of a file with a base is encoded against its base page, and
+    /// is a hole if it equals it.
+    fn new(images: &Images, compression: PageCompression, bases: &Bases) -> io::Result<Self> {
         let images = images
             .iter()
             .map(|(&index, image)| {
-                let value = match image {
-                    Some(page) => Some(Bytes::from(page_codec::encode(page, compression)?)),
-                    None => None,
+                let base = bases.get(&file_of(index));
+                let base_page = base.and_then(|base| base.page(page_of(index)));
+                let value = match (image, base_page) {
+                    (Some(page), Some(base_page)) if page[..] == base_page[..] => None,
+                    (Some(page), Some(base_page)) => Some(Bytes::from(page_codec::encode_against(
+                        page,
+                        base_page,
+                        compression,
+                    )?)),
+                    (Some(page), None) => Some(Bytes::from(page_codec::encode(page, compression)?)),
+                    (None, _) => None,
                 };
                 Ok((index, value))
             })

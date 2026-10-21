@@ -1,7 +1,9 @@
 //! Independent immutable-page envelopes; logical pages remain 4096 bytes.
 //!
 //! The value starts with a codec tag (u8) and logical size (u16 LE, always 4096),
-//! followed by raw bytes (tag 0), one LZ4 block (tag 1) or one zstd frame (tag 2).
+//! followed by raw bytes (tag 0), one LZ4 block (tag 1), one zstd frame (tag 2),
+//! or one zstd frame whose dictionary is the page's base (tag 3: a page of a
+//! file with a base, see [`crate::Base`], which decoding needs).
 //! Compression is retained only when its payload is smaller than the raw page. Incompressible pages therefore use
 //! 4099 bytes including the header, even under the LZ4 policy.
 //!
@@ -75,6 +77,58 @@ pub fn encode(page: &[u8], policy: PageCompression) -> io::Result<Vec<u8>> {
     out.extend_from_slice(&(BLOCK_SIZE as u16).to_le_bytes());
     out.extend_from_slice(payload);
     Ok(out)
+}
+
+/// Encode a page of a file with a base against `base`, its base's page: as a
+/// zstd frame with the base page as its dictionary (tag 3) when that is
+/// smaller than the page's own encoding, else as [`encode`] does.
+pub(crate) fn encode_against(
+    page: &[u8],
+    base: &[u8],
+    policy: PageCompression,
+) -> io::Result<Vec<u8>> {
+    let own = encode(page, policy)?;
+    if policy == PageCompression::Raw || base.len() != BLOCK_SIZE {
+        return Ok(own);
+    }
+    let mut frame = Vec::with_capacity(zstd_safe::compress_bound(BLOCK_SIZE));
+    let mut cctx = CCtx::create();
+    cctx.set_parameter(zstd_safe::CParameter::CompressionLevel(ZSTD_LEVEL))
+        .and_then(|_| cctx.ref_prefix(base))
+        .and_then(|_| cctx.compress2(&mut frame, page))
+        .map_err(|e| io::Error::other(zstd_safe::get_error_name(e)))?;
+    if HEADER + frame.len() >= own.len() {
+        return Ok(own);
+    }
+    let mut out = Vec::with_capacity(HEADER + frame.len());
+    out.push(3);
+    out.extend_from_slice(&(BLOCK_SIZE as u16).to_le_bytes());
+    out.extend_from_slice(&frame);
+    Ok(out)
+}
+
+/// [`decode_bytes`], for a page of a file whose base page is `base`: a page
+/// encoded against it (tag 3) needs it.
+pub(crate) fn decode_against(bytes: &bytes::Bytes, base: Option<&[u8]>) -> io::Result<Page> {
+    if bytes.first() != Some(&3) {
+        return decode_bytes(bytes);
+    }
+    let base = base.ok_or_else(|| invalid("a page encoded against a base, without it"))?;
+    if bytes.len() < HEADER || bytes.len() > MAX_ENCODED_PAGE {
+        return Err(invalid("invalid encoded page length"));
+    }
+    if u16::from_le_bytes([bytes[1], bytes[2]]) as usize != BLOCK_SIZE {
+        return Err(invalid("invalid decoded page length"));
+    }
+    let mut page = Vec::with_capacity(BLOCK_SIZE);
+    let mut dctx = DCtx::create();
+    dctx.ref_prefix(base)
+        .and_then(|_| dctx.decompress(&mut page, &bytes[HEADER..]))
+        .map_err(|_| invalid("invalid zstd page against its base"))?;
+    if page.len() != BLOCK_SIZE {
+        return Err(invalid("invalid zstd decoded length"));
+    }
+    Ok(page.into())
 }
 
 /// Decodes into exactly one bounded page. Never allocate from stored lengths.

@@ -31,20 +31,20 @@ fn chain(images: Images) -> Chain {
 /// The segments of a transaction of file 0, whose page ids are its page
 /// numbers.
 fn encode_transaction(images: &Images, chain: &Chain) -> io::Result<Vec<Bytes>> {
-    Ok(super::encode_transaction(images, chain)?
+    Ok(super::encode_transaction(images, chain, &Bases::new())?
         .remove(&0)
         .unwrap_or_default())
 }
 
 /// A segment of file 0.
 fn decode_segment(bytes: &[u8], chain: &Chain) -> io::Result<Images> {
-    super::decode_segment(bytes, chain, 0)
+    super::decode_segment(bytes, chain, 0, None)
 }
 
 fn paged(size: u64) -> Entry {
     Entry {
         name: "db".into(),
-        kind: Kind::Paged { size },
+        kind: Kind::Paged { size, base: None },
     }
 }
 
@@ -329,7 +329,7 @@ fn implausible_numbers_are_rejected() -> io::Result<()> {
     assert!(Commit::decode(&commit(2, 512 * 3)).is_ok());
 
     let past = [(MAX_DATABASE_BYTES / 4096, &None)];
-    let segment = super::encode_segment(0, &past, &Chain::default())?;
+    let segment = super::encode_segment(0, &past, &Chain::default(), None)?;
     assert!(entries(&segment).is_err(), "page index out of range");
     Ok(())
 }

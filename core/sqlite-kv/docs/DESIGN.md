@@ -48,7 +48,8 @@ A namespace holds four kinds of keys:
 log, else `page/<f>/<n>`, else zeros. The SQL database is the paged file
 `db`; the host's files (`Session::file`) are others, written in the same
 transactions. Everything below says "page" for a page of any file: a page is
-a file and a number.
+a file and a number. A file with a base (a VM's memory over its golden image)
+reads its base's page where it has none; see `FORMAT.md`.
 
 **The record is the commit point.** A transaction is committed once a record
 that holds it is durable. Each put of the record is one transaction more

@@ -126,7 +126,7 @@ mod snapshot;
 
 pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
-pub use log::{MAX_CHAIN_VALUE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES};
+pub use log::{Base, MAX_CHAIN_VALUE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::PageCompression;
 pub use snapshot::{
     CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, ChainUpdate, Durability, INLINE_LOG_BYTES,
@@ -488,7 +488,21 @@ impl Session {
             name: name.into(),
             io: self.io.clone(),
             pending: self.files.clone(),
+            base: None,
         })
+    }
+
+    /// The paged file named `name`, over `base` (see [`Base`]): an absent
+    /// page, or a hole, reads as the base's page, and pages are compressed
+    /// against it. A file made with a base opens only with that one again
+    /// (by [`Base::id`]); its log since the last checkpoint decodes now.
+    /// [`Self::file`] opens it without its base, to write holes and set its
+    /// length only: emptying it for another base, say.
+    pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
+        let mut file = self.file(name)?;
+        self.io.with_base(name, base.clone())?;
+        file.base = Some(base);
+        Ok(file)
     }
 
     /// The record named `name`: a whole value the commit record holds, which
@@ -907,6 +921,7 @@ pub struct File {
     name: Arc<str>,
     io: Arc<KvIo>,
     pending: Arc<Mutex<snapshot::Writes>>,
+    base: Option<Arc<dyn Base>>,
 }
 
 impl File {
@@ -926,19 +941,23 @@ impl File {
         self.len() == 0
     }
 
-    /// Page `page` as the session holds it; `None` for a hole.
+    /// Page `page` as the session holds it; `None` for zeros (a hole of a
+    /// file without a base, or past its end).
     pub async fn read(&self, page: u64) -> Result<Option<Page>> {
-        if let Some(written) = self.pending.lock().unwrap().get(&*self.name) {
-            if let Some(image) = written.pages.get(&page) {
-                return Ok(image.clone());
-            }
-            if page * PAGE >= written.size {
-                return Ok(None);
-            }
+        if page * PAGE >= self.len() {
+            return Ok(None);
+        }
+        let hole = || {
+            let base = self.base.as_ref().and_then(|base| base.page(page));
+            base.map(Page::copy_from_slice)
+        };
+        let written = self.pending.lock().unwrap().get(&*self.name).cloned();
+        if let Some(image) = written.and_then(|written| written.pages.get(&page).cloned()) {
+            return Ok(image.or_else(hole));
         }
         let snapshot = self.io.snapshot();
         if page * PAGE >= snapshot.file_size(&self.name) {
-            return Ok(None);
+            return Ok(hole());
         }
         Ok(snapshot.read(&self.name, page).await?)
     }

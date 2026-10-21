@@ -30,7 +30,7 @@
 use crate::{
     format::{COMMIT, LOG_PREFIX, parse_page_key},
     kv::KvStore,
-    log::{self, Commit, Images, Kind, Part},
+    log::{self, Base, Commit, Images, Kind, Part},
     page_codec,
 };
 use bytes::Bytes;
@@ -39,7 +39,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     io,
     ops::Deref,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 /// A store wrapper that checks the protocol invariants on every request.
@@ -65,12 +65,27 @@ struct Known {
     pages: HashMap<u64, Vec<Option<Bytes>>>,
     commit: Option<Commit>,
     violations: Vec<String>,
+    /// The bases of files made with one, by name: their pages decode
+    /// against them.
+    bases: BTreeMap<String, Arc<dyn Base>>,
     checked: usize,
 }
 
 impl Known {
     fn commit(&self) -> Commit {
         self.commit.clone().unwrap_or_default()
+    }
+
+    /// The base of `commit`'s file `file`: `Err` for a file made with one the
+    /// monitor was not given.
+    fn base(&self, commit: &Commit, file: u32) -> Result<Option<&dyn Base>, ()> {
+        let Some(entry) = commit.directory.get(&file) else {
+            return Ok(None);
+        };
+        match (&entry.kind, self.bases.get(&entry.name)) {
+            (Kind::Paged { base: Some(_), .. }, None) => Err(()),
+            (_, base) => Ok(base.map(|base| &**base)),
+        }
     }
 
     /// Each transaction's images in `commit`'s log, as replay decodes them;
@@ -83,7 +98,9 @@ impl Known {
             for change in &transaction.changes {
                 for part in &change.parts {
                     let segment = self.value(part)?;
-                    images.extend(log::decode_segment(&segment, &chain, change.file).ok()?);
+                    let base = self.base(commit, change.file).ok()?;
+                    let decoded = log::decode_segment(&segment, &chain, change.file, base);
+                    images.extend(decoded.ok()?);
                 }
             }
             chain.images.extend(images.clone());
@@ -115,17 +132,21 @@ impl Known {
             .map(|(&id, entry)| {
                 let held = match &entry.kind {
                     Kind::Record(part) => Held::Record(self.value(part)?),
-                    Kind::Paged { size } => Held::Paged(*size),
+                    Kind::Paged { size, base } => Held::Paged(*size, *base),
                 };
                 Some((id, (entry.name.clone(), held)))
             })
             .collect()
     }
 
-    /// The logical image a page key's value holds; `None` for a hole.
-    fn image(value: &Option<Bytes>) -> Option<Option<Bytes>> {
+    /// The logical image the key of the page `page` holds as `value`; `None`
+    /// for a hole.
+    fn image(&self, page: u64, value: &Option<Bytes>) -> Option<Option<Bytes>> {
+        let commit = self.commit();
+        let base = self.base(&commit, log::file_of(page)).ok()?;
+        let base_page = base.and_then(|base| base.page(log::page_of(page)));
         match value {
-            Some(value) => page_codec::decode_bytes(value).ok().map(Some),
+            Some(value) => page_codec::decode_against(value, base_page).ok().map(Some),
             None => Some(None),
         }
     }
@@ -239,7 +260,7 @@ impl Known {
                 let ok = !held.is_empty()
                     && held
                         .iter()
-                        .all(|value| Self::image(value) == Some(image.clone()));
+                        .all(|value| self.image(page, value) == Some(image.clone()));
                 if !ok {
                     self.violation(format!(
                         "checkpoint to epoch {}: page {page} not known at its key",
@@ -257,7 +278,7 @@ impl Known {
 
     /// 4: a page key gets an image of a transaction in the known log.
     fn check_image(&mut self, key: &str, page: u64, value: Option<&Bytes>) {
-        let Some(value) = Self::image(&value.cloned()) else {
+        let Some(value) = self.image(page, &value.cloned()) else {
             return self.violation(format!("{key}: undecodable page"));
         };
         let known = self.commit();
@@ -319,7 +340,7 @@ impl Known {
 #[derive(Debug, PartialEq)]
 enum Held {
     Record(Bytes),
-    Paged(u64),
+    Paged(u64, Option<u64>),
 }
 
 fn parse(key: &str, prefix: &str) -> Option<u64> {
@@ -345,6 +366,13 @@ impl<S: KvStore> MonitorKv<S> {
             }
         }
         monitor
+    }
+
+    /// Check the pages of the file `name` against `base`, the one it is
+    /// made with (see [`crate::Base`]).
+    pub fn with_base(self, name: &str, base: Arc<dyn Base>) -> Self {
+        self.known.lock().unwrap().bases.insert(name.into(), base);
+        self
     }
 
     /// Invariant violations seen so far.
