@@ -99,7 +99,7 @@ On a retried attempt, each operation the handler reaches happens again:
 
 ## Tests
 
-`make test-sql-py` runs them without a Restate server: the selector against a
+`make test-py` runs them without a Restate server: the selector against a
 fake VM ([`tests/test_selector.py`](tests/test_selector.py)), `ctx.db` and
 `ctx.transaction` over the extension and a fake object state
 ([`tests/test_session.py`](tests/test_session.py)), among them the sends of a

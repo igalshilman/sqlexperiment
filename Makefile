@@ -9,7 +9,8 @@
 #                (rust/functions: functions, functions-python, test-functions)
 #
 #   make          build everything
-#   make test     every test that needs no Restate server
+#   make test     every test that needs no Restate server (test-ts, test-py, ...)
+#   make lint     every lint
 #   make help     every target
 #
 # The Rust crates share one target directory.
@@ -55,7 +56,7 @@ RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
 .PHONY: all help core functions functions-python python-engine addon sdk-rs js py wheels examples-rust \
-	test test-core test-addon test-ts test-sdk-rs test-sql-py test-agents-py test-functions \
+	test test-core test-addon test-ts test-py test-sdk-rs test-functions \
 	crash-test concurrency-test tools-test crash-test-py concurrency-test-py lint lint-core lint-ts lint-py lint-functions format clean
 
 # --- Build
@@ -63,7 +64,7 @@ endif
 all: core addon js py ## Build everything
 
 help: ## List the targets
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
 
 core: ## The sqlite-kv crate
 	cd $(CORE) && $(CARGO) build --locked --release
@@ -111,7 +112,7 @@ examples-rust: ## The Rust example: the core crate's lookup
 
 # --- Test
 
-test: test-core test-addon test-ts test-sql-py test-agents-py ## Every test that needs no Restate server
+test: test-core test-addon test-ts test-py ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
@@ -123,14 +124,11 @@ test-addon: $(ADDON) ## The Node.js addon
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
 	cd typescript/tests && pnpm exec vitest run $(T)
 
+test-py: py ## The Python extension, restate-fns and the integrations (the agents on a scripted model), without a Restate server (T=<filter>, such as T=langgraph)
+	cd python && uv run --locked pytest sqlite-kv/tests fns/tests agents/tests $(if $(T),-k $(T))
+
 test-sdk-rs: $(SDK_RS) ## The patched Rust SDK's unit tests
 	cd rust/sdk/.build/sdk-rust && $(CARGO) test --lib
-
-test-sql-py: py ## The Python extension and restate-fns, without a Restate server
-	cd python && uv run --locked pytest sqlite-kv/tests fns/tests
-
-test-agents-py: py ## The Python agent integrations (python/agents): the checkpointer conformance suite, and the agents on a scripted model
-	cd python && uv run --locked pytest agents/tests
 
 lint: lint-core lint-ts lint-py ## Every lint
 

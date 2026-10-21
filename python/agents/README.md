@@ -414,7 +414,7 @@ async def chat(ctx, message: str) -> str:
 
 ## Tests
 
-`make test-agents-py`, from the repository's root:
+`make test-py`, from the repository's root:
 
 - [`tests/test_checkpointer.py`](tests/test_checkpointer.py): LangGraph's
   checkpointer conformance suite (`langgraph-checkpoint-conformance`, its 58

@@ -20,8 +20,7 @@ From the repository's root (see [its README](../README.md#build-and-test)):
 
 ```sh
 make py                    # the workspace, in .venv here: the extension, restate-fns and the integrations
-make test-sql-py           # the extension's and restate-fns's tests
-make test-agents-py        # the agent integrations' tests, on a scripted model
+make test-py               # the extension's, restate-fns's and the integrations' tests (the agents on a scripted model)
 make concurrency-test-py   # the examples, the context without journal replay, agents and Restate's tools, against a Restate server
 make crash-test-py         # the bank and an agent through crashes, against a Restate server
 make lint-py               # ruff
