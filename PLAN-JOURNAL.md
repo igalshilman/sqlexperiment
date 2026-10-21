@@ -72,6 +72,11 @@ and ask the owner only critical questions.
   (`Journal::join`) holds commits back while it has changes not yet in the
   journal, and may park idle state for the next journal. `core/sql` is one:
   `Sql` on the file `db`, its engine parked between sessions.
+- **After the plan: the bindings' names.** They wrap `sql`, and are named
+  for it: the Node.js addon is `typescript/packages/sql`, npm package
+  `restate-sql`; the Python extension is `python/sql`, package
+  `restate-sql`, module `restate_sql`. Both read their cache file from
+  `RESTATE_SQL_CACHE_FILE`.
 - **Measured after the last step** (the split and the renames, same
   machine, medians), against the run after step 4: the agent stores 2.5 MiB
   over 200 steps (as before), restores in 2.3 ms (2.6), its model and tool

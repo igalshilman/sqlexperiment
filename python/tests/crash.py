@@ -63,7 +63,7 @@ def answered(path: str, body: Any, key: str) -> tuple[int, Any]:
 def faulty(path: str, port: int, name: str) -> Service:
     """``path``'s services, aborting at random state requests (faults.py)."""
     # The page cache survives the process, so that a restarted one trusts only what was saved.
-    cache = {"JOURNAL_CACHE_FILE": str(dir / f"{name}.cache")}
+    cache = {"RESTATE_SQL_CACHE_FILE": str(dir / f"{name}.cache")}
     return Service([ROOT / "python/tests/faults.py", ROOT / path], port, dir / f"{name}.log", cache)
 
 

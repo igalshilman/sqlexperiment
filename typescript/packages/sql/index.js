@@ -1,7 +1,7 @@
 'use strict';
 // SQL over a key/value store implemented in JavaScript. See index.d.ts.
 const { AsyncLocalStorage } = require('node:async_hooks');
-const addon = require('./sqlite_kv.node');
+const addon = require('./sql.node');
 
 const GET = 0;
 const SET = 1;

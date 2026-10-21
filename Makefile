@@ -22,10 +22,10 @@ CORE := core/journal core/sql
 FUNCTIONS := rust/functions
 # CPython for WASI, with its standard library: the engine of durable Python.
 PY_ENGINE := $(CARGO_TARGET_DIR)/pywasm/out/python.wasm
-ADDON := typescript/packages/sql-node/sqlite_kv.node
+ADDON := typescript/packages/sql/sql.node
 SDK_RS := rust/sdk/.build/sdk-rust/.patched
 # The Rust crates that rustfmt and clippy check (rust/functions has lint-functions).
-RUST_CRATES := $(CORE) typescript/packages/sql-node python/journal
+RUST_CRATES := $(CORE) typescript/packages/sql python/sql
 # The durable functions' runtime tests, and the builds they run in: write
 # barriers checked after every turn (verify-dirty), and full scans.
 FUNCTIONS_TESTS := --lib --test runs --test crashes --test sql --test handlers --test python --test fetch --test llm --test files --test transactions
@@ -81,10 +81,10 @@ python-engine: $(PY_ENGINE) ## CPython for WASI, as durable Python's engine (tar
 $(PY_ENGINE): $(FUNCTIONS)/python/build.sh $(FUNCTIONS)/python/reactor.c
 	$(FUNCTIONS)/python/build.sh
 
-addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)
+addon: $(ADDON) ## The Node.js addon (typescript/packages/sql)
 
-$(ADDON): $(wildcard typescript/packages/sql-node/src/*.rs $(addsuffix /src/*.rs,$(CORE)) $(addsuffix /src/*/*.rs,$(CORE))) typescript/packages/sql-node/Cargo.toml $(addsuffix /Cargo.toml,$(CORE))
-	cd typescript/packages/sql-node && npm run build
+$(ADDON): $(wildcard typescript/packages/sql/src/*.rs $(addsuffix /src/*.rs,$(CORE)) $(addsuffix /src/*/*.rs,$(CORE))) typescript/packages/sql/Cargo.toml $(addsuffix /Cargo.toml,$(CORE))
+	cd typescript/packages/sql && npm run build
 
 js: $(ADDON) ## The pnpm workspace, installed with the addon
 	cd typescript && pnpm install
@@ -104,7 +104,7 @@ MATURIN_WHEEL := uv tool run --from 'maturin[zig]>=1.9,<2' maturin build --relea
 
 wheels: ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPython 3.13): the extension, restate-fns and restate-agents
 	rm -rf dist
-	cd python/journal && $(MATURIN_WHEEL)
+	cd python/sql && $(MATURIN_WHEEL)
 	uv build --wheel python/fns -o dist
 	uv build --wheel python/agents -o dist
 
@@ -119,13 +119,13 @@ test-core: ## The journal and SQL crates, with the simulation campaigns
 	for crate in $(CORE); do (cd $$crate && $(CARGO) test --locked && $(CARGO) test --locked --features simulation) || exit 1; done
 
 test-addon: $(ADDON) ## The Node.js addon
-	cd typescript/packages/sql-node && npm test
+	cd typescript/packages/sql && npm test
 
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
 	cd typescript/tests && pnpm exec vitest run $(T)
 
 test-py: py ## The Python extension, restate-fns and the integrations (the agents on a scripted model), without a Restate server (T=<filter>, such as T=langgraph)
-	cd python && uv run --locked pytest journal/tests fns/tests agents/tests $(if $(T),-k $(T))
+	cd python && uv run --locked pytest sql/tests fns/tests agents/tests $(if $(T),-k $(T))
 
 test-sdk-rs: $(SDK_RS) ## The patched Rust SDK's unit tests
 	cd rust/sdk/.build/sdk-rust && $(CARGO) test --lib
@@ -200,4 +200,4 @@ endif
 clean: ## Remove build outputs
 	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) \
 		typescript/node_modules typescript/*/node_modules typescript/packages/*/node_modules examples-typescript/node_modules \
-		python/.venv python/journal/python/journal/*.so
+		python/.venv python/sql/python/restate_sql/*.so

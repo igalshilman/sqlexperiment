@@ -55,10 +55,10 @@ outstanding requests and open a new one; a failed commit's outcome is unknown.
 
 ## Bindings
 
-- [Node.js addon](../../typescript/packages/sql-node/README.md): SQL over a
-  key/value store implemented in JavaScript, in `typescript/packages/sql-node/`
-- [Python extension](../../python/journal/README.md): the same in Python, in
-  `python/journal/`
+- [Node.js addon](../../typescript/packages/sql/README.md): SQL over a
+  key/value store implemented in JavaScript, in `typescript/packages/sql/`
+- [Python extension](../../python/sql/README.md): the same in Python, in
+  `python/sql/`
 
 ## Layout
 

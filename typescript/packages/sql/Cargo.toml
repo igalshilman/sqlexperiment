@@ -1,5 +1,5 @@
 [package]
-name = "sqlite-kv-node"
+name = "sql-node"
 version = "0.1.0"
 edition = "2024"
 publish = false

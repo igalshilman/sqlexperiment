@@ -7,7 +7,7 @@ published TypeScript SDK, and the agent integrations, in a pnpm workspace of its
 
 | Path                                                        | What                                                                                                                                                             |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`packages/sql-node/`](packages/sql-node/README.md)         | **The Node.js addon**, the `sqlite-kv` npm package: the crate over a key/value store implemented in JavaScript.                                                  |
+| [`packages/sql/`](packages/sql/README.md)                   | **The Node.js addon**, the `restate-sql` npm package: the crate over a key/value store implemented in JavaScript.                                                |
 | [`packages/fns/`](packages/fns/README.md)                   | **SQL in virtual objects**, the `restate-fns` package: `ctx.db` and `ctx.transaction`, a database per key in the object's state, over the addon.                 |
 | [`packages/integrations/`](packages/integrations/README.md) | **The integrations**, the `restate-agents` package: pi, OpenCode, LangGraph, Claude (the Anthropic SDK) and the DeepSeek Harness, in virtual objects.            |
 | [`examples-typescript/`](../examples-typescript/README.md)  | **The examples**, each a small file you run with node: beside this directory, and a member of this workspace.                                                    |

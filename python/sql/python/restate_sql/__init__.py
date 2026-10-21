@@ -2,7 +2,7 @@
 
 A session of a namespace's database, over a key/value store::
 
-    db = await journal.open("Ledger/a", store)
+    db = await restate_sql.open("Ledger/a", store)
     async with db.transaction() as tx:
         await tx.execute("INSERT INTO transfers VALUES(?, ?, ?, ?)", [id, src, dst, amount])
     await db.save()  # ends the session, leaving its engine to the next one
@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Awaitable, Sequence
 from contextlib import asynccontextmanager
 from typing import Protocol
 
-from journal import _native
+from restate_sql import _native
 
 __all__ = ["Database", "Rows", "SqlParam", "SqlValue", "Store", "Transaction", "open"]
 
@@ -110,7 +110,7 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Databas
 
 # The transaction whose body is running, in that body's context (and the
 # tasks it starts): the innermost, which knows the ones it runs inside.
-_running: contextvars.ContextVar[Transaction | None] = contextvars.ContextVar("journal_running", default=None)
+_running: contextvars.ContextVar[Transaction | None] = contextvars.ContextVar("restate_sql_running", default=None)
 
 
 class Database:

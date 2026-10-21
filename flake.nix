@@ -1,5 +1,5 @@
 {
-  description = "SQL in Restate virtual objects: the journal crate, its Node.js addon and Python extension, the patched Restate TypeScript SDK, the agent integrations and the examples";
+  description = "SQL in Restate virtual objects: the journal and SQL crates, their Node.js addon and Python extension, the patched Restate TypeScript SDK, the agent integrations and the examples";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

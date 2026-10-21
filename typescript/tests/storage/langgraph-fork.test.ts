@@ -1,7 +1,7 @@
 // A thread forked from an earlier checkpoint, on checkpointer.ts: each branch
 // keeps its own channel values. `make test-ts T=langgraph`.
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
-import { open } from 'sqlite-kv';
+import { open } from 'restate-sql';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from '../testing.ts';
 import { SqlCheckpointSaver } from 'restate-agents/langgraph';

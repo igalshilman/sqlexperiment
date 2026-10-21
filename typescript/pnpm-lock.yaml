@@ -59,9 +59,9 @@ importers:
       restate-fns:
         specifier: workspace:*
         version: link:../typescript/packages/fns
-      sqlite-kv:
+      restate-sql:
         specifier: workspace:*
-        version: link:../typescript/packages/sql-node
+        version: link:../typescript/packages/sql
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -81,9 +81,9 @@ importers:
       '@restatedev/restate-sdk-core':
         specifier: 1.17.4
         version: 1.17.4
-      sqlite-kv:
+      restate-sql:
         specifier: workspace:*
-        version: link:../sql-node
+        version: link:../sql
 
   packages/integrations:
     dependencies:
@@ -219,14 +219,14 @@ importers:
       restate-fns:
         specifier: workspace:*
         version: link:../fns
-      sqlite-kv:
+      restate-sql:
         specifier: workspace:*
-        version: link:../sql-node
+        version: link:../sql
       zod:
         specifier: 4.6.5
         version: 4.6.5
 
-  packages/sql-node: {}
+  packages/sql: {}
 
   tests:
     dependencies:
@@ -365,9 +365,9 @@ importers:
       restate-fns:
         specifier: workspace:*
         version: link:../packages/fns
-      sqlite-kv:
+      restate-sql:
         specifier: workspace:*
-        version: link:../packages/sql-node
+        version: link:../packages/sql
       zod:
         specifier: 4.6.5
         version: 4.6.5

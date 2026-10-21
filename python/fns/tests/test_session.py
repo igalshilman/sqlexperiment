@@ -1,4 +1,4 @@
-"""ctx.db and ctx.transaction, over the journal extension and a fake object state."""
+"""ctx.db and ctx.transaction, over the SQL extension and a fake object state."""
 
 import asyncio
 import itertools
@@ -7,8 +7,8 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
-import journal
 import pytest
+import restate_sql
 from restate import ObjectContext, VirtualObject
 from restate.exceptions import TerminalError
 from restate_fns.session import SqlAttempt
@@ -134,7 +134,7 @@ class _Stored:
 
 async def outbox(state: dict[str, bytes]) -> list[Any]:
     """The transactions in the outbox of the database in ``state``."""
-    db = await journal.open(fresh(), _Stored(state))
+    db = await restate_sql.open(fresh(), _Stored(state))
     effects = await db.effects()
     await db.close()
     return json.loads(effects) if effects else []

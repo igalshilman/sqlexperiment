@@ -5,7 +5,7 @@ kept in the object's state. The handlers that use it run with the SDK's
 explicit recovery instead of journal replay: the storage protocol of this
 repository provides durability and recovery, and Restate provides the state,
 single-writer execution per key, and retries. It uses the
-[sqlite-kv addon](../sql-node/README.md), on the published Restate TypeScript
+[SQL addon](../sql/README.md), on the published Restate TypeScript
 SDK (1.17.4, pinned: see [concurrent awaits](#concurrent-awaits-one-await-point)).
 
 It runs on a released Restate server: see [the requirements](../../../README.md#requirements).
@@ -124,7 +124,7 @@ is the one it left; nothing identifies the database itself. A process
 registered with two Restate clusters (staging and production, or a dev
 cluster wiped and recreated) could take one cluster's `Ledger/bank` for the
 other's and serve its cached pages. Run one process per cluster, or give each
-its own `SQLITE_KV_CACHE_FILE` and restart it after recreating a cluster.
+its own `RESTATE_SQL_CACHE_FILE` and restart it after recreating a cluster.
 (A database id in the commit record is future work.)
 
 ## How it works
