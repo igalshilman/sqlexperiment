@@ -6,8 +6,8 @@ five things:
 - how a turn's time is bounded, instead of fuel;
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
-- one record that commits a turn's SQL, pages and effects together:
-  sqlite-kv v14's commit record, with the VM's chain beside the SQL log;
+- one record that commits a turn's SQL, pages and records together:
+  sqlite-kv v15's commit record, the memory's pages a file beside the SQL's;
 - host bindings: operations the host makes itself, such as a model call,
   whose input nothing but the guest's heap keeps (§6).
 
@@ -179,41 +179,45 @@ two commit points once SQL joined.
 ### The record
 
 ```text
-v14/commit = SC14
-  version, epoch, size, next_segment, garbage
-  effects: the run's state as JSON           // run, program, meta, memoryLen,
-                                             // pending (the outbox), status, outcome
-  log:     the SQL transactions since the checkpoint, inline or stored
-  chain:   the VM's QPD3 batches, in order   // the host's, opaque to sqlite-kv
+v15/commit = SC15
+  version, epoch, next_segment, garbage
+  directory: files by id and name
+    run:               record: the run's state as JSON   // run, program, pending
+                                                         // (the outbox), status, outcome
+    memory:            record: the memory's as JSON      // meta, memoryLen, file, pages
+    memory/<golden>:   paged file over the golden image  // the pages that differ from it
+    db:                paged file                        // SQL
+    <name>:            each extension's record
+  log:     each transaction's changed pages since the checkpoint, per file,
+           inline or stored
 ```
 
-- **A turn is one put.** Its SQL transaction joins `log`, its batch joins
-  `chain`, its state replaces `effects`.
-- **Sealing covers both.** Past `inline_log_bytes` (1 KiB), the inline SQL
-  segments and VM batches move into one stored value, written before the
-  record that names it, in the same round trip.
-- **Each sequence keeps its own checkpoint.** A SQL checkpoint writes pages
-  and empties `log`; `chain` is kept. The VM's chain restarts when the host
-  says so (256 batches, or more than twice the first): the turn's batch is
-  then a new first batch (every page that differs from golden), and the old
-  chain's stored values become garbage.
+- **A turn is one put.** Its SQL pages and its memory's changed pages join
+  `log` as one transaction, and the records it set replace theirs (a record
+  past 1 KiB is a stored value of its own, written first).
+- **Sealing covers it.** Past `inline_log_bytes` (1 KiB), the inline
+  segments move into one stored value, written before the record that names
+  it, in the same round trip.
+- **One checkpoint for all.** A checkpoint writes every file's logged pages
+  in place (`page/<file>/<n>`) and empties `log`; a memory page equal to
+  golden's is a hole, and one that differs is compressed against it.
 - **`ctx.kv` is a table** in the database, so its writes commit with the
   turn.
 
 ### Commit, recover
 
-- **Commit.** Garbage deletes, a seal if one is due, the record, and a SQL
+- **Commit.** Garbage deletes, a seal if one is due, the record, and a
   checkpoint if one is due: queued in that order, then one sync. Then the
   outbox: its Waits are made after the commit, and the next commit drops
   the ones already made.
-- **Recover.** Open reads the record and the stored values it names: the
-  SQL log replays over `page/<n>`, and the VM is the golden image with the
-  chain applied in order. The record's pending Waits are made again, under
-  their IDs.
+- **Recover.** Open reads the record and the stored values it names: each
+  file's log replays over its pages in place, and the VM is the golden image
+  with the pages the memory record lists, read together. The record's
+  pending Waits are made again, under their IDs.
 
-The API is `Session::commit_turn(effects, chain)`, where `chain` is
-unchanged, an appended batch, or a restart with a batch, and
-`Session::chain()`, the chain as opened.
+The API is `Session::record(name)`, `Session::file(name)` and
+`Session::file_with_base(name, base)`, handles each participant writes in
+its prepare, then `Session::seal`, the one put.
 
 ## 5. Plan
 
@@ -234,9 +238,9 @@ On branches, a PR each:
    faster without fuel (116 ms against 127 ms), and the coding session of
    DESIGN.md §10.1 now runs 200 steps instead of failing at 45.
 5. **A registry of the bindings the host makes itself** (§6). Done:
-   `fetch` is the one a deployment offers ([FETCH.md](FETCH.md)); the
-   coding session stores 3.2 MiB over 200 steps, and Restate journals none
-   of its requests (DESIGN.md §10.1).
+   a deployment offers `llm`, the model gateway ([LLM.md](LLM.md)), and
+   `fetch` ([FETCH.md](FETCH.md)); the coding session stores 2.5 MiB over
+   200 steps, and Restate journals none of its requests (DESIGN.md §10.1).
    The in-turn Calls are still `src/db.rs`'s, and the Restate Waits (RPCs,
    timers) a `match` in `restate.rs`.
 
@@ -245,16 +249,18 @@ On branches, a PR each:
 - **Sync or async `ctx.db.sql`.** Synchronous says honestly that a
   statement never ends a turn. Returning a promise would leave room for a
   remote database later. The proposal is synchronous.
-- **Model calls.** `fetch` (§6, [FETCH.md](FETCH.md)), whose request is read
-  from the heap when it is sent; the host adds the API key.
+- **Model calls.** `ctx.llm` (§6, [LLM.md](LLM.md)): the host's gateway,
+  any provider's models in one format, with a conversation's messages in the
+  scope's database. Whether the gateway belongs on the host, or in a service
+  of its own, is open.
 - **Size of a turn record.** Sealing bounds the inline part at about 1 KiB;
   how large a stored value Restate handles well is to be measured.
 
 ## 6. Bindings the host makes
 
 A binding is an operation the host makes for a program, by name, outside
-Restate, such as `fetch(url, init)` ([FETCH.md](FETCH.md)), or by name,
-`ctx.call(name, input)`. A deployment offers them as
+Restate, such as `ctx.llm` ([LLM.md](LLM.md)) and `fetch(url, init)`
+([FETCH.md](FETCH.md)), or by name, `ctx.call(name, input)`. A deployment offers them as
 a registry, passed to `bind`:
 
 ```rust

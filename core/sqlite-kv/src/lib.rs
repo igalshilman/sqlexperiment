@@ -21,7 +21,7 @@
 //! |---|---|---|
 //! | SQL working state | Dirty 4096-byte pages and private engine WAL | No |
 //! | Commit record | `commit`: the log since the last checkpoint, one transaction per save, compressed against the previous images; a large one's segments at `log/<n>` | Yes, after an acknowledged save |
-//! | Pages | `page/<n>`, overwritten in place by checkpoints | Yes |
+//! | Pages | `page/<file>/<n>`, overwritten in place by checkpoints | Yes |
 //!
 //! A save commits by putting the record with one more transaction, usually a
 //! single put, then one sync. An unchanged save performs no mutations. An
@@ -105,8 +105,8 @@
 //! # Limits
 //!
 //! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
-//! A commit's effects are capped at [`MAX_EFFECTS_BYTES`], a chain value at
-//! [`MAX_CHAIN_VALUE_BYTES`].
+//! A record's value is capped at [`MAX_RECORD_BYTES`], its name at
+//! [`MAX_NAME_BYTES`], a chain value at [`MAX_CHAIN_VALUE_BYTES`].
 //! A session's private changes and a statement's result rows are capped by
 //! [`StorageOptions::max_private_bytes`] and [`StorageOptions::max_result_bytes`].
 //! The backend is assumed to return what was stored; decoding checks structure
@@ -126,7 +126,7 @@ mod snapshot;
 
 pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
-pub use log::{MAX_CHAIN_VALUE_BYTES, MAX_EFFECTS_BYTES, MAX_SEGMENT_BYTES};
+pub use log::{Base, MAX_CHAIN_VALUE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::PageCompression;
 pub use snapshot::{
     CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, ChainUpdate, Durability, INLINE_LOG_BYTES,
@@ -137,12 +137,13 @@ pub use turso_core::{Numeric, Value};
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use crate::kv::KvStore;
+use crate::page_codec::Page;
 use crate::snapshot::Snapshot;
 use bytes::Bytes;
 use std::{
     future::poll_fn,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::Poll,
@@ -182,9 +183,13 @@ pub struct Session {
     durability: Durability,
     /// A [`Self::transaction`] body is running.
     in_body: bool,
-    /// The statement running is a [`Self::commit_with`] or
-    /// [`Self::commit_turn`]: the effects it commits, and its chain update.
-    effects: Option<Bytes>,
+    /// Records set and files written since the last commit, which the next
+    /// one makes durable.
+    records: Arc<Mutex<log::Records>>,
+    files: Arc<Mutex<snapshot::Writes>>,
+    /// The statement running is a [`Self::seal`]: it commits even without
+    /// SQL changes, with this chain update.
+    sealing: bool,
     chain: Option<ChainUpdate>,
     /// Set when a [`Self::transaction`] future is dropped or unwinds before
     /// finishing, which may leave its SQL transaction open.
@@ -194,6 +199,8 @@ pub struct Session {
     schema_bytes: Option<usize>,
     /// SQL since the last commit may have changed the schema.
     schema_changed: bool,
+    /// What the last commit wrote.
+    last_report: SaveReport,
 }
 
 /// Marks a session abandoned unless it finished; see [`Session::transaction`].
@@ -311,11 +318,14 @@ impl Session {
                 reusable: true,
                 durability,
                 in_body: false,
-                effects: None,
+                records: Arc::default(),
+                files: Arc::default(),
+                sealing: false,
                 chain: None,
                 abandoned: Arc::default(),
                 schema_bytes: Some(warm.schema_bytes),
                 schema_changed: false,
+                last_report: SaveReport::default(),
             };
             session.io.resume(snapshot).await?;
             session.connection = Some(connect(&session.io, &warm.database).await?);
@@ -334,11 +344,14 @@ impl Session {
             reusable: true,
             durability,
             in_body: false,
-            effects: None,
+            records: Arc::default(),
+            files: Arc::default(),
+            sealing: false,
             chain: None,
             abandoned: Arc::default(),
             schema_bytes: None,
             schema_changed: false,
+            last_report: SaveReport::default(),
         };
         session.io.prepare_engine().await?;
         let database = open_engine(&session.io).await?;
@@ -461,36 +474,73 @@ impl Session {
         self.query_with(sql, params).await.map(|_| ())
     }
 
-    /// `COMMIT` the open transaction, with [`Durability::Commit`], and make
-    /// `effects` the commit record's: they are durable exactly when the
-    /// transaction is, in the same put, even if it changed nothing. They are
-    /// the host's bytes, opaque here (the sends a transaction makes once it
-    /// commits, say), and stay until a later commit replaces them; see
-    /// [`Self::effects`]. A `COMMIT` that fails changes nothing. With no
-    /// transaction open, the effects commit alone, without the SQL engine.
-    pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
-        self.commit_extras(effects, None).await
+    /// The writes to files and records since the last commit, which the next
+    /// one takes.
+    fn take_pending(&self) -> (snapshot::Writes, log::Records) {
+        let files = std::mem::take(&mut *self.files.lock().unwrap());
+        (files, std::mem::take(&mut *self.records.lock().unwrap()))
     }
 
-    /// [`Self::commit_with`], also changing the host's chain in the same put:
-    /// a host's turn, committing its SQL, its state (`effects`) and what its
-    /// turn changed (a VM's page batch, say) together. See [`ChainUpdate`]
-    /// and [`Self::chain`].
-    pub async fn commit_turn(&mut self, effects: Bytes, chain: ChainUpdate) -> Result<()> {
-        self.commit_extras(effects, Some(chain)).await
-    }
-
-    async fn commit_extras(&mut self, effects: Bytes, chain: Option<ChainUpdate>) -> Result<()> {
-        if self.durability != Durability::Commit {
-            return Err("effects commit with Durability::Commit".into());
+    /// The paged file named `name`, beside the SQL database (whose file is
+    /// `db`): 4 KiB pages the next commit makes durable once written (see
+    /// [`File`]).
+    pub fn file(&self, name: &str) -> Result<File> {
+        if name == snapshot::SQL_FILE {
+            return Err(format!("{name:?} is the SQL database's file").into());
         }
-        if effects.len() > log::MAX_EFFECTS_BYTES {
-            return Err(format!(
-                "effects of {} bytes exceed {}",
-                effects.len(),
-                log::MAX_EFFECTS_BYTES
-            )
-            .into());
+        Ok(File {
+            name: name.into(),
+            io: self.io.clone(),
+            pending: self.files.clone(),
+            base: None,
+        })
+    }
+
+    /// The paged file named `name`, over `base` (see [`Base`]): an absent
+    /// page, or a hole, reads as the base's page, and pages are compressed
+    /// against it. A file made with a base opens only with that one again
+    /// (by [`Base::id`]); its log since the last checkpoint decodes now.
+    /// [`Self::file`] opens it without its base, to write holes and set its
+    /// length only: emptying it for another base, say.
+    pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
+        let mut file = self.file(name)?;
+        self.io.with_base(name, base.clone())?;
+        file.base = Some(base);
+        Ok(file)
+    }
+
+    /// The record named `name`: a whole value the commit record holds, which
+    /// the next commit makes durable once set (see [`Record`]).
+    pub fn record(&self, name: &str) -> Record {
+        Record {
+            name: name.into(),
+            io: self.io.clone(),
+            pending: self.records.clone(),
+        }
+    }
+
+    /// `COMMIT` the open transaction, with [`Durability::Commit`], and make
+    /// `effects` the record `effects`: durable exactly when the transaction
+    /// is, in the same put, even if it changed nothing. They are the host's
+    /// bytes (the sends a transaction makes once it commits, say), and stay
+    /// until a later commit replaces them; see [`Self::effects`]. A `COMMIT`
+    /// that fails changes nothing. With no transaction open, the effects
+    /// commit alone, without the SQL engine.
+    pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
+        self.record(EFFECTS).set(effects);
+        self.seal(None).await.map(drop)
+    }
+
+    /// `COMMIT` the open transaction, with [`Durability::Commit`], with every
+    /// record set since the last commit and, with `chain`, a change to the
+    /// host's chain, in one put: a host's turn, committing its SQL, its state
+    /// and what its turn changed (a VM's page batch, say) together. See
+    /// [`ChainUpdate`] and [`Self::chain`]. A `COMMIT` that fails changes
+    /// nothing, and discards the records set since the last commit; with no
+    /// transaction open, the rest commits alone. `Ok` holds what it wrote.
+    pub async fn seal(&mut self, chain: Option<ChainUpdate>) -> Result<SaveReport> {
+        if self.durability != Durability::Commit {
+            return Err("a seal needs Durability::Commit".into());
         }
         let open =
             (self.connection.as_ref()).is_some_and(|connection| !connection.get_auto_commit());
@@ -501,22 +551,28 @@ impl Session {
             }
             // Until the commit is acknowledged its outcome is unknown.
             self.poisoned = true;
-            self.io.publish_with(Some(effects), chain).await?;
+            let (files, records) = self.take_pending();
+            let report = self.io.publish_with(files, records, chain).await?;
             self.poisoned = false;
-            return Ok(());
+            return Ok(report);
         }
-        self.effects = Some(effects);
+        self.sealing = true;
         self.chain = chain;
         let result = self.execute("COMMIT").await;
-        self.effects = None;
+        self.sealing = false;
         self.chain = None;
-        result
+        match result {
+            Ok(()) => Ok(std::mem::take(&mut self.last_report)),
+            Err(error) => {
+                self.take_pending();
+                Err(error)
+            }
+        }
     }
 
-    /// The effects of the last commit that set them, as this session holds
-    /// the database (opened on, or committed itself); empty if none did.
+    /// The record `effects` (see [`Self::commit_with`]).
     pub fn effects(&self) -> Bytes {
-        self.io.snapshot().effects().clone()
+        self.record(EFFECTS).get()
     }
 
     /// The host's chain, as this session holds the database: each value, in
@@ -615,9 +671,11 @@ impl Session {
         // Until the commit is acknowledged the engine may hold uncommitted pages,
         // so a failure must not leave it for reuse.
         self.poisoned = true;
+        let (files, records) = self.take_pending();
         let report = (self.io)
-            .publish_with(self.effects.take(), self.chain.take())
+            .publish_with(files, records, self.chain.take())
             .await?;
+        self.last_report = report.clone();
         // Resident already, unless the page size grew. The commit is durable
         // either way; a failure here only ends the session.
         if self.io.prepare_engine().await.is_ok() {
@@ -743,7 +801,7 @@ impl Session {
             }
             if idle
                 && self.durability == Durability::Commit
-                && (!self.io.is_clean() || self.effects.is_some() || self.chain.is_some())
+                && (!self.io.is_clean() || self.sealing)
             {
                 self.publish().await?;
             }
@@ -811,6 +869,158 @@ impl Session {
         Ok(report)
     }
 }
+
+/// The record [`Session::commit_with`] sets.
+const EFFECTS: &str = "effects";
+
+/// A named whole value the commit record holds, replaced whole: the host's
+/// state beside its tables (a run's progress, an outbox), committed with them
+/// in the same put. A cheap handle; clones share the session's pending
+/// changes.
+///
+/// A value of up to [`StorageOptions::inline_log_bytes`] is in the record,
+/// which every commit rewrites; a larger one is a stored value of its own,
+/// written when it changes. Either way, opening the session reads it.
+#[derive(Clone)]
+pub struct Record {
+    name: Arc<str>,
+    io: Arc<KvIo>,
+    pending: Arc<Mutex<log::Records>>,
+}
+
+impl Record {
+    /// The value as the session holds it: set since the last commit, or
+    /// committed; empty if never set.
+    pub fn get(&self) -> Bytes {
+        if let Some(value) = self.pending.lock().unwrap().get(&*self.name) {
+            return value.clone();
+        }
+        let snapshot = self.io.snapshot();
+        snapshot
+            .records()
+            .get(&*self.name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Replace the value with the next commit (see [`Session::seal`]).
+    pub fn set(&self, value: Bytes) {
+        self.pending
+            .lock()
+            .unwrap()
+            .insert(self.name.to_string(), value);
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// A paged file beside the SQL database: 4 KiB pages, read and written at
+/// random, made durable by the session's next commit with its SQL and its
+/// records. An absent page, never written or past the end, reads as `None`
+/// (zeros). A cheap handle; clones share the session's pending changes.
+///
+/// Its pages are kept as the SQL database's are: the commit record's log
+/// holds the changed ones until a checkpoint writes them in place, and the
+/// [`PageCache`] keeps them across sessions.
+#[derive(Clone)]
+pub struct File {
+    name: Arc<str>,
+    io: Arc<KvIo>,
+    pending: Arc<Mutex<snapshot::Writes>>,
+    base: Option<Arc<dyn Base>>,
+}
+
+impl File {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Bytes in the file: as written since the last commit, or committed.
+    pub fn len(&self) -> u64 {
+        match self.pending.lock().unwrap().get(&*self.name) {
+            Some(written) => written.size,
+            None => self.io.snapshot().file_size(&self.name),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Page `page` as the session holds it; `None` for zeros (a hole of a
+    /// file without a base, or past its end).
+    pub async fn read(&self, page: u64) -> Result<Option<Page>> {
+        if page * PAGE >= self.len() {
+            return Ok(None);
+        }
+        let hole = || {
+            let base = self.base.as_ref().and_then(|base| base.page(page));
+            base.map(Page::copy_from_slice)
+        };
+        let written = self.pending.lock().unwrap().get(&*self.name).cloned();
+        if let Some(image) = written.and_then(|written| written.pages.get(&page).cloned()) {
+            return Ok(image.or_else(hole));
+        }
+        let snapshot = self.io.snapshot();
+        if page * PAGE >= snapshot.file_size(&self.name) {
+            return Ok(hole());
+        }
+        Ok(snapshot.read(&self.name, page).await?)
+    }
+
+    /// Write `image` (4096 bytes) at `page`, or a hole with `None`, growing
+    /// the file to include it; the next commit makes it durable.
+    pub fn write(&self, page: u64, image: Option<Page>) -> Result<()> {
+        if image
+            .as_ref()
+            .is_some_and(|image| image.len() != PAGE as usize)
+        {
+            return Err("a page is 4096 bytes".into());
+        }
+        let end = (page + 1) * PAGE;
+        if end > log::MAX_DATABASE_BYTES {
+            return Err("a page past the largest file".into());
+        }
+        let len = self.len();
+        let mut pending = self.pending.lock().unwrap();
+        let written = pending
+            .entry(self.name.to_string())
+            .or_insert_with(|| snapshot::Written {
+                size: len,
+                pages: Default::default(),
+            });
+        written.size = written.size.max(end);
+        written.pages.insert(page, image);
+        Ok(())
+    }
+
+    /// Make the file `len` bytes (a multiple of 4096): pages past it become
+    /// holes, so regrowing it reads zeros.
+    pub fn set_len(&self, len: u64) -> Result<()> {
+        if !len.is_multiple_of(PAGE) || len > log::MAX_DATABASE_BYTES {
+            return Err(format!("invalid file length {len}").into());
+        }
+        let old = self.len();
+        let mut pending = self.pending.lock().unwrap();
+        let written = pending
+            .entry(self.name.to_string())
+            .or_insert_with(|| snapshot::Written {
+                size: old,
+                pages: Default::default(),
+            });
+        written.pages.retain(|&page, _| page * PAGE < len);
+        for page in len / PAGE..old.div_ceil(PAGE) {
+            written.pages.insert(page, None);
+        }
+        written.size = len;
+        Ok(())
+    }
+}
+
+/// Bytes of a page.
+const PAGE: u64 = io::BLOCK_SIZE as u64;
 
 impl Drop for Session {
     fn drop(&mut self) {

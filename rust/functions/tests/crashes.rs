@@ -162,7 +162,7 @@ fn reference(flow: (Language, &str)) -> Result<View> {
         (kv(&store, "n"), kv(&store, "echoed")),
         (None, Some(json!(5)))
     );
-    assert_eq!(store.batches(), 0);
+    assert_eq!(store.memory_pages(), 0);
     Ok(expected)
 }
 
@@ -170,7 +170,7 @@ fn assert_ended_as(store: &Store, done: &View, expected: &View, case: &str) {
     assert_eq!(done.state, expected.state, "{case}");
     assert_eq!(kv(store, "n"), None::<Value>, "{case}");
     assert_eq!(kv(store, "echoed"), Some(json!(5)), "{case}");
-    assert_eq!(store.batches(), 0, "{case}");
+    assert_eq!(store.memory_pages(), 0, "{case}");
 }
 
 #[test]

@@ -1,6 +1,6 @@
-//! Host bindings: operations a program calls by name, `ctx.call(name,
-//! input)`, that the host makes itself, outside Restate's journal. A
-//! deployment offers them as [`Bindings`]; [`crate::Fetch`] is one, `fetch`.
+//! Bindings: the simplest extensions ([`crate::Extensions`]), an operation
+//! and nothing else. A program calls one by name, `ctx.call(name, input)`;
+//! the host makes it, outside Restate's journal. [`crate::Fetch`] is one.
 //!
 //! Nothing keeps a second copy of a call. Its input stays in the guest's
 //! heap until it is answered, and the turn's commit keeps only the call's ID:
@@ -14,20 +14,14 @@
 //! binding that [deduplicates](Binding::deduplicates) by its key takes a key
 //! the guest sets. Calls last no longer than an attempt: a long one belongs
 //! in a Restate service, called with `ctx.rpc.call`.
-use crate::GuestError;
+use crate::{
+    GuestError,
+    extension::{Attached, Extension, HostCall, Making, Tables},
+    transaction::{Participant, Record, ScopeBlobs},
+};
+use async_trait::async_trait;
 use futures::future::BoxFuture;
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::Arc};
-
-/// One call of a binding.
-pub struct HostCall {
-    /// The operation, `<run>/<n>`: the same on every attempt.
-    pub id: String,
-    /// The guest's idempotency key, if it set one, or else `id`.
-    pub idempotency_key: String,
-    /// The input, as the guest's heap holds it now.
-    pub input: Value,
-}
 
 /// An operation the host makes for a program.
 pub trait Binding: Send + Sync + 'static {
@@ -43,22 +37,34 @@ pub trait Binding: Send + Sync + 'static {
     }
 }
 
-/// The bindings a deployment offers its programs, by name.
-#[derive(Clone, Default)]
-pub struct Bindings(BTreeMap<String, Arc<dyn Binding>>);
+/// A binding is an extension: its operation, under any name.
+#[async_trait]
+impl<B: Binding + Clone> Extension for B {
+    async fn attach(
+        &self,
+        _blobs: ScopeBlobs,
+        _record: Record,
+    ) -> anyhow::Result<Box<dyn Attached>> {
+        Ok(Box::new(Bound(self.clone())))
+    }
+}
 
-impl Bindings {
-    pub fn new() -> Self {
-        Self::default()
+struct Bound<B>(B);
+
+/// A binding keeps nothing.
+impl<B: Binding> Participant for Bound<B> {}
+
+#[async_trait]
+impl<B: Binding> Attached for Bound<B> {
+    fn deduplicates(&self) -> bool {
+        self.0.deduplicates()
     }
 
-    /// Offer `binding` as `name`: `ctx.call(name, input)`.
-    pub fn with(mut self, name: impl Into<String>, binding: impl Binding) -> Self {
-        self.0.insert(name.into(), Arc::new(binding));
-        self
-    }
-
-    pub(crate) fn get(&self, name: &str) -> Option<&Arc<dyn Binding>> {
-        self.0.get(name)
+    async fn operation(
+        &mut self,
+        call: HostCall,
+        _tables: &mut Tables<'_>,
+    ) -> Result<Making, GuestError> {
+        Ok(self.0.call(call))
     }
 }

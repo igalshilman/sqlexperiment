@@ -10,7 +10,7 @@ import { memoryStore, sqlAttempt } from '../testing.ts';
 type Send = restate.GenericSend<Uint8Array>;
 
 /** The database's commit record, whose effects hold the outbox. */
-const COMMIT = 'v14/commit';
+const COMMIT = 'v15/commit';
 let namespaces = 0;
 
 const store = restate.object({

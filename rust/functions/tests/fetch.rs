@@ -2,10 +2,8 @@
 //! carries, and what the policy keeps a program from reaching or reading.
 mod common;
 
-use common::{Store, catalog, programs};
-use functions::{
-    Binding, Fetch, FetchPolicy, HostCall, Language, Operation, Outcome, Programs, Run, View,
-};
+use common::{Store, attempt, catalog, make, programs, settle};
+use functions::{Extensions, Fetch, FetchPolicy, Language, Programs};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -144,65 +142,15 @@ async fn serve(mut stream: TcpStream, log: Arc<Mutex<Vec<Received>>>) {
 /// Run `source`'s `main(input)` in `store`, sending its requests with
 /// `fetch`, until it settles: its outcome.
 async fn run(store: &Store, source: &str, input: Value, fetch: &Fetch) -> Value {
-    let catalog = programs(source);
-    drive(store, &catalog, input, fetch).await
+    drive(store, &programs(source), input, fetch).await
 }
 
 async fn drive(store: &Store, catalog: &Arc<Programs>, input: Value, fetch: &Fetch) -> Value {
-    let mut run = Run::start(catalog, &store.scope(), "s", "r", "v1", "main", input, 1)
-        .await
-        .unwrap();
-    loop {
-        let view = run.view();
-        if let Some(outcome) = view.state.outcome {
-            return match outcome {
-                Outcome::Success { value, .. } => value,
-                Outcome::Failure { error, .. } => json!({"failed": error.message}),
-            };
-        }
-        answer(&mut run, &view, fetch).await;
-    }
+    common::drive(store, catalog, input, &offered(fetch)).await
 }
 
-/// An attempt at run "r" of `source` in `store`: a new run, or the one its
-/// last commit holds, restored.
-async fn attempt(store: &Store, source: &str, input: Value) -> Run {
-    Run::start(
-        &programs(source),
-        &store.scope(),
-        "s",
-        "r",
-        "v1",
-        "main",
-        input,
-        1,
-    )
-    .await
-    .unwrap()
-}
-
-/// Send the run's first pending request, and deliver its response.
-async fn answer(run: &mut Run, view: &View, fetch: &Fetch) {
-    let operation = view.state.pending.first().expect("a request").clone();
-    let Operation::Call { id, name, .. } = &operation else {
-        panic!("Expected a fetch, not {operation:?}");
-    };
-    assert_eq!(name, "fetch");
-    let outcome = match send(run, id, fetch).await {
-        Ok(value) => Outcome::success(value),
-        Err(error) => Outcome::failure(error.name, error.message),
-    };
-    run.deliver(id, outcome, view.state.now + 1).await.unwrap();
-}
-
-async fn send(run: &mut Run, id: &str, fetch: &Fetch) -> Result<Value, functions::GuestError> {
-    let input = run.input(id).await.unwrap()?;
-    let call = HostCall {
-        id: id.into(),
-        idempotency_key: id.into(),
-        input,
-    };
-    fetch.call(call).await
+fn offered(fetch: &Fetch) -> Extensions {
+    Extensions::new().with("fetch", fetch.clone())
 }
 
 /// The program: `main({url, init})` fetches, and answers what it received.
@@ -526,17 +474,15 @@ export async function main({ url }) {
 "#;
     let store = Store::default();
     let input = json!({"url": server.url("/echo")});
-    let mut run = attempt(&store, source, input.clone()).await;
-    let view = run.view();
-    let id = view.state.pending[0].id().to_owned();
+    let catalog = programs(source);
+    let mut run = attempt(&store, &catalog, input.clone(), &offered(&fetch)).await;
+    let id = run.view().state.pending[0].id().to_owned();
     // Sent; and the attempt crashes before the response commits.
-    send(&mut run, &id, &fetch).await.unwrap();
+    make(&mut run, &id).await.unwrap();
     drop(run);
 
-    let mut run = attempt(&store, source, input).await;
-    let view = run.view();
-    answer(&mut run, &view, &fetch).await;
-    let done = common::value(&run.view());
+    let mut run = attempt(&store, &catalog, input, &offered(&fetch)).await;
+    let done = settle(&mut run).await;
     let received = server.received();
     assert_eq!(received.len(), 2);
     assert_eq!(received[0].body, received[1].body);

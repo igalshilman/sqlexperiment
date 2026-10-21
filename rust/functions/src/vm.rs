@@ -4,6 +4,7 @@
 //! tracks the pages they write, and captures and restores their memory.
 use crate::cow::{self, Golden};
 use crate::db::Db;
+use crate::extension::{Attachments, Tables};
 use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, Report, VmMeta, fingerprint};
 use crate::python::{self, Python};
 use crate::quickjs::{self, QuickJs};
@@ -36,7 +37,7 @@ const POOL: u32 = 1000;
 /// Bump it with anything an image depends on: the Wasm, the bridges
 /// (`guest.js`, `guest.py`), the limits, the imports' behavior, the VM
 /// metadata.
-pub(crate) const VERSION: u64 = 11;
+pub(crate) const VERSION: u64 = 13;
 
 /// The language a program is written in, and so the engine it runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +204,8 @@ pub(crate) struct Host {
     limits: StoreLimits,
     /// The scope's database, which the guest's host calls reach.
     db: Option<Arc<Mutex<Db>>>,
+    /// The run's extensions, which the guest's calls `<name>.<op>` reach.
+    extensions: Option<Arc<Mutex<Attachments>>>,
     /// A Python VM's filesystem, its open files, and the host's answer
     /// waiting to be read.
     pub(crate) files: Option<Arc<Files>>,
@@ -673,8 +676,27 @@ pub(crate) async fn host_answer(
     request: serde_json::Value,
 ) -> Result<String> {
     let db = c.data().db.clone().context("No database for host calls")?;
-    let answer =
-        (db.lock().await.call(operation, request).await).map_err(wasmtime::Error::from_anyhow)?;
+    let extensions = c.data().extensions.clone();
+    let answer = match extensions {
+        Some(extensions) if !operation.starts_with("db.") => {
+            // Extensions first, then the database: the order every lock takes.
+            let mut extensions = extensions.lock().await;
+            match extensions.get(operation) {
+                Some(extension) => {
+                    let mut db = db.lock().await;
+                    let mut tables = Tables { db: &mut db };
+                    match extension.call(&mut tables, operation, request).await {
+                        Ok(value) => serde_json::json!({"ok": true, "value": value}),
+                        Err(error) => serde_json::json!({"ok": false, "error": error}),
+                    }
+                }
+                None => (db.lock().await.call(operation, request).await)
+                    .map_err(wasmtime::Error::from_anyhow)?,
+            }
+        }
+        _ => (db.lock().await.call(operation, request).await)
+            .map_err(wasmtime::Error::from_anyhow)?,
+    };
     let text = serde_json::to_string(&answer)?;
     if text.len() > MAX_INPUT {
         let error = serde_json::json!({"ok": false, "error": {"name": "RangeError", "message": "The result exceeds the limit"}});
@@ -768,6 +790,7 @@ impl Vm {
                 .instances(1)
                 .build(),
             db: None,
+            extensions: None,
             files: python.map(|python| python.files.clone()),
             fds: Fds::default(),
             answer: Vec::new(),
@@ -848,9 +871,11 @@ impl Vm {
             chunks: None,
         })
     }
-    /// Let the guest's host calls reach `db`.
-    pub(crate) fn attach(&mut self, db: Arc<Mutex<Db>>) {
-        self.store.data_mut().db = Some(db);
+    /// Let the guest's host calls reach `db`, and `extensions`.
+    pub(crate) fn attach(&mut self, db: Arc<Mutex<Db>>, extensions: Arc<Mutex<Attachments>>) {
+        let host = self.store.data_mut();
+        host.db = Some(db);
+        host.extensions = Some(extensions);
     }
     /// Begin a turn at logical time `now`, its clock started.
     pub(crate) fn begin_turn(&mut self, now: u64) -> Result<()> {

@@ -139,9 +139,9 @@ fn a_run_refuses_another_version_of_its_program_or_runtime() -> Result<()> {
         .is_err()
     );
     let rebuilt = Store::default();
-    let mut commit = store.commit();
-    commit["runtime"] = json!(0);
-    rebuilt.set_commit(&commit);
+    let mut record = store.record("run");
+    record["runtime"] = json!(0);
+    rebuilt.set_record("run", &record);
     assert!(start(&rebuilt, source, Value::Null, 1).is_err());
     // Its own version still completes it.
     let mut run = start(&store, source, Value::Null, 1)?;
@@ -217,8 +217,10 @@ fn memory_growth_survives_a_restore() -> Result<()> {
     let mut run = start(&store, source, Value::Null, 1)?;
     let initial = run.view().memory_bytes;
     let grown = step(&mut run)?;
-    assert!(grown.memory_bytes >= initial + 3 * 1024 * 1024);
-    assert!(grown.batch_bytes < 100_000);
+    // The 3 MiB buffer is mostly new memory: some of it may fit in the
+    // heap's free space.
+    assert!(grown.memory_bytes > initial + 2 * 1024 * 1024);
+    assert!(grown.logged_bytes < 100_000);
     step(&mut run)?;
     let mut run = start(&store, source, Value::Null, 1)?;
     assert_eq!(value(&finish(&mut run)?), json!([0, 9, 0]));
@@ -279,7 +281,7 @@ fn a_trap_ends_the_run() -> Result<()> {
     assert_eq!(error.name, "Trap");
     assert!(error.message.contains("Out of time"), "{}", error.message);
     assert_eq!(kv(&store, "after"), Some(json!(1)));
-    assert_eq!(store.batches(), 0);
+    assert_eq!(store.memory_pages(), 0);
     let late = block(run.deliver(pending[0].id(), Outcome::success(1), 3))?;
     assert_eq!(late.turns, failed.turns);
     // A trap in the first turn ends the run too.
@@ -347,7 +349,7 @@ fn garbage_a_turn_frees_is_not_saved() -> Result<()> {
         // zeroing, ~60 pages changed and the batch took ~70 KiB. With it, a
         // few KiB: how much depends on when the GC runs, which moves with the
         // size of the bridge's heap.
-        assert!(turn.batch_bytes < 8192, "{} bytes", turn.batch_bytes);
+        assert!(turn.logged_bytes < 8192, "{} bytes", turn.logged_bytes);
     }
     assert_eq!(value(&finish(&mut run)?), json!(true));
     Ok(())
@@ -389,29 +391,30 @@ fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
     Ok(())
 }
 
-/// Restoring applies every batch of the commit's chain. Past a limit, a turn
-/// writes every live page into a new first batch, so restoring stays bounded.
+/// A run's memory pages are checkpointed in place like the tables' pages, and
+/// a restore reads the ones that differ from golden, wherever they are.
 #[test]
-fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
+fn a_runs_memory_is_checkpointed_and_restored_from_its_pages() -> Result<()> {
     let source = "const log=[];export async function main(_,ctx){for(let i=0;i<60;i++){log.push('x'.repeat(5000)+i);await durable.call('tick');}return log.length+':'+log[59].slice(-2);}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
-    let mut most = 0;
-    while run.view().state.outcome.is_none() {
+    for _ in 0..40 {
         step(&mut run)?;
-        let batches = store.commit()["batches"].as_u64().unwrap() as usize;
-        most = most.max(batches);
-        assert_eq!(store.batches(), batches);
     }
-    assert_eq!(value(&run.view()), json!("60:59"));
-    assert!((2..=32).contains(&most), "{most} batches");
+    let pages = store.memory_pages();
+    assert!(pages > 40, "{pages} pages differ from golden");
+    // The log was checkpointed along the way: the pages are in place.
+    assert!(store.page_keys() > 40, "{} page keys", store.page_keys());
+    // Another attempt restores them, and the run goes on.
+    let mut run = start(&store, source, Value::Null, 1)?;
+    assert_eq!(value(&finish(&mut run)?), json!("60:59"));
     // A settled run keeps its outcome, not its image.
-    assert_eq!(store.batches(), 0);
+    assert_eq!(store.memory_pages(), 0);
     Ok(())
 }
 
-/// A big image and small turns: the chain grows instead, and the image is
-/// written once, not again every few turns. A restore reads the whole chain.
+/// A big image and small turns: each turn logs what it changed, not the
+/// image, and checkpoints write a changed page in place once.
 #[test]
 fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
     let source = "export async function main(){const words=new Uint32Array(8*1024);for(let i=0;i<words.length;i++)words[i]=Math.random()*2**32;for(let i=0;i<40;i++){words[i]=i;await durable.call('tick');}return words[39];}";
@@ -420,11 +423,14 @@ fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
     for _ in 0..39 {
         step(&mut run)?;
     }
-    assert_eq!(store.batches(), 40);
-    // The first batch holds 32 KiB of noise; the others, a word each (~112
-    // KiB in all). A new first batch every 16 turns took ~155 KiB.
+    assert!(store.memory_pages() >= 8, "{} pages", store.memory_pages());
+    // The first turn logs 32 KiB of noise, and a checkpoint writes it in
+    // place, once (~37 KiB of page keys); the others log a word each, and
+    // put a commit record (~1.3 KiB) each: ~150 KiB in all.
+    let in_place = store.kv.stats().kind("page").bytes_written;
+    assert!(in_place < 48 * 1024, "{in_place} bytes in place");
     let written = store.bytes_written();
-    assert!(written < 120 * 1024, "{written} bytes");
+    assert!(written < 160 * 1024, "{written} bytes");
     let mut run = start(&store, source, Value::Null, 1)?;
     assert_eq!(value(&finish(&mut run)?), json!(39));
     Ok(())
@@ -467,9 +473,9 @@ fn a_call_input_stays_in_the_heap_until_answered() -> Result<()> {
     let issued = run.view();
     // ~39 KiB of JSON, kept in the heap, compressed; none in the commit.
     assert!(
-        (8 * 1024..32 * 1024).contains(&issued.batch_bytes),
+        (8 * 1024..32 * 1024).contains(&issued.logged_bytes),
         "{} bytes",
-        issued.batch_bytes
+        issued.logged_bytes
     );
     assert!(issued.commit_bytes < 2048, "{} bytes", issued.commit_bytes);
     let call = &issued.state.pending[0];
@@ -534,7 +540,7 @@ fn a_scope_shares_its_kv_between_runs() -> Result<()> {
     assert_eq!(run.view().state.status, Status::Waiting);
     assert_eq!(kv(&store, "x"), Some(json!({"n":1})));
     assert_eq!(kv(&store, "temporary"), None);
-    assert!(store.batches() > 0);
+    assert!(store.memory_pages() > 0);
     // Its attempt is gone (say, cancelled): another run takes the scope.
     let second = "export async function main(_,ctx){return await ctx.kv.get('x');}";
     let programs = Arc::new(
@@ -553,7 +559,7 @@ fn a_scope_shares_its_kv_between_runs() -> Result<()> {
         2,
     ))?;
     assert_eq!(value(&next.view()), json!({"n":1}));
-    assert_eq!(store.batches(), 0);
+    assert_eq!(store.memory_pages(), 0);
     Ok(())
 }
 

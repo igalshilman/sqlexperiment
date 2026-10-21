@@ -551,3 +551,43 @@ fn effects_commit_with_their_transaction() -> Result<()> {
         Ok(())
     })
 }
+
+/// Records under the default durability: set with the session's SQL, durable
+/// at save, discarded with a dropped session. A large one is a stored value
+/// of its own, which the commit that replaces it lists as garbage.
+#[test]
+fn records_commit_at_save() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let stored = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/log/")).count();
+        let db = Session::open(store.clone()).await?;
+        let state = db.record("state");
+        assert!(state.get().is_empty());
+        state.set(Bytes::from_static(b"one"));
+        assert_eq!(state.get(), &b"one"[..]);
+        drop(db); // discarded
+        let mut db = Session::open(store.clone()).await?;
+        assert!(db.record("state").get().is_empty());
+        db.execute("CREATE TABLE t(n)").await?;
+        db.record("state").set(Bytes::from(vec![7; 5000]));
+        db.record("small").set(Bytes::from_static(b"s"));
+        db.save().await?;
+        assert_eq!(stored(&store), 1, "the large record, stored first");
+
+        let db = Session::open(store.clone()).await?;
+        assert_eq!(db.record("state").get(), vec![7; 5000]);
+        assert_eq!(db.record("small").get(), &b"s"[..]);
+        db.record("state").set(Bytes::from_static(b"two"));
+        db.save().await?;
+        // The replaced value is garbage, which the next commit deletes.
+        let db = Session::open(store.clone()).await?;
+        assert_eq!(db.record("state").get(), &b"two"[..]);
+        db.record("small").set(Bytes::new());
+        db.save().await?;
+        assert_eq!(stored(&store), 0);
+        let db = Session::open(store.clone()).await?;
+        assert!(db.record("small").get().is_empty());
+        assert_eq!(db.record("state").get(), &b"two"[..]);
+        Ok(())
+    })
+}

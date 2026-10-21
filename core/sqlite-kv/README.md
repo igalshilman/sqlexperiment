@@ -65,13 +65,14 @@ the log lives in one key.
 
 A namespace holds:
 
-- **The commit record** (`commit`): the database's version and size, and the
-  log since the last checkpoint: each transaction's changed pages, compressed
+- **The commit record** (`commit`): the version, the directory of files (the
+  SQL database's, the host's paged files and records, with their sizes), and
+  the log since the last checkpoint: each transaction's changed pages, compressed
   against their previous images. The record holds the log's last KiB or so
   inline; older parts, and large transactions, are stored at `log/<n>` keys,
   which the record names.
-- **Pages** (`page/<n>`): each page as of the last checkpoint, overwritten in
-  place.
+- **Pages** (`page/<file>/<n>`): each page of a paged file as of the last
+  checkpoint, overwritten in place.
 
 A page's current value is its latest image in the record's log, or else its
 page key.

@@ -1,20 +1,21 @@
 // A coding agent: Claude, with a shell and the files of a workspace as its
 // tools, working on a task until it is done. The object's key names the
 // workspace: a directory of the `workspace` service (under FUNCTIONS_WORKSPACES),
-// so the next task finds the last one's files; the tasks done so far are
-// in its KV.
+// so the next task finds the last one's files; each task's conversation is
+// kept, in its database.
 //
 // The agent loop is plain JavaScript, and runs for as long as the task
-// takes. At each wait, on Claude or on a tool, the conversation and the loop
-// are saved with the rest of the heap: a crash resumes the task where it
-// was, and a model call or a command already answered is not made again.
+// takes. The conversation is in the scope's database, and the loop in the
+// heap, saved at each wait, on Claude or on a tool: a crash resumes the task
+// where it was, and a model call or a command already answered is not made
+// again.
 //
 //   ANTHROPIC_API_KEY=... target/release/functions
 //   curl localhost:8080/coder/primes/work --json \
 //     '{"task": "Write primes.py, printing the primes below 100, with a test, and run both"}'
 //   curl localhost:8080/coder/primes/history
 //   ls workspaces/primes
-const MODEL = 'claude-opus-5-5';
+const MODEL = 'anthropic/claude-opus-5-5';
 const MAX_STEPS = 200;
 
 const SYSTEM = `You are a coding agent working in a workspace: a directory, with a shell.
@@ -86,50 +87,34 @@ function workspace(ctx) {
   };
 }
 
-// One request to the Claude Messages API. The host adds the API key: the
-// program never holds it. Rate limits and overloads are retried, after a
-// durable sleep.
-async function claude(ctx, request) {
-  for (let attempt = 0; ; attempt++) {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'anthropic-version': '2023-06-01' },
-      body: fetch.json(request),
-    });
-    if (response.ok) return response.json();
-    if (attempt < 8 && [408, 409, 429, 500, 502, 503, 504, 529].includes(response.status)) {
-      await ctx.sleep(Math.min(30_000, 500 * 2 ** attempt));
-      continue;
-    }
-    throw new Error(`Claude API ${response.status}: ${await response.text()}`);
-  }
-}
-
+// The tasks so far: each one's conversation, from the task to the answer.
 export async function history(_, ctx) {
-  return (await ctx.kv.get('history')) ?? [];
+  return ctx.llm.conversations().map((name) => {
+    const messages = ctx.llm.conversation(name).history();
+    const last = messages[messages.length - 1];
+    const done = last.role === 'assistant' && !last.content.some((block) => block.type === 'tool_use');
+    const steps = messages.filter((message) => message.role === 'assistant').length;
+    return { task: messages[0].content, answer: done ? text(last.content) : null, steps };
+  });
 }
 
 export async function work({ task }, ctx) {
   const tools = workspace(ctx);
-  const messages = [{ role: 'user', content: task }];
+  // The task's own conversation, kept in the scope's database: each step
+  // sends only what it adds, and the host sends Claude the whole
+  // conversation. It stays after the task, for `history`.
+  const chat = ctx.llm.conversation(`task-${ctx.llm.conversations().length + 1}`, {
+    model: MODEL,
+    max_tokens: 32000,
+    system: SYSTEM,
+    tools: TOOLS,
+    options: { output_config: { effort: 'medium' } },
+  });
+  let message = { role: 'user', content: task };
   for (let step = 1; step <= MAX_STEPS; step++) {
-    const response = await claude(ctx, {
-      model: MODEL,
-      max_tokens: 32000,
-      output_config: { effort: 'medium' },
-      system: SYSTEM,
-      tools: TOOLS,
-      messages: cached(messages),
-    });
+    const response = await chat.send({ messages: [message] });
     if (response.stop_reason === 'refusal') throw new Error('Claude declined the task');
-    messages.push({ role: 'assistant', content: response.content });
-    if (response.stop_reason !== 'tool_use') {
-      const text = response.content.filter((block) => block.type === 'text');
-      const answer = text.map((block) => block.text).join('\n');
-      const history = (await ctx.kv.get('history')) ?? [];
-      await ctx.kv.set('history', [...history, { task, answer, steps: step }]);
-      return { answer, steps: step };
-    }
+    if (response.stop_reason !== 'tool_use') return { answer: text(response.content), steps: step };
     // Every tool the model asked for, in order: commands may depend on the
     // files written before them. The results go back in one message.
     const results = [];
@@ -141,16 +126,15 @@ export async function work({ task }, ctx) {
         results.push({ type: 'tool_result', tool_use_id: id, content: error.message, is_error: true });
       }
     }
-    messages.push({ role: 'user', content: results });
+    message = { role: 'user', content: results };
   }
   throw new Error(`The task took more than ${MAX_STEPS} steps`);
 }
 
-// The conversation, with a cache breakpoint at its end: each request reads
-// what came before from the cache, and pays only for what it adds.
-function cached(messages) {
-  const last = messages[messages.length - 1];
-  const content = typeof last.content === 'string' ? [{ type: 'text', text: last.content }] : last.content;
-  const marked = { ...content[content.length - 1], cache_control: { type: 'ephemeral' } };
-  return [...messages.slice(0, -1), { ...last, content: [...content.slice(0, -1), marked] }];
+// A message's text, without its tool calls.
+function text(content) {
+  return content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n');
 }

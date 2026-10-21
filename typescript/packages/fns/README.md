@@ -111,11 +111,11 @@ The store is the object's state: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear` (each named after its key), and `sync` is an empty
 `ctx.run`.
 
-**The database is the object's state.** Its keys (`v14/commit`, `v14/log/…`,
-`v14/page/…`, `v14/hint`) sit next to the object's other state keys, so
+**The database is the object's state.** Its keys (`v15/commit`, `v15/log/…`,
+`v15/page/…`, `v15/hint`) sit next to the object's other state keys, so
 `ctx.clearAll()` in any handler of the object deletes the database, a handler's
-own key starting with `v14/` corrupts it, and `ctx.stateKeys()` lists its
-pages. Keep other state out of `v14/`, and do not clear all of an object that
+own key starting with `v15/` corrupts it, and `ctx.stateKeys()` lists its
+pages. Keep other state out of `v15/`, and do not clear all of an object that
 uses `ctx.db`. (Reserving these keys in the SDK is future work.)
 
 **One cluster per process.** The page cache knows a database by its namespace,

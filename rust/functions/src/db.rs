@@ -14,7 +14,7 @@
 //! spans a commit. Statements that end or nest transactions themselves
 //! (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...) are refused: they would commit the
 //! SQL without the turn.
-use crate::model::MAX_INPUT;
+use crate::{model::MAX_INPUT, transaction::Participant};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Number, Value, json};
 use sqlite_kv::{Session, Value as SqlValue};
@@ -54,20 +54,12 @@ impl Db {
         &self.session
     }
 
-    /// Commit the turn: its SQL, if any, with `effects` and the chain update,
-    /// in one put. The next statement begins the next turn's transaction.
-    pub async fn commit_turn(
-        &mut self,
-        effects: bytes::Bytes,
-        chain: Option<sqlite_kv::ChainUpdate>,
-    ) -> Result<()> {
-        ensure!(self.savepoints == 0, "A transaction is still open");
+    /// Write the seal: the turn's SQL, if any, with every record and file
+    /// the participants set, in one put. The next statement begins the next
+    /// turn's transaction.
+    pub async fn seal(&mut self) -> Result<sqlite_kv::SaveReport> {
         self.began = false;
-        match chain {
-            Some(chain) => self.session.commit_turn(effects, chain).await,
-            None => self.session.commit_with(effects).await,
-        }
-        .map_err(sql)
+        self.session.seal(None).await.map_err(sql)
     }
 
     /// The guest trapped: what its open `ctx.db.transaction` did is undone,
@@ -133,6 +125,22 @@ impl Db {
         }
         .map_err(sql)?;
         Ok(Value::Null)
+    }
+
+    /// The rows `statement` selects with `params`, in the turn's transaction,
+    /// as the host asks it: any statement but the transaction control ones.
+    pub async fn query(&mut self, statement: &str, params: &[Value]) -> Result<Vec<Vec<Value>>> {
+        let params = (params.iter().map(to_sql).collect::<Result<Vec<_>, _>>())
+            .map_err(|message| anyhow::anyhow!(message))?;
+        self.begin().await?;
+        let rows = self
+            .session
+            .query_with(statement, params)
+            .await
+            .map_err(sql)?;
+        Ok((rows.into_iter())
+            .map(|row| row.into_iter().map(from_sql).collect())
+            .collect())
     }
 
     /// Answer a guest's host call: `{ok: true, value}`, or `{ok: false,
@@ -283,6 +291,16 @@ fn unhex(hex: &str) -> Result<Vec<u8>, String> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| "invalid blob".into()))
         .collect()
+}
+
+/// The scope's tables, a participant: their part of the seal is the turn's
+/// SQL transaction, which the seal commits.
+#[async_trait::async_trait]
+impl Participant for Db {
+    async fn prepare(&mut self) -> Result<()> {
+        ensure!(self.savepoints == 0, "A transaction is still open");
+        Ok(())
+    }
 }
 
 #[cfg(test)]

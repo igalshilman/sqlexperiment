@@ -1,7 +1,7 @@
 use super::*;
 use crate::io::BLOCK_SIZE;
 use bytes::Bytes;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn image(n: u8) -> Page {
     Bytes::from(vec![n; BLOCK_SIZE])
@@ -26,6 +26,37 @@ fn varied(seed: u64, n: usize) -> Page {
 
 fn chain(images: Images) -> Chain {
     Chain { images }
+}
+
+/// The segments of a transaction of file 0, whose page ids are its page
+/// numbers.
+fn encode_transaction(images: &Images, chain: &Chain) -> io::Result<Vec<Bytes>> {
+    Ok(super::encode_transaction(images, chain, &Bases::new())?
+        .remove(&0)
+        .unwrap_or_default())
+}
+
+/// A segment of file 0.
+fn decode_segment(bytes: &[u8], chain: &Chain) -> io::Result<Images> {
+    super::decode_segment(bytes, chain, 0, None)
+}
+
+fn paged(size: u64) -> Entry {
+    Entry {
+        name: "db".into(),
+        kind: Kind::Paged { size, base: None },
+    }
+}
+
+/// A transaction changing file 0.
+fn logged(size: u64, parts: Vec<Part>) -> Logged {
+    Logged {
+        changes: vec![Change {
+            file: 0,
+            size,
+            parts,
+        }],
+    }
 }
 
 #[test]
@@ -82,26 +113,25 @@ fn segments_compress_against_the_previous_images() -> io::Result<()> {
 
 fn record() -> io::Result<Commit> {
     let first = encode_transaction(&Images::from([(0, Some(image(1)))]), &Chain::default())?;
+    let record = |name: &str, part| Entry {
+        name: name.into(),
+        kind: Kind::Record(part),
+    };
     Ok(Commit {
         version: 9,
         epoch: 2,
-        size: 3 * 4096,
         next_segment: 12,
         garbage: BTreeSet::from([4, 5, 6]),
-        effects: Bytes::from_static(b"out"),
+        next_file: 5,
+        directory: BTreeMap::from([
+            (0, paged(3 * 4096)),
+            (1, record("out", Part::Inline(Bytes::from_static(b"x")))),
+            (4, record("big", Part::Stored(8, 1))),
+        ]),
         log: vec![
-            Logged {
-                size: 4096,
-                parts: first.into_iter().map(Part::Inline).collect(),
-            },
-            Logged {
-                size: 2 * 4096,
-                parts: vec![Part::Stored(7, 0), Part::Stored(7, 1)],
-            },
-            Logged {
-                size: 3 * 4096,
-                parts: Vec::new(),
-            },
+            logged(4096, first.into_iter().map(Part::Inline).collect()),
+            logged(2 * 4096, vec![Part::Stored(7, 0), Part::Stored(7, 1)]),
+            logged(3 * 4096, Vec::new()),
         ],
         chain: vec![Part::Inline(Bytes::from_static(b"vm0")), Part::Stored(8, 0)],
     })
@@ -117,12 +147,14 @@ fn commit_records_round_trip() -> io::Result<()> {
     );
     let empty = Commit::default();
     assert_eq!(Commit::decode(&empty.encode())?, empty);
-    // `SC14`, version, epoch, units, next segment, garbage {4, 5, 6} (as
-    // deltas), the effects, 3 transactions.
+    // `SC15`, version, epoch, next segment, garbage {4, 5, 6} (as deltas),
+    // the next file id, 3 files (id 0 `db`, paged, 24 units; id 1 `out`, a
+    // record inline `x`; id 4 as a gap of 2, `big`, a record in value 8's
+    // second), 3 transactions.
     let bytes = commit.encode();
     assert_eq!(
-        bytes[..17],
-        *b"SC14\x09\x02\x18\x0c\x03\x04\x01\x01\x03out\x03"
+        bytes[..38],
+        *b"SC15\x09\x02\x0c\x03\x04\x01\x01\x05\x03\x00\x02db\x01\x18\x00\x03out\x00\x00\x01x\x02\x03big\x00\x01\x08\x01\x03"
     );
     // Then the chain: 2 parts, inline `vm0`, and value 8's first.
     assert!(bytes.ends_with(b"\x02\x00\x03vm0\x01\x08\x00"));
@@ -188,21 +220,38 @@ fn malformed_segments_and_records_are_rejected() -> io::Result<()> {
             ..record()?
         }, // more transactions than ever committed
         Commit {
-            size: 4 * 4096,
+            directory: BTreeMap::from([(0, paged(4 * 4096))]),
             ..record()?
         }, // the last transaction's size differs
     ] {
         invalid.push(bad.encode().to_vec());
     }
     let mut large = record()?;
-    large.effects = Bytes::from(vec![0; MAX_EFFECTS_BYTES + 1]);
+    large.directory.get_mut(&1).unwrap().kind =
+        Kind::Record(Part::Inline(Bytes::from(vec![0; MAX_RECORD_BYTES + 1])));
     invalid.push(large.encode().to_vec());
+    let mut twice = record()?;
+    twice.directory.get_mut(&4).unwrap().name = "out".into();
+    invalid.push(twice.encode().to_vec()); // two records of one name
+    let mut unallocated = record()?;
+    unallocated.next_file = 4;
+    invalid.push(unallocated.encode().to_vec()); // an id not yet allocated
     let mut named = record()?;
-    named.log[1].parts[0] = Part::Stored(12, 0); // not allocated
+    named.directory.get_mut(&4).unwrap().kind = Kind::Record(Part::Stored(5, 0));
+    invalid.push(named.encode().to_vec()); // a record naming garbage
+    let mut named = record()?;
+    named.log[1].changes[0].parts[0] = Part::Stored(12, 0); // not allocated
     invalid.push(named.encode().to_vec());
     let mut named = record()?;
-    named.log[1].parts[0] = Part::Stored(5, 0); // garbage
+    named.log[1].changes[0].parts[0] = Part::Stored(5, 0); // garbage
     invalid.push(named.encode().to_vec());
+    let mut of_a_record = record()?;
+    of_a_record.log[2].changes[0].file = 1;
+    invalid.push(of_a_record.encode().to_vec()); // pages of a record
+    let mut twice = record()?;
+    let change = twice.log[2].changes[0].clone();
+    twice.log[2].changes.push(change);
+    invalid.push(twice.encode().to_vec()); // one file changed twice
     for bytes in invalid {
         assert!(Commit::decode(&Bytes::from(bytes)).is_err());
     }
@@ -223,30 +272,22 @@ fn replay_reads_stored_values() -> io::Result<()> {
         let third = Images::from([(1, Some(varied(4, 9)))]);
         let mut log = Log::new();
         let inline = encode_transaction(&first, &log.chain)?;
-        log.append(4096, first, 0);
+        log.append(first, 0);
         let sealed = encode_transaction(&second, &log.chain)?;
-        log.append(2 * 4096, second.clone(), 0);
+        log.append(second.clone(), 0);
         let last = encode_transaction(&third, &log.chain)?;
         // The second transaction sealed with the third, into one value.
         let value = stored_value(&[sealed[0].clone(), last[0].clone()]);
         store.put(&log_key(5), value.clone())?;
         let commit = Commit {
             version: 3,
-            size: 2 * 4096,
             next_segment: 6,
+            next_file: 1,
+            directory: BTreeMap::from([(0, paged(2 * 4096))]),
             log: vec![
-                Logged {
-                    size: 4096,
-                    parts: inline.into_iter().map(Part::Inline).collect(),
-                },
-                Logged {
-                    size: 2 * 4096,
-                    parts: vec![Part::Stored(5, 0)],
-                },
-                Logged {
-                    size: 2 * 4096,
-                    parts: vec![Part::Stored(5, 1)],
-                },
+                logged(4096, inline.into_iter().map(Part::Inline).collect()),
+                logged(2 * 4096, vec![Part::Stored(5, 0)]),
+                logged(2 * 4096, vec![Part::Stored(5, 1)]),
             ],
             ..Commit::default()
         };
@@ -262,7 +303,7 @@ fn replay_reads_stored_values() -> io::Result<()> {
         replay(&store, &commit, values).await?;
         assert!(replay(&store, &commit, Values::new()).await.is_err());
         let mut beyond = commit.clone();
-        beyond.log[2].parts[0] = Part::Stored(5, 2);
+        beyond.log[2].changes[0].parts[0] = Part::Stored(5, 2);
         let held = Values::from([(5, value)]);
         assert!(replay(&store, &beyond, held).await.is_err());
         Ok(())
@@ -276,7 +317,8 @@ fn implausible_numbers_are_rejected() -> io::Result<()> {
     let commit = |version, size| {
         Commit {
             version,
-            size,
+            next_file: 1,
+            directory: BTreeMap::from([(0, paged(size))]),
             ..Commit::default()
         }
         .encode()
@@ -286,8 +328,8 @@ fn implausible_numbers_are_rejected() -> io::Result<()> {
     assert!(Commit::decode(&commit(2, MAX_DATABASE_BYTES + 512)).is_err());
     assert!(Commit::decode(&commit(2, 512 * 3)).is_ok());
 
-    let images = Images::from([(MAX_DATABASE_BYTES / 4096, None)]);
-    let segment = encode_transaction(&images, &Chain::default())?.remove(0);
+    let past = [(MAX_DATABASE_BYTES / 4096, &None)];
+    let segment = super::encode_segment(0, &past, &Chain::default(), None)?;
     assert!(entries(&segment).is_err(), "page index out of range");
     Ok(())
 }

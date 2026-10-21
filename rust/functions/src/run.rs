@@ -1,60 +1,45 @@
 //! A run: one call of a function a program exports, turn by turn. Each run
 //! starts from the program's golden image: its memory lasts for the run. A turn delivers
-//! one event to the VM, runs the JavaScript until it waits, and commits.
+//! one event to the VM, runs the JavaScript until it waits, and seals.
 //!
-//! A scope's storage is a sqlite-kv database ([`Scope`]). A turn is one
-//! commit of it, one put: the run's state ([`Commit`]) as the record's
-//! effects, the pages the turn changed as a value of the record's chain, and
-//! the turn's KV writes as SQL in its `kv` table. The image is the program's
-//! golden image with the chain applied: the first batch holds the pages that
-//! differ from golden, each next one the pages one turn changed, each
-//! compressed against what it replaces, so a turn writes little more than
-//! what it changed. Nothing is applied after a commit, and a crash before one
-//! loses the whole turn, which runs again.
+//! A turn is one transaction (see [`crate::transaction`]): its participants
+//! are the run's state ([`RunState`], the record "run"), its memory
+//! ([`Memory`], the record "memory" and the pages the turn changed, in the
+//! scope's file over the program's golden memory), the scope's tables (the
+//! turn's SQL, KV included), and each extension. The host seals it in one
+//! put, the scope's database's commit. The image is the program's golden
+//! image with the file's pages that differ from it; the journal compresses
+//! each against what it replaces (golden's, at first), so a turn writes
+//! little more than what it changed. Nothing is applied after a seal, and a
+//! crash before one loses the whole turn, which runs again.
 //!
 //! The VM stays live from turn to turn of one attempt; a new attempt restores
-//! it from the commit, once, when a delivery needs it.
+//! it from the seal, once, when a delivery needs it.
 use crate::{
-    Scope, codec,
+    Scope,
     db::Db,
+    extension::{Attachments, HostCall, Making, Tables},
     model::*,
     program::{Program, Programs},
+    transaction::{Participant, Record, ScopeBlobs},
     vm::{self, Vm},
 };
 use anyhow::{Context, Result, ensure};
-use bytes::Bytes;
+use async_trait::async_trait;
 use serde_json::{Value, json};
-use sqlite_kv::ChainUpdate;
+use sqlite_kv::{Base, File};
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::Mutex;
 
-/// Most batches in an image's chain. Restoring reads them all at once and
-/// applies them in order; past this many, or once the later batches outweigh
-/// twice the first, a turn writes every page that differs from golden into a
-/// new first batch, so restoring stays bounded however long a run lives. The
-/// size rule keeps rewriting to a third of what a run writes; this one only
-/// bounds the reads, as each new first batch costs a whole image.
-const MAX_CHAIN: usize = 256;
-
-/// The pages at `indexes`, back to back.
-fn pages<'a>(page: impl Fn(u32) -> &'a [u8], indexes: &[u32]) -> Vec<u8> {
-    let mut pages = Vec::with_capacity(indexes.len() * PAGE);
-    for &index in indexes {
-        pages.extend_from_slice(page(index));
-    }
-    pages
-}
 fn input_size<T: serde::Serialize>(input: &T) -> Result<()> {
     ensure!(json_bytes(input)?.len() <= MAX_INPUT, "Input exceeds limit");
     Ok(())
 }
 
-/// The pages a turn changed, and what they held before it.
-#[derive(Default)]
-struct Changed {
-    indexes: Vec<u32>,
-    old: Vec<u8>,
-    new: Vec<u8>,
+/// The scope's file a program's runs keep their memory in: one per golden
+/// memory, over it.
+fn memory_file(golden: &crate::cow::Golden) -> String {
+    format!("memory/{:016x}", golden.id())
 }
 
 /// A run of a program in one scope, in one attempt. An error leaves it
@@ -64,12 +49,70 @@ pub struct Run {
     /// The scope's database, this attempt's session of it, which the VM's
     /// host calls share.
     db: Arc<Mutex<Db>>,
-    commit: Commit,
-    /// The VM, and its memory as of the last commit: restored when a delivery
-    /// needs it, and dropped once the run has settled.
-    live: Option<Live>,
+    /// The extensions' parts of this attempt, which the VM's host calls share.
+    extensions: Arc<Mutex<Attachments>>,
+    /// The scope's blobs, which the host collects after each seal.
+    blobs: ScopeBlobs,
+    state: RunState,
+    memory: Memory,
     last: Written,
     usable: bool,
+}
+
+/// The run's state, a participant: the record "run".
+struct RunState {
+    record: RunRecord,
+    sealed: RunRecord,
+    stored: Record,
+}
+
+impl RunState {
+    fn new(record: RunRecord, stored: Record) -> Self {
+        Self {
+            sealed: record.clone(),
+            record,
+            stored,
+        }
+    }
+}
+
+#[async_trait]
+impl Participant for RunState {
+    async fn prepare(&mut self) -> Result<()> {
+        self.stored.set(json_bytes(&self.record)?.into());
+        Ok(())
+    }
+
+    fn committed(&mut self) {
+        self.sealed = self.record.clone();
+    }
+
+    fn aborted(&mut self) {
+        self.record = self.sealed.clone();
+    }
+}
+
+/// The run's memory, a participant: the record "memory", and the pages each
+/// turn changed, in the scope's file over the program's golden memory.
+struct Memory {
+    record: MemoryRecord,
+    stored: Record,
+    /// The file over golden.
+    file: File,
+    /// The VM, and its memory as of the last seal: restored when a delivery
+    /// needs it, and dropped once the run has settled.
+    live: Option<Live>,
+    /// What this turn changed, to seal.
+    turn: Option<Turn>,
+    /// The scope's previous run's pages, in its file, which this run's first
+    /// seal makes holes: they are not this run's.
+    stale: Option<(File, Vec<u32>)>,
+}
+
+/// What a turn did to the memory: the pages it changed.
+struct Turn {
+    changed: Vec<u32>,
+    settled: bool,
 }
 
 struct Live {
@@ -77,12 +120,85 @@ struct Live {
     base: Image,
 }
 
+impl Memory {
+    /// The turn captured `capture`, as `live`'s new image.
+    fn captured(&mut self, capture: Capture, settled: bool) -> Result<()> {
+        let live = self.live.as_mut().context("No live VM")?;
+        let base = &mut live.base;
+        base.meta = capture.meta.clone();
+        base.grow(capture.memory_len);
+        let mut changed = Vec::with_capacity(capture.pages.len());
+        for (index, new) in capture.pages {
+            changed.push(index);
+            base.set(index, &new);
+        }
+        self.record.meta = capture.meta;
+        self.record.memory_len = capture.memory_len;
+        self.turn = Some(Turn { changed, settled });
+        Ok(())
+    }
+
+    /// The guest trapped: its image is unusable, and the run ends, keeping
+    /// none.
+    fn trapped(&mut self) {
+        self.live = None;
+        self.turn = Some(Turn {
+            changed: Vec::new(),
+            settled: true,
+        });
+    }
+}
+
+#[async_trait]
+impl Participant for Memory {
+    /// The pages the turn changed, into the file (the journal writes one
+    /// that is golden's again as a hole); a settled run's, as holes.
+    async fn prepare(&mut self) -> Result<()> {
+        let Turn { changed, settled } = self.turn.take().context("No turn to seal")?;
+        if let Some((file, pages)) = self.stale.take() {
+            for page in pages {
+                file.write(page.into(), None).map_err(sql)?;
+            }
+        }
+        match (&self.live, settled) {
+            // A settled run never restores again: it keeps its outcome, not
+            // its image.
+            (_, true) => {
+                for page in self.record.pages().chain(changed) {
+                    self.file.write(page.into(), None).map_err(sql)?;
+                }
+                self.record.pages.clear();
+                self.live = None;
+            }
+            (Some(live), false) => {
+                for page in changed {
+                    let image = bytes::Bytes::copy_from_slice(live.base.page(page));
+                    self.file.write(page.into(), Some(image)).map_err(sql)?;
+                }
+                self.record.set_pages(live.base.changed());
+            }
+            (None, false) => anyhow::bail!("No live VM"),
+        }
+        self.stored.set(json_bytes(&self.record)?.into());
+        Ok(())
+    }
+
+    /// The image no longer matches a seal: the attempt is over.
+    fn aborted(&mut self) {
+        self.live = None;
+    }
+}
+
+fn sql(error: Box<dyn std::error::Error + Send + Sync>) -> anyhow::Error {
+    anyhow::anyhow!(error)
+}
+
 /// What a turn wrote.
 #[derive(Default)]
 struct Written {
     changed_pages: usize,
     examined_pages: usize,
-    batch_bytes: usize,
+    logged_bytes: usize,
     commit_bytes: usize,
 }
 
@@ -100,9 +216,9 @@ enum Delivery {
 impl Run {
     /// Start run `run` of `program`'s `handler` on `input`, in the scope `key`
     /// (the program's `ctx.key`), stored in `scope`: its first turn runs the
-    /// handler until it waits or settles, and commits. When the scope's commit is
+    /// handler until it waits or settles, and seals. When the scope's seal is
     /// already this run's, this is another attempt at it: the run continues as
-    /// committed, and `input` is the one it started with.
+    /// sealed, and `input` is the one it started with.
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         programs: &Arc<Programs>,
@@ -121,43 +237,75 @@ impl Run {
         validate_time(now)?;
         input_size(&input)?;
         let db = Db::new(scope.open().await?);
-        let previous = load(&db)?;
-        let db = Arc::new(Mutex::new(db));
-        if let Some(commit) = previous.filter(|commit| commit.run == run) {
+        let [stored_run, stored_memory] = BUILT_IN_RECORDS.map(|name| db.session().record(name));
+        // What the scope's last seal kept of each extension, whichever run
+        // made it.
+        let blobs = ScopeBlobs::new(scope.extensions.blobs.clone(), key);
+        let extensions = Attachments::attach(&scope.extensions, &blobs, &db).await?;
+        let sealed: Option<RunRecord> = json_record(&stored_run)?;
+        let sealed_memory: Option<MemoryRecord> = json_record(&stored_memory)?;
+        if let Some(record) = sealed.filter(|record| record.run == run) {
             ensure!(
-                commit.program == program && commit.handler == handler,
+                record.program == program && record.handler == handler,
                 "Run {run} is a call of {}.{}",
-                commit.program,
-                commit.handler
+                record.program,
+                record.handler
             );
-            check(programs, &commit)?;
+            let golden = check(programs, &record)?.image();
+            let memory = sealed_memory.context("No memory in the seal")?;
+            let golden = golden.golden_memory();
+            ensure!(
+                memory.file == memory_file(golden),
+                "The memory of another image"
+            );
+            let file = (db.session())
+                .file_with_base(&memory.file, golden.clone() as Arc<dyn Base>)
+                .map_err(sql)?;
             return Ok(Self {
                 programs: programs.clone(),
-                db,
-                commit,
-                live: None,
+                db: Arc::new(Mutex::new(db)),
+                extensions: Arc::new(Mutex::new(extensions)),
+                blobs,
+                state: RunState::new(record, stored_run),
+                memory: Memory {
+                    record: memory,
+                    stored: stored_memory,
+                    file,
+                    live: None,
+                    turn: None,
+                    stale: None,
+                },
                 last: Written::default(),
                 usable: true,
             });
         }
+        // A new run: the scope's previous run's pages, if any, go with its
+        // first seal.
+        let stale = match sealed_memory {
+            Some(old) if !old.pages.is_empty() => {
+                let file = db.session().file(&old.file).map_err(sql)?;
+                Some((file, old.pages().collect()))
+            }
+            _ => None,
+        };
         let golden = programs.get(program)?.image();
+        let name = memory_file(golden.golden_memory());
+        let file = (db.session())
+            .file_with_base(&name, golden.golden_memory().clone() as Arc<dyn Base>)
+            .map_err(sql)?;
+        let db = Arc::new(Mutex::new(db));
+        let extensions = Arc::new(Mutex::new(extensions));
         let language = programs.get(program)?.language();
         let mut vm = Vm::for_image(programs.runtime(), language, &golden, run, now).await?;
         vm.restore(&golden).await?;
-        vm.attach(db.clone());
-        let commit = Commit {
+        vm.attach(db.clone(), extensions.clone());
+        let record = RunRecord {
             run: run.into(),
             handler: handler.into(),
             program: program.into(),
             version: programs.get(program)?.version(),
             runtime: vm::VERSION,
             turns: 0,
-            meta: golden.meta.clone(),
-            memory_len: golden.len(),
-            batches: 0,
-            base_bytes: 0,
-            delta_bytes: 0,
-            live_pages: 0,
             state: State {
                 pending: Vec::new(),
                 next_operation: 0,
@@ -166,11 +314,26 @@ impl Run {
                 outcome: None,
             },
         };
+        let memory = Memory {
+            record: MemoryRecord {
+                meta: golden.meta.clone(),
+                memory_len: golden.len(),
+                file: name,
+                pages: Vec::new(),
+            },
+            stored: stored_memory,
+            file,
+            live: Some(Live { vm, base: golden }),
+            turn: None,
+            stale,
+        };
         let mut this = Self {
             programs: programs.clone(),
             db,
-            commit,
-            live: Some(Live { vm, base: golden }),
+            extensions,
+            blobs,
+            state: RunState::new(record, stored_run),
+            memory,
             last: Written::default(),
             usable: false,
         };
@@ -193,7 +356,7 @@ impl Run {
     }
 
     /// Deliver the outcomes of several pending requests at `now`, in order,
-    /// and run one turn: what arrived together commits once. Requests
+    /// and run one turn: what arrived together seals once. Requests
     /// delivered before, or dropped when the run settled, are skipped.
     pub async fn deliver_all(
         &mut self,
@@ -205,7 +368,8 @@ impl Run {
             "This attempt at the run failed: start it again"
         );
         validate_time(now)?;
-        let state = &self.commit.state;
+        let record = &self.state.record;
+        let state = &record.state;
         let now = now.max(state.now);
         let mut delivered = HashSet::new();
         let mut pending = Vec::new();
@@ -215,10 +379,10 @@ impl Run {
             ensure!(delivered.insert(operation.clone()), "Duplicate outcome");
             let Some(request) = state.pending.iter().find(|p| p.id() == operation) else {
                 let issued = operation
-                    .strip_prefix(&format!("{}/", self.commit.run))
+                    .strip_prefix(&format!("{}/", record.run))
                     .and_then(|n| n.parse::<u64>().ok())
                     .is_some_and(|n| {
-                        n < state.next_operation && operation == format!("{}/{n}", self.commit.run)
+                        n < state.next_operation && operation == format!("{}/{n}", record.run)
                     });
                 ensure!(issued, "Unknown operation ID");
                 continue;
@@ -232,8 +396,8 @@ impl Run {
             return Ok(self.view());
         }
         self.usable = false;
-        if self.live.is_none() {
-            self.live = Some(self.restore(now).await?);
+        if self.memory.live.is_none() {
+            self.memory.live = Some(self.restore(now).await?);
         }
         self.turn(Delivery::Complete(pending), now).await?;
         self.usable = true;
@@ -243,7 +407,7 @@ impl Run {
     /// The memory the run holds while live: its VM's, and the image beside
     /// it (each page that differs from golden). Parked, it holds none.
     pub fn resident(&self) -> usize {
-        match self.live {
+        match self.memory.live {
             Some(_) => self.footprint(),
             None => 0,
         }
@@ -251,26 +415,31 @@ impl Run {
 
     /// The memory the run will hold once its next delivery restores it.
     pub fn footprint(&self) -> usize {
-        self.commit.memory_len + self.commit.live_pages * PAGE
+        let memory = &self.memory.record;
+        memory.memory_len + memory.live_pages() * PAGE
     }
 
-    /// The memory the last turn held at its peak: the run's, and the commit's
+    /// The memory the last turn held at its peak: the run's, and the seal's
     /// buffers (the pages it changed, captured, before and after, and
     /// encoded).
     pub fn turn_peak(&self) -> usize {
-        let last = &self.last;
-        self.commit.memory_len
-            + self.commit.live_pages.max(last.changed_pages) * PAGE
+        let (last, memory) = (&self.last, &self.memory.record);
+        memory.memory_len
+            + memory.live_pages().max(last.changed_pages) * PAGE
             + 3 * last.changed_pages * PAGE
-            + last.batch_bytes
+            + last.logged_bytes
             + last.commit_bytes
     }
 
     /// Let go of the VM and its image: the next delivery restores them from
     /// the scope, as a retried attempt would. Only between turns, which have
-    /// committed all the run is.
+    /// sealed all the run is.
     pub fn park(&mut self) {
-        self.live = None;
+        self.memory.live = None;
+        // Nothing holds the extensions between turns.
+        if let Ok(mut extensions) = self.extensions.try_lock() {
+            extensions.park();
+        }
     }
 
     /// The input of the pending call `operation` (an RPC, or a binding's
@@ -283,19 +452,19 @@ impl Run {
             self.usable,
             "This attempt at the run failed: start it again"
         );
-        let pending = self.commit.state.pending.iter();
+        let state = &self.state.record.state;
         ensure!(
-            pending
+            (state.pending.iter())
                 .filter(|p| matches!(p, Operation::Rpc { .. } | Operation::Call { .. }))
                 .any(|p| p.id() == operation),
             "No pending call {operation}"
         );
-        let now = self.commit.state.now;
+        let now = state.now;
         self.usable = false;
-        if self.live.is_none() {
-            self.live = Some(self.restore(now).await?);
+        if self.memory.live.is_none() {
+            self.memory.live = Some(self.restore(now).await?);
         }
-        let live = self.live.as_mut().context("No live VM")?;
+        let live = self.memory.live.as_mut().context("No live VM")?;
         live.vm.begin_turn(now)?;
         let answer = match live.vm.call("input", Some(operation)).await {
             Ok(answer) => answer,
@@ -303,7 +472,7 @@ impl Run {
             // unusable, and would fail the same way again.
             Err(error) => match vm::trap(&error) {
                 Some(message) => {
-                    self.live = None;
+                    self.memory.live = None;
                     self.usable = true;
                     let message = format!("The input could not be read: {message}");
                     return Ok(Err(GuestError::new("RangeError", message)));
@@ -318,64 +487,112 @@ impl Run {
         })
     }
 
-    /// The run as of its last commit.
+    /// Make the pending operation `operation`, an extension's: its input
+    /// read from the heap, and what the extension reads of the seal. The
+    /// inner `Err` fails the operation, as the guest sees it.
+    pub async fn operation(&mut self, operation: &str) -> Result<Result<Making, GuestError>> {
+        let pending = self.state.record.state.pending.iter();
+        let call = pending.clone().find(|p| p.id() == operation).cloned();
+        let Some(call @ Operation::Call { .. }) = call else {
+            anyhow::bail!("No pending operation {operation}");
+        };
+        let Operation::Call { id, name, .. } = &call else {
+            unreachable!()
+        };
+        let mut extensions = self.extensions.lock().await;
+        let Some(extension) = extensions.get(name) else {
+            return Ok(Err(GuestError::new(
+                "Error",
+                format!("No extension {name:?}"),
+            )));
+        };
+        if call.idempotency_key() != id && !extension.deduplicates() {
+            let message = format!("{name} does not deduplicate: it takes no idempotency key");
+            return Ok(Err(GuestError::new("TypeError", message)));
+        }
+        drop(extensions);
+        let input = match self.input(operation).await? {
+            Ok(input) => input,
+            Err(error) => return Ok(Err(error)),
+        };
+        let host_call = HostCall {
+            id: id.clone(),
+            name: name.clone(),
+            idempotency_key: call.idempotency_key().to_owned(),
+            input,
+        };
+        let mut extensions = self.extensions.lock().await;
+        let extension = extensions.get(name).context("No extension")?;
+        let mut db = self.db.lock().await;
+        let mut tables = Tables { db: &mut db };
+        Ok(extension.operation(host_call, &mut tables).await)
+    }
+
+    /// The run as of its last seal.
     pub fn view(&self) -> View {
-        let commit = &self.commit;
+        let (record, memory) = (&self.state.record, &self.memory.record);
         View {
-            run: commit.run.clone(),
-            program: commit.program.clone(),
-            turns: commit.turns,
-            state: commit.state.clone(),
-            memory_bytes: commit.memory_len,
-            live_pages: commit.live_pages,
+            run: record.run.clone(),
+            program: record.program.clone(),
+            turns: record.turns,
+            state: record.state.clone(),
+            memory_bytes: memory.memory_len,
+            live_pages: memory.live_pages(),
             changed_pages: self.last.changed_pages,
             examined_pages: self.last.examined_pages,
-            batch_bytes: self.last.batch_bytes,
+            logged_bytes: self.last.logged_bytes,
             commit_bytes: self.last.commit_bytes,
         }
     }
 
-    /// The committed image, from golden and the batches, in a new VM.
+    /// The sealed image, from golden and the batches, in a new VM.
     async fn restore(&self, now: u64) -> Result<Live> {
-        let commit = &self.commit;
-        let mut base = check(&self.programs, commit)?.image();
+        let (record, memory) = (&self.state.record, &self.memory.record);
+        let mut base = check(&self.programs, record)?.image();
         ensure!(
-            commit.memory_len >= base.len()
-                && commit.memory_len <= MAX_MEMORY
-                && commit.memory_len.is_multiple_of(65536),
-            "Invalid committed memory size"
+            memory.memory_len >= base.len()
+                && memory.memory_len <= MAX_MEMORY
+                && memory.memory_len.is_multiple_of(65536),
+            "Invalid sealed memory size"
         );
-        base.meta = commit.meta.clone();
-        base.grow(commit.memory_len);
-        // Read with the record at open: the chain is this run's since its
-        // first turn restarted it.
-        let batches = self.db.lock().await.session().chain();
-        ensure!(batches.len() == commit.batches, "Missing page batch");
-        for bytes in batches {
-            let (indexes, frame) = codec::page_indexes(&bytes)?;
-            ensure!(
-                indexes
-                    .last()
-                    .is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
-                "Page beyond memory"
-            );
-            let decoded = codec::decode_pages(frame, &pages(|i| base.page(i), &indexes))?;
-            for (index, page) in indexes.iter().zip(decoded.chunks_exact(PAGE)) {
-                base.set(*index, page);
-            }
+        base.meta = memory.meta.clone();
+        base.grow(memory.memory_len);
+        // The pages that differ from golden, read together: from the log,
+        // the cache, or the store.
+        let indexes: Vec<u32> = memory.pages().collect();
+        ensure!(
+            (indexes.last()).is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
+            "Page beyond memory"
+        );
+        let file = &self.memory.file;
+        let reads = indexes.iter().map(|&index| file.read(index.into()));
+        let pages = futures::future::try_join_all(reads).await.map_err(sql)?;
+        for (index, page) in indexes.iter().zip(pages) {
+            static ZERO: [u8; PAGE] = [0; PAGE];
+            base.set(*index, page.as_deref().unwrap_or(&ZERO));
         }
-        let language = self.programs.get(&commit.program)?.language();
+        let language = self.programs.get(&record.program)?.language();
         let mut vm =
-            Vm::for_image(self.programs.runtime(), language, &base, &commit.run, now).await?;
+            Vm::for_image(self.programs.runtime(), language, &base, &record.run, now).await?;
         vm.restore(&base).await?;
-        vm.attach(self.db.clone());
+        vm.attach(self.db.clone(), self.extensions.clone());
         Ok(Live { vm, base })
     }
 
-    /// Run the JavaScript on `delivery`, capture what changed, and commit.
+    /// Run the JavaScript on `delivery`, capture what changed, and seal.
     async fn turn(&mut self, delivery: Delivery, now: u64) -> Result<()> {
-        let live = self.live.as_mut().context("No live VM")?;
-        let ran = match run(&mut live.vm, &self.db, &self.commit, delivery, now).await {
+        let live = self.memory.live.as_mut().context("No live VM")?;
+        let record = &self.state.record;
+        let ran = match run(
+            &mut live.vm,
+            &self.db,
+            &self.extensions,
+            record,
+            delivery,
+            now,
+        )
+        .await
+        {
             Ok(state) => live
                 .vm
                 .capture(&live.base)
@@ -383,120 +600,75 @@ impl Run {
                 .map(|capture| (state, capture)),
             Err(error) => Err(error),
         };
-        let mut db = self.db.lock().await;
         let mut written = Written::default();
-        let mut live_pages = self.commit.live_pages;
-        let (state, meta, memory_len, changed) = match ran {
+        let state = match ran {
             Ok((state, capture)) => {
                 written.changed_pages = capture.pages.len();
                 written.examined_pages = capture.examined_pages;
-                let base = &mut live.base;
-                base.meta = capture.meta.clone();
-                base.grow(capture.memory_len);
-                let mut changed = Changed::default();
-                for (index, new) in capture.pages {
-                    changed.indexes.push(index);
-                    changed.old.extend_from_slice(base.page(index));
-                    changed.new.extend_from_slice(&new);
-                    base.set(index, &new);
-                }
-                live_pages = base.changed().count();
-                (state, capture.meta, capture.memory_len, changed)
+                let settled = state.status != Status::Waiting;
+                self.memory.captured(capture, settled)?;
+                state
             }
             // The guest trapped: its image is unusable, and the same delivery
             // would trap again. The run ends; the KV writes before the trap
             // stand, as for a thrown error.
             Err(error) => match vm::trap(&error) {
                 Some(message) => {
-                    self.live = None;
-                    db.abandon_transactions().await?;
-                    let state = State {
+                    self.memory.trapped();
+                    self.db.lock().await.abandon_transactions().await?;
+                    State {
                         pending: Vec::new(),
-                        next_operation: self.commit.state.next_operation,
+                        next_operation: record.state.next_operation,
                         now,
                         status: Status::Failed,
                         outcome: Some(Outcome::failure("Trap", message)),
-                    };
-                    let commit = &self.commit;
-                    (
-                        state,
-                        commit.meta.clone(),
-                        commit.memory_len,
-                        Changed::default(),
-                    )
+                    }
                 }
                 None => return Err(error.into()),
             },
         };
-        let previous = &self.commit;
-        let (mut base_bytes, mut delta_bytes) = (previous.base_bytes, previous.delta_bytes);
-        let mut batches = previous.batches;
-        let settled = state.status != Status::Waiting;
-        let empty = db.session().chain().is_empty();
-        let update = if settled || (batches == 0 && changed.indexes.is_empty()) {
-            // A settled run never restores again: it keeps its outcome, not
-            // its image. A run that has changed no page yet keeps none of the
-            // scope's previous run's.
-            if settled {
-                live_pages = 0;
-                batches = 0;
+        self.state.record.state = state;
+        self.state.record.turns += 1;
+
+        // The transaction: each participant sets its records, the host
+        // writes the seal, and tells them.
+        let mut extensions = self.extensions.lock().await;
+        let mut db = self.db.lock().await;
+        let mut participants: Vec<&mut dyn Participant> =
+            vec![&mut self.state, &mut self.memory, &mut *db];
+        let mut prepared = extensions.prepare().await;
+        for participant in &mut participants {
+            if prepared.is_err() {
+                break;
             }
-            (!empty).then_some(ChainUpdate::Clear)
-        } else if batches == 0 {
-            // The run's first batch, against golden: it replaces whatever the
-            // scope's previous run left.
-            let bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
-            (base_bytes, delta_bytes, batches) = (bytes.len(), 0, 1);
-            written.batch_bytes = bytes.len();
-            Some(ChainUpdate::Restart(bytes.into()))
-        } else if !changed.indexes.is_empty() {
-            let bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
-            if batches >= MAX_CHAIN || delta_bytes + bytes.len() > 2 * base_bytes {
-                // A new first batch: every page that differs from golden.
-                let base = &self.live.as_ref().context("No live VM")?.base;
-                let live: Vec<u32> = base.changed().collect();
-                let bytes = codec::encode_pages(
-                    &live,
-                    &pages(|i| base.page(i), &live),
-                    &pages(|i| base.original(i), &live),
-                )?;
-                (base_bytes, delta_bytes, batches) = (bytes.len(), 0, 1);
-                written.batch_bytes = bytes.len();
-                Some(ChainUpdate::Restart(bytes.into()))
-            } else {
-                delta_bytes += bytes.len();
-                batches += 1;
-                written.batch_bytes = bytes.len();
-                Some(ChainUpdate::Append(bytes.into()))
-            }
-        } else {
-            None
+            prepared = participant.prepare().await;
+        }
+        drop(participants);
+        let sealed = match prepared {
+            Ok(()) => db.seal().await.map(|report| {
+                written.logged_bytes = report.logged_bytes;
+                written.commit_bytes = report.record_bytes;
+            }),
+            Err(error) => Err(error),
         };
-        let commit = Commit {
-            run: previous.run.clone(),
-            handler: previous.handler.clone(),
-            program: previous.program.clone(),
-            version: previous.version,
-            runtime: previous.runtime,
-            turns: previous.turns + 1,
-            meta,
-            memory_len,
-            batches,
-            base_bytes,
-            delta_bytes,
-            live_pages,
-            state,
-        };
-        let effects = Bytes::from(json_bytes(&commit)?);
-        written.commit_bytes = effects.len();
-        db.commit_turn(effects, update).await?;
+        let mut participants: Vec<&mut dyn Participant> =
+            vec![&mut self.state, &mut self.memory, &mut *db];
+        if let Err(error) = sealed {
+            participants.iter_mut().for_each(|p| p.aborted());
+            extensions.aborted();
+            return Err(error);
+        }
+        participants.iter_mut().for_each(|p| p.committed());
+        extensions.committed();
         drop(db);
-        self.commit = commit;
         self.last = written;
-        match &mut self.live {
-            Some(_) if settled => self.live = None,
-            Some(live) => live.vm.committed()?,
-            None => {}
+        // After it: the blobs no seal names any more go.
+        if let Err(error) = self.blobs.collect(&extensions.holds()).await {
+            tracing::warn!("Collecting blobs failed: {error:#}");
+        }
+        drop(extensions);
+        if let Some(live) = &mut self.memory.live {
+            live.vm.committed()?;
         }
         Ok(())
     }
@@ -509,7 +681,8 @@ impl Run {
 async fn run(
     vm: &mut Vm,
     db: &Mutex<Db>,
-    commit: &Commit,
+    extensions: &Mutex<Attachments>,
+    commit: &RunRecord,
     delivery: Delivery,
     now: u64,
 ) -> wasmtime::Result<State> {
@@ -536,7 +709,20 @@ async fn run(
                 .await?;
         }
         Delivery::Complete(outcomes) => {
-            for (operation, outcome) in outcomes {
+            for (operation, mut outcome) in outcomes {
+                // An extension's operation: it keeps what the outcome
+                // brought, in this turn, before the guest sees it.
+                if let Some(call @ Operation::Call { name, .. }) =
+                    pending.iter().find(|pending| pending.id() == operation)
+                {
+                    let mut extensions = extensions.lock().await;
+                    if let Some(extension) = extensions.get(name) {
+                        let mut db = db.lock().await;
+                        let mut tables = Tables { db: &mut db };
+                        (extension.delivered(&mut tables, call, &mut outcome).await)
+                            .map_err(wasmtime::Error::from_anyhow)?;
+                    }
+                }
                 pending.retain(|pending| pending.id() != operation);
                 vm.invoke("deliver", &completion(&operation, outcome, now))
                     .await?;
@@ -559,18 +745,36 @@ async fn run(
         let mut answered = false;
         for operation in report.issued.iter().cloned() {
             let kv = match &operation {
-                Operation::KvGet { key, .. } => db.lock().await.kv_read(key).await,
+                Operation::KvGet { key, .. } => db.lock().await.kv_read(key).await.map(Ok),
                 Operation::KvSet { key, value, .. } => {
-                    db.lock().await.kv_write(key, Some(value)).await
+                    db.lock().await.kv_write(key, Some(value)).await.map(Ok)
                 }
-                Operation::KvDelete { key, .. } => db.lock().await.kv_write(key, None).await,
+                Operation::KvDelete { key, .. } => {
+                    db.lock().await.kv_write(key, None).await.map(Ok)
+                }
+                // An extension's operation, which it may refuse now.
+                Operation::Call { name, .. } => {
+                    let refused = match extensions.lock().await.get(name) {
+                        Some(extension) => extension.issued(&operation).err(),
+                        None => None,
+                    };
+                    match refused {
+                        Some(error) => Ok(Err(error)),
+                        None => {
+                            pending.push(operation);
+                            continue;
+                        }
+                    }
+                }
                 _ => {
                     pending.push(operation);
                     continue;
                 }
             };
-            let value = kv.map_err(wasmtime::Error::from_anyhow)?;
-            let outcome = Outcome::success(value);
+            let outcome = match kv.map_err(wasmtime::Error::from_anyhow)? {
+                Ok(value) => Outcome::success(value),
+                Err(error) => Outcome::failure(error.name, error.message),
+            };
             vm.invoke("deliver", &completion(operation.id(), outcome, now))
                 .await?;
             answered = true;
@@ -614,17 +818,20 @@ fn completion(operation: &str, outcome: Outcome, now: u64) -> Value {
     json!({"kind": "complete", "operationId": operation, "outcome": outcome, "now": now})
 }
 
-/// The scope's current run, as its database's last commit holds it.
-fn load(db: &Db) -> Result<Option<Commit>> {
-    let effects = db.session().effects();
-    if effects.is_empty() {
+/// The records of the run's state and memory.
+const BUILT_IN_RECORDS: [&str; 2] = ["run", "memory"];
+
+/// A record's JSON value, as the last seal left it; `None` if none did.
+fn json_record<T: serde::de::DeserializeOwned>(record: &Record) -> Result<Option<T>> {
+    let bytes = record.get();
+    if bytes.is_empty() {
         return Ok(None);
     }
-    Ok(Some(serde_json::from_slice(&effects)?))
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
 /// The run's program, as the version and runtime it started on.
-fn check<'a>(programs: &'a Programs, commit: &Commit) -> Result<&'a Program> {
+fn check<'a>(programs: &'a Programs, commit: &RunRecord) -> Result<&'a Program> {
     let program = programs.get(&commit.program)?;
     ensure!(
         program.version() == commit.version,

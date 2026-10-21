@@ -358,6 +358,64 @@
   globalThis.Headers = Headers;
   globalThis.Response = Response;
 
+  // A string, checked for the host.
+  function text(value) {
+    if (typeof value !== 'string') throw new TypeError('Expected a string');
+    validate(value);
+    return value;
+  }
+  // A model call through the host's gateway (the binding `llm`): `params` is
+  // a request in its format, with `<provider>/<model>` as its model.
+  function complete(params) {
+    if (!params || typeof params !== 'object' || Array.isArray(params) || 'conversation' in params)
+      throw new TypeError('A model request is an object: { model, messages, ... }');
+    return request({ kind: 'call', name: 'llm' }, callInput(params));
+  }
+  // The conversations waiting for the model: one call at a time each.
+  const asking = new Set();
+  // A conversation of this scope, `name`: its messages are in the scope's
+  // database, and the host reads them when it asks the model. `defaults`
+  // (model, system, tools...) go with each request.
+  function conversation(name, defaults = {}) {
+    if (typeof name !== 'string' || !name) throw new TypeError('A conversation has a name');
+    validate(name);
+    defaults = copy(defaults);
+    if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults) || 'messages' in defaults)
+      throw new TypeError("A conversation's defaults are an object, without messages");
+    const append = (messages) => hostCall('llm.append', { conversation: name, messages });
+    return Object.freeze({
+      name,
+      // Add `messages`, and ask the model with the whole conversation and
+      // `params` (model, system, tools...): its response, which joins the
+      // conversation.
+      async send({ messages = [], ...params } = {}) {
+        if (asking.has(name)) throw new Error(`The conversation ${name} is waiting for the model`);
+        if (!Array.isArray(messages)) throw new TypeError('messages is an array');
+        for (const message of messages)
+          if (message?.role !== 'user' && message?.role !== 'assistant')
+            throw new TypeError("A message's role is user or assistant");
+        append(copy(messages));
+        asking.add(name);
+        try {
+          const asked = { ...defaults, ...copy(params), conversation: name };
+          // The host adds the answer to the conversation as it arrives.
+          return await request({ kind: 'call', name: 'llm' }, asked);
+        } finally {
+          asking.delete(name);
+        }
+      },
+      // The messages so far.
+      history() {
+        return hostCall('llm.history', { conversation: name });
+      },
+      // Forget the messages so far.
+      clear() {
+        if (asking.has(name)) throw new Error(`The conversation ${name} is waiting for the model`);
+        hostCall('llm.clear', { conversation: name });
+      },
+    });
+  }
+
   globalThis.durable = Object.freeze({
     // The scope: the key of the object this program is served as.
     get key() {
@@ -438,6 +496,35 @@
       validate(name);
       return request({ kind: 'signal', name, input: copy(input) });
     },
+    // Models, through the host's gateway: `complete(request)` sends a whole
+    // request; a `conversation(name)` keeps its messages in the scope, until
+    // it is cleared.
+    llm: Object.freeze({
+      complete,
+      conversation,
+      // The scope's conversations' names, in the order they began.
+      conversations: () => hostCall('llm.list', null),
+    }),
+    // The scope's files, checkpointed with its commits (the extension `fs`).
+    fs: Object.freeze({
+      // A file's text, or null.
+      read: (path) => hostCall('fs.read', { path: text(path) }),
+      write(path, content) {
+        hostCall('fs.write', { path: text(path), content: text(content) });
+      },
+      // Whether the file was there.
+      remove: (path) => hostCall('fs.remove', { path: text(path) }),
+      // The files' paths under `prefix`.
+      list: (prefix = '') => hostCall('fs.list', { prefix: text(prefix) }),
+      // Run `command` on the files as this turn leaves them: its exit code,
+      // its output, and the paths of the files it changed, which the files
+      // then hold. Until it is done, the files cannot change.
+      exec(command, { timeout } = {}) {
+        const input = { command: text(command) };
+        if (timeout !== undefined) input.timeout = timeout;
+        return request({ kind: 'call', name: 'fs.exec' }, callInput(input));
+      },
+    }),
     sleep(ms) {
       if (!Number.isSafeInteger(ms) || ms < 0 || !Number.isSafeInteger(now + ms) || now + ms > maxTime)
         throw new RangeError('Invalid sleep duration');

@@ -518,6 +518,12 @@ capture. A page written and restored to its original value needs no new
 payload. Reset the tracker on restore before rebinding pointers/limits, and
 after each commit is stored. A failed commit ends the attempt with its VM.
 
+Since 21 October 2026 the runtime keeps no encoding of its own: a turn writes
+its changed pages into the memory file (§5.1), and sqlite-kv compresses each
+against what it replaces (its previous image, or golden's), whole pages with
+Zstd. The block encoding below, and its measurements, are the history that
+design came from.
+
 Selected encoding: **the changed 64-byte blocks of the changed pages,
 compressed as one Zstd frame (level 2, long-distance matching) with the
 blocks they replace as its prefix** (§5.2), in a chain over a base encoded
@@ -610,146 +616,123 @@ Zeroing free chunks (§5.6) already makes what it allocates and frees free.
 
 ### 5.1. Record identities and layouts
 
-A scope's store holds one sqlite-kv database
+A scope's store holds one journal, a sqlite-kv namespace
 ([its format](../../../core/sqlite-kv/docs/FORMAT.md)): the commit record at
-`v14/commit`, the values it outgrew at `v14/log/<n>`, and SQL pages. The
-record holds, besides the SQL log:
+`v15/commit`, the values it outgrew at `v15/log/<n>`, and pages in place at
+`v15/page/<file>/<n>`. Its files:
 
-| Part    | Value                                                                |
-| ------- | -------------------------------------------------------------------- |
-| Effects | The scope's current run as of its last turn: JSON, below             |
-| Chain   | The image's page batches (§5.2), each inline or a stored value       |
-| SQL     | The scope's KV: a table `kv(key TEXT PRIMARY KEY, value TEXT)`, JSON |
+| File                | Kind                      | Holds                                                                    |
+| ------------------- | ------------------------- | ------------------------------------------------------------------------ |
+| `run`               | Record                    | The scope's current run as of its last turn: JSON, below                 |
+| `memory`            | Record                    | Its memory: JSON, below                                                  |
+| `memory/<golden>`   | Paged file over golden    | The pages of the run's memory that differ from its program's golden one |
+| `db`                | Paged file                | SQL: the scope's KV, a table `kv(key TEXT PRIMARY KEY, value TEXT)`      |
+| `<extension>`       | Record                    | Each extension's (§9)                                                    |
 
 Programs and their golden images are not stored: the process supplies them
-(§5.5). The run, in camelCase JSON:
+(§5.5). The records, in camelCase JSON:
 
 ```text
 VmMeta = {stack: i32, runtime: i32, context: i32}
-Commit = {
-    run: run_id, program: name, version: u64, runtime: u64,
-    turns: count, meta: VmMeta, memoryLen: byte_count,
-    batches: count, baseBytes: count, deltaBytes: count,
-    livePages: count, state: State
+Run = {
+    run: run_id, handler: name, program: name, version: u64, runtime: u64,
+    turns: count, state: State
+}
+Memory = {
+    meta: VmMeta, memoryLen: byte_count,
+    file: "memory/<golden fingerprint, 16 hex digits>",
+    pages: [[first, count], ...]
 }
 ```
 
-The chain is the image, as batches applied in order over golden (zeros
-beyond its length): the first, the **base**, holds each page that differs
-from golden; each later one, a **delta**, the pages one turn changed. Base
-and deltas apply alike: each batch is compressed against the pages it
-replaces, in the memory as it stands. `batches` counts this run's,
-`baseBytes` and `deltaBytes` size them, for when to write a new base (§5.3);
-`livePages` counts pages that differ from golden. A settled run's chain is
-empty. `runtime` is the runtime's version, a
-constant bumped by hand with anything an image depends on: the Wasm, the
-bridge, the limits, the imports' behavior. A run restores only on the
-program version and runtime it started on: a changed program needs a new
-name while the old one's runs finish. There is no heap migration.
+The image is golden (zeros beyond its length) with the pages `pages` lists
+read from `file`. The file is over golden (a sqlite-kv base): a page the run
+never changed, or changed back, is a hole that reads as golden's, and the
+journal compresses each page against what it replaces (golden's, the first
+time it is logged, and in place), so a page costs about what changed in it.
+`pages` lists the pages that differ from golden, run-length encoded,
+because the store cannot list a file's pages: a restore reads exactly
+those. A settled run's list is empty, and its pages are holes. `runtime` is
+the runtime's version, a constant bumped by hand with anything an image
+depends on: the Wasm, the bridge, the limits, the imports' behavior. A run
+restores only on the program version and runtime it started on: a changed
+program needs a new name while the old one's runs finish. There is no heap
+migration.
 
 The returned View holds the run, program, turns, State, memory length, live
-pages, and what the last turn wrote: changed and examined pages, batch and
-commit bytes.
+pages, and what the last turn wrote: changed and examined pages, the bytes
+its seal logged (memory and tables) and the commit record's.
 
-### 5.2. Binary page batch
+### 5.2. One file per golden image
 
-| Part           | Encoding                                                                                                                                                                          |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Magic          | ASCII `QPD3`                                                                                                                                                                      |
-| Count          | Page count N, LEB128                                                                                                                                                              |
-| N page indexes | Each as its gap from the previous index plus one (the first: from 0), LEB128                                                                                                      |
-| N block lists  | Each page's changed 64-byte blocks: a count byte k; then, if k < 8, the k block numbers in order, one byte each; if 8 <= k < 64, a 64-bit mask, little-endian; if k = 64, nothing |
-| Blocks         | One Zstd frame: the changed blocks, page by page, in order, back to back                                                                                                          |
-
-The **reference** is the blocks the batch replaces, back to back: their
-contents in the memory the batch applies to. The frame is compressed with the
-reference as its prefix (`ZSTD_CCtx_refPrefix`), level 2, long-distance
-matching, and a window covering reference and blocks (at least 2^17, at most
-2^27, for twice 64 MiB); decoding needs the same reference. Indexes are
-sorted, unique and below `64 MiB / 4096`; counts match their masks; and the
-frame decodes to exactly the reference's length. The lists come first,
-outside the frame, because decoding needs the reference they name. The
-encoder lists a block when any of its bytes differ, and every block of a page
-with 16 or more.
+The memory file is named after its golden image, and opens only with it
+(sqlite-kv refuses another base): its log since the last checkpoint, and its
+pages in place, decode only against that image. A new run in the scope
+writes holes for the previous run's pages in its first seal, in the
+previous run's file (without its golden image: a hole needs none), then its
+own pages in its own file. A scope that runs one program reuses one file; a
+new program version adds a file, which the previous one's emptied file stays
+beside, at no cost but its directory entry.
 
 ### 5.3. Capture algorithm
 
-Inputs are golden image G, the parent P (the memory as of the last commit, kept
-beside the live VM as G and the pages that differ from it), the commit's chain, the live VM and its tracker. A new run
-has P=G and an empty chain.
+Inputs are golden image G, the parent P (the memory as of the last commit,
+kept beside the live VM as G and the pages that differ from it), the live VM
+and its tracker. A new run has P=G.
 
 ```text
-capture(G, P, chain, VM):
+capture(G, P, VM):
     require no active Wasm call or pending host operation future
     read VM metadata first
     require VM.length >= P.length, aligned to 64 KiB, within limit
-    batch = []
+    changed = []
     for each written page i in ascending order:
         previous = P.page(i), or zeros beyond P.length
         zero VM's dead bytes in page i: below the stack pointer, and
             free heap chunks past their links (§5.6)
         current = VM.page(i)
         if current == previous: continue
-        batch.append(i, current, against previous)
+        changed.append(i)
         P.page(i) = current
-    if the run settled: clear the chain              // no image is kept
-    else if the run has no batch yet:
-        restart the chain with the batch, the base    // P was G; clears the
-                                                      // scope's previous run's
-    else if batch is not empty:
-        if chain has 256 batches, or deltaBytes + batch > 2 * baseBytes:
-            batch = every page of P that differs from G, against G
-            restart the chain with it                 // a new base
-        else: append the batch to the chain
-    return the chain update
+    return changed
+
+prepare(changed):                                 // the memory's part of the seal
+    if the scope's previous run left pages: write each as a hole, in its file
+    if the run settled: write every page of P that differs from G as a hole
+                        pages = []                // no image is kept
+    else: write P.page(i) for each i in changed   // the journal makes one equal
+                                                  // to G's a hole
+          pages = the pages of P that differ from G
+    set the record "memory"
 ```
 
 Count compared pages as examined, actual changes as changed. Zeroing dead
 bytes in the VM itself keeps the VM equal to the image it restores from;
 golden is captured with all its dead bytes zeroed. Dead bytes in pages not
-compared stay as they were, in the VM and in P alike. Updating P with
-each changed page keeps it equal to the VM's memory as of the commit: the
-`verify-dirty` build checks that every page that differs from it was written
-(marked or listed), in either mechanism.
-A new base bounds restoring to at most 256 batches, and at most three times
-the base's size. The batches it replaces become garbage.
-
-The size rule alone keeps a run's rewrites to a third of what it writes: a
-new base, of size B, follows 2B of deltas. The batch count only bounds the
-reads of a restore, which fetches the chain's batches all at once; each new
-base it forces costs a whole image. Measured on 18 October 2026, total bytes
-written in `MemoryStore` (batches and commits):
-
-| New base when                     | sleep loop, 400 turns | agent, 400 turns | Map of 5,000 entries, 100 turns |
-| --------------------------------- | --------------------- | ---------------- | ------------------------------- |
-| 16 batches, or deltas > 2 × base  | 633 KiB               | 1,085 KiB        | 5,878 KiB                       |
-| 256 batches, or deltas > 2 × base | 620 KiB               | 1,010 KiB        | 2,256 KiB (58 batches)          |
-| deltas > 1 × base                 | 735 KiB               | 1,229 KiB        | 2,669 KiB                       |
-| deltas > 4 × base                 | 570 KiB               | 904 KiB          | 2,547 KiB                       |
-
-The sleep loop and the agent write mostly commits and small deltas, over a
-base of 5-10 KiB once dead bytes are zeroed; the Map's base is ~600 KiB, and
-16 batches rewrote it every 16 turns.
+compared stay as they were, in the VM and in P alike. Updating P with each
+changed page keeps it equal to the VM's memory as of the commit: the
+`verify-dirty` build checks that every page that differs from it was
+written (marked or listed), in either mechanism. A turn writes the pages it
+changed, once into the log and once in place at a checkpoint: it never
+rewrites the whole image.
 
 ### 5.4. Reconstruction algorithm
 
 ```text
-reconstruct(commit):
-    require the program's version and the runtime's match the commit's
+reconstruct(run, memory):
+    require the program's version and the runtime's match the run's
     require golden_length <= memoryLen <= limit, 64-KiB aligned
     memory = golden bytes, extended with zeros to memoryLen
-    the chain's batches came with the record, at open
-    for each batch in the chain, in order:
-        indexes = its page indexes; require each within memory
-        pages = its frame, decoded against memory's pages at indexes
-        write pages into memory at indexes
-    return Image(memory, commit.meta)
+    read the pages memory.pages lists from memory.file, together
+        (each from the log, the process's page cache, or its page key)
+    write them into memory
+    return Image(memory, memory.meta)
 ```
 
 The process keeps each golden image decompressed in its catalog, shared by
-every image made from it: an image holds only the pages that differ. An attempt
-reconstructs once, when its first delivery needs the VM; reading a settled
-run's commit needs no image.
+every image made from it: an image holds only the pages that differ. An
+attempt reconstructs once, when its first delivery needs the VM; reading a
+settled run's commit needs no image.
 
 ### 5.5. Programs
 
@@ -880,28 +863,31 @@ Resume can coexist. Once the root settles, the run is final.
 
 ## 7. Storage: one commit per turn
 
-A turn is one commit of the scope's database (`Session::commit_turn`), one
-put of its record:
+A turn is one commit of the scope's database (`Session::seal`), one put of
+its record:
 
 1. its KV writes, the SQL transaction its first KV request began;
-2. its pages: the chain update of §5.3 (append, restart or clear);
-3. the run's state, as the record's effects, with the pending requests.
+2. its memory's pages that changed, into the file over golden (§5.3);
+3. the run's state, as the record `run`, with the pending requests; the
+   memory's, as the record `memory`; and each extension's record that
+   changed.
 
-Writes land in any order (§1), so nothing may be its own put: a turn's batch
-and a commit that names it could not be ordered. The record carries the
-batch inline, or names it as a stored value it waits for first (a batch
-larger than the inline budget, 1 KiB here). Past the budget, the record's
-earlier inline parts are sealed into one stored value, which the next commit
-names; a SQL checkpoint keeps the chain. A crash before the record is stored
-loses the whole turn, which the next attempt runs again from the previous
-commit: the requests it issued were never dispatched (§1). Nothing is
-applied after a commit.
+Writes land in any order (§1), so nothing may be its own put: a turn's pages
+and a commit that names them could not be ordered. The record carries the
+turn's log segments (SQL and memory pages alike) inline, or names them as a
+stored value it waits for first (a transaction larger than the inline
+budget, 1 KiB here). Past the budget, the record's earlier inline parts are
+sealed into one stored value, which the next commit names. A checkpoint
+writes every file's logged pages in place, the memory's with the SQL's. A
+crash before the record is stored loses the whole turn, which the next
+attempt runs again from the previous commit: the requests it issued were
+never dispatched (§1). Nothing is applied after a commit.
 
 **SQL again.** Until 18 October 2026 the scope's records lived in SQL tables
 through an earlier sqlite-kv; it cost a turn about 2 ms of CPU and wrote
 every log segment twice, so it gave way to one commit record of its own
 (with `batch/<n>` and `kv/<key>` keys) that relied on ordered writes. With
-the journal off, writes are not ordered, and sqlite-kv v14's one record per
+the journal off, writes are not ordered, and sqlite-kv's one record per
 commit, with the host's effects and chain in it, is that commit. Measured on
 18 October 2026 (`cargo bench --bench checkpoints`, medians), against that
 record of its own:
@@ -1002,7 +988,7 @@ An implementation can be built and accepted in this order:
    pending promises and queued jobs before optimizing capture.
 2. Implement the JSON bridge and the turn over a store in memory. Add stable
    IDs, duplicate handling, and an unusable run after an error.
-3. Add the batch codec, the chain of batches, growth, and new bases.
+3. Add the memory's pages to the journal (a file over golden), and growth.
 4. Add write barriers and host marking, retaining a full-scan control and a
    verification oracle: every actually changed page must have been marked.
 5. Add the commit protocol, then crash tests at every write.
@@ -1064,29 +1050,28 @@ interpreter runs compute-bound code ~10x slower than V8.
 scripted session over an in-memory store, to the program's own limit of 200
 steps. Each step is a few hundred bytes of model text and one tool call: a
 file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
-(~3 KiB). The model is reached with `fetch`, its body `fetch.json(request)`
-([FETCH.md](FETCH.md)); each request is the whole conversation so far.
-Measured on 20 October 2026 (4 vCPUs):
+(~3 KiB). The model is a conversation of the host's gateway
+([LLM.md](LLM.md)): the program sends each step's new messages, which go
+into the scope's database, and the host reads the whole conversation from
+there for each request. Measured on 20 October 2026 (4 vCPUs):
 
-| Step | Request to the model | Stored by the step | Model turn | Tool turn |
-| ---: | -------------------: | -----------------: | ---------: | --------: |
-|    1 |              1.7 KiB |             9.3 KB |    1.06 ms |   0.65 ms |
-|   10 |               31 KiB |              13 KB |    1.36 ms |   0.58 ms |
-|   41 |              136 KiB |              10 KB |    0.65 ms |   0.70 ms |
-|   99 |              328 KiB |              12 KB |    1.11 ms |   0.96 ms |
-|  190 |              636 KiB |              12 KB |    1.32 ms |   1.14 ms |
+| Step | Request to the model | Reading it | Stored by the step | Model turn | Tool turn |
+| ---: | -------------------: | ---------: | -----------------: | ---------: | --------: |
+|    1 |              1.7 KiB |    0.57 ms |             9.3 KB |    1.59 ms |   1.33 ms |
+|   10 |               31 KiB |    0.53 ms |              16 KB |    1.50 ms |   1.22 ms |
+|   41 |              136 KiB |    1.02 ms |             9.7 KB |    1.02 ms |   1.37 ms |
+|   98 |              327 KiB |    1.91 ms |              16 KB |    1.61 ms |   1.03 ms |
+|  190 |              636 KiB |    3.56 ms |              16 KB |    1.76 ms |   1.09 ms |
 
-- **Per step:** 12 KB at the median, 9–34 KB for nine steps in ten, whatever
-  the conversation's length: the request stays in the heap, which holds the
-  conversation anyway, so a step stores the pages its new messages and the
-  model's response take, and a commit record of ~370 B.
-- **New bases:** ten steps (13, 20, 28, 40, 53, 70, 89, 115, 144, 178) write
-  a new base (§5.3), the whole image: 34 KB to 244 KB, growing with the
-  conversation.
-- **The session:** 3.2 MiB stored over 200 steps. Restate journals none of
-  the requests: the host reads each from the heap as it sends it.
-- **Restores:** a new attempt, every 25 steps, restores the run in 0.4–0.8
-  ms.
+- **Per step:** 10 KB at the median, 9–33 KB for nine steps in ten, whatever
+  the conversation's length: the rows of its new messages, a heap batch of
+  2–4 KB (the loop, the latest response) and a commit record of ~365 B.
+- **Checkpoints:** every 16 steps or so, the database writes its pages in
+  place: 31–41 KB, flat. The heap, 1.5 MiB, needs no new base.
+- **The session:** 2.5 MiB stored over 200 steps. Neither the heap nor
+  Restate's journal holds the requests.
+- **Restores:** a new attempt, every 25 steps, restores the run in 1–19 ms,
+  reopening the database.
 
 ## 11. Scope limits, provenance and references
 

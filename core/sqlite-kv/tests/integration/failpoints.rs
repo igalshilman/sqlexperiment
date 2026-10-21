@@ -164,7 +164,7 @@ fn a_failed_commit_is_there_only_if_its_sync_stored_it() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
-        for (operation, prefix) in [(Operation::Put, "v14/page/"), (Operation::Sync, "")] {
+        for (operation, prefix) in [(Operation::Put, "v15/page/"), (Operation::Sync, "")] {
             for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
                 // The save checkpoints the log once it has committed.
@@ -241,7 +241,7 @@ fn open_read_failures_are_retryable() -> Result<()> {
 fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let key = "v14/page/0000000000000001";
+        let key = "v15/page/0000000000000001";
         assert!(store.get(key).await?.is_none());
         store.put(key, vec![1; 4096].into())?;
         store.get(key).await?;

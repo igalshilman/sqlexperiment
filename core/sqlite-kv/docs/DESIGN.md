@@ -37,15 +37,19 @@ covers differs.
 
 A namespace holds four kinds of keys:
 
-| Key            | Holds                                                                                                                                                                         |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v14/commit`   | The commit record: the version, the epoch, the size, the log since the last checkpoint (its tail inline, the rest naming stored values), the host's effects and chain.        |
-| `v14/log/<n>`  | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, before the record that names it, deleted once no record names it. |
-| `v14/page/<n>` | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                                     |
-| `v14/hint`     | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                                       |
+| Key                | Holds                                                                                                                                                                                                                |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v15/commit`       | The commit record: the version, the epoch, the directory of files (records and paged files, with their sizes), the log since the last checkpoint (its tail inline, the rest naming stored values), the host's chain. |
+| `v15/log/<n>`      | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, before the record that names it, deleted once no record names it.                                        |
+| `v15/page/<f>/<n>` | Page _n_ of paged file _f_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                                                          |
+| `v15/hint`         | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                                                                              |
 
-**Read rule.** Page _n_ is its latest image in the record's log, else
-`page/<n>`, else zeros.
+**Read rule.** Page _n_ of a paged file is its latest image in the record's
+log, else `page/<f>/<n>`, else zeros. The SQL database is the paged file
+`db`; the host's files (`Session::file`) are others, written in the same
+transactions. Everything below says "page" for a page of any file: a page is
+a file and a number. A file with a base (a VM's memory over its golden image)
+reads its base's page where it has none; see `FORMAT.md`.
 
 **The record is the commit point.** A transaction is committed once a record
 that holds it is durable. Each put of the record is one transaction more
@@ -92,8 +96,9 @@ and commits them:
    place. So every commit rewrites a record of a few KiB, while the log grows
    long between checkpoints.
 5. **Commit.** Put the record: the previous record's log plus this
-   transaction, at the next version, with the host's effects if it set them,
-   listing as garbage the values it names no more.
+   transaction, at the next version, with the records the host set (a large
+   one stored first, as a value of its own), listing as garbage the values it
+   names no more.
 6. **Checkpoint the whole log, now and then.** When the log then holds more
    than `checkpoint_after` transactions (32) or `checkpoint_log_bytes`
    (64 KiB), each page's latest image to its page key (holes become deletes),
@@ -178,7 +183,7 @@ acknowledged work when a later step fails.
 ## Open
 
 1. Read the record. An owner that knows no pages of the namespace also reads
-   `v14/hint`, in the same round trip.
+   `v15/hint`, in the same round trip.
 2. Replay its log: inline segments are in hand, stored values the owner
    cache holds too, and the others are read together, in one more round trip.
 3. **Cold opens prefetch.** The engine reads one dependent page at a time, so
@@ -375,7 +380,7 @@ checkpoint. Measurements: [log shipping](../benches/LOG_RESULTS.md),
   numbers, so a bug cannot overflow arithmetic or size a huge view. A log
   segment's zstd frame has a checksum, which also catches a segment decoded
   against the wrong previous images; pages have none.
-- **Format.** Only v14, with no migration.
+- **Format.** Only v15, with no migration.
 - **Compression chain.** The simulator's monitor decodes every record it
   sees; the TLA+ specification does not model compression.
 - **Validation.** A monitor checks every write of the simulator's crash

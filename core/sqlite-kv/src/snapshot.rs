@@ -15,9 +15,9 @@
 //! 1. **Garbage:** deletes of the stored values the durable record lists as
 //!    garbage (it names them no more).
 //! 2. **Stored values:** a transaction larger than the record's inline budget
-//!    ([`StorageOptions::inline_log_bytes`]), or a large chain value, goes to
-//!    stored values; past the budget, the record's inline parts are sealed
-//!    into one.
+//!    ([`StorageOptions::inline_log_bytes`]), a large chain value, or a large
+//!    record, goes to stored values; past the budget, the record's inline log
+//!    and chain parts are sealed into one.
 //! 3. **Commit:** the record: the log so far plus the new transaction, naming
 //!    those values, and listing as garbage the ones it names no more.
 //! 4. **Checkpoint:** once more than [`StorageOptions::checkpoint_after`]
@@ -46,7 +46,10 @@ use crate::{
     format::{COMMIT, HINT, log_key, page_key},
     hint::{self, Usage},
     kv::KvStore,
-    log::{self, Commit, Images, Log, Logged, Part, Sealed},
+    log::{
+        self, Base, Bases, Change, Commit, Entry, Images, Kind, Log, Logged, Part, Records, Sealed,
+        file_of, page_id, page_of,
+    },
     page_codec::{self, Page, PageCompression},
 };
 use bytes::Bytes;
@@ -56,8 +59,27 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Logical page replacements from the session; `None` is a hole.
-type Changes = BTreeMap<u64, Option<Page>>;
+/// Logical page replacements of one file, by page number; `None` is a hole.
+pub(crate) type Changes = BTreeMap<u64, Option<Page>>;
+
+/// The name of the file SQL keeps its database in.
+pub(crate) const SQL_FILE: &str = "db";
+
+/// What a commit writes to one paged file: its size after it, and the pages
+/// it changed.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Written {
+    pub size: u64,
+    pub pages: Changes,
+}
+
+/// What a commit writes to paged files, by name.
+pub(crate) type Writes = BTreeMap<String, Written>;
+
+/// Writes to the SQL file only.
+pub(crate) fn sql_writes(pages: Changes, size: u64) -> Writes {
+    Writes::from([(SQL_FILE.to_owned(), Written { size, pages })])
+}
 
 /// Default [`StorageOptions::prefetch_pages`].
 pub const PREFETCH_PAGES: u64 = 16;
@@ -161,11 +183,16 @@ impl Default for StorageOptions {
 }
 
 /// `Ok` means the transaction is durable, with this save's checkpoint, if any.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SaveReport {
     /// Pages written in place by this save's checkpoint; 0 when it did not
     /// checkpoint.
     pub checkpointed_pages: usize,
+    /// Bytes of its transaction's log segments, every file's: about what its
+    /// pages changed.
+    pub logged_bytes: usize,
+    /// Bytes of the commit record it put; 0 when nothing changed.
+    pub record_bytes: usize,
     /// The database's version after this save.
     pub(crate) version: u64,
 }
@@ -180,6 +207,10 @@ pub(crate) struct Snapshot {
     pub(crate) log: Log,
     /// The host's chain, each value's bytes.
     chain: Vec<Bytes>,
+    /// The records' values, by name.
+    records: Records,
+    /// The bases files were opened with, by name.
+    bases: BTreeMap<String, Arc<dyn Base>>,
     /// Nothing changed since this owner last saw the namespace: the cache
     /// saw the same record, at this owner's last commit.
     pub(crate) unchanged: bool,
@@ -250,17 +281,24 @@ impl Snapshot {
             None => Commit::default(),
         };
         let known = cache.is_some_and(|c| c.validate(commit_bytes.as_deref(), commit.epoch));
-        // Without warm pages, fetch a small database whole, or the pages the
+        // Without warm pages, fetch each small file whole, and the pages the
         // working-set hint lists, alongside the log's stored segments.
-        let pages = commit.size.div_ceil(PAGE);
         let cold = cache.is_none_or(|cache| !cache.knows_epoch(commit.epoch));
         let logged = commit.inline_pages();
-        let wanted: Vec<u64> = match (cold, &hint) {
-            (false, _) => Vec::new(),
-            _ if pages <= options.prefetch_pages => (0..pages).collect(),
-            (true, Some(hint)) => hint::decode(hint, options.hint_pages).unwrap_or_default(),
-            (true, None) => Vec::new(),
-        };
+        let mut wanted = std::collections::BTreeSet::new();
+        if cold {
+            let mut large = false;
+            for (file, size) in commit.paged() {
+                let pages = size.div_ceil(PAGE);
+                match pages <= options.prefetch_pages {
+                    true => wanted.extend((0..pages).map(|page| page_id(file, page))),
+                    false => large = true,
+                }
+            }
+            if let (true, Some(hint)) = (large, &hint) {
+                wanted.extend(hint::decode(hint, options.hint_pages).unwrap_or_default());
+            }
+        }
         let wanted: Vec<u64> = wanted.into_iter().filter(|n| !logged.contains(n)).collect();
         let prefetch = async {
             let tokens: Vec<_> = wanted.iter().map(|&n| cache.map(|c| c.token(n))).collect();
@@ -273,7 +311,12 @@ impl Snapshot {
         let held = cache.map_or_else(log::Values::new, |cache| cache.values(&named));
         let (replayed, prefetched_pages) =
             futures::try_join!(log::replay(&*store, &commit, held), prefetch)?;
-        let log::Replayed { log, chain, values } = replayed;
+        let log::Replayed {
+            log,
+            chain,
+            records,
+            values,
+        } = replayed;
         if let Some(cache) = cache {
             cache.keep_values(&named, values);
         }
@@ -290,6 +333,8 @@ impl Snapshot {
             commit_bytes,
             log,
             chain,
+            records,
+            bases: BTreeMap::new(),
             unchanged,
             page: Mutex::default(),
             fetched: Mutex::default(),
@@ -349,14 +394,28 @@ impl Snapshot {
         self.commit.version
     }
 
-    /// Logical database size after replaying the log.
+    /// The SQL file's size after replaying the log.
     pub fn size(&self) -> u64 {
-        self.commit.size
+        self.file_size(SQL_FILE)
     }
 
-    /// The commit record's effects (see [`crate::Session::commit_with`]).
-    pub fn effects(&self) -> &Bytes {
-        &self.commit.effects
+    /// The size of the paged file `name` after replaying the log; 0 if it
+    /// has none.
+    pub fn file_size(&self, name: &str) -> u64 {
+        (self.commit.file_id(name)).map_or(0, |id| self.commit.size(id))
+    }
+
+    /// Page `page` of the file `name`: see [`Self::block`].
+    pub async fn read(&self, name: &str, page: u64) -> io::Result<Option<Page>> {
+        match self.commit.file_id(name) {
+            Some(id) => self.block(page_id(id, page)).await,
+            None => Ok(None),
+        }
+    }
+
+    /// The records' values, by name (see [`crate::Session::record`]).
+    pub fn records(&self) -> &Records {
+        &self.records
     }
 
     /// The host's chain, each value's bytes, in order.
@@ -364,8 +423,41 @@ impl Snapshot {
         &self.chain
     }
 
-    /// Decode a logical page; `None` means a hole. The log's latest image wins,
-    /// then the cache, then the checkpointed value at `page/<n>`.
+    /// The base the file `file` was opened with; `Err` for a file made with
+    /// a base it was not opened with.
+    fn base_of(&self, file: u32) -> io::Result<Option<&Arc<dyn Base>>> {
+        let Some(entry) = self.commit.directory.get(&file) else {
+            return Ok(None);
+        };
+        match (&entry.kind, self.bases.get(&entry.name)) {
+            (Kind::Paged { base: Some(_), .. }, None) => Err(io::Error::other(format!(
+                "{:?} has a base: open it with it",
+                entry.name
+            ))),
+            (_, base) => Ok(base),
+        }
+    }
+
+    /// The bases of the files opened with one, by id.
+    fn bases(&self, commit: &Commit) -> Bases {
+        (self.bases.iter())
+            .filter_map(|(name, base)| Some((commit.file_id(name)?, base.clone())))
+            .collect()
+    }
+
+    /// What a hole of the page `index` reads as: its file's base page, if it
+    /// has a base.
+    fn hole(&self, index: u64) -> io::Result<Option<Page>> {
+        let base = self.base_of(file_of(index))?;
+        Ok(base
+            .and_then(|base| base.page(page_of(index)))
+            .map(Page::copy_from_slice))
+    }
+
+    /// Decode the page `index` (a page id, see [`log::page_id`]); `None` means
+    /// zeros. The log's latest image wins, then the cache, then the
+    /// checkpointed value at its page key. A hole, or a page absent from the
+    /// store, of a file with a base reads as the base's page.
     pub async fn block(&self, index: u64) -> io::Result<Option<Page>> {
         if let Some((cached, page)) = &*self.page.lock().unwrap()
             && *cached == index
@@ -373,8 +465,12 @@ impl Snapshot {
             return Ok(Some(page.clone()));
         }
         let cache = self.options.cache.as_ref();
+        let base = self.base_of(file_of(index))?;
+        let base_page = base.and_then(|base| base.page(page_of(index)));
         let page = if let Some(image) = self.log.images.get(&index) {
-            let Some(image) = image else { return Ok(None) };
+            let Some(image) = image else {
+                return self.hole(index);
+            };
             image.clone()
         } else if let Some((cache, value)) = match cache {
             Some(cache) => cache.get(index).await.map(|value| (cache, value)),
@@ -382,13 +478,13 @@ impl Snapshot {
         } {
             match cache.is_decoded() {
                 true => value,
-                false => page_codec::decode_bytes(&value)?,
+                false => page_codec::decode_against(&value, base_page)?,
             }
         } else {
             let (token, Some(image)) = self.fetch(index).await? else {
-                return Ok(None);
+                return self.hole(index);
             };
-            let page = page_codec::decode_bytes(&image)?;
+            let page = page_codec::decode_against(&image, base_page)?;
             if let (Some(cache), Some(token)) = (cache, token) {
                 let value = if cache.is_decoded() {
                     page.clone()
@@ -415,7 +511,8 @@ impl Snapshot {
             return Ok(value);
         }
         let ahead = self.readahead.lock().unwrap().window();
-        let last = self.size().div_ceil(PAGE);
+        let file = file_of(index);
+        let last = page_id(file, self.commit.size(file).div_ceil(PAGE));
         let ahead: Vec<u64> = {
             let fetched = self.fetched.lock().unwrap();
             (index + 1..(index + 1 + ahead).min(last))
@@ -453,7 +550,7 @@ impl Snapshot {
 
     /// Whether the log is long enough to checkpoint.
     fn wants_checkpoint(&self) -> bool {
-        !self.log.transactions.is_empty() && self.too_long(0, 0)
+        !self.log.transactions.is_empty() && self.too_long(0, 0) && !self.log.waits_for_bases()
     }
 
     /// Whether the log, with `transactions` more of `bytes`, passes a
@@ -470,25 +567,75 @@ impl Snapshot {
     /// cancellation. After an error, reopen; never reuse this snapshot.
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
-        Ok(self.commit(dirty, size, None, None).await?.0)
+        let writes = sql_writes(dirty, size);
+        Ok(self.commit(writes, Records::new(), None).await?.0)
     }
 
     /// [`Self::publish`], also returning the committed view afterwards, which a
-    /// session may continue on. This snapshot is not used again. With
-    /// `effects`, the record's effects become them, and with `chain`, the
-    /// host's chain changes, in the same put. Without SQL changes the log
-    /// gains no transaction; without any change nothing is committed. A commit
-    /// that leaves the log long also checkpoints it, before the one sync.
+    /// session may continue on. This snapshot is not used again. `writes`
+    /// change paged files (a new name makes a new file), each of `records`
+    /// replaces that record's value, and with `chain`, the host's chain
+    /// changes, in the same put. Without page changes the log gains no
+    /// transaction; without any change nothing is committed. A commit that
+    /// leaves the log long also checkpoints it, before the one sync.
     pub(crate) async fn commit(
         &self,
-        dirty: Changes,
-        size: u64,
-        effects: Option<Bytes>,
+        mut writes: Writes,
+        mut records: Records,
         chain: Option<ChainUpdate>,
     ) -> io::Result<(SaveReport, Self)> {
-        let effects = effects.filter(|effects| *effects != self.commit.effects);
-        let changed = !dirty.is_empty() || size != self.size();
-        if !changed && effects.is_none() && chain.is_none() {
+        // A record never set reads as empty.
+        records.retain(|name, value| {
+            self.records
+                .get(name)
+                .map_or(!value.is_empty(), |v| v != value)
+        });
+        if let Some((name, value)) = records
+            .iter()
+            .find(|(_, v)| v.len() > log::MAX_RECORD_BYTES)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "record {name:?} of {} bytes exceeds {}",
+                    value.len(),
+                    log::MAX_RECORD_BYTES
+                ),
+            ));
+        }
+        for name in records.keys().chain(writes.keys()) {
+            if name.len() > log::MAX_NAME_BYTES {
+                return refuse(format!(
+                    "name {name:?} exceeds {} bytes",
+                    log::MAX_NAME_BYTES
+                ));
+            }
+        }
+        for (name, written) in &writes {
+            let paged = |id| matches!(self.commit.directory[&id].kind, Kind::Paged { .. });
+            if records.contains_key(name) || self.commit.file_id(name).is_some_and(|id| !paged(id))
+            {
+                return refuse(format!("{name:?} is a record, not a paged file"));
+            }
+            let size = written.size;
+            if !size.is_multiple_of(512) || size > log::MAX_DATABASE_BYTES {
+                return refuse(format!("{name:?}: invalid size {size}"));
+            }
+            if written.pages.keys().any(|&page| page >= 1 << 32) {
+                return refuse(format!("{name:?}: a page past the largest file"));
+            }
+        }
+        for name in records.keys() {
+            let paged = |id| matches!(self.commit.directory[&id].kind, Kind::Paged { .. });
+            if self.commit.file_id(name).is_some_and(paged) {
+                return refuse(format!("{name:?} is a paged file, not a record"));
+            }
+        }
+        writes.retain(|name, written| {
+            !written.pages.is_empty() || written.size != self.file_size(name)
+        });
+        let changed = !writes.is_empty();
+        if !changed && records.is_empty() && chain.is_none() {
             let report = SaveReport {
                 version: self.version(),
                 ..SaveReport::default()
@@ -506,13 +653,48 @@ impl Snapshot {
                 "another session committed since this one opened; reopen",
             ));
         }
-        let images: Images = dirty;
-        let segments = match changed {
-            true => log::encode_transaction(&images, &self.log.chain)?,
-            false => Vec::new(),
-        };
-        let logged_bytes = segments.iter().map(Bytes::len).sum::<usize>();
         let mut commit = self.commit.clone();
+        // A file's id, allocated for a new name.
+        let allocate = |commit: &mut Commit, name: &str, kind: Kind| match commit.file_id(name) {
+            Some(id) => Ok(id),
+            None if commit.next_file >= log::MAX_FILES => refuse("too many files".into()),
+            None => {
+                let id = commit.next_file;
+                commit.next_file += 1;
+                let name = name.to_owned();
+                commit.directory.insert(id, Entry { name, kind });
+                Ok(id)
+            }
+        };
+        let mut images = Images::new();
+        let mut sizes = BTreeMap::new();
+        for (name, written) in writes {
+            let base = self.bases.get(&name);
+            let kind = Kind::Paged {
+                size: 0,
+                base: base.map(|base| base.id()),
+            };
+            let id = allocate(&mut commit, &name, kind)?;
+            let based = matches!(
+                commit.directory[&id].kind,
+                Kind::Paged { base: Some(_), .. }
+            );
+            for (page, image) in written.pages {
+                let image = match (based, base) {
+                    (true, None) if image.is_some() => {
+                        return refuse(format!("{name:?} has a base: open it with it"));
+                    }
+                    // A page of the base is a hole.
+                    (true, Some(base)) if image.as_deref() == base.page(page) => None,
+                    _ => image,
+                };
+                images.insert(page_id(id, page), image);
+            }
+            sizes.insert(id, written.size);
+        }
+        let bases = self.bases(&commit);
+        let mut segments = log::encode_transaction(&images, &self.log.chain, &bases)?;
+        let logged_bytes = segments.values().flatten().map(Bytes::len).sum::<usize>();
         // Stored values this record names, for the cache.
         let mut named = log::Values::new();
         let named_before = commit.stored_values();
@@ -530,8 +712,8 @@ impl Snapshot {
             write(&log_key(n), None)?;
         }
         commit.garbage.clear();
-        // 2. A transaction past the budget, or a chain value, goes to a
-        // stored value of its own, before the record that names it.
+        // 2. A transaction past the budget, a chain value or a record goes to
+        // a stored value of its own, before the record that names it.
         let mut store_value = |commit: &mut Commit, parts: &[Bytes]| {
             let n = commit.next_segment;
             commit.next_segment += 1;
@@ -540,15 +722,27 @@ impl Snapshot {
             write(&log_key(n), Some(value)).map(|()| n)
         };
         let large = logged_bytes > budget;
-        let parts: Vec<Part> = match large {
-            true => (segments.iter())
-                .map(|segment| {
-                    store_value(&mut commit, std::slice::from_ref(segment))
-                        .map(|n| Part::Stored(n, 0))
-                })
-                .collect::<io::Result<_>>()?,
-            false => segments.into_iter().map(Part::Inline).collect(),
-        };
+        let mut changes = Vec::with_capacity(sizes.len());
+        for (&file, &size) in &sizes {
+            let segments = segments.remove(&file).unwrap_or_default();
+            let parts: Vec<Part> = match large {
+                true => (segments.iter())
+                    .map(|segment| {
+                        store_value(&mut commit, std::slice::from_ref(segment))
+                            .map(|n| Part::Stored(n, 0))
+                    })
+                    .collect::<io::Result<_>>()?,
+                false => segments.into_iter().map(Part::Inline).collect(),
+            };
+            if let Some(Entry {
+                kind: Kind::Paged { size: held, .. },
+                ..
+            }) = commit.directory.get_mut(&file)
+            {
+                *held = size;
+            }
+            changes.push(Change { file, size, parts });
+        }
         let mut values = self.chain.clone();
         let (restart, value) = match &chain {
             None => (false, None),
@@ -593,23 +787,34 @@ impl Snapshot {
             commit.chain.push(part);
             values.push(value.clone());
         }
+        let mut after_records = self.records.clone();
+        for (name, value) in records {
+            let empty = Kind::Record(Part::Inline(Bytes::new()));
+            let id = allocate(&mut commit, &name, empty)?;
+            let record = match value.len() > budget {
+                true => Part::Stored(store_value(&mut commit, std::slice::from_ref(&value))?, 0),
+                false => Part::Inline(value.clone()),
+            };
+            if let Some(entry) = commit.directory.get_mut(&id) {
+                entry.kind = Kind::Record(record);
+            }
+            after_records.insert(name, value);
+        }
         // 3. The record, listing as garbage the values it names no more.
         commit.version += 1;
         if changed {
-            commit.size = size;
-            commit.log.push(Logged { size, parts });
-        }
-        if let Some(effects) = effects {
-            commit.effects = effects;
+            commit.log.push(Logged { changes });
         }
         commit.garbage = &named_before - &commit.stored_values();
         let bytes = commit.encode();
+        let record_bytes = bytes.len();
         write(COMMIT, Some(bytes.clone()))?;
         let version = commit.version;
         let mut after = self.continued(commit, Some(bytes));
         after.chain = values;
+        after.records = after_records;
         if changed {
-            after.extend(size, images, logged_bytes);
+            after.extend(images, logged_bytes);
         }
         // 4. A long log is checkpointed in the same sync. This view is not
         // used again: it must not hold the checkpoint back.
@@ -634,6 +839,8 @@ impl Snapshot {
         }
         let mut report = SaveReport {
             checkpointed_pages: 0,
+            logged_bytes,
+            record_bytes,
             version,
         };
         if let Some(checkpoint) = checkpoint {
@@ -669,7 +876,8 @@ impl Snapshot {
         &mut self,
         write: &impl Fn(&str, Option<Bytes>) -> io::Result<()>,
     ) -> io::Result<Checkpoint> {
-        let checkpoint = Checkpoint::new(&self.log.images, self.options.page_compression)?;
+        let bases = self.bases(&self.commit);
+        let checkpoint = Checkpoint::new(&self.log.images, self.options.page_compression, &bases)?;
         for (index, image) in &checkpoint.images {
             write(&page_key(*index), image.clone())?;
         }
@@ -682,7 +890,7 @@ impl Snapshot {
             log: Vec::new(),
             ..self.commit.clone()
         };
-        // The log's stored values, but those the chain names too.
+        // The log's stored values, but those the chain or a record names too.
         commit.garbage =
             &self.commit.garbage | &(&self.commit.stored_values() - &commit.stored_values());
         let bytes = commit.encode();
@@ -705,7 +913,6 @@ impl Snapshot {
                 .transactions
                 .iter()
                 .map(|t| log::Transaction {
-                    size: t.size,
                     pages: t.pages.clone(),
                     bytes: t.bytes,
                 })
@@ -713,6 +920,7 @@ impl Snapshot {
             images: self.log.images.clone(),
             bytes: self.log.bytes,
             chain: self.log.chain.clone(),
+            undecoded: self.log.undecoded.clone(),
         };
         Self {
             store: self.store.clone(),
@@ -721,6 +929,8 @@ impl Snapshot {
             commit_bytes,
             log,
             chain: self.chain.clone(),
+            records: self.records.clone(),
+            bases: self.bases.clone(),
             unchanged: false,
             page: Mutex::default(),
             fetched: Mutex::new(std::mem::take(&mut *self.fetched.lock().unwrap())),
@@ -729,6 +939,26 @@ impl Snapshot {
             usage: Mutex::new(std::mem::take(&mut *self.usage.lock().unwrap())),
             reader: Mutex::default(),
         }
+    }
+
+    /// This view, with the file `name` opened with `base`: a file made with
+    /// another base, or without one, refuses it. Its log decodes now.
+    pub(crate) fn with_base(&self, name: &str, base: Arc<dyn Base>) -> io::Result<Self> {
+        let id = self.commit.file_id(name);
+        if let Some(id) = id {
+            match &self.commit.directory[&id].kind {
+                Kind::Paged {
+                    base: Some(held), ..
+                } if *held == base.id() => {}
+                _ => return refuse(format!("{name:?} was made with another base, or none")),
+            }
+        }
+        let mut with = self.continued(self.commit.clone(), self.commit_bytes.clone());
+        if let Some(id) = id {
+            with.log.decode_file(id, &*base)?;
+        }
+        with.bases.insert(name.to_owned(), base);
+        Ok(with.registered())
     }
 
     /// An empty view at the same version, for a parked engine: no log images,
@@ -763,13 +993,18 @@ impl Snapshot {
 
     /// Add this owner's acknowledged transaction to the log. Values fetched
     /// ahead for its pages are stale once a checkpoint drops it from the log.
-    fn extend(&mut self, size: u64, images: Images, bytes: usize) {
+    fn extend(&mut self, images: Images, bytes: usize) {
         let fetched = self.fetched.get_mut().unwrap();
         for page in images.keys() {
             fetched.remove(page);
         }
-        self.log.append(size, images, bytes);
+        self.log.append(images, bytes);
     }
+}
+
+/// A commit refused before it writes anything: what it was asked is invalid.
+fn refuse<T>(message: String) -> io::Result<T> {
+    Err(io::Error::new(io::ErrorKind::InvalidInput, message))
 }
 
 /// A checkpoint's page values: each page's latest image, encoded.
@@ -778,13 +1013,23 @@ struct Checkpoint {
 }
 
 impl Checkpoint {
-    fn new(images: &Images, compression: PageCompression) -> io::Result<Self> {
+    /// A page of a file with a base is encoded against its base page, and
+    /// is a hole if it equals it.
+    fn new(images: &Images, compression: PageCompression, bases: &Bases) -> io::Result<Self> {
         let images = images
             .iter()
             .map(|(&index, image)| {
-                let value = match image {
-                    Some(page) => Some(Bytes::from(page_codec::encode(page, compression)?)),
-                    None => None,
+                let base = bases.get(&file_of(index));
+                let base_page = base.and_then(|base| base.page(page_of(index)));
+                let value = match (image, base_page) {
+                    (Some(page), Some(base_page)) if page[..] == base_page[..] => None,
+                    (Some(page), Some(base_page)) => Some(Bytes::from(page_codec::encode_against(
+                        page,
+                        base_page,
+                        compression,
+                    )?)),
+                    (Some(page), None) => Some(Bytes::from(page_codec::encode(page, compression)?)),
+                    (None, _) => None,
                 };
                 Ok((index, value))
             })

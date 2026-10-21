@@ -1,17 +1,17 @@
 // A shop assistant: Claude, with the shop's functions as its tools. It looks
 // up stock and the customer's balance, and buys through `checkout`. The key
-// is the customer, and the conversation is in its KV: each message
+// is the customer, and the conversation is in its database: each message
 // continues it.
 //
 // The agent loop is plain JavaScript. While it waits on Claude or on a tool,
-// the loop and the conversation are saved with the rest of memory: a crash
-// resumes them, and a model call already answered is not made again.
+// the loop is saved with the rest of memory: a crash resumes it, and a model
+// call already answered is not made again.
 //
 //   ANTHROPIC_API_KEY=... target/release/functions
 //   curl localhost:8080/inventory/widget/restock --json 5
 //   curl localhost:8080/payments/alice/deposit --json 100
 //   curl localhost:8080/assistant/alice/chat --json '"Buy two widgets, if I can afford them"'
-const MODEL = 'claude-opus-5-5';
+const MODEL = 'anthropic/claude-opus-5-5';
 const PRICES = { widget: 10, gadget: 30, gizmo: 5 };
 
 const TOOLS = [
@@ -75,43 +75,22 @@ function shop(customer, ctx) {
   };
 }
 
-// One request to the Claude Messages API. The host adds the API key: the
-// program never holds it. Rate limits and overloads are retried, after a
-// durable sleep.
-async function claude(ctx, request) {
-  for (let attempt = 0; ; attempt++) {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'anthropic-version': '2023-06-01' },
-      body: fetch.json(request),
-    });
-    if (response.ok) return response.json();
-    if (attempt < 8 && [408, 409, 429, 500, 502, 503, 504, 529].includes(response.status)) {
-      await ctx.sleep(Math.min(30_000, 500 * 2 ** attempt));
-      continue;
-    }
-    throw new Error(`Claude API ${response.status}: ${await response.text()}`);
-  }
-}
-
 export async function chat(message, ctx) {
   const customer = ctx.key;
   const tools = shop(customer, ctx);
-  const messages = (await ctx.kv.get('messages')) ?? [];
-  messages.push({ role: 'user', content: message });
+  // The customer's conversation, in the scope's database: each chat
+  // continues it.
+  const conversation = ctx.llm.conversation('chat', {
+    model: MODEL,
+    system: `You are the shop assistant of ${customer}. Use the tools to answer and to buy.`,
+    tools: TOOLS,
+    options: { output_config: { effort: 'low' } },
+  });
+  let next = { role: 'user', content: message };
   for (let step = 0; step < 10; step++) {
-    const response = await claude(ctx, {
-      model: MODEL,
-      max_tokens: 16000,
-      output_config: { effort: 'low' },
-      system: `You are the shop assistant of ${customer}. Use the tools to answer and to buy.`,
-      tools: TOOLS,
-      messages,
-    });
+    const response = await conversation.send({ messages: [next] });
     if (response.stop_reason === 'refusal') return { answer: 'Sorry, I cannot help with that.' };
-    messages.push({ role: 'assistant', content: response.content });
     if (response.stop_reason !== 'tool_use') {
-      await ctx.kv.set('messages', messages);
       const answer = response.content.filter((block) => block.type === 'text');
       return { answer: answer.map((block) => block.text).join('\n') };
     }
@@ -127,7 +106,7 @@ export async function chat(message, ctx) {
         }
       }),
     );
-    messages.push({ role: 'user', content: results });
+    next = { role: 'user', content: results };
   }
   throw new Error('The assistant took too many steps');
 }

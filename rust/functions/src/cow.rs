@@ -19,12 +19,32 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::OnceLock;
 
 /// A program's golden memory, and the sealed file it is mapped from, made on
-/// first use.
+/// first use. It is the base a run's memory file diverges from (see
+/// [`crate::run`]).
 pub(crate) struct Golden {
     bytes: Vec<u8>,
     file: OnceLock<Result<OwnedFd, String>>,
     /// Its heap's chunks, walked once for every VM of the program.
     chunks: OnceLock<Option<Chunks>>,
+    /// Its fingerprint, which names it as a run's memory's base.
+    id: OnceLock<u64>,
+}
+
+/// A run's memory is a file over its program's golden memory: a page that
+/// differs from golden is in the file, and any other reads as golden's.
+impl sqlite_kv::Base for Golden {
+    fn id(&self) -> u64 {
+        *self
+            .id
+            .get_or_init(|| crate::model::fingerprint(&self.bytes))
+    }
+
+    fn page(&self, index: u64) -> Option<&[u8]> {
+        let at = usize::try_from(index)
+            .ok()?
+            .checked_mul(crate::model::PAGE)?;
+        self.bytes.get(at..at.checked_add(crate::model::PAGE)?)
+    }
 }
 
 impl Golden {
@@ -33,6 +53,7 @@ impl Golden {
             bytes,
             file: OnceLock::new(),
             chunks: OnceLock::new(),
+            id: OnceLock::new(),
         }
     }
 

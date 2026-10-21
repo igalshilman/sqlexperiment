@@ -328,6 +328,74 @@ def _key(key):
     return key
 
 
+class Conversation:
+    """A conversation with a model, kept in the scope's database: `send` adds
+    messages, and the host reads them all when it asks the model."""
+
+    def __init__(self, bridge, name, defaults):
+        self._bridge = bridge
+        self.name = name
+        self._defaults = defaults
+
+    def _host(self, operation, **request):
+        return self._bridge.host(operation, {"conversation": self.name, **request})
+
+    async def send(self, *messages, **params):
+        """Add `messages`, and ask the model with the whole conversation and
+        `params` (over the conversation's defaults): its response, which joins
+        the conversation."""
+        if self.name in self._bridge.asking:
+            raise RuntimeError(f"The conversation {self.name} is waiting for the model")
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
+                raise TypeError("A message is a dict whose role is user or assistant")
+        self._host("llm.append", messages=_plain(list(messages)))
+        self._bridge.asking.add(self.name)
+        try:
+            asked = {**self._defaults, **_plain(params), "conversation": self.name}
+            # The host adds the answer to the conversation as it arrives.
+            return await self._bridge.request({"kind": "call", "name": "llm"}, asked)
+        finally:
+            self._bridge.asking.discard(self.name)
+
+    def history(self):
+        """The messages so far."""
+        return self._host("llm.history")
+
+    def clear(self):
+        """Forget the messages so far."""
+        if self.name in self._bridge.asking:
+            raise RuntimeError(f"The conversation {self.name} is waiting for the model")
+        self._host("llm.clear")
+
+
+class Llm:
+    """Models, through the host's gateway: any provider's, in one format (the
+    Anthropic Messages API's), named `<provider>/<model>`."""
+
+    def __init__(self, bridge):
+        self._bridge = bridge
+
+    async def complete(self, request):
+        """Send a whole request, `{"model", "messages", ...}`: its response."""
+        if not isinstance(request, dict) or "conversation" in request:
+            raise TypeError("A model request is a dict: {model, messages, ...}")
+        return await self._bridge.request({"kind": "call", "name": "llm"}, request)
+
+    def conversations(self):
+        """The scope's conversations' names, in the order they began."""
+        return self._bridge.host("llm.list", None)
+
+    def conversation(self, name, **defaults):
+        """The conversation `name` of this scope; `defaults` (model, system,
+        tools...) go with each request."""
+        if not isinstance(name, str) or not name:
+            raise TypeError("A conversation has a name")
+        if "messages" in defaults:
+            raise TypeError("A conversation's defaults have no messages")
+        return Conversation(self._bridge, name, _plain(defaults))
+
+
 class Rpc:
     """Calls to Restate services."""
 
@@ -398,6 +466,7 @@ class Context:
         self.db = Db(bridge)
         self.kv = Kv(bridge)
         self.rpc = Rpc(bridge)
+        self.llm = Llm(bridge)
 
     @property
     def key(self):
@@ -477,6 +546,8 @@ class _Bridge:
         # input: it stays, for the host to read when it makes the call.
         self.pending = {}
         self.inputs = {}
+        # The conversations waiting for the model: one call at a time each.
+        self.asking = set()
         self.issued = []
         self.outcome = None
 

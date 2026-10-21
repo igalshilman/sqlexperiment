@@ -5,15 +5,39 @@
 //! new attempt after a crash would be. Results go to bench-agent.json.
 //!
 //! Per step it reports the request the run sends the model (the whole
-//! conversation, which the host reads from the run's heap: neither the
-//! commit nor Restate's journal keeps it), the time of the step's two turns
-//! (the model's answer in, the tool's result in), and what the step stored.
+//! conversation, which the host reads from the scope's database: the
+//! program's heap holds none of it, and Restate's journal neither), the time
+//! to read it, the time of the step's two turns (the model's answer in, the
+//! tool's result in), and what the step stored.
 use anyhow::{Result, bail, ensure};
-use functions::{Operation, Outcome, Programs, Run, Runtime, Scope, Status};
+use functions::{
+    Binding, Extensions, GuestError, HostCall, Llm, Operation, Outcome, Programs, Provider, Run,
+    Runtime, Scope, Status,
+};
+use futures::future::BoxFuture;
 use futures_executor::block_on as block;
 use serde_json::{Value, json};
 use sqlite_kv::simulation::MemoryKv;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
+/// The scripted model, as the gateway's provider `anthropic`: it answers
+/// with `next`, and keeps the size of the request it was sent.
+#[derive(Clone, Default)]
+struct Scripted {
+    next: Arc<Mutex<Value>>,
+    request: Arc<Mutex<usize>>,
+}
+
+impl Binding for Scripted {
+    fn call(&self, call: HostCall) -> BoxFuture<'static, Result<Value, GuestError>> {
+        *self.request.lock().unwrap() = serde_json::to_vec(&call.input).unwrap().len();
+        let answer = self.next.lock().unwrap().clone();
+        Box::pin(async move { Ok(answer) })
+    }
+}
 
 const STEPS: usize = 300;
 const RESTORE_EVERY: usize = 25;
@@ -27,7 +51,9 @@ fn main() -> Result<()> {
     let runtime = Arc::new(Runtime::new()?);
     let programs = Arc::new(Programs::new(runtime).compile("coder", source)?);
     let store = MemoryKv::default();
-    let scope = Scope::new(Arc::new(store.clone()));
+    let model = Scripted::default();
+    let llm = Llm::new().provider("anthropic", Provider::local(model.clone()));
+    let scope = Scope::new(Arc::new(store.clone())).extended(Extensions::new().with("llm", llm));
     let start = |now| {
         let task = json!({"task": "Refactor the parser"});
         block(Run::start(
@@ -44,6 +70,7 @@ fn main() -> Result<()> {
         // The model's answer, then the tool's result.
         let mut turns = [0.0; 2];
         let mut request = 0;
+        let mut read_ms = 0.0;
         for turn in &mut turns {
             let view = run.view();
             if view.state.status != Status::Waiting {
@@ -54,20 +81,15 @@ fn main() -> Result<()> {
             }
             let operation = view.state.pending[0].clone();
             let answer = match &operation {
-                Operation::Call { id, name, .. } if name == "fetch" => {
-                    let input = block(run.input(id))?.map_err(|e| anyhow::anyhow!(e.message))?;
-                    request = match input.get("json") {
-                        Some(json) => serde_json::to_vec(json)?.len(),
-                        None => input["body"].as_str().map_or(0, str::len),
-                    };
-                    json!({
-                        "status": 200,
-                        "statusText": "OK",
-                        "url": "https://api.anthropic.com/v1/messages",
-                        "redirected": false,
-                        "headers": [["content-type", "application/json"]],
-                        "body": session.model(step).to_string(),
-                    })
+                Operation::Call { id, name, .. } if name == "llm" => {
+                    *model.next.lock().unwrap() = session.model(step);
+                    let started = Instant::now();
+                    let making =
+                        block(run.operation(id))?.map_err(|e| anyhow::anyhow!(e.message))?;
+                    read_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let answer = block(making).map_err(|e| anyhow::anyhow!(e.message))?;
+                    request = *model.request.lock().unwrap();
+                    answer
                 }
                 Operation::Rpc { target, .. } => session.tool(&target.handler),
                 _ => bail!("Step {step}: unexpected request {operation:?}"),
@@ -87,10 +109,10 @@ fn main() -> Result<()> {
         }
         let view = run.view();
         rows.push(
-            json!({"step": step, "request_bytes": request, "model_turn_ms": turns[0],
+            json!({"step": step, "request_bytes": request, "request_read_ms": read_ms, "model_turn_ms": turns[0],
             "tool_turn_ms": turns[1], "restore_ms": restore_ms, "stored_bytes": written,
             "memory_bytes": view.memory_bytes,
-            "live_pages": view.live_pages, "batch_bytes": view.batch_bytes,
+            "live_pages": view.live_pages, "logged_bytes": view.logged_bytes,
             "commit_bytes": view.commit_bytes}),
         );
         if step.is_multiple_of(10) || step == 1 {
@@ -118,7 +140,8 @@ fn main() -> Result<()> {
         );
     }
     let output = json!({"steps": STEPS, "ended": ended, "notes": [
-        "request_bytes: the step's request to the model, the whole conversation so far, read from the heap; nothing stores it but the heap.",
+        "request_bytes: the step's request to the model, the whole conversation so far, read from the scope's database as the host makes the call.",
+        "request_read_ms: the time to read it.",
         "stored_bytes: what the step's two turns stored (batches, commits); Scope, no network.",
         "restore_ms: a new attempt after the step, reading the commit and its batches into a new VM."],
         "rows": rows});
