@@ -9,7 +9,7 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use restate_sdk::context::RawState;
-use sqlite_kv::kv::KvStore;
+use journal::kv::KvStore;
 use std::{
     collections::HashMap,
     io,

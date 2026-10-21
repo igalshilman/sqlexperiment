@@ -30,7 +30,7 @@ which builds the store inside the SDK.
 it is stored. The store keeps no order: until a sync resolves, a failure may
 lose any of the writes before it, and keep any others. A `set` or `clear` that
 throws fails the next `sync`. A database's writes are its commit record and
-pages (see the crate's [format](../../../core/sqlite-kv/docs/FORMAT.md)): a
+pages (see the crate's [format](../../../core/journal/docs/FORMAT.md)): a
 transaction commits with one put of the record, so a commit is durable once a
 sync after it resolves.
 

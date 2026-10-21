@@ -12,7 +12,7 @@
 # The sqlite-kv addon, for Linux.
 FROM rust:1-bookworm AS addon
 WORKDIR /src
-COPY core/sqlite-kv core/sqlite-kv
+COPY core/journal core/journal
 COPY typescript/packages/sql-node typescript/packages/sql-node
 RUN cd typescript/packages/sql-node && cargo build --locked --release \
   && cp target/release/libsqlite_kv_node.so sqlite_kv.node

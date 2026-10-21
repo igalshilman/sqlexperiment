@@ -301,7 +301,7 @@ conversation while the agent works, say). It opens as of its first call, and
 writes nothing: what the handler writes stays in its session, and is never
 stored. If the exclusive handler commits while it reads, the attempt fails
 when the handler ends, and Restate retries it, so what a shared handler
-returns was the stored state ([the reader](../../../core/sqlite-kv/docs/DESIGN.md#readers)).
+returns was the stored state ([the reader](../../../core/journal/docs/DESIGN.md#readers)).
 `ctx.transaction` is the exclusive handlers'.
 
 ```ts

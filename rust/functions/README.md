@@ -76,7 +76,7 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   time, then against its previous image. Dead bytes (the stack between
   calls, freed heap memory) are zeroed first, so garbage is not saved.
 - **One commit**: a turn is one put of the scope's
-  [sqlite-kv](../../core/sqlite-kv) record: its memory pages, its SQL
+  [journal](../../core/journal) record: its memory pages, its SQL
   (`ctx.kv` is a table too) and the run's state with its pending requests.
   Restate keeps writes in order, so whatever the record names is stored
   before it.

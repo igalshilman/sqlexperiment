@@ -1,6 +1,6 @@
 # Build and test everything, part by part:
 #
-#   core/        the sqlite-kv crate
+#   core/        the journal crate
 #   typescript/  the pnpm workspace: the Node.js addon, restate-fns, the
 #                integrations, their tests and the examples
 #   python/      the uv workspace: the Python extension, restate-fns, the
@@ -17,7 +17,7 @@
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
-CORE := core/sqlite-kv
+CORE := core/journal
 FUNCTIONS := rust/functions
 # CPython for WASI, with its standard library: the engine of durable Python.
 PY_ENGINE := $(CARGO_TARGET_DIR)/pywasm/out/python.wasm
@@ -66,7 +66,7 @@ all: core addon js py ## Build everything
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
 
-core: ## The sqlite-kv crate
+core: ## The journal crate
 	cd $(CORE) && $(CARGO) build --locked --release
 
 functions: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/functions): a binary serving the durable functions of examples-functions/ (or FUNCTIONS_PROGRAMS)

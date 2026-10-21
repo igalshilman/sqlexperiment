@@ -8,7 +8,7 @@
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
 //! is stored. The object's state keeps writes in issue order, so a crash
-//! loses only a suffix of them (see [`sqlite_kv::kv`]): a statement that
+//! loses only a suffix of them (see [`journal::kv`]): a statement that
 //! commits queues its writes, then completes at one `sync`. A process-wide
 //! page cache is built in.
 use bytes::Bytes;
@@ -16,8 +16,8 @@ use futures::future::BoxFuture;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
-use sqlite_kv::kv::KvStore;
-use sqlite_kv::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
+use journal::kv::KvStore;
+use journal::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;

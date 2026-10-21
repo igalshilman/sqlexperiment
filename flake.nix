@@ -1,5 +1,5 @@
 {
-  description = "SQL in Restate virtual objects: the sqlite-kv crate, its Node.js addon and Python extension, the patched Restate TypeScript SDK, the agent integrations and the examples";
+  description = "SQL in Restate virtual objects: the journal crate, its Node.js addon and Python extension, the patched Restate TypeScript SDK, the agent integrations and the examples";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -57,7 +57,7 @@
               curl
               gnumake
 
-              # The TLA+ check (core/sqlite-kv/spec/check.sh); the benchmark scripts
+              # The TLA+ check (core/journal/spec/check.sh); the benchmark scripts
               # run on the Python above.
               jdk_headless
             ]
