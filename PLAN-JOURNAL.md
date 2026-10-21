@@ -421,7 +421,10 @@ Record before step 1, after step 4, after step 6, in the PR descriptions:
   against a Restate server) and `make lint-functions`. The Restate test
   `a_wait_survives_a_crash_and_one_no_one_answers_is_forgotten` is flaky on
   `main` (an attach that times out after 30 s); a failure of it alone is
-  not yours.
+  not yours. So is `a_run_waits_for_a_signal_from_outside` (2 runs in 10 on
+  `claude/participants`): each `ctx.signal` is its own `wait` call, which
+  sends `listen` to the signals object, so "the oldest wait" is the order
+  the listens arrive in, not the order the program issued them.
 - Other users of the crate: `make test-addon test-ts test-py`.
 - Clippy runs with `-D warnings`; `cargo fmt` before each commit.
 
