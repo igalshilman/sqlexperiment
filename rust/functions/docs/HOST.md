@@ -187,7 +187,7 @@ v15/commit = SC15
     memory:            record: the memory's as JSON      // meta, memoryLen, file, pages
     memory/<golden>:   paged file over the golden image  // the pages that differ from it
     db:                paged file                        // SQL
-    <name>:            each extension's record
+    <name>/…:          each extension's records and files
   log:     each transaction's changed pages since the checkpoint, per file,
            inline or stored
 ```

@@ -5,10 +5,10 @@
 //! - **In the turn**, `ctx.fs.read`, `write`, `remove` and `list` see the
 //!   files as the last commit left them, with the turn's changes over them.
 //! - **Before the commit**, the turn's changes become a checkpoint: each
-//!   file's content is a blob named by its hash, and a manifest (each path's
-//!   blob) is one more. The blobs are written first; the seal keeps only
-//!   the manifest's name. A crash before the seal leaves blobs no seal
-//!   names, which the host collects.
+//!   file's content is a blob named by its hash, written first, and the
+//!   manifest (each path's blob) is the record `fs/manifest`, in the seal.
+//!   A crash before the seal leaves blobs no seal names, which the host
+//!   collects.
 //! - **`ctx.fs.exec(command)`** runs a command after the commit, in a
 //!   directory holding the committed checkpoint. The files it changed come
 //!   back as blobs, and join the files in the turn its outcome arrives; the
@@ -22,7 +22,7 @@
 use crate::{
     GuestError, Operation, Outcome,
     extension::{Attached, Extension, HostCall, Making, Tables},
-    transaction::{Participant, Record, ScopeBlobs, hash, random},
+    transaction::{Journal, Participant, Record, ScopeBlobs, hash, random},
 };
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -49,26 +49,22 @@ impl Files {
 
 #[async_trait]
 impl Extension for Files {
-    /// The scope's files, as the checkpoint its record names.
-    async fn attach(&self, blobs: ScopeBlobs, record: Record) -> Result<Box<dyn Attached>> {
-        let saved: Value = match record.get() {
-            bytes if bytes.is_empty() => Value::Null,
+    /// The scope's files, as its records `manifest` and `running` keep them.
+    async fn attach(&self, blobs: ScopeBlobs, journal: Journal) -> Result<Box<dyn Attached>> {
+        let (manifest_record, running_record) =
+            (journal.record("manifest"), journal.record("running"));
+        let manifest = match manifest_record.get() {
+            bytes if bytes.is_empty() => BTreeMap::new(),
             bytes => serde_json::from_slice(&bytes)?,
         };
-        let checkpoint = saved["checkpoint"].as_str().map(str::to_owned);
-        let running = saved["running"].as_str().map(str::to_owned);
-        let manifest = match &checkpoint {
-            None => BTreeMap::new(),
-            Some(name) => {
-                let bytes = (blobs.get(name).await?)
-                    .with_context(|| format!("Missing checkpoint {name}"))?;
-                serde_json::from_slice(&bytes)?
-            }
+        let running = match running_record.get() {
+            bytes if bytes.is_empty() => None,
+            bytes => Some(String::from_utf8(bytes.to_vec())?),
         };
         Ok(Box::new(Checkpointed {
             blobs,
-            record,
-            checkpoint,
+            manifest_record,
+            running_record,
             manifest,
             changes: BTreeMap::new(),
             saved_running: running.clone(),
@@ -88,10 +84,10 @@ enum Change {
 /// The scope's files in a run.
 struct Checkpointed {
     blobs: ScopeBlobs,
-    /// Its record: the checkpoint, and the command running.
-    record: Record,
-    /// The last commit's checkpoint, and its files: each path's blob.
-    checkpoint: Option<String>,
+    /// Its records: the manifest, and the command running.
+    manifest_record: Record,
+    running_record: Record,
+    /// The last commit's files: each path's blob.
     manifest: BTreeMap<String, String>,
     /// What the turn changed, not yet in a checkpoint.
     changes: BTreeMap<String, Change>,
@@ -263,8 +259,8 @@ impl Attached for Checkpointed {
 
 #[async_trait]
 impl Participant for Checkpointed {
-    /// The turn's changes, as a checkpoint: its blobs written, then its
-    /// manifest; the seal keeps the manifest's name.
+    /// The turn's changes, as a checkpoint: its blobs written, and its
+    /// manifest in the seal.
     async fn prepare(&mut self) -> Result<()> {
         if self.changes.is_empty() && self.running == self.saved_running {
             return Ok(());
@@ -283,30 +279,26 @@ impl Participant for Checkpointed {
                 }
             }
         }
-        if manifest != self.manifest || self.checkpoint.is_none() {
-            let bytes = serde_json::to_vec(&manifest)?;
-            self.checkpoint = Some(self.blobs.put(&bytes).await?);
+        if manifest != self.manifest {
+            self.manifest_record
+                .set(serde_json::to_vec(&manifest)?.into());
             self.manifest = manifest;
         }
-        self.saved_running = self.running.clone();
-        let record = json!({"checkpoint": self.checkpoint, "running": self.running});
-        self.record.set(serde_json::to_vec(&record)?.into());
+        if self.running != self.saved_running {
+            let running = self.running.clone().unwrap_or_default();
+            self.running_record.set(running.into());
+            self.saved_running = self.running.clone();
+        }
         Ok(())
     }
 
-    /// The checkpoint and its files' blobs; none while a command runs: the
-    /// blobs it writes are not named yet.
+    /// The files' blobs; none while a command runs: the blobs it writes are
+    /// not named yet.
     fn holds(&self) -> Option<BTreeSet<String>> {
         if self.saved_running.is_some() {
             return None;
         }
-        Some(
-            self.checkpoint
-                .iter()
-                .chain(self.manifest.values())
-                .cloned()
-                .collect(),
-        )
+        Some(self.manifest.values().cloned().collect())
     }
 }
 

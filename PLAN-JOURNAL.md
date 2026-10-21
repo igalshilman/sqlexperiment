@@ -38,6 +38,10 @@ and ask the owner only critical questions.
   the record's chain fields; `Session::seal()` takes no argument). The crash
   campaign that covered it now covers records alone
   (`tests/integration/records.rs`).
+- **Step 5, extensions on journal handles: done.** `Extension::attach(blobs,
+  journal)` gets the journal scoped to `<name>/`; extension names may not
+  hold `/` or `.`. `fs` keeps its manifest in the record `fs/manifest` and
+  its running command in `fs/running`, so the manifest blob is gone.
 - **Measured after step 4** (in-memory store, medians):
 
   | | Before | After |

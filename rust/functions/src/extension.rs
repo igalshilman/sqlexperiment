@@ -13,17 +13,17 @@
 //!   made; [`Attached::delivered`], in the turn its outcome arrives, before
 //!   the program sees it.
 //! - **State kept by the turn's transaction**: an attached extension is a
-//!   [`Participant`]: it keeps its state in its [`Record`] (named as the
-//!   extension), its large state in the scope's blobs, which the record
-//!   names. The next attempt, on any machine, reads the record back from
-//!   [`Extension::attach`].
+//!   [`Participant`]: it keeps its state in its part of the scope's
+//!   [`Journal`] (records and files named under `<name>/`), and its large
+//!   state in the scope's blobs, which its records name. The next attempt,
+//!   on any machine, reads them back from [`Extension::attach`].
 //!
 //! What a seal keeps of an extension belongs to the scope, as its tables
 //! do: it carries over from one run to the next.
 use crate::{
     GuestError, Operation, Outcome,
     db::Db,
-    transaction::{Blobs, Participant, Record, ScopeBlobs},
+    transaction::{Blobs, Journal, Participant, ScopeBlobs},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -71,8 +71,8 @@ impl Tables<'_> {
 #[async_trait]
 pub trait Extension: Send + Sync + 'static {
     /// Its part of a run in the scope `blobs` are of: as the scope's last
-    /// seal left its `record` (empty if none did), or new.
-    async fn attach(&self, blobs: ScopeBlobs, record: Record) -> Result<Box<dyn Attached>>;
+    /// seal left its `journal` (empty if none did), or new.
+    async fn attach(&self, blobs: ScopeBlobs, journal: Journal) -> Result<Box<dyn Attached>>;
 }
 
 /// An extension's part of one attempt at a run: a participant in each of
@@ -128,7 +128,8 @@ pub trait Attached: Participant {
     fn park(&mut self) {}
 }
 
-/// The runtime's own participants' names, which name their records.
+/// The runtime's own participants' names, which name their records (an
+/// extension's are under `<name>/`).
 pub(crate) const BUILT_IN: [&str; 3] = ["run", "memory", "tables"];
 
 /// The extensions a deployment offers its programs, by name, and where
@@ -154,7 +155,7 @@ impl Extensions {
     pub fn with(mut self, name: impl Into<String>, extension: impl Extension) -> Self {
         let name = name.into();
         assert!(
-            !name.is_empty() && !name.contains('.') && !BUILT_IN.contains(&name.as_str()),
+            !name.is_empty() && !name.contains(['.', '/']) && !BUILT_IN.contains(&name.as_str()),
             "Extension name {name:?}"
         );
         self.offered.insert(name, Arc::new(extension));
@@ -167,12 +168,13 @@ impl Extensions {
 pub(crate) struct Attachments(BTreeMap<String, Box<dyn Attached>>);
 
 impl Attachments {
-    /// Each of `extensions`, in the scope `db` is of, with its record.
+    /// Each of `extensions`, in the scope `db` is of, with its part of the
+    /// journal.
     pub async fn attach(extensions: &Extensions, blobs: &ScopeBlobs, db: &Db) -> Result<Self> {
         let mut attached = BTreeMap::new();
         for (name, extension) in &extensions.offered {
-            let record = db.journal().record(name);
-            let part = extension.attach(blobs.clone(), record).await?;
+            let journal = db.journal().scoped(&format!("{name}/"));
+            let part = extension.attach(blobs.clone(), journal).await?;
             attached.insert(name.clone(), part);
         }
         Ok(Self(attached))

@@ -6,7 +6,9 @@ mod common;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use common::{Store, attempt, programs, settle};
-use functions::{Attached, Extension, Extensions, Outcome, Participant, Record, Run, ScopeBlobs};
+use functions::{
+    Attached, Extension, Extensions, Journal, Outcome, Participant, Record, Run, ScopeBlobs,
+};
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
@@ -36,7 +38,8 @@ struct Counting {
 
 #[async_trait]
 impl Extension for Counter {
-    async fn attach(&self, _blobs: ScopeBlobs, record: Record) -> Result<Box<dyn Attached>> {
+    async fn attach(&self, _blobs: ScopeBlobs, journal: Journal) -> Result<Box<dyn Attached>> {
+        let record = journal.record("state");
         let saved: Value = serde_json::from_slice(&record.get()).unwrap_or(Value::Null);
         Ok(Box::new(Counting {
             counter: self.clone(),
@@ -94,7 +97,7 @@ async fn each_seal_holds_every_record_and_the_next_starts_from_it() {
     for name in ["memory", "run"] {
         assert!(store.record(name).is_object(), "{name}");
     }
-    assert_eq!(store.record("counter"), json!({"count": 3}));
+    assert_eq!(store.record("counter/state"), json!({"count": 3}));
 
     // The next run in the scope: the extension's record carries over, as the
     // scope's tables do.
@@ -104,7 +107,7 @@ async fn each_seal_holds_every_record_and_the_next_starts_from_it() {
         .unwrap();
     settle(&mut next).await;
     assert_eq!(store.seals(), 6);
-    assert_eq!(store.record("counter"), json!({"count": 6}));
+    assert_eq!(store.record("counter/state"), json!({"count": 6}));
 }
 
 #[tokio::test]

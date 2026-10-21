@@ -7,7 +7,8 @@
 //! one of three places around it:
 //!
 //! - **In the seal**: a [`Record`], a named whole value the commit record
-//!   holds, which the next transaction starts from.
+//!   holds, which the next transaction starts from (or a file of the scope's
+//!   [`Journal`]).
 //! - **Before it, named by it**: bytes too large for a record go to the
 //!   scope's [`ScopeBlobs`] first; the record names them. A blob no record
 //!   names is garbage, which the host collects.
@@ -22,7 +23,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-pub use sqlite_kv::Record;
+pub use sqlite_kv::{Journal, Record};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
