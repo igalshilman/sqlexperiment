@@ -251,7 +251,7 @@ nix develop       # or `direnv allow`, with use flake in .envrc
 make              # build everything: the crate, the addon, the pnpm and uv workspaces
 make test         # every test that needs no Restate server
 make test-ts T=langgraph   # the TypeScript tests (vitest in typescript/tests), optionally filtered
-make test-sql-py  # the Python extension's and restate-fns's tests
+make test-py      # the Python tests: the extension, restate-fns and the integrations
 make crash-test         # the integrations and SQL objects through crashes, against a Restate server
 make concurrency-test   # the context without journal replay, against a Restate server
 make crash-test-py concurrency-test-py   # the same, in Python

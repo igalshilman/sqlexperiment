@@ -64,7 +64,7 @@ its engine to the next one when it is idle.
 ## Build and test
 
 From the repository's root, `make py` builds it into the uv workspace and
-`make test-sql-py` runs its tests (pytest, against an in-memory store): SQL
+`make test-py` runs its tests (pytest, against an in-memory store): SQL
 and value round trips, SQL errors and rollback, a write the store rejects,
 transactions holding the session, effects, and lost writes, for every
 position of a request that loses some of its writes.
