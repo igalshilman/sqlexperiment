@@ -7,8 +7,8 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
-import restate_sql
 import pytest
+import restate_sql
 from restate import ObjectContext, VirtualObject
 from restate.exceptions import TerminalError
 from restate_fns.session import SqlAttempt

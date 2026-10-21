@@ -4,8 +4,8 @@ import asyncio
 import itertools
 import random
 
-import restate_sql
 import pytest
+import restate_sql
 
 
 class Backend:
