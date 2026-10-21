@@ -1,5 +1,5 @@
 [package]
-name = "journal-python"
+name = "sql-python"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -9,7 +9,7 @@ description = "Python bindings: SQL over a key/value store the host implements i
 [workspace]
 
 [lib]
-name = "journal_python"
+name = "sql_python"
 crate-type = ["cdylib"]
 
 [dependencies]

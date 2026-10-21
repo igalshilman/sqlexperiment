@@ -1,6 +1,6 @@
 // OpenCode on the object's database: `openOpenCode(db, options)` boots
 // OpenCode 2.0's embedded host (@opencode/sdk) with its database in a
-// sqlite-kv session, `ctx.db`.
+// SQL session, `ctx.db`.
 //
 // The host is OpenCode's workerd profile, the one it boots in a Cloudflare
 // Durable Object: no local filesystem, shell, terminal or version control,
@@ -8,7 +8,7 @@
 // workerd profile reads a Durable Object's SQLite, whose `exec` is
 // synchronous; here OpenCode gets an Effect SqlClient instead, which is
 // asynchronous, through `Database.configuredClient`, the seam OpenCode keeps
-// for an injected client. Each transaction is a sqlite-kv transaction, and the
+// for an injected client. Each transaction is an SQL transaction, and the
 // session runs statements one at a time, as OpenCode's own clients do.
 //
 // `fence.closed` refuses every statement from then on: an attempt that is
@@ -43,7 +43,7 @@ const error = (operation: string, cause: unknown) =>
 
 /** The connection inside a transaction, for statements of that transaction. */
 const InTransaction = Context.Service<SqlClient.TransactionConnection, SqlClient.TransactionConnection.Service>(
-  'sqlite-kv-examples/OpenCodeTransaction',
+  'restate-agents/OpenCodeTransaction',
 );
 
 /** An Effect SqlClient over `db`, with its statements refused once `fence` closes. */
@@ -83,7 +83,7 @@ export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.S
     };
   };
 
-  // `effect` as one sqlite-kv transaction: it commits when `effect` succeeds
+  // `effect` as one SQL transaction: it commits when `effect` succeeds
   // and rolls back when it fails. Its statements go to the transaction's
   // database.
   const withTransaction = <A, E, R>(effect: Effect.Effect<A, E, R>) =>

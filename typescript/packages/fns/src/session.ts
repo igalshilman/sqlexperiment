@@ -1,5 +1,5 @@
 // An attempt's SQL session: the object's database, kept in its state through
-// the sqlite-kv addon, opened on the handler's first use of `ctx.db` or
+// the SQL addon, opened on the handler's first use of `ctx.db` or
 // `ctx.transaction` and saved when the handler ends; and `ctx.transaction(body)`,
 // one transaction of it with the sends it commits with.
 import { Buffer } from 'node:buffer';
@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type * as restate from '@restatedev/restate-sdk';
 import { serde, TerminalError } from '@restatedev/restate-sdk';
 import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
-import { open, type Database, type SqlValue, type Store, type TransactionHandle } from 'sqlite-kv';
+import { open, type Database, type SqlValue, type Store, type TransactionHandle } from 'restate-sql';
 import { sendClients } from './sends.ts';
 
 export type { SqlValue };
@@ -72,7 +72,7 @@ export interface SqlHost {
   genericSend(send: restate.GenericSend<Uint8Array>): unknown;
 }
 
-/** A store, as the sqlite-kv addon takes it. */
+/** A store, as the SQL addon takes it. */
 export interface SqlStore extends Store {
   get(key: string): Promise<Uint8Array | null | undefined>;
   sync(): Promise<void>;

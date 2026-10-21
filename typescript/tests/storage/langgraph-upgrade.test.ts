@@ -2,7 +2,7 @@
 // numbers, goes on with the current one, whose versions are strings.
 // `make test-ts T=langgraph`.
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
-import { open } from 'sqlite-kv';
+import { open } from 'restate-sql';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from '../testing.ts';
 import { SqlCheckpointSaver } from 'restate-agents/langgraph';

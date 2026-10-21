@@ -56,7 +56,7 @@
     "effect": "4.0.1",
     "restate-agents": "workspace:*",
     "restate-fns": "workspace:*",
-    "sqlite-kv": "workspace:*",
+    "restate-sql": "workspace:*",
     "zod": "4.6.5"
   },
   "engines": {

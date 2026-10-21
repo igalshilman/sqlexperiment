@@ -430,11 +430,6 @@ wheels = [
 ]
 
 [[package]]
-name = "journal"
-version = "0.1.0"
-source = { editable = "../python/journal" }
-
-[[package]]
 name = "jsonpatch"
 version = "1.35"
 source = { registry = "https://pypi.org/simple" }
@@ -937,14 +932,14 @@ name = "restate-fns"
 version = "0.1.0"
 source = { editable = "../python/fns" }
 dependencies = [
-    { name = "journal" },
     { name = "restate-sdk" },
+    { name = "restate-sql" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "journal", editable = "../python/journal" },
     { name = "restate-sdk", specifier = "==1.1.0" },
+    { name = "restate-sql", editable = "../python/sql" },
 ]
 
 [[package]]
@@ -970,6 +965,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/11/34/942eec7d095740d18b6682313204db668fd9270f088ee4d4f456c59e29ce/restate_sdk-1.1.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:7e4f8faf82f2b1e504d4baaaa1fa8be34d31027851b73e559a95972a93ce194e", size = 2323445, upload-time = "2026-10-21T07:25:31.414Z" },
     { url = "https://files.pythonhosted.org/packages/6a/fd/556fbaa68e7fedc1009cb41ce8243caa9a311e337c1e5d431e946e3d8d17/restate_sdk-1.1.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:c0b3de82c01c2b3aff3edc77ab6ce5ad9bf963133becffe968639eca19751f06", size = 2405160, upload-time = "2026-10-21T07:25:43.247Z" },
 ]
+
+[[package]]
+name = "restate-sql"
+version = "0.1.0"
+source = { editable = "../python/sql" }
 
 [[package]]
 name = "sniffio"

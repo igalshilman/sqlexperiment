@@ -1,5 +1,5 @@
 {
-  "name": "sqlite-kv",
+  "name": "restate-sql",
   "version": "0.1.0",
   "private": true,
   "description": "SQL over a key/value store implemented in JavaScript (native addon)",

@@ -1,13 +1,13 @@
 # Node.js addon
 
 SQL over a key/value store implemented in JavaScript: a native addon
-([napi-rs](https://napi.rs)) around `sqlite-kv`, for the Restate TypeScript
-SDK, where the store is an object's state: [`restate-fns`](../sql/README.md)
+([napi-rs](https://napi.rs)) around the [`sql`](../../../core/sql/README.md) crate, for the Restate TypeScript
+SDK, where the store is an object's state: [`restate-fns`](../fns/README.md)
 builds `ctx.db` on it, and [`examples-typescript`](../../../examples-typescript) has the
 examples.
 
 ```js
-const { open } = require('sqlite-kv');
+const { open } = require('restate-sql');
 
 const db = await open('Ledger/a', {
   get: (key) => ctx.get(key, serde.binary), // stored value, or this request's own write
@@ -53,7 +53,7 @@ transaction's sends there, its outbox, and makes them once it commits.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, unlinked once open so that it goes away
-with the process, or the file `SQLITE_KV_CACHE_FILE` names. It knows a
+with the process, or the file `RESTATE_SQL_CACHE_FILE` names. It knows a
 database by its commit record: a session opens on the cached pages when the
 record is the one the cache saw last. `save()` (or `close()`) ends a session,
 leaving its engine to the next one when it is idle. The cache knows a
@@ -73,7 +73,7 @@ one namespace (two Restate clusters, say) must not share a process.
 ## Build and test
 
 ```sh
-npm run build      # release build, copied to sqlite_kv.node (or `make addon`)
+npm run build      # release build, copied to sql.node (or `make addon`)
 npm run build:debug
 npm test           # node:test, against an in-memory store
 ```

@@ -11,7 +11,7 @@
   "dependencies": {
     "@restatedev/restate-sdk": "1.17.4",
     "@restatedev/restate-sdk-core": "1.17.4",
-    "sqlite-kv": "workspace:*"
+    "restate-sql": "workspace:*"
   },
   "engines": {
     "node": ">=24"

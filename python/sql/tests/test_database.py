@@ -4,7 +4,7 @@ import asyncio
 import itertools
 import random
 
-import journal
+import restate_sql
 import pytest
 
 
@@ -71,7 +71,7 @@ def fresh():
 async def test_runs_sql_and_round_trips_values():
     backend = Backend()
     ns = fresh()
-    db = await journal.open(ns, backend.request())
+    db = await restate_sql.open(ns, backend.request())
     await db.execute("CREATE TABLE t(i INTEGER, r REAL, s TEXT, b BLOB, n INTEGER)")
     await db.execute("INSERT INTO t VALUES(?, ?, ?, ?, ?)", [42, 1.5, "héllo", b"\x01\x02\x03", None])
     await db.execute("INSERT INTO t VALUES(?, ?, ?, ?, ?)", [2**62, -0.25, "", bytearray(), True])
@@ -83,13 +83,13 @@ async def test_runs_sql_and_round_trips_values():
 
     # Another session, and another process's view (no cached state), read it.
     for name in [ns, fresh()]:
-        again = await journal.open(name, backend.request())
+        again = await restate_sql.open(name, backend.request())
         assert await again.query("SELECT count(*) FROM t") == [[2]]
         await again.save()
 
 
 async def test_rejects_values_it_cannot_store():
-    db = await journal.open(fresh(), Backend().request())
+    db = await restate_sql.open(fresh(), Backend().request())
     with pytest.raises(ValueError, match="exceeds 64 bits"):
         await db.query("SELECT ?", [2**64])
     with pytest.raises(TypeError, match="unsupported SQL value"):
@@ -100,7 +100,7 @@ async def test_rejects_values_it_cannot_store():
 
 
 async def test_an_sql_error_leaves_the_session_usable_and_a_transaction_rolls_back():
-    db = await journal.open(fresh(), Backend().request())
+    db = await restate_sql.open(fresh(), Backend().request())
     await db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)")
     with pytest.raises(RuntimeError, match="no such table"):
         await db.query("SELECT * FROM missing")
@@ -123,12 +123,12 @@ async def consistent_after_loss(lost, seed):
     lost one's only if both do."""
     backend = Backend(seed)
     ns = fresh()
-    db = await journal.open(ns, backend.request())
+    db = await restate_sql.open(ns, backend.request())
     await db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)")
     await db.save()
     for id in range(20):
         fails = id == lost
-        db = await journal.open(ns, backend.request(fails))
+        db = await restate_sql.open(ns, backend.request(fails))
         insert = db.execute("INSERT INTO t VALUES(?, randomblob(3000))", [id])
         if fails:
             with pytest.raises(RuntimeError, match="the request failed"):
@@ -139,7 +139,7 @@ async def consistent_after_loss(lost, seed):
             await db.save()
     seen = []
     for name in [ns, fresh()]:
-        view = await journal.open(name, backend.request())
+        view = await restate_sql.open(name, backend.request())
         [[rows, landed]] = await view.query("SELECT count(*), count(*) FILTER (WHERE id = ?) FROM t", [lost])
         [[integrity]] = await view.query("PRAGMA integrity_check")
         await view.save()
@@ -162,7 +162,7 @@ async def test_a_write_the_store_rejects_is_reported_by_the_next_sync():
         raise RuntimeError("state is closed")
 
     store.set = rejected
-    db = await journal.open(fresh(), store)
+    db = await restate_sql.open(fresh(), store)
     with pytest.raises(RuntimeError, match="state is closed"):
         await db.execute("CREATE TABLE t(id INTEGER)")
     assert not db.is_usable()
@@ -170,7 +170,7 @@ async def test_a_write_the_store_rejects_is_reported_by_the_next_sync():
 
 
 async def test_a_transaction_holds_the_session_other_calls_wait_until_it_ends():
-    db = await journal.open(fresh(), Backend().request())
+    db = await restate_sql.open(fresh(), Backend().request())
     await db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)")
     handle = None
 
@@ -203,7 +203,7 @@ async def test_a_transaction_holds_the_session_other_calls_wait_until_it_ends():
 
 
 async def test_a_commit_that_fails_rolls_the_transaction_back():
-    db = await journal.open(fresh(), Backend().request())
+    db = await restate_sql.open(fresh(), Backend().request())
     await db.execute("PRAGMA foreign_keys=ON")
     await db.execute("CREATE TABLE p(id INTEGER PRIMARY KEY)")
     await db.execute("CREATE TABLE c(pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)")
@@ -221,7 +221,7 @@ async def test_a_commit_that_fails_rolls_the_transaction_back():
 
 
 async def test_a_call_running_meanwhile_does_not_make_the_session_look_unusable():
-    db = await journal.open(fresh(), Backend().request())
+    db = await restate_sql.open(fresh(), Backend().request())
     await db.execute("CREATE TABLE t(id INTEGER)")
     for _ in range(50):
         # The body fails while effects() holds the session: the rollback still runs.
@@ -248,7 +248,7 @@ async def test_a_call_running_meanwhile_does_not_make_the_session_look_unusable(
 async def test_effects_commit_with_their_transaction_and_only_then():
     backend = Backend()
     namespace = fresh()
-    db = await journal.open(namespace, backend.request())
+    db = await restate_sql.open(namespace, backend.request())
     await db.execute("CREATE TABLE t(id INTEGER)")
     assert await db.effects() == b""
     # Even with a transaction that changes nothing.
@@ -269,7 +269,7 @@ async def test_effects_commit_with_their_transaction_and_only_then():
     assert await db.effects() == b"sends 1"
     await db.save()
     # A later session opens with them; an empty transaction clears them.
-    again = await journal.open(namespace, backend.request())
+    again = await restate_sql.open(namespace, backend.request())
     assert await again.effects() == b"sends 1"
     async with again.transaction() as tx:
         tx.commit_effects(b"")
@@ -278,7 +278,7 @@ async def test_effects_commit_with_their_transaction_and_only_then():
 
 
 async def test_a_call_to_the_session_inside_its_transaction_is_refused_not_left_waiting():
-    db = await journal.open(fresh(), Backend().request())
+    db = await restate_sql.open(fresh(), Backend().request())
     await db.execute("CREATE TABLE t(id INTEGER)")
 
     async def after(delay):
@@ -301,8 +301,8 @@ async def test_a_call_to_the_session_inside_its_transaction_is_refused_not_left_
 
 
 async def test_a_call_to_a_session_inside_a_transaction_of_another_inside_its_own_is_refused():
-    a = await journal.open(fresh(), Backend().request())
-    b = await journal.open(fresh(), Backend().request())
+    a = await restate_sql.open(fresh(), Backend().request())
+    b = await restate_sql.open(fresh(), Backend().request())
     async with a.transaction():
         async with b.transaction() as tx:
             await tx.query("SELECT 1")
@@ -317,7 +317,7 @@ async def test_a_call_to_a_session_inside_a_transaction_of_another_inside_its_ow
 
 async def test_a_statement_that_commits_completes_once_its_writes_are_stored_however_many():
     backend = Backend()
-    db = await journal.open(fresh(), backend.request())
+    db = await restate_sql.open(fresh(), backend.request())
     await db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)")
     # Thousands of page writes, each scheduled on the loop.
     await db.execute(
@@ -341,12 +341,12 @@ async def test_an_awaitable_get_is_read_when_issued():
             return future
 
     ns = fresh()
-    db = await journal.open(ns, AwaitableGets(backend, False))
+    db = await restate_sql.open(ns, AwaitableGets(backend, False))
     await db.execute("CREATE TABLE t(id INTEGER)")
     await db.execute("INSERT INTO t VALUES(1)")
     await db.save()
     for name in [ns, fresh()]:
-        again = await journal.open(name, AwaitableGets(backend, False))
+        again = await restate_sql.open(name, AwaitableGets(backend, False))
         assert await again.query("SELECT * FROM t") == [[1]]
         await again.save()
 
@@ -364,11 +364,11 @@ class ReadOnly(Request):
 async def test_a_reader_reads_beside_the_writer_and_knows_when_it_is_stale():
     backend = Backend()
     ns = fresh()
-    writer = await journal.open(ns, backend.request())
+    writer = await restate_sql.open(ns, backend.request())
     await writer.execute("CREATE TABLE t(n INTEGER)")
     await writer.execute("INSERT INTO t VALUES (1)")
 
-    reader = await journal.open(ns, ReadOnly(backend, False), reader=True)
+    reader = await restate_sql.open(ns, ReadOnly(backend, False), reader=True)
     assert await reader.query("SELECT n FROM t") == [[1]]
     assert await reader.is_current()
     # The writer commits again: what the reader read is no longer the stored state.
@@ -376,7 +376,7 @@ async def test_a_reader_reads_beside_the_writer_and_knows_when_it_is_stale():
     assert not await reader.is_current()
     await reader.close()
 
-    again = await journal.open(ns, ReadOnly(backend, False), reader=True)
+    again = await restate_sql.open(ns, ReadOnly(backend, False), reader=True)
     assert await again.query("SELECT n FROM t ORDER BY n") == [[1], [2]]
     assert await again.is_current()
     await again.close()

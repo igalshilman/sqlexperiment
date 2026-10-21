@@ -6,12 +6,12 @@ import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-fns';
 import { SqlAttempt, type SqlHost, withSql } from 'restate-fns/internal';
 import { type Steer, tool, type Tool } from 'restate-agents';
-import type { Store } from 'sqlite-kv';
+import type { Store } from 'restate-sql';
 import { z } from 'zod';
 import type { Audit, Transfer } from './sql/ledger.ts';
 
 /**
- * A sqlite-kv store over `map`. Give the same map to several databases for an
+ * An SQL store over `map`. Give the same map to several databases for an
  * object's state that lives across attempts. Writes through a closed `fence`
  * throw, as Restate fences an attempt that a newer one replaced.
  */

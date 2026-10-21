@@ -1,11 +1,11 @@
-// withPi over a sqlite-kv database in memory, without a Restate server: the
+// withPi over an SQL database in memory, without a Restate server: the
 // coding tools of a workspace write to the local file system.
 import type * as restate from 'restate-fns';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createModels } from '@earendil-works/pi-ai/models';
-import { open } from 'sqlite-kv';
+import { open } from 'restate-sql';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from '../testing.ts';
 import { callTools, fakeProvider, say } from '../fakes/pi.ts';

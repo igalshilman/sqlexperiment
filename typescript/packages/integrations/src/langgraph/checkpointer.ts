@@ -1,4 +1,4 @@
-// A LangGraph checkpointer on a sqlite-kv database: `SqlCheckpointSaver`, over
+// A LangGraph checkpointer on an SQL database: `SqlCheckpointSaver`, over
 // a database session `db` (in Restate, `ctx.db`), which
 // has `query`, `execute` and `transaction(body)`.
 //

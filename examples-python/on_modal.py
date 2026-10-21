@@ -38,7 +38,7 @@ app = modal.App("restate-support", image=image)
     min_containers=1,  # Restate needs the deployment up: a Server with no containers answers 503
     exit_grace_period=600,  # an agent's turn runs on, while a container is replaced
     secrets=[modal.Secret.from_name("anthropic")],
-    env={"JOURNAL_CACHE_FILE": "/tmp/journal.cache"},  # a cache: each container starts cold
+    env={"RESTATE_SQL_CACHE_FILE": "/tmp/restate-sql.cache"},  # a cache: each container starts cold
 )
 class Support:
     @modal.enter()

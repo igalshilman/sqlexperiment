@@ -69,7 +69,7 @@ const PROMPTS = 8;
 const ACCOUNTS = 8;
 const OPENING = 1000;
 
-const dir = mkdtempSync(join(tmpdir(), 'sqlite-kv-examples-'));
+const dir = mkdtempSync(join(tmpdir(), 'restate-sql-examples-'));
 // One descriptor per log, however often its process restarts.
 const logs = new Map<string, number>();
 const log = (name: string) => logs.get(name) ?? logs.set(name, openSync(join(dir, name), 'a')).get(name)!;
@@ -134,7 +134,7 @@ function supervise({ name, groups, port }: Process, perMille: number): Supervise
         ABORT_PER_MILLE: String(perMille),
         ...(first && perMille > 0 ? { ABORT_AT: String(20 + Math.floor(Math.random() * 180)) } : {}),
         SHOP_EXPIRY_MS: String(EXPIRY_MS),
-        SQLITE_KV_CACHE_FILE: join(dir, `${name}.cache`),
+        RESTATE_SQL_CACHE_FILE: join(dir, `${name}.cache`),
       },
       stdio: ['ignore', 'ignore', log(`${name}.log`)],
     });

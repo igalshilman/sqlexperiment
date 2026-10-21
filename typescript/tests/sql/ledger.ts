@@ -4,7 +4,7 @@
 // balances it moves, so a retried or repeated transfer moves money once.
 // Environment: PORT (default 9080), ABORT_PER_MILLE (abort the process at
 // random state requests, for crash tests; see faults.ts) and
-// SQLITE_KV_CACHE_FILE.
+// RESTATE_SQL_CACHE_FILE.
 import * as restate from 'restate-fns';
 import { serveIfMain } from '../faults.ts';
 import { row } from './sql.ts';

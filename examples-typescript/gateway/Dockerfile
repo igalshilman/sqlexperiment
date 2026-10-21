@@ -9,13 +9,13 @@
 # or a part: `node gateway/main.ts agents` (the Assistant and Case), or
 # `node gateway/main.ts tools` (the tools and the Gateway).
 
-# The sqlite-kv addon, for Linux.
+# The SQL addon, for Linux.
 FROM rust:1-bookworm AS addon
 WORKDIR /src
 COPY core/journal core/journal
-COPY typescript/packages/sql-node typescript/packages/sql-node
-RUN cd typescript/packages/sql-node && cargo build --locked --release \
-  && cp target/release/libsqlite_kv_node.so sqlite_kv.node
+COPY typescript/packages/sql typescript/packages/sql
+RUN cd typescript/packages/sql && cargo build --locked --release \
+  && cp target/release/libsql_node.so sql.node
 
 # The workspace's packages that the examples use, laid out as in the
 # repository: the pnpm workspace in typescript/, the examples beside it.
@@ -23,9 +23,9 @@ FROM node:24-bookworm AS deps
 RUN corepack enable
 WORKDIR /app/typescript
 COPY typescript/package.json typescript/pnpm-workspace.yaml typescript/pnpm-lock.yaml ./
-COPY typescript/packages/sql-node/package.json typescript/packages/sql-node/index.js typescript/packages/sql-node/index.d.ts \
-  packages/sql-node/
-COPY --from=addon /src/typescript/packages/sql-node/sqlite_kv.node packages/sql-node/
+COPY typescript/packages/sql/package.json typescript/packages/sql/index.js typescript/packages/sql/index.d.ts \
+  packages/sql/
+COPY --from=addon /src/typescript/packages/sql/sql.node packages/sql/
 COPY typescript/packages/fns packages/fns
 COPY typescript/packages/integrations packages/integrations
 COPY examples-typescript/package.json ../examples-typescript/

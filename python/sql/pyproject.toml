@@ -1,5 +1,5 @@
 [project]
-name = "journal"
+name = "restate-sql"
 version = "0.1.0"
 description = "SQL over a key/value store implemented in Python (native extension)"
 requires-python = ">=3.10"
@@ -9,7 +9,7 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-module-name = "journal._native"
+module-name = "restate_sql._native"
 python-source = "python"
 features = ["pyo3/extension-module"]
 

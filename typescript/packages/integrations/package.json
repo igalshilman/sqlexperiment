@@ -60,7 +60,7 @@
     "@standard-schema/spec": "1.1.0",
     "effect": "4.0.1",
     "restate-fns": "workspace:*",
-    "sqlite-kv": "workspace:*",
+    "restate-sql": "workspace:*",
     "zod": "4.6.5"
   },
   "engines": {

@@ -44,7 +44,7 @@ client.
 [`db.ts`](db.ts) (`restate-agents/opencode/db`) boots OpenCode's embedded
 host on the object's database: an Effect `SqlClient` through
 `Database.configuredClient`, OpenCode's seam for an injected client, each
-OpenCode transaction a sqlite-kv transaction. The handler is not replayed: a
+OpenCode transaction an SQL transaction. The handler is not replayed: a
 retried attempt boots OpenCode again, on the stored database, and OpenCode
 resumes interrupted work on its own: it records an execution claim when a
 turn starts, and resumes every claimed turn when it boots.
