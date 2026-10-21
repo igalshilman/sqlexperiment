@@ -26,5 +26,5 @@ make test-agents-py        # the agent integrations' tests, on a scripted model
 make concurrency-test-py   # the examples, the context without journal replay, agents and Restate's tools, against a Restate server
 make crash-test-py         # the bank and an agent through crashes, against a Restate server
 make lint-py               # ruff
-make wheels                # dist/: Linux wheels of the SDK, the extension and restate-agents, for a container (Modal)
+make wheels                # dist/: Linux wheels of the SDK, the extension, restate-sql and restate-agents, for a container (Modal)
 ```

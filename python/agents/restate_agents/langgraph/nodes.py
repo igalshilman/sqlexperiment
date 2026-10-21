@@ -29,7 +29,7 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
-import restate
+import restate_sql as restate
 from langgraph.runtime import get_runtime
 from restate.handler import Handler
 

@@ -49,10 +49,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-import restate
+import restate_sql as restate
 from anthropic import AsyncAnthropic
 from pydantic import ValidationError
-from restate import ObjectContext
+from restate_sql import ObjectContext
 
 from restate_agents import turns
 from restate_agents.common import Messages, MessagesRequest, Transcript, has_table, model_id_of, model_of

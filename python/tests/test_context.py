@@ -77,9 +77,8 @@ def test_state_and_sleeps_combine_with_asyncio():
     assert call(f"probe/{k}/combined") == (200, [1, 1, 1])
 
 
-def test_run_and_awakeables_are_refused():
-    status, body = call(f"probe/{key()}/run_refused")
-    assert status == 500 and "ctx.run is not available without journal replay" in body["message"]
+def test_a_run_runs_and_awakeables_are_refused():
+    assert call(f"probe/{key()}/with_run") == (200, "hello")
     status, body = call(f"probe/{key()}/awakeable_refused")
     assert status == 500 and "awakeables are not available without journal replay" in body["message"]
 

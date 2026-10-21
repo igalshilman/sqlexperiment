@@ -36,8 +36,8 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from restate.server_context import _restate_context_var
-from restate.sql import SqlAttempt
 from restate_agents import tool as restate_tool
+from restate_sql.session import SqlAttempt
 
 
 class Teller(BaseChatModel):
@@ -364,10 +364,9 @@ class Context:
             return {"revision": self.obj.published}
         return list(self.obj.steered)
 
-    # --- the SqlHost of restate.sql
+    # --- the SqlHost of restate_sql.session
 
     sql_handler_kind = "exclusive"
-    sql_journal_replay = False
 
     @property
     def sql_namespace(self) -> str:

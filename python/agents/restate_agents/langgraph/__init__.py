@@ -45,7 +45,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any
 
-import restate
+import restate_sql as restate
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -55,7 +55,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import StateUpdate
 from pydantic import create_model
-from restate import ObjectContext
+from restate_sql import ObjectContext
 
 from restate_agents import turns
 from restate_agents.common import Messages, MessagesRequest, Transcript, has_table, model_id_of, model_of

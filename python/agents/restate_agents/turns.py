@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import restate
+import restate_sql as restate
 
 from restate_agents.common import CHECK_MODEL, MessageSerde, refused
 from restate_agents.object import TURN, Object, Turn, context, service

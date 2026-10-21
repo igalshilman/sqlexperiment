@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "restate-agents",
+    "restate-python",
     "restate-sql",
     "sqlite-kv",
 ]
@@ -985,8 +986,7 @@ dependencies = [
     { name = "langchain-core" },
     { name = "langgraph" },
     { name = "pydantic-ai-slim", extra = ["anthropic"] },
-    { name = "restate-sdk" },
-    { name = "sqlite-kv" },
+    { name = "restate-sql" },
 ]
 
 [package.metadata]
@@ -997,8 +997,40 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=1.6" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "pydantic-ai-slim", extras = ["anthropic"], specifier = ">=2.57" },
-    { name = "restate-sdk", editable = "sdk/.build/sdk-python" },
-    { name = "sqlite-kv", editable = "sqlite-kv" },
+    { name = "restate-sql", editable = "sql" },
+]
+
+[[package]]
+name = "restate-python"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "hypercorn" },
+    { name = "restate-agents" },
+    { name = "restate-sql" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "langgraph-checkpoint-conformance" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hypercorn", specifier = ">=0.17" },
+    { name = "restate-agents", editable = "agents" },
+    { name = "restate-sql", editable = "sql" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "langgraph-checkpoint-conformance", specifier = ">=0.0.2" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=1" },
+    { name = "ruff", specifier = ">=0.14" },
 ]
 
 [[package]]
@@ -1027,44 +1059,23 @@ requires-dist = [
     { name = "pyright", marker = "extra == 'lint'", specifier = ">=1.1.390" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6.9" },
-    { name = "sqlite-kv", marker = "extra == 'sql'", directory = "sqlite-kv" },
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
-provides-extras = ["adk", "client", "harness", "langchain", "lint", "openai", "pydantic-ai", "serde", "sql", "test", "tracing", "zstd"]
+provides-extras = ["adk", "client", "harness", "langchain", "lint", "openai", "pydantic-ai", "serde", "test", "tracing", "zstd"]
 
 [[package]]
 name = "restate-sql"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "sql" }
 dependencies = [
-    { name = "hypercorn" },
-    { name = "restate-agents" },
     { name = "restate-sdk" },
     { name = "sqlite-kv" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "langgraph-checkpoint-conformance" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "hypercorn", specifier = ">=0.17" },
-    { name = "restate-agents", editable = "agents" },
     { name = "restate-sdk", editable = "sdk/.build/sdk-python" },
     { name = "sqlite-kv", editable = "sqlite-kv" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "langgraph-checkpoint-conformance", specifier = ">=0.0.2" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "pytest-asyncio", specifier = ">=1" },
-    { name = "ruff", specifier = ">=0.14" },
 ]
 
 [[package]]

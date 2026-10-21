@@ -1,14 +1,14 @@
 # The Python workspace (uv), as pnpm-workspace.yaml is the TypeScript one:
-# the sqlite-kv extension (sqlite-kv/), the patched SDK, which sdk/
-# prepares (`make sdk-py`), and the agent integrations (agents/), and their
-# tests (tests/). `make py` installs them into .venv; `make lint-py` checks
-# them. The examples (../examples-python) are a project of their own, as
-# yours would be.
+# the sqlite-kv extension (sqlite-kv/), restate-sql (sql/), SQL in virtual
+# objects over the SDK, which sdk/ patches (`make sdk-py`), the agent
+# integrations (agents/), and their tests (tests/). `make py` installs them
+# into .venv; `make lint-py` checks them. The examples (../examples-python)
+# are a project of their own, as yours would be.
 [project]
-name = "restate-sql"
+name = "restate-python"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["restate-sdk", "sqlite-kv", "restate-agents", "hypercorn>=0.17"]
+dependencies = ["restate-sql", "restate-agents", "hypercorn>=0.17"]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.14", "langgraph-checkpoint-conformance>=0.0.2"]
@@ -17,12 +17,13 @@ dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.14", "langgraph-checkpoint-con
 package = false
 
 [tool.uv.workspace]
-members = ["sqlite-kv", "agents"]
+members = ["sqlite-kv", "sql", "agents"]
 
 [tool.uv.sources]
 sqlite-kv = { workspace = true }
+restate-sql = { workspace = true }
 restate-agents = { workspace = true }
-# The patched SDK, wherever it is used.
+# The patched SDK (sdk/README.md), wherever it is used.
 restate-sdk = { path = "sdk/.build/sdk-python", editable = true }
 
 [tool.pytest.ini_options]

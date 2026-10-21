@@ -17,11 +17,11 @@ from typing import Any
 
 import hypercorn.asyncio
 import hypercorn.config
-import restate
+import restate_sql as restate
 from pydantic import BaseModel, create_model
-from restate import InvocationRetryPolicy
 from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL
 from restate.serde import Serde
+from restate_sql import InvocationRetryPolicy
 
 from restate_agents.common import MessageSerde
 from restate_agents.signals import (
@@ -90,9 +90,8 @@ class Object(restate.VirtualObject):
     """
     A Restate virtual object with a SQL database of its own, ``ctx.db``: one
     per key, stored with the object's state. ``options`` are those of
-    ``restate.VirtualObject``, which add to (or replace) the ones set here:
-    ``restate.sql_options``, and retries without end, since each attempt
-    resumes from the database.
+    ``restate_sql.VirtualObject``, which add to (or replace) the one set here:
+    retries without end, since each attempt resumes from the database.
 
     Besides its own handlers, each has ``status``, what it is doing (the
     message it answers, and what its tools wait for), ``stop``, which stops
@@ -108,18 +107,18 @@ class Object(restate.VirtualObject):
         super().__init__(
             name,
             metadata={**METADATA, **(metadata or {})},
-            **{**restate.sql_options, "invocation_retry_policy": RETRY_POLICY, **options},
+            **{"invocation_retry_policy": RETRY_POLICY, **options},
         )
 
-        async def signal(ctx: restate.ObjectSharedContext, signal: Signal) -> Resolved:
+        async def signal(ctx: restate.JournaledObjectSharedContext, signal: Signal) -> Resolved:
             """Resolve a wait of this object's tools: by its id, or else the oldest for its name."""
             return await ctx.object_call(resolve_signal, key=signals_of(name, ctx.key()), arg=signal)
 
-        async def pending(ctx: restate.ObjectSharedContext, _: None = None) -> list[dict[str, Any]]:
+        async def pending(ctx: restate.JournaledObjectSharedContext, _: None = None) -> list[dict[str, Any]]:
             """The waits of this object's tools, oldest first, as ``Waiting``."""
             return await ctx.object_call(pending_signals, key=signals_of(name, ctx.key()), arg=None)
 
-        async def status(ctx: restate.ObjectSharedContext, _: None = None) -> Status:
+        async def status(ctx: restate.JournaledObjectSharedContext, _: None = None) -> Status:
             """What this object is doing: the message it answers, if any, and what its tools wait for."""
             turn = await ctx.get(TURN)
             return Status(
@@ -127,14 +126,14 @@ class Object(restate.VirtualObject):
                 waiting=await ctx.object_call(pending_signals, key=signals_of(name, ctx.key()), arg=None),
             )
 
-        async def stop(ctx: restate.ObjectSharedContext, _: None = None) -> Stopped:
+        async def stop(ctx: restate.JournaledObjectSharedContext, _: None = None) -> Stopped:
             """Cancel the invocation of the message being answered (``status``'s), as Restate's admin API does."""
             turn = await ctx.get(TURN)
             if turn:
                 ctx.cancel_invocation(turn["invocationId"])
             return Stopped(stopped=turn["invocationId"] if turn else None)
 
-        async def steer(ctx: restate.ObjectSharedContext, text: str) -> Steered:
+        async def steer(ctx: restate.JournaledObjectSharedContext, text: str) -> Steered:
             """
             Add ``text`` to the message being answered (``status``'s), such as
             "Only Monday, please": the agent takes it at its next tool call. A
@@ -146,11 +145,11 @@ class Object(restate.VirtualObject):
             request = SteerRequest(agent=agent, turn=turn["invocationId"] if turn else None, text=text)
             return await ctx.object_call(steer_signal, key=signals_of(name, ctx.key()), arg=request)
 
-        async def notifications(ctx: restate.ObjectSharedContext, _: None = None) -> Notifications:
+        async def notifications(ctx: restate.JournaledObjectSharedContext, _: None = None) -> Notifications:
             """The revision of the conversation: each change of what ``messages`` and ``status`` give increases it."""
             return await ctx.object_call(notifications_of, key=signals_of(name, ctx.key()), arg=None)
 
-        async def watch(ctx: restate.ObjectSharedContext, watch: Watch) -> Notifications:
+        async def watch(ctx: restate.JournaledObjectSharedContext, watch: Watch) -> Notifications:
             """
             The revision, once it is past ``afterRevision``, or at the timeout
             (``timeoutSeconds``, 50 by default, at most 60), whichever comes

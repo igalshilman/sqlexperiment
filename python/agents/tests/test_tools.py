@@ -5,7 +5,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-import restate
+import restate_sql as restate
 from pydantic import BaseModel
 from restate_agents import call, send, signal, subagent, tool, workflow
 from restate_agents.object import _service

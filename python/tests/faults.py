@@ -12,7 +12,7 @@ import signal
 import sys
 from pathlib import Path
 
-from restate.sql import SqlStore, set_store_wrapper
+from restate_sql.session import SqlStore, set_store_wrapper
 
 PER_MILLE = float(os.environ.get("ABORT_PER_MILLE", "0"))
 AT = int(os.environ.get("ABORT_AT", "0"))
