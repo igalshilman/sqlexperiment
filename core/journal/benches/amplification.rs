@@ -1,6 +1,6 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
 use journal::{
-    Result, Session, StorageOptions,
+    Result, Sql, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
 };
 use std::sync::Arc;
@@ -96,15 +96,14 @@ fn sum(s: &Stats) -> Traffic {
 }
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db =
-        Session::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
+    let mut db = Sql::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x%10, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
     db.save().await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
-    let mut db = Session::open_with_options(Arc::new(store.clone()), checkpoint_all()).await?;
+    let mut db = Sql::open_with_options(Arc::new(store.clone()), checkpoint_all()).await?;
     db.execute("CREATE TABLE other(x)").await?;
     db.save().await?;
     store.crash();
@@ -162,7 +161,7 @@ async fn reads(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_delete: 0,
             db_pages: base.page_count(),
         };
-        let mut db = Session::open(store.clone()).await?;
+        let mut db = Sql::open_store(store.clone()).await?;
         sample.emit("open", &store, 0, 0);
         for cache in ["cold", "warm"] {
             sample.cache = cache;
@@ -222,7 +221,7 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_delete: 0,
             db_pages: base.page_count(),
         };
-        let mut db = Session::open(store.clone()).await?;
+        let mut db = Sql::open_store(store.clone()).await?;
         sample.emit("open", &store, 0, 0);
         let id = case.rows / 2;
         let ids: Vec<_> = if op == "ten_scattered" {
@@ -297,7 +296,7 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
         db.save().await?;
         sample.emit("save", &store, 0, 0);
         store.crash();
-        let mut db = Session::open(store.clone()).await?;
+        let mut db = Sql::open_store(store.clone()).await?;
         let count = db.query("SELECT count(*) FROM t").await?[0][0]
             .as_int()
             .unwrap() as usize;
@@ -355,7 +354,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
         ("sync_ack_lost", Effect::After, 0, true),
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
-        let mut db = Session::open_with_options(store.clone(), checkpoint_all()).await?;
+        let mut db = Sql::open_with_options(store.clone(), checkpoint_all()).await?;
         db.execute(&format!(
             "UPDATE t SET payload=printf('%0{}d',0) WHERE id={}",
             case.payload,
@@ -388,7 +387,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_delete: 0,
             db_pages: base.page_count(),
         };
-        let mut db = Session::open(store.clone()).await?;
+        let mut db = Sql::open_store(store.clone()).await?;
         sample.emit("recovery_open", &store.inner, 0, 0);
         let value = db
             .query(&format!("SELECT payload FROM t WHERE id={}", case.rows / 2))

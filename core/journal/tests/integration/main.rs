@@ -6,6 +6,7 @@ mod errors;
 mod failpoints;
 mod failure;
 mod files;
+mod journal;
 mod limits;
 mod log;
 mod publication;

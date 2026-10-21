@@ -1,10 +1,10 @@
-use journal::{Result, Session, simulation::MemoryKv};
+use journal::{Result, Sql, simulation::MemoryKv};
 use std::sync::Arc;
 
 fn main() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Session::open(store.clone()).await?;
+        let mut db = Sql::open_store(store.clone()).await?;
         db.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY, email TEXT NOT NULL, payload TEXT NOT NULL)").await?;
         db.execute("CREATE UNIQUE INDEX accounts_email ON accounts(email)")
             .await?;
@@ -27,7 +27,7 @@ fn main() -> Result<()> {
         let stored_bytes = store.stored_bytes();
         store.reset_stats();
         // New engine, pager, file handles and I/O adapter; only KV bytes survive.
-        let mut cold = Session::open(store.clone()).await?;
+        let mut cold = Sql::open_store(store.clone()).await?;
         let query =
             "SELECT id, length(payload) FROM accounts WHERE email = 'user07321@example.com'";
         let plan = cold.query(&format!("EXPLAIN QUERY PLAN {query}")).await?;

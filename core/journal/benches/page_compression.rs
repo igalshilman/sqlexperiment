@@ -2,7 +2,7 @@
 //! CPU measurements of every codec.
 //! All payloads are deterministic synthetic data; no network or replication model.
 use journal::{
-    PageCompression, Result, Session, StorageOptions,
+    PageCompression, Result, Sql, StorageOptions,
     kv::KvStore,
     page_codec,
     simulation::{MemoryKv, Stats},
@@ -93,7 +93,7 @@ fn options(page_compression: PageCompression) -> StorageOptions {
 }
 async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Session::open_with_options(Arc::new(store.clone()), options(codec)).await?;
+    let mut db = Sql::open_with_options(Arc::new(store.clone()), options(codec)).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload BLOB)")
         .await?;
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
@@ -115,7 +115,7 @@ async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
         checkpoint_after: 0,
         ..options(codec)
     };
-    let mut db = Session::open_with_options(Arc::new(store.clone()), all).await?;
+    let mut db = Sql::open_with_options(Arc::new(store.clone()), all).await?;
     db.execute("CREATE TABLE other(x)").await?;
     db.save().await?;
     store.crash();
@@ -179,7 +179,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
     let case = sample.case;
     let store = Arc::new(base.fork());
     let start = Instant::now();
-    let mut db = Session::open_with_options(store.clone(), options(sample.codec)).await?;
+    let mut db = Sql::open_with_options(store.clone(), options(sample.codec)).await?;
     let middle = case.rows / 2;
     let read_ids: Vec<_> = match sample.operation {
         "cold_pk" => vec![middle],
@@ -243,7 +243,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
         } else {
             PageCompression::Raw
         };
-        let mut db = Session::open_with_options(store.clone(), options(other)).await?;
+        let mut db = Sql::open_with_options(store.clone(), options(other)).await?;
         assert_eq!(
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"

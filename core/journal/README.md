@@ -2,8 +2,7 @@
 
 A durable journal over an asynchronous key/value store, for namespaces with
 one owner at a time (such as a Restate virtual object): SQLite-compatible
-SQL, with named records and paged files committed in the same put
-(`Session::journal`). It runs Turso's Rust
+SQL, with named records and paged files committed in the same put. It runs Turso's Rust
 engine (`turso_core` 0.8.2) unmodified and needs only `get`, `put` and
 `delete` from the backend. Changes become durable per session (`save()`), for
 hosts that journal and replay, or per SQL commit as in SQLite, for objects
@@ -16,7 +15,7 @@ An experiment, not a production backend: see [the design](docs/DESIGN.md).
 Implement `kv::KvStore` over your store, then:
 
 ```rust,ignore
-use journal::{Durability, PageCache, PageCacheConfig, Session, StorageOptions};
+use journal::{Durability, Journal, PageCache, PageCacheConfig, Sql, StorageOptions};
 
 // Once per process: a page cache in memory and on a local disk file.
 let cache = PageCache::open(PageCacheConfig::new("/var/cache/pages", 256 << 20, 8 << 30)).await?;
@@ -26,7 +25,7 @@ let options = StorageOptions {
     cache: Some(cache.namespace("object-42")),
     ..StorageOptions::default()
 };
-let mut db = Session::open_with_options(store, options).await?;
+let mut db = Sql::open_with_options(store, options).await?;
 db.execute("INSERT INTO t VALUES(1)").await?;
 let saved = db.save().await?; // durable once this returns Ok
 ```
@@ -48,12 +47,31 @@ let options = StorageOptions {
     durability: Durability::Commit,
     ..StorageOptions::default()
 };
-let mut db = Session::open_with_options(store, options).await?;
+let mut db = Sql::open_with_options(store, options).await?;
 db.execute("INSERT INTO t VALUES(1)").await?; // durable once this returns Ok
 db.transaction(async |db| {                    // durable as a whole, or rolled back
     db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?;
     db.execute("INSERT INTO shipments VALUES(7)").await
 }).await?;
+```
+
+Or keep more than SQL: a `Journal` holds paged files and records beside the
+SQL database (its file `db`), and its `commit()` makes all of them durable
+in one put. The SQL is then one participant (`Durability::Participant`):
+`flush()` moves what it committed into its file, and the host commits.
+
+```rust,ignore
+let options = StorageOptions {
+    durability: Durability::Participant,
+    ..StorageOptions::default()
+};
+let journal = Journal::open_with_options(store, options).await?;
+let mut db = Sql::open(&journal).await?;
+db.execute("INSERT INTO t VALUES(1)").await?;
+db.flush().await?;
+journal.record("progress").set("step 2".into());
+journal.file("image")?.write(0, Some(page))?;
+journal.commit().await?; // the row, the record and the page, durable together
 ```
 
 ## How durability and recovery work

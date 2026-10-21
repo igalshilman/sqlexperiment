@@ -7,7 +7,7 @@
 //! only durable values. Round trips come from `LatencyKv`'s virtual clock;
 //! operation and byte counts from `MemoryKv`. Output is CSV.
 use journal::{
-    NamespaceCache, PageCompression, Result, Session, StorageOptions,
+    NamespaceCache, PageCompression, Result, Sql, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
@@ -103,7 +103,7 @@ fn options(policy: Policy, cache: &Option<NamespaceCache>) -> StorageOptions {
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
-    let mut db = Session::open_with_options(
+    let mut db = Sql::open_with_options(
         kv.clone(),
         StorageOptions {
             page_compression: codec(),
@@ -124,7 +124,7 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     .await?;
     db.save().await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
-    let mut db = Session::open_with_options(
+    let mut db = Sql::open_with_options(
         kv,
         options(
             Policy {
@@ -201,7 +201,7 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
     } = *phase;
     reset(store);
     let kv: Arc<dyn KvStore> = store.clone();
-    let mut db = Session::open_with_options(kv, options(phase.policy, phase.cache)).await?;
+    let mut db = Sql::open_with_options(kv, options(phase.policy, phase.cache)).await?;
     phase.print("open", store);
     reset(store);
     match phase.workload {
@@ -249,7 +249,7 @@ async fn run(case: Case, policy: Policy, strong: bool, cached: bool, run: usize)
     let store: Store = Arc::new(LatencyKv::new(baseline(case).await?));
     let cache = cached.then(|| open_cache(cache_config(256 << 20, 1 << 30)).namespace("bench"));
     // Warm the owner state outside the measurement.
-    let mut db = Session::open_with_options(store.clone(), options(policy, &cache)).await?;
+    let mut db = Sql::open_with_options(store.clone(), options(policy, &cache)).await?;
     db.execute("UPDATE t SET a = a WHERE id = 1").await?;
     db.save().await?;
     for iteration in 0..ITERATIONS {
@@ -267,7 +267,7 @@ async fn run(case: Case, policy: Policy, strong: bool, cached: bool, run: usize)
         }
     }
     // Every write must be visible to a publish-every-save reader.
-    let mut db = Session::open(store.clone()).await?;
+    let mut db = Sql::open_store(store.clone()).await?;
     let rows = db.query("SELECT count(*), sum(a) FROM t").await?;
     assert_eq!(rows[0][0].as_int(), Some((case.rows + ITERATIONS) as i64));
     Ok(())

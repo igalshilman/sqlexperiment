@@ -2,7 +2,7 @@
 //! instrumentation, forced yields or checkpoint fault hooks are required.
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use journal::{Durability, Result, Session, StorageOptions, kv::KvStore};
+use journal::{Durability, Result, Sql, StorageOptions, kv::KvStore};
 use std::{
     collections::BTreeMap,
     io,
@@ -36,19 +36,19 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let mut db = require_send(Session::open(store.clone())).await?;
+        let mut db = require_send(Sql::open_store(store.clone())).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
         db.save().await?;
-        let mut db = Session::open(store.clone()).await?;
+        let mut db = Sql::open_store(store.clone()).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
         );
         db.execute("UPDATE t SET value='changed'").await?;
         drop(db);
-        let mut db = Session::open(store).await?;
+        let mut db = Sql::open_store(store).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
@@ -72,7 +72,7 @@ fn commit_durability_with_an_immediately_ready_backend() -> Result<()> {
             durability: Durability::Commit,
             ..StorageOptions::default()
         };
-        let mut db = Session::open_with_options(store.clone(), options.clone()).await?;
+        let mut db = Sql::open_with_options(store.clone(), options.clone()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         require_send(db.transaction(async |db| {
@@ -81,7 +81,7 @@ fn commit_durability_with_an_immediately_ready_backend() -> Result<()> {
         }))
         .await?;
         drop(db);
-        let mut db = Session::open_with_options(store, options).await?;
+        let mut db = Sql::open_with_options(store, options).await?;
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(2)

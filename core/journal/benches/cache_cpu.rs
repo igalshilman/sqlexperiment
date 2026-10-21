@@ -10,7 +10,7 @@
 //! confirmed. Output is CSV; traffic counters are deterministic, time is the
 //! median of the repeats.
 use journal::{
-    PageCacheConfig, Result, Session, StorageOptions,
+    PageCacheConfig, Result, Sql, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
@@ -54,7 +54,7 @@ type Store = Arc<LatencyKv<MemoryKv>>;
 async fn baseline() -> Result<(MemoryKv, u64)> {
     let store = MemoryKv::default();
     let kv: Arc<dyn KvStore> = Arc::new(store.clone());
-    let mut db = Session::open(kv.clone()).await?;
+    let mut db = Sql::open_store(kv.clone()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, doc TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -70,10 +70,10 @@ async fn baseline() -> Result<(MemoryKv, u64)> {
         checkpoint_after: 0,
         ..StorageOptions::default()
     };
-    let mut db = Session::open_with_options(kv.clone(), all).await?;
+    let mut db = Sql::open_with_options(kv.clone(), all).await?;
     db.execute("CREATE TABLE other(x)").await?;
     db.save().await?;
-    let pages = Session::open(kv).await?.io_stats().database_len / 4096;
+    let pages = Sql::open_store(kv).await?.io_stats().database_len / 4096;
     Ok((store, pages))
 }
 
@@ -92,7 +92,7 @@ fn row(state: &mut u64) -> u64 {
 
 async fn session(store: &Store, options: &StorageOptions, n: u64, state: &mut u64) -> Result<()> {
     let kv: Arc<dyn KvStore> = store.clone();
-    let mut db = Session::open_with_options(kv, options.clone()).await?;
+    let mut db = Sql::open_with_options(kv, options.clone()).await?;
     for _ in 0..4 {
         let id = row(state);
         let rows = db

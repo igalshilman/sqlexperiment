@@ -6,7 +6,7 @@ use functions::{
     Extensions, GuestError, Language, Limits, Operation, Outcome, Programs, Run, Runtime, Scope,
     View,
 };
-use journal::{Session, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
+use journal::{Journal, Sql, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -46,14 +46,17 @@ impl Store {
         (stats.puts + stats.deletes) as usize
     }
 
-    fn open(&self) -> Session {
-        block(Session::open(self.kv.clone())).unwrap()
+    fn open(&self) -> Sql {
+        block(Sql::open_store(self.kv.clone())).unwrap()
     }
 
     /// The record `name` (`run`, `memory`, an extension's), as the scope's
     /// last seal holds it: JSON, or null if none set it.
     pub fn record(&self, name: &str) -> Value {
-        let bytes = self.open().journal().record(name).get();
+        let bytes = block(Journal::open(self.kv.clone()))
+            .unwrap()
+            .record(name)
+            .get();
         match bytes.is_empty() {
             true => Value::Null,
             false => serde_json::from_slice(&bytes).unwrap(),
@@ -67,14 +70,10 @@ impl Store {
 
     /// Seal `value` as the record `name`, as if a turn did.
     pub fn set_record(&self, name: &str, value: &Value) {
-        let options = journal::StorageOptions {
-            durability: journal::Durability::Commit,
-            ..Default::default()
-        };
-        let mut db = block(Session::open_with_options(self.kv.clone(), options)).unwrap();
+        let journal = block(Journal::open(self.kv.clone())).unwrap();
         let bytes = serde_json::to_vec(value).unwrap();
-        db.journal().record(name).set(bytes.into());
-        block(db.seal()).unwrap();
+        journal.record(name).set(bytes.into());
+        block(journal.commit()).unwrap();
     }
 
     /// Pages of the run's memory that differ from golden, as the memory

@@ -1,6 +1,6 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
 use journal::{
-    Result, Session, StorageOptions,
+    Result, Sql, StorageOptions,
     simulation::{MemoryKv, Stats},
 };
 use std::{
@@ -16,8 +16,7 @@ struct Case {
 }
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db =
-        Session::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
+    let mut db = Sql::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER, note INTEGER, payload TEXT)").await?;
     for column in ["a", "b", "c"].into_iter().take(case.indexes) {
         db.execute(&format!("CREATE INDEX by_{column} ON t({column})"))
@@ -56,7 +55,7 @@ fn print_row(
 }
 async fn run(case: Case, repeats: usize) -> Result<()> {
     let base = baseline(case).await?;
-    let db_bytes = Session::open(Arc::new(base.fork()))
+    let db_bytes = Sql::open_store(Arc::new(base.fork()))
         .await?
         .io_stats()
         .database_len;
@@ -80,7 +79,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             }
             let store = Arc::new(base.fork());
             let mut warm = if op == "warm_pk" {
-                let mut db = Session::open(store.clone()).await?;
+                let mut db = Sql::open_store(store.clone()).await?;
                 db.query(&query).await?;
                 Some(db)
             } else {
@@ -90,7 +89,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             let start = Instant::now();
             let mut db = match warm.take() {
                 Some(db) => db,
-                None => Session::open(store.clone()).await?,
+                None => Sql::open_store(store.clone()).await?,
             };
             match op {
                 "cold_pk" | "warm_pk" | "secondary_lookup" => {
@@ -138,7 +137,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
                             .await?;
                         if op == "ten_updates_ten_saves" && n < 10 {
                             db.save().await?;
-                            db = Session::open(store.clone()).await?;
+                            db = Sql::open_store(store.clone()).await?;
                         }
                     }
                 }
@@ -158,7 +157,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             // Validate results after timing/count capture, with simulated loss of
             // all unacknowledged state and a fresh engine.
             store.crash();
-            let mut reopened = Session::open(store.clone()).await?;
+            let mut reopened = Sql::open_store(store.clone()).await?;
             let count = reopened.query("SELECT count(*) FROM t").await?[0][0].to_string();
             let expected_count =
                 case.rows + usize::from(op == "insert") - usize::from(op == "delete");

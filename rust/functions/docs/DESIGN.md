@@ -863,7 +863,7 @@ Resume can coexist. Once the root settles, the run is final.
 
 ## 7. Storage: one commit per turn
 
-A turn is one commit of the scope's database (`Session::seal`), one put of
+A turn is one commit of the scope's database (`Journal::commit`), one put of
 its record:
 
 1. its KV writes, the SQL transaction its first KV request began;
