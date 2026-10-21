@@ -59,6 +59,13 @@ and ask the owner only critical questions.
   extra bytes are the commit record's records (the memory's page list and
   the directory).
 
+- **Measured after the last step** (the split and the renames, same
+  machine, medians), against the run after step 4: the agent stores 2.5 MiB
+  over 200 steps (as before), restores in 2.3 ms (2.6), its model and tool
+  turns take 1.6 and 1.9 ms (1.6, 1.8); a checkpoints heap-churn turn takes
+  7.7 ms live and 9.9 ms restored (9.3, 11.3), a write-heavy one 3.7 and
+  4.6 ms (4.1, 5.0); bytes written are unchanged. The plan is done; step 6
+  needed no extents.
 - **Against `main` (81f20a3), same machine, after step 4.** The storage
   benchmarks (amplification, small databases, log shipping) make the same
   gets, puts and round trips; only bytes grow: page keys by 9 bytes
