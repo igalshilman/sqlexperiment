@@ -3,9 +3,8 @@
 #   core/        the sqlite-kv crate
 #   typescript/  the pnpm workspace: the Node.js addon, restate-fns, the
 #                integrations, their tests and the examples
-#   python/      the uv workspace: the Python extension, restate-fns on the
-#                patched SDK, the integrations and their tests
-#                (examples-python/ beside it)
+#   python/      the uv workspace: the Python extension, restate-fns, the
+#                integrations and their tests (examples-python/ beside it)
 #   rust/        the patched Rust SDK, and durable functions on it
 #                (rust/functions: functions, functions-python, test-functions)
 #
@@ -22,7 +21,6 @@ FUNCTIONS := rust/functions
 # CPython for WASI, with its standard library: the engine of durable Python.
 PY_ENGINE := $(CARGO_TARGET_DIR)/pywasm/out/python.wasm
 ADDON := typescript/packages/sql-node/sqlite_kv.node
-SDK_PY := python/sdk/.build/sdk-python/.patched
 SDK_RS := rust/sdk/.build/sdk-rust/.patched
 # The Rust crates that rustfmt and clippy check (rust/functions has lint-functions).
 RUST_CRATES := $(CORE) typescript/packages/sql-node python/sqlite-kv
@@ -56,8 +54,8 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core functions functions-python python-engine addon sdk-py sdk-rs js py wheels examples-rust \
-	test test-core test-addon test-ts test-sdk-py test-sdk-rs test-sql-py test-agents-py test-functions \
+.PHONY: all help core functions functions-python python-engine addon sdk-rs js py wheels examples-rust \
+	test test-core test-addon test-ts test-sdk-rs test-sql-py test-agents-py test-functions \
 	crash-test concurrency-test tools-test crash-test-py concurrency-test-py lint lint-core lint-ts lint-py lint-functions format clean
 
 # --- Build
@@ -89,17 +87,12 @@ $(ADDON): $(wildcard typescript/packages/sql-node/src/*.rs $(CORE)/src/*.rs $(CO
 js: $(ADDON) ## The pnpm workspace, installed with the addon
 	cd typescript && pnpm install
 
-sdk-py: $(SDK_PY) ## The patched Python SDK's sources (python/sdk), for the uv workspace to build
-
-$(SDK_PY): $(wildcard python/sdk/patches/*.patch) python/sdk/setup.sh
-	python/sdk/setup.sh
-
 sdk-rs: $(SDK_RS) ## The patched Rust SDK's sources (rust/sdk)
 
 $(SDK_RS): $(wildcard rust/sdk/patches/*.patch) rust/sdk/setup.sh
 	rust/sdk/setup.sh
 
-py: $(SDK_PY) ## The uv workspace (python/.venv): the patched Python SDK and the Python extension, rebuilt when their Rust changes
+py: ## The uv workspace (python/.venv): the Python extension, rebuilt when its Rust changes, restate-fns and the integrations
 	cd python && uv sync --locked
 
 # Built with zig (maturin[zig]), for glibc 2.28 and later: the wheels run on
@@ -107,9 +100,8 @@ py: $(SDK_PY) ## The uv workspace (python/.venv): the patched Python SDK and the
 MATURIN_WHEEL := uv tool run --from 'maturin[zig]>=1.9,<2' maturin build --release --zig --compatibility manylinux_2_28 \
 	-i python3.13 -o $(CURDIR)/dist
 
-wheels: $(SDK_PY) ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPython 3.13): the patched SDK, the extension, restate-fns and restate-agents
+wheels: ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPython 3.13): the extension, restate-fns and restate-agents
 	rm -rf dist
-	cd python/sdk/.build/sdk-python && $(MATURIN_WHEEL)
 	cd python/sqlite-kv && $(MATURIN_WHEEL)
 	uv build --wheel python/fns -o dist
 	uv build --wheel python/agents -o dist
@@ -119,7 +111,7 @@ examples-rust: ## The Rust example: the core crate's lookup
 
 # --- Test
 
-test: test-core test-addon test-ts test-sdk-py test-sql-py test-agents-py ## Every test that needs no Restate server
+test: test-core test-addon test-ts test-sql-py test-agents-py ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
@@ -130,13 +122,6 @@ test-addon: $(ADDON) ## The Node.js addon
 
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
 	cd typescript/tests && pnpm exec vitest run $(T)
-
-# Its own environment, with the extras its tests use; its tests against a
-# Restate server in docker (the test harness) are left out.
-test-sdk-py: $(SDK_PY) ## The patched Python SDK's own tests
-	cd python/sdk/.build/sdk-python && uv run --extra test --extra serde --extra client \
-		pytest -o python_files='*.py' tests --ignore=tests/harness.py --ignore=tests/servercontext.py \
-		--ignore=tests/ext.py -k 'not end_to_end'
 
 test-sdk-rs: $(SDK_RS) ## The patched Rust SDK's unit tests
 	cd rust/sdk/.build/sdk-rust && $(CARGO) test --lib
@@ -165,11 +150,9 @@ lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware)
 	$(OXLINT) --type-aware typescript examples-typescript
 	$(OXFMT) --check
 
-lint-py: py ## The Python (python/, examples-python/, the durable functions in Python and their bridge): ruff format --check and ruff check; and the patched SDK's ruff, as it configures it, and rustfmt
+lint-py: py ## The Python (python/, examples-python/, the durable functions in Python and their bridge): ruff format --check and ruff check
 	uv run --project python --locked ruff format --check python examples-python examples-functions-python rust/functions/assets
 	uv run --project python --locked ruff check python examples-python examples-functions-python rust/functions/assets
-	cd python/sdk/.build/sdk-python && uv run --extra lint ruff format --check && uv run --extra lint ruff check \
-		&& $(CARGO) fmt --check
 
 format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Markdown) and ruff (Python)
 	for crate in $(RUST_CRATES) $(FUNCTIONS); do (cd $$crate && $(CARGO) fmt) || exit 1; done
@@ -217,6 +200,6 @@ endif
 	mv $@.tmp $@
 
 clean: ## Remove build outputs
-	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) python/sdk/.build \
+	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) \
 		typescript/node_modules typescript/*/node_modules typescript/packages/*/node_modules examples-typescript/node_modules \
 		python/.venv python/sqlite-kv/python/sqlite_kv/*.so

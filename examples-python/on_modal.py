@@ -22,7 +22,8 @@ HERE = Path(__file__).parent
 
 image = (
     modal.Image.debian_slim(python_version="3.13")
-    # The patched Restate SDK, the SQL extension and restate-agents: built here, not on PyPI.
+    # The SQL extension, restate-fns and restate-agents: built here, not on PyPI
+    # (pip installs the Restate SDK they need from it).
     .add_local_dir(HERE.parent / "dist", "/wheels", copy=True)
     .run_commands("pip install /wheels/*.whl")
     .add_local_python_source("support")

@@ -8,8 +8,6 @@
 #
 # or a part: `node gateway/main.ts agents` (the Assistant and Case), or
 # `node gateway/main.ts tools` (the tools and the Gateway).
-#
-# Needs the patched SDK's tarball, typescript/packages/sdk-typescript/.build (`make sdk-ts`).
 
 # The sqlite-kv addon, for Linux.
 FROM rust:1-bookworm AS addon
@@ -25,10 +23,10 @@ FROM node:24-bookworm AS deps
 RUN corepack enable
 WORKDIR /app/typescript
 COPY typescript/package.json typescript/pnpm-workspace.yaml typescript/pnpm-lock.yaml ./
-COPY typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.3.tgz packages/sdk-typescript/.build/
 COPY typescript/packages/sql-node/package.json typescript/packages/sql-node/index.js typescript/packages/sql-node/index.d.ts \
   packages/sql-node/
 COPY --from=addon /src/typescript/packages/sql-node/sqlite_kv.node packages/sql-node/
+COPY typescript/packages/fns packages/fns
 COPY typescript/packages/integrations packages/integrations
 COPY examples-typescript/package.json ../examples-typescript/
 RUN pnpm install --frozen-lockfile --prod --filter examples...

@@ -7,9 +7,7 @@ its own tasks, or a library's. The protocol has one await point per
 invocation, though: a suspension, the awaiting-on hint and a cancellation each
 take one unresolved future. So every wait is registered with the selector,
 which asks the VM for progress on the first of all of them to complete, and is
-the only one reading the invocation's input. So is an ephemeral command (a
-state get left out of the journal), by its completion id: the VM reports its
-result ahead of any future.
+the only one reading the invocation's input.
 """
 
 from __future__ import annotations
@@ -26,7 +24,6 @@ from restate.vm import (
     AllCompletedUnresolvedFuture,
     DoProgressAnyCompleted,
     DoProgressCancelSignalReceived,
-    DoProgressEphemeralNotificationReady,
     DoProgressExecuteRun,
     DoProgressWaitExternalProgress,
     FirstCompletedUnresolvedFuture,
@@ -47,10 +44,6 @@ class SelectorDriver(Protocol):
 
     def is_completed(self, handle: int) -> bool:
         """Whether the VM has the result of ``handle``."""
-        ...
-
-    def take_ephemeral(self, completion_id: int) -> Any:
-        """The result of a ready ephemeral command."""
         ...
 
     async def flush_output(self) -> None:
@@ -102,17 +95,13 @@ class FutureSelector:
     to complete: so a suspension waits for any of them, a pending run starts
     whichever wait reaches it first, and a cancellation reaches all of them. A
     wait registered while the loop reads the input wakes it, so it is part of
-    the next check. An ephemeral command is waited for by its completion id,
-    and keeps the loop going with no future pending; a cancellation does not
-    reach it. The loop runs while something is pending.
+    the next check. The loop runs while something is pending.
     """
 
     def __init__(self, driver: SelectorDriver, disconnected: Callable[[], BaseException]) -> None:
         self._driver = driver
         self._disconnected = disconnected
         self._waits: dict[asyncio.Future, UnresolvedFuture] = {}
-        # The ephemeral commands in flight, by completion id.
-        self._ephemeral: dict[int, asyncio.Future] = {}
         self._task: asyncio.Task | None = None
         # Between the VM's WaitExternalProgress and the next input.
         self._waiting = False
@@ -127,7 +116,7 @@ class FutureSelector:
     @property
     def size(self) -> int:
         """The waits still pending, for tests."""
-        return len(self._waits) + len(self._ephemeral)
+        return len(self._waits)
 
     async def wait(self, future: UnresolvedFuture) -> None:
         """Returns once ``future`` is ready; raises if the attempt ends first, or is cancelled."""
@@ -142,18 +131,6 @@ class FutureSelector:
             await waiter
         finally:
             self._waits.pop(waiter, None)
-
-    async def wait_ephemeral(self, completion_id: int) -> Any:
-        """The result of the ephemeral command ``completion_id``; raises if the attempt ends first."""
-        if self._end is not None:
-            raise self._end()
-        waiter = asyncio.get_running_loop().create_future()
-        self._ephemeral[completion_id] = waiter
-        self._start()
-        try:
-            return await waiter
-        finally:
-            self._ephemeral.pop(completion_id, None)
 
     def _start(self) -> None:
         if self._task is None:
@@ -170,11 +147,8 @@ class FutureSelector:
             if not waiter.done() and is_ready(future, self._driver.is_completed):
                 waiter.set_result(None)
 
-    def _fail_all(self, error: Callable[[], BaseException], ephemeral: bool = True) -> None:
-        waiters = list(self._waits)
-        if ephemeral:
-            waiters += self._ephemeral.values()
-        for waiter in waiters:
+    def _fail_all(self, error: Callable[[], BaseException]) -> None:
+        for waiter in list(self._waits):
             if not waiter.done():
                 waiter.set_exception(error())
 
@@ -194,12 +168,9 @@ class FutureSelector:
                 # registers later wakes the loop anyway.
                 await asyncio.sleep(0)
                 pending = [future for waiter, future in self._waits.items() if not waiter.done()]
-                ephemeral = any(not waiter.done() for waiter in self._ephemeral.values())
-                if not pending and not ephemeral:
+                if not pending:
                     return
                 await driver.flush_output()
-                # With only ephemeral commands in flight, no future: the VM
-                # reports their results, or waits for input.
                 response = driver.do_progress(
                     pending[0] if len(pending) == 1 else FirstCompletedUnresolvedFuture(pending)
                 )
@@ -212,15 +183,9 @@ class FutureSelector:
                     return
                 if isinstance(response, DoProgressAnyCompleted):
                     continue
-                if isinstance(response, DoProgressEphemeralNotificationReady):
-                    waiter = self._ephemeral.get(response.completion_id)
-                    result = driver.take_ephemeral(response.completion_id)
-                    if waiter is not None and not waiter.done():
-                        waiter.set_result(result)
-                    continue
                 if isinstance(response, DoProgressCancelSignalReceived):
                     # Reaches every pending wait; what waits after it is not cancelled.
-                    self._fail_all(lambda: TerminalError("cancelled", 409), ephemeral=False)
+                    self._fail_all(lambda: TerminalError("cancelled", 409))
                     continue
                 if isinstance(response, DoProgressExecuteRun):
                     driver.execute_run(response.handle)
@@ -292,9 +257,6 @@ class _ContextDriver:
 
     def is_completed(self, handle: int) -> bool:
         return self.context.vm.is_completed(handle)
-
-    def take_ephemeral(self, completion_id: int) -> Any:
-        return self.context.vm.take_ephemeral_notification(completion_id)
 
     async def flush_output(self) -> None:
         await self.context.take_and_send_output()

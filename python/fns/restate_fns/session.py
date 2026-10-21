@@ -40,22 +40,20 @@ that a row unpacks to what its query selects.
 class SqlOptions(typing.TypedDict):
     """The options of an object whose handlers use ``ctx.db``: see ``sql_options``."""
 
-    journal_replay: bool
     enable_lazy_state: bool
     journal_retention: timedelta
 
 
 sql_options: SqlOptions = {
-    "journal_replay": False,
     "enable_lazy_state": True,
     "journal_retention": timedelta(0),
 }
 """
 The options of an object whose handlers use ``ctx.db``, which
-``restate_fns.VirtualObject`` sets: no journal replay, since a later attempt
-makes different reads; lazy state, so an invocation does not start by loading
-every page; and no journal kept after an invocation completes, since it holds
-every page it read.
+``restate_fns.VirtualObject`` sets: lazy state, so an invocation does not
+start by loading every page; and no journal kept after an invocation
+completes, since it holds every page it read. Its handlers also run with
+explicit recovery, since a later attempt makes different reads.
 """
 
 

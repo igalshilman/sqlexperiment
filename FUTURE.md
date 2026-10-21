@@ -14,18 +14,18 @@ Makefile downloads, negotiates protocol v7 at most.
 **Then:** read with v8's ephemeral get, which leaves the read out of the
 journal. A handler without journal replay never reads its journal back, so
 each read's entry is pure overhead: a database read of N pages adds N
-entries. The code is already in place, unused:
+entries. The TypeScript and Python SDKs have it in their internals, unused:
 
 | SDK        | Read now (TODO)                                          | Ephemeral read, in place                                                                                                                      |
 | ---------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | TypeScript | `objectStore` in `restate-fns`'s `session.ts`: `ctx.get` | The SDK's `ephemeralStateGet` is private (only `getProject` uses it): the SDK needs to expose it, and the selector drives it by completion id |
-| Python     | `sql_get` in `restate-fns`'s `object.py`                 | `_get_ephemeral`: the patched SDK's `vm.ephemeral_state_get`, the selector's `wait_ephemeral`                                                 |
+| Python     | `sql_get` in `restate-fns`'s `object.py`                 | Not exposed: the SDK (1.1.0) has no ephemeral get, though its shared core 8.1.0 does; the SDK needs one, and the selector would drive it      |
 | Rust       | `RawState::get` in `context/mod.rs`                      | `ContextInternal::get_ephemeral`, `EphemeralGetFuture`                                                                                        |
 
 The TypeScript and Python reads are in `restate-fns` (`typescript/packages/fns`,
-`python/fns`), the Rust one in its SDK's patch (`rust/sdk/patches`); the
-Python SDK's patch has its ephemeral get (`python/sdk/patches`). The SDKs'
-discovery already advertises v8; a v7 server picks v7.
+`python/fns`), the Rust one in its SDK's patch (`rust/sdk/patches`). The
+TypeScript and Rust SDKs' discovery already advertises v8; a v7 server picks
+v7.
 
 **Found out (19 October 2026):** v8 is only on Restate's
 `service-protocol-v8` branch. There, `protocol_v8` is one of the
@@ -44,22 +44,6 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
    starts, and in the READMEs' commands that start Restate;
 3. switch the three reads above to the ephemeral ones, and regenerate the
    Rust patch (`patches/regenerate.sh`).
-
-## Explicit recovery in the Python SDK
-
-**Waits on:** a release of the Python SDK with explicit recovery, as the
-TypeScript SDK 1.17.4 has (`restate.internal.explicitRecovery()`). Release
-1.0.5 is on shared core 7.0.3, without it.
-
-**Now:** `restate-fns` (`python/fns`) runs on the Python SDK 1.0.5 with a
-patch (`python/sdk/patches`): shared core 8.1.0 and its
-`JournalReplay::Disabled`, a `journal_replay` option of services and
-handlers, state commands named after their key, and protocol v8's ephemeral
-get.
-
-**Then:** drop `python/sdk`, depend on the release in `python/fns`'s
-`pyproject.toml`, and switch `restate_fns.VirtualObject` to the release's
-option, if it is named differently.
 
 ## Concurrent awaits in the TypeScript and Python SDKs
 
@@ -80,6 +64,6 @@ whether a release has it (with the hook off, its concurrent awaits fail).
 The same holds in Python: `restate-fns`'s selector
 (`python/fns/restate_fns/selector.py`) takes over the context's
 `create_poll_or_cancel_coroutine` and its futures, so `python/fns` pins
-`restate-sdk` 1.0.5. The SDK drives each awaited future with a loop of its
+`restate-sdk` 1.1.0. The SDK drives each awaited future with a loop of its
 own, which concurrent waits race on; `python/tests/test_context.py` tells
-(with the hook off, 4 of its 13 tests fail).
+(with the hook off, 2 of its 13 tests fail on 1.1.0).

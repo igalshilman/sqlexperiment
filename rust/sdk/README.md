@@ -1,7 +1,6 @@
 # The patched Rust SDK
 
-The Rust counterpart of [the patched Python SDK](../../python/sdk/README.md):
-the Restate Rust SDK with handlers that do not replay their journal, over the
+The Restate Rust SDK with handlers that do not replay their journal, over the
 released [shared core 8.1.0](https://github.com/restatedev/sdk-shared-core/releases/tag/v8.1.0) (`JournalReplay::Disabled`). It is what
 [the durable JavaScript objects](../functions/README.md) run on.
 

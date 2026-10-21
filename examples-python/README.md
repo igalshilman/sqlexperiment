@@ -71,7 +71,8 @@ example's docstring has its requests.
 The agents need that: an attempt that waits runs its handler again from the
 start, so HTTP/1.1's request-response mode (Modal's web endpoints, AWS
 Lambda) cannot serve them. Its image installs the wheels of `make wheels`
-(the patched SDK, the SQL extension and restate-fns are not on PyPI).
+(the SQL extension, restate-fns and restate-agents are not on PyPI; the
+Restate SDK is, and pip installs it with them).
 
 ```sh
 make wheels                                          # at the repository's root: dist/
