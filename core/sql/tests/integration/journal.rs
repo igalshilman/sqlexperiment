@@ -129,3 +129,61 @@ fn the_idle_engine_waits_for_the_next_sql() -> Result<()> {
         Ok(())
     })
 }
+
+/// An open SQL transaction holds changes too, though the engine keeps them to
+/// itself until `COMMIT`: the journal refuses to commit around it.
+#[test]
+fn a_commit_refuses_an_open_sql_transaction() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let journal = Journal::open_with_options(store.clone(), options()).await?;
+        let mut sql = Sql::open(&journal).await?;
+        sql.execute("CREATE TABLE t(n INTEGER)").await?;
+        sql.flush().await?;
+        journal.commit().await?;
+        sql.execute("BEGIN").await?;
+        sql.execute("INSERT INTO t VALUES(1)").await?;
+        let refused = journal.commit().await.unwrap_err().to_string();
+        assert!(refused.contains("not yet in the journal"), "{refused}");
+        sql.flush().await?;
+        journal.commit().await?;
+        assert_eq!(rows(&mut sql).await?, 1);
+        Ok(())
+    })
+}
+
+/// A `COMMIT` that fails with an SQL error leaves its transaction open and
+/// takes nothing from the journal: what an earlier flush moved still commits.
+#[test]
+fn a_failed_commit_at_flush_keeps_what_was_flushed() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let journal = Journal::open_with_options(store.clone(), options()).await?;
+        let mut sql = Sql::open(&journal).await?;
+        sql.execute("PRAGMA foreign_keys = ON").await?;
+        sql.execute("CREATE TABLE parent(id INTEGER PRIMARY KEY)")
+            .await?;
+        sql.execute(
+            "CREATE TABLE t(n INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)",
+        )
+        .await?;
+        sql.execute("INSERT INTO parent VALUES(1)").await?;
+        sql.execute("INSERT INTO t VALUES(1)").await?;
+        sql.flush().await?;
+        sql.execute("BEGIN").await?;
+        sql.execute("INSERT INTO t VALUES(2)").await?;
+        let error = sql.flush().await.unwrap_err().to_string();
+        assert!(error.to_lowercase().contains("foreign key"), "{error}");
+        assert!(sql.is_usable());
+        assert!(sql.in_transaction(), "the transaction stays open");
+        sql.execute("ROLLBACK").await?;
+        sql.flush().await?;
+        journal.commit().await?;
+        drop(sql);
+        drop(journal);
+        let journal = Journal::open_with_options(store, options()).await?;
+        let mut sql = Sql::open(&journal).await?;
+        assert_eq!(rows(&mut sql).await?, 1);
+        Ok(())
+    })
+}

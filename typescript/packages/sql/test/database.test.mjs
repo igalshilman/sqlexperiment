@@ -24,7 +24,7 @@ class Backend {
     }
   }
 
-  /** A failure: the store keeps some of the unsynced writes, in no order. */
+  /** A failure: the store keeps some of the unsynced writes, in no order (worse than the contract). */
   lose() {
     for (const [key, value] of this.unconfirmed.splice(0)) {
       if (this.#seed === 0) continue;
@@ -200,6 +200,54 @@ test('a COMMIT that fails rolls the transaction back', async () => {
   await db.save();
 });
 
+test('a statement that ends the transaction of a body ends the session, and commits nothing', async () => {
+  const backend = new Backend();
+  const ns = fresh();
+  const db = await open(ns, backend.request());
+  await db.execute('CREATE TABLE t(id INTEGER)');
+  for (const end of ['COMMIT', 'ROLLBACK', 'END']) {
+    const session = await open(ns, backend.request());
+    await assert.rejects(
+      session.transaction(async (tx) => {
+        await tx.execute('INSERT INTO t VALUES(1)');
+        await tx.execute(end);
+      }),
+      /ended the transaction/,
+    );
+    assert.equal(session.isUsable(), false);
+  }
+  assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
+  await db.save();
+});
+
+test('save refuses a transaction left open, whose changes are lost', async () => {
+  const backend = new Backend();
+  const ns = fresh();
+  const db = await open(ns, backend.request());
+  await db.execute('CREATE TABLE t(id INTEGER)');
+  await db.execute('BEGIN');
+  await db.execute('INSERT INTO t VALUES(1)');
+  await assert.rejects(db.save(), /left open/);
+  const again = await open(ns, backend.request());
+  assert.deepEqual(await again.query('SELECT count(*) FROM t'), [[0]]);
+  await again.save();
+});
+
+test('effects a commit cannot hold are refused, and the session goes on', async () => {
+  const db = await open(fresh(), new Backend().request());
+  await db.execute('CREATE TABLE t(id INTEGER)');
+  await assert.rejects(
+    db.transaction(async (tx) => {
+      await tx.execute('INSERT INTO t VALUES(1)');
+      tx.commitEffects(new Uint8Array((16 << 20) + 1));
+    }),
+    /exceed/,
+  );
+  assert.ok(db.isUsable());
+  assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
+  await db.save();
+});
+
 test('a call running meanwhile does not make the session look unusable', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER)');
@@ -344,6 +392,12 @@ test('a reader reads beside the owner, writes nothing, and knows when the owner 
   await reader.execute('INSERT INTO t VALUES (99)');
   assert.deepEqual(await reader.query('SELECT n FROM t ORDER BY n'), [[1], [99]]);
   assert.equal(await reader.isCurrent(), true);
+  // It commits no effects.
+  await assert.rejects(
+    reader.transaction(async (tx) => tx.commitEffects(new TextEncoder().encode('sends'))),
+    /a reader commits no effects/,
+  );
+  assert.equal(await text(reader), '');
 
   // The owner commits: the reader keeps the state it opened on, which is no longer current.
   await owner.execute('INSERT INTO t VALUES (2)');

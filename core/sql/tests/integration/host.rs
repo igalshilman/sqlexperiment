@@ -134,8 +134,9 @@ impl Db {
     /// `COMMIT` the open transaction with `effects` as the record `effects`,
     /// and commit: what the addon's `commit(effects)` does.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
-        self.sql.journal().record("effects").set(effects);
+        // After the flush: a `COMMIT` that fails takes nothing from the journal.
         self.sql.flush().await?;
+        self.sql.journal().record("effects").set(effects);
         self.sql.journal().commit().await.map(drop)
     }
 

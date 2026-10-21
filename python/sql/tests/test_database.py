@@ -26,7 +26,7 @@ class Backend:
         self.unconfirmed.clear()
 
     def lose(self):
-        """A failure: the store keeps some of the unsynced writes, in no order."""
+        """A failure: the store keeps some of the unsynced writes, in no order (worse than the contract)."""
         kept = [write for write in self.unconfirmed if self.random is not None and self.random.random() < 0.5]
         self.unconfirmed = kept
         self.confirm()
@@ -220,6 +220,48 @@ async def test_a_commit_that_fails_rolls_the_transaction_back():
     await db.save()
 
 
+async def test_a_statement_that_ends_the_transaction_of_a_body_ends_the_session_and_commits_nothing():
+    backend = Backend()
+    ns = fresh()
+    db = await restate_sql.open(ns, backend.request())
+    await db.execute("CREATE TABLE t(id INTEGER)")
+    for end in ["COMMIT", "ROLLBACK", "END"]:
+        session = await restate_sql.open(ns, backend.request())
+        with pytest.raises(RuntimeError, match="ended the transaction"):
+            async with session.transaction() as tx:
+                await tx.execute("INSERT INTO t VALUES(1)")
+                await tx.execute(end)
+        assert not session.is_usable()
+    assert await db.query("SELECT count(*) FROM t") == [[0]]
+    await db.save()
+
+
+async def test_save_refuses_a_transaction_left_open_whose_changes_are_lost():
+    backend = Backend()
+    ns = fresh()
+    db = await restate_sql.open(ns, backend.request())
+    await db.execute("CREATE TABLE t(id INTEGER)")
+    await db.execute("BEGIN")
+    await db.execute("INSERT INTO t VALUES(1)")
+    with pytest.raises(RuntimeError, match="left open"):
+        await db.save()
+    again = await restate_sql.open(ns, backend.request())
+    assert await again.query("SELECT count(*) FROM t") == [[0]]
+    await again.save()
+
+
+async def test_effects_a_commit_cannot_hold_are_refused_and_the_session_goes_on():
+    db = await restate_sql.open(fresh(), Backend().request())
+    await db.execute("CREATE TABLE t(id INTEGER)")
+    with pytest.raises(RuntimeError, match="exceed"):
+        async with db.transaction() as tx:
+            await tx.execute("INSERT INTO t VALUES(1)")
+            tx.commit_effects(bytes((16 << 20) + 1))
+    assert db.is_usable()
+    assert await db.query("SELECT count(*) FROM t") == [[0]]
+    await db.save()
+
+
 async def test_a_call_running_meanwhile_does_not_make_the_session_look_unusable():
     db = await restate_sql.open(fresh(), Backend().request())
     await db.execute("CREATE TABLE t(id INTEGER)")
@@ -371,6 +413,11 @@ async def test_a_reader_reads_beside_the_writer_and_knows_when_it_is_stale():
     reader = await restate_sql.open(ns, ReadOnly(backend, False), reader=True)
     assert await reader.query("SELECT n FROM t") == [[1]]
     assert await reader.is_current()
+    # It commits no effects.
+    with pytest.raises(RuntimeError, match="a reader commits no effects"):
+        async with reader.transaction() as tx:
+            tx.commit_effects(b"sends")
+    assert await reader.effects() == b""
     # The writer commits again: what the reader read is no longer the stored state.
     await writer.execute("INSERT INTO t VALUES (2)")
     assert not await reader.is_current()

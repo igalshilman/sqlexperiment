@@ -157,11 +157,12 @@ class Database:
 
         It commits when the body ends, and rolls back when the body raises; a
         COMMIT that fails rolls back too. The body uses ``tx``, which is
-        invalid once the body has ended.
+        invalid once the body has ended. A statement in it that ends the
+        transaction (``COMMIT``, ``ROLLBACK``) ends the session.
         """
         async with self._serial():
             native = self._native
-            await native.query("BEGIN")
+            await native.begin()
             tx = Transaction(self, native, _running.get())
             token = _running.set(tx)
             try:
@@ -202,12 +203,16 @@ class Database:
             return await self._native.is_current()
 
     async def save(self) -> None:
-        """End the session, after the calls before it."""
+        """End the session after the calls before it, leaving its engine to the next one.
+
+        It fails if they left a transaction open, whose changes are lost, or a
+        failure ended the session.
+        """
         async with self._serial():
             await self._native.save()
 
     async def close(self) -> None:
-        """End the session now: queued calls fail."""
+        """End the session now, whatever its state: queued calls fail."""
         await self._native.close()
 
 
@@ -217,11 +222,10 @@ async def _rollback(native) -> None:
     The caller re-raises its own error, which says why: a failing rollback
     only leaves the session unusable.
     """
-    if native.is_usable():
-        try:
-            await native.query("ROLLBACK")
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
+    try:
+        await native.rollback()
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
 
 
 class Transaction:

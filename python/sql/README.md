@@ -18,8 +18,9 @@ await db.save()  # ends the session, leaving its engine to the next one
 ## The store
 
 `set` and `clear` return at once, and `sync` completes once every write before
-it is stored. The store keeps no order: until a sync completes, a failure may
-lose any of the writes before it, and keep any others.
+it is stored. Writes are stored in the order they were made: until a sync
+completes, a crash may lose the last of them, never one without the ones after
+it (as a Restate object's state does).
 
 `get` issues its read when it is called, and returns the value (`None` when
 absent) or an awaitable of it, as a Restate context's `ctx.get` does. A plain
