@@ -44,6 +44,28 @@ and ask the owner only critical questions.
   extra bytes are the commit record's records (the memory's page list and
   the directory).
 
+- **Against `main` (81f20a3), same machine, after step 4.** The storage
+  benchmarks (amplification, small databases, log shipping) make the same
+  gets, puts and round trips; only bytes grow: page keys by 9 bytes
+  (`<file:08x>/`, +36% key bytes on reads), the commit record by the
+  directory (+1.6% to +5% of its bytes); in all, +0.5% (log shipping) and
+  +4.4% (small databases) bytes written. The runtime (this branch also
+  carries ctx.llm and the participants, so not step 4 alone):
+
+  | | `main` | Branch |
+  |---|--:|--:|
+  | Agent, stored over 200 steps | 3.2 MiB | 2.5 MiB |
+  | Agent, largest step | 238 KiB | 47 KiB |
+  | Agent, restore | 0.6 ms | 2.6 ms |
+  | Agent, model turn / tool turn | 1.2 / 0.9 ms | 1.6 / 1.8 ms |
+  | Checkpoints, heap-churn turn, live / restored | 6.0 / 7.5 ms | 9.3 / 11.3 ms |
+  | Checkpoints, write-heavy turn, live / restored | 3.9 / 4.8 ms | 4.1 / 5.0 ms |
+  | Checkpoints, sparse-256k turn, bytes written | 1.3 KB | 1.9 KB |
+
+  On `main` the agent's conversation lives in the heap (174 live pages); on
+  the branch it is in the scope's database, read for each model call
+  (2.3 ms of the tool turn), and the heap is 66 pages.
+
 ## 1. Goal
 
 Today the durable functions runtime (`rust/functions`) commits each turn
