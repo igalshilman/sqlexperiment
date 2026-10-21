@@ -9,7 +9,6 @@ from restate.vm import (
     AllCompletedUnresolvedFuture,
     DoProgressAnyCompleted,
     DoProgressCancelSignalReceived,
-    DoProgressEphemeralNotificationReady,
     DoProgressExecuteRun,
     DoProgressWaitExternalProgress,
     FirstCompletedUnresolvedFuture,
@@ -35,7 +34,7 @@ class Disconnected(Exception):
 class FakeVm:
     """
     A VM whose handles complete as input names them: a body chunk b"3" completes
-    handle 3, and b"e3" the ephemeral command 3 (reported ahead of the rest).
+    handle 3.
     """
 
     def __init__(self) -> None:
@@ -48,13 +47,9 @@ class FakeVm:
         self.wakes = 0
         self.ended = 0
         self.tasks: list[asyncio.Future] = []
-        self.ephemeral: dict[int, Any] = {}
-        self.ephemeral_ready: list[int] = []
 
     def do_progress(self, future: UnresolvedFuture) -> Any:
         self.checks.append(future)
-        if self.ephemeral_ready:
-            return DoProgressEphemeralNotificationReady(self.ephemeral_ready.pop(0))
         if self.script:
             return self.script.pop(0)
         if is_ready(future, self.is_completed):
@@ -63,9 +58,6 @@ class FakeVm:
 
     def is_completed(self, handle: int) -> bool:
         return handle in self.completed
-
-    def take_ephemeral(self, completion_id: int) -> Any:
-        return self.ephemeral.pop(completion_id)
 
     async def flush_output(self) -> None:
         pass
@@ -83,11 +75,7 @@ class FakeVm:
         self.input.put_nowait({"type": "restate.run_completed"})
 
     def notify_input(self, chunk: dict[str, Any]) -> None:
-        body = chunk["body"]
-        if body.startswith(b"e"):
-            self.ephemeral_ready.append(int(body[1:]))
-        else:
-            self.completed.add(int(body))
+        self.completed.add(int(chunk["body"]))
 
     def track(self, task: asyncio.Future) -> None:
         self.tasks.append(task)
@@ -97,10 +85,6 @@ class FakeVm:
 
     def complete(self, handle: int) -> None:
         self.input.put_nowait({"type": "http.request", "body": str(handle).encode(), "more_body": True})
-
-    def complete_ephemeral(self, completion_id: int, value: Any) -> None:
-        self.ephemeral[completion_id] = value
-        self.input.put_nowait({"type": "http.request", "body": f"e{completion_id}".encode(), "more_body": True})
 
 
 def single(handle: int) -> SingleUnresolvedFuture:
@@ -118,43 +102,6 @@ async def test_a_ready_future_needs_no_loop():
     selector = FutureSelector(vm, Disconnected)
     await selector.wait(single(1))
     assert vm.checks == []
-
-
-async def test_an_ephemeral_command_keeps_the_loop_going_with_no_future():
-    vm = FakeVm()
-    selector = FutureSelector(vm, Disconnected)
-    value = asyncio.ensure_future(selector.wait_ephemeral(7))
-    await settle()
-    assert vm.checks == [FirstCompletedUnresolvedFuture([])]
-    vm.complete_ephemeral(7, b"v")
-    assert await value == b"v"
-    await settle()
-    assert selector.size == 0
-    assert vm.tasks[0].done()
-
-
-async def test_an_ephemeral_command_completes_alongside_the_waits():
-    vm = FakeVm()
-    selector = FutureSelector(vm, Disconnected)
-    wait = asyncio.ensure_future(selector.wait(single(1)))
-    value = asyncio.ensure_future(selector.wait_ephemeral(2))
-    await settle()
-    vm.complete_ephemeral(2, None)
-    assert await value is None
-    assert not wait.done()
-    vm.complete(1)
-    await wait
-    assert selector.size == 0
-
-
-async def test_the_end_of_the_attempt_fails_an_ephemeral_command():
-    vm = FakeVm()
-    selector = FutureSelector(vm, Disconnected)
-    value = asyncio.ensure_future(selector.wait_ephemeral(1))
-    await settle()
-    vm.input.put_nowait({"type": "http.disconnect"})
-    with pytest.raises(Disconnected):
-        await value
 
 
 async def test_concurrent_waits_share_one_await_point():

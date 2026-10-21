@@ -44,13 +44,14 @@ class Database:
         return [[len(self.statements)]]
 
 
-def test_it_is_an_object_without_journal_replay_with_lazy_state_and_no_journal_kept():
+def test_its_handlers_run_with_explicit_recovery_lazy_state_and_no_journal_kept():
     assert isinstance(notes, restate.VirtualObject)
     assert notes.enable_lazy_state
     assert notes.journal_retention == timedelta(0)
-    assert not notes.handlers["add"].journal_replay
-    assert not notes.handlers["count"].journal_replay
-    assert notes.handlers["wait"].journal_replay
+    assert not notes.explicit_recovery
+    assert notes.handlers["add"].explicit_recovery
+    assert notes.handlers["count"].explicit_recovery
+    assert not notes.handlers["wait"].explicit_recovery
 
 
 def test_options_add_to_the_sql_options():
@@ -62,7 +63,7 @@ def test_options_add_to_the_sql_options():
 
     assert obj.inactivity_timeout == timedelta(seconds=5)
     assert not obj.enable_lazy_state
-    assert not obj.handlers["h"].journal_replay
+    assert obj.handlers["h"].explicit_recovery
 
 
 def test_a_handler_keeps_its_signature():

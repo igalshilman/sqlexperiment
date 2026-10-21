@@ -1,9 +1,9 @@
 """
 A virtual object whose handlers have SQL: ``ctx.db`` and ``ctx.transaction()``.
 
-Its handlers run without journal replay, over the SDK's context: each attempt
-gets an SQL session (session.py), and the selector (selector.py) drives its
-waits. A handler with ``journal_replay=True`` is the SDK's own.
+Its handlers run with the SDK's explicit recovery instead of journal replay:
+each attempt gets an SQL session (session.py), and the selector (selector.py)
+drives its waits. A handler with ``journal_replay=True`` is the SDK's own.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from datetime import timedelta
 from typing import Any
 
 import restate
-from restate.exceptions import SdkInternalException, SuspendedException, TerminalError
+from restate.exceptions import SuspendedException, TerminalError
+from restate.handler import handler_from_callable
 from restate.serde import BytesSerde
 from restate.server_context import ServerInvocationContext
-from restate.vm import Failure
 
 from restate_fns import selector
 from restate_fns.session import SqlAttempt, SqlSession, SqlTransaction, sql_options
@@ -97,12 +97,22 @@ class VirtualObject(restate.VirtualObject):
     def __init__(self, name: str, **options: Any) -> None:
         super().__init__(name, **{**sql_options, **options})
 
-    def handler(self, *args: Any, journal_replay: bool | None = None, **options: Any) -> Callable[[Any], Any]:
-        """A handler, as ``restate.VirtualObject.handler`` makes it: with ``ctx.db``, unless it replays its journal."""
-        register = super().handler(*args, journal_replay=journal_replay, **options)
-        if self.journal_replay if journal_replay is None else journal_replay:
+    def handler(self, *args: Any, journal_replay: bool = False, **options: Any) -> Callable[[Any], Any]:
+        """
+        A handler, as ``restate.VirtualObject.handler`` makes it: with
+        ``ctx.db``, and the SDK's explicit recovery, unless it replays its
+        journal.
+        """
+        register = super().handler(*args, **options)
+        if journal_replay:
             return register
-        return lambda fn: register(with_database(fn))
+
+        def register_with_database(fn: Callable[..., Awaitable[Any]]) -> Any:
+            registered = register(with_database(fn))
+            handler_from_callable(registered).explicit_recovery = True
+            return registered
+
+        return register_with_database
 
 
 def with_database(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
@@ -161,31 +171,18 @@ class _ContextHost:
         return f"{self.context.handler.service_tag.name}/{self.context.key()}"
 
     def sql_get(self, key: str) -> Awaitable[bytes | None]:
-        # TODO: read with protocol v8's ephemeral get (``_get_ephemeral``),
-        # left out of the journal, once a Restate release ships v8 (FUTURE.md at
-        # the repository's root). Restate 1.8 negotiates v7 at most.
-        return self.context.get(key, serde=BytesSerde())
-
-    def _get_ephemeral(self, key: str) -> Awaitable[bytes | None]:
-        """A state read, issued now and left out of the journal (protocol V8)."""
-        completion_id = self.context.vm.ephemeral_state_get(key)
-        waits = self.selector
-
-        async def read() -> bytes | None:
-            value = await waits.wait_ephemeral(completion_id)
-            if isinstance(value, Failure):
-                raise TerminalError(value.message, value.code)
-            if isinstance(value, BaseException):
-                raise SdkInternalException() from value
-            return value
-
-        return read()
+        # Each entry is named after its key, so that tooling can hide a
+        # database's pages and log by name.
+        # TODO: read with protocol v8's ephemeral get, left out of the journal,
+        # once a Restate release ships v8 and the SDK exposes the get (FUTURE.md
+        # at the repository's root). Restate 1.8 negotiates v7 at most.
+        return self.context.get(key, serde=BytesSerde(), entry_name=key)
 
     def sql_set(self, key: str, value: bytes) -> None:
-        self.context.set(key, value, serde=BytesSerde())
+        self.context.set(key, value, serde=BytesSerde(), entry_name=key)
 
     def sql_clear(self, key: str) -> None:
-        self.context.clear(key)
+        self.context.clear(key, entry_name=key)
 
     def sql_sync(self) -> Awaitable[Any]:
         return self.context.run_typed("sync", _nothing)

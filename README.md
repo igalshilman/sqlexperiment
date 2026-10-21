@@ -219,7 +219,7 @@ Each part is a directory with its README, a workspace of its own; the
   [`restate-fns`](typescript/packages/fns/README.md) (SQL in virtual objects, on the
   published SDK) and the [`restate-agents`](typescript/packages/integrations/README.md) integrations.
 - [`python/`](python/README.md): the same for Python, with
-  [`restate-fns`](python/fns/README.md) on the patched SDK.
+  [`restate-fns`](python/fns/README.md) on the published SDK.
 - [`rust/`](rust/README.md): the patched Rust SDK, and
   [`functions`](rust/functions/README.md), the runtime for durable functions.
 - `examples-<part>/`: the examples, one directory per part:
@@ -229,12 +229,12 @@ Each part is a directory with its README, a workspace of its own; the
 
 ## Requirements
 
-|                | Version                                                                                                                        |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Restate server | 1.8 or later                                                                                                                   |
-| TypeScript SDK | 1.17.4, as published, with [`restate-fns`](typescript/packages/fns/README.md)                                                  |
-| Python SDK     | 1.0.5 with [a patch](python/sdk/README.md) for explicit recovery, with [`restate-fns`](python/fns/README.md); `make` builds it |
-| Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), on the released shared core 8.1.0; `make sdk-rs` builds it                      |
+|                | Version                                                                                                   |
+| -------------- | --------------------------------------------------------------------------------------------------------- |
+| Restate server | 1.8 or later                                                                                              |
+| TypeScript SDK | 1.17.4, as published, with [`restate-fns`](typescript/packages/fns/README.md)                             |
+| Python SDK     | 1.1.0, as published, with [`restate-fns`](python/fns/README.md)                                           |
+| Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), on the released shared core 8.1.0; `make sdk-rs` builds it |
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway \
@@ -248,11 +248,10 @@ tool below, on macOS and Linux ([`flake.nix`](flake.nix)):
 
 ```sh
 nix develop       # or `direnv allow`, with use flake in .envrc
-make              # build everything: the crate, the addon, the pnpm and uv workspaces, the patched Python SDK
+make              # build everything: the crate, the addon, the pnpm and uv workspaces
 make test         # every test that needs no Restate server
 make test-ts T=langgraph   # the TypeScript tests (vitest in typescript/tests), optionally filtered
-make test-sdk-py  # the patched Python SDK's own tests
-make test-sql-py  # the Python extension's tests
+make test-sql-py  # the Python extension's and restate-fns's tests
 make crash-test         # the integrations and SQL objects through crashes, against a Restate server
 make concurrency-test   # the context without journal replay, against a Restate server
 make crash-test-py concurrency-test-py   # the same, in Python
@@ -264,7 +263,7 @@ Without Nix: besides Rust, the Node.js parts need node 24 or later (the
 examples and tests are TypeScript that node runs as it is, and OpenCode needs 24) and pnpm, which installs [their workspace](typescript/README.md) (`make js`).
 The Python parts need Python 3.13 and [uv](https://docs.astral.sh/uv/), which
 installs [their workspace](python/README.md) into `python/.venv` (`make py`),
-building the patched SDK and the extension with maturin.
+building the extension with maturin.
 
 The tests against a Restate server download its 1.8.0 release on first use
 (see the [`Makefile`](Makefile): `RESTATE_VERSION`,

@@ -3,5 +3,3 @@
 **/.venv
 .git
 .direnv
-typescript/packages/sdk-typescript/.build/sdk-*
-python/sdk/.build
