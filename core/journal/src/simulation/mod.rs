@@ -78,11 +78,23 @@ pub fn fresh_namespace() -> NamespaceCache {
     shared_cache().namespace(&format!("namespace-{}", KEYS.fetch_add(1, Relaxed)))
 }
 
-/// Local engine traffic, distinct from durable backend traffic.
-#[derive(Clone, Copy, Debug)]
-pub struct IoStats {
-    pub database_bytes_written: u64,
-    pub private_wal_bytes_written: u64,
-    pub database_len: u64,
-    pub private_wal_len: u64,
+/// Return to the executor once, even when every awaited future is ready.
+pub(crate) async fn yield_now() {
+    let mut yielded = false;
+    std::future::poll_fn(move |cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+/// The key of page `page` of the paged file numbered `file` (the first file
+/// a namespace's commits wrote is 0).
+pub fn page_key(file: u32, page: u64) -> String {
+    crate::format::page_key(crate::log::page_id(file, page))
 }

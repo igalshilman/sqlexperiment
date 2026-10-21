@@ -1,8 +1,7 @@
 use super::*;
 use crate::{
-    PageCacheConfig,
+    PAGE_SIZE as BLOCK_SIZE, PageCacheConfig,
     format::{COMMIT, HINT, LOG_PREFIX, PAGE_PREFIX},
-    io::BLOCK_SIZE,
     simulation::{
         Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, MonitorKv, Operation, cache_config,
         fresh_namespace, open_cache,
@@ -44,7 +43,7 @@ impl Model {
         self.size = size;
     }
     async fn check(&self, snapshot: &Snapshot) -> io::Result<bool> {
-        if snapshot.size() != self.size {
+        if snapshot.file_size("db") != self.size {
             return Ok(false);
         }
         for index in 0..self.size / BLOCK_SIZE as u64 {
@@ -131,7 +130,7 @@ fn a_save_is_one_put_and_a_checkpointed_page_one_get() -> io::Result<()> {
         assert_eq!(number(snapshot.block(1).await?), Some(1));
         assert_eq!(store.stats().gets, 1, "no map: one get per page");
         assert_eq!(number(snapshot.block(3).await?), None);
-        assert_eq!(snapshot.size(), 4 * 4096);
+        assert_eq!(snapshot.file_size("db"), 4 * 4096);
         Ok(())
     })
 }
@@ -747,7 +746,7 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
             for round in 0..12u64 {
                 let size = PREFETCH_PAGES * 4096;
                 let (_, next) = snapshot
-                    .commit(sql_writes(rewrite.clone(), size), Default::default())
+                    .commit(db_writes(rewrite.clone(), size), Default::default())
                     .await?;
                 model.apply(&rewrite, size);
                 snapshot = next;
@@ -782,7 +781,7 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             for round in 0..12 {
                 let (changes, size) = dirty(round);
                 let (report, after) = snapshot
-                    .commit(sql_writes(changes.clone(), size), Default::default())
+                    .commit(db_writes(changes.clone(), size), Default::default())
                     .await?;
                 assert_eq!(report.checkpointed_pages, 0);
                 model.apply(&changes, size);
@@ -801,7 +800,7 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             store.reset_stats();
             let (changes, size) = dirty(12);
             let (report, after) = snapshot
-                .commit(sql_writes(changes.clone(), size), Default::default())
+                .commit(db_writes(changes.clone(), size), Default::default())
                 .await?;
             model.apply(&changes, size);
             let distinct = model.pages.len();

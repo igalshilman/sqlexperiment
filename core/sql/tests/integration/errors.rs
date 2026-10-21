@@ -1,9 +1,10 @@
 //! Errors: SQL errors leave a session usable; anything else ends it.
 use crate::host::{Db, Durability, Setup};
 use journal::{
-    Result, StorageOptions, Value,
+    Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
+use sql::Value;
 use std::sync::Arc;
 use turso_core::{Connection, Database, IO, MemoryIO, SqliteDialect, StepResult};
 

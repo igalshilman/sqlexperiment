@@ -62,9 +62,6 @@ use std::{
 /// Logical page replacements of one file, by page number; `None` is a hole.
 pub(crate) type Changes = BTreeMap<u64, Option<Page>>;
 
-/// The name of the file SQL keeps its database in.
-pub(crate) const SQL_FILE: &str = "db";
-
 /// What a commit writes to one paged file: its size after it, and the pages
 /// it changed.
 #[derive(Clone, Debug, Default)]
@@ -77,20 +74,16 @@ pub(crate) struct Written {
 pub(crate) type Writes = BTreeMap<String, Written>;
 
 #[cfg(feature = "simulation")]
-/// Writes to the SQL file only.
-pub(crate) fn sql_writes(pages: Changes, size: u64) -> Writes {
-    Writes::from([(SQL_FILE.to_owned(), Written { size, pages })])
+/// Writes to the file `db` only.
+pub(crate) fn db_writes(pages: Changes, size: u64) -> Writes {
+    Writes::from([("db".to_owned(), Written { size, pages })])
 }
 
 /// Default [`StorageOptions::prefetch_pages`].
 pub const PREFETCH_PAGES: u64 = 16;
 /// Default [`StorageOptions::hint_pages`].
 pub const HINT_PAGES: usize = 32;
-/// Default [`StorageOptions::max_private_bytes`].
-pub const MAX_PRIVATE_BYTES: usize = 256 << 20;
-/// Default [`StorageOptions::max_result_bytes`].
-pub const MAX_RESULT_BYTES: usize = 64 << 20;
-const PAGE: u64 = crate::io::BLOCK_SIZE as u64;
+const PAGE: u64 = crate::PAGE_SIZE as u64;
 /// Consecutive page reads that start sequential readahead.
 const READAHEAD_AFTER: u32 = 3;
 /// Largest readahead window, in pages.
@@ -127,12 +120,6 @@ pub struct StorageOptions {
     /// open of a larger database fetches alongside replay (at most
     /// [`crate::MAX_HINT_PAGES`]); 0 neither writes nor reads it.
     pub hint_pages: usize,
-    /// Most bytes of uncommitted changes and private engine WAL a session may
-    /// hold; a write beyond it fails its statement.
-    pub max_private_bytes: usize,
-    /// Most bytes of result rows one statement may collect; beyond it the
-    /// statement fails.
-    pub max_result_bytes: usize,
 }
 
 impl Default for StorageOptions {
@@ -145,8 +132,6 @@ impl Default for StorageOptions {
             inline_log_bytes: INLINE_LOG_BYTES,
             prefetch_pages: PREFETCH_PAGES,
             hint_pages: HINT_PAGES,
-            max_private_bytes: MAX_PRIVATE_BYTES,
-            max_result_bytes: MAX_RESULT_BYTES,
         }
     }
 }
@@ -162,8 +147,6 @@ pub struct SaveReport {
     pub logged_bytes: usize,
     /// Bytes of the commit record it put; 0 when nothing changed.
     pub record_bytes: usize,
-    /// The database's version after this save.
-    pub(crate) version: u64,
 }
 
 /// The committed view a session reads and extends.
@@ -350,18 +333,9 @@ impl Snapshot {
         self
     }
 
-    pub(crate) fn options(&self) -> &StorageOptions {
-        &self.options
-    }
-
     /// The database's version: the transactions ever committed.
     pub fn version(&self) -> u64 {
         self.commit.version
-    }
-
-    /// The SQL file's size after replaying the log.
-    pub fn size(&self) -> u64 {
-        self.file_size(SQL_FILE)
     }
 
     /// The size of the paged file `name` after replaying the log; 0 if it
@@ -528,7 +502,7 @@ impl Snapshot {
     #[cfg_attr(not(test), allow(dead_code))]
     #[cfg(feature = "simulation")]
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
-        let writes = sql_writes(dirty, size);
+        let writes = db_writes(dirty, size);
         Ok(self.commit(writes, Records::new()).await?.0)
     }
 
@@ -595,10 +569,7 @@ impl Snapshot {
         });
         let changed = !writes.is_empty();
         if !changed && records.is_empty() {
-            let report = SaveReport {
-                version: self.version(),
-                ..SaveReport::default()
-            };
+            let report = SaveReport::default();
             let after = self.continued(self.commit.clone(), self.commit_bytes.clone());
             return Ok((report, after.registered()));
         }
@@ -763,7 +734,6 @@ impl Snapshot {
             checkpointed_pages: 0,
             logged_bytes,
             record_bytes,
-            version,
         };
         if let Some(checkpoint) = checkpoint {
             report.checkpointed_pages = checkpoint.images.len();
@@ -880,16 +850,6 @@ impl Snapshot {
         }
         with.bases.insert(name.to_owned(), base);
         Ok(with.registered())
-    }
-
-    /// An empty view at the same version, for a parked engine: no log images,
-    /// pages fetched ahead, usage or reader registration.
-    pub(crate) fn idle(&self) -> Self {
-        let mut idle = self.continued(self.commit.clone(), self.commit_bytes.clone());
-        idle.log = Log::new();
-        idle.fetched = Mutex::default();
-        idle.usage = Mutex::default();
-        idle
     }
 
     /// Register this view, at its version, with the owner cache.

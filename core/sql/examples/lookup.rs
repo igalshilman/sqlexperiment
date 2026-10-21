@@ -1,4 +1,5 @@
-use journal::{Journal, Result, Sql, simulation::MemoryKv};
+use journal::{Journal, Result, simulation::MemoryKv};
+use sql::Sql;
 use std::sync::Arc;
 
 /// Flush and commit `db`'s journal, ending the session.

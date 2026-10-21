@@ -1,8 +1,9 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
 use journal::{
-    Journal, Result, Sql, StorageOptions,
+    Journal, Result, StorageOptions,
     simulation::{MemoryKv, Stats},
 };
+use sql::Sql;
 use std::{
     sync::Arc,
     time::{Duration, Instant},

@@ -17,7 +17,7 @@
 //!
 //! The namespace also remembers the exact commit record it last read or wrote.
 //! If open reads the same bytes, nothing changed since: the log, the version
-//! this owner committed and an idle engine all still hold.
+//! this owner committed and what participants left idle all still hold.
 //!
 //! # Keys are never reused
 //!
@@ -32,14 +32,13 @@
 //! # Durability knowledge
 //!
 //! Besides pages, the namespace remembers its last durable commit (so a
-//! session can tell another committed since it opened) and an idle engine at
-//! that commit, for the next session.
+//! session can tell another committed since it opened) and what participants
+//! left idle at that commit (SQL's engine, say), for the next session.
 //!
-//! Namespace states are kept for a bounded number of namespaces, and parked
-//! engines within a byte budget, least recently used first; forgetting either
+//! Namespace states are kept for a bounded number of namespaces, and idle
+//! state within a byte budget, least recently used first; forgetting either
 //! only makes a namespace cold.
 use crate::{
-    WarmEngine,
     hint::Usage,
     page_codec::{self, Page},
 };
@@ -48,6 +47,7 @@ use foyer::{
     HybridCacheBuilder, RecoverMode, Spawner,
 };
 use std::{
+    any::Any,
     collections::{BTreeMap, HashMap},
     io,
     path::PathBuf,
@@ -79,11 +79,10 @@ pub struct PageCacheConfig {
     pub decoded: bool,
     /// Namespaces whose durability knowledge is kept.
     pub namespaces: usize,
-    /// Bytes of idle engines kept for the next session of their namespace, by
-    /// estimate: a parked engine holds its database's buffer pool (~4 MiB)
-    /// and its parsed schema, 16 bytes per byte of schema SQL. Least recently
-    /// parked go first.
-    pub engine_bytes: usize,
+    /// Bytes of what participants leave idle for the next session of their
+    /// namespace (see [`crate::Participant::park`]), as they weigh it: SQL's
+    /// engine, say. Least recently parked go first.
+    pub idle_bytes: usize,
 }
 
 impl PageCacheConfig {
@@ -95,19 +94,19 @@ impl PageCacheConfig {
             disk_block: 4 << 20,
             decoded: false,
             namespaces: 1 << 16,
-            engine_bytes: 64 << 20,
+            idle_bytes: 64 << 20,
         }
     }
 }
 
 /// Process-wide page cache; clones share it.
 ///
-/// Parked engines live here and refer back to their namespace's handle, so
-/// handles only reach them weakly: dropping the last `PageCache` drops them.
+/// Idle state lives here and may refer back to its namespace's handle, so
+/// handles only reach it weakly: dropping the last `PageCache` drops it.
 #[derive(Clone)]
 pub struct PageCache {
     shared: Arc<Shared>,
-    engines: Arc<Mutex<Engines>>,
+    idle: Arc<Mutex<Parked>>,
 }
 
 struct Shared {
@@ -164,7 +163,7 @@ impl PageCache {
                 ids: AtomicU64::new(random_start()),
                 _runtime: matches!(spawner, Spawner::Runtime(_)).then_some(spawner),
             }),
-            engines: Arc::new(Mutex::new(Engines::new(config.engine_bytes))),
+            idle: Arc::new(Mutex::new(Parked::new(config.idle_bytes))),
         })
     }
 
@@ -188,7 +187,7 @@ impl PageCache {
         drop(live);
         NamespaceCache {
             shared: self.shared.clone(),
-            engines: Arc::downgrade(&self.engines),
+            idle: Arc::downgrade(&self.idle),
             owner,
         }
     }
@@ -203,13 +202,13 @@ impl PageCache {
 #[derive(Clone)]
 pub struct NamespaceCache {
     shared: Arc<Shared>,
-    engines: Weak<Mutex<Engines>>,
+    idle: Weak<Mutex<Parked>>,
     owner: Arc<Mutex<Owner>>,
 }
 
 /// Per-namespace state.
 struct Owner {
-    /// Identity of this state, which keys its parked engine.
+    /// Identity of this state, which keys its idle state.
     id: u64,
     /// Generation of its page keys; a new one drops every page.
     generation: u64,
@@ -354,7 +353,7 @@ impl NamespaceCache {
     fn forget_locked(&self, owner: &mut Owner) {
         owner.commit = None;
         owner.committed = None;
-        self.take_engine_of(owner.id);
+        self.take_idle_of(owner.id);
     }
 
     /// Record a page read by a session, for the working-set hint.
@@ -379,20 +378,25 @@ impl NamespaceCache {
         self.owner().committed
     }
 
-    /// Keep an engine for the next session; it is dropped on any reset.
-    pub(crate) fn park(&self, engine: WarmEngine) {
+    /// Keep a participant's idle state for the next session; it is dropped
+    /// on any reset.
+    pub(crate) fn park(&self, name: &str, idle: Idle) {
         let id = self.owner().id;
-        if let Some(engines) = self.engines.upgrade() {
-            engines.lock().unwrap().park(id, engine);
+        if let Some(parked) = self.idle.upgrade() {
+            parked.lock().unwrap().park((id, name.to_owned()), idle);
         }
     }
 
-    pub(crate) fn take_engine(&self) -> Option<WarmEngine> {
-        self.take_engine_of(self.owner().id)
+    /// Every participant's idle state, by participant.
+    pub(crate) fn take_idle(&self) -> HashMap<String, Idle> {
+        self.take_idle_of(self.owner().id)
     }
 
-    fn take_engine_of(&self, id: u64) -> Option<WarmEngine> {
-        self.engines.upgrade()?.lock().unwrap().take(id)
+    fn take_idle_of(&self, id: u64) -> HashMap<String, Idle> {
+        let Some(parked) = self.idle.upgrade() else {
+            return HashMap::new();
+        };
+        parked.lock().unwrap().take_all(id)
     }
 
     fn key(&self, page: u64) -> PageKey {
@@ -521,16 +525,27 @@ impl Drop for Reader {
     }
 }
 
-/// Parked engines within a byte budget, least recently parked dropped first.
-struct Engines {
+/// What a participant left idle at a durable version, for its namespace's
+/// next session (see [`crate::Participant::park`]).
+pub(crate) struct Idle {
+    pub value: Box<dyn Any + Send>,
+    /// The version it corresponds to.
+    pub version: u64,
+    /// Its bytes, as the participant weighs it.
+    pub weight: usize,
+}
+
+/// Idle state within a byte budget, by owner and participant, least recently
+/// parked dropped first.
+struct Parked {
     budget: usize,
     used: usize,
     clock: u64,
-    parked: HashMap<u64, (WarmEngine, u64)>,
-    order: BTreeMap<u64, u64>,
+    parked: HashMap<(u64, String), (Idle, u64)>,
+    order: BTreeMap<u64, (u64, String)>,
 }
 
-impl Engines {
+impl Parked {
     fn new(budget: usize) -> Self {
         Self {
             budget,
@@ -541,27 +556,38 @@ impl Engines {
         }
     }
 
-    fn park(&mut self, id: u64, engine: WarmEngine) {
-        self.take(id);
+    fn park(&mut self, key: (u64, String), idle: Idle) {
+        self.take(&key);
         self.clock += 1;
-        self.used += engine.weight();
-        self.parked.insert(id, (engine, self.clock));
-        self.order.insert(self.clock, id);
+        self.used += idle.weight;
+        self.parked.insert(key.clone(), (idle, self.clock));
+        self.order.insert(self.clock, key);
         while self.used > self.budget {
             let (_, oldest) = self.order.pop_first().expect("nonempty when over budget");
-            let (engine, _) = self
+            let (idle, _) = self
                 .parked
                 .remove(&oldest)
-                .expect("ordered engines are parked");
-            self.used -= engine.weight();
+                .expect("ordered state is parked");
+            self.used -= idle.weight;
         }
     }
 
-    fn take(&mut self, id: u64) -> Option<WarmEngine> {
-        let (engine, parked) = self.parked.remove(&id)?;
+    fn take(&mut self, key: &(u64, String)) -> Option<Idle> {
+        let (idle, parked) = self.parked.remove(key)?;
         self.order.remove(&parked);
-        self.used -= engine.weight();
-        Some(engine)
+        self.used -= idle.weight;
+        Some(idle)
+    }
+
+    /// Every participant's idle state of the owner `id`.
+    fn take_all(&mut self, id: u64) -> HashMap<String, Idle> {
+        let keys: Vec<_> = (self.parked.keys())
+            .filter(|(owner, _)| *owner == id)
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| Some((key.1.clone(), self.take(&key)?)))
+            .collect()
     }
 }
 

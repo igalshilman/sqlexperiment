@@ -1,5 +1,5 @@
 use super::*;
-use crate::simulation::MemoryKv;
+use journal::simulation::MemoryKv;
 
 #[test]
 fn cached_snapshot_page_never_masks_overlay_wal_or_truncation() -> crate::Result<()> {

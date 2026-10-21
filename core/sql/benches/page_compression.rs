@@ -2,11 +2,12 @@
 //! CPU measurements of every codec.
 //! All payloads are deterministic synthetic data; no network or replication model.
 use journal::{
-    Journal, PageCompression, Result, Sql, StorageOptions,
+    Journal, PageCompression, Result, StorageOptions,
     kv::KvStore,
     page_codec,
     simulation::{MemoryKv, Stats},
 };
+use sql::Sql;
 use std::{
     fmt::Write as _,
     fs::File,

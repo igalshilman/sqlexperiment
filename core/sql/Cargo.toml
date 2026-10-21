@@ -1,0 +1,63 @@
+[package]
+name = "sql"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "SQLite-compatible SQL on a journal's file: Turso's engine, unmodified, committed with the journal"
+
+[features]
+default = []
+simulation = ["journal/simulation"]
+
+[lib]
+bench = false
+
+[dependencies]
+journal = { path = "../journal" }
+turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
+futures = "0.3"
+bytes = "1.10"
+# The engine retains an owned schema lock across open-time I/O. Allow that
+# guard to move with the host future between executor threads, without a worker.
+parking_lot = { version = "0.12", features = ["send_guard"] }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+required-features = ["simulation"]
+
+[[example]]
+name = "lookup"
+path = "examples/lookup.rs"
+required-features = ["simulation"]
+
+[[bench]]
+name = "amplification"
+harness = false
+required-features = ["simulation"]
+
+[[bench]]
+name = "page_compression"
+harness = false
+required-features = ["simulation"]
+
+[[bench]]
+name = "small_databases"
+harness = false
+required-features = ["simulation"]
+
+[[bench]]
+name = "log_shipping"
+harness = false
+required-features = ["simulation"]
+
+[[bench]]
+name = "cache_cpu"
+harness = false
+required-features = ["simulation"]

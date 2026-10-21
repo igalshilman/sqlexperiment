@@ -3,7 +3,7 @@
 use crate::{
     format::{COMMIT, HINT, LOG_PREFIX, PAGE_PREFIX},
     kv::KvStore,
-    yield_now,
+    simulation::yield_now,
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;

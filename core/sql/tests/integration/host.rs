@@ -3,7 +3,8 @@
 //! transaction ([`Durability::Commit`]), as the Node.js addon and the Python
 //! extension do.
 use bytes::Bytes;
-use journal::{Journal, Result, SaveReport, Sql, StorageOptions, Value, kv::KvStore};
+use journal::{Journal, Result, SaveReport, StorageOptions, kv::KvStore};
+use sql::{Sql, SqlOptions, Value};
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -69,10 +70,19 @@ type Rows = Vec<Vec<Value>>;
 
 impl Db {
     pub async fn open(store: Arc<dyn KvStore>, setup: impl Into<Setup>) -> Result<Self> {
+        Self::open_with(store, setup, SqlOptions::default()).await
+    }
+
+    /// [`Self::open`] with explicit SQL limits.
+    pub async fn open_with(
+        store: Arc<dyn KvStore>,
+        setup: impl Into<Setup>,
+        limits: SqlOptions,
+    ) -> Result<Self> {
         let Setup(options, durability) = setup.into();
         let journal = Journal::open_with_options(store, options).await?;
         Ok(Self {
-            sql: Sql::open(&journal).await?,
+            sql: Sql::open_with_options(&journal, limits).await?,
             durability,
         })
     }

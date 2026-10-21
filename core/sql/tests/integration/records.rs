@@ -274,8 +274,6 @@ fn a_scoped_journal_is_part_of_the_session_s() -> Result<()> {
         fs.scoped("blobs/")
             .file("a")?
             .write(0, Some(vec![7; 4096].into()))?;
-        assert!(fs.file("../db").is_ok(), "only `db` itself is the SQL's");
-        assert!(db.journal().scoped("d").file("b").is_err());
         db.flush().await?;
         db.journal().commit().await?;
         drop(db);

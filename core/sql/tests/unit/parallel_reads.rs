@@ -1,7 +1,7 @@
 use super::*;
-use crate::{kv::KvStore, simulation::MemoryKv};
 use bytes::Bytes;
 use futures::{channel::oneshot, future::BoxFuture};
+use journal::{kv::KvStore, simulation::MemoryKv};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct GatedReads {
@@ -26,7 +26,7 @@ impl KvStore for GatedReads {
                 let _active = Active(&self.active);
                 self.maximum.fetch_max(n, Ordering::SeqCst);
                 gate.await.map_err(io::Error::other)?;
-                if self.fail_first && key == crate::format::page_key(0) {
+                if self.fail_first && key == journal::simulation::page_key(0, 0) {
                     return Err(io::Error::other("injected read error"));
                 }
                 return self.inner.get(key).await;
@@ -51,10 +51,11 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
         for mode in ["success", "error", "cancel"] {
             let base = Arc::new(MemoryKv::default());
             // Commit two pages, then checkpoint them so reads reach the backend.
-            // No prefetch at open: the reads under test reach the backend.
-            let all = crate::StorageOptions {
+            // No prefetch or hint at open: the reads under test reach the backend.
+            let all = journal::StorageOptions {
                 checkpoint_after: 0,
                 prefetch_pages: 0,
+                hint_pages: 0,
                 ..Default::default()
             };
             for _ in 0..2 {
@@ -74,8 +75,8 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
             let store = Arc::new(GatedReads {
                 inner: base.fork(),
                 gates: Mutex::new(BTreeMap::from([
-                    (crate::format::page_key(0), recv_a),
-                    (crate::format::page_key(1), recv_b),
+                    (journal::simulation::page_key(0, 0), recv_a),
+                    (journal::simulation::page_key(0, 1), recv_b),
                 ])),
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),
