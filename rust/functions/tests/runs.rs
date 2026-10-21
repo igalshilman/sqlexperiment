@@ -401,9 +401,7 @@ fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
     let mut most = 0;
     while run.view().state.outcome.is_none() {
         step(&mut run)?;
-        let batches = store.record("memory")["batches"]
-            .as_u64()
-            .unwrap() as usize;
+        let batches = store.record("memory")["batches"].as_u64().unwrap() as usize;
         most = most.max(batches);
         assert_eq!(store.batches(), batches);
     }

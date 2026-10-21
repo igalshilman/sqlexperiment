@@ -690,8 +690,8 @@ impl Run {
         drop(participants);
         let sealed = match prepared {
             Ok(()) => {
-                written.commit_bytes = self.state.stored.get().len()
-                    + self.memory.stored.get().len();
+                written.commit_bytes =
+                    self.state.stored.get().len() + self.memory.stored.get().len();
                 db.seal(self.memory.update.take()).await
             }
             Err(error) => Err(error),

@@ -14,10 +14,7 @@
 //! spans a commit. Statements that end or nest transactions themselves
 //! (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...) are refused: they would commit the
 //! SQL without the turn.
-use crate::{
-    model::MAX_INPUT,
-    transaction::Participant,
-};
+use crate::{model::MAX_INPUT, transaction::Participant};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Number, Value, json};
 use sqlite_kv::{Session, Value as SqlValue};
