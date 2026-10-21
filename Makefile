@@ -1,9 +1,9 @@
 # Build and test everything, part by part:
 #
 #   core/        the sqlite-kv crate
-#   typescript/  the pnpm workspace: the Node.js addon, restate-sql, the
+#   typescript/  the pnpm workspace: the Node.js addon, restate-fns, the
 #                integrations, their tests and the examples
-#   python/      the uv workspace: the Python extension, restate-sql on the
+#   python/      the uv workspace: the Python extension, restate-fns on the
 #                patched SDK, the integrations and their tests
 #                (examples-python/ beside it)
 #   rust/        the patched Rust SDK, and durable functions on it
@@ -107,11 +107,11 @@ py: $(SDK_PY) ## The uv workspace (python/.venv): the patched Python SDK and the
 MATURIN_WHEEL := uv tool run --from 'maturin[zig]>=1.9,<2' maturin build --release --zig --compatibility manylinux_2_28 \
 	-i python3.13 -o $(CURDIR)/dist
 
-wheels: $(SDK_PY) ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPython 3.13): the patched SDK, the extension, restate-sql and restate-agents
+wheels: $(SDK_PY) ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPython 3.13): the patched SDK, the extension, restate-fns and restate-agents
 	rm -rf dist
 	cd python/sdk/.build/sdk-python && $(MATURIN_WHEEL)
 	cd python/sqlite-kv && $(MATURIN_WHEEL)
-	uv build --wheel python/sql -o dist
+	uv build --wheel python/fns -o dist
 	uv build --wheel python/agents -o dist
 
 examples-rust: ## The Rust example: the core crate's lookup
@@ -141,8 +141,8 @@ test-sdk-py: $(SDK_PY) ## The patched Python SDK's own tests
 test-sdk-rs: $(SDK_RS) ## The patched Rust SDK's unit tests
 	cd rust/sdk/.build/sdk-rust && $(CARGO) test --lib
 
-test-sql-py: py ## The Python extension and restate-sql, without a Restate server
-	cd python && uv run --locked pytest sqlite-kv/tests sql/tests
+test-sql-py: py ## The Python extension and restate-fns, without a Restate server
+	cd python && uv run --locked pytest sqlite-kv/tests fns/tests
 
 test-agents-py: py ## The Python agent integrations (python/agents): the checkpointer conformance suite, and the agents on a scripted model
 	cd python && uv run --locked pytest agents/tests

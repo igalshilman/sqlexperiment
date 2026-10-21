@@ -1,6 +1,6 @@
 // Restate's own tools (restate-agents' call, send, workflow and signal), run
 // with a fake context that records the calls they make.
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import { call, object, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';

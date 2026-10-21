@@ -3,8 +3,8 @@
 // that records its calls, through crashes of the handler.
 import { expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import * as restate from 'restate-sql';
-import { SqlAttempt, type SqlHost, withSql } from 'restate-sql/internal';
+import * as restate from 'restate-fns';
+import { SqlAttempt, type SqlHost, withSql } from 'restate-fns/internal';
 import { type Steer, tool, type Tool } from 'restate-agents';
 import type { Store } from 'sqlite-kv';
 import { z } from 'zod';
@@ -88,7 +88,7 @@ export interface AttemptOptions {
 }
 
 /**
- * `ctx.db` and `ctx.transaction` of an attempt, restate-sql's own, over `map`, and
+ * `ctx.db` and `ctx.transaction` of an attempt, restate-fns's own, over `map`, and
  * `end`, which runs the handler and ends the attempt's session as a
  * handler of `sql.object` does. Each attempt is a database of its own in this process (a namespace
  * of its own), so that one a crash abandoned does not share the page cache.

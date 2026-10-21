@@ -80,7 +80,7 @@ curl localhost:8080/notes/alice/list
 
 A statement is durable when it returns. `ctx.transaction` groups
 statements, and the sends made in it, into one commit. See
-[SQL in virtual objects](typescript/packages/sql/README.md), and
+[SQL in virtual objects](typescript/packages/fns/README.md), and
 [`examples-python/notes.py`](examples-python/notes.py) for the same in Python.
 
 ## An agent with tools of its own
@@ -204,10 +204,10 @@ Each part is a directory with its README, a workspace of its own; the
 - [`core/`](core): the storage ([`sqlite-kv`](core/sqlite-kv/README.md)) every
   SDK builds on.
 - [`typescript/`](typescript/README.md): the Node.js addon,
-  [`restate-sql`](typescript/packages/sql/README.md) (SQL in virtual objects, on the
+  [`restate-fns`](typescript/packages/fns/README.md) (SQL in virtual objects, on the
   published SDK) and the [`restate-agents`](typescript/packages/integrations/README.md) integrations.
 - [`python/`](python/README.md): the same for Python, with
-  [`restate-sql`](python/sql/README.md) on the patched SDK.
+  [`restate-fns`](python/fns/README.md) on the patched SDK.
 - [`rust/`](rust/README.md): the patched Rust SDK, and
   [`functions`](rust/functions/README.md), the runtime for durable functions.
 - `examples-<part>/`: the examples, one directory per part:
@@ -220,8 +220,8 @@ Each part is a directory with its README, a workspace of its own; the
 |                | Version                                                                                                                        |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | Restate server | 1.8 or later                                                                                                                   |
-| TypeScript SDK | 1.17.4, as published, with [`restate-sql`](typescript/packages/sql/README.md)                                                  |
-| Python SDK     | 1.0.5 with [a patch](python/sdk/README.md) for explicit recovery, with [`restate-sql`](python/sql/README.md); `make` builds it |
+| TypeScript SDK | 1.17.4, as published, with [`restate-fns`](typescript/packages/fns/README.md)                                                  |
+| Python SDK     | 1.0.5 with [a patch](python/sdk/README.md) for explicit recovery, with [`restate-fns`](python/fns/README.md); `make` builds it |
 | Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), on the released shared core 8.1.0; `make sdk-rs` builds it                      |
 
 ```sh

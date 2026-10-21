@@ -31,7 +31,7 @@ import {
   type SessionPersistenceCreateOptions,
   type SessionPersistenceSnapshot,
 } from '@deepseek-ai/dsh-session-persistence';
-import type { SqlSession } from 'restate-sql';
+import type { SqlSession } from 'restate-fns';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS dsh_sessions (id TEXT PRIMARY KEY, header TEXT NOT NULL, inherited INTEGER NOT NULL);

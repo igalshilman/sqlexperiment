@@ -9,8 +9,8 @@ resolution-markers = [
 [manifest]
 members = [
     "restate-agents",
+    "restate-fns",
     "restate-python",
-    "restate-sql",
     "sqlite-kv",
 ]
 
@@ -986,7 +986,7 @@ dependencies = [
     { name = "langchain-core" },
     { name = "langgraph" },
     { name = "pydantic-ai-slim", extra = ["anthropic"] },
-    { name = "restate-sql" },
+    { name = "restate-fns" },
 ]
 
 [package.metadata]
@@ -997,7 +997,22 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=1.6" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "pydantic-ai-slim", extras = ["anthropic"], specifier = ">=2.57" },
-    { name = "restate-sql", editable = "sql" },
+    { name = "restate-fns", editable = "fns" },
+]
+
+[[package]]
+name = "restate-fns"
+version = "0.1.0"
+source = { editable = "fns" }
+dependencies = [
+    { name = "restate-sdk" },
+    { name = "sqlite-kv" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "restate-sdk", editable = "sdk/.build/sdk-python" },
+    { name = "sqlite-kv", editable = "sqlite-kv" },
 ]
 
 [[package]]
@@ -1007,7 +1022,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "hypercorn" },
     { name = "restate-agents" },
-    { name = "restate-sql" },
+    { name = "restate-fns" },
 ]
 
 [package.dev-dependencies]
@@ -1022,7 +1037,7 @@ dev = [
 requires-dist = [
     { name = "hypercorn", specifier = ">=0.17" },
     { name = "restate-agents", editable = "agents" },
-    { name = "restate-sql", editable = "sql" },
+    { name = "restate-fns", editable = "fns" },
 ]
 
 [package.metadata.requires-dev]
@@ -1062,21 +1077,6 @@ requires-dist = [
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
 provides-extras = ["adk", "client", "harness", "langchain", "lint", "openai", "pydantic-ai", "serde", "test", "tracing", "zstd"]
-
-[[package]]
-name = "restate-sql"
-version = "0.1.0"
-source = { editable = "sql" }
-dependencies = [
-    { name = "restate-sdk" },
-    { name = "sqlite-kv" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "restate-sdk", editable = "sdk/.build/sdk-python" },
-    { name = "sqlite-kv", editable = "sqlite-kv" },
-]
 
 [[package]]
 name = "ruff"

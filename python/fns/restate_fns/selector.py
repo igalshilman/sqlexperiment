@@ -340,7 +340,7 @@ def hook(context: ServerInvocationContext, on_end: Callable[[], None]) -> Future
     """
     missing = [name for name in _HOOKED if not hasattr(context, name)]
     if missing:
-        raise TerminalError(f"restate_sql does not support this version of restate-sdk: it has no {', '.join(missing)}")
+        raise TerminalError(f"restate_fns does not support this version of restate-sdk: it has no {', '.join(missing)}")
     selector = FutureSelector(_ContextDriver(context, on_end), DisconnectedException)
     started: set[asyncio.Task] = set()
 

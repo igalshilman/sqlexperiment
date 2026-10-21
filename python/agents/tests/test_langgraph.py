@@ -1,7 +1,7 @@
 """The LangGraph agent, on the scripted teller, over an object's state through crashes."""
 
 import pytest
-import restate_sql as restate
+import restate_fns as restate
 from fakes import Bank, Object, Teller
 from langchain_core.messages import AIMessage
 from langgraph.graph import START, MessagesState, StateGraph

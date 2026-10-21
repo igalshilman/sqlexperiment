@@ -18,7 +18,7 @@
  * A model of another provider takes its API key, such as
  * `{"model": "openai/gpt-6-luna"}` with OPENAI_API_KEY.
  */
-import type * as restate from 'restate-sql';
+import type * as restate from 'restate-fns';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';

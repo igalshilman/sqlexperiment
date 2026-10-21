@@ -2,7 +2,7 @@
 
 Agent frameworks in Restate virtual objects, in Python: each object (one per
 key) keeps the agent's state in its SQL database (`ctx.db`, of
-[`restate-sql`](../sql/README.md)), and each message is answered once per
+[`restate-fns`](../fns/README.md)), and each message is answered once per
 invocation, however often an attempt crashes. The Python counterpart of
 [`restate-agents`](../../typescript/packages/integrations/README.md), with
 [Claude](#claude) (the Anthropic SDK), [LangGraph](#langgraph) and
@@ -373,7 +373,7 @@ and Reject, Steer and Stop.
 ## Handlers of your own
 
 An agent is a virtual object with a SQL database of its own, `ctx.db`, one
-per key: `restate_sql.VirtualObject`, retries up to
+per key: `restate_fns.VirtualObject`, retries up to
 100,000 times, 50 to 500 ms apart (each attempt resumes from the database),
 and the SQL storage hidden from the journal in Restate's UI.
 `@assistant.handler` adds a handler, which takes `ctx`, then its input: one

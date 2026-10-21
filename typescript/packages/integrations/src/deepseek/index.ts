@@ -25,7 +25,7 @@
 // - A message is answered once per invocation: its message carries the
 //   invocation id, and a retried attempt returns the answer of the turn that
 //   finished it.
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import { Context } from '@deepseek-ai/cordis';
 import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import { AgentLoop } from '@deepseek-ai/dsh-agent-loop';

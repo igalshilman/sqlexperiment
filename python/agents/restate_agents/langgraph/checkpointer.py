@@ -39,7 +39,7 @@ from langgraph.checkpoint.base import (
     get_checkpoint_metadata,
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
-from restate_sql import SqlDatabase, SqlSession
+from restate_fns import SqlDatabase, SqlSession
 
 from restate_agents.common import has_table
 

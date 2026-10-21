@@ -32,7 +32,7 @@
 // argument). A tool that throws fails the attempt rather than hand the error
 // to the model: from then on the attempt stores nothing (its fence closes),
 // and the next attempt finds the call interrupted.
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';

@@ -9,7 +9,7 @@
 //
 // Environment: PORT (default 9080), MODEL with its provider's API key,
 // and ABORT_PER_MILLE (see ../faults.ts).
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import { object, signals } from 'restate-agents';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';

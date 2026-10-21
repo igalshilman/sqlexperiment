@@ -1,6 +1,6 @@
-# restate-sql (Python): SQL in Restate virtual objects
+# restate-fns (Python): SQL in Restate virtual objects
 
-The Python counterpart of [`restate-sql`](../../typescript/packages/sql/README.md),
+The Python counterpart of [`restate-fns`](../../typescript/packages/fns/README.md),
 and the same library: each key of a virtual object gets a SQL database of its
 own, `ctx.db`, kept in the object's state, through the
 [`sqlite-kv` extension](../sqlite-kv/README.md). The handlers that use it run
@@ -10,7 +10,7 @@ over the Restate Python SDK, which it re-exports; the SDK is
 TypeScript SDK 1.17.4 does.
 
 ```python
-import restate_sql as restate
+import restate_fns as restate
 
 notes = restate.VirtualObject("notes")
 
@@ -34,10 +34,10 @@ async def count(ctx: restate.ObjectSharedContext) -> int:
     return n
 ```
 
-It works as in TypeScript ([how it works](../../typescript/packages/sql/README.md#how-it-works)),
+It works as in TypeScript ([how it works](../../typescript/packages/fns/README.md#how-it-works)),
 with the same storage, page cache and pending sends:
 
-- `restate_sql` is the SDK (`from restate import *`), with a `VirtualObject`,
+- `restate_fns` is the SDK (`from restate import *`), with a `VirtualObject`,
   `ObjectContext` and `ObjectSharedContext` of its own. Its `VirtualObject`
   takes the options of the SDK's and adds `restate.sql_options`
   (`journal_replay=False`, `enable_lazy_state=True`,
@@ -76,7 +76,7 @@ them with `asyncio.gather`, `asyncio.wait`, tasks of your own, or a library's
 - **An operation starts when it is made.** It is driven to completion whether
   or not anything awaits it: a call is made without an `await`.
 - **One await point.** One loop per invocation,
-  [the selector](restate_sql/selector.py), drives every pending wait and asks
+  [the selector](restate_fns/selector.py), drives every pending wait and asks
   the server about all of them at once, so a suspension resumes on the first
   of them to complete. The SDK drives each awaited future with a loop of its
   own, which concurrent waits would race on: so before a handler with SQL
@@ -106,5 +106,5 @@ fake VM ([`tests/test_selector.py`](tests/test_selector.py)), `ctx.db` and
 transaction for every point at which its attempt may crash, and the object's
 options and handlers
 ([`tests/test_virtual_object.py`](tests/test_virtual_object.py)).
-`restate_sql.session.set_store_wrapper` wraps each object's store, for fault
+`restate_fns.session.set_store_wrapper` wraps each object's store, for fault
 injection ([`python/tests/faults.py`](../tests/faults.py)).

@@ -45,7 +45,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Any
 
-import restate_sql as restate
+import restate_fns as restate
 from pydantic import TypeAdapter
 from pydantic_ai import Agent, RunContext
 from pydantic_ai import Tool as PydanticTool
@@ -62,7 +62,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.toolsets import FunctionToolset
-from restate_sql import ObjectContext
+from restate_fns import ObjectContext
 
 from restate_agents import turns
 from restate_agents.common import Messages, MessagesRequest, Transcript, has_table, model_of

@@ -21,7 +21,7 @@
 //   runner hands it to the model as the tool's result).
 // - A message is answered once per invocation: its answer is stored with the
 //   model's last reply, and a retried attempt returns it.
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import {

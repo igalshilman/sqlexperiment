@@ -14,7 +14,7 @@ invocation of ``checkins/checkin``; FOLLOW_UP_SECONDS=10 makes it come sooner.
 import os
 from datetime import timedelta
 
-import restate_sql as restate
+import restate_fns as restate
 from pydantic import BaseModel
 from restate_agents import claude, send, serve
 

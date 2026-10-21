@@ -1,5 +1,5 @@
 // Virtual objects set up for SQL and agents.
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import { messageSerde, TURN, type Turn } from './common.ts';
 import {
   type Notifications,

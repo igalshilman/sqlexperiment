@@ -1,6 +1,6 @@
 // withPi over a sqlite-kv database in memory, without a Restate server: the
 // coding tools of a workspace write to the local file system.
-import type * as restate from 'restate-sql';
+import type * as restate from 'restate-fns';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

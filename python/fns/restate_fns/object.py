@@ -21,8 +21,8 @@ from restate.serde import BytesSerde
 from restate.server_context import ServerInvocationContext
 from restate.vm import Failure
 
-from restate_sql import selector
-from restate_sql.session import SqlAttempt, SqlSession, SqlTransaction, sql_options
+from restate_fns import selector
+from restate_fns.session import SqlAttempt, SqlSession, SqlTransaction, sql_options
 
 
 class ObjectContext(restate.ObjectContext):

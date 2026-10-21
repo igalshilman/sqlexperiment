@@ -1,5 +1,5 @@
 // What the integrations share.
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import { type Steer, signals, signalsOf } from './signals.ts';
 
 /**
