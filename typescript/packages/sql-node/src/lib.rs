@@ -12,11 +12,12 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use journal::kv::KvStore;
-use journal::{Journal, PageCache, PageCacheConfig, Sql, StorageOptions, Value};
+use journal::{Journal, PageCache, PageCacheConfig, StorageOptions};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use sql::{Sql, Value};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;

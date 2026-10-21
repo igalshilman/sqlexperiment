@@ -16,8 +16,9 @@
 //! SQL without the turn.
 use crate::{model::MAX_INPUT, transaction::Participant};
 use anyhow::{Context, Result, bail, ensure};
-use journal::{Journal, Sql, Value as SqlValue};
+use journal::Journal;
 use serde_json::{Map, Number, Value, json};
+use sql::{Sql, Value as SqlValue};
 
 /// The scope's KV, a table of its database: values are JSON.
 const KV_TABLE: &str = "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL)";
@@ -256,11 +257,11 @@ fn from_sql(value: SqlValue) -> Value {
     const SAFE: i64 = (1 << 53) - 1;
     match value {
         SqlValue::Null => Value::Null,
-        SqlValue::Numeric(journal::Numeric::Integer(i)) if (-SAFE..=SAFE).contains(&i) => {
+        SqlValue::Numeric(sql::Numeric::Integer(i)) if (-SAFE..=SAFE).contains(&i) => {
             Value::from(i)
         }
-        SqlValue::Numeric(journal::Numeric::Integer(i)) => json!({"$int": i.to_string()}),
-        SqlValue::Numeric(journal::Numeric::Float(f)) => {
+        SqlValue::Numeric(sql::Numeric::Integer(i)) => json!({"$int": i.to_string()}),
+        SqlValue::Numeric(sql::Numeric::Float(f)) => {
             Number::from_f64(f64::from(f)).map_or(Value::Null, Value::Number)
         }
         SqlValue::Text(text) => Value::String(text.as_str().to_owned()),

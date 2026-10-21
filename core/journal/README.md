@@ -1,12 +1,17 @@
 # Journal
 
 A durable journal over an asynchronous key/value store, for namespaces with
-one owner at a time (such as a Restate virtual object): SQLite-compatible
-SQL, with named records and paged files committed in the same put. It runs Turso's Rust
-engine (`turso_core` 0.8.2) unmodified and needs only `get`, `put` and
-`delete` from the backend. Changes become durable per session (`save()`), for
-hosts that journal and replay, or per SQL commit as in SQLite, for objects
-without a journal. Either way, a save is usually one put.
+one owner at a time: the state of a Restate object without Restate's journal
+(`journalReplay: false`). It keeps named **records** (small whole values) and
+paged **files** (4 KiB pages, read and written at random), and commits every
+change since the last commit in one put, usually. It needs only `get`, `put`
+and `delete` from the backend, and has no SQL in it.
+
+What uses a journal is a **participant**: it keeps changes of its own, moves
+them into the journal's files and records before a commit, and may leave state
+idle for the namespace's next journal. [SQL](../sql/README.md) is one, on the
+file `db`; the durable functions runtime adds a program's memory (a file) and
+its run's state (a record).
 
 An experiment, not a production backend: see [the design](docs/DESIGN.md).
 
@@ -15,7 +20,7 @@ An experiment, not a production backend: see [the design](docs/DESIGN.md).
 Implement `kv::KvStore` over your store, then:
 
 ```rust,ignore
-use journal::{Journal, PageCache, PageCacheConfig, Sql, StorageOptions};
+use journal::{Journal, PageCache, PageCacheConfig, StorageOptions};
 
 // Once per process: a page cache in memory and on a local disk file.
 let cache = PageCache::open(PageCacheConfig::new("/var/cache/pages", 256 << 20, 8 << 30)).await?;
@@ -26,43 +31,37 @@ let options = StorageOptions {
     ..StorageOptions::default()
 };
 let journal = Journal::open_with_options(store, options).await?;
-let mut db = Sql::open(&journal).await?;
-db.transaction(async |db| {                    // one SQL transaction, or rolled back
-    db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?;
-    db.execute("INSERT INTO shipments VALUES(7)").await
-}).await?;
-db.flush().await?;                             // into the file `db`, still private
-journal.record("progress").set("shipped 7".into());
+journal.record("progress").set("step 7".into());
 journal.file("image")?.write(0, Some(page))?;
-journal.commit().await?; // the rows, the record and the page, durable together
+journal.commit().await?; // the record and the page, durable together
 ```
 
-Nothing is durable before `Journal::commit`, and then everything changed
-since the last commit is, in one put. The host chooses when: after each SQL
-transaction, as the Node.js addon and the Python extension do, or once per
-turn, as the durable functions runtime does. Bind values with
-`query_with`/`execute_with` rather than formatting them into SQL. The host
-must guarantee one owner per namespace: an object without Restate's journal
-(`journalReplay: false`), whose state this is.
+Nothing is durable before `Journal::commit`, and then everything changed since
+the last commit is, in one put. The host must guarantee one owner per
+namespace. A failed or cancelled commit ends the journal (`is_usable()`
+returns false): its outcome is unknown, so settle outstanding requests and open
+a new one.
 
-An SQL error (syntax, a constraint, a missing table) undoes just that statement,
-as in SQLite, and the session goes on. A storage error, a cancelled call or a
-failed commit ends the session (`is_usable()` returns false): settle
-outstanding requests and open a new one; a failed commit's outcome is unknown.
+A participant joins under a name (`journal.join("sql")`), one at a time per
+name. While it says it holds changes not yet in the journal
+(`set_unflushed(true)`), the journal refuses to commit. With a page cache, it
+may `park` state for the next journal of the namespace, which takes it back
+(`take_idle`) when nothing changed since: the SQL crate keeps its engine warm
+this way.
 
 ## How durability and recovery work
 
 The backend is a Restate object's state: single-key puts and deletes, queued
 in issue order, and a sync that returns once they are stored. A crash keeps a
-prefix of the writes since the last sync. A database change touches many
-pages, so it can't be written atomically as pages. Like SQLite's WAL, this
+prefix of the writes since the last sync. A commit touches many pages, so
+it can't be written atomically as pages. Like SQLite's WAL, this
 crate commits through a log instead, and copies pages into place later; here
 the log lives in one key.
 
 A namespace holds:
 
-- **The commit record** (`commit`): the version, the directory of files (the
-  SQL database's, the host's paged files and records, with their sizes), and
+- **The commit record** (`commit`): the version, the directory of files (paged
+  files, such as the SQL database's, and records, with their sizes), and
   the log since the last checkpoint: each transaction's changed pages, compressed
   against their previous images. The record holds the log's last KiB or so
   inline; older parts, and large transactions, are stored at `log/<n>` keys,
@@ -80,15 +79,15 @@ names them. Once the inline log outgrows a KiB, a commit puts it, sealed,
 into a stored value, which the record names: so every commit rewrites a
 small record.
 
-**Checkpoint.** Once the log holds more than a few transactions, a save also
+**Checkpoint.** Once the log holds more than a few transactions, a commit also
 copies the latest image of each page in it to its page key, after the record,
 then puts a record with an empty log. A half-finished checkpoint is harmless,
 because the record before it still holds every image it was copying, and
 replays over whatever landed. The commit and its checkpoint share one sync:
-a save is one round trip.
+a commit is one round trip.
 
 **Recovery.** There's no separate recovery step; every open reads the record
-and replays its log. Whatever a failed save left (segments no record names,
+and replays its log. Whatever a failed commit left (segments no record names,
 pages a checkpoint wrote) is ignored, or covered by the log.
 
 **What a crash leaves.** Interrupting any step leaves a state the next open
@@ -98,7 +97,7 @@ reads correctly:
 | -------------------------- | ------------------------------------------------------- |
 | A commit                   | Either all of the transaction or none of it             |
 | A checkpoint               | Pages hold old or new images; the log replays over them |
-| A deletion of old segments | Repeated by a later save                                |
+| A deletion of old segments | Repeated by a later commit                              |
 
 **What it relies on.**
 
@@ -114,29 +113,22 @@ the owner cache.
 
 ## Docs
 
-- [Design](docs/DESIGN.md): the model, invariants, save, open, failures, cache
-  and costs
+- [Design](docs/DESIGN.md): the model, invariants, commit, open, failures,
+  cache and costs
 - [Storage format](docs/FORMAT.md): exact encodings
 - [Review and validation](docs/REVIEW.md): what was tested and how
 - [Protocol specification](spec/README.md): the protocol in TLA+, model-checked
   with TLC, and the monitor that checks the code against it
-- [Benchmarks](benches/README.md)
-- [Node.js addon](../../typescript/packages/sql-node/README.md): the same over a key/value store
-  implemented in JavaScript, in `typescript/packages/sql-node/`
-- [Python extension](../../python/journal/README.md): the same over a
-  key/value store implemented in Python, in `python/journal/`
-
-It is used by a patched Restate TypeScript SDK, for SQL in virtual objects:
-see [the repository's README](../../README.md).
+- [SQL](../sql/README.md): SQLite-compatible SQL on a journal, with the
+  storage tests and benchmarks that run SQL workloads
 
 ## Layout
 
-| Path                          | What                                |
-| ----------------------------- | ----------------------------------- |
-| `src/`, `tests/`, `examples/` | The crate, its tests and an example |
-| [`benches/`](benches)         | Benchmarks and their results        |
-| [`docs/`](docs)               | Design, storage format, review      |
-| [`spec/`](spec)               | The protocol in TLA+                |
+| Path             | What                           |
+| ---------------- | ------------------------------ |
+| `src/`, `tests/` | The crate and its tests        |
+| [`docs/`](docs)  | Design, storage format, review |
+| [`spec/`](spec)  | The protocol in TLA+           |
 
 ## Build and test
 
@@ -144,12 +136,9 @@ From this directory:
 
 ```sh
 cargo test --locked
-cargo test --locked --features simulation   # storage, cache and failure campaigns
+cargo test --locked --features simulation   # with the in-memory store and fault injection
 cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo run --locked --features simulation --example lookup
-(cd ../packages/sql-node && npm run build && npm test)   # the addon
 ```
 
 The `simulation` feature adds an in-memory KV store, fault injection and a
-latency simulator, used by most tests and all benchmarks. The addon needs node
-20 or later.
+latency simulator, which the tests here and in [`sql`](../sql) use.

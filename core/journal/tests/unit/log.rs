@@ -1,5 +1,5 @@
 use super::*;
-use crate::io::BLOCK_SIZE;
+use crate::PAGE_SIZE as BLOCK_SIZE;
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet};
 

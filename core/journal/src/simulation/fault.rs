@@ -1,7 +1,7 @@
 //! Deterministic simulator failpoints. Not a production backend or remote fencing.
 use super::MemoryKv;
+use super::yield_now;
 use crate::kv::KvStore;
-use crate::yield_now;
 use bytes::Bytes;
 use futures::{channel::oneshot, future::BoxFuture};
 use std::{io, sync::Mutex};

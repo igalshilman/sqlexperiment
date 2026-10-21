@@ -3,9 +3,10 @@
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
 use journal::{
-    Base, NamespaceCache, Result, Sql, StorageOptions,
+    Base, NamespaceCache, Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
+use sql::Sql;
 use std::sync::Arc;
 
 fn page(byte: u8) -> Bytes {

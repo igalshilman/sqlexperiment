@@ -10,10 +10,11 @@
 //! confirmed. Output is CSV; traffic counters are deterministic, time is the
 //! median of the repeats.
 use journal::{
-    Journal, PageCacheConfig, Result, Sql, StorageOptions,
+    Journal, PageCacheConfig, Result, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
+use sql::Sql;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::{

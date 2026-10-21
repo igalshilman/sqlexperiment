@@ -1,19 +1,19 @@
-//! Bridge between engine byte-addressed files and the committed KV state.
+//! Bridge between engine byte-addressed files and the journal's file `db`.
 //!
 //! The engine sees two virtual files: [`DB_PATH`] and [`WAL_PATH`]. The database
-//! starts from a recovered snapshot; its dirty pages and the entire WAL live in
-//! `State`. Full-page writes avoid a backing read; partial writes merge with the
+//! reads through the journal's file; its dirty pages and the entire WAL live in
+//! `State` until [`KvIo::move_into_file`]. Full-page writes avoid a backing read; partial writes merge with the
 //! visible page. Truncation records explicit holes and clears a partial tail so
-//! regrowing a file never exposes bytes from the old snapshot.
+//! regrowing a file never exposes bytes from before.
 //!
 //! File methods enqueue work without calling KV. [`KvIo::drive`] polls backend
 //! futures on the host executor. Adjacent reads overlap in bounded batches; writes,
 //! truncation and sync serialize the queue into ordered phases. Within a read batch,
 //! completion order may differ from submission order. A single multi-page file read
-//! fetches its pages sequentially. This layer does not prefetch: the snapshot does
+//! fetches its pages sequentially. This layer does not prefetch: the journal does
 //! (a small database whole, or the working-set hint, at open; readahead after
 //! consecutive misses), and cross-session reuse comes from the optional
-//! [`crate::PageCache`].
+//! [`journal::PageCache`].
 //!
 //! Read buffers are staged privately until the read succeeds. `Completing` retires
 //! in-flight accounting and aborts incomplete engine callbacks even if a dequeued
@@ -31,18 +31,19 @@
 //! file mutation or wait with no queued work returns an error instead of blocking
 //! or spinning. Normal engine I/O is driven by the asynchronous pump.
 //!
-//! File sync is only a private-overlay ordering barrier. Durable KV mutations happen
-//! later when the save commits, after a complete private checkpoint.
-//! The engine WAL never becomes a durable KV object.
-use crate::kv::KvStore;
-use crate::page_codec::Page;
-use crate::snapshot::{SQL_FILE, Snapshot, StorageOptions, Writes, Written};
+//! File sync is only a private-overlay ordering barrier. A complete private
+//! checkpoint moves the database's pages into the journal's file, which the
+//! journal's commit makes durable. The engine WAL never becomes a durable KV object.
 use bytes::BytesMut;
 use futures::future::join_all;
+use journal::{File as JournalFile, Page};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use turso_core::io::{FileId, FileSyncType, clock::DefaultClock};
 use turso_core::{
@@ -51,7 +52,7 @@ use turso_core::{
 };
 
 /// Logical database-page and overlay-block size; encoded KV values may be smaller.
-pub const BLOCK_SIZE: usize = 4096;
+pub const BLOCK_SIZE: usize = journal::PAGE_SIZE;
 /// Engine-visible virtual database name, not a filesystem or KV key.
 pub const DB_PATH: &str = "object.db";
 /// Engine-visible private WAL name; this file is never fetched from KV.
@@ -95,7 +96,7 @@ fn blocks(pos: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize, usiz
 
 /// Mutable session overlay indexed by `(file number, logical block number)`.
 /// File 0 is the database and file 1 is its private WAL. A missing entry falls
-/// through to the snapshot for file 0; `Some(None)` is an explicit zero-filled
+/// through to the journal's file for file 0; `Some(None)` is an explicit zero-filled
 /// hole that masks old data after truncation. Sizes track the private view.
 #[derive(Default)]
 struct State {
@@ -159,13 +160,14 @@ impl Drop for Completing<'_> {
 
 /// Shared virtual-file adapter; prefer [`crate::Sql`] for SQL and durability.
 ///
-/// Mount performs recovery and requires exclusive namespace ownership. The queue
-/// lock orders engine mutations; it does not implement a distributed ownership lock.
+/// The queue lock orders engine mutations; it does not implement a
+/// distributed ownership lock.
 pub struct KvIo {
-    /// The committed view; replaced when a warm engine continues in a new session.
-    snapshot: Mutex<Arc<Snapshot>>,
-    /// See [`Self::version`].
-    version: Mutex<u64>,
+    /// The journal's file `db`; replaced when a warm engine continues on a
+    /// new journal, and `None` while the engine is parked.
+    file: Mutex<Option<JournalFile>>,
+    /// See [`crate::SqlOptions::max_private_bytes`].
+    max_private_bytes: AtomicUsize,
     state: Mutex<State>,
     queue: Mutex<VecDeque<Pending>>,
     driver: futures::lock::Mutex<()>,
@@ -173,66 +175,74 @@ pub struct KvIo {
     /// A request or synchronous engine read failed: the engine's state after
     /// the error is unknown.
     failed: std::sync::atomic::AtomicBool,
+    /// The journal of [`Self::mount`], which [`Self::publish`] commits.
+    #[cfg(feature = "simulation")]
+    journal: Mutex<Option<journal::Journal>>,
     #[cfg(all(test, feature = "simulation"))]
     fault: Mutex<Option<test_faults::Fault>>,
 }
 
 impl KvIo {
-    /// Open the snapshot (the commit record, and its log's replay), then
-    /// fetch pages on demand.
-    pub async fn mount(store: Arc<dyn KvStore>) -> io::Result<Arc<Self>> {
-        Self::mount_with_options(store, StorageOptions::default()).await
-    }
-
-    /// Mount with an encoding policy for new pages; existing page tags control reads.
-    pub async fn mount_with_options(
-        store: Arc<dyn KvStore>,
-        options: StorageOptions,
-    ) -> io::Result<Arc<Self>> {
-        let snapshot = Snapshot::open_with_options(store, options).await?;
-        Ok(Self::from_snapshot(snapshot))
-    }
-
-    pub(crate) fn from_snapshot(snapshot: Snapshot) -> Arc<Self> {
+    /// An adapter over `file`, the journal's file `db`.
+    pub fn new(file: JournalFile, max_private_bytes: usize) -> Arc<Self> {
         let state = State {
-            sizes: [snapshot.size(), 0],
+            sizes: [file.len(), 0],
             ..State::default()
         };
         Arc::new(Self {
-            version: Mutex::new(snapshot.version()),
-            snapshot: Mutex::new(Arc::new(snapshot)),
+            file: Mutex::new(Some(file)),
+            max_private_bytes: AtomicUsize::new(max_private_bytes),
             state: Mutex::new(state),
             queue: Mutex::default(),
             driver: futures::lock::Mutex::new(()),
             progress: Mutex::default(),
             failed: Default::default(),
+            #[cfg(feature = "simulation")]
+            journal: Mutex::new(None),
             #[cfg(all(test, feature = "simulation"))]
             fault: Mutex::new(None),
         })
     }
 
-    /// The version of the committed state the engine holds: the snapshot it
-    /// was opened or resumed on, or its own acknowledged save.
-    pub(crate) fn version(&self) -> u64 {
-        *self.version.lock().unwrap()
+    /// Open the namespace's journal, and an adapter over its file `db`.
+    #[cfg(feature = "simulation")]
+    pub async fn mount(store: Arc<dyn journal::kv::KvStore>) -> io::Result<Arc<Self>> {
+        Self::mount_with_options(store, journal::StorageOptions::default()).await
     }
 
-    /// Release the committed view while the engine is parked: it reads
-    /// nothing until a new open replaces the view.
-    pub(crate) fn idle(&self) {
-        let idle = Arc::new(self.snapshot().idle());
-        *self.snapshot.lock().unwrap() = idle;
+    /// [`Self::mount`] with explicit storage options.
+    #[cfg(feature = "simulation")]
+    pub async fn mount_with_options(
+        store: Arc<dyn journal::kv::KvStore>,
+        options: journal::StorageOptions,
+    ) -> io::Result<Arc<Self>> {
+        let journal = (journal::Journal::open_with_options(store, options).await)
+            .map_err(io::Error::other)?;
+        let file = journal.file(crate::DB_FILE).map_err(io::Error::other)?;
+        let io = Self::new(file, crate::MAX_PRIVATE_BYTES);
+        *io.journal.lock().unwrap() = Some(journal);
+        Ok(io)
     }
 
-    pub(crate) fn snapshot(&self) -> Arc<Snapshot> {
-        self.snapshot.lock().unwrap().clone()
+    /// Move the private pages into the file and commit the journal of
+    /// [`Self::mount`].
+    #[cfg(feature = "simulation")]
+    pub async fn publish(&self) -> io::Result<journal::SaveReport> {
+        self.move_into_file().await?;
+        let journal = self.journal.lock().unwrap().clone();
+        let journal = journal.ok_or_else(|| invalid("not mounted"))?;
+        journal.commit().await.map_err(io::Error::other)
     }
 
-    /// Open the file `name` with `base` (see [`Snapshot::with_base`]).
-    pub(crate) fn with_base(&self, name: &str, base: Arc<dyn crate::Base>) -> io::Result<()> {
-        let mut snapshot = self.snapshot.lock().unwrap();
-        *snapshot = Arc::new(snapshot.with_base(name, base)?);
-        Ok(())
+    /// Let go of the journal while the engine is parked: it reads nothing
+    /// until [`Self::resume`] gives it the next one.
+    pub(crate) fn release(&self) {
+        *self.file.lock().unwrap() = None;
+    }
+
+    fn file(&self) -> io::Result<JournalFile> {
+        let file = self.file.lock().unwrap().clone();
+        file.ok_or_else(|| invalid("the engine is parked"))
     }
 
     /// No private changes, no private WAL and no outstanding I/O: the engine's
@@ -246,18 +256,22 @@ impl KvIo {
             && !progress.stopped
     }
 
-    /// Continue a clean adapter on a newly opened snapshot of the same committed
-    /// state, keeping the engine that uses it warm.
-    pub(crate) async fn resume(&self, snapshot: Snapshot) -> io::Result<()> {
+    /// Continue a clean adapter on `file` of a newly opened journal at the
+    /// same committed state, keeping the engine that uses it warm.
+    pub(crate) async fn resume(
+        &self,
+        file: JournalFile,
+        max_private_bytes: usize,
+    ) -> io::Result<()> {
         if !self.is_clean() {
             return Err(invalid("cannot resume an adapter with private changes"));
         }
+        (self.max_private_bytes).store(max_private_bytes, Ordering::SeqCst);
         *self.state.lock().unwrap() = State {
-            sizes: [snapshot.size(), 0],
+            sizes: [file.len(), 0],
             ..State::default()
         };
-        *self.version.lock().unwrap() = snapshot.version();
-        *self.snapshot.lock().unwrap() = Arc::new(snapshot);
+        *self.file.lock().unwrap() = Some(file);
         self.prepare_engine().await
     }
 
@@ -281,9 +295,9 @@ impl KvIo {
 
     /// Snapshot local database/WAL traffic counters; these are not durable KV bytes.
     #[cfg(feature = "simulation")]
-    pub fn stats(&self) -> crate::simulation::IoStats {
+    pub fn stats(&self) -> crate::IoStats {
         let state = self.state.lock().unwrap();
-        crate::simulation::IoStats {
+        crate::IoStats {
             database_bytes_written: state.written[0],
             private_wal_bytes_written: state.written[1],
             database_len: state.sizes[0],
@@ -357,7 +371,7 @@ impl KvIo {
         if let Some(page) = self.resident_block(file, index) {
             return Ok(page);
         }
-        match self.snapshot().read(SQL_FILE, index).await? {
+        match self.file()?.read(index).await.map_err(io::Error::other)? {
             Some(page) if page.len() == BLOCK_SIZE => Ok(page),
             Some(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -396,12 +410,12 @@ impl KvIo {
 
     async fn write(&self, file: usize, pos: u64, bytes: &[u8]) -> io::Result<usize> {
         // Count the blocks this write may add: one write can be a large batch.
-        let limit = self.snapshot().options().max_private_bytes;
+        let limit = self.max_private_bytes.load(Ordering::SeqCst);
         let held = self.state.lock().unwrap().dirty.len() * BLOCK_SIZE;
         if held + bytes.len() + 2 * BLOCK_SIZE > limit {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
-                "private changes exceed StorageOptions::max_private_bytes",
+                "private changes exceed SqlOptions::max_private_bytes",
             ));
         }
         let end = pos
@@ -573,53 +587,41 @@ impl KvIo {
         }
     }
 
-    /// Publish once no SQL transaction remains and the private WAL is truncated.
-    /// The dirty pages move into the save. On success the adapter continues on
-    /// the committed view.
-    #[cfg_attr(not(test), allow(dead_code))]
-    #[cfg(feature = "simulation")]
-    pub(crate) async fn publish(&self) -> io::Result<crate::SaveReport> {
-        self.publish_with(Writes::new(), Default::default()).await
+    /// Whether the engine changed the database since the last move, or holds
+    /// WAL a checkpoint has not moved into it.
+    pub(crate) fn has_changes(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.sizes[1] != 0 || state.dirty.keys().any(|(file, _)| *file == 0)
     }
 
-    /// [`Self::publish`], with `writes` to other paged files, replacing
-    /// and replacing `records` (see [`Snapshot::commit`]).
-    pub(crate) async fn publish_with(
-        &self,
-        mut writes: Writes,
-        records: crate::log::Records,
-    ) -> io::Result<crate::SaveReport> {
-        if writes.contains_key(SQL_FILE) {
-            return Err(invalid(format!("{SQL_FILE:?} is the SQL database's file")));
-        }
+    /// Move the database's private pages into the journal's file, once no
+    /// SQL transaction remains and the private WAL is truncated; the
+    /// journal's commit makes them durable. The adapter goes on reading
+    /// them through the file.
+    pub(crate) async fn move_into_file(&self) -> io::Result<()> {
         if self.pending_count() != 0 {
-            return Err(invalid("cannot save with pending I/O"));
+            return Err(invalid("cannot move pages with pending I/O"));
         }
+        let file = self.file()?;
         let (dirty, size) = {
             let mut state = self.state.lock().unwrap();
             if state.sizes[1] != 0 {
-                return Err(invalid(
-                    "the SQL engine has committed changes not yet in its file: Sql::flush first",
-                ));
+                return Err(invalid("the private WAL is not checkpointed"));
             }
+            // Read again through the file below.
+            state.header.clear();
             let dirty: BTreeMap<u64, Option<Page>> = std::mem::take(&mut state.dirty)
                 .into_iter()
                 .filter(|((file, _), _)| *file == 0)
                 .map(|((_, block), page)| (block, page))
                 .collect();
-            // The resident header must show the committed first page.
-            for (block, slot) in state.header.iter_mut().enumerate() {
-                if let Some(page) = dirty.get(&(block as u64)) {
-                    *slot = page.clone().unwrap_or_else(zero);
-                }
-            }
             (dirty, state.sizes[0])
         };
-        writes.insert(SQL_FILE.to_owned(), Written { size, pages: dirty });
-        let (report, after) = self.snapshot().commit(writes, records).await?;
-        *self.version.lock().unwrap() = report.version;
-        *self.snapshot.lock().unwrap() = Arc::new(after);
-        Ok(report)
+        let moved = (dirty.into_iter())
+            .try_for_each(|(block, page)| file.write(block, page))
+            .and_then(|()| file.set_len(size));
+        moved.map_err(io::Error::other)?;
+        self.prepare_engine().await
     }
 }
 
@@ -693,7 +695,7 @@ impl IO for KvIo {
 
 /// Thin Arc holder, avoiding self-referential backend/file ownership.
 /// Engine `IO` facade that opens virtual handles sharing the same adapter.
-/// The wrapped adapter owns queue ordering, private bytes and snapshot access.
+/// The wrapped adapter owns queue ordering, private bytes and file access.
 pub struct MountedIo(pub Arc<KvIo>);
 impl Clock for MountedIo {
     fn current_time_monotonic(&self) -> MonotonicInstant {

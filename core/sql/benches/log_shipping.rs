@@ -7,10 +7,11 @@
 //! only durable values. Round trips come from `LatencyKv`'s virtual clock;
 //! operation and byte counts from `MemoryKv`. Output is CSV.
 use journal::{
-    Journal, NamespaceCache, PageCompression, Result, Sql, StorageOptions,
+    Journal, NamespaceCache, PageCompression, Result, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
+use sql::Sql;
 use std::sync::Arc;
 
 /// Flush and commit `db`'s journal, ending the session.

@@ -2,7 +2,8 @@
 //! instrumentation, forced yields or checkpoint fault hooks are required.
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use journal::{Journal, Result, Sql, kv::KvStore};
+use journal::{Journal, Result, kv::KvStore};
+use sql::Sql;
 use std::{
     collections::BTreeMap,
     io,

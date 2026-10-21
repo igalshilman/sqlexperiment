@@ -1024,9 +1024,7 @@ dependencies = [
  "foyer",
  "futures",
  "lz4_flex",
- "parking_lot",
  "tokio",
- "turso_core",
  "zstd-safe",
 ]
 
@@ -1832,6 +1830,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
 
 [[package]]
+name = "sql"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "journal",
+ "parking_lot",
+ "turso_core",
+]
+
+[[package]]
 name = "sqlite-kv-node"
 version = "0.1.0"
 dependencies = [
@@ -1841,6 +1850,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "sql",
  "tokio",
  "turso_core",
 ]

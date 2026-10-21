@@ -1201,6 +1201,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sql",
  "tempfile",
  "tokio",
  "tracing",
@@ -1984,9 +1985,7 @@ dependencies = [
  "foyer",
  "futures",
  "lz4_flex",
- "parking_lot",
  "tokio",
- "turso_core",
  "zstd-safe",
 ]
 
@@ -3530,6 +3529,17 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "sql"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "journal",
+ "parking_lot",
+ "turso_core",
 ]
 
 [[package]]

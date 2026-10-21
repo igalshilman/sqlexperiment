@@ -191,7 +191,7 @@ fn large_page_sizes_reopen_after_a_save() -> Result<()> {
 /// mismatched count or a second statement is refused before anything runs.
 #[test]
 fn parameters_bind_values_not_text() -> Result<()> {
-    use journal::Value;
+    use sql::Value;
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let mut db = Db::open(store, StorageOptions::default()).await?;
@@ -239,7 +239,7 @@ fn query_columns_names_the_last_statement_columns() -> Result<()> {
         let (columns, rows) = db
             .query_columns(
                 "SELECT value FROM items WHERE id = ?",
-                Some(vec![journal::Value::from_i64(1)]),
+                Some(vec![sql::Value::from_i64(1)]),
             )
             .await?;
         assert_eq!(columns, ["value"]);

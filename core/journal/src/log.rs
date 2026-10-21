@@ -30,8 +30,8 @@
 //! (none when every entry is a hole). A value at `log/<n>` is `SL15`, then the
 //! segment count and each segment's length and bytes.
 use crate::{
+    PAGE_SIZE,
     format::{COMMIT_MAGIC, LOG_MAGIC, log_key},
-    io::BLOCK_SIZE,
     kv::KvStore,
     page_codec::Page,
 };
@@ -254,20 +254,20 @@ pub(crate) fn decode_segment(
         return Ok(images);
     }
     let dictionary = chain.dictionary(file, pages.iter(), base);
-    let mut raw = Vec::with_capacity(count * BLOCK_SIZE);
+    let mut raw = Vec::with_capacity(count * PAGE_SIZE);
     let mut dctx = DCtx::create();
     dctx.ref_prefix(&dictionary)
         .and_then(|_| dctx.decompress(&mut raw, &bytes[at..]))
         .map_err(|_| invalid("log segment images"))?;
-    if raw.len() != count * BLOCK_SIZE {
+    if raw.len() != count * PAGE_SIZE {
         return Err(invalid("log segment images"));
     }
     let raw = Bytes::from(raw);
     let mut next = 0;
     for &(index, image) in &pages {
         let page = image.then(|| {
-            next += BLOCK_SIZE;
-            raw.slice(next - BLOCK_SIZE..next)
+            next += PAGE_SIZE;
+            raw.slice(next - PAGE_SIZE..next)
         });
         images.insert(page_id(file, index), page);
     }

@@ -1,8 +1,5 @@
-use journal::{
-    Result,
-    io::{BLOCK_SIZE, DB_PATH, KvIo, MountedIo},
-    simulation::MemoryKv,
-};
+use journal::{Result, simulation::MemoryKv};
+use sql::io::{BLOCK_SIZE, DB_PATH, KvIo, MountedIo};
 use std::sync::{
     Arc,
     atomic::{AtomicI32, Ordering},

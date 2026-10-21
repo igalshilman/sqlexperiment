@@ -2,7 +2,7 @@
 
 SQL over a key/value store implemented in Python: a native extension
 ([PyO3](https://pyo3.rs), built with [maturin](https://www.maturin.rs)) around
-the [`journal`](../../core/journal/README.md) crate, for the Restate Python SDK, where the store is an object's state.
+the [`sql`](../../core/sql/README.md) and [`journal`](../../core/journal/README.md) crates, for the Restate Python SDK, where the store is an object's state.
 It is the [Node.js addon](../../typescript/packages/sql-node/README.md) for Python, with the same
 store, sessions and page cache.
 

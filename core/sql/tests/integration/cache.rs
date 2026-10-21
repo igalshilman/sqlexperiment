@@ -281,7 +281,7 @@ fn parked_engines_are_bounded() -> Result<()> {
     };
     futures::executor::block_on(async {
         let cache = open_cache(PageCacheConfig {
-            engine_bytes: (4 << 20) + (12 << 10), // one engine with an empty schema
+            idle_bytes: (4 << 20) + (12 << 10), // one engine with an empty schema
             ..cache_config(1 << 20, 16 << 20)
         });
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
@@ -430,7 +430,7 @@ fn parked_engines_are_weighed_by_schema() -> Result<()> {
     };
     futures::executor::block_on(async {
         let cache = open_cache(PageCacheConfig {
-            engine_bytes: (16 << 20) + (100 << 10), // four engines with empty schemas
+            idle_bytes: (16 << 20) + (100 << 10), // four engines with empty schemas
             ..cache_config(1 << 20, 16 << 20)
         });
         let open = |name: &str, store: &Arc<dyn KvStore>| {

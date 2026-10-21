@@ -237,4 +237,4 @@ Request fencing, real-backend
 latency and process crash/power-loss validation remain future work.
 
 See [format](FORMAT.md), [design](DESIGN.md), and
-[benchmark methodology and evidence](../benches/README.md).
+[benchmark methodology and evidence](../../sql/benches/README.md).

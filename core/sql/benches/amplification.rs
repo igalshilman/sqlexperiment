@@ -1,8 +1,9 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
 use journal::{
-    Journal, Result, Sql, StorageOptions,
+    Journal, Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
 };
+use sql::Sql;
 use std::sync::Arc;
 
 /// Flush and commit `db`'s journal, ending the session.

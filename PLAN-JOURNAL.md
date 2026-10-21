@@ -67,6 +67,11 @@ and ask the owner only critical questions.
   journal, commit the journal after each call that leaves no SQL
   transaction open, so their SQL commits stay durable when the call
   returns; their `commit(effects)` sets the record `effects` with it.
+- **After the plan: two crates.** `core/journal` keeps records and paged
+  files and commits them, with no SQL in it; a participant
+  (`Journal::join`) holds commits back while it has changes not yet in the
+  journal, and may park idle state for the next journal. `core/sql` is one:
+  `Sql` on the file `db`, its engine parked between sessions.
 - **Measured after the last step** (the split and the renames, same
   machine, medians), against the run after step 4: the agent stores 2.5 MiB
   over 200 steps (as before), restores in 2.3 ms (2.6), its model and tool

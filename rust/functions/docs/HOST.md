@@ -128,7 +128,8 @@ it returns, is a new runtime version: names live in heaps.
 
 ## 3. `ctx.db.sql`
 
-Each scope (an object key) has a SQLite database: `core/journal`,
+Each scope (an object key) has a SQLite database: `core/sql` on the scope's
+journal (`core/journal`),
 running in the host over the object's Restate state. The guest never holds
 pages of it. Only statements go in and only rows come out.
 

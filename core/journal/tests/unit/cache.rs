@@ -79,23 +79,29 @@ fn another_record_forgets_the_commit_and_another_epoch_the_pages() {
     })
 }
 
-/// A parked engine refers back to its namespace's handle; dropping the last
-/// `PageCache` still frees everything.
+/// Idle state that refers back to its namespace's handle (as a parked SQL
+/// engine does); dropping the last `PageCache` still frees everything.
 #[test]
-fn dropping_the_cache_frees_parked_engines() -> crate::Result<()> {
-    use crate::{Sql, StorageOptions, kv::KvStore, simulation::*};
+fn dropping_the_cache_frees_idle_state() -> crate::Result<()> {
+    use crate::{StorageOptions, kv::KvStore, simulation::*};
     futures::executor::block_on(async {
         let cache = open_cache(cache_config(1 << 20, 16 << 20));
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
+        let namespace = cache.namespace("parked");
         let options = StorageOptions {
-            cache: Some(cache.namespace("parked")),
+            cache: Some(namespace.clone()),
             ..StorageOptions::default()
         };
-        drop(Sql::open(&crate::Journal::open_with_options(store, options).await?).await?);
-        assert_eq!(cache.engines.lock().unwrap().parked.len(), 1);
+        let journal = crate::Journal::open_with_options(store, options).await?;
+        let freed = Arc::new(());
+        let idle = (namespace, freed.clone());
+        assert!(journal.join("engine")?.park(idle, 1).is_ok());
+        assert_eq!(cache.idle.lock().unwrap().parked.len(), 1);
+        drop(journal);
         let shared = Arc::downgrade(&cache.shared);
         drop(cache);
         assert!(shared.upgrade().is_none());
+        assert_eq!(Arc::strong_count(&freed), 1);
         Ok(())
     })
 }

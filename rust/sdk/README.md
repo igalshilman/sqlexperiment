@@ -38,7 +38,7 @@ timer) loses that much at each. Also an upstream bug, patched here only.
 
 `ObjectContext::raw_state()` is the object's state as bytes, through a handle
 that outlives the context's borrow, for a store that must own its storage,
-such as [a database in the state](../../core/journal/README.md).
+such as [a database in the state](../../core/sql/README.md).
 
 ## Build
 

@@ -14,10 +14,11 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use journal::kv::KvStore;
-use journal::{Journal, PageCache, PageCacheConfig, Sql, StorageOptions, Value};
+use journal::{Journal, PageCache, PageCacheConfig, StorageOptions};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
+use sql::{Sql, Value};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -2,9 +2,10 @@
 //! files beside it, made durable together by `Journal::commit`.
 use bytes::Bytes;
 use journal::{
-    Journal, Result, Sql, StorageOptions,
+    Journal, Result, StorageOptions,
     simulation::{MemoryKv, fresh_namespace},
 };
+use sql::Sql;
 use std::sync::Arc;
 
 fn options() -> StorageOptions {
@@ -69,7 +70,10 @@ fn a_commit_refuses_sql_not_flushed() -> Result<()> {
         let mut sql = Sql::open(&journal).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
         let refused = journal.commit().await.unwrap_err().to_string();
-        assert!(refused.contains("Sql::flush"), "{refused}");
+        assert!(
+            refused.contains("\"sql\" has changes not yet in the journal"),
+            "{refused}"
+        );
         assert!(store.keys().is_empty());
         Ok(())
     })
