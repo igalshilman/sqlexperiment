@@ -136,9 +136,9 @@ impl Default for StorageOptions {
     }
 }
 
-/// `Ok` means the transaction is durable, with this save's checkpoint, if any.
+/// What a commit wrote: its log and record bytes, and the pages its checkpoint, if any, wrote.
 #[derive(Clone, Debug, Default)]
-pub struct SaveReport {
+pub struct CommitReport {
     /// Pages written in place by this save's checkpoint; 0 when it did not
     /// checkpoint.
     pub checkpointed_pages: usize,
@@ -501,28 +501,15 @@ impl Snapshot {
     /// cancellation. After an error, reopen; never reuse this snapshot.
     #[cfg_attr(not(test), allow(dead_code))]
     #[cfg(feature = "simulation")]
-    pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
+    pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<CommitReport> {
         let writes = db_writes(dirty, size);
         Ok(self.commit(writes, Records::new()).await?.0)
     }
 
-    /// [`Self::publish`], also returning the committed view afterwards, which a
-    /// session may continue on. This snapshot is not used again. `writes`
-    /// change paged files (a new name makes a new file), each of `records`
-    /// replaces that record's value, in the same put. Without page changes the log gains no
-    /// transaction; without any change nothing is committed. A commit that
-    /// leaves the log long also checkpoints it, before the one sync.
-    pub(crate) async fn commit(
-        &self,
-        mut writes: Writes,
-        mut records: Records,
-    ) -> io::Result<(SaveReport, Self)> {
-        // A record never set reads as empty.
-        records.retain(|name, value| {
-            self.records
-                .get(name)
-                .map_or(!value.is_empty(), |v| v != value)
-        });
+    /// Refuse what a commit cannot store, before it writes anything: a
+    /// record too large, a name too long, a name both a record and a paged
+    /// file, a size not a multiple of 512 or past the largest file.
+    pub(crate) fn check(&self, writes: &Writes, records: &Records) -> io::Result<()> {
         if let Some((name, value)) = records
             .iter()
             .find(|(_, v)| v.len() > log::MAX_RECORD_BYTES)
@@ -544,7 +531,7 @@ impl Snapshot {
                 ));
             }
         }
-        for (name, written) in &writes {
+        for (name, written) in writes {
             let paged = |id| matches!(self.commit.directory[&id].kind, Kind::Paged { .. });
             if records.contains_key(name) || self.commit.file_id(name).is_some_and(|id| !paged(id))
             {
@@ -564,12 +551,33 @@ impl Snapshot {
                 return refuse(format!("{name:?} is a paged file, not a record"));
             }
         }
+        Ok(())
+    }
+
+    /// [`Self::publish`], also returning the committed view afterwards, which a
+    /// session may continue on. This snapshot is not used again. `writes`
+    /// change paged files (a new name makes a new file), each of `records`
+    /// replaces that record's value, in the same put. Without page changes the log gains no
+    /// transaction; without any change nothing is committed. A commit that
+    /// leaves the log long also checkpoints it, before the one sync.
+    pub(crate) async fn commit(
+        &self,
+        mut writes: Writes,
+        mut records: Records,
+    ) -> io::Result<(CommitReport, Self)> {
+        self.check(&writes, &records)?;
+        // A record never set reads as empty.
+        records.retain(|name, value| {
+            self.records
+                .get(name)
+                .map_or(!value.is_empty(), |v| v != value)
+        });
         writes.retain(|name, written| {
             !written.pages.is_empty() || written.size != self.file_size(name)
         });
         let changed = !writes.is_empty();
         if !changed && records.is_empty() {
-            let report = SaveReport::default();
+            let report = CommitReport::default();
             let after = self.continued(self.commit.clone(), self.commit_bytes.clone());
             return Ok((report, after.registered()));
         }
@@ -719,25 +727,12 @@ impl Snapshot {
         if let Err(error) = self.store.sync().await {
             return Err(self.failed(error));
         }
+        let checkpointed_pages = checkpoint.as_ref().map_or(0, |c| c.images.len());
         if let Some(cache) = cache {
-            let (bytes, epoch) = (
-                after.commit_bytes.clone().unwrap_or_default(),
-                after.commit.epoch,
-            );
-            match checkpoint {
-                Some(_) => cache.checkpointed(bytes, epoch, version),
-                None => cache.record(Some(bytes), epoch, Some(version)),
-            }
-            cache.keep_values(&after.commit.stored_values(), named);
-        }
-        let mut report = SaveReport {
-            checkpointed_pages: 0,
-            logged_bytes,
-            record_bytes,
-        };
-        if let Some(checkpoint) = checkpoint {
-            report.checkpointed_pages = checkpoint.images.len();
-            if let Some(cache) = cache {
+            // The checkpoint's pages first: a journal that opens on the new
+            // record must not find a page as it was before the checkpoint.
+            // (One opening on the old record replays the log over them.)
+            if let Some(checkpoint) = &checkpoint {
                 for (index, image) in &checkpoint.images {
                     match image {
                         Some(image) => cache.replace(*index, image.clone()),
@@ -748,7 +743,21 @@ impl Snapshot {
                     cache.wrote_hint(hint.to_vec());
                 }
             }
+            let (bytes, epoch) = (
+                after.commit_bytes.clone().unwrap_or_default(),
+                after.commit.epoch,
+            );
+            match checkpoint {
+                Some(_) => cache.checkpointed(bytes, epoch, version),
+                None => cache.record(Some(bytes), epoch, Some(version)),
+            }
+            cache.keep_values(&after.commit.stored_values(), named);
         }
+        let report = CommitReport {
+            checkpointed_pages,
+            logged_bytes,
+            record_bytes,
+        };
         Ok((report, after.registered()))
     }
 

@@ -252,10 +252,13 @@ impl NamespaceCache {
         if owner.commit.as_deref() == Some(bytes.unwrap_or_default()) {
             return true;
         }
-        self.forget_locked(&mut owner);
+        let stale = self.forget_locked(&mut owner);
         if owner.epoch != Some(epoch) {
             owner.clear(&self.shared.ids);
         }
+        // Idle state may hold journal handles, whose drop takes this lock.
+        drop(owner);
+        drop(stale);
         false
     }
 
@@ -303,7 +306,8 @@ impl NamespaceCache {
     /// unknown. Cached pages stay: a checkpoint that landed moved the epoch,
     /// which the next open sees.
     pub(crate) fn forget(&self) {
-        self.forget_locked(&mut self.owner());
+        let stale = self.forget_locked(&mut self.owner());
+        drop(stale);
     }
 
     /// The stored log values this owner holds, of those in `named`.
@@ -350,10 +354,13 @@ impl NamespaceCache {
         readers.next().map(|(&next, _)| next)
     }
 
-    fn forget_locked(&self, owner: &mut Owner) {
+    /// Forget the commit record and what was idle at it, which the caller
+    /// drops once it holds no lock.
+    #[must_use]
+    fn forget_locked(&self, owner: &mut Owner) -> HashMap<String, Idle> {
         owner.commit = None;
         owner.committed = None;
-        self.take_idle_of(owner.id);
+        self.take_idle_of(owner.id)
     }
 
     /// Record a page read by a session, for the working-set hint.
@@ -383,7 +390,9 @@ impl NamespaceCache {
     pub(crate) fn park(&self, name: &str, idle: Idle) {
         let id = self.owner().id;
         if let Some(parked) = self.idle.upgrade() {
-            parked.lock().unwrap().park((id, name.to_owned()), idle);
+            // Dropped once the lock is released.
+            let evicted = parked.lock().unwrap().park((id, name.to_owned()), idle);
+            drop(evicted);
         }
     }
 
@@ -556,8 +565,16 @@ impl Parked {
         }
     }
 
-    fn park(&mut self, key: (u64, String), idle: Idle) {
-        self.take(&key);
+    /// Park `idle` under `key`, evicting the least recently parked to stay
+    /// in the budget; one heavier than the whole budget is refused rather
+    /// than evict everything. What no longer fits is returned.
+    #[must_use]
+    fn park(&mut self, key: (u64, String), idle: Idle) -> Vec<Idle> {
+        let mut out: Vec<Idle> = self.take(&key).into_iter().collect();
+        if idle.weight > self.budget {
+            out.push(idle);
+            return out;
+        }
         self.clock += 1;
         self.used += idle.weight;
         self.parked.insert(key.clone(), (idle, self.clock));
@@ -569,7 +586,9 @@ impl Parked {
                 .remove(&oldest)
                 .expect("ordered state is parked");
             self.used -= idle.weight;
+            out.push(idle);
         }
+        out
     }
 
     fn take(&mut self, key: &(u64, String)) -> Option<Idle> {

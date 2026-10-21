@@ -3,7 +3,7 @@
 //! transaction ([`Durability::Commit`]), as the Node.js addon and the Python
 //! extension do.
 use bytes::Bytes;
-use journal::{Journal, Result, SaveReport, StorageOptions, kv::KvStore};
+use journal::{Journal, Result, CommitReport, StorageOptions, kv::KvStore};
 use sql::{Sql, SqlOptions, Value};
 use std::{
     ops::{Deref, DerefMut},
@@ -88,7 +88,7 @@ impl Db {
     }
 
     /// Flush and commit, and end the session (leaving its engine).
-    pub async fn save(mut self) -> Result<SaveReport> {
+    pub async fn save(mut self) -> Result<CommitReport> {
         self.sql.flush().await?;
         self.sql.journal().commit().await
     }

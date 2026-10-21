@@ -227,7 +227,7 @@ impl KvIo {
     /// Move the private pages into the file and commit the journal of
     /// [`Self::mount`].
     #[cfg(feature = "simulation")]
-    pub async fn publish(&self) -> io::Result<journal::SaveReport> {
+    pub async fn publish(&self) -> io::Result<journal::CommitReport> {
         self.move_into_file().await?;
         let journal = self.journal.lock().unwrap().clone();
         let journal = journal.ok_or_else(|| invalid("not mounted"))?;

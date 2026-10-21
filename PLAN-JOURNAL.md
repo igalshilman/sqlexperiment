@@ -217,7 +217,7 @@ impl Journal {
     /// The seal: every file's and record's changes, one put (plus a
     /// checkpoint when the log is long), then one sync. Nothing changed:
     /// no write.
-    pub async fn commit(&mut self) -> Result<SaveReport>;
+    pub async fn commit(&mut self) -> Result<CommitReport>;
     pub fn version(&self) -> u64;
     pub async fn is_current(&self) -> Result<bool>;
 }
@@ -247,7 +247,7 @@ impl Sql {
     /// With Durability::Commit, also seal; with Durability::Participant, the
     /// host seals (Journal::commit).
     pub async fn flush(&mut self) -> Result<()>;
-    pub async fn save(self) -> Result<SaveReport>;                 // flush, seal, park the engine
+    pub async fn save(self) -> Result<CommitReport>;                 // flush, seal, park the engine
     // For sql-node and the Python extension: thin wrappers over the record
     // "effects" plus flush and seal.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()>;

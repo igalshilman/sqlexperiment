@@ -54,7 +54,7 @@ const MAX_TRANSACTIONS: u64 = 1 << 20;
 pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Bytes of a record's name.
 pub const MAX_NAME_BYTES: usize = 255;
-/// Most records a commit record may name.
+/// Most files and records a commit record may name.
 pub(crate) const MAX_FILES: u32 = 1 << 16;
 const MAGIC: usize = 4;
 const ZSTD_LEVEL: i32 = 3;
