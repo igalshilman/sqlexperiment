@@ -547,8 +547,9 @@ impl File {
             let base = self.base.as_ref().and_then(|base| base.page(page));
             base.map(Page::copy_from_slice)
         };
-        let written = self.shared.files.lock().unwrap().get(&*self.name).cloned();
-        if let Some(image) = written.and_then(|written| written.pages.get(&page).cloned()) {
+        let written = (self.shared.files.lock().unwrap().get(&*self.name))
+            .and_then(|written| written.pages.get(&page).cloned());
+        if let Some(image) = written {
             return Ok(image.or_else(hole));
         }
         let snapshot = self.shared.snapshot();
