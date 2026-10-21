@@ -111,7 +111,7 @@ pub use hint::MAX_HINT_PAGES;
 pub use log::{Base, MAX_NAME_BYTES, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::{Page, PageCompression};
 pub use snapshot::{
-    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, INLINE_LOG_BYTES, SaveReport, StorageOptions,
+    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, CommitReport, INLINE_LOG_BYTES, StorageOptions,
 };
 
 use crate::cache::Idle;
@@ -167,11 +167,39 @@ struct Shared {
     reader: AtomicBool,
     /// A commit failed or was cancelled: its outcome is unknown.
     poisoned: AtomicBool,
+    /// A commit is running.
+    committing: AtomicBool,
 }
 
 impl Shared {
     fn snapshot(&self) -> Arc<Snapshot> {
         self.snapshot.lock().unwrap().clone()
+    }
+}
+
+/// A running commit. One that fails ends the journal. One dropped midway
+/// has an unknown outcome too, and the cache forgets what it knew of the
+/// namespace (as a failed sync makes it), so that no other journal commits
+/// on top of a state that may be gone.
+struct Committing<'a> {
+    shared: &'a Shared,
+    /// The commit returned, rather than being dropped.
+    returned: bool,
+    /// It succeeded.
+    done: bool,
+}
+
+impl Drop for Committing<'_> {
+    fn drop(&mut self) {
+        self.shared.committing.store(false, Ordering::SeqCst);
+        if !self.done {
+            self.shared.poisoned.store(true, Ordering::SeqCst);
+        }
+        if !self.returned
+            && let Some(cache) = &self.shared.options.cache
+        {
+            cache.forget();
+        }
     }
 }
 
@@ -225,6 +253,7 @@ impl Journal {
                 idle: Mutex::new(idle),
                 reader: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
+                committing: AtomicBool::new(false),
             }),
             prefix: Arc::from(""),
         })
@@ -311,10 +340,12 @@ impl Journal {
     /// The commit: every record set and file written since the last one, in
     /// one put (and a checkpoint, when the log is long), then one sync.
     /// Nothing changed: nothing is written. It is refused while a
-    /// participant holds changes not yet in the journal. `Ok` holds what it
-    /// wrote; an error, or dropping the future, leaves the outcome unknown
-    /// and ends the journal: open it again.
-    pub async fn commit(&self) -> Result<SaveReport> {
+    /// participant holds changes not yet in the journal, and while another
+    /// commit of it runs. What it cannot store (a record too large, a bad
+    /// size) is refused before anything is written, and stays pending. `Ok`
+    /// holds what it wrote; any other error, or dropping the future, leaves
+    /// the outcome unknown and ends the journal: open it again.
+    pub async fn commit(&self) -> Result<CommitReport> {
         let shared = &self.shared;
         if shared.poisoned.load(Ordering::SeqCst) {
             return Err(ENDED.into());
@@ -327,12 +358,30 @@ impl Journal {
                 format!("{name:?} has changes not yet in the journal: flush it first").into(),
             );
         }
-        // Until the commit is acknowledged its outcome is unknown.
-        shared.poisoned.store(true, Ordering::SeqCst);
+        if shared.committing.swap(true, Ordering::SeqCst) {
+            return Err("a commit of this journal is running".into());
+        }
+        let mut running = Committing {
+            shared,
+            returned: false,
+            done: false,
+        };
+        let snapshot = shared.snapshot();
+        // What it cannot store is refused before anything is written, and
+        // stays pending: the journal goes on.
+        {
+            let (files, records) = (shared.files.lock().unwrap(), shared.records.lock().unwrap());
+            if let Err(error) = snapshot.check(&files, &records) {
+                (running.returned, running.done) = (true, true);
+                return Err(error.into());
+            }
+        }
         let (files, records) = self.take_pending();
-        let (report, after) = shared.snapshot().commit(files, records).await?;
+        let result = snapshot.commit(files, records).await;
+        running.returned = true;
+        let (report, after) = result?;
         *shared.snapshot.lock().unwrap() = Arc::new(after);
-        shared.poisoned.store(false, Ordering::SeqCst);
+        running.done = true;
         Ok(report)
     }
 
@@ -445,7 +494,10 @@ impl Participant {
     /// the namespace's next journal, weighing `weight` bytes against
     /// [`PageCacheConfig::idle_bytes`]. `Err` gives it back if it cannot be
     /// kept (see [`Self::can_park`]). The cache drops it when anything
-    /// changes, or under its budget.
+    /// changes, or under its budget; one heavier than the whole budget is
+    /// not kept. `value` must hold no handle of this journal (a [`File`], a
+    /// [`Record`], the [`Journal`]), which would keep it open meanwhile and
+    /// hold back the namespace's checkpoints.
     pub fn park<T: Any + Send>(&self, value: T, weight: usize) -> std::result::Result<(), T> {
         if !self.can_park() {
             return Err(value);
@@ -540,7 +592,7 @@ impl File {
     /// Page `page` as the journal holds it; `None` for zeros (a hole of a
     /// file without a base, or past its end).
     pub async fn read(&self, page: u64) -> Result<Option<Page>> {
-        if page * PAGE >= self.len() {
+        if page.saturating_mul(PAGE) >= self.len() {
             return Ok(None);
         }
         let hole = || {
@@ -565,7 +617,7 @@ impl File {
         if image.as_ref().is_some_and(|image| image.len() != PAGE_SIZE) {
             return Err("a page is 4096 bytes".into());
         }
-        let end = (page + 1) * PAGE;
+        let end = page.saturating_add(1).saturating_mul(PAGE);
         if end > log::MAX_DATABASE_BYTES {
             return Err("a page past the largest file".into());
         }
@@ -582,11 +634,11 @@ impl File {
         Ok(())
     }
 
-    /// Make the file `len` bytes: pages wholly past it become holes, so
-    /// regrowing it reads zeros. Bytes of a last, partial page past `len`
-    /// stay as written.
+    /// Make the file `len` bytes, a multiple of 512: pages wholly past it
+    /// become holes, so regrowing it reads zeros (or its base's pages). Bytes
+    /// of a last, partial page past `len` stay as written.
     pub fn set_len(&self, len: u64) -> Result<()> {
-        if len > log::MAX_DATABASE_BYTES {
+        if !len.is_multiple_of(512) || len > log::MAX_DATABASE_BYTES {
             return Err(format!("invalid file length {len}").into());
         }
         let old = self.len();

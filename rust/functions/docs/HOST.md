@@ -262,8 +262,10 @@ On branches, a PR each:
 
 A binding is an operation the host makes for a program, by name, outside
 Restate, such as `ctx.llm` ([LLM.md](LLM.md)) and `fetch(url, init)`
-([FETCH.md](FETCH.md)), or by name, `ctx.call(name, input)`. A deployment offers them as
-a registry, passed to `bind`:
+([FETCH.md](FETCH.md)), or by name, `ctx.call(name, input)`. It is an
+extension that keeps nothing ([`Extension`](../src/extension.rs) is the
+general contract); a deployment offers it among its extensions, passed to
+`bind`:
 
 ```rust
 /// An operation the host makes for a program.
@@ -275,8 +277,8 @@ pub trait Binding: Send + Sync + 'static {
     fn deduplicates(&self) -> bool { false }
 }
 
-let bindings = Bindings::new().with("fetch", Fetch::new(FetchPolicy::from_env()));
-functions::bind(Endpoint::builder(), &programs, &cache, &bindings)?
+let extensions = Extensions::new().with("fetch", Fetch::new(FetchPolicy::from_env()));
+functions::bind(Endpoint::builder(), &programs, &cache, &budget, &extensions)?
 ```
 
 A call is a pending request like an RPC: the handler makes it after the

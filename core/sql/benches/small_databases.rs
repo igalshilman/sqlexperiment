@@ -10,7 +10,7 @@ use std::{
 };
 
 /// Flush and commit `db`'s journal, ending the session.
-async fn save(mut db: Sql) -> journal::Result<journal::SaveReport> {
+async fn save(mut db: Sql) -> journal::Result<journal::CommitReport> {
     db.flush().await?;
     db.journal().commit().await
 }

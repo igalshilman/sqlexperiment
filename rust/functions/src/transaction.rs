@@ -174,7 +174,9 @@ impl Blobs for DirBlobs {
             Err(error) => return Err(error.into()),
         };
         while let Some(entry) = entries.next_entry().await? {
-            names.extend(entry.file_name().to_str().map(str::to_owned));
+            // A `.partial` file is a put in flight, not a blob yet.
+            let name = entry.file_name().to_str().map(str::to_owned);
+            names.extend(name.filter(|name| !name.ends_with(".partial")));
         }
         Ok(names)
     }

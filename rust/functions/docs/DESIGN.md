@@ -923,15 +923,15 @@ With count=41:
 
 | Turn                                | The record's put                                             | Effect R                    |
 | ----------------------------------- | ------------------------------------------------------------ | --------------------------- |
-| T1: execute until the RPC wait      | count=42 in SQL, the base batch, the run (R pending)         | Dispatched after the commit |
-| T2: deliver R's result 84, continue | lastAnswer=84 in SQL, the chain cleared, the run (completed) | Done                        |
+| T1: execute until the RPC wait      | count=42 in SQL, the changed pages, the run (R pending)      | Dispatched after the commit |
+| T2: deliver R's result 84, continue | lastAnswer=84 in SQL, the changed pages, the run (completed) | Done                        |
 
 A crash before T1's record is stored leaves nothing: the next attempt starts
 the run again, and R was never dispatched. After it, count=42 is stored with
 it. After dispatch, the next attempt waits on R again under its stable ID:
 Restate attaches to the call already made. After T2's record, a repeated
-delivery is a no-op and another attempt returns the outcome; the base batch,
-stored or not, is garbage the next commit deletes.
+delivery is a no-op and another attempt returns the outcome. Pages a crashed
+commit wrote before its record are garbage the journal deletes.
 
 ### 8.2. Fan-out
 
@@ -999,7 +999,7 @@ Required acceptance cases:
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Snapshot ABI | Hidden mutable globals/table mutation/passive lifecycle rejected; stack limit catches recursive overflow before/after restore                                                     |
 | Tracking     | Every scalar store width, offsets and cross-page writes; overlapping bulk writes; zero lengths; traps; growth; host writes; epoch reset; deliberate missed-write detection        |
-| Images       | Golden isolation; sparse writes; zero growth; zero over nonzero golden; pages back to golden leave the live count; a new base bounds the chain; bounded decoding                  |
+| Images       | Golden isolation; sparse writes; zero growth; zero over nonzero golden; pages back to golden leave the live count; a restored image equals the live one; bounded decoding         |
 | Promises     | all/race/any/allSettled, rejection, fan-out delivery order, captured queued KV result, RPC before Resume and multiple Resume delivery orders                                      |
 | Commits      | Read-your-writes in a turn; a crash after any write, and again after any write of the recovering attempt, ends as without one; a live run and a restored one store the same bytes |
 | Identities   | Another program version or runtime rejected; canonical duplicate IDs are no-ops; unknown IDs fail                                                                                 |

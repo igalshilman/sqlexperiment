@@ -15,9 +15,9 @@ fn offered() -> (Extensions, TempDir) {
     (extensions, dir)
 }
 
-/// The blobs of scope "s".
+/// The blobs of program "v1"'s object "s".
 async fn blobs(dir: &TempDir) -> Vec<String> {
-    let mut names = DirBlobs::new(dir.path()).list("s").await.unwrap();
+    let mut names = DirBlobs::new(dir.path()).list("v1/s").await.unwrap();
     names.sort();
     names
 }
@@ -164,6 +164,41 @@ export async function main(_, ctx) {
             "a": "after",
         })
     );
+}
+
+#[tokio::test]
+async fn a_run_that_ends_with_a_command_running_frees_the_files() {
+    let (extensions, _dir) = offered();
+    let source = r#"
+export async function main({ leave }, ctx) {
+  ctx.fs.write('a.txt', leave ? 'left' : 'next');
+  if (leave) {
+    ctx.fs.exec('true');
+    await ctx.sleep(5);
+    return 'left';
+  }
+  return (await ctx.fs.exec('cat a.txt')).output;
+}
+"#;
+    let store = Store::default();
+    let catalog = programs(source);
+    // The command is issued; the run ends on the timer, before its outcome.
+    let mut run = attempt(&store, &catalog, json!({"leave": true}), &extensions).await;
+    let view = run.view();
+    let Some(Operation::Sleep { id, deadline }) = view.state.pending.get(1).cloned() else {
+        panic!("Expected a timer: {:?}", view.state.pending);
+    };
+    run.deliver(&id, Outcome::success(Value::Null), deadline)
+        .await
+        .unwrap();
+    assert_eq!(common::value(&run.view()), json!("left"));
+
+    // The next run in the scope may change the files and run a command.
+    let scope = store.scope().extended(extensions.clone());
+    let mut next = Run::start(&catalog, &scope, "s", "r2", "v1", "main", json!({}), 20)
+        .await
+        .unwrap();
+    assert_eq!(settle(&mut next).await, json!("next"));
 }
 
 #[tokio::test]

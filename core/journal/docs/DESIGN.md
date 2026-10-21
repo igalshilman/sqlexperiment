@@ -75,11 +75,12 @@ log replays over whatever pages and values it kept.
 
 Exact encodings are in [FORMAT.md](FORMAT.md).
 
-## Save
+## Commit
 
-A session writes SQL into a private view (dirty pages and a private engine WAL).
-A save checkpoints that private WAL inside the engine, takes the changed pages,
-and commits them:
+SQL writes into a private view (dirty pages and a private engine WAL). Its
+flush checkpoints that private WAL inside the engine and moves the changed
+pages into the file `db`; the journal's commit then writes every file and
+record changed since the last one:
 
 1. **Encode.** The changed pages as one transaction of segments (up to 240
    pages each), compressed against the log (below).
@@ -116,7 +117,7 @@ the last checkpoint, where the previous images start empty.
 the cost of a commit: the seal bounds it, and a transaction's segments are
 written about twice (inline, then sealed), its pages once more at a
 checkpoint. Pages are zstd frames by default (`PageCompression::Zstd`).
-`Ok(SaveReport)` means committed; an error leaves the commit outcome unknown.
+`Ok(CommitReport)` means committed; an error leaves the commit outcome unknown.
 
 **Effects.** A host may commit bytes of its own with a transaction, as a
 record (the SDKs' `effects`): they ride in the same record put, so they are
@@ -223,6 +224,7 @@ it a record whose log replays over whatever else it kept.
 
 ## Engine integration
 
+How the [`sql`](../../sql/README.md) crate runs the SQL engine on the journal.
 The engine sees two virtual files, the database and its WAL, served by `KvIo`:
 
 - **Reads** of the database file go to the committed view: log image, then
@@ -233,8 +235,8 @@ The engine sees two virtual files, the database and its WAL, served by `KvIo`:
   window that doubles up to 64, so a scan costs a few round trips rather than
   one per page.
 - **Writes, truncation and sync** stay in private memory. File sync is only an
-  ordering barrier. Nothing reaches KV before a save, and the engine WAL never
-  does.
+  ordering barrier. Nothing reaches KV before a commit, and the engine WAL
+  never does.
 - **Execution.** The caller's task drives the engine's state machines and
   awaits KV I/O. Queries yield every 64 engine steps; one engine call cannot be
   preempted. The engine also reads synchronously for metadata. Open preloads the
@@ -250,10 +252,10 @@ The engine sees two virtual files, the database and its WAL, served by `KvIo`:
   so this holds when no I/O failed and none is pending; the adapter records
   every failed request and synchronous read to tell. Any other error (storage,
   a limit, a cancelled call, an engine anomaly) ends the session, and an error
-  from a statement that saves leaves its commit outcome unknown.
+  from a commit leaves its outcome unknown.
   `Sql::is_usable` says which happened.
-- **Sessions.** `save()` consumes a session, and dropping it discards unsaved
-  work. Inside
+- **Sessions.** Nothing is durable before the journal's commit, and dropping
+  the journal discards what it holds since. Inside
   `Sql::transaction`, a statement that ends the transaction (`COMMIT`,
   `END`, `ROLLBACK`) fails and ends the session before anything is durable,
   and so does dropping or unwinding the transaction future.

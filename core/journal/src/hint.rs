@@ -77,9 +77,11 @@ pub(crate) struct Usage {
 impl Usage {
     /// Record a read of `page` with the first bytes of its content.
     pub(crate) fn record(&mut self, page: u64, content: &[u8]) {
-        // B-tree page type: 0x02 interior index, 0x05 interior table. Page 0
-        // (the file header and schema root) is kept like an interior page.
-        let interior = page == 0 || matches!(content.first(), Some(0x02 | 0x05));
+        // B-tree page type: 0x02 interior index, 0x05 interior table. A
+        // file's first page (an SQL file's header and schema root) is kept
+        // like an interior page.
+        let first = crate::log::page_of(page) == 0;
+        let interior = first || matches!(content.first(), Some(0x02 | 0x05));
         self.clock += 1;
         self.pages.insert(page, (self.clock, interior));
         // Trim in bulk, so each read costs amortized constant time: keep the
