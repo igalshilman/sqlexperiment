@@ -1,5 +1,5 @@
 # The Python workspace (uv), as pnpm-workspace.yaml is the TypeScript one:
-# the sqlite-kv extension (sqlite-kv/), restate-fns (fns/), SQL in virtual
+# the journal extension (journal/), restate-fns (fns/), SQL in virtual
 # objects over the Restate SDK, the agent integrations (agents/), and their
 # tests (tests/). `make py` installs them
 # into .venv; `make lint-py` checks them. The examples (../examples-python)
@@ -17,10 +17,10 @@ dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.14", "langgraph-checkpoint-con
 package = false
 
 [tool.uv.workspace]
-members = ["sqlite-kv", "fns", "agents"]
+members = ["journal", "fns", "agents"]
 
 [tool.uv.sources]
-sqlite-kv = { workspace = true }
+journal = { workspace = true }
 restate-fns = { workspace = true }
 restate-agents = { workspace = true }
 

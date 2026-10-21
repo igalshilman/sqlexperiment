@@ -2,7 +2,7 @@
 
 import itertools
 
-import sqlite_kv
+import journal
 
 _namespaces = itertools.count()
 
@@ -26,6 +26,6 @@ class MemoryStore:
         pass
 
 
-async def session(store: MemoryStore | None = None) -> sqlite_kv.Database:
+async def session(store: MemoryStore | None = None) -> journal.Database:
     """A session of a database of its own (or of ``store``'s), as another process would open it."""
-    return await sqlite_kv.open(f"memory-{next(_namespaces)}", store or MemoryStore())
+    return await journal.open(f"memory-{next(_namespaces)}", store or MemoryStore())

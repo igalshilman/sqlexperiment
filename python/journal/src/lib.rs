@@ -1,7 +1,7 @@
 //! Python bindings: SQL over a key/value store implemented in Python.
 //!
 //! The host passes its asyncio event loop and one dispatcher function,
-//! `dispatch(op, key, value, reply)`, which `sqlite_kv/__init__.py` builds from
+//! `dispatch(op, key, value, reply)`, which `journal/__init__.py` builds from
 //! a store object (`get`, `set`, `clear`, `sync`). Every request is scheduled
 //! on the loop with `call_soon_threadsafe`, which runs callbacks in the order
 //! they were scheduled, so a read sees the writes before it.
@@ -122,15 +122,15 @@ impl KvStore for PyStore {
 
 /// The page cache shared by the process's databases: 256 MiB of memory and
 /// 1 GiB of disk, in a file under the temporary directory, or the file
-/// `SQLITE_KV_CACHE_FILE` names.
+/// `JOURNAL_CACHE_FILE` names.
 static CACHE: OnceCell<PageCache> = OnceCell::const_new();
 
 async fn page_cache() -> PyResult<&'static PageCache> {
     CACHE
         .get_or_try_init(async || {
-            let named = std::env::var_os("SQLITE_KV_CACHE_FILE").map(PathBuf::from);
+            let named = std::env::var_os("JOURNAL_CACHE_FILE").map(PathBuf::from);
             let file = named.clone().unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("sqlite-kv-py-{}.cache", std::process::id()))
+                std::env::temp_dir().join(format!("journal-py-{}.cache", std::process::id()))
             });
             let cache = PageCache::open(PageCacheConfig::new(&file, 256 << 20, 1 << 30)).await?;
             // The cache keeps the file open, and nothing else uses the
@@ -164,7 +164,7 @@ struct Database {
 }
 
 /// Open the database of `namespace` over the store behind `dispatch`, which
-/// runs on `event_loop`; see `sqlite_kv/__init__.py` for the store object it
+/// runs on `event_loop`; see `journal/__init__.py` for the store object it
 /// is built from.
 ///
 /// A `reader` reads the namespace beside its owner (see `Journal::open_reader`):

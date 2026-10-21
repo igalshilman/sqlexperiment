@@ -1,5 +1,5 @@
 [package]
-name = "sqlite-kv-python"
+name = "journal-python"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -9,7 +9,7 @@ description = "Python bindings: SQL over a key/value store the host implements i
 [workspace]
 
 [lib]
-name = "sqlite_kv_python"
+name = "journal_python"
 crate-type = ["cdylib"]
 
 [dependencies]

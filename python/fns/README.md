@@ -3,7 +3,7 @@
 The Python counterpart of [`restate-fns`](../../typescript/packages/fns/README.md),
 and the same library: each key of a virtual object gets a SQL database of its
 own, `ctx.db`, kept in the object's state, through the
-[`sqlite-kv` extension](../sqlite-kv/README.md). The handlers that use it run
+[`journal` extension](../journal/README.md). The handlers that use it run
 with the SDK's explicit recovery instead of journal replay. It is a library
 over the published Restate Python SDK (1.1.0, pinned: see
 [the context](#the-context-with-explicit-recovery)), which it re-exports.

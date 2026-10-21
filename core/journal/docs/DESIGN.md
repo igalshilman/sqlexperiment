@@ -37,12 +37,12 @@ covers differs.
 
 A namespace holds four kinds of keys:
 
-| Key                | Holds                                                                                                                                                                                                                |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v15/commit`       | The commit record: the version, the epoch, the directory of files (records and paged files, with their sizes), the log since the last checkpoint (its tail inline, the rest naming stored values).                    |
-| `v15/log/<n>`      | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, before the record that names it, deleted once no record names it.                                        |
-| `v15/page/<f>/<n>` | Page _n_ of paged file _f_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                                                          |
-| `v15/hint`         | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                                                                              |
+| Key                | Holds                                                                                                                                                                                              |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v15/commit`       | The commit record: the version, the epoch, the directory of files (records and paged files, with their sizes), the log since the last checkpoint (its tail inline, the rest naming stored values). |
+| `v15/log/<n>`      | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, before the record that names it, deleted once no record names it.                      |
+| `v15/page/<f>/<n>` | Page _n_ of paged file _f_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                                        |
+| `v15/hint`         | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                                                            |
 
 **Read rule.** Page _n_ of a paged file is its latest image in the record's
 log, else `page/<f>/<n>`, else zeros. The SQL database is the paged file

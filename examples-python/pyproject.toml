@@ -13,4 +13,4 @@ package = false
 [tool.uv.sources]
 restate-agents = { path = "../python/agents", editable = true }
 restate-fns = { path = "../python/fns", editable = true }
-sqlite-kv = { path = "../python/sqlite-kv", editable = true }
+journal = { path = "../python/journal", editable = true }

@@ -1028,6 +1028,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "journal-python"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "journal",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "tokio",
+ "turso_core",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1846,19 +1859,6 @@ name = "softaes"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
-
-[[package]]
-name = "sqlite-kv-python"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "journal",
- "pyo3",
- "pyo3-async-runtimes",
- "tokio",
- "turso_core",
-]
 
 [[package]]
 name = "stable_deref_trait"

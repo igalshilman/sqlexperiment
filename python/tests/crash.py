@@ -41,7 +41,7 @@ CLIENTS = 4
 SESSIONS = 3
 PROMPTS = 6
 
-dir = Path(tempfile.mkdtemp(prefix="sqlite-kv-python-crash-"))
+dir = Path(tempfile.mkdtemp(prefix="journal-python-crash-"))
 print(f"logs in {dir}", file=sys.stderr)
 
 
@@ -63,7 +63,7 @@ def answered(path: str, body: Any, key: str) -> tuple[int, Any]:
 def faulty(path: str, port: int, name: str) -> Service:
     """``path``'s services, aborting at random state requests (faults.py)."""
     # The page cache survives the process, so that a restarted one trusts only what was saved.
-    cache = {"SQLITE_KV_CACHE_FILE": str(dir / f"{name}.cache")}
+    cache = {"JOURNAL_CACHE_FILE": str(dir / f"{name}.cache")}
     return Service([ROOT / "python/tests/faults.py", ROOT / path], port, dir / f"{name}.log", cache)
 
 

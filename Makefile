@@ -24,7 +24,7 @@ PY_ENGINE := $(CARGO_TARGET_DIR)/pywasm/out/python.wasm
 ADDON := typescript/packages/sql-node/sqlite_kv.node
 SDK_RS := rust/sdk/.build/sdk-rust/.patched
 # The Rust crates that rustfmt and clippy check (rust/functions has lint-functions).
-RUST_CRATES := $(CORE) typescript/packages/sql-node python/sqlite-kv
+RUST_CRATES := $(CORE) typescript/packages/sql-node python/journal
 # The durable functions' runtime tests, and the builds they run in: write
 # barriers checked after every turn (verify-dirty), and full scans.
 FUNCTIONS_TESTS := --lib --test runs --test crashes --test sql --test handlers --test python --test fetch --test llm --test files --test transactions
@@ -103,7 +103,7 @@ MATURIN_WHEEL := uv tool run --from 'maturin[zig]>=1.9,<2' maturin build --relea
 
 wheels: ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPython 3.13): the extension, restate-fns and restate-agents
 	rm -rf dist
-	cd python/sqlite-kv && $(MATURIN_WHEEL)
+	cd python/journal && $(MATURIN_WHEEL)
 	uv build --wheel python/fns -o dist
 	uv build --wheel python/agents -o dist
 
@@ -125,7 +125,7 @@ test-ts: js ## The integrations, their storage and SQL in objects, without a Res
 	cd typescript/tests && pnpm exec vitest run $(T)
 
 test-py: py ## The Python extension, restate-fns and the integrations (the agents on a scripted model), without a Restate server (T=<filter>, such as T=langgraph)
-	cd python && uv run --locked pytest sqlite-kv/tests fns/tests agents/tests $(if $(T),-k $(T))
+	cd python && uv run --locked pytest journal/tests fns/tests agents/tests $(if $(T),-k $(T))
 
 test-sdk-rs: $(SDK_RS) ## The patched Rust SDK's unit tests
 	cd rust/sdk/.build/sdk-rust && $(CARGO) test --lib
@@ -200,4 +200,4 @@ endif
 clean: ## Remove build outputs
 	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) \
 		typescript/node_modules typescript/*/node_modules typescript/packages/*/node_modules examples-typescript/node_modules \
-		python/.venv python/sqlite-kv/python/sqlite_kv/*.so
+		python/.venv python/journal/python/journal/*.so
