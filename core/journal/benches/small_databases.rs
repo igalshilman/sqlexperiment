@@ -1,12 +1,18 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
 use journal::{
-    Result, Sql, StorageOptions,
+    Journal, Result, Sql, StorageOptions,
     simulation::{MemoryKv, Stats},
 };
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+/// Flush and commit `db`'s journal, ending the session.
+async fn save(mut db: Sql) -> journal::Result<journal::SaveReport> {
+    db.flush().await?;
+    db.journal().commit().await
+}
 
 #[derive(Clone, Copy)]
 struct Case {
@@ -16,14 +22,17 @@ struct Case {
 }
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Sql::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
+    let mut db = Sql::open(
+        &Journal::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?,
+    )
+    .await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER, note INTEGER, payload TEXT)").await?;
     for column in ["a", "b", "c"].into_iter().take(case.indexes) {
         db.execute(&format!("CREATE INDEX by_{column} ON t({column})"))
             .await?;
     }
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x, x, x, 0, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
-    db.save().await?;
+    save(db).await?;
     store.crash();
     Ok(store)
 }
@@ -55,7 +64,7 @@ fn print_row(
 }
 async fn run(case: Case, repeats: usize) -> Result<()> {
     let base = baseline(case).await?;
-    let db_bytes = Sql::open_store(Arc::new(base.fork()))
+    let db_bytes = Sql::open(&Journal::open(Arc::new(base.fork())).await?)
         .await?
         .io_stats()
         .database_len;
@@ -79,7 +88,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             }
             let store = Arc::new(base.fork());
             let mut warm = if op == "warm_pk" {
-                let mut db = Sql::open_store(store.clone()).await?;
+                let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
                 db.query(&query).await?;
                 Some(db)
             } else {
@@ -89,7 +98,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             let start = Instant::now();
             let mut db = match warm.take() {
                 Some(db) => db,
-                None => Sql::open_store(store.clone()).await?,
+                None => Sql::open(&Journal::open(store.clone()).await?).await?,
             };
             match op {
                 "cold_pk" | "warm_pk" | "secondary_lookup" => {
@@ -136,14 +145,14 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
                         db.execute(&format!("UPDATE t SET note={n} WHERE id={id}"))
                             .await?;
                         if op == "ten_updates_ten_saves" && n < 10 {
-                            db.save().await?;
-                            db = Sql::open_store(store.clone()).await?;
+                            save(db).await?;
+                            db = Sql::open(&Journal::open(store.clone()).await?).await?;
                         }
                     }
                 }
                 _ => unreachable!(),
             }
-            db.save().await?;
+            save(db).await?;
             let elapsed = start.elapsed();
             let stats = store.stats();
             print_row(
@@ -157,7 +166,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             // Validate results after timing/count capture, with simulated loss of
             // all unacknowledged state and a fresh engine.
             store.crash();
-            let mut reopened = Sql::open_store(store.clone()).await?;
+            let mut reopened = Sql::open(&Journal::open(store.clone()).await?).await?;
             let count = reopened.query("SELECT count(*) FROM t").await?[0][0].to_string();
             let expected_count =
                 case.rows + usize::from(op == "insert") - usize::from(op == "delete");

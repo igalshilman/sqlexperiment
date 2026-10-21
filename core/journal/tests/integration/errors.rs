@@ -1,19 +1,22 @@
 //! Errors: SQL errors leave a session usable; anything else ends it.
+use crate::host::{Db, Durability, Setup};
 use journal::{
-    Durability, Result, Sql, StorageOptions, Value,
+    Result, StorageOptions, Value,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
 use std::sync::Arc;
 use turso_core::{Connection, Database, IO, MemoryIO, SqliteDialect, StepResult};
 
-fn options(durability: Durability) -> StorageOptions {
-    StorageOptions {
+fn options(durability: Durability) -> Setup {
+    Setup(
+        StorageOptions {
+            ..StorageOptions::default()
+        },
         durability,
-        ..StorageOptions::default()
-    }
+    )
 }
 
-async fn rows(db: &mut Sql) -> Result<Vec<(i64, i64)>> {
+async fn rows(db: &mut Db) -> Result<Vec<(i64, i64)>> {
     let rows = db.query("SELECT id, n FROM t ORDER BY id").await?;
     Ok(rows
         .iter()
@@ -28,7 +31,7 @@ fn sql_errors_leave_the_session_usable() -> Result<()> {
     futures::executor::block_on(async {
         for durability in [Durability::Save, Durability::Commit] {
             let store = Arc::new(MemoryKv::default());
-            let mut db = Sql::open_with_options(store.clone(), options(durability)).await?;
+            let mut db = Db::open(store.clone(), options(durability)).await?;
             db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER CHECK (n >= 0))")
                 .await?;
             db.execute("INSERT INTO t VALUES (1, 1)").await?;
@@ -62,7 +65,7 @@ fn sql_errors_leave_the_session_usable() -> Result<()> {
                 drop(db);
             }
             store.crash();
-            let mut db = Sql::open_with_options(store, options(durability)).await?;
+            let mut db = Db::open(store, options(durability)).await?;
             assert_eq!(
                 rows(&mut db).await?,
                 [(1, 1), (3, 3), (4, 4)],
@@ -79,7 +82,7 @@ fn sql_errors_leave_the_session_usable() -> Result<()> {
 fn a_duplicate_request_rolls_back_and_the_session_goes_on() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open_with_options(store.clone(), options(Durability::Commit)).await?;
+        let mut db = Db::open(store.clone(), options(Durability::Commit)).await?;
         db.execute("CREATE TABLE requests(id TEXT PRIMARY KEY); CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         for (request, id) in [("a", 1), ("b", 2), ("a", 3), ("c", 4)] {
@@ -98,7 +101,7 @@ fn a_duplicate_request_rolls_back_and_the_session_goes_on() -> Result<()> {
             assert!(db.is_usable());
         }
         drop(db);
-        let mut db = Sql::open_with_options(store, options(Durability::Commit)).await?;
+        let mut db = Db::open(store, options(Durability::Commit)).await?;
         assert_eq!(rows(&mut db).await?, [(1, 0), (2, 0), (4, 0)]);
         Ok(())
     })
@@ -113,7 +116,7 @@ fn storage_errors_end_the_session() -> Result<()> {
             (Operation::Put, "v15/commit"),
         ] {
             let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
-            let mut db = Sql::open_with_options(store.clone(), options(Durability::Commit)).await?;
+            let mut db = Db::open(store.clone(), options(Durability::Commit)).await?;
             db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, pad BLOB)")
                 .await?;
             for i in 0..300 {
@@ -124,12 +127,12 @@ fn storage_errors_end_the_session() -> Result<()> {
                 .await?;
             }
             drop(db);
-            let options = StorageOptions {
+            let options = options(Durability::Commit).with(|o| StorageOptions {
                 prefetch_pages: 0,
                 hint_pages: 0,
-                ..options(Durability::Commit)
-            };
-            let mut db = Sql::open_with_options(store.clone(), options).await?;
+                ..o
+            });
+            let mut db = Db::open(store.clone(), options).await?;
             let _signal = store.arm(Failpoint {
                 operation,
                 key_prefix: prefix.into(),
@@ -202,7 +205,7 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
                 seed % n
             };
             let store = Arc::new(MemoryKv::default());
-            let mut db = Sql::open_with_options(store.clone(), options(durability)).await?;
+            let mut db = Db::open(store.clone(), options(durability)).await?;
             let reference = oracle();
             let schema = "CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER CHECK (n >= 0))";
             db.execute(schema).await?;
@@ -251,7 +254,7 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
                 drop(db);
             }
             store.crash();
-            let mut db = Sql::open_with_options(store, options(durability)).await?;
+            let mut db = Db::open(store, options(durability)).await?;
             let got: Vec<String> = db
                 .query("SELECT id, n FROM t ORDER BY id")
                 .await?
@@ -270,7 +273,7 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
 fn a_transaction_whose_begin_fails_leaves_the_session_usable() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open_with_options(store, options(Durability::Commit)).await?;
+        let mut db = Db::open(store, options(Durability::Commit)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         db.execute("BEGIN").await?;
@@ -295,7 +298,7 @@ fn a_transaction_whose_commit_fails_rolls_back() -> Result<()> {
     futures::executor::block_on(async {
         for durability in [Durability::Commit, Durability::Save] {
             let store = Arc::new(MemoryKv::default());
-            let mut db = Sql::open_with_options(store, options(durability)).await?;
+            let mut db = Db::open(store, options(durability)).await?;
             db.execute("PRAGMA foreign_keys=ON").await?;
             db.execute(
                 "CREATE TABLE p(id INTEGER PRIMARY KEY);

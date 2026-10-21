@@ -59,6 +59,14 @@ and ask the owner only critical questions.
   extra bytes are the commit record's records (the memory's page list and
   the directory).
 
+- **After the plan: one durability mode.** The crate has none to choose:
+  nothing is durable before `Journal::commit`, and `Sql` opens only on a
+  journal (`Sql::open(&journal)`). `Durability`, `Sql::save`,
+  `commit_with`, `effects` and `Sql::open_with_options` are gone. The
+  Node.js addon and the Python extension, for objects without Restate's
+  journal, commit the journal after each call that leaves no SQL
+  transaction open, so their SQL commits stay durable when the call
+  returns; their `commit(effects)` sets the record `effects` with it.
 - **Measured after the last step** (the split and the renames, same
   machine, medians), against the run after step 4: the agent stores 2.5 MiB
   over 200 steps (as before), restores in 2.3 ms (2.6), its model and tool

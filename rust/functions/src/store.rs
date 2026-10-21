@@ -6,7 +6,7 @@
 //! Writes may land in any order; a write counts once it is acknowledged.
 use crate::extension::Extensions;
 use anyhow::Result;
-use journal::{Durability, Journal, NamespaceCache, StorageOptions, kv::KvStore};
+use journal::{Journal, NamespaceCache, StorageOptions, kv::KvStore};
 use std::sync::Arc;
 
 /// A scope's storage: the store its database lives in, and, for a process
@@ -41,12 +41,11 @@ impl Scope {
         }
     }
 
-    /// Open the scope's journal: its SQL a participant, durable with the
-    /// rest at each turn's commit.
+    /// Open the scope's journal: its SQL, memory and records durable together
+    /// at each turn's commit.
     pub(crate) async fn open(&self) -> Result<Journal> {
         let options = StorageOptions {
             cache: self.cache.clone(),
-            durability: Durability::Participant,
             // A turn changes a few pages: a small inline log keeps the record
             // each turn rewrites small.
             inline_log_bytes: 1024,

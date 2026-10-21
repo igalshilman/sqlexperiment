@@ -436,9 +436,11 @@ async fn a_wait_survives_a_crash_and_one_no_one_answers_is_forgotten() {
         json!({"id": wait["id"], "value": "approved"}),
     )
     .await;
+    // The run waits for the note only once its turn after the approval
+    // commits: keep the note until then.
     call(
         "approvals/carol/signal",
-        json!({"name": "note", "value": "thanks"}),
+        json!({"name": "note", "value": "thanks", "keep": true}),
     )
     .await;
     assert_eq!(

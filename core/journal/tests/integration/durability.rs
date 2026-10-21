@@ -1,7 +1,8 @@
 //! `Durability::Commit`: every SQL commit is durable when its statement returns.
+use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
 use journal::{
-    Durability, NamespaceCache, Result, Sql, StorageOptions,
+    NamespaceCache, Result, StorageOptions,
     simulation::{
         Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, MonitorKv, Operation, fresh_namespace,
         logged_transactions,
@@ -9,15 +10,17 @@ use journal::{
 };
 use std::sync::Arc;
 
-fn options(cache: Option<NamespaceCache>) -> StorageOptions {
-    StorageOptions {
-        cache,
-        durability: Durability::Commit,
-        ..StorageOptions::default()
-    }
+fn options(cache: Option<NamespaceCache>) -> Setup {
+    Setup(
+        StorageOptions {
+            cache,
+            ..StorageOptions::default()
+        },
+        Durability::Commit,
+    )
 }
 
-async fn count(db: &mut Sql) -> Result<i64> {
+async fn count(db: &mut Db) -> Result<i64> {
     let rows = db
         .query("SELECT count(*), coalesce(sum(n), 0) FROM t")
         .await?;
@@ -30,7 +33,7 @@ async fn count(db: &mut Sql) -> Result<i64> {
 fn statements_are_durable_without_save() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         assert_eq!(
@@ -45,7 +48,7 @@ fn statements_are_durable_without_save() -> Result<()> {
         drop(db);
         store.crash();
 
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(count(&mut db).await?, 1);
         Ok(())
     })
@@ -55,7 +58,7 @@ fn statements_are_durable_without_save() -> Result<()> {
 fn a_transaction_commits_as_a_whole_or_not_at_all() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         let before = store.stats().kind("commit").puts;
@@ -88,7 +91,7 @@ fn a_transaction_commits_as_a_whole_or_not_at_all() -> Result<()> {
         db.execute("INSERT INTO t VALUES(4, 1)").await?;
         drop(db);
         store.crash();
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(count(&mut db).await?, 2);
         Ok(())
     })
@@ -101,7 +104,7 @@ fn a_long_session_checkpoints_and_reads_its_writes() -> Result<()> {
     futures::executor::block_on(async {
         for cache in [None, Some(fresh_namespace())] {
             let store = Arc::new(MemoryKv::default());
-            let mut db = Sql::open_with_options(store.clone(), options(cache.clone())).await?;
+            let mut db = Db::open(store.clone(), options(cache.clone())).await?;
             db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, body TEXT)")
                 .await?;
             for i in 0..60i64 {
@@ -129,7 +132,7 @@ fn a_long_session_checkpoints_and_reads_its_writes() -> Result<()> {
             drop(db);
             store.crash();
 
-            let mut db = Sql::open_with_options(store.clone(), options(cache)).await?;
+            let mut db = Db::open(store.clone(), options(cache)).await?;
             assert_eq!(count(&mut db).await?, 120);
             assert_eq!(
                 db.query("PRAGMA integrity_check").await?[0][0].to_string(),
@@ -148,12 +151,12 @@ fn a_commit_is_one_round_trip_with_a_cache() -> Result<()> {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
         let cache = fresh_namespace();
         // A log the record holds inline: no commit seals it.
-        let options = StorageOptions {
+        let options = options(Some(cache)).with(|o| StorageOptions {
             checkpoint_after: 32,
             inline_log_bytes: usize::MAX,
-            ..options(Some(cache))
-        };
-        let mut db = Sql::open_with_options(store.clone(), options).await?;
+            ..o
+        });
+        let mut db = Db::open(store.clone(), options).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         for i in 0..20 {
@@ -195,16 +198,18 @@ fn every_acknowledged_commit_survives_a_crash_at_any_write() -> Result<()> {
 async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
     let cache = cached.then(fresh_namespace);
     // Seals and checkpoints happen within the run.
-    let options = |cache| StorageOptions {
-        checkpoint_after: 8,
-        inline_log_bytes: 512,
-        ..options(cache)
+    let options = |cache| {
+        options(cache).with(|o| StorageOptions {
+            checkpoint_after: 8,
+            inline_log_bytes: 512,
+            ..o
+        })
     };
     let store = Arc::new(MonitorKv::new(FaultKv::new(
         MemoryKv::default(),
         nth as u64,
     )));
-    let mut db = Sql::open_with_options(store.clone(), options(cache.clone())).await?;
+    let mut db = Db::open(store.clone(), options(cache.clone())).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, body TEXT)")
         .await?;
     let _signal = store.arm(Failpoint {
@@ -246,7 +251,7 @@ async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
         // Reopen through the same owner cache, as a restarted handler would:
         // only to read, as the cache follows one history, and the forks are
         // each another.
-        let mut db = Sql::open_with_options(store.clone(), options(cache.clone())).await?;
+        let mut db = Db::open(store.clone(), options(cache.clone())).await?;
         let survived = count(&mut db).await?;
         assert!(
             survived == acknowledged || survived == acknowledged + 2,
@@ -259,10 +264,10 @@ async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
         );
         drop(db);
         // The namespace stays writable.
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         db.execute("INSERT INTO t VALUES(1000, 0, 'y')").await?;
         drop(db);
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(count(&mut db).await?, survived + 1);
         assert_eq!(
             store.violations(),
@@ -280,11 +285,13 @@ fn every_statement_of_a_string_runs() -> Result<()> {
     futures::executor::block_on(async {
         for durability in [Durability::Save, Durability::Commit] {
             let store = Arc::new(MemoryKv::default());
-            let options = StorageOptions {
+            let options = (
+                StorageOptions {
+                    ..StorageOptions::default()
+                },
                 durability,
-                ..StorageOptions::default()
-            };
-            let mut db = Sql::open_with_options(store.clone(), options.clone()).await?;
+            );
+            let mut db = Db::open(store.clone(), options.clone()).await?;
             let rows = db
                 .query(
                     "CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER);
@@ -302,7 +309,7 @@ fn every_statement_of_a_string_runs() -> Result<()> {
                 drop(db);
             }
             store.crash();
-            let mut db = Sql::open_with_options(store, options).await?;
+            let mut db = Db::open(store, options).await?;
             assert_eq!(count(&mut db).await?, 3, "{durability:?}");
         }
         Ok(())
@@ -316,7 +323,7 @@ fn a_transaction_body_cannot_commit_itself() -> Result<()> {
     futures::executor::block_on(async {
         for end in ["COMMIT", "END", "ROLLBACK", "COMMIT; BEGIN"] {
             let store = Arc::new(MemoryKv::default());
-            let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+            let mut db = Db::open(store.clone(), options(None)).await?;
             db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
                 .await?;
             let result: Result<()> = db
@@ -330,12 +337,12 @@ fn a_transaction_body_cannot_commit_itself() -> Result<()> {
             assert!(db.execute("SELECT 1").await.is_err(), "{end}: poisoned");
             drop(db);
             store.crash();
-            let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+            let mut db = Db::open(store.clone(), options(None)).await?;
             assert_eq!(count(&mut db).await?, 0, "{end}");
         }
 
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open_with_options(store, options(None)).await?;
+        let mut db = Db::open(store, options(None)).await?;
         let nested: Result<()> = db
             .transaction(async |db| db.transaction(async |_| Ok(())).await)
             .await;
@@ -351,7 +358,7 @@ fn a_transaction_body_cannot_commit_itself() -> Result<()> {
 fn an_abandoned_transaction_poisons_the_session() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         {
@@ -379,13 +386,15 @@ fn an_overlapping_reader_keeps_its_view() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let namespace = fresh_namespace();
-        let opts = || StorageOptions {
-            checkpoint_after: 4,
-            prefetch_pages: 0,
-            hint_pages: 0,
-            ..options(Some(namespace.clone()))
+        let opts = || {
+            options(Some(namespace.clone())).with(|o| StorageOptions {
+                checkpoint_after: 4,
+                prefetch_pages: 0,
+                hint_pages: 0,
+                ..o
+            })
         };
-        let mut db = Sql::open_with_options(store.clone(), opts()).await?;
+        let mut db = Db::open(store.clone(), opts()).await?;
         db.execute(
             "CREATE TABLE a(x); CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, pad BLOB)",
         )
@@ -403,9 +412,9 @@ fn an_overlapping_reader_keeps_its_view() -> Result<()> {
         }
         drop(db);
 
-        let mut reader = Sql::open_with_options(store.clone(), opts()).await?;
+        let mut reader = Db::open(store.clone(), opts()).await?;
         reader.query("SELECT count(*) FROM a").await?;
-        let mut writer = Sql::open_with_options(store.clone(), opts()).await?;
+        let mut writer = Db::open(store.clone(), opts()).await?;
         for _ in 0..10 {
             writer.execute("UPDATE t SET n = n + 1").await?;
         }
@@ -437,23 +446,16 @@ fn an_overlapping_reader_keeps_its_view() -> Result<()> {
 #[test]
 fn a_second_concurrent_writer_is_refused() -> Result<()> {
     futures::executor::block_on(async {
-        for durability in [
-            Durability::Save,
-            Durability::Commit,
-            Durability::Participant,
-        ] {
+        for durability in [Durability::Save, Durability::Commit] {
             let store = Arc::new(MemoryKv::default());
             let namespace = fresh_namespace();
-            let opts = || StorageOptions {
-                durability,
-                ..options(Some(namespace.clone()))
-            };
-            let mut db = Sql::open_with_options(store.clone(), opts()).await?;
+            let opts = || options(Some(namespace.clone())).mode(durability);
+            let mut db = Db::open(store.clone(), opts()).await?;
             db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
                 .await?;
             db.save().await?;
-            let mut first = Sql::open_with_options(store.clone(), opts()).await?;
-            let mut second = Sql::open_with_options(store.clone(), opts()).await?;
+            let mut first = Db::open(store.clone(), opts()).await?;
+            let mut second = Db::open(store.clone(), opts()).await?;
             first.execute("INSERT INTO t VALUES(1, 0)").await?;
             let refused = match durability {
                 Durability::Save => {
@@ -462,16 +464,9 @@ fn a_second_concurrent_writer_is_refused() -> Result<()> {
                     second.save().await.map(|_| ())
                 }
                 Durability::Commit => second.execute("INSERT INTO t VALUES(2, 0)").await,
-                Durability::Participant => {
-                    first.flush().await?;
-                    first.journal().commit().await?;
-                    second.execute("INSERT INTO t VALUES(2, 0)").await?;
-                    second.flush().await?;
-                    second.journal().commit().await.map(drop)
-                }
             };
             assert!(refused.unwrap_err().to_string().contains("another session"));
-            let mut db = Sql::open_with_options(store.clone(), opts()).await?;
+            let mut db = Db::open(store.clone(), opts()).await?;
             assert_eq!(count(&mut db).await?, 1, "{durability:?}");
         }
         Ok(())
@@ -486,12 +481,12 @@ fn a_parked_engine_does_not_hold_back_checkpoints() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let namespace = fresh_namespace();
         let opts = || options(Some(namespace.clone()));
-        let mut db = Sql::open_with_options(store.clone(), opts()).await?;
+        let mut db = Db::open(store.clone(), opts()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         drop(db);
-        let mut idle = Sql::open_with_options(store.clone(), opts()).await?;
-        let mut writer = Sql::open_with_options(store.clone(), opts()).await?;
+        let mut idle = Db::open(store.clone(), opts()).await?;
+        let mut writer = Db::open(store.clone(), opts()).await?;
         idle.query("SELECT count(*) FROM t").await?;
         drop(idle); // parks: nothing was committed since it opened
         for i in 0..30 {
@@ -509,7 +504,7 @@ fn a_parked_engine_does_not_hold_back_checkpoints() -> Result<()> {
 fn effects_commit_with_their_transaction() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         db.execute("PRAGMA foreign_keys=ON").await?;
         db.execute(
             "CREATE TABLE p(id INTEGER PRIMARY KEY);
@@ -546,7 +541,7 @@ fn effects_commit_with_their_transaction() -> Result<()> {
         drop(db);
         store.crash();
 
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(db.effects(), &b"sends 1"[..]);
         assert_eq!(db.version(), v0 + 11);
         assert_eq!(
@@ -557,7 +552,7 @@ fn effects_commit_with_their_transaction() -> Result<()> {
         db.execute("BEGIN").await?;
         db.commit_with(Bytes::new()).await?;
         drop(db);
-        let db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let db = Db::open(store.clone(), options(None)).await?;
         assert!(db.effects().is_empty());
         Ok(())
     })
@@ -571,13 +566,13 @@ fn records_commit_at_save() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let stored = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/log/")).count();
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         let state = db.journal().record("state");
         assert!(state.get().is_empty());
         state.set(Bytes::from_static(b"one"));
         assert_eq!(state.get(), &b"one"[..]);
         drop(db); // discarded
-        let mut db = Sql::open_store(store.clone()).await?;
+        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
         assert!(db.journal().record("state").get().is_empty());
         db.execute("CREATE TABLE t(n)").await?;
         db.journal().record("state").set(Bytes::from(vec![7; 5000]));
@@ -585,18 +580,18 @@ fn records_commit_at_save() -> Result<()> {
         db.save().await?;
         assert_eq!(stored(&store), 1, "the large record, stored first");
 
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         assert_eq!(db.journal().record("state").get(), vec![7; 5000]);
         assert_eq!(db.journal().record("small").get(), &b"s"[..]);
         db.journal().record("state").set(Bytes::from_static(b"two"));
         db.save().await?;
         // The replaced value is garbage, which the next commit deletes.
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         assert_eq!(db.journal().record("state").get(), &b"two"[..]);
         db.journal().record("small").set(Bytes::new());
         db.save().await?;
         assert_eq!(stored(&store), 0);
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         assert!(db.journal().record("small").get().is_empty());
         assert_eq!(db.journal().record("state").get(), &b"two"[..]);
         Ok(())

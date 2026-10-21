@@ -76,6 +76,7 @@ pub(crate) struct Written {
 /// What a commit writes to paged files, by name.
 pub(crate) type Writes = BTreeMap<String, Written>;
 
+#[cfg(feature = "simulation")]
 /// Writes to the SQL file only.
 pub(crate) fn sql_writes(pages: Changes, size: u64) -> Writes {
     Writes::from([(SQL_FILE.to_owned(), Written { size, pages })])
@@ -100,24 +101,6 @@ pub const CHECKPOINT_AFTER: u32 = 32;
 pub const CHECKPOINT_LOG_BYTES: usize = 64 * 1024;
 /// Default [`StorageOptions::inline_log_bytes`].
 pub const INLINE_LOG_BYTES: usize = 1024;
-
-/// When a session's SQL changes become durable.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Durability {
-    /// At [`crate::Sql::save`], as one log transaction for the whole
-    /// session. SQL `COMMIT` is private, and dropping the session discards it.
-    #[default]
-    Save,
-    /// At every SQL commit: a statement that ends a write transaction (an
-    /// autocommit statement or `COMMIT`) returns once it is durable, one log
-    /// transaction per SQL transaction. Dropping the session discards only an
-    /// open transaction.
-    Commit,
-    /// At the journal's [`crate::Journal::commit`], which the host calls: the
-    /// SQL is one participant of its commit among others. An SQL commit is
-    /// private until [`crate::Sql::flush`] moves it into the journal's file.
-    Participant,
-}
 
 /// Per-session storage options. They never change the stored format.
 #[derive(Clone)]
@@ -144,8 +127,6 @@ pub struct StorageOptions {
     /// open of a larger database fetches alongside replay (at most
     /// [`crate::MAX_HINT_PAGES`]); 0 neither writes nor reads it.
     pub hint_pages: usize,
-    /// When SQL changes become durable.
-    pub durability: Durability,
     /// Most bytes of uncommitted changes and private engine WAL a session may
     /// hold; a write beyond it fails its statement.
     pub max_private_bytes: usize,
@@ -164,7 +145,6 @@ impl Default for StorageOptions {
             inline_log_bytes: INLINE_LOG_BYTES,
             prefetch_pages: PREFETCH_PAGES,
             hint_pages: HINT_PAGES,
-            durability: Durability::Save,
             max_private_bytes: MAX_PRIVATE_BYTES,
             max_result_bytes: MAX_RESULT_BYTES,
         }
@@ -546,6 +526,7 @@ impl Snapshot {
     /// Requires exclusive ownership until every request settles, even on
     /// cancellation. After an error, reopen; never reuse this snapshot.
     #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(feature = "simulation")]
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
         let writes = sql_writes(dirty, size);
         Ok(self.commit(writes, Records::new()).await?.0)

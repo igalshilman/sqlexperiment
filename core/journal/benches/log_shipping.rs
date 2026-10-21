@@ -7,11 +7,17 @@
 //! only durable values. Round trips come from `LatencyKv`'s virtual clock;
 //! operation and byte counts from `MemoryKv`. Output is CSV.
 use journal::{
-    NamespaceCache, PageCompression, Result, Sql, StorageOptions,
+    Journal, NamespaceCache, PageCompression, Result, Sql, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
 use std::sync::Arc;
+
+/// Flush and commit `db`'s journal, ending the session.
+async fn save(mut db: Sql) -> journal::Result<journal::SaveReport> {
+    db.flush().await?;
+    db.journal().commit().await
+}
 
 #[derive(Clone, Copy)]
 struct Case {
@@ -103,12 +109,15 @@ fn options(policy: Policy, cache: &Option<NamespaceCache>) -> StorageOptions {
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
-    let mut db = Sql::open_with_options(
-        kv.clone(),
-        StorageOptions {
-            page_compression: codec(),
-            ..StorageOptions::default()
-        },
+    let mut db = Sql::open(
+        &Journal::open_with_options(
+            kv.clone(),
+            StorageOptions {
+                page_compression: codec(),
+                ..StorageOptions::default()
+            },
+        )
+        .await?,
     )
     .await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, payload TEXT)")
@@ -122,22 +131,25 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
         case.rows, case.payload
     ))
     .await?;
-    db.save().await?;
+    save(db).await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
-    let mut db = Sql::open_with_options(
-        kv,
-        options(
-            Policy {
-                after: 0,
-                log_bytes: 0,
-                inline_bytes: 0,
-            },
-            &None,
-        ),
+    let mut db = Sql::open(
+        &Journal::open_with_options(
+            kv,
+            options(
+                Policy {
+                    after: 0,
+                    log_bytes: 0,
+                    inline_bytes: 0,
+                },
+                &None,
+            ),
+        )
+        .await?,
     )
     .await?;
     db.execute("CREATE TABLE other(x)").await?;
-    db.save().await?;
+    save(db).await?;
     Ok(store)
 }
 
@@ -201,7 +213,9 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
     } = *phase;
     reset(store);
     let kv: Arc<dyn KvStore> = store.clone();
-    let mut db = Sql::open_with_options(kv, options(phase.policy, phase.cache)).await?;
+    let mut db =
+        Sql::open(&Journal::open_with_options(kv, options(phase.policy, phase.cache)).await?)
+            .await?;
     phase.print("open", store);
     reset(store);
     match phase.workload {
@@ -239,7 +253,7 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
     phase.print("query", store);
     if phase.workload != "read_pk" {
         reset(store);
-        db.save().await?;
+        save(db).await?;
         phase.print("save", store);
     }
     Ok(())
@@ -249,9 +263,11 @@ async fn run(case: Case, policy: Policy, strong: bool, cached: bool, run: usize)
     let store: Store = Arc::new(LatencyKv::new(baseline(case).await?));
     let cache = cached.then(|| open_cache(cache_config(256 << 20, 1 << 30)).namespace("bench"));
     // Warm the owner state outside the measurement.
-    let mut db = Sql::open_with_options(store.clone(), options(policy, &cache)).await?;
+    let mut db =
+        Sql::open(&Journal::open_with_options(store.clone(), options(policy, &cache)).await?)
+            .await?;
     db.execute("UPDATE t SET a = a WHERE id = 1").await?;
-    db.save().await?;
+    save(db).await?;
     for iteration in 0..ITERATIONS {
         for workload in WORKLOADS {
             let phase = Phase {
@@ -267,7 +283,7 @@ async fn run(case: Case, policy: Policy, strong: bool, cached: bool, run: usize)
         }
     }
     // Every write must be visible to a publish-every-save reader.
-    let mut db = Sql::open_store(store.clone()).await?;
+    let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
     let rows = db.query("SELECT count(*), sum(a) FROM t").await?;
     assert_eq!(rows[0][0].as_int(), Some((case.rows + ITERATIONS) as i64));
     Ok(())

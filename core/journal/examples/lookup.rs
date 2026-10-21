@@ -1,10 +1,16 @@
-use journal::{Result, Sql, simulation::MemoryKv};
+use journal::{Journal, Result, Sql, simulation::MemoryKv};
 use std::sync::Arc;
+
+/// Flush and commit `db`'s journal, ending the session.
+async fn save(mut db: Sql) -> journal::Result<journal::SaveReport> {
+    db.flush().await?;
+    db.journal().commit().await
+}
 
 fn main() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open_store(store.clone()).await?;
+        let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
         db.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY, email TEXT NOT NULL, payload TEXT NOT NULL)").await?;
         db.execute("CREATE UNIQUE INDEX accounts_email ON accounts(email)")
             .await?;
@@ -12,7 +18,7 @@ fn main() -> Result<()> {
         let local = db.io_stats();
         assert_eq!(store.stats().puts, 0);
         // A large save: commit to the log, then checkpoint into page keys and meta.
-        db.save().await?;
+        save(db).await?;
         let saved = store.stats();
         store.crash();
         println!(
@@ -27,7 +33,7 @@ fn main() -> Result<()> {
         let stored_bytes = store.stored_bytes();
         store.reset_stats();
         // New engine, pager, file handles and I/O adapter; only KV bytes survive.
-        let mut cold = Sql::open_store(store.clone()).await?;
+        let mut cold = Sql::open(&Journal::open(store.clone()).await?).await?;
         let query =
             "SELECT id, length(payload) FROM accounts WHERE email = 'user07321@example.com'";
         let plan = cold.query(&format!("EXPLAIN QUERY PLAN {query}")).await?;

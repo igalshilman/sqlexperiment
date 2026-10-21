@@ -15,7 +15,7 @@ An experiment, not a production backend: see [the design](docs/DESIGN.md).
 Implement `kv::KvStore` over your store, then:
 
 ```rust,ignore
-use journal::{Durability, Journal, PageCache, PageCacheConfig, Sql, StorageOptions};
+use journal::{Journal, PageCache, PageCacheConfig, Sql, StorageOptions};
 
 // Once per process: a page cache in memory and on a local disk file.
 let cache = PageCache::open(PageCacheConfig::new("/var/cache/pages", 256 << 20, 8 << 30)).await?;
@@ -25,54 +25,30 @@ let options = StorageOptions {
     cache: Some(cache.namespace("object-42")),
     ..StorageOptions::default()
 };
-let mut db = Sql::open_with_options(store, options).await?;
-db.execute("INSERT INTO t VALUES(1)").await?;
-let saved = db.save().await?; // durable once this returns Ok
+let journal = Journal::open_with_options(store, options).await?;
+let mut db = Sql::open(&journal).await?;
+db.transaction(async |db| {                    // one SQL transaction, or rolled back
+    db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?;
+    db.execute("INSERT INTO shipments VALUES(7)").await
+}).await?;
+db.flush().await?;                             // into the file `db`, still private
+journal.record("progress").set("shipped 7".into());
+journal.file("image")?.write(0, Some(page))?;
+journal.commit().await?; // the rows, the record and the page, durable together
 ```
 
-Bind values with `query_with`/`execute_with` rather than formatting them into
-SQL. SQL changes are private until `save()`. `Ok` means committed. The host must
-guarantee one owner per namespace.
+Nothing is durable before `Journal::commit`, and then everything changed
+since the last commit is, in one put. The host chooses when: after each SQL
+transaction, as the Node.js addon and the Python extension do, or once per
+turn, as the durable functions runtime does. Bind values with
+`query_with`/`execute_with` rather than formatting them into SQL. The host
+must guarantee one owner per namespace: an object without Restate's journal
+(`journalReplay: false`), whose state this is.
 
 An SQL error (syntax, a constraint, a missing table) undoes just that statement,
 as in SQLite, and the session goes on. A storage error, a cancelled call or a
 failed commit ends the session (`is_usable()` returns false): settle
 outstanding requests and open a new one; a failed commit's outcome is unknown.
-
-Or make every SQL commit durable, as in SQLite, with no `save()`:
-
-```rust,ignore
-let options = StorageOptions {
-    cache: Some(cache.namespace("object-42")),
-    durability: Durability::Commit,
-    ..StorageOptions::default()
-};
-let mut db = Sql::open_with_options(store, options).await?;
-db.execute("INSERT INTO t VALUES(1)").await?; // durable once this returns Ok
-db.transaction(async |db| {                    // durable as a whole, or rolled back
-    db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?;
-    db.execute("INSERT INTO shipments VALUES(7)").await
-}).await?;
-```
-
-Or keep more than SQL: a `Journal` holds paged files and records beside the
-SQL database (its file `db`), and its `commit()` makes all of them durable
-in one put. The SQL is then one participant (`Durability::Participant`):
-`flush()` moves what it committed into its file, and the host commits.
-
-```rust,ignore
-let options = StorageOptions {
-    durability: Durability::Participant,
-    ..StorageOptions::default()
-};
-let journal = Journal::open_with_options(store, options).await?;
-let mut db = Sql::open(&journal).await?;
-db.execute("INSERT INTO t VALUES(1)").await?;
-db.flush().await?;
-journal.record("progress").set("step 2".into());
-journal.file("image")?.write(0, Some(page))?;
-journal.commit().await?; // the row, the record and the page, durable together
-```
 
 ## How durability and recovery work
 
