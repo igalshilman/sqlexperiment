@@ -6,8 +6,8 @@ use functions::{
     Extensions, GuestError, Language, Limits, Operation, Outcome, Programs, Run, Runtime, Scope,
     View,
 };
-use serde_json::{Value, json};
 use journal::{Session, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, OnceLock},

@@ -5,8 +5,8 @@
 //! VM starts and the pages its turns change.
 use anyhow::{Result, ensure};
 use functions::{Language, Outcome, Program, Programs, Run, Runtime, Scope, Status};
-use serde_json::{Value, json};
 use journal::simulation::MemoryKv;
+use serde_json::{Value, json};
 use std::{sync::Arc, time::Instant};
 
 const CASES: &[(&str, &str, &str, i64)] = &[

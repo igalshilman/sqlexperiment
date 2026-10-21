@@ -47,10 +47,7 @@ fn remove_stale_cache_files() {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(rest) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix("journal-cache-"))
-        else {
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("journal-cache-")) else {
             continue;
         };
         let pid = rest.split('-').next().unwrap_or_default();

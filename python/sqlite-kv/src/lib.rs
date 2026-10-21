@@ -13,11 +13,11 @@
 //! page cache is built in.
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use journal::kv::KvStore;
+use journal::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
-use journal::kv::KvStore;
-use journal::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;

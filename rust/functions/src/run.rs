@@ -26,8 +26,8 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use serde_json::{Value, json};
 use journal::{Base, File};
+use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::Mutex;
 

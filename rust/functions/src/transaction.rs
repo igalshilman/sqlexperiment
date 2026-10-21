@@ -22,8 +22,8 @@
 //! a crash may skip: what a participant is, it recovers from the seal.
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 pub use journal::{Journal, Record};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,

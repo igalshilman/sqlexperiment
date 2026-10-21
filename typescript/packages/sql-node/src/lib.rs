@@ -11,12 +11,12 @@
 //! page cache is built in.
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use journal::kv::KvStore;
+use journal::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use journal::kv::KvStore;
-use journal::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
