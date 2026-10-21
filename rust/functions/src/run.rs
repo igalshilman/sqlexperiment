@@ -4,20 +4,19 @@
 //!
 //! A turn is one transaction (see [`crate::transaction`]): its participants
 //! are the run's state ([`RunState`], the record "run"), its memory
-//! ([`Memory`], the record "memory", and the pages the turn changed as a
-//! value of the database's chain), the scope's tables (the turn's SQL, KV
-//! included), and each extension. The host seals it in one put, the scope's
-//! database's commit. The image is the program's golden image with the
-//! chain applied: the first batch holds the pages that differ from golden,
-//! each next one the pages one turn changed, each compressed against what it
-//! replaces, so a turn writes little more than what it changed. Nothing is
-//! applied after a seal, and a crash before one loses the whole turn, which
-//! runs again.
+//! ([`Memory`], the record "memory" and the pages the turn changed, in the
+//! scope's file over the program's golden memory), the scope's tables (the
+//! turn's SQL, KV included), and each extension. The host seals it in one
+//! put, the scope's database's commit. The image is the program's golden
+//! image with the file's pages that differ from it; the journal compresses
+//! each against what it replaces (golden's, at first), so a turn writes
+//! little more than what it changed. Nothing is applied after a seal, and a
+//! crash before one loses the whole turn, which runs again.
 //!
 //! The VM stays live from turn to turn of one attempt; a new attempt restores
 //! it from the seal, once, when a delivery needs it.
 use crate::{
-    Scope, codec,
+    Scope,
     db::Db,
     extension::{Attachments, HostCall, Making, Tables},
     model::*,
@@ -28,37 +27,19 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use sqlite_kv::ChainUpdate;
+use sqlite_kv::{Base, File};
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::Mutex;
 
-/// Most batches in an image's chain. Restoring reads them all at once and
-/// applies them in order; past this many, or once the later batches outweigh
-/// twice the first, a turn writes every page that differs from golden into a
-/// new first batch, so restoring stays bounded however long a run lives. The
-/// size rule keeps rewriting to a third of what a run writes; this one only
-/// bounds the reads, as each new first batch costs a whole image.
-const MAX_CHAIN: usize = 256;
-
-/// The pages at `indexes`, back to back.
-fn pages<'a>(page: impl Fn(u32) -> &'a [u8], indexes: &[u32]) -> Vec<u8> {
-    let mut pages = Vec::with_capacity(indexes.len() * PAGE);
-    for &index in indexes {
-        pages.extend_from_slice(page(index));
-    }
-    pages
-}
 fn input_size<T: serde::Serialize>(input: &T) -> Result<()> {
     ensure!(json_bytes(input)?.len() <= MAX_INPUT, "Input exceeds limit");
     Ok(())
 }
 
-/// The pages a turn changed, and what they held before it.
-#[derive(Default)]
-struct Changed {
-    indexes: Vec<u32>,
-    old: Vec<u8>,
-    new: Vec<u8>,
+/// The scope's file a program's runs keep their memory in: one per golden
+/// memory, over it.
+fn memory_file(golden: &crate::cow::Golden) -> String {
+    format!("memory/{:016x}", golden.id())
 }
 
 /// A run of a program in one scope, in one attempt. An error leaves it
@@ -112,28 +93,25 @@ impl Participant for RunState {
 }
 
 /// The run's memory, a participant: the record "memory", and the pages each
-/// turn changed, as a batch of the database's chain.
+/// turn changed, in the scope's file over the program's golden memory.
 struct Memory {
     record: MemoryRecord,
     stored: Record,
+    /// The file over golden.
+    file: File,
     /// The VM, and its memory as of the last seal: restored when a delivery
     /// needs it, and dropped once the run has settled.
     live: Option<Live>,
     /// What this turn changed, to seal.
     turn: Option<Turn>,
-    /// Whether the database's chain is empty, as of the last seal; and as of
-    /// the one prepared.
-    chain_empty: bool,
-    preparing: Option<bool>,
-    /// The chain's change prepared, which the seal makes.
-    update: Option<ChainUpdate>,
-    /// The bytes of the batch prepared.
-    batch_bytes: usize,
+    /// The scope's previous run's pages, in its file, which this run's first
+    /// seal makes holes: they are not this run's.
+    stale: Option<(File, Vec<u32>)>,
 }
 
-/// What a turn did to the memory.
+/// What a turn did to the memory: the pages it changed.
 struct Turn {
-    changed: Changed,
+    changed: Vec<u32>,
     settled: bool,
 }
 
@@ -149,16 +127,13 @@ impl Memory {
         let base = &mut live.base;
         base.meta = capture.meta.clone();
         base.grow(capture.memory_len);
-        let mut changed = Changed::default();
+        let mut changed = Vec::with_capacity(capture.pages.len());
         for (index, new) in capture.pages {
-            changed.indexes.push(index);
-            changed.old.extend_from_slice(base.page(index));
-            changed.new.extend_from_slice(&new);
+            changed.push(index);
             base.set(index, &new);
         }
         self.record.meta = capture.meta;
         self.record.memory_len = capture.memory_len;
-        self.record.live_pages = base.changed().count();
         self.turn = Some(Turn { changed, settled });
         Ok(())
     }
@@ -167,9 +142,8 @@ impl Memory {
     /// none.
     fn trapped(&mut self) {
         self.live = None;
-        let changed = Changed::default();
         self.turn = Some(Turn {
-            changed,
+            changed: Vec::new(),
             settled: true,
         });
     }
@@ -177,76 +151,46 @@ impl Memory {
 
 #[async_trait]
 impl Participant for Memory {
-    /// The turn's pages, as a batch of the chain: appended, or a new first
-    /// batch.
+    /// The pages the turn changed, into the file (the journal writes one
+    /// that is golden's again as a hole); a settled run's, as holes.
     async fn prepare(&mut self) -> Result<()> {
         let Turn { changed, settled } = self.turn.take().context("No turn to seal")?;
-        let record = &mut self.record;
-        self.batch_bytes = 0;
-        let update = if settled || (record.batches == 0 && changed.indexes.is_empty()) {
+        if let Some((file, pages)) = self.stale.take() {
+            for page in pages {
+                file.write(page.into(), None).map_err(sql)?;
+            }
+        }
+        match (&self.live, settled) {
             // A settled run never restores again: it keeps its outcome, not
-            // its image. A run that has changed no page yet keeps none of the
-            // scope's previous run's.
-            if settled {
-                record.live_pages = 0;
-                record.batches = 0;
+            // its image.
+            (_, true) => {
+                for page in self.record.pages().chain(changed) {
+                    self.file.write(page.into(), None).map_err(sql)?;
+                }
+                self.record.pages.clear();
+                self.live = None;
             }
-            (!self.chain_empty).then_some(ChainUpdate::Clear)
-        } else if record.batches == 0 {
-            // The run's first batch, against golden: it replaces whatever the
-            // scope's previous run left.
-            let bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
-            (record.base_bytes, record.delta_bytes, record.batches) = (bytes.len(), 0, 1);
-            self.batch_bytes = bytes.len();
-            Some(ChainUpdate::Restart(bytes.into()))
-        } else if !changed.indexes.is_empty() {
-            let bytes = codec::encode_pages(&changed.indexes, &changed.new, &changed.old)?;
-            if record.batches >= MAX_CHAIN
-                || record.delta_bytes + bytes.len() > 2 * record.base_bytes
-            {
-                // A new first batch: every page that differs from golden.
-                let base = &self.live.as_ref().context("No live VM")?.base;
-                let live: Vec<u32> = base.changed().collect();
-                let bytes = codec::encode_pages(
-                    &live,
-                    &pages(|i| base.page(i), &live),
-                    &pages(|i| base.original(i), &live),
-                )?;
-                (record.base_bytes, record.delta_bytes, record.batches) = (bytes.len(), 0, 1);
-                self.batch_bytes = bytes.len();
-                Some(ChainUpdate::Restart(bytes.into()))
-            } else {
-                record.delta_bytes += bytes.len();
-                record.batches += 1;
-                self.batch_bytes = bytes.len();
-                Some(ChainUpdate::Append(bytes.into()))
+            (Some(live), false) => {
+                for page in changed {
+                    let image = bytes::Bytes::copy_from_slice(live.base.page(page));
+                    self.file.write(page.into(), Some(image)).map_err(sql)?;
+                }
+                self.record.set_pages(live.base.changed());
             }
-        } else {
-            None
-        };
-        self.preparing = update
-            .as_ref()
-            .map(|update| matches!(update, ChainUpdate::Clear));
-        self.update = update;
+            (None, false) => anyhow::bail!("No live VM"),
+        }
         self.stored.set(json_bytes(&self.record)?.into());
-        if settled {
-            self.live = None;
-        }
         Ok(())
-    }
-
-    fn committed(&mut self) {
-        if let Some(empty) = self.preparing.take() {
-            self.chain_empty = empty;
-        }
     }
 
     /// The image no longer matches a seal: the attempt is over.
     fn aborted(&mut self) {
         self.live = None;
-        self.preparing = None;
-        self.update = None;
     }
+}
+
+fn sql(error: Box<dyn std::error::Error + Send + Sync>) -> anyhow::Error {
+    anyhow::anyhow!(error)
 }
 
 /// What a turn wrote.
@@ -254,7 +198,7 @@ impl Participant for Memory {
 struct Written {
     changed_pages: usize,
     examined_pages: usize,
-    batch_bytes: usize,
+    logged_bytes: usize,
     commit_bytes: usize,
 }
 
@@ -294,14 +238,12 @@ impl Run {
         input_size(&input)?;
         let db = Db::new(scope.open().await?);
         let [stored_run, stored_memory] = BUILT_IN_RECORDS.map(|name| db.session().record(name));
-        let chain_empty = db.session().chain().is_empty();
         // What the scope's last seal kept of each extension, whichever run
         // made it.
         let blobs = ScopeBlobs::new(scope.extensions.blobs.clone(), key);
         let extensions = Attachments::attach(&scope.extensions, &blobs, &db).await?;
-        let db = Arc::new(Mutex::new(db));
-        let extensions = Arc::new(Mutex::new(extensions));
         let sealed: Option<RunRecord> = json_record(&stored_run)?;
+        let sealed_memory: Option<MemoryRecord> = json_record(&stored_memory)?;
         if let Some(record) = sealed.filter(|record| record.run == run) {
             ensure!(
                 record.program == program && record.handler == handler,
@@ -309,29 +251,50 @@ impl Run {
                 record.program,
                 record.handler
             );
-            check(programs, &record)?;
-            let memory = json_record(&stored_memory)?.context("No memory in the seal")?;
+            let golden = check(programs, &record)?.image();
+            let memory = sealed_memory.context("No memory in the seal")?;
+            let golden = golden.golden_memory();
+            ensure!(
+                memory.file == memory_file(golden),
+                "The memory of another image"
+            );
+            let file = (db.session())
+                .file_with_base(&memory.file, golden.clone() as Arc<dyn Base>)
+                .map_err(sql)?;
             return Ok(Self {
                 programs: programs.clone(),
-                db,
-                extensions,
+                db: Arc::new(Mutex::new(db)),
+                extensions: Arc::new(Mutex::new(extensions)),
                 blobs,
                 state: RunState::new(record, stored_run),
                 memory: Memory {
                     record: memory,
                     stored: stored_memory,
+                    file,
                     live: None,
                     turn: None,
-                    chain_empty,
-                    preparing: None,
-                    update: None,
-                    batch_bytes: 0,
+                    stale: None,
                 },
                 last: Written::default(),
                 usable: true,
             });
         }
+        // A new run: the scope's previous run's pages, if any, go with its
+        // first seal.
+        let stale = match sealed_memory {
+            Some(old) if !old.pages.is_empty() => {
+                let file = db.session().file(&old.file).map_err(sql)?;
+                Some((file, old.pages().collect()))
+            }
+            _ => None,
+        };
         let golden = programs.get(program)?.image();
+        let name = memory_file(golden.golden_memory());
+        let file = (db.session())
+            .file_with_base(&name, golden.golden_memory().clone() as Arc<dyn Base>)
+            .map_err(sql)?;
+        let db = Arc::new(Mutex::new(db));
+        let extensions = Arc::new(Mutex::new(extensions));
         let language = programs.get(program)?.language();
         let mut vm = Vm::for_image(programs.runtime(), language, &golden, run, now).await?;
         vm.restore(&golden).await?;
@@ -355,18 +318,14 @@ impl Run {
             record: MemoryRecord {
                 meta: golden.meta.clone(),
                 memory_len: golden.len(),
-                batches: 0,
-                base_bytes: 0,
-                delta_bytes: 0,
-                live_pages: 0,
+                file: name,
+                pages: Vec::new(),
             },
             stored: stored_memory,
+            file,
             live: Some(Live { vm, base: golden }),
             turn: None,
-            chain_empty,
-            preparing: None,
-            update: None,
-            batch_bytes: 0,
+            stale,
         };
         let mut this = Self {
             programs: programs.clone(),
@@ -457,7 +416,7 @@ impl Run {
     /// The memory the run will hold once its next delivery restores it.
     pub fn footprint(&self) -> usize {
         let memory = &self.memory.record;
-        memory.memory_len + memory.live_pages * PAGE
+        memory.memory_len + memory.live_pages() * PAGE
     }
 
     /// The memory the last turn held at its peak: the run's, and the seal's
@@ -466,9 +425,9 @@ impl Run {
     pub fn turn_peak(&self) -> usize {
         let (last, memory) = (&self.last, &self.memory.record);
         memory.memory_len
-            + memory.live_pages.max(last.changed_pages) * PAGE
+            + memory.live_pages().max(last.changed_pages) * PAGE
             + 3 * last.changed_pages * PAGE
-            + last.batch_bytes
+            + last.logged_bytes
             + last.commit_bytes
     }
 
@@ -578,10 +537,10 @@ impl Run {
             turns: record.turns,
             state: record.state.clone(),
             memory_bytes: memory.memory_len,
-            live_pages: memory.live_pages,
+            live_pages: memory.live_pages(),
             changed_pages: self.last.changed_pages,
             examined_pages: self.last.examined_pages,
-            batch_bytes: self.last.batch_bytes,
+            logged_bytes: self.last.logged_bytes,
             commit_bytes: self.last.commit_bytes,
         }
     }
@@ -598,22 +557,19 @@ impl Run {
         );
         base.meta = memory.meta.clone();
         base.grow(memory.memory_len);
-        // Read with the record at open: the chain is this run's since its
-        // first turn restarted it.
-        let batches = self.db.lock().await.session().chain();
-        ensure!(batches.len() == memory.batches, "Missing page batch");
-        for bytes in batches {
-            let (indexes, frame) = codec::page_indexes(&bytes)?;
-            ensure!(
-                indexes
-                    .last()
-                    .is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
-                "Page beyond memory"
-            );
-            let decoded = codec::decode_pages(frame, &pages(|i| base.page(i), &indexes))?;
-            for (index, page) in indexes.iter().zip(decoded.chunks_exact(PAGE)) {
-                base.set(*index, page);
-            }
+        // The pages that differ from golden, read together: from the log,
+        // the cache, or the store.
+        let indexes: Vec<u32> = memory.pages().collect();
+        ensure!(
+            (indexes.last()).is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
+            "Page beyond memory"
+        );
+        let file = &self.memory.file;
+        let reads = indexes.iter().map(|&index| file.read(index.into()));
+        let pages = futures::future::try_join_all(reads).await.map_err(sql)?;
+        for (index, page) in indexes.iter().zip(pages) {
+            static ZERO: [u8; PAGE] = [0; PAGE];
+            base.set(*index, page.as_deref().unwrap_or(&ZERO));
         }
         let language = self.programs.get(&record.program)?.language();
         let mut vm =
@@ -689,11 +645,10 @@ impl Run {
         }
         drop(participants);
         let sealed = match prepared {
-            Ok(()) => {
-                written.commit_bytes =
-                    self.state.stored.get().len() + self.memory.stored.get().len();
-                db.seal(self.memory.update.take()).await
-            }
+            Ok(()) => db.seal().await.map(|report| {
+                written.logged_bytes = report.logged_bytes;
+                written.commit_bytes = report.record_bytes;
+            }),
             Err(error) => Err(error),
         };
         let mut participants: Vec<&mut dyn Participant> =
@@ -706,7 +661,6 @@ impl Run {
         participants.iter_mut().for_each(|p| p.committed());
         extensions.committed();
         drop(db);
-        written.batch_bytes = self.memory.batch_bytes;
         self.last = written;
         // After it: the blobs no seal names any more go.
         if let Err(error) = self.blobs.collect(&extensions.holds()).await {

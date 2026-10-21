@@ -54,12 +54,12 @@ impl Db {
         &self.session
     }
 
-    /// Write the seal: the turn's SQL, if any, with every record the
-    /// participants set and the chain update, in one put. The next statement
-    /// begins the next turn's transaction.
-    pub async fn seal(&mut self, chain: Option<sqlite_kv::ChainUpdate>) -> Result<()> {
+    /// Write the seal: the turn's SQL, if any, with every record and file
+    /// the participants set, in one put. The next statement begins the next
+    /// turn's transaction.
+    pub async fn seal(&mut self) -> Result<sqlite_kv::SaveReport> {
         self.began = false;
-        self.session.seal(chain).await.map_err(sql)
+        self.session.seal(None).await.map_err(sql)
     }
 
     /// The guest trapped: what its open `ctx.db.transaction` did is undone,

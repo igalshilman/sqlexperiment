@@ -37,7 +37,7 @@ const POOL: u32 = 1000;
 /// Bump it with anything an image depends on: the Wasm, the bridges
 /// (`guest.js`, `guest.py`), the limits, the imports' behavior, the VM
 /// metadata.
-pub(crate) const VERSION: u64 = 12;
+pub(crate) const VERSION: u64 = 13;
 
 /// The language a program is written in, and so the engine it runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

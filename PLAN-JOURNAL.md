@@ -5,6 +5,45 @@ starting. The rules of [CLAUDE.md](CLAUDE.md) apply: no backwards
 compatibility, small commits, frequent PRs merged once green, decide yourself
 and ask the owner only critical questions.
 
+## 0. Progress (branch `claude/journal`)
+
+- **Step 1, records: done.** `Session::record`, `Session::seal`; the runtime's
+  participants keep their state in records. Agent bench: 2.6 MiB over 200
+  steps, as before.
+- **Step 2, files: done.** `Session::file`; pages keyed by a page id (the
+  file's id in the high 32 bits, so the cache, hint and readahead are
+  unchanged); keys `v15/page/<file>/<page>`.
+- **Step 3, based files: done; the `Journal`/`Sql` split: not yet.**
+  `Session::file_with_base`. Decided on the way: a base has an id, which the
+  directory records, and a file opens only with that base again; a based
+  file's segments decode when it is opened with its base; a checkpoint waits
+  until every based file's logged images are decoded or replaced by holes;
+  a page equal to its base's is a hole, in the log and in place (tag 3
+  compresses against the base).
+- **Step 4, memory on the journal: done, before the split** (the split is a
+  rename; step 4 is what the measurements are about). The memory file is
+  `memory/<golden fingerprint>`, one per golden image, since a scope's next
+  run may be another program; a new run writes holes for the previous run's
+  pages (the old file opened without its base). A settled run writes holes
+  for its pages rather than `set_len(0)`, which on a based file would write
+  a hole for every page up to the memory's length. `codec.rs` and the chain's
+  use in the runtime are gone; `vm::VERSION` is 13. The chain itself is
+  still in sqlite-kv, unused by the runtime.
+- **Measured after step 4** (in-memory store, medians):
+
+  | | Before | After |
+  |---|--:|--:|
+  | Agent, stored over 200 steps | 2.6 MiB | 2.5 MiB |
+  | Agent, restore | 1.5 ms | 2.5 ms |
+  | Agent, model turn | 1.4 ms | 1.7 ms |
+  | Checkpoints, heap-churn turn, restored | 7.7 ms | 12.7 ms |
+  | Checkpoints, write-heavy turn, live | 6.2 ms | 3.4 ms |
+  | Checkpoints, sparse turn, bytes written | ~1.0 KB | ~1.5 KB |
+
+  Restore regressed by less than 2x: no extents (step 6). The sparse turns'
+  extra bytes are the commit record's records (the memory's page list and
+  the directory).
+
 ## 1. Goal
 
 Today the durable functions runtime (`rust/functions`) commits each turn

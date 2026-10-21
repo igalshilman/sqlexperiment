@@ -199,6 +199,8 @@ pub struct Session {
     schema_bytes: Option<usize>,
     /// SQL since the last commit may have changed the schema.
     schema_changed: bool,
+    /// What the last commit wrote.
+    last_report: SaveReport,
 }
 
 /// Marks a session abandoned unless it finished; see [`Session::transaction`].
@@ -323,6 +325,7 @@ impl Session {
                 abandoned: Arc::default(),
                 schema_bytes: Some(warm.schema_bytes),
                 schema_changed: false,
+                last_report: SaveReport::default(),
             };
             session.io.resume(snapshot).await?;
             session.connection = Some(connect(&session.io, &warm.database).await?);
@@ -348,6 +351,7 @@ impl Session {
             abandoned: Arc::default(),
             schema_bytes: None,
             schema_changed: false,
+            last_report: SaveReport::default(),
         };
         session.io.prepare_engine().await?;
         let database = open_engine(&session.io).await?;
@@ -524,7 +528,7 @@ impl Session {
     /// commit alone, without the SQL engine.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
         self.record(EFFECTS).set(effects);
-        self.seal(None).await
+        self.seal(None).await.map(drop)
     }
 
     /// `COMMIT` the open transaction, with [`Durability::Commit`], with every
@@ -533,8 +537,8 @@ impl Session {
     /// and what its turn changed (a VM's page batch, say) together. See
     /// [`ChainUpdate`] and [`Self::chain`]. A `COMMIT` that fails changes
     /// nothing, and discards the records set since the last commit; with no
-    /// transaction open, the rest commits alone.
-    pub async fn seal(&mut self, chain: Option<ChainUpdate>) -> Result<()> {
+    /// transaction open, the rest commits alone. `Ok` holds what it wrote.
+    pub async fn seal(&mut self, chain: Option<ChainUpdate>) -> Result<SaveReport> {
         if self.durability != Durability::Commit {
             return Err("a seal needs Durability::Commit".into());
         }
@@ -548,19 +552,22 @@ impl Session {
             // Until the commit is acknowledged its outcome is unknown.
             self.poisoned = true;
             let (files, records) = self.take_pending();
-            self.io.publish_with(files, records, chain).await?;
+            let report = self.io.publish_with(files, records, chain).await?;
             self.poisoned = false;
-            return Ok(());
+            return Ok(report);
         }
         self.sealing = true;
         self.chain = chain;
         let result = self.execute("COMMIT").await;
         self.sealing = false;
         self.chain = None;
-        if result.is_err() {
-            self.take_pending();
+        match result {
+            Ok(()) => Ok(std::mem::take(&mut self.last_report)),
+            Err(error) => {
+                self.take_pending();
+                Err(error)
+            }
         }
-        result
     }
 
     /// The record `effects` (see [`Self::commit_with`]).
@@ -668,6 +675,7 @@ impl Session {
         let report = (self.io)
             .publish_with(files, records, self.chain.take())
             .await?;
+        self.last_report = report.clone();
         // Resident already, unless the page size grew. The commit is durable
         // either way; a failure here only ends the session.
         if self.io.prepare_engine().await.is_ok() {

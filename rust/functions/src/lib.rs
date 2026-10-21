@@ -22,7 +22,6 @@
 
 mod bindings;
 mod budget;
-mod codec;
 mod cow;
 mod db;
 mod extension;
@@ -60,10 +59,6 @@ pub use store::Scope;
 pub use transaction::{Blobs, DirBlobs, MemoryBlobs, Participant, Record, ScopeBlobs};
 pub use vm::{Language, Limits, Runtime};
 pub use workspace::Workspace;
-
-#[cfg(test)]
-#[path = "../tests/unit/codec.rs"]
-mod codec_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/heap.rs"]

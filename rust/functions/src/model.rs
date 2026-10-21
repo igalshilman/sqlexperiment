@@ -313,24 +313,43 @@ pub(crate) struct RunRecord {
     pub state: State,
 }
 
-/// The run's memory, as its last seal keeps it (the part "memory"): the
-/// image is the program's golden image with the database's chain applied.
+/// The run's memory, as its last seal keeps it (the record "memory"): the
+/// image is the program's golden image with the pages of `file`, the
+/// scope's file over golden, that differ from it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MemoryRecord {
     pub meta: VmMeta,
     pub memory_len: usize,
-    /// Batches in the database's chain since this run restarted it: the image
-    /// is golden (zeros beyond its length) with the chain applied in order.
-    /// The first holds the pages that differ from golden, each next one the
-    /// pages one turn changed. Zero until the run's first turn, and once it
-    /// has settled.
-    pub batches: usize,
-    /// Bytes of the chain's first batch, and of the others.
-    pub base_bytes: usize,
-    pub delta_bytes: usize,
-    /// Pages that differ from golden.
-    pub live_pages: usize,
+    /// The file the pages are in, named after its golden memory.
+    pub file: String,
+    /// The pages that differ from golden, as runs of `[first, count]`: the
+    /// store cannot list the file's pages, so the record does. Empty until
+    /// the run's first turn, and once it has settled.
+    pub pages: Vec<(u32, u32)>,
+}
+
+impl MemoryRecord {
+    /// The pages that differ from golden, in order.
+    pub fn pages(&self) -> impl Iterator<Item = u32> + '_ {
+        (self.pages.iter()).flat_map(|&(first, count)| first..first + count)
+    }
+
+    /// Record `pages` (ascending) as the ones that differ from golden.
+    pub fn set_pages(&mut self, pages: impl Iterator<Item = u32>) {
+        self.pages.clear();
+        for page in pages {
+            match self.pages.last_mut() {
+                Some((first, count)) if *first + *count == page => *count += 1,
+                _ => self.pages.push((page, 1)),
+            }
+        }
+    }
+
+    /// How many pages differ from golden.
+    pub fn live_pages(&self) -> usize {
+        self.pages.iter().map(|&(_, count)| count as usize).sum()
+    }
 }
 
 /// A run as of its last commit, and what that turn wrote.
@@ -348,7 +367,10 @@ pub struct View {
     /// Pages the last turn compared: those it wrote to by default, all pages
     /// in the benchmark-only full-scan build.
     pub examined_pages: usize,
-    pub batch_bytes: usize,
+    /// Bytes the last turn's seal logged: the pages it changed (memory and
+    /// tables), compressed against what they replace.
+    pub logged_bytes: usize,
+    /// Bytes of the commit record it put.
     pub commit_bytes: usize,
 }
 

@@ -183,11 +183,16 @@ impl Default for StorageOptions {
 }
 
 /// `Ok` means the transaction is durable, with this save's checkpoint, if any.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SaveReport {
     /// Pages written in place by this save's checkpoint; 0 when it did not
     /// checkpoint.
     pub checkpointed_pages: usize,
+    /// Bytes of its transaction's log segments, every file's: about what its
+    /// pages changed.
+    pub logged_bytes: usize,
+    /// Bytes of the commit record it put; 0 when nothing changed.
+    pub record_bytes: usize,
     /// The database's version after this save.
     pub(crate) version: u64,
 }
@@ -802,6 +807,7 @@ impl Snapshot {
         }
         commit.garbage = &named_before - &commit.stored_values();
         let bytes = commit.encode();
+        let record_bytes = bytes.len();
         write(COMMIT, Some(bytes.clone()))?;
         let version = commit.version;
         let mut after = self.continued(commit, Some(bytes));
@@ -833,6 +839,8 @@ impl Snapshot {
         }
         let mut report = SaveReport {
             checkpointed_pages: 0,
+            logged_bytes,
+            record_bytes,
             version,
         };
         if let Some(checkpoint) = checkpoint {

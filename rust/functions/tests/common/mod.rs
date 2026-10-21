@@ -77,9 +77,19 @@ impl Store {
         block(db.seal(None)).unwrap();
     }
 
-    /// Batches in the image's chain.
-    pub fn batches(&self) -> usize {
-        self.open().chain().len()
+    /// Pages of the run's memory that differ from golden, as the memory
+    /// record lists them.
+    pub fn memory_pages(&self) -> usize {
+        let pages = self.record("memory")["pages"].clone();
+        let runs = pages.as_array().cloned().unwrap_or_default();
+        runs.iter()
+            .map(|run| run[1].as_u64().unwrap() as usize)
+            .sum()
+    }
+
+    /// Page keys in the store: pages checkpointed in place.
+    pub fn page_keys(&self) -> usize {
+        self.kv.page_count()
     }
 }
 

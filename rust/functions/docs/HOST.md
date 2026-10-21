@@ -6,8 +6,8 @@ five things:
 - how a turn's time is bounded, instead of fuel;
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
-- one record that commits a turn's SQL, pages and effects together:
-  sqlite-kv v14's commit record, with the VM's chain beside the SQL log;
+- one record that commits a turn's SQL, pages and records together:
+  sqlite-kv v15's commit record, the memory's pages a file beside the SQL's;
 - host bindings: operations the host makes itself, such as a model call,
   whose input nothing but the guest's heap keeps (§6).
 
@@ -180,45 +180,44 @@ two commit points once SQL joined.
 
 ```text
 v15/commit = SC15
-  version, epoch, size, next_segment, garbage
-  directory: records by id and name, each inline or stored
-    run:     the run's state as JSON         // run, program, pending (the outbox),
-                                             // status, outcome
-    memory:  the memory's as JSON            // meta, memoryLen, batches
-    <name>:  each extension's
-  log:     the SQL transactions since the checkpoint, inline or stored
-  chain:   the VM's QPD3 batches, in order   // the host's, opaque to sqlite-kv
+  version, epoch, next_segment, garbage
+  directory: files by id and name
+    run:               record: the run's state as JSON   // run, program, pending
+                                                         // (the outbox), status, outcome
+    memory:            record: the memory's as JSON      // meta, memoryLen, file, pages
+    memory/<golden>:   paged file over the golden image  // the pages that differ from it
+    db:                paged file                        // SQL
+    <name>:            each extension's record
+  log:     each transaction's changed pages since the checkpoint, per file,
+           inline or stored
 ```
 
-- **A turn is one put.** Its SQL transaction joins `log`, its batch joins
-  `chain`, and the records it set replace theirs (a record past 1 KiB is a
-  stored value of its own, written first).
-- **Sealing covers both.** Past `inline_log_bytes` (1 KiB), the inline SQL
-  segments and VM batches move into one stored value, written before the
-  record that names it, in the same round trip.
-- **Each sequence keeps its own checkpoint.** A SQL checkpoint writes pages
-  and empties `log`; `chain` is kept. The VM's chain restarts when the host
-  says so (256 batches, or more than twice the first): the turn's batch is
-  then a new first batch (every page that differs from golden), and the old
-  chain's stored values become garbage.
+- **A turn is one put.** Its SQL pages and its memory's changed pages join
+  `log` as one transaction, and the records it set replace theirs (a record
+  past 1 KiB is a stored value of its own, written first).
+- **Sealing covers it.** Past `inline_log_bytes` (1 KiB), the inline
+  segments move into one stored value, written before the record that names
+  it, in the same round trip.
+- **One checkpoint for all.** A checkpoint writes every file's logged pages
+  in place (`page/<file>/<n>`) and empties `log`; a memory page equal to
+  golden's is a hole, and one that differs is compressed against it.
 - **`ctx.kv` is a table** in the database, so its writes commit with the
   turn.
 
 ### Commit, recover
 
-- **Commit.** Garbage deletes, a seal if one is due, the record, and a SQL
+- **Commit.** Garbage deletes, a seal if one is due, the record, and a
   checkpoint if one is due: queued in that order, then one sync. Then the
   outbox: its Waits are made after the commit, and the next commit drops
   the ones already made.
-- **Recover.** Open reads the record and the stored values it names: the
-  SQL log replays over `page/<n>`, and the VM is the golden image with the
-  chain applied in order. The record's pending Waits are made again, under
-  their IDs.
+- **Recover.** Open reads the record and the stored values it names: each
+  file's log replays over its pages in place, and the VM is the golden image
+  with the pages the memory record lists, read together. The record's
+  pending Waits are made again, under their IDs.
 
-The API is `Session::record(name)`, a handle each participant sets in its
-prepare, then `Session::seal(chain)`, where `chain` is unchanged, an
-appended batch, or a restart with a batch; and `Session::chain()`, the
-chain as opened.
+The API is `Session::record(name)`, `Session::file(name)` and
+`Session::file_with_base(name, base)`, handles each participant writes in
+its prepare, then `Session::seal`, the one put.
 
 ## 5. Plan
 

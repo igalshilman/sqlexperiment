@@ -112,7 +112,7 @@ fn main() -> Result<()> {
             json!({"step": step, "request_bytes": request, "request_read_ms": read_ms, "model_turn_ms": turns[0],
             "tool_turn_ms": turns[1], "restore_ms": restore_ms, "stored_bytes": written,
             "memory_bytes": view.memory_bytes,
-            "live_pages": view.live_pages, "batch_bytes": view.batch_bytes,
+            "live_pages": view.live_pages, "logged_bytes": view.logged_bytes,
             "commit_bytes": view.commit_bytes}),
         );
         if step.is_multiple_of(10) || step == 1 {
