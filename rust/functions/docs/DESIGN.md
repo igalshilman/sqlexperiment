@@ -880,12 +880,14 @@ Resume can coexist. Once the root settles, the run is final.
 
 ## 7. Storage: one commit per turn
 
-A turn is one commit of the scope's database (`Session::commit_turn`), one
-put of its record:
+A turn is one commit of the scope's database (`Session::seal`), one put of
+its record:
 
 1. its KV writes, the SQL transaction its first KV request began;
 2. its pages: the chain update of §5.3 (append, restart or clear);
-3. the run's state, as the record's effects, with the pending requests.
+3. the run's state, as the record `run`, with the pending requests; the
+   memory's, as the record `memory`; and each extension's record that
+   changed.
 
 Writes land in any order (§1), so nothing may be its own put: a turn's batch
 and a commit that names it could not be ordered. The record carries the

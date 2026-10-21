@@ -3,9 +3,9 @@
 //! one event to the VM, runs the JavaScript until it waits, and seals.
 //!
 //! A turn is one transaction (see [`crate::transaction`]): its participants
-//! are the run's state ([`RunState`], the part "run" of the seal), its
-//! memory ([`Memory`], the part "memory", and the pages the turn changed as
-//! a value of the database's chain), the scope's tables (the turn's SQL, KV
+//! are the run's state ([`RunState`], the record "run"), its memory
+//! ([`Memory`], the record "memory", and the pages the turn changed as a
+//! value of the database's chain), the scope's tables (the turn's SQL, KV
 //! included), and each extension. The host seals it in one put, the scope's
 //! database's commit. The image is the program's golden image with the
 //! chain applied: the first batch holds the pages that differ from golden,
@@ -19,15 +19,14 @@
 use crate::{
     Scope, codec,
     db::Db,
-    extension::{Attachments, BUILT_IN, HostCall, Making, Tables},
+    extension::{Attachments, HostCall, Making, Tables},
     model::*,
     program::{Program, Programs},
-    transaction::{Participant, ScopeBlobs, Seal, Sealing, Sink},
+    transaction::{Participant, Record, ScopeBlobs},
     vm::{self, Vm},
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use bytes::Bytes;
 use serde_json::{Value, json};
 use sqlite_kv::ChainUpdate;
 use std::{collections::HashSet, sync::Arc};
@@ -73,33 +72,33 @@ pub struct Run {
     extensions: Arc<Mutex<Attachments>>,
     /// The scope's blobs, which the host collects after each seal.
     blobs: ScopeBlobs,
-    /// The last seal.
-    seal: Seal,
     state: RunState,
     memory: Memory,
     last: Written,
     usable: bool,
 }
 
-/// The run's state, a participant: the part "run" of the seal.
+/// The run's state, a participant: the record "run".
 struct RunState {
     record: RunRecord,
     sealed: RunRecord,
+    stored: Record,
 }
 
 impl RunState {
-    fn new(record: RunRecord) -> Self {
+    fn new(record: RunRecord, stored: Record) -> Self {
         Self {
             sealed: record.clone(),
             record,
+            stored,
         }
     }
 }
 
 #[async_trait]
 impl Participant for RunState {
-    async fn prepare(&mut self, sink: &mut Sink) -> Result<()> {
-        sink.record(serde_json::to_value(&self.record)?);
+    async fn prepare(&mut self) -> Result<()> {
+        self.stored.set(json_bytes(&self.record)?.into());
         Ok(())
     }
 
@@ -112,10 +111,11 @@ impl Participant for RunState {
     }
 }
 
-/// The run's memory, a participant: the part "memory" of the seal, and the
-/// pages each turn changed, as a batch of the database's chain.
+/// The run's memory, a participant: the record "memory", and the pages each
+/// turn changed, as a batch of the database's chain.
 struct Memory {
     record: MemoryRecord,
+    stored: Record,
     /// The VM, and its memory as of the last seal: restored when a delivery
     /// needs it, and dropped once the run has settled.
     live: Option<Live>,
@@ -125,6 +125,8 @@ struct Memory {
     /// the one prepared.
     chain_empty: bool,
     preparing: Option<bool>,
+    /// The chain's change prepared, which the seal makes.
+    update: Option<ChainUpdate>,
     /// The bytes of the batch prepared.
     batch_bytes: usize,
 }
@@ -177,7 +179,7 @@ impl Memory {
 impl Participant for Memory {
     /// The turn's pages, as a batch of the chain: appended, or a new first
     /// batch.
-    async fn prepare(&mut self, sink: &mut Sink) -> Result<()> {
+    async fn prepare(&mut self) -> Result<()> {
         let Turn { changed, settled } = self.turn.take().context("No turn to seal")?;
         let record = &mut self.record;
         self.batch_bytes = 0;
@@ -225,10 +227,8 @@ impl Participant for Memory {
         self.preparing = update
             .as_ref()
             .map(|update| matches!(update, ChainUpdate::Clear));
-        if let Some(update) = update {
-            sink.chain(update);
-        }
-        sink.record(serde_json::to_value(&self.record)?);
+        self.update = update;
+        self.stored.set(json_bytes(&self.record)?.into());
         if settled {
             self.live = None;
         }
@@ -245,6 +245,7 @@ impl Participant for Memory {
     fn aborted(&mut self) {
         self.live = None;
         self.preparing = None;
+        self.update = None;
     }
 }
 
@@ -292,19 +293,15 @@ impl Run {
         validate_time(now)?;
         input_size(&input)?;
         let db = Db::new(scope.open().await?);
-        let seal = load(&db)?;
+        let [stored_run, stored_memory] = BUILT_IN_RECORDS.map(|name| db.session().record(name));
         let chain_empty = db.session().chain().is_empty();
-        let db = Arc::new(Mutex::new(db));
         // What the scope's last seal kept of each extension, whichever run
         // made it.
-        let mut saved = seal.parts.clone();
-        saved.retain(|name, _| !BUILT_IN.contains(&name.as_str()));
         let blobs = ScopeBlobs::new(scope.extensions.blobs.clone(), key);
-        let extensions = Attachments::attach(&scope.extensions, &blobs, &saved).await?;
+        let extensions = Attachments::attach(&scope.extensions, &blobs, &db).await?;
+        let db = Arc::new(Mutex::new(db));
         let extensions = Arc::new(Mutex::new(extensions));
-        let sealed: Option<RunRecord> = (seal.parts.get("run").cloned())
-            .map(serde_json::from_value)
-            .transpose()?;
+        let sealed: Option<RunRecord> = json_record(&stored_run)?;
         if let Some(record) = sealed.filter(|record| record.run == run) {
             ensure!(
                 record.program == program && record.handler == handler,
@@ -313,21 +310,21 @@ impl Run {
                 record.handler
             );
             check(programs, &record)?;
-            let memory = seal.parts.get("memory").context("No memory in the seal")?;
-            let memory = serde_json::from_value(memory.clone())?;
+            let memory = json_record(&stored_memory)?.context("No memory in the seal")?;
             return Ok(Self {
                 programs: programs.clone(),
                 db,
                 extensions,
                 blobs,
-                seal,
-                state: RunState::new(record),
+                state: RunState::new(record, stored_run),
                 memory: Memory {
                     record: memory,
+                    stored: stored_memory,
                     live: None,
                     turn: None,
                     chain_empty,
                     preparing: None,
+                    update: None,
                     batch_bytes: 0,
                 },
                 last: Written::default(),
@@ -363,10 +360,12 @@ impl Run {
                 delta_bytes: 0,
                 live_pages: 0,
             },
+            stored: stored_memory,
             live: Some(Live { vm, base: golden }),
             turn: None,
             chain_empty,
             preparing: None,
+            update: None,
             batch_bytes: 0,
         };
         let mut this = Self {
@@ -374,8 +373,7 @@ impl Run {
             db,
             extensions,
             blobs,
-            seal,
-            state: RunState::new(record),
+            state: RunState::new(record, stored_run),
             memory,
             last: Written::default(),
             usable: false,
@@ -676,47 +674,38 @@ impl Run {
         self.state.record.state = state;
         self.state.record.turns += 1;
 
-        // The transaction: each participant prepares its part, the host
+        // The transaction: each participant sets its records, the host
         // writes the seal, and tells them.
         let mut extensions = self.extensions.lock().await;
         let mut db = self.db.lock().await;
-        let mut sealing = Sealing::after(&self.seal);
-        let mut participants: Vec<(&str, &mut dyn Participant)> = vec![
-            ("run", &mut self.state),
-            ("memory", &mut self.memory),
-            ("tables", &mut *db),
-        ];
-        let mut prepared = extensions.prepare(&mut sealing).await;
-        for (name, participant) in &mut participants {
+        let mut participants: Vec<&mut dyn Participant> =
+            vec![&mut self.state, &mut self.memory, &mut *db];
+        let mut prepared = extensions.prepare().await;
+        for participant in &mut participants {
             if prepared.is_err() {
                 break;
             }
-            prepared = sealing.prepare(name, *participant).await;
+            prepared = participant.prepare().await;
         }
         drop(participants);
         let sealed = match prepared {
             Ok(()) => {
-                let (seal, chain) = sealing.finish();
-                let effects = Bytes::from(json_bytes(&seal)?);
-                written.commit_bytes = effects.len();
-                db.seal(effects, chain).await.map(|()| seal)
+                written.commit_bytes = self.state.stored.get().len()
+                    + self.memory.stored.get().len();
+                db.seal(self.memory.update.take()).await
             }
             Err(error) => Err(error),
         };
         let mut participants: Vec<&mut dyn Participant> =
             vec![&mut self.state, &mut self.memory, &mut *db];
-        let seal = match sealed {
-            Ok(seal) => seal,
-            Err(error) => {
-                participants.iter_mut().for_each(|p| p.aborted());
-                extensions.aborted();
-                return Err(error);
-            }
-        };
+        if let Err(error) = sealed {
+            participants.iter_mut().for_each(|p| p.aborted());
+            extensions.aborted();
+            return Err(error);
+        }
         participants.iter_mut().for_each(|p| p.committed());
         extensions.committed();
         drop(db);
-        self.seal = seal;
         written.batch_bytes = self.memory.batch_bytes;
         self.last = written;
         // After it: the blobs no seal names any more go.
@@ -875,13 +864,16 @@ fn completion(operation: &str, outcome: Outcome, now: u64) -> Value {
     json!({"kind": "complete", "operationId": operation, "outcome": outcome, "now": now})
 }
 
-/// The scope's last seal: its database's commit's effects.
-fn load(db: &Db) -> Result<Seal> {
-    let effects = db.session().effects();
-    if effects.is_empty() {
-        return Ok(Seal::default());
+/// The records of the run's state and memory.
+const BUILT_IN_RECORDS: [&str; 2] = ["run", "memory"];
+
+/// A record's JSON value, as the last seal left it; `None` if none did.
+fn json_record<T: serde::de::DeserializeOwned>(record: &Record) -> Result<Option<T>> {
+    let bytes = record.get();
+    if bytes.is_empty() {
+        return Ok(None);
     }
-    Ok(serde_json::from_slice(&effects)?)
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
 /// The run's program, as the version and runtime it started on.

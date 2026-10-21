@@ -22,7 +22,7 @@
 use crate::{
     GuestError, Operation, Outcome,
     extension::{Attached, Extension, HostCall, Making, Tables},
-    transaction::{Participant, ScopeBlobs, Sink, hash, random},
+    transaction::{Participant, Record, ScopeBlobs, hash, random},
 };
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -49,9 +49,12 @@ impl Files {
 
 #[async_trait]
 impl Extension for Files {
-    /// The scope's files, as the checkpoint `saved` names.
-    async fn attach(&self, blobs: ScopeBlobs, saved: Option<Value>) -> Result<Box<dyn Attached>> {
-        let saved = saved.unwrap_or(Value::Null);
+    /// The scope's files, as the checkpoint its record names.
+    async fn attach(&self, blobs: ScopeBlobs, record: Record) -> Result<Box<dyn Attached>> {
+        let saved: Value = match record.get() {
+            bytes if bytes.is_empty() => Value::Null,
+            bytes => serde_json::from_slice(&bytes)?,
+        };
         let checkpoint = saved["checkpoint"].as_str().map(str::to_owned);
         let running = saved["running"].as_str().map(str::to_owned);
         let manifest = match &checkpoint {
@@ -64,6 +67,7 @@ impl Extension for Files {
         };
         Ok(Box::new(Checkpointed {
             blobs,
+            record,
             checkpoint,
             manifest,
             changes: BTreeMap::new(),
@@ -84,6 +88,8 @@ enum Change {
 /// The scope's files in a run.
 struct Checkpointed {
     blobs: ScopeBlobs,
+    /// Its record: the checkpoint, and the command running.
+    record: Record,
     /// The last commit's checkpoint, and its files: each path's blob.
     checkpoint: Option<String>,
     manifest: BTreeMap<String, String>,
@@ -259,7 +265,7 @@ impl Attached for Checkpointed {
 impl Participant for Checkpointed {
     /// The turn's changes, as a checkpoint: its blobs written, then its
     /// manifest; the seal keeps the manifest's name.
-    async fn prepare(&mut self, sink: &mut Sink) -> Result<()> {
+    async fn prepare(&mut self) -> Result<()> {
         if self.changes.is_empty() && self.running == self.saved_running {
             return Ok(());
         }
@@ -283,7 +289,8 @@ impl Participant for Checkpointed {
             self.manifest = manifest;
         }
         self.saved_running = self.running.clone();
-        sink.record(json!({"checkpoint": self.checkpoint, "running": self.running}));
+        let record = json!({"checkpoint": self.checkpoint, "running": self.running});
+        self.record.set(serde_json::to_vec(&record)?.into());
         Ok(())
     }
 

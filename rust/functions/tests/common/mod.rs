@@ -50,21 +50,31 @@ impl Store {
         block(Session::open(self.kv.clone())).unwrap()
     }
 
-    /// The scope's current run, as its last commit holds it.
-    pub fn commit(&self) -> Value {
-        serde_json::from_slice(&self.open().effects()).unwrap()
+    /// The record `name` (`run`, `memory`, an extension's), as the scope's
+    /// last seal holds it: JSON, or null if none set it.
+    pub fn record(&self, name: &str) -> Value {
+        let bytes = self.open().record(name).get();
+        match bytes.is_empty() {
+            true => Value::Null,
+            false => serde_json::from_slice(&bytes).unwrap(),
+        }
     }
 
-    /// Commit `commit` as the scope's current run, as if a turn did.
-    pub fn set_commit(&self, commit: &Value) {
+    /// Seals written in the scope: its database's version.
+    pub fn seals(&self) -> u64 {
+        self.open().version()
+    }
+
+    /// Seal `value` as the record `name`, as if a turn did.
+    pub fn set_record(&self, name: &str, value: &Value) {
         let options = sqlite_kv::StorageOptions {
             durability: sqlite_kv::Durability::Commit,
             ..Default::default()
         };
         let mut db = block(Session::open_with_options(self.kv.clone(), options)).unwrap();
-        block(db.execute("BEGIN")).unwrap();
-        let effects = serde_json::to_vec(commit).unwrap();
-        block(db.commit_with(effects.into())).unwrap();
+        let bytes = serde_json::to_vec(value).unwrap();
+        db.record(name).set(bytes.into());
+        block(db.seal(None)).unwrap();
     }
 
     /// Batches in the image's chain.

@@ -6,10 +6,10 @@
 //! run's state, its memory, its tables, each extension) keeps its part in
 //! one of three places around it:
 //!
-//! - **In the seal**: a small record ([`Sink::record`]), which the next
-//!   transaction starts from.
-//! - **Before it, named by it**: bytes too large for the seal go to the
-//!   scope's [`ScopeBlobs`] first; the record names them. A blob no seal
+//! - **In the seal**: a [`Record`], a named whole value the commit record
+//!   holds, which the next transaction starts from.
+//! - **Before it, named by it**: bytes too large for a record go to the
+//!   scope's [`ScopeBlobs`] first; the record names them. A blob no record
 //!   names is garbage, which the host collects.
 //! - **After it**: what reaches the outside world (a request, a command) is
 //!   an operation the seal records, made once it is written, and again on
@@ -19,12 +19,10 @@
 //! refuse only before the seal, by failing [`Participant::prepare`]. And
 //! [`Participant::committed`] and [`Participant::aborted`] are notices, which
 //! a crash may skip: what a participant is, it recovers from the seal.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlite_kv::ChainUpdate;
+pub use sqlite_kv::Record;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -34,9 +32,9 @@ use std::{
 /// Something a turn's transaction keeps.
 #[async_trait]
 pub trait Participant: Send {
-    /// Before the seal: put what changed in `sink`. An error abandons the
+    /// Before the seal: set the records that changed. An error abandons the
     /// transaction (and the attempt, which starts again from the last seal).
-    async fn prepare(&mut self, _sink: &mut Sink) -> Result<()> {
+    async fn prepare(&mut self) -> Result<()> {
         Ok(())
     }
 
@@ -46,82 +44,11 @@ pub trait Participant: Send {
     /// The transaction is abandoned: what was prepared is not sealed.
     fn aborted(&mut self) {}
 
-    /// The blobs the last seal's record names, or `None` while some it will
+    /// The blobs the last seal's records name, or `None` while some it will
     /// name may still be in flight (written by an operation the host is
     /// making): until then, the host collects none.
     fn holds(&self) -> Option<BTreeSet<String>> {
         Some(BTreeSet::new())
-    }
-}
-
-/// What a participant puts in the seal.
-pub struct Sink {
-    record: Option<Value>,
-    chain: Option<ChainUpdate>,
-}
-
-impl Sink {
-    /// The record the last seal kept, which this one keeps unless replaced.
-    pub fn kept(&self) -> Option<&Value> {
-        self.record.as_ref()
-    }
-
-    /// Keep `record` in the seal instead.
-    pub fn record(&mut self, record: Value) {
-        self.record = Some(record);
-    }
-
-    /// Change the database's chain with the seal: the run's memory's.
-    pub(crate) fn chain(&mut self, update: ChainUpdate) {
-        self.chain = Some(update);
-    }
-}
-
-/// The seal: each participant's record, by name. What the scope's
-/// database's commit holds as its effects, with its SQL and its chain.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct Seal {
-    /// Seals written in the scope, this one included.
-    pub seq: u64,
-    pub parts: BTreeMap<String, Value>,
-}
-
-/// The next seal, as its participants prepare it.
-pub(crate) struct Sealing {
-    seal: Seal,
-    chain: Option<ChainUpdate>,
-}
-
-impl Sealing {
-    /// After `previous`, whose records it keeps unless replaced.
-    pub fn after(previous: &Seal) -> Self {
-        let seal = Seal {
-            seq: previous.seq + 1,
-            parts: previous.parts.clone(),
-        };
-        Self { seal, chain: None }
-    }
-
-    /// `participant`'s part, as `name`.
-    pub async fn prepare(&mut self, name: &str, participant: &mut dyn Participant) -> Result<()> {
-        let mut sink = Sink {
-            record: self.seal.parts.remove(name),
-            chain: None,
-        };
-        participant.prepare(&mut sink).await?;
-        self.seal
-            .parts
-            .extend(sink.record.map(|record| (name.to_owned(), record)));
-        if let Some(chain) = sink.chain {
-            ensure!(self.chain.is_none(), "Two participants change the chain");
-            self.chain = Some(chain);
-        }
-        Ok(())
-    }
-
-    /// The seal, and the chain's change.
-    pub fn finish(self) -> (Seal, Option<ChainUpdate>) {
-        (self.seal, self.chain)
     }
 }
 

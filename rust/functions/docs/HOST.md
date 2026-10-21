@@ -179,16 +179,20 @@ two commit points once SQL joined.
 ### The record
 
 ```text
-v14/commit = SC14
+v15/commit = SC15
   version, epoch, size, next_segment, garbage
-  effects: the run's state as JSON           // run, program, meta, memoryLen,
-                                             // pending (the outbox), status, outcome
+  directory: records by id and name, each inline or stored
+    run:     the run's state as JSON         // run, program, pending (the outbox),
+                                             // status, outcome
+    memory:  the memory's as JSON            // meta, memoryLen, batches
+    <name>:  each extension's
   log:     the SQL transactions since the checkpoint, inline or stored
   chain:   the VM's QPD3 batches, in order   // the host's, opaque to sqlite-kv
 ```
 
 - **A turn is one put.** Its SQL transaction joins `log`, its batch joins
-  `chain`, its state replaces `effects`.
+  `chain`, and the records it set replace theirs (a record past 1 KiB is a
+  stored value of its own, written first).
 - **Sealing covers both.** Past `inline_log_bytes` (1 KiB), the inline SQL
   segments and VM batches move into one stored value, written before the
   record that names it, in the same round trip.
@@ -211,9 +215,10 @@ v14/commit = SC14
   chain applied in order. The record's pending Waits are made again, under
   their IDs.
 
-The API is `Session::commit_turn(effects, chain)`, where `chain` is
-unchanged, an appended batch, or a restart with a batch, and
-`Session::chain()`, the chain as opened.
+The API is `Session::record(name)`, a handle each participant sets in its
+prepare, then `Session::seal(chain)`, where `chain` is unchanged, an
+appended batch, or a restart with a batch; and `Session::chain()`, the
+chain as opened.
 
 ## 5. Plan
 

@@ -16,7 +16,7 @@
 //! SQL without the turn.
 use crate::{
     model::MAX_INPUT,
-    transaction::{Participant, Sink},
+    transaction::Participant,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Number, Value, json};
@@ -57,20 +57,12 @@ impl Db {
         &self.session
     }
 
-    /// Write the seal: the turn's SQL, if any, with `effects` and the chain
-    /// update, in one put. The next statement begins the next turn's
-    /// transaction.
-    pub async fn seal(
-        &mut self,
-        effects: bytes::Bytes,
-        chain: Option<sqlite_kv::ChainUpdate>,
-    ) -> Result<()> {
+    /// Write the seal: the turn's SQL, if any, with every record the
+    /// participants set and the chain update, in one put. The next statement
+    /// begins the next turn's transaction.
+    pub async fn seal(&mut self, chain: Option<sqlite_kv::ChainUpdate>) -> Result<()> {
         self.began = false;
-        match chain {
-            Some(chain) => self.session.commit_turn(effects, chain).await,
-            None => self.session.commit_with(effects).await,
-        }
-        .map_err(sql)
+        self.session.seal(chain).await.map_err(sql)
     }
 
     /// The guest trapped: what its open `ctx.db.transaction` did is undone,
@@ -308,7 +300,7 @@ fn unhex(hex: &str) -> Result<Vec<u8>, String> {
 /// SQL transaction, which the seal commits.
 #[async_trait::async_trait]
 impl Participant for Db {
-    async fn prepare(&mut self, _sink: &mut Sink) -> Result<()> {
+    async fn prepare(&mut self) -> Result<()> {
         ensure!(self.savepoints == 0, "A transaction is still open");
         Ok(())
     }

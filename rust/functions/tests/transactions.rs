@@ -1,12 +1,12 @@
-//! A turn's transaction: participants prepare their parts, the host seals
-//! them in one put, and tells them; a part that fails to prepare abandons
-//! the turn, which runs again from the last seal.
+//! A turn's transaction: participants set their records, the host seals
+//! them in one put, and tells them; a participant that fails to prepare
+//! abandons the turn, which runs again from the last seal.
 mod common;
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use common::{Store, attempt, programs, settle};
-use functions::{Attached, Extension, Extensions, Outcome, Participant, Run, ScopeBlobs, Sink};
+use functions::{Attached, Extension, Extensions, Outcome, Participant, Record, Run, ScopeBlobs};
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
@@ -30,28 +30,31 @@ impl Counter {
 
 struct Counting {
     counter: Counter,
+    record: Record,
     count: u64,
 }
 
 #[async_trait]
 impl Extension for Counter {
-    async fn attach(&self, _blobs: ScopeBlobs, saved: Option<Value>) -> Result<Box<dyn Attached>> {
-        let count = saved.and_then(|saved| saved["count"].as_u64());
+    async fn attach(&self, _blobs: ScopeBlobs, record: Record) -> Result<Box<dyn Attached>> {
+        let saved: Value = serde_json::from_slice(&record.get()).unwrap_or(Value::Null);
         Ok(Box::new(Counting {
             counter: self.clone(),
-            count: count.unwrap_or(0),
+            record,
+            count: saved["count"].as_u64().unwrap_or(0),
         }))
     }
 }
 
 #[async_trait]
 impl Participant for Counting {
-    async fn prepare(&mut self, sink: &mut Sink) -> Result<()> {
+    async fn prepare(&mut self) -> Result<()> {
         if self.counter.fail.swap(false, Ordering::SeqCst) {
             bail!("Injected prepare failure");
         }
         self.count += 1;
-        sink.record(json!({"count": self.count}));
+        let record = json!({"count": self.count});
+        self.record.set(serde_json::to_vec(&record)?.into());
         Ok(())
     }
 
@@ -80,38 +83,38 @@ fn offered(counter: &Counter) -> Extensions {
 }
 
 #[tokio::test]
-async fn each_seal_holds_every_part_and_the_next_starts_from_it() {
+async fn each_seal_holds_every_record_and_the_next_starts_from_it() {
     let counter = Counter::default();
     let store = Store::default();
     let catalog = programs(TWO_SLEEPS);
     let mut run = attempt(&store, &catalog, Value::Null, &offered(&counter)).await;
     assert_eq!(settle(&mut run).await, json!("done"));
     assert_eq!(counter.log(), ["committed 1", "committed 2", "committed 3"]);
-    let seal = store.commit();
-    assert_eq!(seal["seq"], 3);
-    let parts: Vec<&String> = seal["parts"].as_object().unwrap().keys().collect();
-    assert_eq!(parts, ["counter", "memory", "run"]);
-    assert_eq!(seal["parts"]["counter"], json!({"count": 3}));
+    assert_eq!(store.seals(), 3);
+    for name in ["memory", "run"] {
+        assert!(store.record(name).is_object(), "{name}");
+    }
+    assert_eq!(store.record("counter"), json!({"count": 3}));
 
-    // The next run in the scope: the extension's part carries over, as the
+    // The next run in the scope: the extension's record carries over, as the
     // scope's tables do.
     let scope = store.scope().extended(offered(&counter));
     let mut next = Run::start(&catalog, &scope, "s", "r2", "v1", "main", Value::Null, 20)
         .await
         .unwrap();
     settle(&mut next).await;
-    assert_eq!(store.commit()["seq"], 6);
-    assert_eq!(store.commit()["parts"]["counter"], json!({"count": 6}));
+    assert_eq!(store.seals(), 6);
+    assert_eq!(store.record("counter"), json!({"count": 6}));
 }
 
 #[tokio::test]
-async fn a_part_that_fails_to_prepare_abandons_the_turn() {
+async fn a_participant_that_fails_to_prepare_abandons_the_turn() {
     let counter = Counter::default();
     let store = Store::default();
     let catalog = programs(TWO_SLEEPS);
     let mut run = attempt(&store, &catalog, Value::Null, &offered(&counter)).await;
     counter.log();
-    let sealed = store.commit();
+    let sealed = store.values();
     let timer = run.view().state.pending[0].clone();
 
     // The second turn's prepare fails: nothing is sealed, every participant
@@ -122,7 +125,7 @@ async fn a_part_that_fails_to_prepare_abandons_the_turn() {
         .await;
     assert!(format!("{:#}", delivered.unwrap_err()).contains("Injected prepare failure"));
     assert_eq!(counter.log(), ["aborted"]);
-    assert_eq!(store.commit(), sealed);
+    assert_eq!(store.values(), sealed);
     assert!(
         run.deliver(timer.id(), Outcome::success(Value::Null), 10)
             .await

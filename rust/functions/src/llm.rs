@@ -26,7 +26,7 @@
 use crate::{
     Binding, GuestError, Operation, Outcome,
     extension::{Attached, Extension, HostCall, Making, Tables},
-    transaction::{Participant, ScopeBlobs},
+    transaction::{Participant, Record, ScopeBlobs},
 };
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
@@ -244,7 +244,7 @@ impl Extension for Llm {
     async fn attach(
         &self,
         _blobs: ScopeBlobs,
-        _saved: Option<Value>,
+        _record: Record,
     ) -> anyhow::Result<Box<dyn Attached>> {
         Ok(Box::new(Asking {
             llm: self.clone(),

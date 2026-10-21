@@ -13,16 +13,17 @@
 //!   made; [`Attached::delivered`], in the turn its outcome arrives, before
 //!   the program sees it.
 //! - **State kept by the turn's transaction**: an attached extension is a
-//!   [`Participant`]: it puts its record in the seal, its large state in the
-//!   scope's blobs, which the record names. The next attempt, on any
-//!   machine, gets the record back in [`Extension::attach`].
+//!   [`Participant`]: it keeps its state in its [`Record`] (named as the
+//!   extension), its large state in the scope's blobs, which the record
+//!   names. The next attempt, on any machine, reads the record back from
+//!   [`Extension::attach`].
 //!
 //! What a seal keeps of an extension belongs to the scope, as its tables
 //! do: it carries over from one run to the next.
 use crate::{
     GuestError, Operation, Outcome,
     db::Db,
-    transaction::{Blobs, Participant, ScopeBlobs, Sealing},
+    transaction::{Blobs, Participant, Record, ScopeBlobs},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -70,8 +71,8 @@ impl Tables<'_> {
 #[async_trait]
 pub trait Extension: Send + Sync + 'static {
     /// Its part of a run in the scope `blobs` are of: as the scope's last
-    /// seal left it (`saved`, its record), or new.
-    async fn attach(&self, blobs: ScopeBlobs, saved: Option<Value>) -> Result<Box<dyn Attached>>;
+    /// seal left its `record` (empty if none did), or new.
+    async fn attach(&self, blobs: ScopeBlobs, record: Record) -> Result<Box<dyn Attached>>;
 }
 
 /// An extension's part of one attempt at a run: a participant in each of
@@ -127,7 +128,7 @@ pub trait Attached: Participant {
     fn park(&mut self) {}
 }
 
-/// The runtime's own participants' names, in the seal.
+/// The runtime's own participants' names, which name their records.
 pub(crate) const BUILT_IN: [&str; 3] = ["run", "memory", "tables"];
 
 /// The extensions a deployment offers its programs, by name, and where
@@ -166,16 +167,12 @@ impl Extensions {
 pub(crate) struct Attachments(BTreeMap<String, Box<dyn Attached>>);
 
 impl Attachments {
-    /// Each of `extensions`, in `scope`, as `saved` (the last commit's) has it.
-    pub async fn attach(
-        extensions: &Extensions,
-        blobs: &ScopeBlobs,
-        saved: &BTreeMap<String, Value>,
-    ) -> Result<Self> {
+    /// Each of `extensions`, in the scope `db` is of, with its record.
+    pub async fn attach(extensions: &Extensions, blobs: &ScopeBlobs, db: &Db) -> Result<Self> {
         let mut attached = BTreeMap::new();
         for (name, extension) in &extensions.offered {
-            let saved = saved.get(name).cloned();
-            let part = extension.attach(blobs.clone(), saved).await?;
+            let record = db.session().record(name);
+            let part = extension.attach(blobs.clone(), record).await?;
             attached.insert(name.clone(), part);
         }
         Ok(Self(attached))
@@ -187,10 +184,10 @@ impl Attachments {
         self.0.get_mut(name)
     }
 
-    /// Each extension's part of `sealing`.
-    pub async fn prepare(&mut self, sealing: &mut Sealing) -> Result<()> {
-        for (name, part) in &mut self.0 {
-            sealing.prepare(name, part.as_mut()).await?;
+    /// Each extension's part of the seal.
+    pub async fn prepare(&mut self) -> Result<()> {
+        for part in self.0.values_mut() {
+            part.prepare().await?;
         }
         Ok(())
     }

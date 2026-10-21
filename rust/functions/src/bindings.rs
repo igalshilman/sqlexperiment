@@ -17,7 +17,7 @@
 use crate::{
     GuestError,
     extension::{Attached, Extension, HostCall, Making, Tables},
-    transaction::{Participant, ScopeBlobs},
+    transaction::{Participant, Record, ScopeBlobs},
 };
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -43,7 +43,7 @@ impl<B: Binding + Clone> Extension for B {
     async fn attach(
         &self,
         _blobs: ScopeBlobs,
-        _saved: Option<Value>,
+        _record: Record,
     ) -> anyhow::Result<Box<dyn Attached>> {
         Ok(Box::new(Bound(self.clone())))
     }
