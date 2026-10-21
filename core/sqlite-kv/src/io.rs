@@ -36,7 +36,7 @@
 //! The engine WAL never becomes a durable KV object.
 use crate::kv::KvStore;
 use crate::page_codec::Page;
-use crate::snapshot::{Snapshot, StorageOptions};
+use crate::snapshot::{SQL_FILE, Snapshot, StorageOptions, Writes, Written};
 use bytes::BytesMut;
 use futures::future::join_all;
 use std::{
@@ -350,7 +350,7 @@ impl KvIo {
         if let Some(page) = self.resident_block(file, index) {
             return Ok(page);
         }
-        match self.snapshot().block(index).await? {
+        match self.snapshot().read(SQL_FILE, index).await? {
             Some(page) if page.len() == BLOCK_SIZE => Ok(page),
             Some(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -571,16 +571,21 @@ impl KvIo {
     /// the committed view.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn publish(&self) -> io::Result<crate::SaveReport> {
-        self.publish_with(Default::default(), None).await
+        self.publish_with(Writes::new(), Default::default(), None)
+            .await
     }
 
-    /// [`Self::publish`], replacing `records` and changing the host's chain
-    /// (see [`Snapshot::commit`]).
+    /// [`Self::publish`], with `writes` to other paged files, replacing
+    /// `records` and changing the host's chain (see [`Snapshot::commit`]).
     pub(crate) async fn publish_with(
         &self,
+        mut writes: Writes,
         records: crate::log::Records,
         chain: Option<crate::ChainUpdate>,
     ) -> io::Result<crate::SaveReport> {
+        if writes.contains_key(SQL_FILE) {
+            return Err(invalid(format!("{SQL_FILE:?} is the SQL database's file")));
+        }
         if self.pending_count() != 0 {
             return Err(invalid("cannot save with pending I/O"));
         }
@@ -604,7 +609,8 @@ impl KvIo {
             }
             (dirty, state.sizes[0])
         };
-        let (report, after) = self.snapshot().commit(dirty, size, records, chain).await?;
+        writes.insert(SQL_FILE.to_owned(), Written { size, pages: dirty });
+        let (report, after) = self.snapshot().commit(writes, records, chain).await?;
         *self.version.lock().unwrap() = report.version;
         *self.snapshot.lock().unwrap() = Arc::new(after);
         Ok(report)

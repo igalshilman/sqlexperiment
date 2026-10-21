@@ -37,15 +37,18 @@ covers differs.
 
 A namespace holds four kinds of keys:
 
-| Key            | Holds                                                                                                                                                                         |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v15/commit`   | The commit record: the version, the epoch, the size, the log since the last checkpoint (its tail inline, the rest naming stored values), the host's records and chain.        |
-| `v15/log/<n>`  | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, before the record that names it, deleted once no record names it. |
-| `v15/page/<n>` | Page _n_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                                     |
-| `v15/hint`     | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                                       |
+| Key                | Holds                                                                                                                                                                                                                |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v15/commit`       | The commit record: the version, the epoch, the directory of files (records and paged files, with their sizes), the log since the last checkpoint (its tail inline, the rest naming stored values), the host's chain. |
+| `v15/log/<n>`      | A stored value: segments the record's inline log sealed, or a large transaction's. Immutable: written once, before the record that names it, deleted once no record names it.                                        |
+| `v15/page/<f>/<n>` | Page _n_ of paged file _f_ as of some checkpoint, overwritten in place. Absent means zeros.                                                                                                                          |
+| `v15/hint`         | Advisory: pages a cold open should fetch. Never needed for correctness.                                                                                                                                              |
 
-**Read rule.** Page _n_ is its latest image in the record's log, else
-`page/<n>`, else zeros.
+**Read rule.** Page _n_ of a paged file is its latest image in the record's
+log, else `page/<f>/<n>`, else zeros. The SQL database is the paged file
+`db`; the host's files (`Session::file`) are others, written in the same
+transactions. Everything below says "page" for a page of any file: a page is
+a file and a number.
 
 **The record is the commit point.** A transaction is committed once a record
 that holds it is durable. Each put of the record is one transaction more

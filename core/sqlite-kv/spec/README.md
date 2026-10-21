@@ -35,8 +35,10 @@ Page values are transaction ids, so a state names which transaction last
 wrote each page. A ghost history records the acknowledged transactions and at
 most one whose outcome is unknown (a failed sync).
 
-Not modelled: the SQL engine, page encodings, effects and the host's chain
-(they ride in the record), the working-set hint, prefetch and readahead (they
+Not modelled: the SQL engine, page encodings, records and the host's chain
+(they ride in the record), files (a page here is abstract: a page of a paged
+file is its file and its number, and nothing in the protocol tells files
+apart), the working-set hint, prefetch and readahead (they
 change which reads happen, not their values), transactions of several stored
 values, overlapping sessions within one process (reader marks), and deleted
 pages.

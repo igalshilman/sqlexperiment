@@ -46,7 +46,10 @@ use crate::{
     format::{COMMIT, HINT, log_key, page_key},
     hint::{self, Usage},
     kv::KvStore,
-    log::{self, Commit, Entry, Images, Log, Logged, Part, Records, Sealed},
+    log::{
+        self, Change, Commit, Entry, Images, Kind, Log, Logged, Part, Records, Sealed, file_of,
+        page_id,
+    },
     page_codec::{self, Page, PageCompression},
 };
 use bytes::Bytes;
@@ -56,8 +59,27 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Logical page replacements from the session; `None` is a hole.
-type Changes = BTreeMap<u64, Option<Page>>;
+/// Logical page replacements of one file, by page number; `None` is a hole.
+pub(crate) type Changes = BTreeMap<u64, Option<Page>>;
+
+/// The name of the file SQL keeps its database in.
+pub(crate) const SQL_FILE: &str = "db";
+
+/// What a commit writes to one paged file: its size after it, and the pages
+/// it changed.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Written {
+    pub size: u64,
+    pub pages: Changes,
+}
+
+/// What a commit writes to paged files, by name.
+pub(crate) type Writes = BTreeMap<String, Written>;
+
+/// Writes to the SQL file only.
+pub(crate) fn sql_writes(pages: Changes, size: u64) -> Writes {
+    Writes::from([(SQL_FILE.to_owned(), Written { size, pages })])
+}
 
 /// Default [`StorageOptions::prefetch_pages`].
 pub const PREFETCH_PAGES: u64 = 16;
@@ -252,17 +274,24 @@ impl Snapshot {
             None => Commit::default(),
         };
         let known = cache.is_some_and(|c| c.validate(commit_bytes.as_deref(), commit.epoch));
-        // Without warm pages, fetch a small database whole, or the pages the
+        // Without warm pages, fetch each small file whole, and the pages the
         // working-set hint lists, alongside the log's stored segments.
-        let pages = commit.size.div_ceil(PAGE);
         let cold = cache.is_none_or(|cache| !cache.knows_epoch(commit.epoch));
         let logged = commit.inline_pages();
-        let wanted: Vec<u64> = match (cold, &hint) {
-            (false, _) => Vec::new(),
-            _ if pages <= options.prefetch_pages => (0..pages).collect(),
-            (true, Some(hint)) => hint::decode(hint, options.hint_pages).unwrap_or_default(),
-            (true, None) => Vec::new(),
-        };
+        let mut wanted = std::collections::BTreeSet::new();
+        if cold {
+            let mut large = false;
+            for (file, size) in commit.paged() {
+                let pages = size.div_ceil(PAGE);
+                match pages <= options.prefetch_pages {
+                    true => wanted.extend((0..pages).map(|page| page_id(file, page))),
+                    false => large = true,
+                }
+            }
+            if let (true, Some(hint)) = (large, &hint) {
+                wanted.extend(hint::decode(hint, options.hint_pages).unwrap_or_default());
+            }
+        }
         let wanted: Vec<u64> = wanted.into_iter().filter(|n| !logged.contains(n)).collect();
         let prefetch = async {
             let tokens: Vec<_> = wanted.iter().map(|&n| cache.map(|c| c.token(n))).collect();
@@ -357,9 +386,23 @@ impl Snapshot {
         self.commit.version
     }
 
-    /// Logical database size after replaying the log.
+    /// The SQL file's size after replaying the log.
     pub fn size(&self) -> u64 {
-        self.commit.size
+        self.file_size(SQL_FILE)
+    }
+
+    /// The size of the paged file `name` after replaying the log; 0 if it
+    /// has none.
+    pub fn file_size(&self, name: &str) -> u64 {
+        (self.commit.file_id(name)).map_or(0, |id| self.commit.size(id))
+    }
+
+    /// Page `page` of the file `name`: see [`Self::block`].
+    pub async fn read(&self, name: &str, page: u64) -> io::Result<Option<Page>> {
+        match self.commit.file_id(name) {
+            Some(id) => self.block(page_id(id, page)).await,
+            None => Ok(None),
+        }
     }
 
     /// The records' values, by name (see [`crate::Session::record`]).
@@ -372,8 +415,9 @@ impl Snapshot {
         &self.chain
     }
 
-    /// Decode a logical page; `None` means a hole. The log's latest image wins,
-    /// then the cache, then the checkpointed value at `page/<n>`.
+    /// Decode the page `index` (a page id, see [`log::page_id`]); `None` means
+    /// a hole. The log's latest image wins, then the cache, then the
+    /// checkpointed value at its page key.
     pub async fn block(&self, index: u64) -> io::Result<Option<Page>> {
         if let Some((cached, page)) = &*self.page.lock().unwrap()
             && *cached == index
@@ -423,7 +467,8 @@ impl Snapshot {
             return Ok(value);
         }
         let ahead = self.readahead.lock().unwrap().window();
-        let last = self.size().div_ceil(PAGE);
+        let file = file_of(index);
+        let last = page_id(file, self.commit.size(file).div_ceil(PAGE));
         let ahead: Vec<u64> = {
             let fetched = self.fetched.lock().unwrap();
             (index + 1..(index + 1 + ahead).min(last))
@@ -478,19 +523,20 @@ impl Snapshot {
     /// cancellation. After an error, reopen; never reuse this snapshot.
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<SaveReport> {
-        Ok(self.commit(dirty, size, Records::new(), None).await?.0)
+        let writes = sql_writes(dirty, size);
+        Ok(self.commit(writes, Records::new(), None).await?.0)
     }
 
     /// [`Self::publish`], also returning the committed view afterwards, which a
-    /// session may continue on. This snapshot is not used again. Each of
-    /// `records` replaces that record's value, and with `chain`, the host's
-    /// chain changes, in the same put. Without SQL changes the log gains no
+    /// session may continue on. This snapshot is not used again. `writes`
+    /// change paged files (a new name makes a new file), each of `records`
+    /// replaces that record's value, and with `chain`, the host's chain
+    /// changes, in the same put. Without page changes the log gains no
     /// transaction; without any change nothing is committed. A commit that
     /// leaves the log long also checkpoints it, before the one sync.
     pub(crate) async fn commit(
         &self,
-        dirty: Changes,
-        size: u64,
+        mut writes: Writes,
         mut records: Records,
         chain: Option<ChainUpdate>,
     ) -> io::Result<(SaveReport, Self)> {
@@ -513,13 +559,38 @@ impl Snapshot {
                 ),
             ));
         }
-        if let Some(name) = records.keys().find(|name| name.len() > log::MAX_NAME_BYTES) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("record name {name:?} exceeds {} bytes", log::MAX_NAME_BYTES),
-            ));
+        for name in records.keys().chain(writes.keys()) {
+            if name.len() > log::MAX_NAME_BYTES {
+                return refuse(format!(
+                    "name {name:?} exceeds {} bytes",
+                    log::MAX_NAME_BYTES
+                ));
+            }
         }
-        let changed = !dirty.is_empty() || size != self.size();
+        for (name, written) in &writes {
+            let paged = |id| matches!(self.commit.directory[&id].kind, Kind::Paged { .. });
+            if records.contains_key(name) || self.commit.file_id(name).is_some_and(|id| !paged(id))
+            {
+                return refuse(format!("{name:?} is a record, not a paged file"));
+            }
+            let size = written.size;
+            if !size.is_multiple_of(512) || size > log::MAX_DATABASE_BYTES {
+                return refuse(format!("{name:?}: invalid size {size}"));
+            }
+            if written.pages.keys().any(|&page| page >= 1 << 32) {
+                return refuse(format!("{name:?}: a page past the largest file"));
+            }
+        }
+        for name in records.keys() {
+            let paged = |id| matches!(self.commit.directory[&id].kind, Kind::Paged { .. });
+            if self.commit.file_id(name).is_some_and(paged) {
+                return refuse(format!("{name:?} is a paged file, not a record"));
+            }
+        }
+        writes.retain(|name, written| {
+            !written.pages.is_empty() || written.size != self.file_size(name)
+        });
+        let changed = !writes.is_empty();
         if !changed && records.is_empty() && chain.is_none() {
             let report = SaveReport {
                 version: self.version(),
@@ -538,13 +609,30 @@ impl Snapshot {
                 "another session committed since this one opened; reopen",
             ));
         }
-        let images: Images = dirty;
-        let segments = match changed {
-            true => log::encode_transaction(&images, &self.log.chain)?,
-            false => Vec::new(),
-        };
-        let logged_bytes = segments.iter().map(Bytes::len).sum::<usize>();
         let mut commit = self.commit.clone();
+        // A file's id, allocated for a new name.
+        let allocate = |commit: &mut Commit, name: &str, kind: Kind| match commit.file_id(name) {
+            Some(id) => Ok(id),
+            None if commit.next_file >= log::MAX_FILES => refuse("too many files".into()),
+            None => {
+                let id = commit.next_file;
+                commit.next_file += 1;
+                let name = name.to_owned();
+                commit.directory.insert(id, Entry { name, kind });
+                Ok(id)
+            }
+        };
+        let mut images = Images::new();
+        let mut sizes = BTreeMap::new();
+        for (name, written) in writes {
+            let id = allocate(&mut commit, &name, Kind::Paged { size: 0 })?;
+            images.extend(
+                (written.pages.into_iter()).map(|(page, image)| (page_id(id, page), image)),
+            );
+            sizes.insert(id, written.size);
+        }
+        let mut segments = log::encode_transaction(&images, &self.log.chain)?;
+        let logged_bytes = segments.values().flatten().map(Bytes::len).sum::<usize>();
         // Stored values this record names, for the cache.
         let mut named = log::Values::new();
         let named_before = commit.stored_values();
@@ -572,15 +660,23 @@ impl Snapshot {
             write(&log_key(n), Some(value)).map(|()| n)
         };
         let large = logged_bytes > budget;
-        let parts: Vec<Part> = match large {
-            true => (segments.iter())
-                .map(|segment| {
-                    store_value(&mut commit, std::slice::from_ref(segment))
-                        .map(|n| Part::Stored(n, 0))
-                })
-                .collect::<io::Result<_>>()?,
-            false => segments.into_iter().map(Part::Inline).collect(),
-        };
+        let mut changes = Vec::with_capacity(sizes.len());
+        for (&file, &size) in &sizes {
+            let segments = segments.remove(&file).unwrap_or_default();
+            let parts: Vec<Part> = match large {
+                true => (segments.iter())
+                    .map(|segment| {
+                        store_value(&mut commit, std::slice::from_ref(segment))
+                            .map(|n| Part::Stored(n, 0))
+                    })
+                    .collect::<io::Result<_>>()?,
+                false => segments.into_iter().map(Part::Inline).collect(),
+            };
+            if let Some(entry) = commit.directory.get_mut(&file) {
+                entry.kind = Kind::Paged { size };
+            }
+            changes.push(Change { file, size, parts });
+        }
         let mut values = self.chain.clone();
         let (restart, value) = match &chain {
             None => (false, None),
@@ -627,38 +723,21 @@ impl Snapshot {
         }
         let mut after_records = self.records.clone();
         for (name, value) in records {
-            let id = match commit.record_id(&name) {
-                Some(id) => id,
-                None => {
-                    let id = commit.next_file;
-                    if id >= log::MAX_FILES {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "too many records",
-                        ));
-                    }
-                    commit.next_file = id + 1;
-                    id
-                }
-            };
+            let empty = Kind::Record(Part::Inline(Bytes::new()));
+            let id = allocate(&mut commit, &name, empty)?;
             let record = match value.len() > budget {
                 true => Part::Stored(store_value(&mut commit, std::slice::from_ref(&value))?, 0),
                 false => Part::Inline(value.clone()),
             };
-            commit.directory.insert(
-                id,
-                Entry {
-                    name: name.clone(),
-                    record,
-                },
-            );
+            if let Some(entry) = commit.directory.get_mut(&id) {
+                entry.kind = Kind::Record(record);
+            }
             after_records.insert(name, value);
         }
         // 3. The record, listing as garbage the values it names no more.
         commit.version += 1;
         if changed {
-            commit.size = size;
-            commit.log.push(Logged { size, parts });
+            commit.log.push(Logged { changes });
         }
         commit.garbage = &named_before - &commit.stored_values();
         let bytes = commit.encode();
@@ -668,7 +747,7 @@ impl Snapshot {
         after.chain = values;
         after.records = after_records;
         if changed {
-            after.extend(size, images, logged_bytes);
+            after.extend(images, logged_bytes);
         }
         // 4. A long log is checkpointed in the same sync. This view is not
         // used again: it must not hold the checkpoint back.
@@ -764,7 +843,6 @@ impl Snapshot {
                 .transactions
                 .iter()
                 .map(|t| log::Transaction {
-                    size: t.size,
                     pages: t.pages.clone(),
                     bytes: t.bytes,
                 })
@@ -823,13 +901,18 @@ impl Snapshot {
 
     /// Add this owner's acknowledged transaction to the log. Values fetched
     /// ahead for its pages are stale once a checkpoint drops it from the log.
-    fn extend(&mut self, size: u64, images: Images, bytes: usize) {
+    fn extend(&mut self, images: Images, bytes: usize) {
         let fetched = self.fetched.get_mut().unwrap();
         for page in images.keys() {
             fetched.remove(page);
         }
-        self.log.append(size, images, bytes);
+        self.log.append(images, bytes);
     }
+}
+
+/// A commit refused before it writes anything: what it was asked is invalid.
+fn refuse<T>(message: String) -> io::Result<T> {
+    Err(io::Error::new(io::ErrorKind::InvalidInput, message))
 }
 
 /// A checkpoint's page values: each page's latest image, encoded.

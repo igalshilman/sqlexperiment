@@ -7,7 +7,7 @@
 //! issued, and values it read (after a crash, a read learns what was kept).
 //! A write that fails makes its key unknown, and adds its value to a page
 //! key's possible values. Each write is checked against that state when it is
-//! issued:
+//! issued (a page is a page of a paged file: its file's id and its number):
 //!
 //! 1. **Name only what is written**: a commit record names only stored
 //!    segments written before it.
@@ -28,9 +28,9 @@
 //! 6. **Decodable**: every record put decodes, its log against the segments
 //!    it names, and its records' and chain's values are known.
 use crate::{
-    format::{COMMIT, LOG_PREFIX, PAGE_PREFIX},
+    format::{COMMIT, LOG_PREFIX, parse_page_key},
     kv::KvStore,
-    log::{self, Commit, Images, Part},
+    log::{self, Commit, Images, Kind, Part},
     page_codec,
 };
 use bytes::Bytes;
@@ -60,7 +60,8 @@ impl<S> Deref for MonitorKv<S> {
 struct Known {
     /// Stored segments, by number.
     segments: BTreeMap<u64, Bytes>,
-    /// The values each page key may hold durably; `None` is a hole.
+    /// The values each page key may hold durably, by page id; `None` is a
+    /// hole.
     pages: HashMap<u64, Vec<Option<Bytes>>>,
     commit: Option<Commit>,
     violations: Vec<String>,
@@ -79,15 +80,11 @@ impl Known {
         let mut transactions = Vec::new();
         for transaction in &commit.log {
             let mut images = Images::new();
-            for part in &transaction.parts {
-                let segment = match part {
-                    Part::Inline(bytes) => bytes.clone(),
-                    Part::Stored(n, index) => log::stored_segments(self.segments.get(n)?)
-                        .ok()?
-                        .get(*index as usize)?
-                        .clone(),
-                };
-                images.extend(log::decode_segment(&segment, &chain).ok()?);
+            for change in &transaction.changes {
+                for part in &change.parts {
+                    let segment = self.value(part)?;
+                    images.extend(log::decode_segment(&segment, &chain, change.file).ok()?);
+                }
             }
             chain.images.extend(images.clone());
             transactions.push(images);
@@ -111,11 +108,17 @@ impl Known {
         commit.chain.iter().map(|part| self.value(part)).collect()
     }
 
-    /// `commit`'s records by id, with their names and values; `None` when one
-    /// it names is unknown.
-    fn records(&self, commit: &Commit) -> Option<BTreeMap<u32, (String, Bytes)>> {
+    /// `commit`'s files by id, with their names, and a record's value or a
+    /// paged file's size; `None` when a record's value is unknown.
+    fn files(&self, commit: &Commit) -> Option<BTreeMap<u32, (String, Held)>> {
         (commit.directory.iter())
-            .map(|(&id, entry)| Some((id, (entry.name.clone(), self.value(&entry.record)?))))
+            .map(|(&id, entry)| {
+                let held = match &entry.kind {
+                    Kind::Record(part) => Held::Record(self.value(part)?),
+                    Kind::Paged { size } => Held::Paged(*size),
+                };
+                Some((id, (entry.name.clone(), held)))
+            })
             .collect()
     }
 
@@ -139,7 +142,7 @@ impl Known {
             if n < self.commit().next_segment {
                 self.violation(format!("{key}: a segment number already allocated"));
             }
-        } else if let Some(page) = parse(key, PAGE_PREFIX) {
+        } else if let Some(page) = parse_page_key(key) {
             self.check_image(key, page, Some(value));
         } else if key == COMMIT {
             self.check_commit(value);
@@ -154,7 +157,7 @@ impl Known {
         // 1, 6: it names known segments, and its log decodes
         if self.transactions(&commit).is_none()
             || self.chain(&commit).is_none()
-            || self.records(&commit).is_none()
+            || self.files(&commit).is_none()
         {
             return self.violation(format!(
                 "commit {}: names an unknown segment, or does not decode",
@@ -164,15 +167,18 @@ impl Known {
         if commit == known {
             return;
         }
-        let same = |a: &Commit, b: &Commit| {
-            (a.size, a.next_segment, a.next_file) == (b.size, b.next_segment, b.next_file)
-        };
+        let same =
+            |a: &Commit, b: &Commit| (a.next_segment, a.next_file) == (b.next_segment, b.next_file);
         if commit.version == known.version + 1 {
             // 2: the known log plus one transaction (or none, for a commit
             // without SQL changes), whether its earlier transactions stay
             // inline or are sealed into a stored value; the known chain, plus
             // a value, restarted with one, or cleared
-            let sizes = |c: &Commit| c.log.iter().map(|t| t.size).collect::<Vec<_>>();
+            let sizes = |c: &Commit| {
+                let sizes = |t: &log::Logged| t.changes.iter().map(|c| (c.file, c.size)).collect();
+                c.log.iter().map(sizes).collect::<Vec<Vec<_>>>()
+            };
+            let paged = |c: &Commit| c.paged().collect::<Vec<_>>();
             let earlier = self.transactions(&commit).map(|mut t| {
                 t.truncate(known.log.len());
                 t
@@ -187,17 +193,16 @@ impl Known {
                 }
                 _ => false,
             };
-            // every known record, under its id and name
+            // every known file, under its id and name, of its kind
+            let kind = |entry: &log::Entry| matches!(entry.kind, Kind::Record(_));
             let keeps_records = commit.next_file >= known.next_file
                 && known.directory.iter().all(|(id, entry)| {
-                    commit
-                        .directory
-                        .get(id)
-                        .is_some_and(|e| e.name == entry.name)
+                    (commit.directory.get(id))
+                        .is_some_and(|e| e.name == entry.name && kind(e) == kind(entry))
                 });
             let (named, known_named) = (commit.stored_values(), known.stored_values());
             let extends = commit.epoch == known.epoch
-                && (added == Some(1) || (added == Some(0) && commit.size == known.size))
+                && (added == Some(1) || (added == Some(0) && paged(&commit) == paged(&known)))
                 && sizes(&commit)[..known.log.len()] == sizes(&known)[..]
                 && earlier.is_some()
                 && earlier == self.transactions(&known)
@@ -219,7 +224,7 @@ impl Known {
             && commit.log.is_empty()
             && same(&commit, &known)
             && self.chain(&commit) == self.chain(&known)
-            && self.records(&commit) == self.records(&known)
+            && self.files(&commit) == self.files(&known)
         {
             // 3: every page of the known log is known at its key
             let Some(known_log) = self.transactions(&known) else {
@@ -274,7 +279,7 @@ impl Known {
             if self.commit().stored_values().contains(&n) {
                 self.violation(format!("{key}: deleted while the known record names it"));
             }
-        } else if let Some(page) = parse(key, PAGE_PREFIX) {
+        } else if let Some(page) = parse_page_key(key) {
             self.check_image(key, page, None);
         } else if key == COMMIT {
             self.violation("commit: deleted".into());
@@ -288,7 +293,7 @@ impl Known {
                 Some(value) => self.segments.insert(n, value),
                 None => self.segments.remove(&n),
             };
-        } else if let Some(page) = parse(key, PAGE_PREFIX) {
+        } else if let Some(page) = parse_page_key(key) {
             self.pages.insert(page, vec![value]);
         } else if key == COMMIT {
             self.commit = value.and_then(|bytes| Commit::decode(&bytes).ok());
@@ -299,7 +304,7 @@ impl Known {
     fn forget(&mut self, key: &str, value: Option<&Bytes>) {
         if let Some(n) = parse(key, LOG_PREFIX) {
             self.segments.remove(&n);
-        } else if let Some(page) = parse(key, PAGE_PREFIX)
+        } else if let Some(page) = parse_page_key(key)
             && let Some(held) = self.pages.get_mut(&page)
         {
             held.push(value.cloned());
@@ -308,6 +313,13 @@ impl Known {
         // so checks against it stay conservative until a read learns which.
         // (A write fails only as its session ends.)
     }
+}
+
+/// What a file of the directory holds, as the monitor compares it.
+#[derive(Debug, PartialEq)]
+enum Held {
+    Record(Bytes),
+    Paged(u64),
 }
 
 fn parse(key: &str, prefix: &str) -> Option<u64> {

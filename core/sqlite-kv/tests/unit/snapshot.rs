@@ -121,7 +121,7 @@ fn a_save_is_one_put_and_a_checkpointed_page_one_get() -> io::Result<()> {
         assert!(keys(&store, LOG_PREFIX).is_empty());
         let commit = record(&store).await?;
         assert_eq!(
-            (commit.version, commit.epoch, commit.size),
+            (commit.version, commit.epoch, commit.size(0)),
             (2, 1, 4 * 4096)
         );
         assert!(commit.log.is_empty());
@@ -747,7 +747,7 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
             for round in 0..12u64 {
                 let size = PREFETCH_PAGES * 4096;
                 let (_, next) = snapshot
-                    .commit(rewrite.clone(), size, Default::default(), None)
+                    .commit(sql_writes(rewrite.clone(), size), Default::default(), None)
                     .await?;
                 model.apply(&rewrite, size);
                 snapshot = next;
@@ -782,7 +782,7 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             for round in 0..12 {
                 let (changes, size) = dirty(round);
                 let (report, after) = snapshot
-                    .commit(changes.clone(), size, Default::default(), None)
+                    .commit(sql_writes(changes.clone(), size), Default::default(), None)
                     .await?;
                 assert_eq!(report.checkpointed_pages, 0);
                 model.apply(&changes, size);
@@ -801,7 +801,7 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             store.reset_stats();
             let (changes, size) = dirty(12);
             let (report, after) = snapshot
-                .commit(changes.clone(), size, Default::default(), None)
+                .commit(sql_writes(changes.clone(), size), Default::default(), None)
                 .await?;
             model.apply(&changes, size);
             let distinct = model.pages.len();

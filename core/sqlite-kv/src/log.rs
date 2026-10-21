@@ -66,13 +66,7 @@ pub(crate) const MAX_SEQUENCE: u64 = 1 << 62;
 /// Largest database size a stored record may name (16 TiB).
 pub(crate) const MAX_DATABASE_BYTES: u64 = 1 << 44;
 
-/// Whether a stored database size is plausible: whole pages of at least the
-/// smallest SQLite page size, bounded.
-fn valid_size(size: u64) -> bool {
-    size.is_multiple_of(512) && size <= MAX_DATABASE_BYTES
-}
-
-/// Logical page images by page number; `None` is a hole.
+/// Logical page images by page id (see [`page_id`]); `None` is a hole.
 pub(crate) type Images = BTreeMap<u64, Option<Page>>;
 
 fn invalid(what: &str) -> io::Error {
@@ -80,19 +74,19 @@ fn invalid(what: &str) -> io::Error {
 }
 
 /// The previous images a segment is compressed against: the latest image of
-/// each page in the log before it.
+/// each page in the log before it, by page id.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Chain {
     pub images: Images,
 }
 
 impl Chain {
-    /// The dictionary of a segment of `pages`: the previous image of each one
-    /// with an image, in order.
-    fn dictionary<'a>(&self, pages: impl Iterator<Item = &'a (u64, bool)>) -> Vec<u8> {
+    /// The dictionary of a segment of `file`'s `pages`: the previous image of
+    /// each one with an image, in order.
+    fn dictionary<'a>(&self, file: u32, pages: impl Iterator<Item = &'a (u64, bool)>) -> Vec<u8> {
         let mut out = Vec::new();
         for (index, _) in pages.filter(|(_, image)| *image) {
-            if let Some(Some(previous)) = self.images.get(index) {
+            if let Some(Some(previous)) = self.images.get(&page_id(file, *index)) {
                 out.extend_from_slice(previous);
             }
         }
@@ -121,21 +115,32 @@ fn get_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
     None
 }
 
-/// Encode a transaction's images as segments, compressed against `chain`.
-/// An empty transaction (one [`crate::Session::commit`] records) has none.
-pub(crate) fn encode_transaction(images: &Images, chain: &Chain) -> io::Result<Vec<Bytes>> {
-    let entries: Vec<_> = images
-        .iter()
-        .map(|(&index, image)| (index, image))
-        .collect();
-    entries
-        .chunks(MAX_SEGMENT_PAGES)
-        .map(|entries| encode_segment(entries, chain).map(Bytes::from))
-        .collect()
+/// Encode a transaction's images as segments, each of one file's pages,
+/// compressed against `chain`: each file's segments, by file.
+pub(crate) fn encode_transaction(
+    images: &Images,
+    chain: &Chain,
+) -> io::Result<BTreeMap<u32, Vec<Bytes>>> {
+    let mut files: BTreeMap<u32, Vec<(u64, &Option<Page>)>> = BTreeMap::new();
+    for (&id, image) in images {
+        files
+            .entry(file_of(id))
+            .or_default()
+            .push((page_of(id), image));
+    }
+    let mut segments = BTreeMap::new();
+    for (file, entries) in files {
+        let encoded = (entries.chunks(MAX_SEGMENT_PAGES))
+            .map(|entries| encode_segment(file, entries, chain).map(Bytes::from))
+            .collect::<io::Result<_>>()?;
+        segments.insert(file, encoded);
+    }
+    Ok(segments)
 }
 
-/// One segment of `entries`.
+/// One segment of `file`'s `entries` (page numbers in the file).
 pub(crate) fn encode_segment(
+    file: u32,
     entries: &[(u64, &Option<Page>)],
     chain: &Chain,
 ) -> io::Result<Vec<u8>> {
@@ -159,7 +164,7 @@ pub(crate) fn encode_segment(
         .copied()
         .collect();
     if !raw.is_empty() {
-        let dictionary = chain.dictionary(pages.iter());
+        let dictionary = chain.dictionary(file, pages.iter());
         let mut frame = Vec::with_capacity(zstd_safe::compress_bound(raw.len()));
         let mut cctx = CCtx::create();
         cctx.set_parameter(CParameter::CompressionLevel(ZSTD_LEVEL))
@@ -205,16 +210,17 @@ pub(crate) fn entries(bytes: &[u8]) -> io::Result<(Vec<(u64, bool)>, usize)> {
     Ok((pages, at))
 }
 
-/// Decode a segment that follows `chain`.
-pub(crate) fn decode_segment(bytes: &[u8], chain: &Chain) -> io::Result<Images> {
+/// Decode a segment of `file`'s pages that follows `chain`: images by page
+/// id.
+pub(crate) fn decode_segment(bytes: &[u8], chain: &Chain, file: u32) -> io::Result<Images> {
     let (pages, at) = entries(bytes)?;
     let count = pages.iter().filter(|(_, image)| *image).count();
     let mut images = Images::new();
     if count == 0 {
-        images.extend(pages.iter().map(|&(index, _)| (index, None)));
+        images.extend(pages.iter().map(|&(index, _)| (page_id(file, index), None)));
         return Ok(images);
     }
-    let dictionary = chain.dictionary(pages.iter());
+    let dictionary = chain.dictionary(file, pages.iter());
     let mut raw = Vec::with_capacity(count * BLOCK_SIZE);
     let mut dctx = DCtx::create();
     dctx.ref_prefix(&dictionary)
@@ -230,7 +236,7 @@ pub(crate) fn decode_segment(bytes: &[u8], chain: &Chain) -> io::Result<Images> 
             next += BLOCK_SIZE;
             raw.slice(next - BLOCK_SIZE..next)
         });
-        images.insert(index, page);
+        images.insert(page_id(file, index), page);
     }
     Ok(images)
 }
@@ -296,49 +302,84 @@ pub(crate) enum Part {
     Stored(u64, u32),
 }
 
-/// A named record: a whole value, replaced whole, kept by checkpoints.
+/// A page's id across files: its file's id in the high 32 bits, its page
+/// number in the low 32 (a file holds at most 2^32 pages). The cache, the
+/// hint and the log's images key pages by it.
+pub(crate) fn page_id(file: u32, page: u64) -> u64 {
+    debug_assert!(page < 1 << 32);
+    u64::from(file) << 32 | page
+}
+
+/// The file of a page id.
+pub(crate) fn file_of(id: u64) -> u32 {
+    (id >> 32) as u32
+}
+
+/// The page number of a page id, in its file.
+pub(crate) fn page_of(id: u64) -> u64 {
+    id & 0xffff_ffff
+}
+
+/// A file of the directory: its name, and what it is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Entry {
     pub name: String,
-    pub record: Part,
+    pub kind: Kind,
 }
 
-/// A committed transaction, as the commit record holds it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Kind {
+    /// A whole value, replaced whole, kept by checkpoints.
+    Record(Part),
+    /// 4 KiB pages: the log since the last checkpoint holds its changed
+    /// pages, its page keys the rest. Its size after the log.
+    Paged { size: u64 },
+}
+
+/// One file's part of a committed transaction.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Change {
+    pub file: u32,
+    /// The file's size after it.
+    pub size: u64,
+    /// Its segments, each of this file's pages.
+    pub parts: Vec<Part>,
+}
+
+/// A committed transaction, as the commit record holds it: each paged file
+/// it changed, in ascending id order.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Logged {
-    /// Database size after it.
-    pub size: u64,
-    pub parts: Vec<Part>,
+    pub changes: Vec<Change>,
 }
 
 /// The commit record at `commit`.
 ///
-/// Encoding: `SC15`, then LEB128 varints: the version, the epoch, the
-/// database size in 512-byte units, the next segment number, the garbage's
-/// count and its numbers (ascending, each from the one before), the next
-/// file id, the directory's count and per record its id (ascending, as the
-/// gap from the one before), its name's length and bytes, and its part; then
-/// the transaction count; per transaction its size in 512-byte units and its
-/// part count; then the chain's part count. Per part 0 and the bytes' length
-/// and bytes (inline), or 1, the stored value's number and the part's index
-/// in it (stored).
-#[derive(Clone, Debug, PartialEq)]
+/// Encoding: `SC15`, then LEB128 varints: the version, the epoch, the next
+/// segment number, the garbage's count and its numbers (ascending, each from
+/// the one before), the next file id, the directory's count, and per file
+/// its id (ascending, as the gap after the one before), its name's length and
+/// bytes, then 0 and its part (a record) or 1 and its size in 512-byte units
+/// (a paged file); then the transaction count, and per transaction its change
+/// count, per change its file's id, its size in 512-byte units and its part
+/// count and parts; then the chain's part count and parts. A part is 0 and
+/// the bytes' length and bytes (inline), or 1, the stored value's number and
+/// the part's index in it (stored).
+#[derive(Clone, Debug, PartialEq, Default)]
 pub(crate) struct Commit {
-    /// Transactions ever committed: the database's version.
+    /// Transactions ever committed: the namespace's version.
     pub version: u64,
     /// Checkpoints ever recorded: page keys changed only under another epoch.
     pub epoch: u64,
-    /// Database size after the log.
-    pub size: u64,
     /// The number of the next stored segment.
     pub next_segment: u64,
     /// Stored values no transaction in the log names, to delete: those a
     /// checkpoint passed, and a seal not yet named.
     pub garbage: BTreeSet<u64>,
-    /// The id the next new record takes: ids are never reused.
+    /// The id the next new file takes: ids are never reused.
     pub next_file: u32,
-    /// The records, by id: the host's values, each committed with the last
-    /// transaction that set it (its outbox, say), and kept by checkpoints.
+    /// The files, by id: records (the host's values, each committed with the
+    /// last transaction that set it, its outbox say) and paged files.
     pub directory: BTreeMap<u32, Entry>,
     /// The log since the last checkpoint, in order.
     pub log: Vec<Logged>,
@@ -347,19 +388,56 @@ pub(crate) struct Commit {
     pub chain: Vec<Part>,
 }
 
-impl Default for Commit {
-    /// An empty database, never committed.
-    fn default() -> Self {
-        Self {
-            version: 0,
-            epoch: 0,
-            size: 0,
-            next_segment: 0,
-            garbage: BTreeSet::new(),
-            next_file: 0,
-            directory: BTreeMap::new(),
-            log: Vec::new(),
-            chain: Vec::new(),
+/// Reads a commit record: each method fails on a malformed or implausible
+/// value.
+struct Reader<'a> {
+    bytes: &'a Bytes,
+    at: usize,
+}
+
+impl Reader<'_> {
+    fn varint(&mut self) -> io::Result<u64> {
+        get_varint(self.bytes, &mut self.at).ok_or_else(record_error)
+    }
+
+    /// A varint of at most `max`.
+    fn bounded(&mut self, max: u64) -> io::Result<u64> {
+        Some(self.varint()?)
+            .filter(|&n| n <= max)
+            .ok_or_else(record_error)
+    }
+
+    /// A size in 512-byte units, as bytes.
+    fn size(&mut self) -> io::Result<u64> {
+        let units = self.bounded(MAX_DATABASE_BYTES / 512)?;
+        Ok(units * 512)
+    }
+
+    /// A length, then that many bytes, of at most `max`.
+    fn bytes(&mut self, max: usize) -> io::Result<Bytes> {
+        let len = self.bounded(max as u64)? as usize;
+        let end = (self.at.checked_add(len))
+            .filter(|&end| end <= self.bytes.len())
+            .ok_or_else(record_error)?;
+        let bytes = self.bytes.slice(self.at..end);
+        self.at = end;
+        Ok(bytes)
+    }
+
+    /// A part of at most `max` bytes inline, or naming a stored value below
+    /// `next_segment` and not in `garbage`.
+    fn part(&mut self, max: usize, next_segment: u64, garbage: &BTreeSet<u64>) -> io::Result<Part> {
+        match self.varint()? {
+            0 => Ok(Part::Inline(self.bytes(max)?)),
+            1 => {
+                let n = self.varint()?;
+                let index = u32::try_from(self.varint()?).map_err(|_| record_error())?;
+                if n >= next_segment || garbage.contains(&n) {
+                    return Err(record_error());
+                }
+                Ok(Part::Stored(n, index))
+            }
+            _ => Err(record_error()),
         }
     }
 }
@@ -373,13 +451,12 @@ impl Commit {
                 Part::Stored(..) => 15,
             })
             .sum();
-        let names: usize = self.directory.values().map(|e| e.name.len() + 4).sum();
-        let mut out = Vec::with_capacity(64 + names + 4 * self.log.len() + inline);
+        let names: usize = self.directory.values().map(|e| e.name.len() + 8).sum();
+        let mut out = Vec::with_capacity(64 + names + 8 * self.log.len() + inline);
         out.extend_from_slice(COMMIT_MAGIC);
         for n in [
             self.version,
             self.epoch,
-            self.size / 512,
             self.next_segment,
             self.garbage.len() as u64,
         ] {
@@ -398,14 +475,27 @@ impl Commit {
             previous = Some(id);
             put_varint(&mut out, entry.name.len() as u64);
             out.extend_from_slice(entry.name.as_bytes());
-            put_part(&mut out, &entry.record);
+            match &entry.kind {
+                Kind::Record(part) => {
+                    put_varint(&mut out, 0);
+                    put_part(&mut out, part);
+                }
+                Kind::Paged { size } => {
+                    put_varint(&mut out, 1);
+                    put_varint(&mut out, size / 512);
+                }
+            }
         }
         put_varint(&mut out, self.log.len() as u64);
         for transaction in &self.log {
-            put_varint(&mut out, transaction.size / 512);
-            put_varint(&mut out, transaction.parts.len() as u64);
-            for part in &transaction.parts {
-                put_part(&mut out, part);
+            put_varint(&mut out, transaction.changes.len() as u64);
+            for change in &transaction.changes {
+                put_varint(&mut out, change.file.into());
+                put_varint(&mut out, change.size / 512);
+                put_varint(&mut out, change.parts.len() as u64);
+                for part in &change.parts {
+                    put_part(&mut out, part);
+                }
             }
         }
         put_varint(&mut out, self.chain.len() as u64);
@@ -416,128 +506,98 @@ impl Commit {
     }
 
     pub(crate) fn decode(bytes: &Bytes) -> io::Result<Self> {
-        let record = || invalid("commit record");
         if bytes.len() < MAGIC || &bytes[..MAGIC] != COMMIT_MAGIC {
-            return Err(record());
+            return Err(record_error());
         }
-        let mut at = MAGIC;
-        let varint = |at: &mut usize| get_varint(bytes, at).ok_or_else(record);
-        let version = varint(&mut at)?;
-        let epoch = varint(&mut at)?;
-        let size = varint(&mut at)?.checked_mul(512).ok_or_else(record)?;
-        let next_segment = varint(&mut at)?;
-        let garbage_count = varint(&mut at)?;
-        if garbage_count > MAX_TRANSACTIONS || next_segment > MAX_SEQUENCE {
-            return Err(record());
-        }
+        let mut r = Reader { bytes, at: MAGIC };
+        let version = r.bounded(MAX_SEQUENCE)?;
+        let epoch = r.bounded(MAX_SEQUENCE)?;
+        let next_segment = r.bounded(MAX_SEQUENCE)?;
+        let garbage_count = r.bounded(MAX_TRANSACTIONS)?;
         let mut garbage = BTreeSet::new();
         let mut previous = 0u64;
         for first in (0..garbage_count).map(|i| i == 0) {
-            let delta = varint(&mut at)?;
+            let delta = r.varint()?;
             // Ascending, and below the next segment.
             let n = previous.checked_add(delta).filter(|&n| n < next_segment);
-            let n = n.filter(|_| first || delta > 0).ok_or_else(record)?;
+            let n = n.filter(|_| first || delta > 0).ok_or_else(record_error)?;
             garbage.insert(n);
             previous = n;
         }
-        let next_file = varint(&mut at)?;
-        let files = varint(&mut at)?;
-        if next_file > u64::from(MAX_FILES) || files > next_file {
-            return Err(record());
-        }
-        let next_file = next_file as u32;
-        let mut directory_ids = Vec::with_capacity(files as usize);
-        let mut names = Vec::with_capacity(files as usize);
-        let mut record_parts = Vec::with_capacity(files as usize);
-        let mut previous: Option<u64> = None;
+        let next_file = r.bounded(MAX_FILES.into())? as u32;
+        let files = r.bounded(next_file.into())?;
+        let mut directory = BTreeMap::new();
+        let mut previous: Option<u32> = None;
         for _ in 0..files {
-            let gap = varint(&mut at)?;
+            let gap = r.varint()?;
             let id = match previous {
-                Some(p) => p.checked_add(gap).and_then(|id| id.checked_add(1)),
+                Some(p) => u64::from(p)
+                    .checked_add(gap)
+                    .and_then(|id| id.checked_add(1)),
                 None => Some(gap),
             };
-            let id = id
-                .filter(|&id| id < u64::from(next_file))
-                .ok_or_else(record)?;
+            let id = (id.filter(|&id| id < u64::from(next_file))).ok_or_else(record_error)? as u32;
             previous = Some(id);
-            let len = varint(&mut at)? as usize;
-            let end = at.checked_add(len).filter(|&end| end <= bytes.len());
-            let end = end.filter(|_| len <= MAX_NAME_BYTES).ok_or_else(record)?;
-            let name = std::str::from_utf8(&bytes[at..end]).map_err(|_| record())?;
-            at = end;
-            directory_ids.push(id as u32);
-            names.push(name.to_owned());
-            // A record's part follows its name; parsed below with the others.
-            record_parts.push(at);
-            at = skip_part(bytes, at).ok_or_else(record)?;
-        }
-        let count = varint(&mut at)?;
-        let plausible = [version, epoch, next_segment]
-            .iter()
-            .all(|&n| n <= MAX_SEQUENCE)
-            && valid_size(size)
-            && count <= MAX_TRANSACTIONS
-            && count <= version;
-        if !plausible {
-            return Err(record());
-        }
-        let part = |at: &mut usize, max: usize| -> io::Result<Part> {
-            match varint(at)? {
-                0 => {
-                    let len = varint(at)? as usize;
-                    let end = at.checked_add(len).filter(|&end| end <= bytes.len());
-                    let end = end.filter(|_| len <= max).ok_or_else(record)?;
-                    let part = Part::Inline(bytes.slice(*at..end));
-                    *at = end;
-                    Ok(part)
-                }
-                1 => {
-                    let n = varint(at)?;
-                    let index = u32::try_from(varint(at)?).map_err(|_| record())?;
-                    if n >= next_segment || garbage.contains(&n) {
-                        return Err(record());
-                    }
-                    Ok(Part::Stored(n, index))
-                }
-                _ => Err(record()),
-            }
-        };
-        let mut log = Vec::with_capacity(count.min(1024) as usize);
-        for _ in 0..count {
-            let size = varint(&mut at)?.checked_mul(512).ok_or_else(record)?;
-            let parts_count = varint(&mut at)?;
-            if !valid_size(size) || parts_count > MAX_TRANSACTIONS {
-                return Err(record());
-            }
-            let mut parts = Vec::with_capacity(parts_count.min(1024) as usize);
-            for _ in 0..parts_count {
-                parts.push(part(&mut at, MAX_SEGMENT_BYTES)?);
-            }
-            log.push(Logged { size, parts });
-        }
-        let chain_count = varint(&mut at)?;
-        if chain_count > MAX_TRANSACTIONS {
-            return Err(record());
-        }
-        let mut chain = Vec::with_capacity(chain_count.min(1024) as usize);
-        for _ in 0..chain_count {
-            chain.push(part(&mut at, MAX_CHAIN_VALUE_BYTES)?);
-        }
-        if at != bytes.len() || log.last().is_some_and(|last| last.size != size) {
-            return Err(record());
-        }
-        let mut directory = BTreeMap::new();
-        for ((id, name), mut at) in directory_ids.into_iter().zip(names).zip(record_parts) {
-            let record = part(&mut at, MAX_RECORD_BYTES)?;
+            let name = r.bytes(MAX_NAME_BYTES)?;
+            let name = String::from_utf8(name.to_vec()).map_err(|_| record_error())?;
+            let kind = match r.varint()? {
+                0 => Kind::Record(r.part(MAX_RECORD_BYTES, next_segment, &garbage)?),
+                1 => Kind::Paged { size: r.size()? },
+                _ => return Err(record_error()),
+            };
             if directory.values().any(|entry: &Entry| entry.name == name) {
                 return Err(record_error());
             }
-            directory.insert(id, Entry { name, record });
+            directory.insert(id, Entry { name, kind });
+        }
+        let paged = |file: u32| {
+            matches!(
+                directory.get(&file),
+                Some(Entry {
+                    kind: Kind::Paged { .. },
+                    ..
+                })
+            )
+        };
+        let count = r.bounded(MAX_TRANSACTIONS.min(version))?;
+        let mut log = Vec::with_capacity(count.min(1024) as usize);
+        // The size each file has after the log, which the directory holds.
+        let mut sizes = BTreeMap::new();
+        for _ in 0..count {
+            let changes_count = r.bounded(files)?;
+            let mut changes = Vec::with_capacity(changes_count as usize);
+            for _ in 0..changes_count {
+                let file = r.bounded(u32::MAX.into())? as u32;
+                // Distinct paged files, ascending.
+                let ascending = changes.last().is_none_or(|last: &Change| last.file < file);
+                if !paged(file) || !ascending {
+                    return Err(record_error());
+                }
+                let size = r.size()?;
+                let parts_count = r.bounded(MAX_TRANSACTIONS)?;
+                let mut parts = Vec::with_capacity(parts_count.min(1024) as usize);
+                for _ in 0..parts_count {
+                    parts.push(r.part(MAX_SEGMENT_BYTES, next_segment, &garbage)?);
+                }
+                sizes.insert(file, size);
+                changes.push(Change { file, size, parts });
+            }
+            log.push(Logged { changes });
+        }
+        let chain_count = r.bounded(MAX_TRANSACTIONS)?;
+        let mut chain = Vec::with_capacity(chain_count.min(1024) as usize);
+        for _ in 0..chain_count {
+            chain.push(r.part(MAX_CHAIN_VALUE_BYTES, next_segment, &garbage)?);
+        }
+        let sized = sizes.iter().all(|(file, size)| {
+            matches!(&directory[file].kind, Kind::Paged { size: held } if held == size)
+        });
+        if r.at != bytes.len() || !sized {
+            return Err(record_error());
         }
         Ok(Self {
             version,
             epoch,
-            size,
             next_segment,
             garbage,
             next_file,
@@ -549,20 +609,50 @@ impl Commit {
 
     /// The parts a seal takes, in order: the log's then the chain's.
     fn sealable(&self) -> impl Iterator<Item = &Part> {
-        self.log.iter().flat_map(|t| &t.parts).chain(&self.chain)
+        self.log_parts().chain(&self.chain)
+    }
+
+    /// The log's parts, in order.
+    fn log_parts(&self) -> impl Iterator<Item = &Part> {
+        (self.log.iter())
+            .flat_map(|t| &t.changes)
+            .flat_map(|change| &change.parts)
     }
 
     /// Every part: the sealable ones, then the records'.
     pub(crate) fn parts(&self) -> impl Iterator<Item = &Part> {
-        (self.sealable()).chain(self.directory.values().map(|entry| &entry.record))
+        let records = self
+            .directory
+            .values()
+            .filter_map(|entry| match &entry.kind {
+                Kind::Record(part) => Some(part),
+                Kind::Paged { .. } => None,
+            });
+        self.sealable().chain(records)
     }
 
-    /// The id of the record named `name`.
-    pub(crate) fn record_id(&self, name: &str) -> Option<u32> {
+    /// The id of the file named `name`.
+    pub(crate) fn file_id(&self, name: &str) -> Option<u32> {
         let mut entries = self.directory.iter();
         entries
             .find(|(_, entry)| entry.name == name)
             .map(|(&id, _)| id)
+    }
+
+    /// The size of the paged file `file`; 0 for any other.
+    pub(crate) fn size(&self, file: u32) -> u64 {
+        match self.directory.get(&file).map(|entry| &entry.kind) {
+            Some(Kind::Paged { size }) => *size,
+            _ => 0,
+        }
+    }
+
+    /// The paged files, and their sizes.
+    pub(crate) fn paged(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
+        (self.directory.iter()).filter_map(|(&id, entry)| match entry.kind {
+            Kind::Paged { size } => Some((id, size)),
+            Kind::Record(_) => None,
+        })
     }
 
     /// Bytes of the inline parts, the log's and the chain's.
@@ -575,25 +665,29 @@ impl Commit {
             .sum()
     }
 
-    /// The pages the log's inline segments change, read from their entries
-    /// without decoding images: the log overrides them, so open need not
-    /// fetch their page keys.
-    pub(crate) fn inline_pages(&self) -> std::collections::BTreeSet<u64> {
-        self.log
-            .iter()
-            .flat_map(|t| &t.parts)
-            .filter_map(|part| match part {
-                Part::Inline(bytes) => entries(bytes).ok(),
-                Part::Stored(..) => None,
-            })
-            .flat_map(|(pages, _)| pages.into_iter().map(|(index, _)| index))
-            .collect()
+    /// The pages the log's inline segments change, as page ids, read from
+    /// their entries without decoding images: the log overrides them, so
+    /// open need not fetch their page keys.
+    pub(crate) fn inline_pages(&self) -> BTreeSet<u64> {
+        let mut pages = BTreeSet::new();
+        for change in self.log.iter().flat_map(|t| &t.changes) {
+            for part in &change.parts {
+                if let Part::Inline(bytes) = part
+                    && let Ok((entries, _)) = entries(bytes)
+                {
+                    pages.extend(entries.iter().map(|&(page, _)| page_id(change.file, page)));
+                }
+            }
+        }
+        pages
     }
 
     /// Name `sealed` in place of the inline parts it holds.
     pub(crate) fn name(&mut self, sealed: &Sealed) {
         let inline = |part: &&mut Part| matches!(part, Part::Inline(_));
-        let log = self.log.iter_mut().flat_map(|t| &mut t.parts);
+        let log = (self.log.iter_mut())
+            .flat_map(|t| &mut t.changes)
+            .flat_map(|change| &mut change.parts);
         let log = log.filter(inline).take(sealed.log);
         let chain = self.chain.iter_mut().filter(inline).take(sealed.chain);
         for (index, part) in log.chain(chain).enumerate() {
@@ -607,16 +701,14 @@ impl Commit {
             Part::Inline(bytes) => Some(bytes.clone()),
             Part::Stored(..) => None,
         };
-        let log = self.log.iter().flat_map(|t| &t.parts).filter_map(inline);
         (
-            log.collect(),
+            self.log_parts().filter_map(inline).collect(),
             self.chain.iter().filter_map(inline).collect(),
         )
     }
 
-    /// The stored values the record names, the log's and the chain's, by
-    /// number.
-    pub(crate) fn stored_values(&self) -> std::collections::BTreeSet<u64> {
+    /// The stored values the record names, by number.
+    pub(crate) fn stored_values(&self) -> BTreeSet<u64> {
         self.parts()
             .filter_map(|part| match part {
                 Part::Stored(n, _) => Some(*n),
@@ -628,22 +720,6 @@ impl Commit {
 
 fn record_error() -> io::Error {
     invalid("commit record")
-}
-
-/// The offset after the part at `at`, without reading it.
-fn skip_part(bytes: &[u8], mut at: usize) -> Option<usize> {
-    match get_varint(bytes, &mut at)? {
-        0 => {
-            let len = usize::try_from(get_varint(bytes, &mut at)?).ok()?;
-            at.checked_add(len).filter(|&end| end <= bytes.len())
-        }
-        1 => {
-            get_varint(bytes, &mut at)?;
-            get_varint(bytes, &mut at)?;
-            Some(at)
-        }
-        _ => None,
-    }
 }
 
 fn put_part(out: &mut Vec<u8>, part: &Part) {
@@ -663,9 +739,7 @@ fn put_part(out: &mut Vec<u8>, part: &Part) {
 
 /// A committed transaction in the replayed log.
 pub(crate) struct Transaction {
-    /// Database size after it.
-    pub size: u64,
-    /// Pages it changed.
+    /// Pages it changed, by id.
     pub pages: Vec<u64>,
     /// Encoded bytes of its segments.
     pub bytes: usize,
@@ -693,9 +767,8 @@ impl Log {
     }
 
     /// Add a committed transaction.
-    pub(crate) fn append(&mut self, size: u64, images: Images, bytes: usize) {
+    pub(crate) fn append(&mut self, images: Images, bytes: usize) {
         self.transactions.push(Transaction {
-            size,
             pages: images.keys().copied().collect(),
             bytes,
         });
@@ -758,22 +831,27 @@ pub(crate) async fn replay(
     for transaction in &commit.log {
         let mut images = Images::new();
         let mut bytes = 0;
-        for part in &transaction.parts {
-            let segment = resolve(part)?;
-            bytes += segment.len();
-            // The parts of a transaction decode against the log before it.
-            images.extend(decode_segment(&segment, &log.chain)?);
+        for change in &transaction.changes {
+            for part in &change.parts {
+                let segment = resolve(part)?;
+                bytes += segment.len();
+                // The parts of a transaction decode against the log before it.
+                images.extend(decode_segment(&segment, &log.chain, change.file)?);
+            }
         }
-        log.append(transaction.size, images, bytes);
+        log.append(images, bytes);
     }
     let chain = commit
         .chain
         .iter()
         .map(resolve)
         .collect::<io::Result<_>>()?;
-    let records = (commit.directory.values())
-        .map(|entry| Ok((entry.name.clone(), resolve(&entry.record)?)))
-        .collect::<io::Result<_>>()?;
+    let mut records = Records::new();
+    for entry in commit.directory.values() {
+        if let Kind::Record(part) = &entry.kind {
+            records.insert(entry.name.clone(), resolve(part)?);
+        }
+    }
     Ok(Replayed {
         log,
         chain,
