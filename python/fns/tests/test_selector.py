@@ -17,7 +17,7 @@ from restate.vm import (
     Suspended,
     UnresolvedFuture,
 )
-from restate_sql.selector import FutureSelector, is_ready
+from restate_fns.selector import FutureSelector, is_ready
 
 
 @pytest.fixture(scope="session")

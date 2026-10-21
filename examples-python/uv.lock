@@ -191,13 +191,13 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "restate-agents" },
-    { name = "restate-sql" },
+    { name = "restate-fns" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "restate-agents", editable = "../python/agents" },
-    { name = "restate-sql", editable = "../python/sql" },
+    { name = "restate-fns", editable = "../python/fns" },
 ]
 
 [[package]]
@@ -913,7 +913,7 @@ dependencies = [
     { name = "langchain-core" },
     { name = "langgraph" },
     { name = "pydantic-ai-slim", extra = ["anthropic"] },
-    { name = "restate-sql" },
+    { name = "restate-fns" },
 ]
 
 [package.metadata]
@@ -924,7 +924,22 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=1.6" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "pydantic-ai-slim", extras = ["anthropic"], specifier = ">=2.57" },
-    { name = "restate-sql", editable = "../python/sql" },
+    { name = "restate-fns", editable = "../python/fns" },
+]
+
+[[package]]
+name = "restate-fns"
+version = "0.1.0"
+source = { editable = "../python/fns" }
+dependencies = [
+    { name = "restate-sdk" },
+    { name = "sqlite-kv" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "restate-sdk", editable = "../python/sdk/.build/sdk-python" },
+    { name = "sqlite-kv", editable = "../python/sqlite-kv" },
 ]
 
 [[package]]
@@ -956,21 +971,6 @@ requires-dist = [
     { name = "testcontainers", marker = "extra == 'harness'" },
 ]
 provides-extras = ["adk", "client", "harness", "langchain", "lint", "openai", "pydantic-ai", "serde", "test", "tracing", "zstd"]
-
-[[package]]
-name = "restate-sql"
-version = "0.1.0"
-source = { editable = "../python/sql" }
-dependencies = [
-    { name = "restate-sdk" },
-    { name = "sqlite-kv" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "restate-sdk", editable = "../python/sdk/.build/sdk-python" },
-    { name = "sqlite-kv", editable = "../python/sqlite-kv" },
-]
 
 [[package]]
 name = "sniffio"

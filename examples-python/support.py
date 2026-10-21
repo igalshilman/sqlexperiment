@@ -25,7 +25,7 @@ tool call), see what it does, or stop it:
 
 from datetime import timedelta
 
-import restate_sql as restate
+import restate_fns as restate
 from pydantic import BaseModel
 from restate_agents import call, langgraph, serve, signal, workflow
 

@@ -404,7 +404,7 @@ own: here, an assistant whose tools keep facts in its own table
 ([`examples-typescript/memory.ts`](../../../examples-typescript/memory.ts)):
 
 ```ts
-import type * as restate from 'restate-sql';
+import type * as restate from 'restate-fns';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
@@ -469,7 +469,7 @@ message being answered.
 ## Build your own
 
 `restate-agents` is not published: it runs on
-[`restate-sql`](../sql/README.md) (SQL in virtual objects) and the Node.js
+[`restate-fns`](../sql/README.md) (SQL in virtual objects) and the Node.js
 addon, which this repository builds. Build it once, at the repository's root, with `make js`:
 it needs Rust (for the Node.js addon), Node 24 or later, and pnpm; `nix develop` has them all (see
 [Build and test](../../../README.md#build-and-test)).

@@ -14,7 +14,7 @@
  *   curl localhost:8080/coder/fizzbuzz/chat -d 'Also write a README at the top'   # refused: not in src/
  *   curl localhost:8080/coder/fizzbuzz/messages
  */
-import type * as restate from 'restate-sql';
+import type * as restate from 'restate-fns';
 import type { Plugin } from '@opencode/plugin';
 import { chatHandler, object, serve } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';

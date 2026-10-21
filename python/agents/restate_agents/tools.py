@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Annotated, Any
 
-import restate_sql as restate
+import restate_fns as restate
 from pydantic import BaseModel, Field, create_model
 from pydantic_core import to_json
 from restate.handler import Handler, handler_from_callable

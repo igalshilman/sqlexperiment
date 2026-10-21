@@ -8,7 +8,7 @@
 // A framework that gives a tool call cut off by a crash a new id (OpenCode,
 // the DeepSeek Harness) has the model retry it with `retryOf`, the id of the
 // call it retries.
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import { tool } from 'restate-agents';
 import { z } from 'zod';
 import { ledger } from '../sql/ledger.ts';

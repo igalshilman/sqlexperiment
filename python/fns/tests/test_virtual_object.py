@@ -1,27 +1,27 @@
-"""restate_sql.VirtualObject: its options, and which of its handlers get ctx.db."""
+"""restate_fns.VirtualObject: its options, and which of its handlers get ctx.db."""
 
 from datetime import timedelta
 
 import restate
-import restate_sql
+import restate_fns
 from restate.handler import handler_from_callable
 
-notes = restate_sql.VirtualObject("notes")
+notes = restate_fns.VirtualObject("notes")
 
 
 @notes.handler()
-async def add(ctx: restate_sql.ObjectContext, note: str) -> None:
+async def add(ctx: restate_fns.ObjectContext, note: str) -> None:
     await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [note])
 
 
 @notes.handler(kind="shared")
-async def count(ctx: restate_sql.ObjectSharedContext) -> int:
+async def count(ctx: restate_fns.ObjectSharedContext) -> int:
     [[n]] = await ctx.db.query("SELECT count(*) FROM notes")
     return n
 
 
 @notes.handler(journal_replay=True)
-async def wait(ctx: restate_sql.JournaledObjectContext) -> str:
+async def wait(ctx: restate_fns.JournaledObjectContext) -> str:
     _, signal = ctx.awakeable()
     return await signal
 
@@ -54,10 +54,10 @@ def test_it_is_an_object_without_journal_replay_with_lazy_state_and_no_journal_k
 
 
 def test_options_add_to_the_sql_options():
-    obj = restate_sql.VirtualObject("o", inactivity_timeout=timedelta(seconds=5), enable_lazy_state=False)
+    obj = restate_fns.VirtualObject("o", inactivity_timeout=timedelta(seconds=5), enable_lazy_state=False)
 
     @obj.handler()
-    async def h(ctx: restate_sql.ObjectContext) -> None:
+    async def h(ctx: restate_fns.ObjectContext) -> None:
         pass
 
     assert obj.inactivity_timeout == timedelta(seconds=5)

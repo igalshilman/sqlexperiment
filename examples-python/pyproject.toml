@@ -1,17 +1,17 @@
 # The Python examples, each a file you run with `uv run`, after `make py` at
-# the repository's root: restate-sql and restate-agents, from the
+# the repository's root: restate-fns and restate-agents, from the
 # workspace of python/.
 [project]
 name = "examples"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["restate-agents", "restate-sql"]
+dependencies = ["restate-agents", "restate-fns"]
 
 [tool.uv]
 package = false
 
 [tool.uv.sources]
 restate-agents = { path = "../python/agents", editable = true }
-restate-sql = { path = "../python/sql", editable = true }
+restate-fns = { path = "../python/fns", editable = true }
 restate-sdk = { path = "../python/sdk/.build/sdk-python", editable = true }
 sqlite-kv = { path = "../python/sqlite-kv", editable = true }

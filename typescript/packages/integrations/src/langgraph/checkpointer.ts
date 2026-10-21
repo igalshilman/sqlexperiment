@@ -33,7 +33,7 @@ import {
   type PendingWrite,
   type SerializerProtocol,
 } from '@langchain/langgraph-checkpoint';
-import type { SqlSession, SqlValue } from 'restate-sql';
+import type { SqlSession, SqlValue } from 'restate-fns';
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS checkpoints (

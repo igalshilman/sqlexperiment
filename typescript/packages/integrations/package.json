@@ -59,7 +59,7 @@
     "@restatedev/restate-sdk-core": "1.17.4",
     "@standard-schema/spec": "1.1.0",
     "effect": "4.0.1",
-    "restate-sql": "workspace:*",
+    "restate-fns": "workspace:*",
     "sqlite-kv": "workspace:*",
     "zod": "4.6.5"
   },

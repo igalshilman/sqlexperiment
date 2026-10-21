@@ -24,7 +24,7 @@
 //   would hand it to the model as the tool's result).
 // - A message is answered once per invocation: the graph records each answer
 //   in its state, and a retried attempt returns it.
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';

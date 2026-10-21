@@ -1,6 +1,6 @@
 // The Effect SqlClient of restate-agents/opencode/db over a sqlite-kv database in memory.
 // `make test-ts T=opencode`.
-import type { SqlSession } from 'restate-sql';
+import type { SqlSession } from 'restate-fns';
 import { Effect, Exit, Fiber } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { open } from 'sqlite-kv';

@@ -14,7 +14,7 @@
     "@restatedev/restate-sdk": "1.17.4",
     "@restatedev/restate-sdk-clients": "1.17.4",
     "restate-agents": "workspace:*",
-    "restate-sql": "workspace:*",
+    "restate-fns": "workspace:*",
     "sqlite-kv": "workspace:*",
     "zod": "4.6.5"
   },

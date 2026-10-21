@@ -1,7 +1,7 @@
 """The Claude agent, on the scripted teller as an Anthropic client, over an object's state through crashes."""
 
 import pytest
-import restate_sql as restate
+import restate_fns as restate
 from anthropic import beta_async_tool
 from fakes import Bank, ClaudeClient, Crash, Object, Teller
 from restate_agents import claude, tool

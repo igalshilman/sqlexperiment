@@ -22,7 +22,7 @@
 //
 // Environment: PORT (default 9080), SHOP_EXPIRY_MS (how long an unpaid order
 // holds its stock, default 5000) and ABORT_PER_MILLE (see faults.ts).
-import * as restate from 'restate-sql';
+import * as restate from 'restate-fns';
 import { serveIfMain } from '../faults.ts';
 import { row } from './sql.ts';
 

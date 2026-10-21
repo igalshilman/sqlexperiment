@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Agent frameworks in Restate virtual objects, their state in the object's SQL database"
 requires-python = ">=3.13"
 dependencies = [
-  "restate-sql",
+  "restate-fns",
   "anthropic>=1.15",
   "hypercorn>=0.17",
   "langgraph>=1.2",

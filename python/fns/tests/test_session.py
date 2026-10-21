@@ -11,7 +11,7 @@ import pytest
 import sqlite_kv
 from restate import ObjectContext, VirtualObject
 from restate.exceptions import TerminalError
-from restate_sql.session import SqlAttempt
+from restate_fns.session import SqlAttempt
 
 
 @pytest.fixture(scope="session")

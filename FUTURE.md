@@ -18,12 +18,12 @@ entries. The code is already in place, unused:
 
 | SDK        | Read now (TODO)                                          | Ephemeral read, in place                                                                                                                      |
 | ---------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| TypeScript | `objectStore` in `restate-sql`'s `session.ts`: `ctx.get` | The SDK's `ephemeralStateGet` is private (only `getProject` uses it): the SDK needs to expose it, and the selector drives it by completion id |
-| Python     | `sql_get` in `restate-sql`'s `object.py`                 | `_get_ephemeral`: the patched SDK's `vm.ephemeral_state_get`, the selector's `wait_ephemeral`                                                 |
+| TypeScript | `objectStore` in `restate-fns`'s `session.ts`: `ctx.get` | The SDK's `ephemeralStateGet` is private (only `getProject` uses it): the SDK needs to expose it, and the selector drives it by completion id |
+| Python     | `sql_get` in `restate-fns`'s `object.py`                 | `_get_ephemeral`: the patched SDK's `vm.ephemeral_state_get`, the selector's `wait_ephemeral`                                                 |
 | Rust       | `RawState::get` in `context/mod.rs`                      | `ContextInternal::get_ephemeral`, `EphemeralGetFuture`                                                                                        |
 
-The TypeScript and Python reads are in `restate-sql` (`typescript/packages/sql`,
-`python/sql`), the Rust one in its SDK's patch (`rust/sdk/patches`); the
+The TypeScript and Python reads are in `restate-fns` (`typescript/packages/fns`,
+`python/fns`), the Rust one in its SDK's patch (`rust/sdk/patches`); the
 Python SDK's patch has its ephemeral get (`python/sdk/patches`). The SDKs'
 discovery already advertises v8; a v7 server picks v7.
 
@@ -51,14 +51,14 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
 TypeScript SDK 1.17.4 has (`restate.internal.explicitRecovery()`). Release
 1.0.5 is on shared core 7.0.3, without it.
 
-**Now:** `restate-sql` (`python/sql`) runs on the Python SDK 1.0.5 with a
+**Now:** `restate-fns` (`python/fns`) runs on the Python SDK 1.0.5 with a
 patch (`python/sdk/patches`): shared core 8.1.0 and its
 `JournalReplay::Disabled`, a `journal_replay` option of services and
 handlers, state commands named after their key, and protocol v8's ephemeral
 get.
 
-**Then:** drop `python/sdk`, depend on the release in `python/sql`'s
-`pyproject.toml`, and switch `restate_sql.VirtualObject` to the release's
+**Then:** drop `python/sdk`, depend on the release in `python/fns`'s
+`pyproject.toml`, and switch `restate_fns.VirtualObject` to the release's
 option, if it is named differently.
 
 ## Concurrent awaits in the TypeScript and Python SDKs
@@ -66,8 +66,8 @@ option, if it is named differently.
 **Waits on:** a release of each SDK whose explicit recovery lets a handler
 await concurrently.
 
-**Now:** `restate-sql` drives a SQL handler's promises with a selector of its
-own (`typescript/packages/sql/src/selector.ts`), which takes over the
+**Now:** `restate-fns` drives a SQL handler's promises with a selector of its
+own (`typescript/packages/fns/src/selector.ts`), which takes over the
 invocation's `promisesExecutor.doProgress`: the SDK's internals, so the
 package pins `@restatedev/restate-sdk` 1.17.4. The published SDK lets one
 awaited promise wait for the server at a time
@@ -77,9 +77,9 @@ server fail with `awaitNext already pending`.
 **Then:** drop the selector, and the pin. `tests/concurrency.ts` tells
 whether a release has it (with the hook off, its concurrent awaits fail).
 
-The same holds in Python: `restate-sql`'s selector
-(`python/sql/restate_sql/selector.py`) takes over the context's
-`create_poll_or_cancel_coroutine` and its futures, so `python/sql` pins
+The same holds in Python: `restate-fns`'s selector
+(`python/fns/restate_fns/selector.py`) takes over the context's
+`create_poll_or_cancel_coroutine` and its futures, so `python/fns` pins
 `restate-sdk` 1.0.5. The SDK drives each awaited future with a loop of its
 own, which concurrent waits race on; `python/tests/test_context.py` tells
 (with the hook off, 4 of its 13 tests fail).

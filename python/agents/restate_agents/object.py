@@ -17,11 +17,11 @@ from typing import Any
 
 import hypercorn.asyncio
 import hypercorn.config
-import restate_sql as restate
+import restate_fns as restate
 from pydantic import BaseModel, create_model
 from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL
 from restate.serde import Serde
-from restate_sql import InvocationRetryPolicy
+from restate_fns import InvocationRetryPolicy
 
 from restate_agents.common import MessageSerde
 from restate_agents.signals import (
@@ -90,7 +90,7 @@ class Object(restate.VirtualObject):
     """
     A Restate virtual object with a SQL database of its own, ``ctx.db``: one
     per key, stored with the object's state. ``options`` are those of
-    ``restate_sql.VirtualObject``, which add to (or replace) the one set here:
+    ``restate_fns.VirtualObject``, which add to (or replace) the one set here:
     retries without end, since each attempt resumes from the database.
 
     Besides its own handlers, each has ``status``, what it is doing (the

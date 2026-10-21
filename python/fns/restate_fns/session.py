@@ -52,7 +52,7 @@ sql_options: SqlOptions = {
 }
 """
 The options of an object whose handlers use ``ctx.db``, which
-``restate_sql.VirtualObject`` sets: no journal replay, since a later attempt
+``restate_fns.VirtualObject`` sets: no journal replay, since a later attempt
 makes different reads; lazy state, so an invocation does not start by loading
 every page; and no journal kept after an invocation completes, since it holds
 every page it read.

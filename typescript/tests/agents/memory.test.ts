@@ -2,7 +2,7 @@
 // as examples/memory.ts does, without a Restate server: the facts and the
 // conversation share the object's database, and a retried attempt stores a
 // fact once.
-import type * as restate from 'restate-sql';
+import type * as restate from 'restate-fns';
 import { tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';

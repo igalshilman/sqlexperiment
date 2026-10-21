@@ -1,7 +1,7 @@
 """
 The Restate Python SDK, with SQL in virtual objects::
 
-    import restate_sql as restate
+    import restate_fns as restate
 
     notes = restate.VirtualObject("notes")
 
@@ -19,14 +19,14 @@ and ``ObjectSharedContext`` of its own: see README.md.
 from restate import *  # noqa: F403
 from restate import __all__ as _restate_all
 
-from restate_sql.object import (
+from restate_fns.object import (
     JournaledObjectContext,
     JournaledObjectSharedContext,
     ObjectContext,
     ObjectSharedContext,
     VirtualObject,
 )
-from restate_sql.session import (
+from restate_fns.session import (
     SqlDatabase,
     SqlOptions,
     SqlSession,

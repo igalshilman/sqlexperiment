@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples-python"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests"))
 
-import restate_sql as restate  # noqa: E402
+import restate_fns as restate  # noqa: E402
 from bank import account  # noqa: E402
 from fakes import ClaudeClient, Teller, pydantic_ai_model  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
@@ -35,7 +35,7 @@ from restate_agents import (  # noqa: E402
     workflow,
 )
 from restate_agents.langgraph import nodes  # noqa: E402
-from restate_sql import Context, ObjectContext, WorkflowContext  # noqa: E402
+from restate_fns import Context, ObjectContext, WorkflowContext  # noqa: E402
 from scripted_agent import teller  # noqa: E402
 
 echo = restate.Service("echo")
