@@ -88,7 +88,7 @@ class Database {
   transaction(body) {
     return this.#serial(async () => {
       const native = this.#native;
-      await native.query('BEGIN');
+      await native.begin();
       const tx = new Transaction(this, native, running.getStore());
       let result;
       try {
@@ -153,9 +153,7 @@ class Database {
  * leaves the session unusable.
  */
 async function rollback(native) {
-  if (native.isUsable()) {
-    await native.query('ROLLBACK').catch(() => {});
-  }
+  await native.rollback().catch(() => {});
 }
 
 /** SQL in one transaction, until it ends. */

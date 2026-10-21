@@ -24,7 +24,7 @@ import { SqlAttempt, type SqlHost, type SqlSession, type SqlTransaction, withSql
 
 // The SDK, but what this module declares in its place.
 export * from '@restatedev/restate-sdk';
-export type { SqlDatabase, SqlSession, SqlTransaction, SqlTransactionSends, SqlValue } from './session.ts';
+export type { SqlDatabase, SqlSession, SqlTransaction, SqlTransactionSends, SqlParam, SqlValue } from './session.ts';
 
 /** The SDK's context of an object's handler that replays its journal (`journalReplay: true`): no `ctx.db`. */
 export type JournaledObjectContext = restate.ObjectContext;

@@ -7,19 +7,19 @@ import { randomUUID } from 'node:crypto';
 import type * as restate from '@restatedev/restate-sdk';
 import { serde, TerminalError } from '@restatedev/restate-sdk';
 import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
-import { open, type Database, type SqlValue, type Store, type TransactionHandle } from 'restate-sql';
+import { open, type Database, type SqlParam, type SqlValue, type Store, type TransactionHandle } from 'restate-sql';
 import { sendClients } from './sends.ts';
 
-export type { SqlValue };
+export type { SqlParam, SqlValue };
 
 /** SQL: the object's database, or one transaction of it. */
 export interface SqlDatabase {
   /** Run SQL and return its rows; parameters bind to a single statement. */
-  query(sql: string, params?: SqlValue[]): Promise<SqlValue[][]>;
+  query(sql: string, params?: SqlParam[]): Promise<SqlValue[][]>;
   /** {@link query}, with the column names of the statement whose rows these are. */
-  queryColumns(sql: string, params?: SqlValue[]): Promise<{ columns: string[]; rows: SqlValue[][] }>;
+  queryColumns(sql: string, params?: SqlParam[]): Promise<{ columns: string[]; rows: SqlValue[][] }>;
   /** Run SQL (one or more statements), discarding rows. */
-  execute(sql: string, params?: SqlValue[]): Promise<void>;
+  execute(sql: string, params?: SqlParam[]): Promise<void>;
 }
 
 /**
