@@ -13,7 +13,13 @@ and ask the owner only critical questions.
 - **Step 2, files: done.** `Session::file`; pages keyed by a page id (the
   file's id in the high 32 bits, so the cache, hint and readahead are
   unchanged); keys `v15/page/<file>/<page>`.
-- **Step 3, based files: done; the `Journal`/`Sql` split: not yet.**
+- **Step 3, based files: done; the split: done as a handle.** `Session::journal()`
+  returns a `Journal` (records, files, `scoped(prefix)`, version), a cheap
+  handle on the session's pending changes; `Session` keeps the SQL and
+  `seal()`, which commits both. Decided: no `Sql` participant and no
+  `Durability::Participant`. The engine flushes its WAL into the journal's
+  pages at `COMMIT` already, so a separate `Sql` would only move code, and
+  every user of the journal so far also has SQL.
   `Session::file_with_base`. Decided on the way: a base has an id, which the
   directory records, and a file opens only with that base again; a based
   file's segments decode when it is opened with its base; a checkpoint waits

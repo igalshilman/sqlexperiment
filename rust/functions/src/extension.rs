@@ -171,7 +171,7 @@ impl Attachments {
     pub async fn attach(extensions: &Extensions, blobs: &ScopeBlobs, db: &Db) -> Result<Self> {
         let mut attached = BTreeMap::new();
         for (name, extension) in &extensions.offered {
-            let record = db.session().record(name);
+            let record = db.journal().record(name);
             let part = extension.attach(blobs.clone(), record).await?;
             attached.insert(name.clone(), part);
         }

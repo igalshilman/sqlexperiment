@@ -36,12 +36,14 @@ async fn turn(db: &mut Session, i: usize) -> Result<()> {
         db.execute("BEGIN").await?;
         db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     }
-    db.record("effects").set(Bytes::from(format!("turn {i}")));
-    db.record("turn").set(value(i));
+    db.journal()
+        .record("effects")
+        .set(Bytes::from(format!("turn {i}")));
+    db.journal().record("turn").set(value(i));
     if i % 11 == 10 {
-        db.record("state").set(Bytes::new());
+        db.journal().record("state").set(Bytes::new());
     } else if i.is_multiple_of(3) {
-        db.record("state").set(value(i));
+        db.journal().record("state").set(value(i));
     }
     db.seal().await.map(drop)
 }
@@ -71,7 +73,11 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
             db.execute("CREATE TABLE t(n INTEGER)").await?;
             for i in 0..60 {
                 turn(&mut db, i).await?;
-                assert_eq!(db.record("turn").get(), expected(i + 1), "turn {i}");
+                assert_eq!(
+                    db.journal().record("turn").get(),
+                    expected(i + 1),
+                    "turn {i}"
+                );
                 if i % 7 == 6 {
                     // Another session reads the same turn: the record, and the
                     // stored values it names.
@@ -79,12 +85,12 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
                     let mut other =
                         Session::open_with_options(store.clone(), options(None)).await?;
                     assert_eq!(
-                        other.record("turn").get(),
+                        other.journal().record("turn").get(),
                         expected(i + 1),
                         "turn {i}, reopened"
                     );
                     assert_eq!(other.effects(), format!("turn {i}").as_bytes());
-                    assert_eq!(other.record("state").get(), state(i + 1));
+                    assert_eq!(other.journal().record("state").get(), state(i + 1));
                     assert_eq!(rows(&mut other).await?, (i / 2 + 1) as i64);
                     drop(other);
                     db = Session::open_with_options(store.clone(), options(cache.clone())).await?;
@@ -123,7 +129,9 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
             if i % 3 == 0 {
                 db.execute("BEGIN").await?;
             }
-            db.record("turn").set(Bytes::from(vec![i as u8; 64]));
+            db.journal()
+                .record("turn")
+                .set(Bytes::from(vec![i as u8; 64]));
             db.seal().await?;
         }
         assert_eq!(db.version(), version + 100);
@@ -133,7 +141,7 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
         assert_eq!(pages(&store), 0);
         drop(db);
         let db = Session::open_with_options(store.clone(), options(None)).await?;
-        assert_eq!(db.record("turn").get(), vec![99u8; 64]);
+        assert_eq!(db.journal().record("turn").get(), vec![99u8; 64]);
         Ok(())
     })
 }
@@ -204,11 +212,11 @@ async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
         // only to read, as the cache follows one history, and the forks are
         // each another.
         let db = Session::open_with_options(store.clone(), options(cache.clone())).await?;
-        let turns = match db.record("turn").get() == expected(acknowledged) {
+        let turns = match db.journal().record("turn").get() == expected(acknowledged) {
             true => acknowledged,
             false => {
                 assert_eq!(
-                    db.record("turn").get(),
+                    db.journal().record("turn").get(),
                     expected(acknowledged + 1),
                     "{case}"
                 );
@@ -224,14 +232,45 @@ async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
                 "{case}"
             );
         }
-        assert_eq!(db.record("state").get(), state(turns), "{case}");
+        assert_eq!(db.journal().record("state").get(), state(turns), "{case}");
         assert_eq!(rows(&mut db).await?, turns.div_ceil(2) as i64, "{case}");
         // The namespace takes turns again.
         turn(&mut db, turns).await?;
         drop(db);
         let db = Session::open_with_options(store.clone(), options(None)).await?;
-        assert_eq!(db.record("turn").get(), expected(turns + 1), "{case}");
+        assert_eq!(
+            db.journal().record("turn").get(),
+            expected(turns + 1),
+            "{case}"
+        );
         assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
     }
     Ok(Some(writes + 1))
+}
+
+/// A scoped journal names its records and files under its prefix, and
+/// commits with the session.
+#[test]
+fn a_scoped_journal_is_part_of_the_session_s() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let mut db = Session::open_with_options(store.clone(), options(None)).await?;
+        let fs = db.journal().scoped("fs/");
+        fs.record("manifest").set(Bytes::from_static(b"m"));
+        fs.scoped("blobs/")
+            .file("a")?
+            .write(0, Some(vec![7; 4096].into()))?;
+        assert!(fs.file("../db").is_ok(), "only `db` itself is the SQL's");
+        assert!(db.journal().scoped("d").file("b").is_err());
+        db.seal().await?;
+        drop(db);
+        let db = Session::open_with_options(store, options(None)).await?;
+        let journal = db.journal();
+        assert_eq!(journal.record("fs/manifest").get(), &b"m"[..]);
+        assert_eq!(journal.scoped("fs/").record("manifest").get(), &b"m"[..]);
+        let file = journal.file("fs/blobs/a")?;
+        assert_eq!(file.len(), 4096);
+        assert_eq!(file.read(0).await?.unwrap()[0], 7);
+        Ok(())
+    })
 }

@@ -237,7 +237,7 @@ impl Run {
         validate_time(now)?;
         input_size(&input)?;
         let db = Db::new(scope.open().await?);
-        let [stored_run, stored_memory] = BUILT_IN_RECORDS.map(|name| db.session().record(name));
+        let [stored_run, stored_memory] = BUILT_IN_RECORDS.map(|name| db.journal().record(name));
         // What the scope's last seal kept of each extension, whichever run
         // made it.
         let blobs = ScopeBlobs::new(scope.extensions.blobs.clone(), key);
@@ -258,7 +258,8 @@ impl Run {
                 memory.file == memory_file(golden),
                 "The memory of another image"
             );
-            let file = (db.session())
+            let file = db
+                .journal()
                 .file_with_base(&memory.file, golden.clone() as Arc<dyn Base>)
                 .map_err(sql)?;
             return Ok(Self {
@@ -283,14 +284,15 @@ impl Run {
         // first seal.
         let stale = match sealed_memory {
             Some(old) if !old.pages.is_empty() => {
-                let file = db.session().file(&old.file).map_err(sql)?;
+                let file = db.journal().file(&old.file).map_err(sql)?;
                 Some((file, old.pages().collect()))
             }
             _ => None,
         };
         let golden = programs.get(program)?.image();
         let name = memory_file(golden.golden_memory());
-        let file = (db.session())
+        let file = db
+            .journal()
             .file_with_base(&name, golden.golden_memory().clone() as Arc<dyn Base>)
             .map_err(sql)?;
         let db = Arc::new(Mutex::new(db));
