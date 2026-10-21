@@ -3,7 +3,7 @@
 //! transaction ([`Durability::Commit`]), as the Node.js addon and the Python
 //! extension do.
 use bytes::Bytes;
-use journal::{Journal, Result, CommitReport, StorageOptions, kv::KvStore};
+use journal::{CommitReport, Journal, Result, StorageOptions, kv::KvStore};
 use sql::{Sql, SqlOptions, Value};
 use std::{
     ops::{Deref, DerefMut},
