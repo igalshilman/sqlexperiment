@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "SQL in Restate virtual objects: the Restate SDK with ctx.db, a database per key in the object's state"
 requires-python = ">=3.13"
 # The selector hooks the SDK's context (restate_fns/selector.py): its version is pinned.
-dependencies = ["restate-sdk==1.1.0", "sqlite-kv"]
+dependencies = ["restate-sdk==1.1.0", "journal"]
 
 [build-system]
 requires = ["hatchling"]

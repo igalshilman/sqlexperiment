@@ -1,6 +1,6 @@
 """
 An attempt's SQL session: ``ctx.db``, a database kept in the object's state,
-through the sqlite-kv extension, with no journal replay; and
+through the journal extension, with no journal replay; and
 ``ctx.transaction()``, one transaction of it with the sends it commits with.
 An attempt has one session, opened on first use and saved when the handler
 ends. It needs of the handler's context what ``SqlHost`` lists (object.py
@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, Protocol
 
-import sqlite_kv
+import journal
 from restate.context import HandlerType, SendHandle
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable
@@ -213,7 +213,7 @@ class SqlHost(Protocol):
 
 
 class SqlStore(Protocol):
-    """An ordered store, as the sqlite-kv extension takes it."""
+    """An ordered store, as the journal extension takes it."""
 
     def get(self, key: str) -> Awaitable[bytes | None]: ...
     def set(self, key: str, value: bytes) -> None: ...
@@ -558,7 +558,7 @@ class SqlAttempt:
         if _wrap_store is not None:
             store = _wrap_store(store)
         try:
-            db = await sqlite_kv.open(host.sql_namespace, store, reader=self._reader())
+            db = await journal.open(host.sql_namespace, store, reader=self._reader())
         except Exception as error:  # pylint: disable=broad-exception-caught
             _reraise(error, self.classify)
         self._db = db

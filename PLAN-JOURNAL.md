@@ -40,19 +40,19 @@ and ask the owner only critical questions.
   journal)` gets the journal scoped to `<name>/`; extension names may not
   hold `/` or `.`. `fs` keeps its manifest in the record `fs/manifest` and
   its running command in `fs/running`, so the manifest blob is gone.
-- **Step 7, rename: done for the Rust crate.** `core/sqlite-kv` is
-  `core/journal`, crate `journal`. Decided: the Node.js addon and the
-  Python extension keep their names (`sqlite-kv`): to their users they are
-  SQL over a key/value store, which the name says.
+- **Step 7, rename: done.** `core/sqlite-kv` is `core/journal`, crate
+  `journal`; the Python extension is `python/journal`, package and module
+  `journal` (its cache variable `JOURNAL_CACHE_FILE`). The Node.js addon
+  keeps its package name, `sqlite-kv-node`, which the plan left alone.
 - **Measured after step 4** (in-memory store, medians):
 
-  | | Before | After |
-  |---|--:|--:|
-  | Agent, stored over 200 steps | 2.6 MiB | 2.5 MiB |
-  | Agent, restore | 1.5 ms | 2.5 ms |
-  | Agent, model turn | 1.4 ms | 1.7 ms |
-  | Checkpoints, heap-churn turn, restored | 7.7 ms | 12.7 ms |
-  | Checkpoints, write-heavy turn, live | 6.2 ms | 3.4 ms |
+  |                                         |  Before |   After |
+  | --------------------------------------- | ------: | ------: |
+  | Agent, stored over 200 steps            | 2.6 MiB | 2.5 MiB |
+  | Agent, restore                          |  1.5 ms |  2.5 ms |
+  | Agent, model turn                       |  1.4 ms |  1.7 ms |
+  | Checkpoints, heap-churn turn, restored  |  7.7 ms | 12.7 ms |
+  | Checkpoints, write-heavy turn, live     |  6.2 ms |  3.4 ms |
   | Checkpoints, sparse turn, bytes written | ~1.0 KB | ~1.5 KB |
 
   Restore regressed by less than 2x: no extents (step 6). The sparse turns'
@@ -67,15 +67,15 @@ and ask the owner only critical questions.
   +4.4% (small databases) bytes written. The runtime (this branch also
   carries ctx.llm and the participants, so not step 4 alone):
 
-  | | `main` | Branch |
-  |---|--:|--:|
-  | Agent, stored over 200 steps | 3.2 MiB | 2.5 MiB |
-  | Agent, largest step | 238 KiB | 47 KiB |
-  | Agent, restore | 0.6 ms | 2.6 ms |
-  | Agent, model turn / tool turn | 1.2 / 0.9 ms | 1.6 / 1.8 ms |
-  | Checkpoints, heap-churn turn, live / restored | 6.0 / 7.5 ms | 9.3 / 11.3 ms |
-  | Checkpoints, write-heavy turn, live / restored | 3.9 / 4.8 ms | 4.1 / 5.0 ms |
-  | Checkpoints, sparse-256k turn, bytes written | 1.3 KB | 1.9 KB |
+  |                                                |       `main` |        Branch |
+  | ---------------------------------------------- | -----------: | ------------: |
+  | Agent, stored over 200 steps                   |      3.2 MiB |       2.5 MiB |
+  | Agent, largest step                            |      238 KiB |        47 KiB |
+  | Agent, restore                                 |       0.6 ms |        2.6 ms |
+  | Agent, model turn / tool turn                  | 1.2 / 0.9 ms |  1.6 / 1.8 ms |
+  | Checkpoints, heap-churn turn, live / restored  | 6.0 / 7.5 ms | 9.3 / 11.3 ms |
+  | Checkpoints, write-heavy turn, live / restored | 3.9 / 4.8 ms |  4.1 / 5.0 ms |
+  | Checkpoints, sparse-256k turn, bytes written   |       1.3 KB |        1.9 KB |
 
   On `main` the agent's conversation lives in the heap (174 live pages); on
   the branch it is in the scope's database, read for each model call
@@ -103,7 +103,7 @@ into stored values written first, delta compression, checkpoints, the
 process-wide page cache, garbage.
 
 None of sqlite-kv's machinery is rewritten. Its log, pages in place,
-compression, cache, hint and garbage collection already *are* the journal,
+compression, cache, hint and garbage collection already _are_ the journal,
 for one file. The work is to give pages a file, give records a name, and
 move the SQL engine from owner to client.
 
@@ -139,12 +139,12 @@ are not on the remote):
 How sqlite-kv works now (read `core/journal/docs/DESIGN.md` and
 `FORMAT.md`; they are accurate):
 
-| Key | Holds |
-|---|---|
-| `v14/commit` | The commit record: version, epoch, database size, next segment number, garbage, `effects` (opaque host bytes), the log since the last checkpoint (segments inline, or naming stored values), the host's `chain` (opaque values, appended or restarted) |
-| `v14/log/<n>` | A stored value: log segments too large for the record, or the record's inline parts sealed once they outgrow `inline_log_bytes` (1 KiB in the runtime); immutable; written before the record that names it; deleted once no record names it |
-| `v14/page/<n>` | A checkpointed page, overwritten in place; absent means zeros |
-| `v14/hint` | Advisory: pages a cold open fetches first |
+| Key            | Holds                                                                                                                                                                                                                                                  |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `v14/commit`   | The commit record: version, epoch, database size, next segment number, garbage, `effects` (opaque host bytes), the log since the last checkpoint (segments inline, or naming stored values), the host's `chain` (opaque values, appended or restarted) |
+| `v14/log/<n>`  | A stored value: log segments too large for the record, or the record's inline parts sealed once they outgrow `inline_log_bytes` (1 KiB in the runtime); immutable; written before the record that names it; deleted once no record names it            |
+| `v14/page/<n>` | A checkpointed page, overwritten in place; absent means zeros                                                                                                                                                                                          |
+| `v14/hint`     | Advisory: pages a cold open fetches first                                                                                                                                                                                                              |
 
 The read rule: a page is its latest image in the record's log, else the
 cache, else `page/<n>`, else zeros (`Snapshot::block`). A save queues, in
@@ -267,13 +267,13 @@ that identity.
 
 ### 3.3 Participants in the runtime
 
-| Participant | Opens | Notes |
-|---|---|---|
-| `run` (`RunState`) | record `run` | JSON of `RunRecord`, as today's part "run" |
+| Participant         | Opens                                                                 | Notes                                                                                                                                                                                                                                                                                                                                    |
+| ------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `run` (`RunState`)  | record `run`                                                          | JSON of `RunRecord`, as today's part "run"                                                                                                                                                                                                                                                                                               |
 | `memory` (`Memory`) | file `memory` with base = the program's golden image; record `memory` | Writes the captured pages; `set_len(memory_len)`. The record keeps `VmMeta`, `memory_len`, and the list of present pages (the pages that differ from golden, run-length encoded), since the store cannot list keys. Restore: golden mapped copy-on-write (`cow.rs`) plus `file.read` of each present page. `Clear` becomes `set_len(0)`. |
-| `tables` (`Db`) | `Sql` on file `db`, `Durability::Participant` | `prepare` = `flush`; the host seals |
-| extension `<name>` | files and records under the prefix `<name>/` | `Attachments` hands each extension a `Journal` view that prefixes names, so extensions cannot collide with each other or the built-ins |
-| `fs` | record `fs/manifest`, blobs as today | Contents stay content-addressed blobs (`Blobs`, `ScopeBlobs`): shared across checkpoints and read by `exec` outside the process |
+| `tables` (`Db`)     | `Sql` on file `db`, `Durability::Participant`                         | `prepare` = `flush`; the host seals                                                                                                                                                                                                                                                                                                      |
+| extension `<name>`  | files and records under the prefix `<name>/`                          | `Attachments` hands each extension a `Journal` view that prefixes names, so extensions cannot collide with each other or the built-ins                                                                                                                                                                                                   |
+| `fs`                | record `fs/manifest`, blobs as today                                  | Contents stay content-addressed blobs (`Blobs`, `ScopeBlobs`): shared across checkpoints and read by `exec` outside the process                                                                                                                                                                                                          |
 
 `Participant` loses `prepare(sink)`'s sink: each participant holds its
 handles and writes into them; `prepare(&mut self)` is the moment to do it.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate and aggregate the benchmark; Python standard library only."""
-import csv
 import argparse
+import csv
 from collections import defaultdict
 from pathlib import Path
 

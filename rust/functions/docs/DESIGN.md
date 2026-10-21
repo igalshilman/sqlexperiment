@@ -621,13 +621,13 @@ A scope's store holds one journal, a `journal` namespace
 `v15/commit`, the values it outgrew at `v15/log/<n>`, and pages in place at
 `v15/page/<file>/<n>`. Its files:
 
-| File                | Kind                      | Holds                                                                    |
-| ------------------- | ------------------------- | ------------------------------------------------------------------------ |
-| `run`               | Record                    | The scope's current run as of its last turn: JSON, below                 |
-| `memory`            | Record                    | Its memory: JSON, below                                                  |
-| `memory/<golden>`   | Paged file over golden    | The pages of the run's memory that differ from its program's golden one |
-| `db`                | Paged file                | SQL: the scope's KV, a table `kv(key TEXT PRIMARY KEY, value TEXT)`      |
-| `<extension>/…`     | Records and paged files   | Each extension's part of the journal (`fs/manifest`, say)                |
+| File              | Kind                    | Holds                                                                   |
+| ----------------- | ----------------------- | ----------------------------------------------------------------------- |
+| `run`             | Record                  | The scope's current run as of its last turn: JSON, below                |
+| `memory`          | Record                  | Its memory: JSON, below                                                 |
+| `memory/<golden>` | Paged file over golden  | The pages of the run's memory that differ from its program's golden one |
+| `db`              | Paged file              | SQL: the scope's KV, a table `kv(key TEXT PRIMARY KEY, value TEXT)`     |
+| `<extension>/…`   | Records and paged files | Each extension's part of the journal (`fs/manifest`, say)               |
 
 Programs and their golden images are not stored: the process supplies them
 (§5.5). The records, in camelCase JSON:
