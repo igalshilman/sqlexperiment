@@ -8,19 +8,19 @@
  *   curl localhost:8080/notes/alice/add --json '"Buy milk"'
  *   curl localhost:8080/notes/alice/list
  */
-import { object, serve } from 'restate-agents';
+import * as restate from 'restate-fns';
 
 const SCHEMA = 'CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)';
 
-const notes = object({
+const notes = restate.object({
   name: 'notes',
   handlers: {
-    add: async (ctx, note: string) => {
+    add: async (ctx: restate.ObjectContext, note: string) => {
       await ctx.db.execute(SCHEMA);
       await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
     },
 
-    list: async (ctx) => {
+    list: async (ctx: restate.ObjectContext) => {
       await ctx.db.execute(SCHEMA);
       const rows = await ctx.db.query('SELECT text FROM notes ORDER BY rowid');
       return rows.map(([text]) => text);
@@ -28,4 +28,4 @@ const notes = object({
   },
 });
 
-await serve(notes);
+await restate.serve({ services: [notes], port: 9080 });
