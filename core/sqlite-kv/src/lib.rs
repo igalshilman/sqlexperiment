@@ -478,41 +478,16 @@ impl Session {
         (files, std::mem::take(&mut *self.records.lock().unwrap()))
     }
 
-    /// The paged file named `name`, beside the SQL database (whose file is
-    /// `db`): 4 KiB pages the next commit makes durable once written (see
-    /// [`File`]).
-    pub fn file(&self, name: &str) -> Result<File> {
-        if name == snapshot::SQL_FILE {
-            return Err(format!("{name:?} is the SQL database's file").into());
-        }
-        Ok(File {
-            name: name.into(),
+    /// The journal the session commits with its SQL: its records and paged
+    /// files, made durable by the next [`Self::seal`] (or a commit, under
+    /// [`Durability::Commit`]). A cheap handle; clones share the session's
+    /// pending changes.
+    pub fn journal(&self) -> Journal {
+        Journal {
             io: self.io.clone(),
-            pending: self.files.clone(),
-            base: None,
-        })
-    }
-
-    /// The paged file named `name`, over `base` (see [`Base`]): an absent
-    /// page, or a hole, reads as the base's page, and pages are compressed
-    /// against it. A file made with a base opens only with that one again
-    /// (by [`Base::id`]); its log since the last checkpoint decodes now.
-    /// [`Self::file`] opens it without its base, to write holes and set its
-    /// length only: emptying it for another base, say.
-    pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
-        let mut file = self.file(name)?;
-        self.io.with_base(name, base.clone())?;
-        file.base = Some(base);
-        Ok(file)
-    }
-
-    /// The record named `name`: a whole value the commit record holds, which
-    /// the next commit makes durable once set (see [`Record`]).
-    pub fn record(&self, name: &str) -> Record {
-        Record {
-            name: name.into(),
-            io: self.io.clone(),
-            pending: self.records.clone(),
+            records: self.records.clone(),
+            files: self.files.clone(),
+            prefix: Arc::from(""),
         }
     }
 
@@ -524,7 +499,7 @@ impl Session {
     /// that fails changes nothing. With no transaction open, the effects
     /// commit alone, without the SQL engine.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
-        self.record(EFFECTS).set(effects);
+        self.journal().record(EFFECTS).set(effects);
         self.seal().await.map(drop)
     }
 
@@ -566,7 +541,7 @@ impl Session {
 
     /// The record `effects` (see [`Self::commit_with`]).
     pub fn effects(&self) -> Bytes {
-        self.record(EFFECTS).get()
+        self.journal().record(EFFECTS).get()
     }
 
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
@@ -858,6 +833,74 @@ impl Session {
 
 /// The record [`Session::commit_with`] sets.
 const EFFECTS: &str = "effects";
+
+/// The records and paged files a session commits with its SQL, in the same
+/// put (see [`Session::journal`]). A cheap handle; clones, and the views of
+/// [`Self::scoped`], share the session's pending changes.
+#[derive(Clone)]
+pub struct Journal {
+    io: Arc<KvIo>,
+    records: Arc<Mutex<log::Records>>,
+    files: Arc<Mutex<snapshot::Writes>>,
+    /// Prefixed to every name: a view of part of the journal.
+    prefix: Arc<str>,
+}
+
+impl Journal {
+    /// The record named `name`: a whole value the commit record holds, which
+    /// the next commit makes durable once set (see [`Record`]).
+    pub fn record(&self, name: &str) -> Record {
+        Record {
+            name: format!("{}{name}", self.prefix).into(),
+            io: self.io.clone(),
+            pending: self.records.clone(),
+        }
+    }
+
+    /// The paged file named `name`, beside the SQL database (whose file is
+    /// `db`): 4 KiB pages the next commit makes durable once written (see
+    /// [`File`]).
+    pub fn file(&self, name: &str) -> Result<File> {
+        let name = format!("{}{name}", self.prefix);
+        if name == snapshot::SQL_FILE {
+            return Err(format!("{name:?} is the SQL database's file").into());
+        }
+        Ok(File {
+            name: name.into(),
+            io: self.io.clone(),
+            pending: self.files.clone(),
+            base: None,
+        })
+    }
+
+    /// The paged file named `name`, over `base` (see [`Base`]): an absent
+    /// page, or a hole, reads as the base's page, and pages are compressed
+    /// against it. A file made with a base opens only with that one again
+    /// (by [`Base::id`]); its log since the last checkpoint decodes now.
+    /// [`Self::file`] opens it without its base, to write holes and set its
+    /// length only: emptying it for another base, say.
+    pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
+        let mut file = self.file(name)?;
+        self.io.with_base(file.name(), base.clone())?;
+        file.base = Some(base);
+        Ok(file)
+    }
+
+    /// The part of the journal whose names start with `prefix`, named
+    /// without it: an extension's, say (`scoped("fs/")` makes `manifest`
+    /// the record `fs/manifest`).
+    pub fn scoped(&self, prefix: &str) -> Journal {
+        Journal {
+            prefix: format!("{}{prefix}", self.prefix).into(),
+            ..self.clone()
+        }
+    }
+
+    /// The database's version (see [`Session::version`]).
+    pub fn version(&self) -> u64 {
+        self.io.version()
+    }
+}
 
 /// A named whole value the commit record holds, replaced whole: the host's
 /// state beside its tables (a run's progress, an outbox), committed with them

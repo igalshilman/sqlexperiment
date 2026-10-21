@@ -17,7 +17,7 @@
 use crate::{model::MAX_INPUT, transaction::Participant};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Number, Value, json};
-use sqlite_kv::{Session, Value as SqlValue};
+use sqlite_kv::{Journal, Session, Value as SqlValue};
 
 /// The scope's KV, a table of its database: values are JSON.
 const KV_TABLE: &str = "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL)";
@@ -50,8 +50,9 @@ impl Db {
         }
     }
 
-    pub fn session(&self) -> &Session {
-        &self.session
+    /// The scope's journal: the records and files sealed with its SQL.
+    pub fn journal(&self) -> Journal {
+        self.session.journal()
     }
 
     /// Write the seal: the turn's SQL, if any, with every record and file

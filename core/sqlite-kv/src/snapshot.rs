@@ -394,7 +394,7 @@ impl Snapshot {
         }
     }
 
-    /// The records' values, by name (see [`crate::Session::record`]).
+    /// The records' values, by name (see [`crate::Journal::record`]).
     pub fn records(&self) -> &Records {
         &self.records
     }

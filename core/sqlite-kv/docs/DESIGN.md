@@ -46,7 +46,7 @@ A namespace holds four kinds of keys:
 
 **Read rule.** Page _n_ of a paged file is its latest image in the record's
 log, else `page/<f>/<n>`, else zeros. The SQL database is the paged file
-`db`; the host's files (`Session::file`) are others, written in the same
+`db`; the host's files (`Journal::file`) are others, written in the same
 transactions. Everything below says "page" for a page of any file: a page is
 a file and a number. A file with a base (a VM's memory over its golden image)
 reads its base's page where it has none; see `FORMAT.md`.
@@ -126,8 +126,8 @@ checkpoint. Pages are zstd frames by default (`PageCompression::Zstd`).
 durable exactly when the transaction is, and stay, through checkpoints, until
 a later commit replaces them. The Restate SDKs keep a transaction's sends
 there, as its outbox, and make them once it commits. These are the record
-`effects`; a host may set any record (`Session::record`) and write paged
-files of its own (`Session::file`), committed by the next `Session::seal`. A
+`effects`; a host may set any record (`Journal::record`) and write paged
+files of its own (`Journal::file`), committed by the next `Session::seal`. A
 commit with no page changes adds no log transaction, so a host's turns do
 not checkpoint SQL.
 
