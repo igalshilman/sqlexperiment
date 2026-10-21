@@ -577,6 +577,7 @@ impl KvIo {
     /// The dirty pages move into the save. On success the adapter continues on
     /// the committed view.
     #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(feature = "simulation")]
     pub(crate) async fn publish(&self) -> io::Result<crate::SaveReport> {
         self.publish_with(Writes::new(), Default::default()).await
     }

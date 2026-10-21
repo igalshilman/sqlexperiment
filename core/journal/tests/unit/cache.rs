@@ -91,7 +91,7 @@ fn dropping_the_cache_frees_parked_engines() -> crate::Result<()> {
             cache: Some(cache.namespace("parked")),
             ..StorageOptions::default()
         };
-        drop(Sql::open_with_options(store, options).await?);
+        drop(Sql::open(&crate::Journal::open_with_options(store, options).await?).await?);
         assert_eq!(cache.engines.lock().unwrap().parked.len(), 1);
         let shared = Arc::downgrade(&cache.shared);
         drop(cache);

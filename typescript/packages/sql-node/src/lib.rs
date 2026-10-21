@@ -12,7 +12,7 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use journal::kv::KvStore;
-use journal::{Durability, PageCache, PageCacheConfig, Sql, StorageOptions, Value};
+use journal::{Journal, PageCache, PageCacheConfig, Sql, StorageOptions, Value};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -117,10 +117,15 @@ fn sql_error(error: Box<dyn std::error::Error + Send + Sync>) -> Error {
     Error::from_reason(error.to_string())
 }
 
-/// One session of a namespace's database.
+/// One session of a namespace's database: SQL on the namespace's journal,
+/// for an object's handler without Restate's journal. Every SQL commit is
+/// durable when its call returns: a call that leaves no SQL transaction open
+/// commits the journal.
 #[napi]
 pub struct Database {
     session: Arc<Mutex<Option<Sql>>>,
+    /// A reader's: it never commits.
+    reader: bool,
     /// Whether the session can still run SQL, as of the last call that ended:
     /// read without the lock, which a running call holds.
     usable: Arc<AtomicBool>,
@@ -152,16 +157,18 @@ pub fn open<'env>(
         };
         let options = StorageOptions {
             cache,
-            durability: Durability::Commit,
             ..StorageOptions::default()
         };
-        let session = match reader.unwrap_or(false) {
-            true => Sql::open_reader(store.clone(), options).await,
-            false => Sql::open_with_options(store.clone(), options).await,
+        let reader = reader.unwrap_or(false);
+        let journal = match reader {
+            true => Journal::open_reader(store.clone(), options).await,
+            false => Journal::open_with_options(store.clone(), options).await,
         }
         .map_err(sql_error)?;
+        let session = Sql::open(&journal).await.map_err(sql_error)?;
         Ok(Database {
             session: Arc::new(Mutex::new(Some(session))),
+            reader,
             usable: Arc::new(AtomicBool::new(true)),
         })
     })
@@ -191,6 +198,7 @@ impl Database {
             }
             None => session.query(&sql).await,
         };
+        let rows = settle(session, self.reader, rows).await;
         self.usable.store(session.is_usable(), Ordering::Release);
         let rows = rows.map_err(sql_error)?;
         Ok(rows
@@ -216,6 +224,7 @@ impl Database {
             .ok_or_else(|| Error::from_reason("the database is closed"))?;
         let params = params.map(|params| params.into_iter().map(|p| p.0).collect());
         let result = session.query_columns(&sql, params).await;
+        let result = settle(session, self.reader, result).await;
         self.usable.store(session.is_usable(), Ordering::Release);
         let (columns, rows) = result.map_err(sql_error)?;
         Ok(QueryResult {
@@ -227,8 +236,9 @@ impl Database {
         })
     }
 
-    /// `COMMIT` the open transaction; with `effects`, they commit with it
-    /// (see `Sql::commit_with`).
+    /// `COMMIT` the open transaction; with `effects`, they commit with it,
+    /// as the record `effects`, in the same put, even if the transaction
+    /// changed nothing.
     #[napi]
     pub async fn commit(&self, effects: Option<Buffer>) -> Result<()> {
         let mut session = self.session.lock().await;
@@ -236,9 +246,14 @@ impl Database {
             .as_mut()
             .ok_or_else(|| Error::from_reason("the database is closed"))?;
         let result = match effects {
-            Some(effects) => session.commit_with(Bytes::copy_from_slice(&effects)).await,
+            Some(effects) => {
+                let effects = Bytes::copy_from_slice(&effects);
+                session.journal().record(EFFECTS).set(effects);
+                session.flush().await
+            }
             None => session.execute("COMMIT").await,
         };
+        let result = settle(session, self.reader, result).await;
         self.usable.store(session.is_usable(), Ordering::Release);
         result.map_err(sql_error)
     }
@@ -251,14 +266,16 @@ impl Database {
         self.usable.load(Ordering::Acquire)
     }
 
-    /// The effects of the last commit that set them (see `Sql::effects`).
+    /// The effects of the last commit that set them.
     #[napi]
     pub async fn effects(&self) -> Result<Buffer> {
         let session = self.session.lock().await;
         let session = session
             .as_ref()
             .ok_or_else(|| Error::from_reason("the database is closed"))?;
-        Ok(Buffer::from(session.effects().to_vec()))
+        Ok(Buffer::from(
+            session.journal().record(EFFECTS).get().to_vec(),
+        ))
     }
 
     /// Whether the store still holds the state this reader opened on, so
@@ -278,8 +295,10 @@ impl Database {
     pub async fn save(&self) -> Result<()> {
         let session = self.session.lock().await.take();
         self.usable.store(false, Ordering::Release);
-        let session = session.ok_or_else(|| Error::from_reason("the database is closed"))?;
-        session.save().await.map(drop).map_err(sql_error)
+        let mut session = session.ok_or_else(|| Error::from_reason("the database is closed"))?;
+        settle(&mut session, self.reader, Ok(()))
+            .await
+            .map_err(sql_error)
     }
 
     /// End the session.
@@ -288,6 +307,26 @@ impl Database {
         self.session.lock().await.take();
         self.usable.store(false, Ordering::Release);
     }
+}
+
+/// The record a commit's effects are in.
+const EFFECTS: &str = "effects";
+
+/// After a call that leaves no SQL transaction open, commit the journal: what
+/// the SQL committed (the call's own commit, or `COMMIT`), with the effects
+/// set, durable before the call returns. A reader commits nothing, and a
+/// session that a failure ended cannot.
+async fn settle<T>(
+    session: &mut Sql,
+    reader: bool,
+    result: std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>,
+) -> std::result::Result<T, Box<dyn std::error::Error + Send + Sync>> {
+    if reader || !session.is_usable() || session.in_transaction() {
+        return result;
+    }
+    session.flush().await?;
+    session.journal().commit().await?;
+    result
 }
 
 /// Rows with the column names of their statement.

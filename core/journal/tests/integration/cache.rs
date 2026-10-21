@@ -1,5 +1,6 @@
+use crate::host::{Db, Durability};
 use journal::{
-    NamespaceCache, Result, Sql, StorageOptions,
+    NamespaceCache, Result, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, fresh_namespace},
 };
@@ -13,7 +14,7 @@ fn cached(cache: &NamespaceCache) -> StorageOptions {
 }
 
 async fn create(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<()> {
-    let mut db = Sql::open_with_options(store, options).await?;
+    let mut db = Db::open(store, options).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT)")
         .await?;
     // Incompressible: a large save that checkpoints itself through the cache.
@@ -23,7 +24,7 @@ async fn create(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<()> 
 }
 
 async fn payload_sum(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<i64> {
-    let mut db = Sql::open_with_options(store, options).await?;
+    let mut db = Db::open(store, options).await?;
     let rows = db.query("SELECT sum(length(payload) + id) FROM t").await?;
     Ok(rows[0][0].as_int().unwrap())
 }
@@ -68,7 +69,7 @@ fn other_writers_never_leave_the_cache_stale() -> Result<()> {
                 checkpoint_after,
                 ..StorageOptions::default()
             };
-            let mut db = Sql::open_with_options(store.clone(), other).await?;
+            let mut db = Db::open(store.clone(), other).await?;
             db.execute(&format!(
                 "UPDATE t SET payload = printf('%0800d', id) WHERE id % 4 = {round}"
             ))
@@ -87,7 +88,7 @@ fn owner(cache: &NamespaceCache) -> StorageOptions {
         ..StorageOptions::default()
     }
 }
-async fn count(db: &mut Sql) -> Result<i64> {
+async fn count(db: &mut Db) -> Result<i64> {
     Ok(db.query("SELECT count(*) FROM t").await?[0][0]
         .as_int()
         .unwrap())
@@ -101,38 +102,38 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
     futures::executor::block_on(async {
         let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
         let cache = fresh_namespace();
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(!db.reused_engine());
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
         db.save().await?;
 
         // After a save, and after a read-only session, the engine continues.
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(db.reused_engine(), "after a save");
         db.execute("INSERT INTO t VALUES (1)").await?;
         db.save().await?;
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(db.reused_engine());
         assert_eq!(count(&mut db).await?, 1);
         drop(db);
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(db.reused_engine(), "after a read-only session");
 
         // Unsaved changes discard the engine with them.
         db.execute("INSERT INTO t VALUES (2)").await?;
         drop(db);
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(!db.reused_engine(), "unsaved changes");
         assert_eq!(count(&mut db).await?, 1);
         drop(db);
 
         // An SQL error leaves the session, and so its engine, usable.
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(db.reused_engine());
         assert!(db.execute("INSERT INTO missing VALUES (1)").await.is_err());
         assert!(db.is_usable());
         drop(db);
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(db.reused_engine(), "after an SQL error");
         assert_eq!(count(&mut db).await?, 1);
         drop(db);
@@ -143,21 +144,21 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
                 checkpoint_after,
                 ..StorageOptions::default()
             };
-            let mut db = Sql::open_with_options(store.clone(), other).await?;
+            let mut db = Db::open(store.clone(), other).await?;
             db.execute("INSERT INTO t SELECT max(id) + 1 FROM t")
                 .await?;
             db.save().await?;
-            let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+            let mut db = Db::open(store.clone(), owner(&cache)).await?;
             assert!(!db.reused_engine(), "another writer");
             let expected = if checkpoint_after == 0 { 3 } else { 2 };
             assert_eq!(count(&mut db).await?, expected);
             drop(db);
-            let db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+            let db = Db::open(store.clone(), owner(&cache)).await?;
             assert!(db.reused_engine(), "warm again once unchanged");
         }
 
         // A save that fails before committing leaves nothing to reuse.
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
@@ -168,7 +169,7 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
         });
         assert!(db.save().await.is_err());
         store.disarm();
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(!db.reused_engine(), "failed save");
         assert_eq!(count(&mut db).await?, 3);
         Ok(())
@@ -192,7 +193,7 @@ fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
                     checkpoint_after: 4,
                     ..cached(&other)
                 };
-                let mut db = Sql::open_with_options(store.clone(), options).await?;
+                let mut db = Db::open(store.clone(), options).await?;
                 db.execute(&format!(
                     "UPDATE t SET payload = printf('%0800d', id) WHERE id = {}",
                     n * 31 + 1
@@ -226,10 +227,10 @@ fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
         };
         // The same history shape, so the same meta, with different values.
         for (n, store) in stores.iter().enumerate() {
-            let mut db = Sql::open_with_options(store.clone(), options(n)).await?;
+            let mut db = Db::open(store.clone(), options(n)).await?;
             db.execute("CREATE TABLE t(v TEXT)").await?;
             db.save().await?;
-            let mut db = Sql::open_with_options(store.clone(), options(n)).await?;
+            let mut db = Db::open(store.clone(), options(n)).await?;
             db.execute(&format!("INSERT INTO t VALUES ('from {n}')"))
                 .await?;
             db.save().await?;
@@ -237,7 +238,7 @@ fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
         let read = |n: usize| {
             let store = stores[n].clone();
             async move {
-                let mut db = Sql::open_with_options(store, options(n)).await?;
+                let mut db = Db::open(store, options(n)).await?;
                 let rows = db.query("SELECT v FROM t").await?;
                 Result::Ok(rows[0][0].to_string())
             }
@@ -286,14 +287,10 @@ fn parked_engines_are_bounded() -> Result<()> {
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
         let other: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
         let a = || owner(&cache.namespace("a"));
-        drop(Sql::open_with_options(store.clone(), a()).await?);
-        assert!(
-            Sql::open_with_options(store.clone(), a())
-                .await?
-                .reused_engine()
-        );
-        drop(Sql::open_with_options(other, owner(&cache.namespace("b"))).await?);
-        let db = Sql::open_with_options(store, a()).await?;
+        drop(Db::open(store.clone(), a()).await?);
+        assert!(Db::open(store.clone(), a()).await?.reused_engine());
+        drop(Db::open(other, owner(&cache.namespace("b"))).await?);
+        let db = Db::open(store, a()).await?;
         assert!(!db.reused_engine(), "evicted by b's engine");
         Ok(())
     })
@@ -306,22 +303,22 @@ fn an_overlapping_session_never_parks_a_stale_engine() -> Result<()> {
     futures::executor::block_on(async {
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
         let cache = fresh_namespace();
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
         db.save().await?;
 
-        let mut reader = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut reader = Db::open(store.clone(), owner(&cache)).await?;
         assert_eq!(count(&mut reader).await?, 0);
-        let mut writer = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut writer = Db::open(store.clone(), owner(&cache)).await?;
         writer.execute("INSERT INTO t VALUES (1)").await?;
         writer.save().await?;
         drop(reader);
 
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert_eq!(count(&mut db).await?, 1);
         db.execute("INSERT INTO t VALUES (2)").await?;
         db.save().await?;
-        let mut cold = Sql::open_store(store).await?;
+        let mut cold = Db::open(store, StorageOptions::default()).await?;
         assert_eq!(count(&mut cold).await?, 2, "no commit lost");
         Ok(())
     })
@@ -334,28 +331,28 @@ fn connection_state_never_reaches_the_next_session() -> Result<()> {
     futures::executor::block_on(async {
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
         let cache = fresh_namespace();
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
         db.save().await?;
 
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         db.execute("PRAGMA query_only = 1").await?;
         drop(db);
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(!db.reused_engine());
         db.execute("INSERT INTO t VALUES (1)").await?;
         db.execute("CREATE TEMP TABLE scratch(x)").await?;
         db.save().await?;
 
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert!(!db.reused_engine());
         assert!(db.query("SELECT * FROM scratch").await.is_err());
         drop(db);
         // Ordinary SQL keeps the engine warm.
-        let mut db = Sql::open_with_options(store.clone(), owner(&cache)).await?;
+        let mut db = Db::open(store.clone(), owner(&cache)).await?;
         assert_eq!(count(&mut db).await?, 1);
         drop(db);
-        let db = Sql::open_with_options(store, owner(&cache)).await?;
+        let db = Db::open(store, owner(&cache)).await?;
         assert!(db.reused_engine());
         Ok(())
     })
@@ -371,14 +368,14 @@ fn a_reused_engine_has_fresh_connection_counters() -> journal::Result<()> {
             cache: Some(journal::simulation::fresh_namespace()),
             ..journal::StorageOptions::default()
         };
-        let mut db = journal::Sql::open_with_options(store.clone(), options.clone()).await?;
+        let mut db = Db::open(store.clone(), options.clone()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
         db.execute("INSERT INTO t VALUES(42)").await?;
         db.save().await?;
         let counters = "SELECT last_insert_rowid(), changes(), total_changes()";
-        let mut warm = journal::Sql::open_with_options(store.clone(), options).await?;
+        let mut warm = Db::open(store.clone(), options).await?;
         assert!(warm.reused_engine());
-        let mut cold = journal::Sql::open_store(store).await?;
+        let mut cold = Db::open(store, StorageOptions::default()).await?;
         assert_eq!(warm.query(counters).await?, cold.query(counters).await?);
         assert_eq!(warm.query(counters).await?[0][0].as_int(), Some(0));
         Ok(())
@@ -390,35 +387,34 @@ fn a_reused_engine_has_fresh_connection_counters() -> journal::Result<()> {
 /// would not see each other's commits and could both write one log position.
 #[test]
 fn an_evicted_namespace_keeps_one_state_while_in_use() -> Result<()> {
-    use journal::{
-        Durability,
-        simulation::{cache_config, open_cache},
-    };
+    use journal::simulation::{cache_config, open_cache};
     futures::executor::block_on(async {
         let cache = open_cache(journal::PageCacheConfig {
             namespaces: 1,
             ..cache_config(1 << 20, 64 << 20)
         });
         let store = Arc::new(MemoryKv::default());
-        let options = |namespace: NamespaceCache| StorageOptions {
-            cache: Some(namespace),
-            durability: Durability::Commit,
-            ..StorageOptions::default()
+        let options = |namespace: NamespaceCache| {
+            (
+                StorageOptions {
+                    cache: Some(namespace),
+                    ..StorageOptions::default()
+                },
+                Durability::Commit,
+            )
         };
-        let mut first =
-            Sql::open_with_options(store.clone(), options(cache.namespace("a"))).await?;
+        let mut first = Db::open(store.clone(), options(cache.namespace("a"))).await?;
         first
             .execute("CREATE TABLE t(id INTEGER PRIMARY KEY)")
             .await?;
         for other in 0..1000 {
             cache.namespace(&format!("other-{other}")); // evicts "a"
         }
-        let mut second =
-            Sql::open_with_options(store.clone(), options(cache.namespace("a"))).await?;
+        let mut second = Db::open(store.clone(), options(cache.namespace("a"))).await?;
         second.execute("INSERT INTO t VALUES(1)").await?;
         assert!(first.execute("INSERT INTO t VALUES(2)").await.is_err());
         drop((first, second));
-        let mut db = Sql::open_store(store).await?;
+        let mut db = Db::open(store, StorageOptions::default()).await?;
         assert_eq!(db.query("SELECT id FROM t").await?.len(), 1);
         Ok(())
     })
@@ -438,7 +434,7 @@ fn parked_engines_are_weighed_by_schema() -> Result<()> {
             ..cache_config(1 << 20, 16 << 20)
         });
         let open = |name: &str, store: &Arc<dyn KvStore>| {
-            Sql::open_with_options(store.clone(), owner(&cache.namespace(name)))
+            Db::open(store.clone(), owner(&cache.namespace(name)))
         };
         let small: Vec<Arc<dyn KvStore>> = (0..4)
             .map(|_| Arc::new(MemoryKv::default()) as Arc<dyn KvStore>)

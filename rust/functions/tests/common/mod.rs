@@ -47,7 +47,8 @@ impl Store {
     }
 
     fn open(&self) -> Sql {
-        block(Sql::open_store(self.kv.clone())).unwrap()
+        let journal = block(Journal::open(self.kv.clone())).unwrap();
+        block(Sql::open(&journal)).unwrap()
     }
 
     /// The record `name` (`run`, `memory`, an extension's), as the scope's

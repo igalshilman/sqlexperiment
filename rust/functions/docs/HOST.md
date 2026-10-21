@@ -217,8 +217,8 @@ v15/commit = SC15
 
 The API is `Journal::open`, whose `record(name)`, `file(name)` and
 `file_with_base(name, base)` are handles each participant writes in
-its prepare (the SQL, `Sql::open(&journal)` with
-`Durability::Participant`, flushes), then `Journal::commit`, the one put.
+its prepare (the SQL, `Sql::open(&journal)`,
+flushes), then `Journal::commit`, the one put.
 
 ## 5. Plan
 

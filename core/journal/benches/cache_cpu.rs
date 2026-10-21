@@ -10,7 +10,7 @@
 //! confirmed. Output is CSV; traffic counters are deterministic, time is the
 //! median of the repeats.
 use journal::{
-    PageCacheConfig, Result, Sql, StorageOptions,
+    Journal, PageCacheConfig, Result, Sql, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
@@ -22,6 +22,12 @@ use std::{
     },
     time::Instant,
 };
+
+/// Flush and commit `db`'s journal, ending the session.
+async fn save(mut db: Sql) -> journal::Result<journal::SaveReport> {
+    db.flush().await?;
+    db.journal().commit().await
+}
 
 struct Counting;
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
@@ -54,7 +60,7 @@ type Store = Arc<LatencyKv<MemoryKv>>;
 async fn baseline() -> Result<(MemoryKv, u64)> {
     let store = MemoryKv::default();
     let kv: Arc<dyn KvStore> = Arc::new(store.clone());
-    let mut db = Sql::open_store(kv.clone()).await?;
+    let mut db = Sql::open(&Journal::open(kv.clone()).await?).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, doc TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -64,16 +70,20 @@ async fn baseline() -> Result<(MemoryKv, u64)> {
          'tags', json_array('alpha', 'beta', i % 7), 'note', hex(randomblob(40 + i % 30))) FROM x"
     ))
     .await?;
-    db.save().await?;
+    save(db).await?;
     // Checkpoint the bulk load into page keys, as a steady state would.
     let all = StorageOptions {
         checkpoint_after: 0,
         ..StorageOptions::default()
     };
-    let mut db = Sql::open_with_options(kv.clone(), all).await?;
+    let mut db = Sql::open(&Journal::open_with_options(kv.clone(), all).await?).await?;
     db.execute("CREATE TABLE other(x)").await?;
-    db.save().await?;
-    let pages = Sql::open_store(kv).await?.io_stats().database_len / 4096;
+    save(db).await?;
+    let pages = Sql::open(&Journal::open(kv).await?)
+        .await?
+        .io_stats()
+        .database_len
+        / 4096;
     Ok((store, pages))
 }
 
@@ -92,7 +102,7 @@ fn row(state: &mut u64) -> u64 {
 
 async fn session(store: &Store, options: &StorageOptions, n: u64, state: &mut u64) -> Result<()> {
     let kv: Arc<dyn KvStore> = store.clone();
-    let mut db = Sql::open_with_options(kv, options.clone()).await?;
+    let mut db = Sql::open(&Journal::open_with_options(kv, options.clone()).await?).await?;
     for _ in 0..4 {
         let id = row(state);
         let rows = db
@@ -112,7 +122,7 @@ async fn session(store: &Store, options: &StorageOptions, n: u64, state: &mut u6
         let id = row(state);
         db.execute(&format!("UPDATE t SET n = n + 1 WHERE id = {id}"))
             .await?;
-        db.save().await?;
+        save(db).await?;
     }
     Ok(())
 }

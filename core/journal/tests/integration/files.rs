@@ -1,8 +1,9 @@
 //! Paged files beside the SQL database (`Journal::file`): written with the
 //! tables, in one commit record, and kept like the database's own pages.
+use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
 use journal::{
-    Base, Durability, NamespaceCache, Result, Sql, StorageOptions,
+    Base, NamespaceCache, Result, Sql, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
@@ -54,20 +55,22 @@ fn golden() -> Arc<Golden> {
     Golden::new(7, 8)
 }
 
-fn options(cache: Option<NamespaceCache>) -> StorageOptions {
-    StorageOptions {
-        cache,
-        durability: Durability::Commit,
-        // Checkpoints happen within a run of turns.
-        checkpoint_after: 4,
-        ..StorageOptions::default()
-    }
+fn options(cache: Option<NamespaceCache>) -> Setup {
+    Setup(
+        StorageOptions {
+            cache,
+            // Checkpoints happen within a run of turns.
+            checkpoint_after: 4,
+            ..StorageOptions::default()
+        },
+        Durability::Commit,
+    )
 }
 
 /// Turn `i`: a row, page `i % 5` of `a` and page `i % 3` of `b` hold `i`,
 /// every seventh turn empties `b`, and page `i % 4` of `c` (over the golden
 /// image) is its golden page with the first byte `i`.
-async fn turn(db: &mut Sql, i: usize) -> Result<()> {
+async fn turn(db: &mut Db, i: usize) -> Result<()> {
     db.execute("BEGIN").await?;
     db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     db.journal()
@@ -83,7 +86,8 @@ async fn turn(db: &mut Sql, i: usize) -> Result<()> {
         6 => b.set_len(0)?,
         _ => b.write((i % 3) as u64, Some(page(i as u8)))?,
     }
-    db.flush().await.map(drop)
+    db.flush().await?;
+    db.journal().commit().await.map(drop)
 }
 
 /// File `name`'s pages after turns `0..turns`: each page's first byte,
@@ -121,7 +125,7 @@ async fn pages(db: &Sql, name: &str) -> Result<Vec<Option<u8>>> {
     Ok(pages)
 }
 
-async fn rows(db: &mut Sql) -> Result<usize> {
+async fn rows(db: &mut Db) -> Result<usize> {
     let rows = db.query("SELECT count(*) FROM t").await?;
     Ok(rows[0][0].as_int().unwrap() as usize)
 }
@@ -151,7 +155,7 @@ async fn crash_case(cached: bool, nth: usize) -> Result<Option<usize>> {
     let store = Arc::new(
         MonitorKv::new(FaultKv::new(MemoryKv::default(), nth as u64)).with_base("c", golden()),
     );
-    let mut db = Sql::open_with_options(store.clone(), options(cache.clone())).await?;
+    let mut db = Db::open(store.clone(), options(cache.clone())).await?;
     db.execute("CREATE TABLE t(n INTEGER)").await?;
     let _signal = store.arm(Failpoint {
         operation: Operation::Sync,
@@ -180,7 +184,7 @@ async fn crash_case(cached: bool, nth: usize) -> Result<Option<usize>> {
         let store =
             Arc::new(MonitorKv::seeded(memory.clone(), memory.values()).with_base("c", golden()));
         let case = format!("sync #{nth}, {kept} of {writes} writes kept, cached={cached}");
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         let turns = rows(&mut db).await?;
         assert!(
             turns == acknowledged || turns == acknowledged + 1,
@@ -196,7 +200,7 @@ async fn crash_case(cached: bool, nth: usize) -> Result<Option<usize>> {
         // The namespace takes turns again.
         turn(&mut db, turns).await?;
         drop(db);
-        let db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(pages(&db, "a").await?, expected("a", turns + 1), "{case}");
         assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
     }
@@ -224,7 +228,7 @@ fn checkpointing(cache: Option<NamespaceCache>) -> StorageOptions {
 fn an_emptied_file_loses_its_page_keys_at_the_next_checkpoint() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MonitorKv::new(MemoryKv::default()));
-        let db = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let db = Db::open(store.clone(), checkpointing(None)).await?;
         let file = db.journal().file("m")?;
         for n in 0..6 {
             file.write(n, Some(page(n as u8 + 1)))?;
@@ -233,7 +237,7 @@ fn an_emptied_file_loses_its_page_keys_at_the_next_checkpoint() -> Result<()> {
         db.save().await?;
         assert_eq!(first_file_pages(&store.inner), 6);
 
-        let db = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let db = Db::open(store.clone(), checkpointing(None)).await?;
         let file = db.journal().file("m")?;
         assert_eq!(file.read(5).await?, Some(page(6)));
         file.set_len(0)?;
@@ -242,12 +246,12 @@ fn an_emptied_file_loses_its_page_keys_at_the_next_checkpoint() -> Result<()> {
         assert_eq!(first_file_pages(&store.inner), 0);
 
         // Regrown, it reads zeros where it held pages.
-        let db = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let db = Db::open(store.clone(), checkpointing(None)).await?;
         let file = db.journal().file("m")?;
         assert!(file.is_empty());
         file.write(7, Some(page(9)))?;
         db.save().await?;
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         let file = db.journal().file("m")?;
         assert_eq!(file.len(), 8 * 4096);
         assert_eq!(file.read(5).await?, None);
@@ -262,7 +266,7 @@ fn a_files_pages_are_cached_until_another_epoch() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let cache = fresh_namespace();
-        let db = Sql::open_with_options(store.clone(), checkpointing(Some(cache.clone()))).await?;
+        let db = Db::open(store.clone(), checkpointing(Some(cache.clone()))).await?;
         let file = db.journal().file("m")?;
         for n in 0..40 {
             file.write(n, Some(page(n as u8)))?;
@@ -271,7 +275,7 @@ fn a_files_pages_are_cached_until_another_epoch() -> Result<()> {
 
         // The owner reads them back from the cache.
         store.reset_stats();
-        let db = Sql::open_with_options(store.clone(), checkpointing(Some(cache.clone()))).await?;
+        let db = Db::open(store.clone(), checkpointing(Some(cache.clone()))).await?;
         let file = db.journal().file("m")?;
         for n in 0..40 {
             assert_eq!(file.read(n).await?, Some(page(n as u8)));
@@ -281,11 +285,11 @@ fn a_files_pages_are_cached_until_another_epoch() -> Result<()> {
 
         // Another writer checkpoints: the owner's cached pages are of another
         // epoch, and it reads them from the store.
-        let other = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let other = Db::open(store.clone(), checkpointing(None)).await?;
         other.journal().file("m")?.write(3, Some(page(99)))?;
         other.save().await?;
         store.reset_stats();
-        let db = Sql::open_with_options(store.clone(), checkpointing(Some(cache.clone()))).await?;
+        let db = Db::open(store.clone(), checkpointing(Some(cache.clone()))).await?;
         let file = db.journal().file("m")?;
         assert_eq!(file.read(3).await?, Some(page(99)));
         assert_eq!(file.read(4).await?, Some(page(4)));
@@ -298,7 +302,7 @@ fn a_files_pages_are_cached_until_another_epoch() -> Result<()> {
 fn a_file_over_a_base_reads_it_where_it_has_no_page() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MonitorKv::new(MemoryKv::default()).with_base("m", golden()));
-        let db = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let db = Db::open(store.clone(), checkpointing(None)).await?;
         let file = db.journal().file_with_base("m", golden())?;
         file.set_len(8 * 4096)?;
         assert_eq!(file.read(3).await?.as_deref(), golden().page(3));
@@ -309,7 +313,7 @@ fn a_file_over_a_base_reads_it_where_it_has_no_page() -> Result<()> {
         file.write(6, Some(Bytes::copy_from_slice(golden().page(6).unwrap())))?;
         db.save().await?;
 
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         let file = db.journal().file_with_base("m", golden())?;
         assert_eq!(file.read(2).await?, Some(golden().changed(2, 1)));
         assert_eq!(file.read(3).await?.as_deref(), golden().page(3));
@@ -327,7 +331,7 @@ fn a_small_change_to_a_base_page_costs_little_in_the_log_and_in_place() -> Resul
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         // Logged, without checkpointing.
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         let file = db.journal().file_with_base("m", golden())?;
         file.write(4, Some(golden().changed(4, 1)))?;
         store.reset_stats();
@@ -336,7 +340,7 @@ fn a_small_change_to_a_base_page_costs_little_in_the_log_and_in_place() -> Resul
         assert!(logged < 300, "{logged} bytes logged");
 
         // In place, after a checkpoint.
-        let db = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let db = Db::open(store.clone(), checkpointing(None)).await?;
         let file = db.journal().file_with_base("m", golden())?;
         file.write(4, Some(golden().changed(4, 2)))?;
         db.save().await?;
@@ -345,7 +349,7 @@ fn a_small_change_to_a_base_page_costs_little_in_the_log_and_in_place() -> Resul
             .find(|(key, _)| key.starts_with("v15/page/00000000/"))
             .expect("the page in place");
         assert!(value.len() < 100, "{} bytes in place", value.len());
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         let file = db.journal().file_with_base("m", golden())?;
         assert_eq!(file.read(4).await?, Some(golden().changed(4, 2)));
         Ok(())
@@ -356,12 +360,12 @@ fn a_small_change_to_a_base_page_costs_little_in_the_log_and_in_place() -> Resul
 fn a_file_opens_only_with_its_base_and_empties_without_it() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let db = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let db = Db::open(store.clone(), checkpointing(None)).await?;
         let file = db.journal().file_with_base("m", golden())?;
         file.write(1, Some(golden().changed(1, 1)))?;
         db.save().await?;
 
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         assert!(db.journal().file_with_base("m", Golden::new(8, 8)).is_err());
         assert!(db.journal().file("plain")?.read(0).await?.is_none());
         let file = db.journal().file("m")?;
@@ -369,7 +373,7 @@ fn a_file_opens_only_with_its_base_and_empties_without_it() -> Result<()> {
         assert!(file.write(1, Some(page(1))).is_err() || db.save().await.is_err());
 
         // Emptied without its base: no page keys are left.
-        let db = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let db = Db::open(store.clone(), checkpointing(None)).await?;
         let file = db.journal().file("m")?;
         file.write(1, None)?;
         file.set_len(0)?;
@@ -383,23 +387,23 @@ fn a_file_opens_only_with_its_base_and_empties_without_it() -> Result<()> {
 fn a_checkpoint_waits_for_a_based_file_to_be_opened() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MonitorKv::new(MemoryKv::default()).with_base("m", golden()));
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         db.journal()
             .file_with_base("m", golden())?
             .write(1, Some(golden().changed(1, 5)))?;
         db.save().await?;
         // Its log decodes only with its base: without it, no checkpoint.
-        let mut db = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
         db.execute("CREATE TABLE t(n)").await?;
         db.save().await?;
         assert_eq!(store.inner.page_count(), 0, "no checkpoint");
         // Opened with it, the next save checkpoints the whole log.
-        let mut db = Sql::open_with_options(store.clone(), checkpointing(None)).await?;
+        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
         db.journal().file_with_base("m", golden())?;
         db.execute("INSERT INTO t VALUES(1)").await?;
         db.save().await?;
         assert!(first_file_pages(&store.inner) == 1 && store.inner.page_count() > 1);
-        let db = Sql::open_store(store.clone()).await?;
+        let db = Db::open(store.clone(), StorageOptions::default()).await?;
         let file = db.journal().file_with_base("m", golden())?;
         assert_eq!(file.read(1).await?, Some(golden().changed(1, 5)));
         assert_eq!(store.violations(), Vec::<String>::new());

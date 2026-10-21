@@ -2,12 +2,18 @@
 //! instrumentation, forced yields or checkpoint fault hooks are required.
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use journal::{Durability, Result, Sql, StorageOptions, kv::KvStore};
+use journal::{Journal, Result, Sql, kv::KvStore};
 use std::{
     collections::BTreeMap,
     io,
     sync::{Arc, Mutex},
 };
+
+/// Flush and commit `db`'s journal, ending the session.
+async fn save(mut db: Sql) -> journal::Result<journal::SaveReport> {
+    db.flush().await?;
+    db.journal().commit().await
+}
 
 #[derive(Default)]
 struct Store(Mutex<BTreeMap<String, Bytes>>);
@@ -36,19 +42,19 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let mut db = require_send(Sql::open_store(store.clone())).await?;
+        let mut db = require_send(Sql::open(&Journal::open(store.clone()).await?)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
-        db.save().await?;
-        let mut db = Sql::open_store(store.clone()).await?;
+        save(db).await?;
+        let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
         );
         db.execute("UPDATE t SET value='changed'").await?;
         drop(db);
-        let mut db = Sql::open_store(store).await?;
+        let mut db = Sql::open(&Journal::open(store).await?).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
@@ -61,18 +67,16 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
     })
 }
 
+/// A transaction and records, durable together at the journal's commit.
 #[test]
-fn commit_durability_with_an_immediately_ready_backend() -> Result<()> {
+fn a_journal_commit_with_an_immediately_ready_backend() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(Store::default());
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let options = StorageOptions {
-            durability: Durability::Commit,
-            ..StorageOptions::default()
-        };
-        let mut db = Sql::open_with_options(store.clone(), options.clone()).await?;
+        let journal = Journal::open(store.clone()).await?;
+        let mut db = Sql::open(&journal).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         require_send(db.transaction(async |db| {
@@ -80,8 +84,13 @@ fn commit_durability_with_an_immediately_ready_backend() -> Result<()> {
             db.execute("INSERT INTO t VALUES (2, 'world')").await
         }))
         .await?;
+        db.flush().await?;
+        journal.record("note").set(Bytes::from_static(b"two rows"));
+        require_send(journal.commit()).await?;
         drop(db);
-        let mut db = Sql::open_with_options(store, options).await?;
+        let journal = Journal::open(store).await?;
+        assert_eq!(journal.record("note").get(), &b"two rows"[..]);
+        let mut db = Sql::open(&journal).await?;
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(2)

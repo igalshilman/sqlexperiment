@@ -4,19 +4,12 @@ SQLite-compatible SQL (Turso's `turso_core` engine, unmodified) over a
 Restate virtual object's state: a key/value namespace with one owner at a
 time.
 
-It serves two kinds of host:
-
-- **A journaled handler**, which a failure replays from the start. The
-  database is part of the invocation's state: a session is durable as a whole at
-  its end (`Durability::Save`), and a failed attempt leaves nothing behind.
-- **An object without a journal**: a key, its own database, and calls to other
-  objects or services, with at-least-once delivery. The database is the
-  object's only durable record, so it behaves like SQLite: each SQL
-  transaction is durable when it commits (`Durability::Commit`), and
-  `Sql::transaction` scopes one to a closure.
-
-Both write the same format through the same protocol; only how much one save
-covers differs.
+Its host is an object without Restate's journal: a key, its own database,
+and calls to other objects or services, with at-least-once delivery. The
+database is the object's only durable record, and the journal is how it
+reaches the store: the host commits the journal (records, paged files and
+the SQL's file `db`, in one put) when it chooses, after each SQL transaction
+as SQLite does, or once per turn of everything that takes part.
 
 ## Constraints
 
@@ -121,8 +114,8 @@ written about twice (inline, then sealed), its pages once more at a
 checkpoint. Pages are zstd frames by default (`PageCompression::Zstd`).
 `Ok(SaveReport)` means committed; an error leaves the commit outcome unknown.
 
-**Effects.** A host may commit bytes of its own with a transaction
-(`Sql::commit_with`): they ride in the same record put, so they are
+**Effects.** A host may commit bytes of its own with a transaction, as a
+record (the SDKs' `effects`): they ride in the same record put, so they are
 durable exactly when the transaction is, and stay, through checkpoints, until
 a later commit replaces them. The Restate SDKs keep a transaction's sends
 there, as its outbox, and make them once it commits. These are the record
@@ -131,27 +124,16 @@ files of its own (`Journal::file`), committed by the next `Journal::commit`. A
 commit with no page changes adds no log transaction, so a host's turns do
 not checkpoint SQL.
 
-## When a save happens
+## When a commit happens
 
-`StorageOptions::durability` decides what one save covers:
-
-- **`Durability::Save`** (default): the whole session. SQL `COMMIT` stays
-  private until `Sql::save()`, which commits everything as one log
-  transaction and ends the session. Dropping the session discards it all. This
-  fits a host that already makes the unit of work atomic, such as a journaled
-  handler that a failure replays from the start.
-- **`Durability::Commit`**: every SQL transaction, as in SQLite. When a
-  statement leaves the engine in autocommit mode with private changes (an
-  autocommit write, or `COMMIT`), the session saves before the statement
-  returns and continues on the committed view. Reads never save. Dropping the
-  session loses only an open transaction. `Sql::transaction(closure)` wraps
-  `BEGIN`/`COMMIT`, and rolls back when the closure returns `Err`.
-- **`Durability::Participant`**: the journal's commit, which the host
-  makes. The SQL is one participant among its records and files: an SQL
-  commit stays in the engine until `Sql::flush` moves it into the file `db`,
-  and `Journal::commit` makes it durable with everything else changed since
-  the last commit, in one put. A journal commit with SQL committed but not
-  flushed is refused.
+At `Journal::commit`, and only then. SQL statements and SQL `COMMIT` change
+the engine's private view; `Sql::flush` commits an open SQL transaction and
+moves what the SQL committed into the file `db`, still private; the
+journal's commit makes it durable with every record and file changed since
+the last commit, in one put. A journal commit with SQL committed but not
+flushed is refused. Dropping the journal discards what it holds.
+`Sql::transaction(closure)` wraps `BEGIN`/`COMMIT`, and rolls back when the
+closure returns `Err`.
 
 A continuing session moves its view forward locally instead of reopening: the
 new transaction joins its replayed log, and a checkpoint empties it. Each SQL
@@ -214,7 +196,7 @@ saves gets. It stays out of the record, which is on the correctness path.
 A reader (`Journal::open_reader`) reads a namespace that another owns,
 alongside it, such as a virtual object's shared handler beside the exclusive
 one. It writes nothing to the store: no cache, and its SQL changes stay in
-the session ([`Durability::Save`], never saved). It opens like anyone, and
+the session, and its journal refuses to commit. It opens like anyone, and
 reads pages lazily, so a checkpoint by the owner meanwhile could give it a
 page newer than its log. `Journal::is_current` tells, once it has read: the
 record unchanged. A checkpoint writes only pages its record's log covers, and
@@ -352,7 +334,6 @@ one-thread runtime of its own. It is the only background work.
 | Operation                            | Round trips                                                                     | Mutations                                                                                                                                                                            |
 | ------------------------------------ | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Save                                 | 1, the sync                                                                     | The record (its inline tail rewritten); a seal now and then; a large transaction's segments; the garbage's deletes; when the log is long, every logged page, the hint and the record |
-| SQL commit with `Durability::Commit` | Same as a save                                                                  | Same as a save                                                                                                                                                                       |
 | Open, with cache                     | 1, plus 1 if the log names stored values the cache lacks                        | None                                                                                                                                                                                 |
 | Cold open                            | 1, then the hinted pages (or a small database whole) and stored values together | None                                                                                                                                                                                 |
 | Cold page read                       | 1 get; sequential reads fetch up to 64 ahead                                    | None                                                                                                                                                                                 |

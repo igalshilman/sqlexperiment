@@ -2,7 +2,7 @@
 //! CPU measurements of every codec.
 //! All payloads are deterministic synthetic data; no network or replication model.
 use journal::{
-    PageCompression, Result, Sql, StorageOptions,
+    Journal, PageCompression, Result, Sql, StorageOptions,
     kv::KvStore,
     page_codec,
     simulation::{MemoryKv, Stats},
@@ -15,6 +15,12 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+
+/// Flush and commit `db`'s journal, ending the session.
+async fn save(mut db: Sql) -> journal::Result<journal::SaveReport> {
+    db.flush().await?;
+    db.journal().commit().await
+}
 
 /// The codec compared with raw pages in SQL traffic: the default.
 const COMPRESSED: PageCompression = PageCompression::Zstd;
@@ -93,7 +99,9 @@ fn options(page_compression: PageCompression) -> StorageOptions {
 }
 async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Sql::open_with_options(Arc::new(store.clone()), options(codec)).await?;
+    let mut db =
+        Sql::open(&Journal::open_with_options(Arc::new(store.clone()), options(codec)).await?)
+            .await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload BLOB)")
         .await?;
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
@@ -109,15 +117,16 @@ async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
         db.execute(&sql).await?;
     }
     db.execute("COMMIT").await?;
-    db.save().await?;
+    save(db).await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
     let all = StorageOptions {
         checkpoint_after: 0,
         ..options(codec)
     };
-    let mut db = Sql::open_with_options(Arc::new(store.clone()), all).await?;
+    let mut db =
+        Sql::open(&Journal::open_with_options(Arc::new(store.clone()), all).await?).await?;
     db.execute("CREATE TABLE other(x)").await?;
-    db.save().await?;
+    save(db).await?;
     store.crash();
     Ok(store)
 }
@@ -179,7 +188,8 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
     let case = sample.case;
     let store = Arc::new(base.fork());
     let start = Instant::now();
-    let mut db = Sql::open_with_options(store.clone(), options(sample.codec)).await?;
+    let mut db =
+        Sql::open(&Journal::open_with_options(store.clone(), options(sample.codec)).await?).await?;
     let middle = case.rows / 2;
     let read_ids: Vec<_> = match sample.operation {
         "cold_pk" => vec![middle],
@@ -227,7 +237,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
             }
             db.execute("COMMIT").await?;
         }
-        db.save().await?;
+        save(db).await?;
         let elapsed = start.elapsed().as_nanos();
         sample.emit(
             &store.stats(),
@@ -243,7 +253,8 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
         } else {
             PageCompression::Raw
         };
-        let mut db = Sql::open_with_options(store.clone(), options(other)).await?;
+        let mut db =
+            Sql::open(&Journal::open_with_options(store.clone(), options(other)).await?).await?;
         assert_eq!(
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"

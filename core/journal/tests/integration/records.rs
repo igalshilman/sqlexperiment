@@ -1,18 +1,21 @@
 //! The host's records: named values a turn commits with its SQL, in one
 //! commit record (`Sql::seal`).
+use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
 use journal::{
-    Durability, NamespaceCache, Result, Sql, StorageOptions,
+    NamespaceCache, Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
 
-fn options(cache: Option<NamespaceCache>) -> StorageOptions {
-    StorageOptions {
-        cache,
-        durability: Durability::Commit,
-        ..StorageOptions::default()
-    }
+fn options(cache: Option<NamespaceCache>) -> Setup {
+    Setup(
+        StorageOptions {
+            cache,
+            ..StorageOptions::default()
+        },
+        Durability::Commit,
+    )
 }
 
 /// Turn `i`'s value: small, past the inline budget so that commits seal, or
@@ -31,7 +34,7 @@ fn expected(turns: usize) -> Bytes {
 /// its number as the record `effects`, its value as the record `turn` (small,
 /// sealed, or stored), and every eleventh empties the record `state`, every
 /// third sets it to its value.
-async fn turn(db: &mut Sql, i: usize) -> Result<()> {
+async fn turn(db: &mut Db, i: usize) -> Result<()> {
     if i.is_multiple_of(2) {
         db.execute("BEGIN").await?;
         db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
@@ -61,7 +64,7 @@ fn state(turns: usize) -> Bytes {
         .unwrap_or_default()
 }
 
-async fn rows(db: &mut Sql) -> Result<i64> {
+async fn rows(db: &mut Db) -> Result<i64> {
     let rows = db.query("SELECT count(*) FROM t").await?;
     Ok(rows[0][0].as_int().unwrap())
 }
@@ -72,7 +75,7 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
         for cached in [false, true] {
             let cache = cached.then(fresh_namespace);
             let store = Arc::new(MonitorKv::new(MemoryKv::default()));
-            let mut db = Sql::open_with_options(store.clone(), options(cache.clone())).await?;
+            let mut db = Db::open(store.clone(), options(cache.clone())).await?;
             db.execute("CREATE TABLE t(n INTEGER)").await?;
             for i in 0..60 {
                 turn(&mut db, i).await?;
@@ -85,7 +88,7 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
                     // Another session reads the same turn: the record, and the
                     // stored values it names.
                     drop(db);
-                    let mut other = Sql::open_with_options(store.clone(), options(None)).await?;
+                    let mut other = Db::open(store.clone(), options(None)).await?;
                     assert_eq!(
                         other.journal().record("turn").get(),
                         expected(i + 1),
@@ -95,7 +98,7 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
                     assert_eq!(other.journal().record("state").get(), state(i + 1));
                     assert_eq!(rows(&mut other).await?, (i / 2 + 1) as i64);
                     drop(other);
-                    db = Sql::open_with_options(store.clone(), options(cache.clone())).await?;
+                    db = Db::open(store.clone(), options(cache.clone())).await?;
                 }
             }
             // A turn without SQL changes adds no log transaction: checkpoints
@@ -123,8 +126,7 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
 fn turns_without_sql_leave_the_log_alone() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db =
-            Sql::open_with_options(store.clone(), options(Some(fresh_namespace()))).await?;
+        let mut db = Db::open(store.clone(), options(Some(fresh_namespace()))).await?;
         db.execute("CREATE TABLE t(n INTEGER)").await?;
         let version = db.version();
         for i in 0..100 {
@@ -135,6 +137,7 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
                 .record("turn")
                 .set(Bytes::from(vec![i as u8; 64]));
             db.flush().await?;
+            db.journal().commit().await?;
         }
         assert_eq!(db.version(), version + 100);
         // Without SQL nothing checkpointed: no page keys beyond the first
@@ -142,7 +145,7 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
         let pages = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/page/")).count();
         assert_eq!(pages(&store), 0);
         drop(db);
-        let db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(db.journal().record("turn").get(), vec![99u8; 64]);
         Ok(())
     })
@@ -155,7 +158,7 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
 fn every_acknowledged_turn_survives_a_crash_at_any_write() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
-        for durability in [Durability::Commit, Durability::Participant] {
+        for durability in [Durability::Commit, Durability::Save] {
             for cached in [false, true] {
                 for nth in 1.. {
                     let Some(prefixes) = run_case(durability, cached, nth).await? else {
@@ -176,16 +179,19 @@ fn every_acknowledged_turn_survives_a_crash_at_any_write() -> Result<()> {
 async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Option<usize>> {
     let cache = cached.then(fresh_namespace);
     // Checkpoints happen within the run.
-    let options = |cache| StorageOptions {
-        checkpoint_after: 4,
-        durability,
-        ..options(cache)
+    let options = |cache| {
+        options(cache)
+            .with(|o| StorageOptions {
+                checkpoint_after: 4,
+                ..o
+            })
+            .mode(durability)
     };
     let store = Arc::new(MonitorKv::new(FaultKv::new(
         MemoryKv::default(),
         nth as u64,
     )));
-    let mut db = Sql::open_with_options(store.clone(), options(cache.clone())).await?;
+    let mut db = Db::open(store.clone(), options(cache.clone())).await?;
     db.execute("CREATE TABLE t(n INTEGER)").await?;
     db.flush().await?;
     db.journal().commit().await?;
@@ -219,7 +225,7 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
         // Reopen through the same owner cache, as a restarted handler would:
         // only to read, as the cache follows one history, and the forks are
         // each another.
-        let db = Sql::open_with_options(store.clone(), options(cache.clone())).await?;
+        let db = Db::open(store.clone(), options(cache.clone())).await?;
         let turns = match db.journal().record("turn").get() == expected(acknowledged) {
             true => acknowledged,
             false => {
@@ -232,7 +238,7 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
             }
         };
         drop(db);
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         if turns > 0 {
             assert_eq!(
                 db.effects(),
@@ -245,7 +251,7 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
         // The namespace takes turns again.
         turn(&mut db, turns).await?;
         drop(db);
-        let db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(
             db.journal().record("turn").get(),
             expected(turns + 1),
@@ -262,7 +268,7 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
 fn a_scoped_journal_is_part_of_the_session_s() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open_with_options(store.clone(), options(None)).await?;
+        let mut db = Db::open(store.clone(), options(None)).await?;
         let fs = db.journal().scoped("fs/");
         fs.record("manifest").set(Bytes::from_static(b"m"));
         fs.scoped("blobs/")
@@ -271,8 +277,9 @@ fn a_scoped_journal_is_part_of_the_session_s() -> Result<()> {
         assert!(fs.file("../db").is_ok(), "only `db` itself is the SQL's");
         assert!(db.journal().scoped("d").file("b").is_err());
         db.flush().await?;
+        db.journal().commit().await?;
         drop(db);
-        let db = Sql::open_with_options(store, options(None)).await?;
+        let db = Db::open(store, options(None)).await?;
         let journal = db.journal();
         assert_eq!(journal.record("fs/manifest").get(), &b"m"[..]);
         assert_eq!(journal.scoped("fs/").record("manifest").get(), &b"m"[..]);

@@ -1,18 +1,14 @@
-//! A journal and its participants: the SQL as one of them
-//! (`Durability::Participant`), its records and files beside it, made
-//! durable together by `Journal::commit`.
+//! A journal and its participants: the SQL as one of them, its records and
+//! files beside it, made durable together by `Journal::commit`.
 use bytes::Bytes;
 use journal::{
-    Durability, Journal, Result, Sql, StorageOptions,
+    Journal, Result, Sql, StorageOptions,
     simulation::{MemoryKv, fresh_namespace},
 };
 use std::sync::Arc;
 
 fn options() -> StorageOptions {
-    StorageOptions {
-        durability: Durability::Participant,
-        ..StorageOptions::default()
-    }
+    StorageOptions::default()
 }
 
 async fn rows(sql: &mut Sql) -> Result<i64> {
@@ -55,7 +51,8 @@ fn a_commit_makes_every_participant_durable_together() -> Result<()> {
         journal.record("state").set(Bytes::from_static(b"two"));
         drop(sql);
         drop(journal);
-        let mut sql = Sql::open_with_options(store, options()).await?;
+        let journal = Journal::open_with_options(store, options()).await?;
+        let mut sql = Sql::open(&journal).await?;
         assert_eq!(rows(&mut sql).await?, 1);
         assert_eq!(sql.journal().record("state").get(), &b"one"[..]);
         Ok(())
