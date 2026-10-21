@@ -7,7 +7,7 @@ five things:
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
 - one record that commits a turn's SQL, pages and records together:
-  sqlite-kv v15's commit record, the memory's pages a file beside the SQL's;
+  the journal's (v15) commit record, the memory's pages a file beside the SQL's;
 - host bindings: operations the host makes itself, such as a model call,
   whose input nothing but the guest's heap keeps (§6).
 
@@ -128,7 +128,7 @@ it returns, is a new runtime version: names live in heaps.
 
 ## 3. `ctx.db.sql`
 
-Each scope (an object key) has a SQLite database: `core/sqlite-kv`,
+Each scope (an object key) has a SQLite database: `core/journal`,
 running in the host over the object's Restate state. The guest never holds
 pages of it. Only statements go in and only rows come out.
 
@@ -162,14 +162,14 @@ export async function order({ sku, qty }, ctx) {
   undoes that statement, as in SQLite. A storage error fails the attempt,
   which is retried from the last commit, as today.
 - **Readers.** A shared handler (`<program>/<key>/query`) can run read-only
-  SQL against the committed database (sqlite-kv's reader), without
+  SQL against the committed database (the journal's reader), without
   disturbing a running run.
 - **`ctx.kv`** is already a table in this database, so one store holds a
   scope's data.
 
 ## 4. One record commits a turn
 
-Built in #142 and #143. A turn is one sqlite-kv commit: the run's state, the
+Built in #142 and #143. A turn is one journal commit: the run's state, the
 VM's page batch and the turn's SQL go into one record, written in one put.
 Before, a turn put `batch/<n>`, then `commit` (naming the batch), then the KV
 writes the commit listed. That was correct, since Restate keeps writes in
@@ -223,9 +223,9 @@ its prepare, then `Session::seal`, the one put.
 
 On branches, a PR each:
 
-1. **sqlite-kv: the host's page chain in the record** (§4), with tests.
+1. **sqlite-kv (now `journal`): the host's page chain in the record** (§4), with tests.
    Done in #142.
-2. **The functions runtime on sqlite-kv:** a turn commits through
+2. **The functions runtime on the journal:** a turn commits through
    `commit_turn`; `batch/<n>`, `commit` and `kv/<key>` are gone, and
    `ctx.kv` is a table. Done in #143, measured in DESIGN.md §7.
 3. **`ctx.db.sql` and `ctx.db.transaction`**, as Calls over `host_call`

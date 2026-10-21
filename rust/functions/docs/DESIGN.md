@@ -226,7 +226,7 @@ in order, in one turn. A run takes its `Scope`: the store its database lives
 in, and, for a process that keeps owning it, an owner cache. Every store call
 is awaited outside any Wasm call, so a remote store may suspend in each. An
 error leaves the `Run` unusable: the attempt ends, and the next one starts
-from the store. Tests run over sqlite-kv's `MemoryKv`, and its `FaultKv`
+from the store. Tests run over the `journal` crate's `MemoryKv`, and its `FaultKv`
 fails any one write, as a crash may.
 
 ## 3. QuickJS/Wasm snapshot ABI
@@ -519,7 +519,7 @@ payload. Reset the tracker on restore before rebinding pointers/limits, and
 after each commit is stored. A failed commit ends the attempt with its VM.
 
 Since 21 October 2026 the runtime keeps no encoding of its own: a turn writes
-its changed pages into the memory file (§5.1), and sqlite-kv compresses each
+its changed pages into the memory file (§5.1), and the journal compresses each
 against what it replaces (its previous image, or golden's), whole pages with
 Zstd. The block encoding below, and its measurements, are the history that
 design came from.
@@ -616,8 +616,8 @@ Zeroing free chunks (§5.6) already makes what it allocates and frees free.
 
 ### 5.1. Record identities and layouts
 
-A scope's store holds one journal, a sqlite-kv namespace
-([its format](../../../core/sqlite-kv/docs/FORMAT.md)): the commit record at
+A scope's store holds one journal, a `journal` namespace
+([its format](../../../core/journal/docs/FORMAT.md)): the commit record at
 `v15/commit`, the values it outgrew at `v15/log/<n>`, and pages in place at
 `v15/page/<file>/<n>`. Its files:
 
@@ -646,7 +646,7 @@ Memory = {
 ```
 
 The image is golden (zeros beyond its length) with the pages `pages` lists
-read from `file`. The file is over golden (a sqlite-kv base): a page the run
+read from `file`. The file is over golden (a `journal` base): a page the run
 never changed, or changed back, is a hole that reads as golden's, and the
 journal compresses each page against what it replaces (golden's, the first
 time it is logged, and in place), so a page costs about what changed in it.
@@ -666,7 +666,7 @@ its seal logged (memory and tables) and the commit record's.
 ### 5.2. One file per golden image
 
 The memory file is named after its golden image, and opens only with it
-(sqlite-kv refuses another base): its log since the last checkpoint, and its
+(the journal refuses another base): its log since the last checkpoint, and its
 pages in place, decode only against that image. A new run in the scope
 writes holes for the previous run's pages in its first seal, in the
 previous run's file (without its golden image: a hole needs none), then its
@@ -884,10 +884,10 @@ attempt runs again from the previous commit: the requests it issued were
 never dispatched (§1). Nothing is applied after a commit.
 
 **SQL again.** Until 18 October 2026 the scope's records lived in SQL tables
-through an earlier sqlite-kv; it cost a turn about 2 ms of CPU and wrote
+through an earlier version of the journal; it cost a turn about 2 ms of CPU and wrote
 every log segment twice, so it gave way to one commit record of its own
 (with `batch/<n>` and `kv/<key>` keys) that relied on ordered writes. With
-the journal off, writes are not ordered, and sqlite-kv's one record per
+the journal off, writes are not ordered, and the journal's one record per
 commit, with the host's records in it, is that commit. Measured on
 18 October 2026 (`cargo bench --bench checkpoints`, medians), against that
 record of its own:

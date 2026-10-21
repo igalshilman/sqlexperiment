@@ -42,6 +42,10 @@ and ask the owner only critical questions.
   journal)` gets the journal scoped to `<name>/`; extension names may not
   hold `/` or `.`. `fs` keeps its manifest in the record `fs/manifest` and
   its running command in `fs/running`, so the manifest blob is gone.
+- **Step 7, rename: done for the Rust crate.** `core/sqlite-kv` is
+  `core/journal`, crate `journal`. Decided: the Node.js addon and the
+  Python extension keep their names (`sqlite-kv`): to their users they are
+  SQL over a key/value store, which the name says.
 - **Measured after step 4** (in-memory store, medians):
 
   | | Before | After |
@@ -82,7 +86,7 @@ and ask the owner only critical questions.
 ## 1. Goal
 
 Today the durable functions runtime (`rust/functions`) commits each turn
-through `core/sqlite-kv`, a crate that puts SQLite over a key/value store
+through `core/journal`, a crate that puts SQLite over a key/value store
 (a Restate object's state). SQLite owns the commit record; the runtime bolts
 two things onto it from the side: `effects` (the run's state, JSON) and the
 `chain` (the program's memory, as page batches). Extensions (`fs`, `llm`)
@@ -134,7 +138,7 @@ are not on the remote):
   all, seals, tells all (`committed`/`aborted`), collects blobs. Tests in
   `rust/functions/tests/transactions.rs`. **Start from this branch.**
 
-How sqlite-kv works now (read `core/sqlite-kv/docs/DESIGN.md` and
+How sqlite-kv works now (read `core/journal/docs/DESIGN.md` and
 `FORMAT.md`; they are accurate):
 
 | Key | Holds |
@@ -428,7 +432,7 @@ page keys are gone after a settled run: count keys under
 
 Docs: `rust/functions/docs/DESIGN.md` §5 (persistent format, §5.2 the
 binary page batch is gone) and §7; `HOST.md` §4; `README.md` "Where things
-are"; `core/sqlite-kv/docs/DESIGN.md` and `FORMAT.md`.
+are"; `core/journal/docs/DESIGN.md` and `FORMAT.md`.
 
 Done when every suite is green and §6's numbers are recorded.
 
@@ -453,7 +457,7 @@ extent it does not fully hold). Measure again.
 
 ### Step 7: rename
 
-`core/sqlite-kv` becomes `core/journal`, crate `journal`
+`core/journal` becomes `core/journal`, crate `journal`
 (`Makefile` `CORE`, `RUST_CRATES`; the path dependencies in
 `rust/functions/Cargo.toml`, `typescript/packages/sql-node/Cargo.toml`,
 `python/sqlite-kv/Cargo.toml` (rename that directory too, and the Python
@@ -477,7 +481,7 @@ Record before step 1, after step 4, after step 6, in the PR descriptions:
   `stored_bytes` summed (baseline 2.6 MiB over 200 steps), `restore_ms`,
   `read_ms` of the request (3.6 ms at 636 KiB).
 - `cargo bench --bench checkpoints`: live and restored turn times.
-- `core/sqlite-kv/benches/README.md` lists the crate's benchmarks and how to
+- `core/journal/benches/README.md` lists the crate's benchmarks and how to
   run them; `amplification` (reads, writes, recovery traffic) and
   `small_databases` are the ones that must not regress.
 - `MemoryKv::stats()` in the tests above: bytes written and gets per

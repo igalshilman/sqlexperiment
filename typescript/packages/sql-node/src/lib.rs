@@ -6,17 +6,17 @@
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
 //! is stored. The object's state keeps writes in issue order, so a crash
-//! loses only a suffix of them (see [`sqlite_kv::kv`]): a statement that
+//! loses only a suffix of them (see [`journal::kv`]): a statement that
 //! commits queues its writes, then resolves at one `sync`. A process-wide
 //! page cache is built in.
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use journal::kv::KvStore;
+use journal::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use sqlite_kv::kv::KvStore;
-use sqlite_kv::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;

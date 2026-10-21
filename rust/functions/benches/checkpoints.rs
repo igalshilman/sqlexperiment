@@ -4,8 +4,8 @@
 //! a new attempt would. Results go to bench-<mode>.json.
 use anyhow::{Result, ensure};
 use functions::{Outcome, Program, Programs, Run, Runtime, Scope, Status};
+use journal::simulation::MemoryKv;
 use serde_json::{Value, json};
-use sqlite_kv::simulation::MemoryKv;
 use std::{sync::Arc, time::Instant};
 
 fn main() -> Result<()> {

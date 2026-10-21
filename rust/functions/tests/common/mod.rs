@@ -6,8 +6,8 @@ use functions::{
     Extensions, GuestError, Language, Limits, Operation, Outcome, Programs, Run, Runtime, Scope,
     View,
 };
+use journal::{Session, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
 use serde_json::{Value, json};
-use sqlite_kv::{Session, Value as SqlValue, kv::KvStore, simulation::MemoryKv};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, OnceLock},
@@ -67,8 +67,8 @@ impl Store {
 
     /// Seal `value` as the record `name`, as if a turn did.
     pub fn set_record(&self, name: &str, value: &Value) {
-        let options = sqlite_kv::StorageOptions {
-            durability: sqlite_kv::Durability::Commit,
+        let options = journal::StorageOptions {
+            durability: journal::Durability::Commit,
             ..Default::default()
         };
         let mut db = block(Session::open_with_options(self.kv.clone(), options)).unwrap();

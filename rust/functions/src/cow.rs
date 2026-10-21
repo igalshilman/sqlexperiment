@@ -32,7 +32,7 @@ pub(crate) struct Golden {
 
 /// A run's memory is a file over its program's golden memory: a page that
 /// differs from golden is in the file, and any other reads as golden's.
-impl sqlite_kv::Base for Golden {
+impl journal::Base for Golden {
     fn id(&self) -> u64 {
         *self
             .id

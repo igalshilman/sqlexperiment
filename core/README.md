@@ -5,7 +5,7 @@ which runs a handler without journal replay since 8.1.0, is used as released.)
 
 | Path                                | What                                                                                                                                                                                                                                                |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`sqlite-kv/`](sqlite-kv/README.md) | **The storage.** SQL over an asynchronous key/value store, for namespaces with one owner at a time: a Rust crate. The [Node.js addon](../typescript/packages/sql-node/README.md) and the [Python extension](../python/sqlite-kv/README.md) wrap it. |
+| [`journal/`](journal/README.md) | **The storage.** SQL, records and paged files over an asynchronous key/value store, for namespaces with one owner at a time: a Rust crate. The [Node.js addon](../typescript/packages/sql-node/README.md) and the [Python extension](../python/sqlite-kv/README.md) wrap it. |
 
 ## Build and test
 

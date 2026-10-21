@@ -8,8 +8,8 @@
 //! `RawState::get`, FUTURE.md at the repository's root).
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use journal::kv::KvStore;
 use restate_sdk::context::RawState;
-use sqlite_kv::kv::KvStore;
 use std::{
     collections::HashMap,
     io,

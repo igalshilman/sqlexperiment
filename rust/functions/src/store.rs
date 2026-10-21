@@ -1,4 +1,4 @@
-//! Where a scope's runs and KV live: a sqlite-kv database in a key/value
+//! Where a scope's runs and KV live: a journal (the `journal` crate) in a key/value
 //! store (in Restate, the object's state; in tests, a `MemoryKv`). A turn is
 //! one commit of it: the run's state and each participant's in records, the
 //! pages the turn changed in the memory file, and the KV writes as SQL, in
@@ -6,7 +6,7 @@
 //! Writes may land in any order; a write counts once it is acknowledged.
 use crate::extension::Extensions;
 use anyhow::Result;
-use sqlite_kv::{Durability, NamespaceCache, Session, StorageOptions, kv::KvStore};
+use journal::{Durability, NamespaceCache, Session, StorageOptions, kv::KvStore};
 use std::sync::Arc;
 
 /// A scope's storage: the store its database lives in, and, for a process

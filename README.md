@@ -213,7 +213,7 @@ in WebAssembly. How it works: [`rust/functions`](rust/functions/README.md).
 Each part is a directory with its README, a workspace of its own; the
 [`Makefile`](Makefile) builds and tests them all.
 
-- [`core/`](core): the storage ([`sqlite-kv`](core/sqlite-kv/README.md)) every
+- [`core/`](core): the storage ([`journal`](core/journal/README.md)) every
   SDK builds on.
 - [`typescript/`](typescript/README.md): the Node.js addon,
   [`restate-fns`](typescript/packages/fns/README.md) (SQL in virtual objects, on the

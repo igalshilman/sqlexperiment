@@ -1017,6 +1017,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "journal"
+version = "0.11.0"
+dependencies = [
+ "bytes",
+ "foyer",
+ "futures",
+ "lz4_flex",
+ "parking_lot",
+ "tokio",
+ "turso_core",
+ "zstd-safe",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1818,29 +1832,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
 
 [[package]]
-name = "sqlite-kv"
-version = "0.11.0"
-dependencies = [
- "bytes",
- "foyer",
- "futures",
- "lz4_flex",
- "parking_lot",
- "tokio",
- "turso_core",
- "zstd-safe",
-]
-
-[[package]]
 name = "sqlite-kv-node"
 version = "0.1.0"
 dependencies = [
  "bytes",
  "futures",
+ "journal",
  "napi",
  "napi-build",
  "napi-derive",
- "sqlite-kv",
  "tokio",
  "turso_core",
 ]

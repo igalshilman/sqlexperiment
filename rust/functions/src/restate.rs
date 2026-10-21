@@ -57,7 +57,7 @@ use std::{
 };
 
 mod store;
-use sqlite_kv::{PageCache, PageCacheConfig};
+use journal::{PageCache, PageCacheConfig};
 use store::StateQueue;
 
 /// Fault injection, for tests.

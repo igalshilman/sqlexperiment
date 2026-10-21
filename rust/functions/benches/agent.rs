@@ -16,8 +16,8 @@ use functions::{
 };
 use futures::future::BoxFuture;
 use futures_executor::block_on as block;
+use journal::simulation::MemoryKv;
 use serde_json::{Value, json};
-use sqlite_kv::simulation::MemoryKv;
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
