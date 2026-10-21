@@ -57,7 +57,7 @@ async fn turn(db: &mut Session, i: usize) -> Result<()> {
     if i.is_multiple_of(3) {
         db.record("state").set(value(i));
     }
-    db.seal(Some(update(i))).await
+    db.seal(Some(update(i))).await.map(drop)
 }
 
 /// The record `state` after turns `0..turns`.

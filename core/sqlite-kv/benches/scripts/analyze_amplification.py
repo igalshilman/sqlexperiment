@@ -103,7 +103,7 @@ def table(data, fields):
     return "\n".join(result)
 
 report = ["# Amplification results — 2026-10-10", "",
-          "Storage format v14: one commit record holding the log since the last checkpoint "
+          "Storage format v15: one commit record holding the log since the last checkpoint "
           "(a large transaction's segments stored beside it), pages checkpointed in place, "
           "with adaptive LZ4 page envelopes. Each baseline is a bulk load followed by a save "
           "that checkpoints it, so reads reach page keys.", "",
