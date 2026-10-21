@@ -1,8 +1,8 @@
-# SQL in Restate virtual objects
+# Durable functions on Restate
 
-An experiment: each Restate virtual object gets its own SQLite-compatible
-database, stored in the object's state, and its handlers run without journal
-replay, so a retried attempt runs again against the state as stored.
+An experiment: Restate virtual objects whose handlers run without journal
+replay, so a retried attempt runs again against the state as stored, each
+with its own SQLite-compatible database, stored in the object's state.
 
 ## What it looks like
 
