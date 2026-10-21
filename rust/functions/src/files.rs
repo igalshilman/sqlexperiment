@@ -6,9 +6,9 @@
 //!   files as the last commit left them, with the turn's changes over them.
 //! - **Before the commit**, the turn's changes become a checkpoint: each
 //!   file's content is a blob named by its hash, and a manifest (each path's
-//!   blob) is one more. The blobs are written first; the commit keeps only
-//!   the manifest's name. A crash before the commit leaves blobs no commit
-//!   names, which the next commit's `retain` deletes.
+//!   blob) is one more. The blobs are written first; the seal keeps only
+//!   the manifest's name. A crash before the seal leaves blobs no seal
+//!   names, which the host collects.
 //! - **`ctx.fs.exec(command)`** runs a command after the commit, in a
 //!   directory holding the committed checkpoint. The files it changed come
 //!   back as blobs, and join the files in the turn its outcome arrives; the
@@ -16,21 +16,20 @@
 //!   checkpoint: what it did to the files cannot happen twice. While it runs,
 //!   the files cannot change.
 //!
-//! The blobs live in a [`Blobs`] store (a directory here; object storage in
-//! production): none of the files' contents are in the program's heap, its
-//! commit, or Restate.
+//! The blobs are the scope's [`ScopeBlobs`] (a directory here; object
+//! storage in production): none of the files' contents are in the program's
+//! heap, the seal, or Restate.
 use crate::{
     GuestError, Operation, Outcome,
     extension::{Attached, Extension, HostCall, Making, Tables},
+    transaction::{Participant, ScopeBlobs, Sink, hash, random},
 };
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::Path,
     time::Duration,
 };
 
@@ -38,116 +37,33 @@ use std::{
 const TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Where checkpoints' blobs live, per scope, by name.
-#[async_trait]
-pub trait Blobs: Send + Sync + 'static {
-    async fn put(&self, scope: &str, name: &str, bytes: &[u8]) -> Result<()>;
-    async fn get(&self, scope: &str, name: &str) -> Result<Option<Vec<u8>>>;
-    async fn list(&self, scope: &str) -> Result<Vec<String>>;
-    async fn delete(&self, scope: &str, name: &str) -> Result<()>;
-}
-
-/// Blobs in a directory: `<root>/<the scope's hash>/<name>`.
-pub struct DirBlobs {
-    root: PathBuf,
-}
-
-impl DirBlobs {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
-    }
-
-    fn dir(&self, scope: &str) -> PathBuf {
-        self.root.join(&hash(scope.as_bytes())[..32])
-    }
-}
-
-#[async_trait]
-impl Blobs for DirBlobs {
-    async fn put(&self, scope: &str, name: &str, bytes: &[u8]) -> Result<()> {
-        let dir = self.dir(scope);
-        let path = dir.join(name);
-        if tokio::fs::try_exists(&path).await? {
-            return Ok(());
-        }
-        tokio::fs::create_dir_all(&dir).await?;
-        // Whole or not at all: written aside, then renamed into place.
-        let partial = dir.join(format!("{name}.{}.partial", random()));
-        tokio::fs::write(&partial, bytes).await?;
-        tokio::fs::rename(&partial, &path).await?;
-        Ok(())
-    }
-
-    async fn get(&self, scope: &str, name: &str) -> Result<Option<Vec<u8>>> {
-        match tokio::fs::read(self.dir(scope).join(name)).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    async fn list(&self, scope: &str) -> Result<Vec<String>> {
-        let mut names = Vec::new();
-        let mut entries = match tokio::fs::read_dir(self.dir(scope)).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(names),
-            Err(error) => return Err(error.into()),
-        };
-        while let Some(entry) = entries.next_entry().await? {
-            names.extend(entry.file_name().to_str().map(str::to_owned));
-        }
-        Ok(names)
-    }
-
-    async fn delete(&self, scope: &str, name: &str) -> Result<()> {
-        match tokio::fs::remove_file(self.dir(scope).join(name)).await {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
-            _ => Ok(()),
-        }
-    }
-}
-
-/// The extension: scopes' files, their checkpoints in `blobs`.
-#[derive(Clone)]
-pub struct Files {
-    blobs: Arc<dyn Blobs>,
-}
+/// The extension: each scope's files, checkpointed in its blobs.
+#[derive(Clone, Default)]
+pub struct Files;
 
 impl Files {
-    pub fn new(blobs: impl Blobs) -> Self {
-        Self {
-            blobs: Arc::new(blobs),
-        }
-    }
-
-    /// Checkpoints in the directory FUNCTIONS_FILES, or else in
-    /// `functions-files` under the system's temporary directory.
-    pub fn from_env() -> Result<Self> {
-        let root = std::env::var_os("FUNCTIONS_FILES")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("functions-files"));
-        Ok(Self::new(DirBlobs::new(root)))
+    pub fn new() -> Self {
+        Self
     }
 }
 
 #[async_trait]
 impl Extension for Files {
     /// The scope's files, as the checkpoint `saved` names.
-    async fn attach(&self, scope: &str, saved: Option<Value>) -> Result<Box<dyn Attached>> {
+    async fn attach(&self, blobs: ScopeBlobs, saved: Option<Value>) -> Result<Box<dyn Attached>> {
         let saved = saved.unwrap_or(Value::Null);
         let checkpoint = saved["checkpoint"].as_str().map(str::to_owned);
         let running = saved["running"].as_str().map(str::to_owned);
         let manifest = match &checkpoint {
             None => BTreeMap::new(),
             Some(name) => {
-                let bytes = (self.blobs.get(scope, name).await?)
+                let bytes = (blobs.get(name).await?)
                     .with_context(|| format!("Missing checkpoint {name}"))?;
                 serde_json::from_slice(&bytes)?
             }
         };
         Ok(Box::new(Checkpointed {
-            blobs: self.blobs.clone(),
-            scope: scope.to_owned(),
+            blobs,
             checkpoint,
             manifest,
             changes: BTreeMap::new(),
@@ -167,8 +83,7 @@ enum Change {
 
 /// The scope's files in a run.
 struct Checkpointed {
-    blobs: Arc<dyn Blobs>,
-    scope: String,
+    blobs: ScopeBlobs,
     /// The last commit's checkpoint, and its files: each path's blob.
     checkpoint: Option<String>,
     manifest: BTreeMap<String, String>,
@@ -192,7 +107,7 @@ impl Checkpointed {
                 None => return Ok(None),
             },
         };
-        let bytes = (self.blobs.get(&self.scope, blob).await?)
+        let bytes = (self.blobs.get(blob).await?)
             .with_context(|| format!("Missing blob {blob} of {path}"))?;
         Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
@@ -300,13 +215,9 @@ impl Attached for Checkpointed {
                 "The files changed after the commit",
             ));
         }
-        let (blobs, scope, manifest) = (
-            self.blobs.clone(),
-            self.scope.clone(),
-            self.manifest.clone(),
-        );
+        let (blobs, manifest) = (self.blobs.clone(), self.manifest.clone());
         Ok(Box::pin(async move {
-            exec(&*blobs, &scope, &manifest, &command, timeout)
+            exec(&blobs, &manifest, &command, timeout)
                 .await
                 .map_err(|error| GuestError::new("Error", format!("{error:#}")))
         }))
@@ -342,20 +253,21 @@ impl Attached for Checkpointed {
         value["changed"] = json!(changed);
         Ok(())
     }
+}
 
+#[async_trait]
+impl Participant for Checkpointed {
     /// The turn's changes, as a checkpoint: its blobs written, then its
-    /// manifest; the commit keeps the manifest's name.
-    async fn prepare(&mut self) -> Result<Option<Value>> {
+    /// manifest; the seal keeps the manifest's name.
+    async fn prepare(&mut self, sink: &mut Sink) -> Result<()> {
         if self.changes.is_empty() && self.running == self.saved_running {
-            return Ok(None);
+            return Ok(());
         }
         let mut manifest = self.manifest.clone();
         for (path, change) in std::mem::take(&mut self.changes) {
             match change {
                 Change::Text(text) => {
-                    let blob = hash(text.as_bytes());
-                    self.blobs.put(&self.scope, &blob, text.as_bytes()).await?;
-                    manifest.insert(path, blob);
+                    manifest.insert(path, self.blobs.put(text.as_bytes()).await?);
                 }
                 Change::Blob(blob) => {
                     manifest.insert(path, blob);
@@ -367,34 +279,27 @@ impl Attached for Checkpointed {
         }
         if manifest != self.manifest || self.checkpoint.is_none() {
             let bytes = serde_json::to_vec(&manifest)?;
-            let name = hash(&bytes);
-            self.blobs.put(&self.scope, &name, &bytes).await?;
-            self.checkpoint = Some(name);
+            self.checkpoint = Some(self.blobs.put(&bytes).await?);
             self.manifest = manifest;
         }
         self.saved_running = self.running.clone();
-        Ok(Some(
-            json!({"checkpoint": self.checkpoint, "running": self.running}),
-        ))
+        sink.record(json!({"checkpoint": self.checkpoint, "running": self.running}));
+        Ok(())
     }
 
-    /// Delete the blobs the commit's checkpoint does not name, but while a
-    /// command runs: its blobs are not named yet.
-    async fn retain(&mut self) -> Result<()> {
-        if self.running.is_some() {
-            return Ok(());
+    /// The checkpoint and its files' blobs; none while a command runs: the
+    /// blobs it writes are not named yet.
+    fn holds(&self) -> Option<BTreeSet<String>> {
+        if self.saved_running.is_some() {
+            return None;
         }
-        let kept: BTreeSet<&String> = self
-            .checkpoint
-            .iter()
-            .chain(self.manifest.values())
-            .collect();
-        for name in self.blobs.list(&self.scope).await? {
-            if !kept.contains(&name) {
-                self.blobs.delete(&self.scope, &name).await?;
-            }
-        }
-        Ok(())
+        Some(
+            self.checkpoint
+                .iter()
+                .chain(self.manifest.values())
+                .cloned()
+                .collect(),
+        )
     }
 }
 
@@ -402,8 +307,7 @@ impl Attached for Checkpointed {
 /// its output, and the files it changed, each as a blob it wrote (or null,
 /// if it removed it).
 async fn exec(
-    blobs: &dyn Blobs,
-    scope: &str,
+    blobs: &ScopeBlobs,
     manifest: &BTreeMap<String, String>,
     command: &str,
     timeout: Duration,
@@ -411,8 +315,7 @@ async fn exec(
     let dir = std::env::temp_dir().join(format!("functions-exec-{}", random()));
     let ran = async {
         for (path, blob) in manifest {
-            let bytes =
-                (blobs.get(scope, blob).await?).with_context(|| format!("Missing blob {blob}"))?;
+            let bytes = (blobs.get(blob).await?).with_context(|| format!("Missing blob {blob}"))?;
             let file = dir.join(path);
             tokio::fs::create_dir_all(file.parent().context("A file has a directory")?).await?;
             tokio::fs::write(&file, bytes).await?;
@@ -422,9 +325,8 @@ async fn exec(
         let mut changes = serde_json::Map::new();
         let mut seen = BTreeSet::new();
         for (path, bytes) in files_in(&dir).await? {
-            let blob = hash(&bytes);
-            if manifest.get(&path) != Some(&blob) {
-                blobs.put(scope, &blob, &bytes).await?;
+            if manifest.get(&path) != Some(&hash(&bytes)) {
+                let blob = blobs.put(&bytes).await?;
                 changes.insert(path.clone(), blob.into());
             }
             seen.insert(path);
@@ -478,19 +380,6 @@ fn path(input: &Value) -> Result<String, GuestError> {
         )));
     }
     Ok(parts.join("/"))
-}
-
-fn hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn random() -> u64 {
-    let mut bytes = [0; 8];
-    getrandom::fill(&mut bytes).expect("randomness");
-    u64::from_le_bytes(bytes)
 }
 
 fn type_error(message: impl Into<String>) -> GuestError {

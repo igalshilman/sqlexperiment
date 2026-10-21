@@ -7,11 +7,12 @@ use functions::{Blobs, DirBlobs, Extensions, Files, Operation, Outcome, Run};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-/// The extension `fs`, its blobs in a new directory.
+/// The extension `fs`, the scopes' blobs in a new directory.
 fn offered() -> (Extensions, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let files = Files::new(DirBlobs::new(dir.path()));
-    (Extensions::new().with("fs", files), dir)
+    let extensions =
+        (Extensions::new().with_blobs(DirBlobs::new(dir.path()))).with("fs", Files::new());
+    (extensions, dir)
 }
 
 /// The blobs of scope "s".

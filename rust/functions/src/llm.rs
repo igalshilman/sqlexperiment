@@ -26,6 +26,7 @@
 use crate::{
     Binding, GuestError, Operation, Outcome,
     extension::{Attached, Extension, HostCall, Making, Tables},
+    transaction::{Participant, ScopeBlobs},
 };
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
@@ -242,7 +243,7 @@ impl Llm {
 impl Extension for Llm {
     async fn attach(
         &self,
-        _scope: &str,
+        _blobs: ScopeBlobs,
         _saved: Option<Value>,
     ) -> anyhow::Result<Box<dyn Attached>> {
         Ok(Box::new(Asking {
@@ -258,6 +259,9 @@ struct Asking {
     /// Each model call made in this attempt, by operation: its conversation.
     asked: HashMap<String, String>,
 }
+
+/// Its conversations are in the scope's tables, which keep them.
+impl Participant for Asking {}
 
 #[async_trait]
 impl Attached for Asking {

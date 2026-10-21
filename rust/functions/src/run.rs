@@ -20,6 +20,7 @@ use crate::{
     extension::{Attachments, HostCall, Making, Tables},
     model::*,
     program::{Program, Programs},
+    transaction::ScopeBlobs,
     vm::{self, Vm},
 };
 use anyhow::{Context, Result, ensure};
@@ -67,6 +68,8 @@ pub struct Run {
     db: Arc<Mutex<Db>>,
     /// The extensions' parts of this attempt, which the VM's host calls share.
     extensions: Arc<Mutex<Attachments>>,
+    /// The scope's blobs, which the host collects after each seal.
+    blobs: ScopeBlobs,
     commit: Commit,
     /// The VM, and its memory as of the last commit: restored when a delivery
     /// needs it, and dropped once the run has settled.
@@ -131,7 +134,8 @@ impl Run {
         let saved = (previous.as_ref())
             .map(|commit| commit.extensions.clone())
             .unwrap_or_default();
-        let extensions = Attachments::attach(&scope.extensions, key, &saved).await?;
+        let blobs = ScopeBlobs::new(scope.extensions.blobs.clone(), key);
+        let extensions = Attachments::attach(&scope.extensions, &blobs, &saved).await?;
         let extensions = Arc::new(Mutex::new(extensions));
         if let Some(commit) = previous.filter(|commit| commit.run == run) {
             ensure!(
@@ -145,6 +149,7 @@ impl Run {
                 programs: programs.clone(),
                 db,
                 extensions,
+                blobs,
                 commit,
                 live: None,
                 last: Written::default(),
@@ -182,6 +187,7 @@ impl Run {
             programs: programs.clone(),
             db,
             extensions,
+            blobs,
             commit,
             live: Some(Live { vm, base: golden }),
             last: Written::default(),
@@ -450,11 +456,13 @@ impl Run {
                 .map(|capture| (state, capture)),
             Err(error) => Err(error),
         };
-        // Before the commit: each extension makes what changed durable, and
-        // the commit keeps what names it.
+        // Before the seal: each extension puts its part in it.
         let mut extensions = self.extensions.lock().await;
         let mut saved = self.commit.extensions.clone();
-        saved.extend(extensions.prepare().await?);
+        if let Err(error) = extensions.prepare(&mut saved).await {
+            extensions.aborted();
+            return Err(error);
+        }
         let mut db = self.db.lock().await;
         let mut written = Written::default();
         let mut live_pages = self.commit.live_pages;
@@ -562,10 +570,16 @@ impl Run {
         };
         let effects = Bytes::from(json_bytes(&commit)?);
         written.commit_bytes = effects.len();
-        db.commit_turn(effects, update).await?;
+        if let Err(error) = db.commit_turn(effects, update).await {
+            extensions.aborted();
+            return Err(error);
+        }
         drop(db);
-        // After it: what no commit names any more may go.
-        extensions.retain().await;
+        extensions.committed();
+        // After it: the blobs no seal names any more go.
+        if let Err(error) = self.blobs.collect(&extensions.holds()).await {
+            tracing::warn!("Collecting blobs failed: {error:#}");
+        }
         drop(extensions);
         self.commit = commit;
         self.last = written;

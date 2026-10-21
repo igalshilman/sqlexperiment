@@ -17,6 +17,7 @@
 use crate::{
     GuestError,
     extension::{Attached, Extension, HostCall, Making, Tables},
+    transaction::{Participant, ScopeBlobs},
 };
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -41,7 +42,7 @@ pub trait Binding: Send + Sync + 'static {
 impl<B: Binding + Clone> Extension for B {
     async fn attach(
         &self,
-        _scope: &str,
+        _blobs: ScopeBlobs,
         _saved: Option<Value>,
     ) -> anyhow::Result<Box<dyn Attached>> {
         Ok(Box::new(Bound(self.clone())))
@@ -49,6 +50,9 @@ impl<B: Binding + Clone> Extension for B {
 }
 
 struct Bound<B>(B);
+
+/// A binding keeps nothing.
+impl<B: Binding> Participant for Bound<B> {}
 
 #[async_trait]
 impl<B: Binding> Attached for Bound<B> {

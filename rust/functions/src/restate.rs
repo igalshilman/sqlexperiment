@@ -603,7 +603,8 @@ pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
     let fetch = crate::Fetch::new(crate::FetchPolicy::from_env());
     let extensions = (Extensions::new().with("fetch", fetch))
         .with("llm", crate::Llm::from_env())
-        .with("fs", crate::Files::from_env()?);
+        .with("fs", crate::Files::new())
+        .with_blobs(crate::DirBlobs::from_env());
     let cache = page_cache().await?;
     Ok(
         bind(Endpoint::builder(), programs, &cache, &budget, &extensions)?

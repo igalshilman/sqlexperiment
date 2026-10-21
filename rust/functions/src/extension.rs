@@ -12,20 +12,26 @@
 //!   [`Attached::issued`], in its turn; [`Attached::operation`], as it is
 //!   made; [`Attached::delivered`], in the turn its outcome arrives, before
 //!   the program sees it.
-//! - **State saved with the commit**: before each commit,
-//!   [`Attached::prepare`] makes what changed durable, and returns what the
-//!   commit keeps of it (a checkpoint's name, say). The next attempt, on any
-//!   machine, gets it back in [`Extension::attach`]. After a commit,
-//!   [`Attached::retain`] may drop what no commit names any more.
+//! - **State kept by the turn's transaction**: an attached extension is a
+//!   [`Participant`]: it puts its record in the seal, its large state in the
+//!   scope's blobs, which the record names. The next attempt, on any
+//!   machine, gets the record back in [`Extension::attach`].
 //!
-//! What a commit keeps of an extension belongs to the scope, as its tables
+//! What a seal keeps of an extension belongs to the scope, as its tables
 //! do: it carries over from one run to the next.
-use crate::{GuestError, Operation, Outcome, db::Db};
+use crate::{
+    GuestError, Operation, Outcome,
+    db::Db,
+    transaction::{Blobs, Participant, ScopeBlobs, Sink},
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 /// One operation, as the host makes it.
 pub struct HostCall {
@@ -63,14 +69,15 @@ impl Tables<'_> {
 /// An extension, as a deployment offers it.
 #[async_trait]
 pub trait Extension: Send + Sync + 'static {
-    /// Its part of a run in `scope`: as the scope's last commit left it
-    /// (`saved`), or new.
-    async fn attach(&self, scope: &str, saved: Option<Value>) -> Result<Box<dyn Attached>>;
+    /// Its part of a run in the scope `blobs` are of: as the scope's last
+    /// seal left it (`saved`, its record), or new.
+    async fn attach(&self, blobs: ScopeBlobs, saved: Option<Value>) -> Result<Box<dyn Attached>>;
 }
 
-/// An extension's part of one attempt at a run.
+/// An extension's part of one attempt at a run: a participant in each of
+/// its turns' transactions.
 #[async_trait]
-pub trait Attached: Send {
+pub trait Attached: Participant {
     /// In the turn: the host call `op`, `<name>.<op>`.
     async fn call(
         &mut self,
@@ -116,38 +123,40 @@ pub trait Attached: Send {
         Ok(())
     }
 
-    /// Before the commit: make what changed durable, and return what the
-    /// commit keeps of it; `None` if it keeps what it kept.
-    async fn prepare(&mut self) -> Result<Option<Value>> {
-        Ok(None)
-    }
-
-    /// After the commit: drop what no commit names any more.
-    async fn retain(&mut self) -> Result<()> {
-        Ok(())
-    }
-
     /// The run waits, and may move: release what is live.
     fn park(&mut self) {}
 }
 
-/// The extensions a deployment offers its programs, by name.
+/// The runtime's own participants' names, in the seal.
+pub(crate) const BUILT_IN: [&str; 3] = ["run", "memory", "tables"];
+
+/// The extensions a deployment offers its programs, by name, and where
+/// they keep what is too large for a seal.
 #[derive(Clone, Default)]
-pub struct Extensions(BTreeMap<String, Arc<dyn Extension>>);
+pub struct Extensions {
+    offered: BTreeMap<String, Arc<dyn Extension>>,
+    pub(crate) blobs: Option<Arc<dyn Blobs>>,
+}
 
 impl Extensions {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Keep scopes' blobs in `blobs`.
+    pub fn with_blobs(mut self, blobs: impl Blobs) -> Self {
+        self.blobs = Some(Arc::new(blobs));
+        self
+    }
+
     /// Offer `extension` as `name`: its calls are `<name>.<op>`.
     pub fn with(mut self, name: impl Into<String>, extension: impl Extension) -> Self {
         let name = name.into();
         assert!(
-            !name.is_empty() && !name.contains('.'),
+            !name.is_empty() && !name.contains('.') && !BUILT_IN.contains(&name.as_str()),
             "Extension name {name:?}"
         );
-        self.0.insert(name, Arc::new(extension));
+        self.offered.insert(name, Arc::new(extension));
         self
     }
 }
@@ -160,12 +169,13 @@ impl Attachments {
     /// Each of `extensions`, in `scope`, as `saved` (the last commit's) has it.
     pub async fn attach(
         extensions: &Extensions,
-        scope: &str,
+        blobs: &ScopeBlobs,
         saved: &BTreeMap<String, Value>,
     ) -> Result<Self> {
         let mut attached = BTreeMap::new();
-        for (name, extension) in &extensions.0 {
-            let part = extension.attach(scope, saved.get(name).cloned()).await?;
+        for (name, extension) in &extensions.offered {
+            let saved = saved.get(name).cloned();
+            let part = extension.attach(blobs.clone(), saved).await?;
             attached.insert(name.clone(), part);
         }
         Ok(Self(attached))
@@ -177,25 +187,32 @@ impl Attachments {
         self.0.get_mut(name)
     }
 
-    /// Each extension's prepare: what the commit keeps, of those that
-    /// changed.
-    pub async fn prepare(&mut self) -> Result<BTreeMap<String, Value>> {
-        let mut saved = BTreeMap::new();
+    /// Each extension's part of the seal, over what `parts` kept: whether
+    /// any changed.
+    pub async fn prepare(&mut self, parts: &mut BTreeMap<String, Value>) -> Result<bool> {
+        let mut changed = false;
         for (name, part) in &mut self.0 {
-            if let Some(value) = part.prepare().await? {
-                saved.insert(name.clone(), value);
-            }
+            let mut sink = Sink::new(parts.remove(name));
+            part.prepare(&mut sink).await?;
+            let (record, recorded) = sink.finish();
+            changed |= recorded;
+            parts.extend(record.map(|record| (name.clone(), record)));
         }
-        Ok(saved)
+        Ok(changed)
     }
 
-    /// Each extension's retain. A failure leaves garbage, not a broken run.
-    pub async fn retain(&mut self) {
-        for (name, part) in &mut self.0 {
-            if let Err(error) = part.retain().await {
-                tracing::warn!(extension = name, "Retain failed: {error:#}");
-            }
-        }
+    pub fn committed(&mut self) {
+        self.0.values_mut().for_each(|part| part.committed());
+    }
+
+    pub fn aborted(&mut self) {
+        self.0.values_mut().for_each(|part| part.aborted());
+    }
+
+    /// The blobs each extension's record names (`None` for one with some in
+    /// flight).
+    pub fn holds(&self) -> Vec<Option<BTreeSet<String>>> {
+        self.0.values().map(|part| part.holds()).collect()
     }
 
     pub fn park(&mut self) {
