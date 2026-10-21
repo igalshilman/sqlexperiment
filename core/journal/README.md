@@ -124,11 +124,11 @@ the owner cache.
 
 ## Layout
 
-| Path                         | What                                         |
-| ---------------------------- | -------------------------------------------- |
-| `src/`, `tests/`             | The crate and its tests                      |
-| [`docs/`](docs)              | Design, storage format, review               |
-| [`spec/`](spec)              | The protocol in TLA+                         |
+| Path             | What                           |
+| ---------------- | ------------------------------ |
+| `src/`, `tests/` | The crate and its tests        |
+| [`docs/`](docs)  | Design, storage format, review |
+| [`spec/`](spec)  | The protocol in TLA+           |
 
 ## Build and test
 

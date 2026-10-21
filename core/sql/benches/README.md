@@ -4,7 +4,7 @@ These are standalone Cargo bench targets (`harness = false`), separate from test
 and examples. All use the current (v15) storage format and require the opt-in `simulation` feature. They count logical KV
 operations and bytes in MemoryKv; they do not model a real remote backend.
 
-Run from the repository root:
+Run from `core/sql`:
 
 ```sh
 cargo bench --locked --features simulation --bench amplification -- 3 > benches/results/amplification.csv

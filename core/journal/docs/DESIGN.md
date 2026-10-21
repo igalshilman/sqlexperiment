@@ -1,15 +1,19 @@
 # Design
 
-SQLite-compatible SQL (Turso's `turso_core` engine, unmodified) over a
-Restate virtual object's state: a key/value namespace with one owner at a
-time.
+A journal over a Restate virtual object's state (a key/value namespace with
+one owner at a time): records and paged files, committed together in one put.
+Its participants keep changes of their own and move them in before a commit;
+the main one is SQLite-compatible SQL (the [`sql`](../../sql/README.md) crate:
+Turso's `turso_core` engine, unmodified) on the file `db`.
 
 Its host is an object without Restate's journal: a key, its own database,
 and calls to other objects or services, with at-least-once delivery. The
 database is the object's only durable record, and the journal is how it
 reaches the store: the host commits the journal (records, paged files and
 the SQL's file `db`, in one put) when it chooses, after each SQL transaction
-as SQLite does, or once per turn of everything that takes part.
+as SQLite does, or once per turn of everything that takes part. The sections
+on SQL describe the `sql` crate, which keeps its engine's state private until
+it flushes into the file `db`.
 
 ## Constraints
 
@@ -314,13 +318,13 @@ Only the database is kept: the next session connects afresh, so connection
 counters (`last_insert_rowid()`, `changes()`) and settings never carry over.
 The next open reuses it if the record is the one it committed, and its I/O
 is clean. This keeps the parsed schema warm, which cuts CPU per
-session several-fold ([cache results](../benches/CACHE_RESULTS.md)). A parked
+session several-fold ([cache results](../../sql/benches/CACHE_RESULTS.md)). A parked
 engine releases its view of the log (the next open replaces it), so what it
 holds is its database's buffer pool and its parsed schema. The buffer pool is
 a 3 MiB arena that turso maps outside the allocator: resident, ~4 MiB per
 parked engine (a counting allocator saw only the schema's 40–110 KiB, from one
 to 50 tables, and the budget had let ~1,300 engines, ~5 GiB, stay parked).
-Parked engines share a byte budget (`PageCacheConfig::engine_bytes`, 64 MiB),
+Parked engines share a byte budget (`PageCacheConfig::idle_bytes`, 64 MiB, shared with any other participant's idle state),
 each weighed as 4 MiB plus 16 bytes per byte of schema SQL, measured when an
 engine opens and after a commit that may have changed the schema. Namespace states are
 capped by count. Least recently used go first; dropping either only makes a
@@ -340,8 +344,8 @@ one-thread runtime of its own. It is the only background work.
 
 Each page is written twice, once to the log (compressed against its previous
 image, and rewritten with the record until a checkpoint) and once at
-checkpoint. Measurements: [log shipping](../benches/LOG_RESULTS.md),
-[cache](../benches/CACHE_RESULTS.md).
+checkpoint. Measurements: [log shipping](../../sql/benches/LOG_RESULTS.md),
+[cache](../../sql/benches/CACHE_RESULTS.md).
 
 ## Limits and open questions
 

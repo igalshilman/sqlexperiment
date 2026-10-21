@@ -1021,9 +1021,7 @@ dependencies = [
  "foyer",
  "futures",
  "lz4_flex",
- "parking_lot",
  "tokio",
- "turso_core",
  "zstd-safe",
 ]
 
@@ -1036,6 +1034,7 @@ dependencies = [
  "journal",
  "pyo3",
  "pyo3-async-runtimes",
+ "sql",
  "tokio",
  "turso_core",
 ]
@@ -1859,6 +1858,17 @@ name = "softaes"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
+
+[[package]]
+name = "sql"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "journal",
+ "parking_lot",
+ "turso_core",
+]
 
 [[package]]
 name = "stable_deref_trait"
