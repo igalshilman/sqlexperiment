@@ -62,7 +62,7 @@ replaced whole by a commit that sets it. One of at most the inline budget
 written by the commit that sets it. Checkpoints keep them. A record never
 set reads as empty.
 
-A commit (`Session::seal`) sets records and writes paged files with its
+A commit (`Journal::commit`) sets records and writes paged files with its
 SQL, in the same put. A stored value holds a large transaction's segment, a
 large record, or the record's inline log sealed into one (a seal).
 

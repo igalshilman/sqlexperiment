@@ -5,7 +5,7 @@ use futures::{
     future::{BoxFuture, FutureExt, Shared},
 };
 use journal::{
-    Durability, NamespaceCache, Result, Session, StorageOptions,
+    Durability, NamespaceCache, Result, Sql, StorageOptions,
     kv::KvStore,
     simulation::{MemoryKv, fresh_namespace},
 };
@@ -57,7 +57,7 @@ impl KvStore for GateKv {
     }
 }
 
-async fn value(db: &mut Session, id: i64) -> Result<String> {
+async fn value(db: &mut Sql, id: i64) -> Result<String> {
     Ok(db
         .query(&format!("SELECT v FROM t WHERE id = {id}"))
         .await?[0][0]
@@ -78,22 +78,21 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         });
         let plain: Arc<dyn KvStore> = Arc::new(memory.clone());
         // Setup without a cache: a large save checkpoints every page in place.
-        let mut db = Session::open(plain.clone()).await?;
+        let mut db = Sql::open_store(plain.clone()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)")
             .await?;
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<600) INSERT INTO t SELECT x, 'old' || x || '|' || hex(randomblob(700)) FROM n").await?;
         db.save().await?;
 
         let ns = fresh_namespace();
-        let mut reader =
-            Session::open_with_options(gate.clone(), opts(&ns, Durability::Save)).await?;
+        let mut reader = Sql::open_with_options(gate.clone(), opts(&ns, Durability::Save)).await?;
         assert!(value(&mut reader, 1).await?.starts_with("old1"));
         let (tx, started) = oneshot::channel();
         *gate.started.lock().unwrap() = Some(tx);
         let (release_tx, release_rx) = oneshot::channel::<()>();
         *gate.release.lock().unwrap() = Some(release_rx.shared());
 
-        let mut writer = Session::open_with_options(
+        let mut writer = Sql::open_with_options(
             plain.clone(),
             StorageOptions {
                 checkpoint_after: 0,
@@ -124,8 +123,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         drop(writer);
         *gate.release.lock().unwrap() = None;
 
-        let mut db =
-            Session::open_with_options(plain.clone(), opts(&ns, Durability::Commit)).await?;
+        let mut db = Sql::open_with_options(plain.clone(), opts(&ns, Durability::Commit)).await?;
         assert!(!db.reused_engine());
         let seen = value(&mut db, 250).await?;
         let seen = seen[..seen.len().min(6)].to_owned();
@@ -133,7 +131,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         db.execute("UPDATE t SET v = substr(v, 1, 6) || '!' WHERE id = 250")
             .await?;
         drop(db);
-        let mut cold = Session::open(plain).await?;
+        let mut cold = Sql::open_store(plain).await?;
         let durable = value(&mut cold, 250).await?;
         assert_eq!(
             (seen.as_str(), durable.as_str()),

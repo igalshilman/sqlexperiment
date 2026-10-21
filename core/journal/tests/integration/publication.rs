@@ -2,7 +2,7 @@
 //! outcome, with and without a crash and an owner cache. The save is atomic, the
 //! database stays consistent and the next save works.
 use journal::{
-    NamespaceCache, Result, Session, StorageOptions,
+    NamespaceCache, Result, Sql, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
@@ -19,13 +19,13 @@ fn options(cache: Option<&NamespaceCache>) -> StorageOptions {
 async fn baseline(cache: Option<&NamespaceCache>) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
-    let mut db = Session::open_with_options(kv.clone(), options(cache)).await?;
+    let mut db = Sql::open_with_options(kv.clone(), options(cache)).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
     db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<40) INSERT INTO t SELECT x,x,printf('%0300d',x) FROM n").await?;
     db.save().await?;
-    let mut db = Session::open_with_options(kv, options(cache)).await?;
+    let mut db = Sql::open_with_options(kv, options(cache)).await?;
     db.execute("UPDATE t SET n = n + 100 WHERE id % 3 = 0")
         .await?;
     db.save().await?;
@@ -34,7 +34,7 @@ async fn baseline(cache: Option<&NamespaceCache>) -> Result<MemoryKv> {
 
 /// Returns whether the update `n = 7000` is visible; it must be all or nothing.
 async fn changed(store: Arc<FaultKv>, options: StorageOptions) -> Result<bool> {
-    let mut db = Session::open_with_options(store, options).await?;
+    let mut db = Sql::open_with_options(store, options).await?;
     let rows = db
         .query("SELECT count(*), sum(n = 7000), sum(length(payload)) FROM t")
         .await?;
@@ -62,7 +62,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                             let base = baseline(cache.as_ref()).await?;
                             let store = Arc::new(FaultKv::new(base, nth as u64));
                             let mut db =
-                                Session::open_with_options(store.clone(), options(cache.as_ref()))
+                                Sql::open_with_options(store.clone(), options(cache.as_ref()))
                                     .await?;
                             db.execute("UPDATE t SET n = 7000").await?;
                             let _gate = store.arm(Failpoint {
@@ -91,7 +91,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                             }
                             // The next save works and survives a crash.
                             let mut db =
-                                Session::open_with_options(store.clone(), options(cache.as_ref()))
+                                Sql::open_with_options(store.clone(), options(cache.as_ref()))
                                     .await?;
                             db.execute("UPDATE t SET n = 7000").await?;
                             db.save().await?;

@@ -14,7 +14,7 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use journal::kv::KvStore;
-use journal::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
+use journal::{Durability, PageCache, PageCacheConfig, Sql, StorageOptions, Value};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
@@ -157,7 +157,7 @@ fn closed() -> PyErr {
 /// One session of a namespace's database.
 #[pyclass(frozen)]
 struct Database {
-    session: Arc<Mutex<Option<Session>>>,
+    session: Arc<Mutex<Option<Sql>>>,
     /// Whether the session can still run SQL, as of the last call that ended:
     /// read without the lock, which a running call holds.
     usable: Arc<AtomicBool>,
@@ -167,7 +167,7 @@ struct Database {
 /// runs on `event_loop`; see `sqlite_kv/__init__.py` for the store object it
 /// is built from.
 ///
-/// A `reader` reads the namespace beside its owner (see `Session::open_reader`):
+/// A `reader` reads the namespace beside its owner (see `Journal::open_reader`):
 /// it writes nothing to the store, and `is_current` says whether what it read
 /// is still the stored state.
 #[pyfunction]
@@ -194,8 +194,8 @@ fn open<'py>(
             ..StorageOptions::default()
         };
         let session = match reader {
-            true => Session::open_reader(store, options).await,
-            false => Session::open_with_options(store, options).await,
+            true => Sql::open_reader(store, options).await,
+            false => Sql::open_with_options(store, options).await,
         }
         .map_err(sql_error)?;
         Ok(Database {
@@ -262,7 +262,7 @@ impl Database {
     }
 
     /// `COMMIT` the open transaction; with `effects`, they commit with it
-    /// (see `Session::commit_with`).
+    /// (see `Sql::commit_with`).
     #[pyo3(signature = (effects=None))]
     fn commit<'py>(
         &self,
@@ -290,7 +290,7 @@ impl Database {
         self.usable.load(Ordering::Acquire)
     }
 
-    /// The effects of the last commit that set them (see `Session::effects`).
+    /// The effects of the last commit that set them (see `Sql::effects`).
     fn effects<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let session = self.session.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -302,7 +302,7 @@ impl Database {
 
     /// Whether the store still holds the state this reader opened on, so
     /// that what it read is: if not, read again in a new session (see
-    /// `Session::is_current`).
+    /// `Journal::is_current`).
     fn is_current<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let session = self.session.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

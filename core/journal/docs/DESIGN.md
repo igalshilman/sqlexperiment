@@ -13,7 +13,7 @@ It serves two kinds of host:
   objects or services, with at-least-once delivery. The database is the
   object's only durable record, so it behaves like SQLite: each SQL
   transaction is durable when it commits (`Durability::Commit`), and
-  `Session::transaction` scopes one to a closure.
+  `Sql::transaction` scopes one to a closure.
 
 Both write the same format through the same protocol; only how much one save
 covers differs.
@@ -122,12 +122,12 @@ checkpoint. Pages are zstd frames by default (`PageCompression::Zstd`).
 `Ok(SaveReport)` means committed; an error leaves the commit outcome unknown.
 
 **Effects.** A host may commit bytes of its own with a transaction
-(`Session::commit_with`): they ride in the same record put, so they are
+(`Sql::commit_with`): they ride in the same record put, so they are
 durable exactly when the transaction is, and stay, through checkpoints, until
 a later commit replaces them. The Restate SDKs keep a transaction's sends
 there, as its outbox, and make them once it commits. These are the record
 `effects`; a host may set any record (`Journal::record`) and write paged
-files of its own (`Journal::file`), committed by the next `Session::seal`. A
+files of its own (`Journal::file`), committed by the next `Journal::commit`. A
 commit with no page changes adds no log transaction, so a host's turns do
 not checkpoint SQL.
 
@@ -136,7 +136,7 @@ not checkpoint SQL.
 `StorageOptions::durability` decides what one save covers:
 
 - **`Durability::Save`** (default): the whole session. SQL `COMMIT` stays
-  private until `Session::save()`, which commits everything as one log
+  private until `Sql::save()`, which commits everything as one log
   transaction and ends the session. Dropping the session discards it all. This
   fits a host that already makes the unit of work atomic, such as a journaled
   handler that a failure replays from the start.
@@ -144,8 +144,14 @@ not checkpoint SQL.
   statement leaves the engine in autocommit mode with private changes (an
   autocommit write, or `COMMIT`), the session saves before the statement
   returns and continues on the committed view. Reads never save. Dropping the
-  session loses only an open transaction. `Session::transaction(closure)` wraps
+  session loses only an open transaction. `Sql::transaction(closure)` wraps
   `BEGIN`/`COMMIT`, and rolls back when the closure returns `Err`.
+- **`Durability::Participant`**: the journal's commit, which the host
+  makes. The SQL is one participant among its records and files: an SQL
+  commit stays in the engine until `Sql::flush` moves it into the file `db`,
+  and `Journal::commit` makes it durable with everything else changed since
+  the last commit, in one put. A journal commit with SQL committed but not
+  flushed is refused.
 
 A continuing session moves its view forward locally instead of reopening: the
 new transaction joins its replayed log, and a checkpoint empties it. Each SQL
@@ -158,7 +164,7 @@ fails after a commit runs again on top of it. Two patterns keep that correct:
 - **Idempotent requests.** In the same transaction as the request's effects,
   record its id, and stop if it was already there:
   a plain `INSERT` into a table keyed by the id fails on a duplicate, which
-  rolls back `Session::transaction`, or `ON CONFLICT DO NOTHING RETURNING id`
+  rolls back `Sql::transaction`, or `ON CONFLICT DO NOTHING RETURNING id`
   returns no row for one. The dedupe record and the effects commit atomically,
   because they are one log transaction.
 - **Outbox for calls.** Commit the intent to call another object or service
@@ -205,12 +211,12 @@ saves gets. It stays out of the record, which is on the correctness path.
 
 ## Readers
 
-A reader (`Session::open_reader`) reads a namespace that another owns,
+A reader (`Journal::open_reader`) reads a namespace that another owns,
 alongside it, such as a virtual object's shared handler beside the exclusive
 one. It writes nothing to the store: no cache, and its SQL changes stay in
 the session ([`Durability::Save`], never saved). It opens like anyone, and
 reads pages lazily, so a checkpoint by the owner meanwhile could give it a
-page newer than its log. `Session::is_current` tells, once it has read: the
+page newer than its log. `Journal::is_current` tells, once it has read: the
 record unchanged. A checkpoint writes only pages its record's log covers, and
 moves the record after, so a reader that read an overwritten page finds the
 record changed. It is conservative: any commit since open makes the reader
@@ -259,10 +265,10 @@ The engine sees two virtual files, the database and its WAL, served by `KvIo`:
   every failed request and synchronous read to tell. Any other error (storage,
   a limit, a cancelled call, an engine anomaly) ends the session, and an error
   from a statement that saves leaves its commit outcome unknown.
-  `Session::is_usable` says which happened.
+  `Sql::is_usable` says which happened.
 - **Sessions.** `save()` consumes a session, and dropping it discards unsaved
   work. Inside
-  `Session::transaction`, a statement that ends the transaction (`COMMIT`,
+  `Sql::transaction`, a statement that ends the transaction (`COMMIT`,
   `END`, `ROLLBACK`) fails and ends the session before anything is durable,
   and so does dropping or unwinding the transaction future.
 

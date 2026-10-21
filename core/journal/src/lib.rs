@@ -1,21 +1,28 @@
-//! SQLite-compatible SQL over an asynchronous key/value store.
+//! A durable journal over an asynchronous key/value store: paged files and
+//! records, committed together in one put, with SQLite-compatible SQL on the
+//! file `db`.
 //!
-//! The engine is Turso's Rust implementation (`turso_core`); this crate supplies
-//! its file I/O and makes the database durable in a KV store: a Restate
-//! object's state, which keeps writes in issue order and makes them durable at
-//! a sync (see [`kv`]). It needs no multi-key transaction, compare-and-swap,
-//! listing operation or backend WAL API.
+//! A [`Journal`] is one namespace in a KV store: a Restate object's state,
+//! which keeps writes in issue order and makes them durable at a sync (see
+//! [`kv`]). It needs no multi-key transaction, compare-and-swap, listing
+//! operation or backend WAL API. Its [`File`]s are 4 KiB pages read and
+//! written at random, and its [`Record`]s whole values in the commit record;
+//! [`Journal::commit`] makes every change durable at once. [`Sql`] runs
+//! Turso's Rust engine (`turso_core`) on the file `db`.
 //!
 //! # When changes become durable
 //!
-//! [`StorageOptions::durability`] chooses. With [`Durability::Save`] (default),
-//! SQL statements, SQL `COMMIT`, file sync and [`Session::checkpoint`] affect a
-//! private in-memory view. They do **not** make changes durable in KV. Dropping a
-//! session discards that view. [`Session::save`] checkpoints the private WAL,
-//! commits the changed pages and consumes the session. With
+//! [`StorageOptions::durability`] chooses, for SQL. With [`Durability::Save`]
+//! (default), SQL statements, SQL `COMMIT`, file sync and [`Sql::checkpoint`]
+//! affect a private in-memory view. They do **not** make changes durable in
+//! KV. Dropping a session discards that view. [`Sql::save`] checkpoints the
+//! private WAL, commits the changed pages and consumes the session. With
 //! [`Durability::Commit`], each SQL commit does the same before its statement
-//! returns, and the session continues; [`Session::transaction`] runs a closure
-//! as one SQL transaction.
+//! returns, and the session continues; [`Sql::transaction`] runs a closure
+//! as one SQL transaction. With [`Durability::Participant`], the SQL is one
+//! participant of the journal's commit: [`Sql::flush`] moves what it
+//! committed into the file `db`, and the host's [`Journal::commit`] makes it
+//! durable with the rest.
 //!
 //! | Layer | Representation | Survives dropping the session? |
 //! |---|---|---|
@@ -92,12 +99,19 @@
 //!
 //! ```no_run
 //! # use std::sync::Arc;
-//! # use journal::{Session, kv::KvStore};
+//! # use journal::{Durability, Journal, Sql, StorageOptions, kv::KvStore};
 //! # async fn example(store: Arc<dyn KvStore>) -> journal::Result<()> {
-//! let mut session = Session::open(store).await?;
-//! session.execute("CREATE TABLE messages(body TEXT)").await?;
-//! session.execute("INSERT INTO messages VALUES('hello')").await?;
-//! session.save().await?;
+//! let options = StorageOptions {
+//!     durability: Durability::Participant,
+//!     ..StorageOptions::default()
+//! };
+//! let journal = Journal::open_with_options(store, options).await?;
+//! let mut sql = Sql::open(&journal).await?;
+//! sql.execute("CREATE TABLE messages(body TEXT)").await?;
+//! sql.execute("INSERT INTO messages VALUES('hello')").await?;
+//! sql.flush().await?;
+//! journal.record("seen").set("1 message".into());
+//! journal.commit().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -158,7 +172,8 @@ use turso_core::{
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type Rows = Vec<Vec<Value>>;
 
-/// One private SQL view, driven entirely by the caller's async task.
+/// The SQL engine over a journal's file `db`: one private SQL view, driven
+/// entirely by the caller's async task.
 ///
 /// The host advances engine state machines, awaits queued KV I/O and resumes the
 /// engine on the same task. No worker thread or background task is created.
@@ -166,12 +181,13 @@ type Rows = Vec<Vec<Value>>;
 /// session usable; a storage error, a cancelled call or a failed commit ends
 /// it (see [`Self::is_usable`]): open a new one after settling backend requests.
 /// [`Self::save`] consumes the handle; dropping it never implicitly saves.
-pub struct Session {
+/// When its changes become durable is the journal's [`Durability`].
+pub struct Sql {
+    journal: Journal,
     database: Option<Arc<Database>>,
     connection: Option<Arc<Connection>>,
     io: Arc<KvIo>,
     poisoned: bool,
-    cache: Option<NamespaceCache>,
     /// The engine moved into the owner cache; nothing is left to shut down.
     parked: bool,
     /// No SQL changed per-connection state (settings, attachments, the temp
@@ -183,12 +199,8 @@ pub struct Session {
     durability: Durability,
     /// A [`Self::transaction`] body is running.
     in_body: bool,
-    /// Records set and files written since the last commit, which the next
-    /// one makes durable.
-    records: Arc<Mutex<log::Records>>,
-    files: Arc<Mutex<snapshot::Writes>>,
-    /// The statement running is a [`Self::seal`]: it commits even without
-    /// SQL changes.
+    /// The statement running is a [`Self::flush`] with [`Durability::Commit`]:
+    /// it commits even without SQL changes.
     sealing: bool,
     /// Set when a [`Self::transaction`] future is dropped or unwinds before
     /// finishing, which may leave its SQL transaction open.
@@ -198,11 +210,9 @@ pub struct Session {
     schema_bytes: Option<usize>,
     /// SQL since the last commit may have changed the schema.
     schema_changed: bool,
-    /// What the last commit wrote.
-    last_report: SaveReport,
 }
 
-/// Marks a session abandoned unless it finished; see [`Session::transaction`].
+/// Marks a session abandoned unless it finished; see [`Sql::transaction`].
 struct Abandon {
     abandoned: Arc<AtomicBool>,
     finished: bool,
@@ -270,109 +280,81 @@ pub(crate) async fn yield_now() {
     .await
 }
 
-impl Session {
+impl Sql {
     /// Local engine I/O only, useful for separating WAL traffic from backend writes.
     #[cfg(feature = "simulation")]
     pub fn io_stats(&self) -> crate::simulation::IoStats {
         self.io.stats()
     }
 
-    /// Recover any pending publication and open a fresh engine with default compression.
-    ///
-    /// Acquire exclusive ownership and settle the preceding owner's requests first.
-    /// Recovery may perform mutations before the session becomes usable.
-    /// The returned future is `Send`; all work is polled by the caller's executor.
-    pub async fn open(store: Arc<dyn KvStore>) -> Result<Self> {
-        Self::open_with_options(store, StorageOptions::default()).await
+    /// Open the SQL database of `journal`, its file `db`: an engine left idle
+    /// by this owner's previous session if the journal found one, or a new
+    /// one. One `Sql` runs on a journal.
+    pub async fn open(journal: &Journal) -> Result<Self> {
+        let shared = &journal.shared;
+        if shared.sql.swap(true, Ordering::SeqCst) {
+            return Err("an Sql already runs on this journal".into());
+        }
+        let warm = shared.warm.lock().unwrap().take();
+        let mut sql = Self {
+            journal: Journal {
+                shared: shared.clone(),
+                prefix: Arc::from(""),
+            },
+            database: None,
+            connection: None,
+            io: shared.io.clone(),
+            poisoned: true,
+            parked: false,
+            reused: warm.is_some(),
+            reusable: true,
+            durability: shared.options.durability,
+            in_body: false,
+            sealing: false,
+            abandoned: Arc::default(),
+            schema_bytes: warm.as_ref().map(|warm| warm.schema_bytes),
+            schema_changed: false,
+        };
+        let database = match warm {
+            Some(warm) => warm.database,
+            None => {
+                sql.io.prepare_engine().await?;
+                open_engine(&sql.io).await?
+            }
+        };
+        sql.connection = Some(connect(&sql.io, &database).await?);
+        sql.database = Some(database);
+        sql.poisoned = false;
+        if !sql.reused && shared.options.cache.is_some() {
+            sql.schema_bytes = Some(sql.measure_schema().await?);
+        }
+        Ok(sql)
     }
 
-    /// Open with explicit [`StorageOptions`]. Options never change the stored
-    /// format: existing page tags determine decoding.
-    ///
-    /// With a [`PageCache`], an engine left idle by this owner's previous session
-    /// is reused when nothing changed since: the record is the one that engine
-    /// committed. Its page cache and parsed schema stay warm.
+    /// A journal of its own, opened with `options` (see
+    /// [`Journal::open_with_options`]), and its SQL database: for a host whose
+    /// state is all SQL.
     pub async fn open_with_options(
         store: Arc<dyn KvStore>,
         options: StorageOptions,
     ) -> Result<Self> {
-        let cache = options.cache.clone();
-        let durability = options.durability;
-        let snapshot = Snapshot::open_with_options(store, options).await?;
-        let warm = match &cache {
-            Some(cache) if snapshot.unchanged => cache
-                .take_engine()
-                .filter(|warm| warm.version == snapshot.version() && warm.io.is_clean()),
-            _ => None,
-        };
-        if let Some(warm) = warm {
-            let mut session = Self {
-                database: None,
-                connection: None,
-                io: warm.io,
-                poisoned: true,
-                cache,
-                parked: false,
-                reused: true,
-                reusable: true,
-                durability,
-                in_body: false,
-                records: Arc::default(),
-                files: Arc::default(),
-                sealing: false,
-                abandoned: Arc::default(),
-                schema_bytes: Some(warm.schema_bytes),
-                schema_changed: false,
-                last_report: SaveReport::default(),
-            };
-            session.io.resume(snapshot).await?;
-            session.connection = Some(connect(&session.io, &warm.database).await?);
-            session.database = Some(warm.database);
-            session.poisoned = false;
-            return Ok(session);
-        }
-        let mut session = Self {
-            database: None,
-            connection: None,
-            io: KvIo::from_snapshot(snapshot),
-            poisoned: true,
-            cache,
-            parked: false,
-            reused: false,
-            reusable: true,
-            durability,
-            in_body: false,
-            records: Arc::default(),
-            files: Arc::default(),
-            sealing: false,
-            abandoned: Arc::default(),
-            schema_bytes: None,
-            schema_changed: false,
-            last_report: SaveReport::default(),
-        };
-        session.io.prepare_engine().await?;
-        let database = open_engine(&session.io).await?;
-        session.connection = Some(connect(&session.io, &database).await?);
-        session.database = Some(database);
-        session.poisoned = false;
-        if session.cache.is_some() {
-            session.schema_bytes = Some(session.measure_schema().await?);
-        }
-        Ok(session)
+        Self::open(&Journal::open_with_options(store, options).await?).await
     }
 
-    /// Open a reader of a namespace that another owns, alongside it: a
-    /// session that writes nothing to the store (its SQL changes stay
-    /// private, [`Durability::Save`], and it is never saved) and keeps no
-    /// cache. It reads the state as of open, unless the owner checkpoints
-    /// meanwhile: [`Self::is_current`], once it has read, says whether it did.
+    /// [`Self::open_with_options`] with default [`StorageOptions`].
+    pub async fn open_store(store: Arc<dyn KvStore>) -> Result<Self> {
+        Self::open_with_options(store, StorageOptions::default()).await
+    }
+
+    /// A reader's journal of its own (see [`Journal::open_reader`]), and its
+    /// SQL database.
     pub async fn open_reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        let options = StorageOptions {
-            cache: None,
-            durability: Durability::Save,
-            ..options
-        };
-        Self::open_with_options(store, options).await
+        Self::open(&Journal::open_reader(store, options).await?).await
+    }
+
+    /// The journal this SQL commits with.
+    pub fn journal(&self) -> Journal {
+        self.journal.clone()
     }
 
     /// Whether this session continued a previous session's engine.
@@ -385,7 +367,9 @@ impl Session {
     /// engine at the owner's latest acknowledged commit qualifies: one that an
     /// overlapping session left behind holds an older state.
     fn park(&mut self) {
-        let Some(cache) = &self.cache else { return };
+        let Some(cache) = &self.journal.shared.options.cache else {
+            return;
+        };
         let version = self.io.version();
         if cache.committed() != Some(version) || !self.reusable || self.schema_changed {
             return;
@@ -471,77 +455,65 @@ impl Session {
         self.query_with(sql, params).await.map(|_| ())
     }
 
-    /// The writes to files and records since the last commit, which the next
-    /// one takes.
-    fn take_pending(&self) -> (snapshot::Writes, log::Records) {
-        let files = std::mem::take(&mut *self.files.lock().unwrap());
-        (files, std::mem::take(&mut *self.records.lock().unwrap()))
-    }
-
-    /// The journal the session commits with its SQL: its records and paged
-    /// files, made durable by the next [`Self::seal`] (or a commit, under
-    /// [`Durability::Commit`]). A cheap handle; clones share the session's
-    /// pending changes.
-    pub fn journal(&self) -> Journal {
-        Journal {
-            io: self.io.clone(),
-            records: self.records.clone(),
-            files: self.files.clone(),
-            prefix: Arc::from(""),
-        }
-    }
-
-    /// `COMMIT` the open transaction, with [`Durability::Commit`], and make
-    /// `effects` the record `effects`: durable exactly when the transaction
-    /// is, in the same put, even if it changed nothing. They are the host's
-    /// bytes (the sends a transaction makes once it commits, say), and stay
-    /// until a later commit replaces them; see [`Self::effects`]. A `COMMIT`
-    /// that fails changes nothing. With no transaction open, the effects
-    /// commit alone, without the SQL engine.
+    /// `COMMIT` the open transaction and make `effects` the record `effects`,
+    /// then [`Self::flush`]: with [`Durability::Commit`], durable exactly when
+    /// the transaction is, in the same put, even if it changed nothing. They
+    /// are the host's bytes (the sends a transaction makes once it commits,
+    /// say), and stay until a later commit replaces them; see
+    /// [`Self::effects`]. A `COMMIT` that fails changes nothing. With no
+    /// transaction open, the effects commit alone, without the SQL engine.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
-        self.journal().record(EFFECTS).set(effects);
-        self.seal().await.map(drop)
+        self.journal.record(EFFECTS).set(effects);
+        self.flush().await
     }
 
-    /// `COMMIT` the open transaction, with [`Durability::Commit`], with every
-    /// record set and file written since the last commit, in one put: a
-    /// host's turn, committing its SQL, its state and what its turn changed
-    /// (a VM's memory, say) together. A `COMMIT` that fails changes
-    /// nothing, and discards the records set since the last commit; with no
-    /// transaction open, the rest commits alone. `Ok` holds what it wrote.
-    pub async fn seal(&mut self) -> Result<SaveReport> {
-        if self.durability != Durability::Commit {
-            return Err("a seal needs Durability::Commit".into());
-        }
+    /// `COMMIT` the open transaction, if any, and move the SQL's pages into
+    /// the journal's file `db`. With [`Durability::Commit`], also seal (the
+    /// journal's [`Journal::commit`]): the SQL with every record set and file
+    /// written since the last commit, in one put, even without SQL changes.
+    /// With [`Durability::Participant`], the host seals. A `COMMIT` that fails
+    /// changes nothing, and discards the records and files changed since the
+    /// last commit.
+    pub async fn flush(&mut self) -> Result<()> {
         let open =
             (self.connection.as_ref()).is_some_and(|connection| !connection.get_auto_commit());
-        if !open && self.io.is_clean() {
-            // No SQL to commit: the record alone.
-            if self.is_poisoned() {
-                return Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into());
+        let result = match self.durability {
+            Durability::Save => {
+                return Err("a flush needs Durability::Commit or Participant".into());
             }
-            // Until the commit is acknowledged its outcome is unknown.
-            self.poisoned = true;
-            let (files, records) = self.take_pending();
-            let report = self.io.publish_with(files, records).await?;
-            self.poisoned = false;
-            return Ok(report);
-        }
-        self.sealing = true;
-        let result = self.execute("COMMIT").await;
-        self.sealing = false;
-        match result {
-            Ok(()) => Ok(std::mem::take(&mut self.last_report)),
-            Err(error) => {
-                self.take_pending();
-                Err(error)
+            Durability::Commit if !open && self.io.is_clean() => {
+                // No SQL to commit: the journal alone.
+                if self.is_poisoned() {
+                    return Err(ENDED.into());
+                }
+                return self.journal.commit().await.map(drop);
             }
+            Durability::Commit => {
+                self.sealing = true;
+                let result = self.execute("COMMIT").await;
+                self.sealing = false;
+                result
+            }
+            Durability::Participant => {
+                let committed = match open {
+                    true => self.execute("COMMIT").await,
+                    false => Ok(()),
+                };
+                match committed {
+                    Ok(()) if self.io.wal_len() != 0 => self.move_pages().await,
+                    result => result,
+                }
+            }
+        };
+        if result.is_err() {
+            self.journal.discard();
         }
+        result
     }
 
     /// The record `effects` (see [`Self::commit_with`]).
     pub fn effects(&self) -> Bytes {
-        self.journal().record(EFFECTS).get()
+        self.journal.record(EFFECTS).get()
     }
 
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
@@ -583,7 +555,7 @@ impl Session {
                 // after it would run inside it.
                 Err(error) => self.rollback(error).await,
             },
-            Ok(_) => Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into()),
+            Ok(_) => Err(ENDED.into()),
             Err(error) if open => self.rollback(error).await,
             Err(error) => Err(error),
         };
@@ -628,33 +600,30 @@ impl Session {
         Ok(bytes.unwrap_or(0).max(0) as usize)
     }
 
-    /// Make the committed SQL state durable and continue on it.
-    async fn publish(&mut self) -> Result<SaveReport> {
+    /// Move the committed SQL state into the journal's file `db`: its WAL
+    /// into the file's pages. Nothing is durable yet.
+    async fn move_pages(&mut self) -> Result<()> {
         self.checkpoint().await?;
-        // Until the commit is acknowledged the engine may hold uncommitted pages,
-        // so a failure must not leave it for reuse.
-        self.poisoned = true;
-        let (files, records) = self.take_pending();
-        let report = self.io.publish_with(files, records).await?;
-        self.last_report = report.clone();
-        // Resident already, unless the page size grew. The commit is durable
-        // either way; a failure here only ends the session.
-        if self.io.prepare_engine().await.is_ok() {
-            self.poisoned = false;
-        }
-        if self.schema_changed && self.cache.is_some() && !self.poisoned {
-            // Durable either way; without a size the engine is just not parked.
+        if self.schema_changed && self.journal.shared.options.cache.is_some() {
+            // Without a size the engine is just not parked.
             self.schema_bytes = self.measure_schema().await.ok();
             self.schema_changed = false;
         }
-        Ok(report)
+        Ok(())
+    }
+
+    /// Make the committed SQL state durable, with the journal's changes, and
+    /// continue on it.
+    async fn publish(&mut self) -> Result<SaveReport> {
+        self.move_pages().await?;
+        self.journal.commit().await
     }
 
     /// The database's version: the transactions ever committed, as this
     /// session holds the database (opened on, or committed itself); an open
     /// transaction does not change it.
     pub fn version(&self) -> u64 {
-        self.io.version()
+        self.journal.version()
     }
 
     /// Whether the store still holds the state this session opened on (see
@@ -663,7 +632,7 @@ impl Session {
     /// session. A session's own commits change the state, so this is for a
     /// session that has not committed.
     pub async fn is_current(&self) -> Result<bool> {
-        Ok(self.io.snapshot().is_current().await?)
+        self.journal.is_current().await
     }
 
     /// Whether the session can run more SQL. An SQL error (a syntax error, a
@@ -676,7 +645,7 @@ impl Session {
     }
 
     fn is_poisoned(&self) -> bool {
-        self.poisoned || self.abandoned.load(Ordering::SeqCst)
+        self.poisoned || self.abandoned.load(Ordering::SeqCst) || !self.journal.is_usable()
     }
 
     /// Run each statement of `sql`, applying the transaction rules after each:
@@ -697,7 +666,7 @@ impl Session {
         let mut rows = None;
         loop {
             if self.is_poisoned() {
-                return Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into());
+                return Err(ENDED.into());
             }
             self.poisoned = true; // cancellation/error requires discarding the session
             let connection = self.connection.as_ref().unwrap();
@@ -753,7 +722,7 @@ impl Session {
             };
             let idle = connection.get_auto_commit();
             if self.in_body && idle {
-                return Err("a statement ended the transaction of Session::transaction".into());
+                return Err("a statement ended the transaction of Sql::transaction".into());
             }
             self.poisoned = false;
             // The statement had no effect; earlier statements of `sql` stand.
@@ -773,7 +742,7 @@ impl Session {
     /// Run one statement of this crate's own, outside the transaction rules.
     async fn internal(&mut self, sql: &str) -> Result<Rows> {
         if self.is_poisoned() {
-            return Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into());
+            return Err(ENDED.into());
         }
         self.poisoned = true;
         let statement = self.connection.as_ref().unwrap().prepare(sql)?;
@@ -820,7 +789,7 @@ impl Session {
     /// this only ends the session.
     pub async fn save(mut self) -> Result<SaveReport> {
         if self.is_poisoned() {
-            return Err("the session ended after a storage error, a cancelled call or a failed commit; open a new one".into());
+            return Err(ENDED.into());
         }
         if !self.connection.as_ref().unwrap().get_auto_commit() {
             return Err("cannot save an open SQL transaction".into());
@@ -831,35 +800,132 @@ impl Session {
     }
 }
 
-/// The record [`Session::commit_with`] sets.
+/// The record [`Sql::commit_with`] sets.
 const EFFECTS: &str = "effects";
 
-/// The records and paged files a session commits with its SQL, in the same
-/// put (see [`Session::journal`]). A cheap handle; clones, and the views of
-/// [`Self::scoped`], share the session's pending changes.
+/// One namespace's journal: its paged files (the SQL database is the file
+/// `db`, which [`Sql`] opens) and its records, changed in memory and made
+/// durable together by [`Self::commit`], one put. A cheap handle; clones,
+/// and the views of [`Self::scoped`], share the pending changes.
+///
+/// Acquire exclusive ownership of the namespace and settle the preceding
+/// owner's requests before opening it; a reader ([`Self::open_reader`]) may
+/// open beside the owner.
 #[derive(Clone)]
 pub struct Journal {
-    io: Arc<KvIo>,
-    records: Arc<Mutex<log::Records>>,
-    files: Arc<Mutex<snapshot::Writes>>,
+    shared: Arc<Shared>,
     /// Prefixed to every name: a view of part of the journal.
     prefix: Arc<str>,
 }
 
+/// What a journal's handles share.
+struct Shared {
+    io: Arc<KvIo>,
+    options: StorageOptions,
+    /// Records set and files written since the last commit, which the next
+    /// one makes durable.
+    records: Mutex<log::Records>,
+    files: Mutex<snapshot::Writes>,
+    /// The engine this owner's previous session left idle at the committed
+    /// state, until [`Sql::open`] takes it.
+    warm: Mutex<Option<WarmEngine>>,
+    /// An [`Sql`] runs on the file `db`.
+    sql: AtomicBool,
+    /// A commit failed or was cancelled: its outcome is unknown.
+    poisoned: AtomicBool,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // An engine no [`Sql`] took goes back, if nothing changed.
+        let Some(warm) = self.warm.get_mut().unwrap().take() else {
+            return;
+        };
+        if let Some(cache) = &self.options.cache
+            && cache.committed() == Some(warm.version)
+            && warm.io.version() == warm.version
+            && warm.io.is_clean()
+        {
+            warm.io.idle();
+            cache.park(warm);
+        }
+    }
+}
+
+/// The error of a journal or SQL session that a failure ended.
+const ENDED: &str =
+    "the session ended after a storage error, a cancelled call or a failed commit; open a new one";
+
 impl Journal {
+    /// Open the namespace with default [`StorageOptions`]: read its commit
+    /// record (and the stored values it names), recovering what a crash
+    /// left, before anything reads.
+    pub async fn open(store: Arc<dyn KvStore>) -> Result<Self> {
+        Self::open_with_options(store, StorageOptions::default()).await
+    }
+
+    /// Open with explicit [`StorageOptions`]. Options never change the stored
+    /// format: existing page tags determine decoding. With a [`PageCache`],
+    /// an engine left idle by this owner's previous session waits for
+    /// [`Sql::open`] when nothing changed since.
+    pub async fn open_with_options(
+        store: Arc<dyn KvStore>,
+        options: StorageOptions,
+    ) -> Result<Self> {
+        let snapshot = Snapshot::open_with_options(store, options.clone()).await?;
+        let warm = match &options.cache {
+            Some(cache) if snapshot.unchanged => cache
+                .take_engine()
+                .filter(|warm| warm.version == snapshot.version() && warm.io.is_clean()),
+            _ => None,
+        };
+        let io = match &warm {
+            Some(warm) => {
+                warm.io.resume(snapshot).await?;
+                warm.io.clone()
+            }
+            None => KvIo::from_snapshot(snapshot),
+        };
+        Ok(Self {
+            shared: Arc::new(Shared {
+                io,
+                options,
+                records: Mutex::default(),
+                files: Mutex::default(),
+                warm: Mutex::new(warm),
+                sql: AtomicBool::new(false),
+                poisoned: AtomicBool::new(false),
+            }),
+            prefix: Arc::from(""),
+        })
+    }
+
+    /// Open a reader of a namespace that another owns, alongside it: a
+    /// journal that writes nothing to the store (its SQL changes stay
+    /// private, [`Durability::Save`], and it is never committed) and keeps no
+    /// cache. It reads the state as of open, unless the owner checkpoints
+    /// meanwhile: [`Self::is_current`], once it has read, says whether it did.
+    pub async fn open_reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
+        let options = StorageOptions {
+            cache: None,
+            durability: Durability::Save,
+            ..options
+        };
+        Self::open_with_options(store, options).await
+    }
+
     /// The record named `name`: a whole value the commit record holds, which
     /// the next commit makes durable once set (see [`Record`]).
     pub fn record(&self, name: &str) -> Record {
         Record {
             name: format!("{}{name}", self.prefix).into(),
-            io: self.io.clone(),
-            pending: self.records.clone(),
+            shared: self.shared.clone(),
         }
     }
 
-    /// The paged file named `name`, beside the SQL database (whose file is
-    /// `db`): 4 KiB pages the next commit makes durable once written (see
-    /// [`File`]).
+    /// The paged file named `name`: 4 KiB pages the next commit makes
+    /// durable once written (see [`File`]). `db` is the SQL database's,
+    /// which [`Sql`] opens.
     pub fn file(&self, name: &str) -> Result<File> {
         let name = format!("{}{name}", self.prefix);
         if name == snapshot::SQL_FILE {
@@ -867,8 +933,7 @@ impl Journal {
         }
         Ok(File {
             name: name.into(),
-            io: self.io.clone(),
-            pending: self.files.clone(),
+            shared: self.shared.clone(),
             base: None,
         })
     }
@@ -881,7 +946,7 @@ impl Journal {
     /// length only: emptying it for another base, say.
     pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
         let mut file = self.file(name)?;
-        self.io.with_base(file.name(), base.clone())?;
+        self.shared.io.with_base(file.name(), base.clone())?;
         file.base = Some(base);
         Ok(file)
     }
@@ -896,9 +961,63 @@ impl Journal {
         }
     }
 
-    /// The database's version (see [`Session::version`]).
+    /// The seal: every record set and file written since the last commit,
+    /// and the SQL database's pages [`Sql::flush`] moved into its file, in
+    /// one put (and a checkpoint, when the log is long), then one sync.
+    /// Nothing changed: nothing is written. `Ok` holds what it wrote; an
+    /// error, or dropping the future, leaves the outcome unknown and ends
+    /// the journal (and its [`Sql`]): open it again.
+    pub async fn commit(&self) -> Result<SaveReport> {
+        let shared = &self.shared;
+        if shared.poisoned.load(Ordering::SeqCst) {
+            return Err(ENDED.into());
+        }
+        // Until the commit is acknowledged its outcome is unknown.
+        shared.poisoned.store(true, Ordering::SeqCst);
+        let (files, records) = self.take_pending();
+        let report = shared.io.publish_with(files, records).await?;
+        // The SQL engine's header, resident already unless the page size
+        // grew. The commit is durable either way; a failure here only ends
+        // the journal.
+        if shared.io.prepare_engine().await.is_ok() {
+            shared.poisoned.store(false, Ordering::SeqCst);
+        }
+        Ok(report)
+    }
+
+    /// Drop the records set and files written since the last commit.
+    pub fn discard(&self) {
+        self.take_pending();
+    }
+
+    /// The writes to files and records since the last commit, which the next
+    /// one takes.
+    fn take_pending(&self) -> (snapshot::Writes, log::Records) {
+        let files = std::mem::take(&mut *self.shared.files.lock().unwrap());
+        (
+            files,
+            std::mem::take(&mut *self.shared.records.lock().unwrap()),
+        )
+    }
+
+    /// The namespace's version: the commits ever made, as this journal holds
+    /// it (opened on, or committed itself).
     pub fn version(&self) -> u64 {
-        self.io.version()
+        self.shared.io.version()
+    }
+
+    /// Whether the store still holds the state this journal opened on (see
+    /// [`Self::open_reader`]): if it does not, what was read may mix that
+    /// state with a later checkpoint's pages, so read again in a new one. A
+    /// journal's own commits change the state, so this is for one that has
+    /// not committed.
+    pub async fn is_current(&self) -> Result<bool> {
+        Ok(self.shared.io.snapshot().is_current().await?)
+    }
+
+    /// Whether the journal can commit: a failed or cancelled commit ends it.
+    pub fn is_usable(&self) -> bool {
+        !self.shared.poisoned.load(Ordering::SeqCst)
     }
 }
 
@@ -913,18 +1032,17 @@ impl Journal {
 #[derive(Clone)]
 pub struct Record {
     name: Arc<str>,
-    io: Arc<KvIo>,
-    pending: Arc<Mutex<log::Records>>,
+    shared: Arc<Shared>,
 }
 
 impl Record {
     /// The value as the session holds it: set since the last commit, or
     /// committed; empty if never set.
     pub fn get(&self) -> Bytes {
-        if let Some(value) = self.pending.lock().unwrap().get(&*self.name) {
+        if let Some(value) = self.shared.records.lock().unwrap().get(&*self.name) {
             return value.clone();
         }
-        let snapshot = self.io.snapshot();
+        let snapshot = self.shared.io.snapshot();
         snapshot
             .records()
             .get(&*self.name)
@@ -932,12 +1050,9 @@ impl Record {
             .unwrap_or_default()
     }
 
-    /// Replace the value with the next commit (see [`Session::seal`]).
+    /// Replace the value with the next commit (see [`Journal::commit`]).
     pub fn set(&self, value: Bytes) {
-        self.pending
-            .lock()
-            .unwrap()
-            .insert(self.name.to_string(), value);
+        (self.shared.records.lock().unwrap()).insert(self.name.to_string(), value);
     }
 
     pub fn name(&self) -> &str {
@@ -956,8 +1071,7 @@ impl Record {
 #[derive(Clone)]
 pub struct File {
     name: Arc<str>,
-    io: Arc<KvIo>,
-    pending: Arc<Mutex<snapshot::Writes>>,
+    shared: Arc<Shared>,
     base: Option<Arc<dyn Base>>,
 }
 
@@ -968,9 +1082,9 @@ impl File {
 
     /// Bytes in the file: as written since the last commit, or committed.
     pub fn len(&self) -> u64 {
-        match self.pending.lock().unwrap().get(&*self.name) {
+        match self.shared.files.lock().unwrap().get(&*self.name) {
             Some(written) => written.size,
-            None => self.io.snapshot().file_size(&self.name),
+            None => self.shared.io.snapshot().file_size(&self.name),
         }
     }
 
@@ -988,11 +1102,11 @@ impl File {
             let base = self.base.as_ref().and_then(|base| base.page(page));
             base.map(Page::copy_from_slice)
         };
-        let written = self.pending.lock().unwrap().get(&*self.name).cloned();
+        let written = self.shared.files.lock().unwrap().get(&*self.name).cloned();
         if let Some(image) = written.and_then(|written| written.pages.get(&page).cloned()) {
             return Ok(image.or_else(hole));
         }
-        let snapshot = self.io.snapshot();
+        let snapshot = self.shared.io.snapshot();
         if page * PAGE >= snapshot.file_size(&self.name) {
             return Ok(hole());
         }
@@ -1013,7 +1127,7 @@ impl File {
             return Err("a page past the largest file".into());
         }
         let len = self.len();
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.shared.files.lock().unwrap();
         let written = pending
             .entry(self.name.to_string())
             .or_insert_with(|| snapshot::Written {
@@ -1032,7 +1146,7 @@ impl File {
             return Err(format!("invalid file length {len}").into());
         }
         let old = self.len();
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.shared.files.lock().unwrap();
         let written = pending
             .entry(self.name.to_string())
             .or_insert_with(|| snapshot::Written {
@@ -1051,7 +1165,7 @@ impl File {
 /// Bytes of a page.
 const PAGE: u64 = io::BLOCK_SIZE as u64;
 
-impl Drop for Session {
+impl Drop for Sql {
     fn drop(&mut self) {
         // A clean read-only session leaves its engine for the next one.
         self.park();

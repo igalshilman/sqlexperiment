@@ -215,9 +215,10 @@ v15/commit = SC15
   with the pages the memory record lists, read together. The record's
   pending Waits are made again, under their IDs.
 
-The API is `Session::journal()`, whose `record(name)`, `file(name)` and
+The API is `Journal::open`, whose `record(name)`, `file(name)` and
 `file_with_base(name, base)` are handles each participant writes in
-its prepare, then `Session::seal`, the one put.
+its prepare (the SQL, `Sql::open(&journal)` with
+`Durability::Participant`, flushes), then `Journal::commit`, the one put.
 
 ## 5. Plan
 

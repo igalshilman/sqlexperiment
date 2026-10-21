@@ -24,9 +24,9 @@ use crate::{
     transaction::{Participant, Record, ScopeBlobs},
     vm::{self, Vm},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
-use journal::{Base, File};
+use journal::{Base, File, Journal, Sql};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::Mutex;
@@ -46,6 +46,8 @@ fn memory_file(golden: &crate::cow::Golden) -> String {
 /// unusable: the attempt starts again, from the store.
 pub struct Run {
     programs: Arc<Programs>,
+    /// The scope's journal, which each turn commits.
+    journal: Journal,
     /// The scope's database, this attempt's session of it, which the VM's
     /// host calls share.
     db: Arc<Mutex<Db>>,
@@ -236,8 +238,9 @@ impl Run {
         );
         validate_time(now)?;
         input_size(&input)?;
-        let db = Db::new(scope.open().await?);
-        let [stored_run, stored_memory] = BUILT_IN_RECORDS.map(|name| db.journal().record(name));
+        let journal = scope.open().await?;
+        let db = Db::new(Sql::open(&journal).await.map_err(|error| anyhow!(error))?);
+        let [stored_run, stored_memory] = BUILT_IN_RECORDS.map(|name| journal.record(name));
         // What the scope's last seal kept of each extension, whichever run
         // made it.
         let blobs = ScopeBlobs::new(scope.extensions.blobs.clone(), key);
@@ -258,12 +261,12 @@ impl Run {
                 memory.file == memory_file(golden),
                 "The memory of another image"
             );
-            let file = db
-                .journal()
+            let file = journal
                 .file_with_base(&memory.file, golden.clone() as Arc<dyn Base>)
                 .map_err(sql)?;
             return Ok(Self {
                 programs: programs.clone(),
+                journal,
                 db: Arc::new(Mutex::new(db)),
                 extensions: Arc::new(Mutex::new(extensions)),
                 blobs,
@@ -284,15 +287,14 @@ impl Run {
         // first seal.
         let stale = match sealed_memory {
             Some(old) if !old.pages.is_empty() => {
-                let file = db.journal().file(&old.file).map_err(sql)?;
+                let file = journal.file(&old.file).map_err(sql)?;
                 Some((file, old.pages().collect()))
             }
             _ => None,
         };
         let golden = programs.get(program)?.image();
         let name = memory_file(golden.golden_memory());
-        let file = db
-            .journal()
+        let file = journal
             .file_with_base(&name, golden.golden_memory().clone() as Arc<dyn Base>)
             .map_err(sql)?;
         let db = Arc::new(Mutex::new(db));
@@ -331,6 +333,7 @@ impl Run {
         };
         let mut this = Self {
             programs: programs.clone(),
+            journal,
             db,
             extensions,
             blobs,
@@ -647,10 +650,12 @@ impl Run {
         }
         drop(participants);
         let sealed = match prepared {
-            Ok(()) => db.seal().await.map(|report| {
-                written.logged_bytes = report.logged_bytes;
-                written.commit_bytes = report.record_bytes;
-            }),
+            Ok(()) => (self.journal.commit().await)
+                .map(|report| {
+                    written.logged_bytes = report.logged_bytes;
+                    written.commit_bytes = report.record_bytes;
+                })
+                .map_err(|error| anyhow!(error)),
             Err(error) => Err(error),
         };
         let mut participants: Vec<&mut dyn Participant> =

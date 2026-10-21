@@ -83,7 +83,7 @@ fn another_record_forgets_the_commit_and_another_epoch_the_pages() {
 /// `PageCache` still frees everything.
 #[test]
 fn dropping_the_cache_frees_parked_engines() -> crate::Result<()> {
-    use crate::{Session, StorageOptions, kv::KvStore, simulation::*};
+    use crate::{Sql, StorageOptions, kv::KvStore, simulation::*};
     futures::executor::block_on(async {
         let cache = open_cache(cache_config(1 << 20, 16 << 20));
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
@@ -91,7 +91,7 @@ fn dropping_the_cache_frees_parked_engines() -> crate::Result<()> {
             cache: Some(cache.namespace("parked")),
             ..StorageOptions::default()
         };
-        drop(Session::open_with_options(store, options).await?);
+        drop(Sql::open_with_options(store, options).await?);
         assert_eq!(cache.engines.lock().unwrap().parked.len(), 1);
         let shared = Arc::downgrade(&cache.shared);
         drop(cache);

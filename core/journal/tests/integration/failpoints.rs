@@ -3,7 +3,7 @@ use futures::{
     future::{Either, select},
 };
 use journal::{
-    Result, Session, StorageOptions,
+    Result, Sql, StorageOptions,
     kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
@@ -11,15 +11,14 @@ use std::sync::Arc;
 
 async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db =
-        Session::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
+    let mut db = Sql::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
     db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30) INSERT INTO t SELECT x,x,printf('%09000d',x) FROM n").await?;
     db.save().await?;
     // Checkpoint `t` so that queries read its pages from the backend.
-    let mut db = Session::open_with_options(Arc::new(store.clone()), all()).await?;
+    let mut db = Sql::open_with_options(Arc::new(store.clone()), all()).await?;
     db.execute("CREATE TABLE other(x)").await?;
     assert!(db.save().await?.checkpointed_pages > 0);
     Ok(store)
@@ -40,7 +39,7 @@ fn plan(operation: Operation, prefix: &str, nth: usize, effect: Effect, cancel: 
     }
 }
 async fn check(store: Arc<dyn KvStore>, changed: bool) -> Result<()> {
-    let mut db = Session::open(store).await?;
+    let mut db = Sql::open_store(store).await?;
     let rows = db
         .query("SELECT id,n,length(payload),substr(payload,-2) FROM t ORDER BY id")
         .await?;
@@ -83,12 +82,12 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
         ] {
             let probe = Arc::new(FaultKv::new(base.fork(), 7));
             if let Some(sql) = sql {
-                let mut db = Session::open(probe.clone()).await?;
+                let mut db = Sql::open_store(probe.clone()).await?;
                 let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
                 db.query(sql).await?;
             } else {
                 let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
-                drop(Session::open(probe.clone()).await?);
+                drop(Sql::open_store(probe.clone()).await?);
             }
             let count = probe
                 .events()
@@ -101,7 +100,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
                     for cancel in [false, true] {
                         let store = Arc::new(FaultKv::new(base.fork(), nth as u64));
                         let mut session = if sql.is_some() {
-                            Some(Session::open(store.clone()).await?)
+                            Some(Sql::open_store(store.clone()).await?)
                         } else {
                             None
                         };
@@ -111,7 +110,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
                             if let Some(sql) = sql {
                                 session.as_mut().unwrap().query(sql).await.map(|_| ())
                             } else {
-                                Session::open(store.clone()).await.map(drop)
+                                Sql::open_store(store.clone()).await.map(drop)
                             }
                         }
                         .boxed();
@@ -168,7 +167,7 @@ fn a_failed_commit_is_there_only_if_its_sync_stored_it() -> Result<()> {
             for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
                 // The save checkpoints the log once it has committed.
-                let mut db = Session::open_with_options(store.clone(), all()).await?;
+                let mut db = Sql::open_with_options(store.clone(), all()).await?;
                 db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
                     .await?;
                 let _gate = store.arm(plan(operation, prefix, 1, effect, false));
@@ -195,7 +194,7 @@ fn open_read_failures_are_retryable() -> Result<()> {
         let reads = {
             let probe = Arc::new(FaultKv::new(base.fork(), 0));
             let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
-            drop(Session::open(probe.clone()).await?);
+            drop(Sql::open_store(probe.clone()).await?);
             probe.disarm();
             probe
                 .events()
@@ -209,7 +208,7 @@ fn open_read_failures_are_retryable() -> Result<()> {
                 for cancel in [false, true] {
                     let store = Arc::new(FaultKv::new(base.fork(), 31));
                     let gate = store.arm(plan(Operation::Get, "", nth, effect, cancel));
-                    let future = Session::open(store.clone()).boxed();
+                    let future = Sql::open_store(store.clone()).boxed();
                     if cancel {
                         match select(future, gate).await {
                             Either::Left(_) => panic!("open read failpoint not reached"),

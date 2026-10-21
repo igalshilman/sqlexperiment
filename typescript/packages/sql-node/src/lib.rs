@@ -12,7 +12,7 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use journal::kv::KvStore;
-use journal::{Durability, PageCache, PageCacheConfig, Session, StorageOptions, Value};
+use journal::{Durability, PageCache, PageCacheConfig, Sql, StorageOptions, Value};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -120,7 +120,7 @@ fn sql_error(error: Box<dyn std::error::Error + Send + Sync>) -> Error {
 /// One session of a namespace's database.
 #[napi]
 pub struct Database {
-    session: Arc<Mutex<Option<Session>>>,
+    session: Arc<Mutex<Option<Sql>>>,
     /// Whether the session can still run SQL, as of the last call that ended:
     /// read without the lock, which a running call holds.
     usable: Arc<AtomicBool>,
@@ -129,7 +129,7 @@ pub struct Database {
 /// Open the database of `namespace` over the store behind `dispatch`; see
 /// `index.js` for the store object it is built from.
 ///
-/// A `reader` reads the namespace beside its owner (see `Session::open_reader`):
+/// A `reader` reads the namespace beside its owner (see `Journal::open_reader`):
 /// it writes nothing to the store, and `isCurrent` says whether what it read
 /// is still the stored state.
 #[napi(ts_return_type = "Promise<Database>")]
@@ -156,8 +156,8 @@ pub fn open<'env>(
             ..StorageOptions::default()
         };
         let session = match reader.unwrap_or(false) {
-            true => Session::open_reader(store.clone(), options).await,
-            false => Session::open_with_options(store.clone(), options).await,
+            true => Sql::open_reader(store.clone(), options).await,
+            false => Sql::open_with_options(store.clone(), options).await,
         }
         .map_err(sql_error)?;
         Ok(Database {
@@ -228,7 +228,7 @@ impl Database {
     }
 
     /// `COMMIT` the open transaction; with `effects`, they commit with it
-    /// (see `Session::commit_with`).
+    /// (see `Sql::commit_with`).
     #[napi]
     pub async fn commit(&self, effects: Option<Buffer>) -> Result<()> {
         let mut session = self.session.lock().await;
@@ -251,7 +251,7 @@ impl Database {
         self.usable.load(Ordering::Acquire)
     }
 
-    /// The effects of the last commit that set them (see `Session::effects`).
+    /// The effects of the last commit that set them (see `Sql::effects`).
     #[napi]
     pub async fn effects(&self) -> Result<Buffer> {
         let session = self.session.lock().await;
@@ -263,7 +263,7 @@ impl Database {
 
     /// Whether the store still holds the state this reader opened on, so
     /// that what it read is: if not, read again in a new session (see
-    /// `Session::is_current`).
+    /// `Journal::is_current`).
     #[napi]
     pub async fn is_current(&self) -> Result<bool> {
         let session = self.session.lock().await;

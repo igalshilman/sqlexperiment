@@ -16,7 +16,7 @@
 //! SQL without the turn.
 use crate::{model::MAX_INPUT, transaction::Participant};
 use anyhow::{Context, Result, bail, ensure};
-use journal::{Journal, Session, Value as SqlValue};
+use journal::{Journal, Sql, Value as SqlValue};
 use serde_json::{Map, Number, Value, json};
 
 /// The scope's KV, a table of its database: values are JSON.
@@ -31,7 +31,7 @@ fn sql(error: Box<dyn std::error::Error + Send + Sync>) -> anyhow::Error {
 
 /// The scope's database, and where this turn's transaction stands.
 pub struct Db {
-    session: Session,
+    sql: Sql,
     /// Whether the turn's transaction is open.
     began: bool,
     /// Whether this session made sure the KV table exists.
@@ -41,9 +41,9 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn new(session: Session) -> Self {
+    pub fn new(sql: Sql) -> Self {
         Self {
-            session,
+            sql,
             began: false,
             kv_table: false,
             savepoints: 0,
@@ -52,15 +52,7 @@ impl Db {
 
     /// The scope's journal: the records and files sealed with its SQL.
     pub fn journal(&self) -> Journal {
-        self.session.journal()
-    }
-
-    /// Write the seal: the turn's SQL, if any, with every record and file
-    /// the participants set, in one put. The next statement begins the next
-    /// turn's transaction.
-    pub async fn seal(&mut self) -> Result<journal::SaveReport> {
-        self.began = false;
-        self.session.seal().await.map_err(sql)
+        self.sql.journal()
     }
 
     /// The guest trapped: what its open `ctx.db.transaction` did is undone,
@@ -83,7 +75,7 @@ impl Db {
     }
 
     async fn internal(&mut self, statement: &str) -> Result<()> {
-        self.session.execute(statement).await.map_err(sql)
+        self.sql.execute(statement).await.map_err(sql)
     }
 
     async fn kv_table(&mut self) -> Result<()> {
@@ -100,7 +92,7 @@ impl Db {
         self.kv_table().await?;
         let select = "SELECT value FROM kv WHERE key = ?";
         let key = SqlValue::build_text(key.to_owned());
-        let rows = self.session.query_with(select, [key]).await.map_err(sql)?;
+        let rows = self.sql.query_with(select, [key]).await.map_err(sql)?;
         let text = match rows.first().and_then(|row| row.first()) {
             None => return Ok(Value::Null),
             Some(SqlValue::Text(text)) => text.as_str(),
@@ -118,9 +110,9 @@ impl Db {
             Some(value) => {
                 let value = SqlValue::build_text(serde_json::to_string(value)?);
                 let set = "INSERT INTO kv VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value";
-                self.session.execute_with(set, [key, value]).await
+                self.sql.execute_with(set, [key, value]).await
             }
-            None => (self.session)
+            None => (self.sql)
                 .execute_with("DELETE FROM kv WHERE key = ?", [key])
                 .await,
         }
@@ -134,11 +126,7 @@ impl Db {
         let params = (params.iter().map(to_sql).collect::<Result<Vec<_>, _>>())
             .map_err(|message| anyhow::anyhow!(message))?;
         self.begin().await?;
-        let rows = self
-            .session
-            .query_with(statement, params)
-            .await
-            .map_err(sql)?;
+        let rows = self.sql.query_with(statement, params).await.map_err(sql)?;
         Ok((rows.into_iter())
             .map(|row| row.into_iter().map(from_sql).collect())
             .collect())
@@ -199,7 +187,7 @@ impl Db {
         };
         self.begin().await?;
         // With parameters given, even none, the SQL must be one statement.
-        match self.session.query_columns(statement, Some(params)).await {
+        match self.sql.query_columns(statement, Some(params)).await {
             Ok((columns, rows)) => Ok(Ok(Value::Array(
                 rows.into_iter()
                     .map(|row| {
@@ -208,7 +196,7 @@ impl Db {
                     })
                     .collect(),
             ))),
-            Err(error) if self.session.is_usable() => Ok(Err(error.to_string())),
+            Err(error) if self.sql.is_usable() => Ok(Err(error.to_string())),
             Err(error) => Err(sql(error)),
         }
     }
@@ -298,9 +286,12 @@ fn unhex(hex: &str) -> Result<Vec<u8>, String> {
 /// SQL transaction, which the seal commits.
 #[async_trait::async_trait]
 impl Participant for Db {
+    /// The turn's transaction, committed and in the journal's file `db`;
+    /// the next statement begins the next turn's.
     async fn prepare(&mut self) -> Result<()> {
         ensure!(self.savepoints == 0, "A transaction is still open");
-        Ok(())
+        self.began = false;
+        self.sql.flush().await.map_err(sql)
     }
 }
 

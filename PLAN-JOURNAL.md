@@ -13,19 +13,17 @@ and ask the owner only critical questions.
 - **Step 2, files: done.** `Session::file`; pages keyed by a page id (the
   file's id in the high 32 bits, so the cache, hint and readahead are
   unchanged); keys `v15/page/<file>/<page>`.
-- **Step 3, based files: done; the split: done as a handle.** `Session::journal()`
-  returns a `Journal` (records, files, `scoped(prefix)`, version), a cheap
-  handle on the session's pending changes; `Session` keeps the SQL and
-  `seal()`, which commits both. Decided: no `Sql` participant and no
-  `Durability::Participant`. The engine flushes its WAL into the journal's
-  pages at `COMMIT` already, so a separate `Sql` would only move code, and
-  every user of the journal so far also has SQL.
-  `Session::file_with_base`. Decided on the way: a base has an id, which the
-  directory records, and a file opens only with that base again; a based
-  file's segments decode when it is opened with its base; a checkpoint waits
-  until every based file's logged images are decoded or replaced by holes;
-  a page equal to its base's is a hole, in the log and in place (tag 3
-  compresses against the base).
+- **Step 3, based files and the split: done.** `Journal::open` (and
+  `open_reader`) opens the namespace: records, files, `scoped(prefix)`,
+  `commit()`. `Sql::open(&journal)` runs the engine on the file `db`, and
+  `Sql::open_with_options(store, options)` opens a journal of its own for a
+  host whose state is all SQL (the Node.js addon and the Python extension).
+  `Durability::Participant`: `Sql::flush` moves the SQL's commits into its
+  file, and `Journal::commit` makes them durable with the rest; a commit with
+  SQL not flushed is refused. With `Durability::Commit`, `flush` seals. The
+  engine a session parks is taken by the next journal's open and handed to
+  its `Sql`; a journal that opens no SQL parks it again. The records crash
+  campaign runs in both modes.
 - **Step 4, memory on the journal: done, before the split** (the split is a
   rename; step 4 is what the measurements are about). The memory file is
   `memory/<golden fingerprint>`, one per golden image, since a scope's next

@@ -104,7 +104,7 @@ pub const INLINE_LOG_BYTES: usize = 1024;
 /// When a session's SQL changes become durable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Durability {
-    /// At [`crate::Session::save`], as one log transaction for the whole
+    /// At [`crate::Sql::save`], as one log transaction for the whole
     /// session. SQL `COMMIT` is private, and dropping the session discards it.
     #[default]
     Save,
@@ -113,6 +113,10 @@ pub enum Durability {
     /// transaction per SQL transaction. Dropping the session discards only an
     /// open transaction.
     Commit,
+    /// At the journal's [`crate::Journal::commit`], which the host calls: the
+    /// SQL is one participant of its commit among others. An SQL commit is
+    /// private until [`crate::Sql::flush`] moves it into the journal's file.
+    Participant,
 }
 
 /// Per-session storage options. They never change the stored format.

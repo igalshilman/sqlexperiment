@@ -18,14 +18,14 @@
 //! Read buffers are staged privately until the read succeeds. `Completing` retires
 //! in-flight accounting and aborts incomplete engine callbacks even if a dequeued
 //! future is never polled. Ordinary read errors drain their batch; cancellation
-//! aborts the dequeued batch. A [`crate::Session`] treats either as fatal and drops
+//! aborts the dequeued batch. A [`crate::Sql`] treats either as fatal and drops
 //! its private view.
 //!
 //! The host task runs both engine steps and completion callbacks, separated by
 //! async backend waits. There is no cross-thread completion queue. `pending_count`
 //! includes queued and executing requests, so publication cannot race them.
 //!
-//! Session open preloads the database header page asynchronously. The engine's
+//! Sql open preloads the database header page asynchronously. The engine's
 //! synchronous metadata helpers may then read resident header/overlay/WAL bytes
 //! through `IO::step`. That method never polls KV futures: a nonresident read,
 //! file mutation or wait with no queued work returns an error instead of blocking
@@ -157,7 +157,7 @@ impl Drop for Completing<'_> {
     }
 }
 
-/// Shared virtual-file adapter; prefer [`crate::Session`] for SQL and durability.
+/// Shared virtual-file adapter; prefer [`crate::Sql`] for SQL and durability.
 ///
 /// Mount performs recovery and requires exclusive namespace ownership. The queue
 /// lock orders engine mutations; it does not implement a distributed ownership lock.
@@ -598,7 +598,7 @@ impl KvIo {
             let mut state = self.state.lock().unwrap();
             if state.sizes[1] != 0 {
                 return Err(invalid(
-                    "WAL must be fully checkpointed and truncated before publication",
+                    "the SQL engine has committed changes not yet in its file: Sql::flush first",
                 ));
             }
             let dirty: BTreeMap<u64, Option<Page>> = std::mem::take(&mut state.dirty)

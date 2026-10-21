@@ -4,7 +4,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either, select},
 };
-use journal::{Result, Session, StorageOptions, kv::KvStore, simulation::MemoryKv};
+use journal::{Result, Sql, StorageOptions, kv::KvStore, simulation::MemoryKv};
 use std::{
     io,
     sync::{
@@ -52,7 +52,7 @@ async fn populated() -> Result<Arc<ControlledKv>> {
         fail_reads: AtomicBool::new(false),
         gate: Mutex::new(None),
     });
-    let mut db = Session::open(store.clone()).await?;
+    let mut db = Sql::open_store(store.clone()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
         .await?;
     db.execute("INSERT INTO t VALUES(1,10)").await?;
@@ -64,10 +64,10 @@ async fn populated() -> Result<Arc<ControlledKv>> {
         checkpoint_after: 0,
         ..StorageOptions::default()
     };
-    let mut db = Session::open_with_options(store.clone(), all).await?;
+    let mut db = Sql::open_with_options(store.clone(), all).await?;
     db.execute("CREATE TABLE other(x)").await?;
     db.save().await?;
-    let mut db = Session::open(store.clone()).await?;
+    let mut db = Sql::open_store(store.clone()).await?;
     db.execute("CREATE TABLE another(x)").await?;
     db.save().await?;
     Ok(store)
@@ -87,14 +87,14 @@ fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
     futures::executor::block_on(async {
         let store = populated().await?;
         store.fail_reads.store(true, Ordering::SeqCst);
-        let mut db = Session::open_with_options(store.clone(), no_prefetch()).await?;
+        let mut db = Sql::open_with_options(store.clone(), no_prefetch()).await?;
         match db.query("SELECT n FROM t").await {
             Ok(_) => panic!("expected injected failure"),
             Err(e) => assert!(e.to_string().contains("injected page-read failure")),
         }
         drop(db);
         store.fail_reads.store(false, Ordering::SeqCst);
-        let mut db = Session::open(store).await?;
+        let mut db = Sql::open_store(store).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
         Ok(())
     })
@@ -104,7 +104,7 @@ fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
 fn cancellation_during_pending_kv_read_poison_session_without_publishing() -> Result<()> {
     futures::executor::block_on(async {
         let store = populated().await?;
-        let mut db = Session::open_with_options(store.clone(), no_prefetch()).await?;
+        let mut db = Sql::open_with_options(store.clone(), no_prefetch()).await?;
         let (started, waiting) = oneshot::channel();
         *store.gate.lock().unwrap() = Some(started);
         store.inner.reset_stats();
@@ -126,7 +126,7 @@ fn cancellation_during_pending_kv_read_poison_session_without_publishing() -> Re
         );
         drop(db);
         assert_eq!(store.inner.stats().puts, 0);
-        let mut db = Session::open(store).await?;
+        let mut db = Sql::open_store(store).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
         Ok(())
     })

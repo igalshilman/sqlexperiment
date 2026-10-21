@@ -1,4 +1,4 @@
-use journal::{Result, Session, StorageOptions, simulation::MemoryKv};
+use journal::{Result, Sql, StorageOptions, simulation::MemoryKv};
 use std::sync::Arc;
 
 fn options(checkpoint_after: u32) -> StorageOptions {
@@ -8,7 +8,7 @@ fn options(checkpoint_after: u32) -> StorageOptions {
     }
 }
 
-async fn summary(db: &mut Session) -> Result<(i64, i64)> {
+async fn summary(db: &mut Sql) -> Result<(i64, i64)> {
     let rows = db
         .query("SELECT count(*), coalesce(sum(id * length(payload)), 0) FROM t")
         .await?;
@@ -22,7 +22,7 @@ async fn summary(db: &mut Session) -> Result<(i64, i64)> {
 fn sql_sessions_match_a_model_across_checkpoint_policies() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let mut db = Session::open_with_options(Arc::new(store.clone()), options(3)).await?;
+        let mut db = Sql::open_with_options(Arc::new(store.clone()), options(3)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT)")
             .await?;
         db.save().await?;
@@ -32,8 +32,7 @@ fn sql_sessions_match_a_model_across_checkpoint_policies() -> Result<()> {
         let mut model = std::collections::BTreeMap::new();
         for round in 0..24i64 {
             let policy = [3, 3, 0, 8][(round / 6) as usize];
-            let mut db =
-                Session::open_with_options(Arc::new(store.clone()), options(policy)).await?;
+            let mut db = Sql::open_with_options(Arc::new(store.clone()), options(policy)).await?;
             let start = round * 25;
             db.execute(&format!(
                 "WITH RECURSIVE n(x) AS (VALUES({start}) UNION ALL SELECT x+1 FROM n WHERE x<{}) \
@@ -64,11 +63,10 @@ fn sql_sessions_match_a_model_across_checkpoint_policies() -> Result<()> {
                 model.len() as i64,
                 model.iter().map(|(id, len)| id * len).sum::<i64>(),
             );
-            let mut db =
-                Session::open_with_options(Arc::new(store.clone()), options(policy)).await?;
+            let mut db = Sql::open_with_options(Arc::new(store.clone()), options(policy)).await?;
             assert_eq!(summary(&mut db).await?, expected, "round {round}");
         }
-        let mut db = Session::open(Arc::new(store.clone())).await?;
+        let mut db = Sql::open_store(Arc::new(store.clone())).await?;
         let rows = db
             .query("SELECT count(*) FROM t INDEXED BY by_payload WHERE payload > ''")
             .await?;
