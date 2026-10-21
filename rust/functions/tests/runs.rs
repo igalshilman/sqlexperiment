@@ -140,7 +140,7 @@ fn a_run_refuses_another_version_of_its_program_or_runtime() -> Result<()> {
     );
     let rebuilt = Store::default();
     let mut commit = store.commit();
-    commit["runtime"] = json!(0);
+    commit["parts"]["run"]["runtime"] = json!(0);
     rebuilt.set_commit(&commit);
     assert!(start(&rebuilt, source, Value::Null, 1).is_err());
     // Its own version still completes it.
@@ -401,7 +401,9 @@ fn a_run_keeps_a_bounded_number_of_batches() -> Result<()> {
     let mut most = 0;
     while run.view().state.outcome.is_none() {
         step(&mut run)?;
-        let batches = store.commit()["batches"].as_u64().unwrap() as usize;
+        let batches = store.commit()["parts"]["memory"]["batches"]
+            .as_u64()
+            .unwrap() as usize;
         most = most.max(batches);
         assert_eq!(store.batches(), batches);
     }

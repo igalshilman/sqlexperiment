@@ -22,7 +22,7 @@
 use crate::{
     GuestError, Operation, Outcome,
     db::Db,
-    transaction::{Blobs, Participant, ScopeBlobs, Sink},
+    transaction::{Blobs, Participant, ScopeBlobs, Sealing},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -187,18 +187,12 @@ impl Attachments {
         self.0.get_mut(name)
     }
 
-    /// Each extension's part of the seal, over what `parts` kept: whether
-    /// any changed.
-    pub async fn prepare(&mut self, parts: &mut BTreeMap<String, Value>) -> Result<bool> {
-        let mut changed = false;
+    /// Each extension's part of `sealing`.
+    pub async fn prepare(&mut self, sealing: &mut Sealing) -> Result<()> {
         for (name, part) in &mut self.0 {
-            let mut sink = Sink::new(parts.remove(name));
-            part.prepare(&mut sink).await?;
-            let (record, recorded) = sink.finish();
-            changed |= recorded;
-            parts.extend(record.map(|record| (name.clone(), record)));
+            sealing.prepare(name, part.as_mut()).await?;
         }
-        Ok(changed)
+        Ok(())
     }
 
     pub fn committed(&mut self) {

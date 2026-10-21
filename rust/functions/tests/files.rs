@@ -41,7 +41,7 @@ async fn files_are_saved_with_the_commit_and_stay_from_run_to_run() {
     // The first turn writes, and commits: the commit names a checkpoint, its
     // blobs written before it.
     let mut run = attempt(&store, &catalog, json!({"write": true}), &extensions).await;
-    let checkpoint = store.commit()["extensions"]["fs"]["checkpoint"].clone();
+    let checkpoint = store.commit()["parts"]["fs"]["checkpoint"].clone();
     assert!(checkpoint.is_string(), "{}", store.commit());
     assert!(
         blobs(&dir)

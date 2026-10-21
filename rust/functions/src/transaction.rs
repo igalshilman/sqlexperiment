@@ -19,11 +19,12 @@
 //! refuse only before the seal, by failing [`Participant::prepare`]. And
 //! [`Participant::committed`] and [`Participant::aborted`] are notices, which
 //! a crash may skip: what a participant is, it recovers from the seal.
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use sqlite_kv::ChainUpdate;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -56,17 +57,10 @@ pub trait Participant: Send {
 /// What a participant puts in the seal.
 pub struct Sink {
     record: Option<Value>,
-    changed: bool,
+    chain: Option<ChainUpdate>,
 }
 
 impl Sink {
-    pub(crate) fn new(kept: Option<Value>) -> Self {
-        Self {
-            record: kept,
-            changed: false,
-        }
-    }
-
     /// The record the last seal kept, which this one keeps unless replaced.
     pub fn kept(&self) -> Option<&Value> {
         self.record.as_ref()
@@ -75,21 +69,60 @@ impl Sink {
     /// Keep `record` in the seal instead.
     pub fn record(&mut self, record: Value) {
         self.record = Some(record);
-        self.changed = true;
     }
 
-    pub(crate) fn finish(self) -> (Option<Value>, bool) {
-        (self.record, self.changed)
+    /// Change the database's chain with the seal: the run's memory's.
+    pub(crate) fn chain(&mut self, update: ChainUpdate) {
+        self.chain = Some(update);
     }
 }
 
 /// The seal: each participant's record, by name. What the scope's
-/// database's commit holds as its effects.
+/// database's commit holds as its effects, with its SQL and its chain.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Seal {
     /// Seals written in the scope, this one included.
     pub seq: u64,
     pub parts: BTreeMap<String, Value>,
+}
+
+/// The next seal, as its participants prepare it.
+pub(crate) struct Sealing {
+    seal: Seal,
+    chain: Option<ChainUpdate>,
+}
+
+impl Sealing {
+    /// After `previous`, whose records it keeps unless replaced.
+    pub fn after(previous: &Seal) -> Self {
+        let seal = Seal {
+            seq: previous.seq + 1,
+            parts: previous.parts.clone(),
+        };
+        Self { seal, chain: None }
+    }
+
+    /// `participant`'s part, as `name`.
+    pub async fn prepare(&mut self, name: &str, participant: &mut dyn Participant) -> Result<()> {
+        let mut sink = Sink {
+            record: self.seal.parts.remove(name),
+            chain: None,
+        };
+        participant.prepare(&mut sink).await?;
+        self.seal
+            .parts
+            .extend(sink.record.map(|record| (name.to_owned(), record)));
+        if let Some(chain) = sink.chain {
+            ensure!(self.chain.is_none(), "Two participants change the chain");
+            self.chain = Some(chain);
+        }
+        Ok(())
+    }
+
+    /// The seal, and the chain's change.
+    pub fn finish(self) -> (Seal, Option<ChainUpdate>) {
+        (self.seal, self.chain)
+    }
 }
 
 /// Where a deployment keeps blobs, per scope, by name.

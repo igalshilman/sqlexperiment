@@ -294,12 +294,12 @@ impl Image {
     }
 }
 
-/// A scope's current run, as of its last turn: the effects of the scope's
-/// database commit record, so the turn happened exactly when its SQL (the KV
-/// writes) and its pages (the chain) did.
+/// The scope's current run, as its last seal keeps it (the part "run"):
+/// what it calls, and where it stands, its pending operations the outbox the
+/// host makes once the seal is written.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Commit {
+pub(crate) struct RunRecord {
     /// The run, and the exported function it calls.
     pub run: String,
     pub handler: String,
@@ -308,8 +308,16 @@ pub(crate) struct Commit {
     pub version: u64,
     /// The runtime's version: an image restores only on the runtime that made it.
     pub runtime: u64,
-    /// Turns committed, this one included.
+    /// Turns sealed, this one included.
     pub turns: u64,
+    pub state: State,
+}
+
+/// The run's memory, as its last seal keeps it (the part "memory"): the
+/// image is the program's golden image with the database's chain applied.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MemoryRecord {
     pub meta: VmMeta,
     pub memory_len: usize,
     /// Batches in the database's chain since this run restarted it: the image
@@ -323,11 +331,6 @@ pub(crate) struct Commit {
     pub delta_bytes: usize,
     /// Pages that differ from golden.
     pub live_pages: usize,
-    pub state: State,
-    /// What the commit keeps of each extension's state, by name: the
-    /// scope's, carried over from run to run.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub extensions: std::collections::BTreeMap<String, Value>,
 }
 
 /// A run as of its last commit, and what that turn wrote.
