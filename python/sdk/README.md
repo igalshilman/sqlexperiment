@@ -1,6 +1,6 @@
 # The patched Python SDK
 
-The Python counterpart of [the patched TypeScript SDK](../../typescript/packages/sdk-typescript/README.md):
+The Python counterpart of [`restate-sql`](../../typescript/packages/sql/README.md), as a patch:
 the Restate Python SDK with an invocation that does not replay its journal,
 and SQL in a virtual object on it, over the released
 [shared core 8.1.0](https://github.com/restatedev/sdk-shared-core/releases/tag/v8.1.0) (`JournalReplay::Disabled`), which it links natively (PyO3).
@@ -34,7 +34,7 @@ async def transfer(ctx: ObjectContext, order: dict) -> None:
         t.tx.object_send(shipping.ship, key=order["sku"], arg=order)
 ```
 
-It works as in TypeScript ([how SQL in virtual objects works](../../typescript/packages/sdk-typescript/SQL.md)),
+It works as in TypeScript ([how SQL in virtual objects works](../../typescript/packages/sql/README.md)),
 with the same storage, page cache and pending sends:
 
 - `restate.sql_options` is `journal_replay=False`, `enable_lazy_state=True`

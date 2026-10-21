@@ -66,5 +66,5 @@ The Python examples are in [`examples-python`](../examples-python/README.md).
 ## Write your own
 
 A new file here, beside the others, runs the same way: its package has
-`restate-agents`, the patched SDK and zod. For a package of your own, see
+`restate-agents`, the SDK and zod. For a package of your own, see
 [Build your own](../typescript/packages/integrations/README.md#build-your-own).

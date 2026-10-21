@@ -468,9 +468,9 @@ message being answered.
 
 ## Build your own
 
-`restate-agents` is not published: it runs on a Restate SDK with
-[patches](../sdk-typescript/README.md) (SQL in virtual objects), which this
-repository builds. Build it once, at the repository's root, with `make js`:
+`restate-agents` is not published: it runs on
+[`restate-sql`](../sql/README.md) (SQL in virtual objects) and the Node.js
+addon, which this repository builds. Build it once, at the repository's root, with `make js`:
 it needs Rust (for the Node.js addon), Node 24 or later, and pnpm; `nix develop` has them all (see
 [Build and test](../../../README.md#build-and-test)).
 
@@ -486,7 +486,7 @@ in the pnpm workspace: a directory listed in
 }
 ```
 
-and `pnpm install` (the workspace swaps in the patched SDK). Node runs
+and `pnpm install`. Node runs
 TypeScript as it is: `node agent.ts`.
 
 ## Words
