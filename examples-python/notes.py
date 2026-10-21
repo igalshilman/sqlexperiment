@@ -8,10 +8,10 @@ stored in Restate with the object's state. No database to run.
     curl localhost:8080/notes/alice/list
 """
 
-import restate
+import restate_sql as restate
 from restate_agents import serve
 
-notes = restate.VirtualObject("notes", **restate.sql_options)
+notes = restate.VirtualObject("notes")
 
 
 @notes.handler()

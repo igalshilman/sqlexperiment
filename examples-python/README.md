@@ -46,8 +46,8 @@ workflows and other agents, and wait for signals:
 support = claude.agent("support", tools=[call(status), signal("approval", description=...), workflow(refund)])
 ```
 
-`notes.py` uses the patched SDK alone, with
-`restate.sql_options`.
+`notes.py` uses [`restate-sql`](../python/sql/README.md) alone:
+`restate_sql.VirtualObject`.
 
 ## Run an example
 
@@ -71,7 +71,7 @@ example's docstring has its requests.
 The agents need that: an attempt that waits runs its handler again from the
 start, so HTTP/1.1's request-response mode (Modal's web endpoints, AWS
 Lambda) cannot serve them. Its image installs the wheels of `make wheels`
-(the patched SDK and the SQL extension are not on PyPI).
+(the patched SDK, the SQL extension and restate-sql are not on PyPI).
 
 ```sh
 make wheels                                          # at the repository's root: dist/

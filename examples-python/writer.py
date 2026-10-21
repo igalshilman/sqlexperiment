@@ -15,7 +15,7 @@ mid-review carries on from the last draft, and the post is published once.
     curl localhost:8080/writer/post/messages   # each draft, and where it was published
 """
 
-import restate
+import restate_sql as restate
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, MessagesState, StateGraph

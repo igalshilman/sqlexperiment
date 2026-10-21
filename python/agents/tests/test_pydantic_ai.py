@@ -1,7 +1,7 @@
 """The Pydantic AI agent, on the scripted teller, over an object's state through crashes."""
 
 import pytest
-import restate
+import restate_sql as restate
 from fakes import Bank, Crash, Object, Teller, pydantic_ai_model
 from pydantic import BaseModel
 from pydantic_ai import Agent

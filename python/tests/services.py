@@ -14,14 +14,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples-python"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests"))
 
-import restate  # noqa: E402
+import restate_sql as restate  # noqa: E402
 from bank import account  # noqa: E402
 from fakes import ClaudeClient, Teller, pydantic_ai_model  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
 from langgraph.graph import START, MessagesState, StateGraph  # noqa: E402
 from notes import add, notes  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
-from restate import Context, ObjectContext, WorkflowContext  # noqa: E402
 from restate_agents import (  # noqa: E402
     Object,
     ask,
@@ -36,6 +35,7 @@ from restate_agents import (  # noqa: E402
     workflow,
 )
 from restate_agents.langgraph import nodes  # noqa: E402
+from restate_sql import Context, ObjectContext, WorkflowContext  # noqa: E402
 from scripted_agent import teller  # noqa: E402
 
 echo = restate.Service("echo")
@@ -54,7 +54,7 @@ async def slowly(ctx: Context, word: str) -> str:
 
 
 # A short inactivity timeout, so that a handler waiting for a few seconds suspends.
-probe = restate.VirtualObject("probe", inactivity_timeout=timedelta(seconds=1), **restate.sql_options)
+probe = restate.VirtualObject("probe", inactivity_timeout=timedelta(seconds=1))
 
 
 @probe.handler()
@@ -109,8 +109,9 @@ async def combined(ctx: ObjectContext) -> list:
 
 
 @probe.handler()
-async def run_refused(ctx: ObjectContext) -> None:
-    await ctx.run_typed("nothing", lambda: None)
+async def with_run(ctx: ObjectContext) -> str:
+    """A run runs its action, again on each attempt."""
+    return await ctx.run_typed("greet", lambda: "hello")
 
 
 @probe.handler()

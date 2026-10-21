@@ -3,8 +3,9 @@
 #   core/        the sqlite-kv crate
 #   typescript/  the pnpm workspace: the Node.js addon, restate-sql, the
 #                integrations, their tests and the examples
-#   python/      the uv workspace: the Python extension, the patched SDK, the
-#                integrations and their tests (examples-python/ beside it)
+#   python/      the uv workspace: the Python extension, restate-sql on the
+#                patched SDK, the integrations and their tests
+#                (examples-python/ beside it)
 #   rust/        the patched Rust SDK, and durable functions on it
 #                (rust/functions: functions, functions-python, test-functions)
 #
@@ -106,10 +107,11 @@ py: $(SDK_PY) ## The uv workspace (python/.venv): the patched Python SDK and the
 MATURIN_WHEEL := uv tool run --from 'maturin[zig]>=1.9,<2' maturin build --release --zig --compatibility manylinux_2_28 \
 	-i python3.13 -o $(CURDIR)/dist
 
-wheels: $(SDK_PY) ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPython 3.13): the patched SDK, the extension and restate-agents
+wheels: $(SDK_PY) ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPython 3.13): the patched SDK, the extension, restate-sql and restate-agents
 	rm -rf dist
 	cd python/sdk/.build/sdk-python && $(MATURIN_WHEEL)
 	cd python/sqlite-kv && $(MATURIN_WHEEL)
+	uv build --wheel python/sql -o dist
 	uv build --wheel python/agents -o dist
 
 examples-rust: ## The Rust example: the core crate's lookup
@@ -132,15 +134,15 @@ test-ts: js ## The integrations, their storage and SQL in objects, without a Res
 # Its own environment, with the extras its tests use; its tests against a
 # Restate server in docker (the test harness) are left out.
 test-sdk-py: $(SDK_PY) ## The patched Python SDK's own tests
-	cd python/sdk/.build/sdk-python && uv run --extra test --extra serde --extra client --extra sql \
+	cd python/sdk/.build/sdk-python && uv run --extra test --extra serde --extra client \
 		pytest -o python_files='*.py' tests --ignore=tests/harness.py --ignore=tests/servercontext.py \
 		--ignore=tests/ext.py -k 'not end_to_end'
 
 test-sdk-rs: $(SDK_RS) ## The patched Rust SDK's unit tests
 	cd rust/sdk/.build/sdk-rust && $(CARGO) test --lib
 
-test-sql-py: py ## The Python extension
-	cd python && uv run --locked pytest sqlite-kv/tests
+test-sql-py: py ## The Python extension and restate-sql, without a Restate server
+	cd python && uv run --locked pytest sqlite-kv/tests sql/tests
 
 test-agents-py: py ## The Python agent integrations (python/agents): the checkpointer conformance suite, and the agents on a scripted model
 	cd python && uv run --locked pytest agents/tests
