@@ -1,26 +1,18 @@
 # Build and test everything, part by part:
 #
 #   core/        the sqlite-kv crate
-#   typescript/  the pnpm workspace: the patched TypeScript SDK, the Node.js
-#                addon, the integrations and their tests; with the examples
-#                (examples-typescript/, a member of the workspace)
-#   python/      the uv workspace: the patched Python SDK, the Python
-#                extension, the agent integrations and their tests; and the
-#                examples (examples-python/, a project of their own)
-#   rust/        the patched Rust SDK (rust/sdk), and durable JavaScript and
-#                Python in Restate objects on it (rust/functions; its
-#                own targets: functions, functions-python, python-engine, test-functions,
-#                lint-functions), which serves the durable functions
-#                (examples-functions/, examples-functions-python/)
+#   typescript/  the pnpm workspace: the Node.js addon, restate-sql, the
+#                patched SDK, the integrations, their tests and the examples
+#   python/      the uv workspace: the Python extension, the patched SDK, the
+#                integrations and their tests (examples-python/ beside it)
+#   rust/        the patched Rust SDK, and durable functions on it
+#                (rust/functions: functions, functions-python, test-functions)
 #
-#   make              build everything
-#   make test         unit and integration tests (no Restate server needed)
-#   make crash-test   the crash campaign, against RESTATE_SERVER
-#   make concurrency-test   the context without journal replay, against RESTATE_SERVER
-#   make help         every target
+#   make          build everything
+#   make test     every test that needs no Restate server
+#   make help     every target
 #
-# The Rust workspaces (the crate, the addon, the Python extension) share one
-# target directory.
+# The Rust crates share one target directory.
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
@@ -32,6 +24,12 @@ PY_ENGINE := $(CARGO_TARGET_DIR)/pywasm/out/python.wasm
 ADDON := typescript/packages/sql-node/sqlite_kv.node
 SDK_PY := python/sdk/.build/sdk-python/.patched
 SDK_RS := rust/sdk/.build/sdk-rust/.patched
+# The Rust crates that rustfmt and clippy check (rust/functions has lint-functions).
+RUST_CRATES := $(CORE) typescript/packages/sql-node python/sqlite-kv
+# The durable functions' runtime tests, and the builds they run in: write
+# barriers checked after every turn (verify-dirty), and full scans.
+FUNCTIONS_TESTS := --lib --test runs --test crashes --test sql --test handlers --test python --test fetch
+FUNCTIONS_MODES := verify-dirty full-scan
 # Formats the TypeScript, JavaScript and Markdown of every part, as .oxfmtrc.json says.
 OXFMT := typescript/node_modules/.bin/oxfmt
 # Lints the TypeScript of every part, as .oxlintrc.json says; its type-aware
@@ -58,9 +56,9 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core functions functions-python python-engine addon sdk-ts sdk-py sdk-rs js py examples-rust test test-core test-addon test-sdk-ts test-ts \
-	test-sdk-py test-sdk-rs test-sql-py test-agents-py test-functions lint lint-core lint-ts lint-py lint-functions format crash-test concurrency-test tools-test \
-	crash-test-py concurrency-test-py wheels clean
+.PHONY: all help core functions functions-python python-engine addon sdk-ts sdk-py sdk-rs js py wheels examples-rust \
+	test test-core test-addon test-sdk-ts test-ts test-sdk-py test-sdk-rs test-sql-py test-agents-py test-functions \
+	crash-test concurrency-test tools-test crash-test-py concurrency-test-py lint lint-core lint-ts lint-py lint-functions format clean
 
 # --- Build
 
@@ -131,10 +129,6 @@ test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
 	cd $(CORE) && $(CARGO) test --locked --features simulation
 
-# Release builds: the guest interpreter is slow unoptimized. verify-dirty
-# checks after every turn that the write barriers marked each changed page;
-# full-scan is the uninstrumented build, which compares every page.
-
 test-addon: $(ADDON) ## The Node.js addon
 	cd typescript/packages/sql-node && npm test
 
@@ -163,14 +157,15 @@ test-agents-py: py ## The Python agent integrations (python/agents): the checkpo
 lint: lint-core lint-ts lint-py ## Every lint
 
 lint-core: ## The Rust crates (the core, the addon and the Python extension): rustfmt --check and clippy
-	cd $(CORE) && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings
-	cd typescript/packages/sql-node && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
-	cd python/sqlite-kv && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
+	for crate in $(RUST_CRATES); do \
+		(cd $$crate && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings) || exit 1; \
+	done
 
 lint-functions: $(SDK_RS) ## Durable JavaScript and Python in Restate objects: rustfmt --check and clippy, in both capture modes
 	cd $(FUNCTIONS) && $(CARGO) fmt --check
-	cd $(FUNCTIONS) && $(CARGO) clippy --locked --release --features verify-dirty --all-targets -- -D warnings
-	cd $(FUNCTIONS) && $(CARGO) clippy --locked --release --features full-scan --all-targets -- -D warnings
+	for mode in $(FUNCTIONS_MODES); do \
+		(cd $(FUNCTIONS) && $(CARGO) clippy --locked --release --features $$mode --all-targets -- -D warnings) || exit 1; \
+	done
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	cd typescript && pnpm typecheck
@@ -184,20 +179,17 @@ lint-py: py ## The Python (python/, examples-python/, the durable functions in P
 		&& $(CARGO) fmt --check
 
 format: js py ## Format everything: rustfmt, oxfmt (TypeScript, JavaScript, Markdown) and ruff (Python)
-	cd $(CORE) && $(CARGO) fmt
-	cd $(FUNCTIONS) && $(CARGO) fmt
-	cd typescript/packages/sql-node && $(CARGO) fmt
-	cd python/sqlite-kv && $(CARGO) fmt
+	for crate in $(RUST_CRATES) $(FUNCTIONS); do (cd $$crate && $(CARGO) fmt) || exit 1; done
 	$(OXFMT)
 	uv run --project python --locked ruff format python examples-python examples-functions-python rust/functions/assets
 
 crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through crashes, against a Restate server
 	cd typescript/tests && node crash.ts
 
-concurrency-test: js $(RESTATE_SERVER) ## The context without journal replay, against a Restate server
+concurrency-test: js $(RESTATE_SERVER) ## Handlers with SQL: concurrent awaits, recovery, ctx.db and its transactions, against a Restate server
 	cd typescript/tests && node concurrency.ts
 
-concurrency-test-py: py $(RESTATE_SERVER) ## Python: the context without journal replay, agents, Restate's tools and the examples (examples-python/), against a Restate server
+concurrency-test-py: py $(RESTATE_SERVER) ## Python: handlers without journal replay, agents, Restate's tools and the examples (examples-python/), against a Restate server
 	cd python && uv run --locked pytest tests
 
 crash-test-py: py $(RESTATE_SERVER) ## Python: a bank and an agent through crashes, against a Restate server
@@ -206,11 +198,14 @@ crash-test-py: py $(RESTATE_SERVER) ## Python: a bank and an agent through crash
 tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, workflow), against a Restate server
 	cd typescript/tests && node restate-tools.ts
 
-# One server at a time, on the default ports.
-test-functions: $(SDK_RS) $(PY_ENGINE) $(RESTATE_SERVER) ## Durable JavaScript and Python in Restate objects: the runtime with native and with barrier write tracking (verified), and with full scans, then the programs against a Restate server
-	cd $(FUNCTIONS) && $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql --test handlers --test python --test fetch
-	cd $(FUNCTIONS) && FUNCTIONS_TRACKING=barriers $(CARGO) test --locked --release --features verify-dirty --lib --test runs --test crashes --test sql --test handlers --test python --test fetch
-	cd $(FUNCTIONS) && $(CARGO) test --locked --release --features full-scan --lib --test runs --test crashes --test sql --test handlers --test python --test fetch
+# Release builds: the guest interpreter is slow unoptimized. With verify-dirty,
+# native page tracking and write barriers (FUNCTIONS_TRACKING=barriers); then
+# full scans. The programs against a Restate server run one at a time, on the
+# default ports.
+test-functions: $(SDK_RS) $(PY_ENGINE) $(RESTATE_SERVER) ## Durable JavaScript and Python in Restate objects: the runtime in every page-tracking mode, then the programs against a Restate server
+	cd $(FUNCTIONS) && $(CARGO) test --locked --release --features verify-dirty $(FUNCTIONS_TESTS)
+	cd $(FUNCTIONS) && FUNCTIONS_TRACKING=barriers $(CARGO) test --locked --release --features verify-dirty $(FUNCTIONS_TESTS)
+	cd $(FUNCTIONS) && $(CARGO) test --locked --release --features full-scan $(FUNCTIONS_TESTS)
 	cd $(FUNCTIONS) && $(CARGO) test --locked --release --test restate -- --include-ignored --test-threads 1
 
 # Into a temporary file, moved into place once it runs: a failed download or
