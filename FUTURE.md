@@ -23,7 +23,7 @@ entries. The code is already in the patched SDKs, unused:
 | Rust       | `RawState::get` in `context/mod.rs`                      | `ContextInternal::get_ephemeral`, `EphemeralGetFuture`                                                                                        |
 
 The Python and Rust files are in their SDK's patch (`python/sdk/patches`,
-`rust/sdk/patches`); the TypeScript one is `typescript/packages/sql`. The SDKs' discovery already
+`rust/sdk/patches`); the TypeScript one is in `typescript/packages/sql`. The SDKs' discovery already
 advertises v8; a v7 server picks v7.
 
 **Found out (19 October 2026):** v8 is only on Restate's
@@ -49,13 +49,13 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
 **Waits on:** a release of the TypeScript SDK whose explicit recovery lets a
 handler await promises concurrently.
 
-**Now:** the SDK is patched (`typescript/packages/sdk-typescript/patches`):
-with explicit recovery, one loop, `PromiseSelector`, drives every awaited
-promise. The published 1.17.4 lets one awaited promise wait for the server at
-a time (`ExternalProgressChannel.awaitNext`), so concurrent awaits that need
-the server fail with `awaitNext already pending`, and `restate-sql`'s reads
-are concurrent.
+**Now:** `restate-sql` drives a SQL handler's promises with a selector of its
+own (`typescript/packages/sql/src/selector.ts`), which takes over the
+invocation's `promisesExecutor.doProgress`: the SDK's internals, so the
+package pins `@restatedev/restate-sdk` 1.17.4. The published SDK lets one
+awaited promise wait for the server at a time
+(`ExternalProgressChannel.awaitNext`), so concurrent awaits that need the
+server fail with `awaitNext already pending`.
 
-**Then:** drop the patch, and the SDK build with it: the workspace takes
-`@restatedev/restate-sdk` from npm. `tests/concurrency.ts` tells whether a
-release has it.
+**Then:** drop the selector, and the pin. `tests/concurrency.ts` tells
+whether a release has it (with the hook off, its concurrent awaits fail).

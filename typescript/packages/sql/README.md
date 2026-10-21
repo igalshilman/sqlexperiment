@@ -5,8 +5,8 @@ kept in the object's state. The handlers that use it run with the SDK's
 explicit recovery instead of journal replay: the storage protocol of this
 repository provides durability and recovery, and Restate provides the state,
 single-writer execution per key, and retries. It uses the
-[sqlite-kv addon](../sql-node/README.md), and the Restate TypeScript SDK with
-[one patch](../sdk-typescript/README.md): concurrent awaits.
+[sqlite-kv addon](../sql-node/README.md), on the published Restate TypeScript
+SDK (1.17.4, pinned: see [concurrent awaits](#concurrent-awaits-one-await-point)).
 
 It runs on a released Restate server: see [the requirements](../../../README.md#requirements).
 
@@ -204,9 +204,17 @@ retention).
 The context's operations are the SDK's `RestatePromise`s, and they can be
 awaited concurrently: `Promise.all`, `Promise.race`, your own combinators,
 several async functions at once, or a library's (the database's own reads
-are concurrent). The published SDK lets one awaited promise wait for the
-server at a time, so this needs [the patched SDK](../sdk-typescript/README.md):
-with explicit recovery, one loop per invocation drives every awaited promise.
+are concurrent). The published SDK drives each awaited promise with a loop
+of its own, and lets one of them wait for the server at a time
+(`ExternalProgressChannel`: a second waiter fails the attempt with
+`awaitNext already pending`, and it is retried forever). So a handler with
+SQL drives every promise it awaits with one loop of its own,
+[the selector](src/selector.ts): before the handler runs, it takes over the
+invocation's `promisesExecutor.doProgress`, and at the attempt's end gives it
+back. That is the SDK's internals, as of 1.17.4: the package pins that
+version, and refuses to run a handler on an SDK without them.
+[`tests/sql/selector.test.ts`](../../tests/sql/selector.test.ts) tests the
+selector against a fake VM and the SDK's single-waiter channel.
 
 - **One await point.** The loop asks the server about every awaited promise
   at once. So a suspension (after the server's inactivity timeout) resumes on
@@ -252,7 +260,7 @@ where the tests use them. Each runs alone (`node sql/shop.ts` from
 storage in the object's database.
 
 ```sh
-make js   # from the repository root: the addon, the patched SDK, pnpm install
+make js   # from the repository root: the addon, pnpm install
 cd typescript/tests && pnpm serve
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.8.0   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host

@@ -4,9 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@restatedev/restate-sdk': file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
-
 importers:
 
   .:
@@ -51,8 +48,8 @@ importers:
         specifier: 2.0.32
         version: 2.0.32(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.5.17(typescript@7.0.2)(web-tree-sitter@0.25.10))(redis@6.3.0(@opentelemetry/api@1.9.0))
       '@restatedev/restate-sdk':
-        specifier: file:../typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
-        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
+        specifier: 1.17.4
+        version: 1.17.4
       '@restatedev/restate-sdk-clients':
         specifier: 1.17.4
         version: 1.17.4
@@ -193,8 +190,8 @@ importers:
         specifier: 2.0.32
         version: 2.0.32(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.5.17(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.4)(graphql@16.14.2)(redis@6.3.0(@opentelemetry/api@1.9.0))(typebox@1.3.27)(typescript@7.0.2)(web-tree-sitter@0.25.10)(ws@8.22.0)
       '@restatedev/restate-sdk':
-        specifier: file:../sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
-        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
+        specifier: 1.17.4
+        version: 1.17.4
       '@restatedev/restate-sdk-clients':
         specifier: 1.17.4
         version: 1.17.4
@@ -217,13 +214,11 @@ importers:
         specifier: 4.6.5
         version: 4.6.5
 
-  packages/sdk-typescript: {}
-
   packages/sql:
     dependencies:
       '@restatedev/restate-sdk':
-        specifier: file:../sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
-        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
+        specifier: 1.17.4
+        version: 1.17.4
       '@restatedev/restate-sdk-core':
         specifier: 1.17.4
         version: 1.17.4
@@ -353,8 +348,8 @@ importers:
         specifier: 2.0.32
         version: 2.0.32(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.5.17(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.4)(graphql@16.14.2)(redis@6.3.0(@opentelemetry/api@1.9.0))(typebox@1.3.27)(typescript@7.0.2)(web-tree-sitter@0.25.10)(ws@8.22.0)
       '@restatedev/restate-sdk':
-        specifier: file:../packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
-        version: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
+        specifier: 1.17.4
+        version: 1.17.4
       '@restatedev/restate-sdk-clients':
         specifier: 1.17.4
         version: 1.17.4
@@ -1936,9 +1931,8 @@ packages:
   '@restatedev/restate-sdk-core@1.17.4':
     resolution: {integrity: sha512-CEuffSwTiaa5FWGcoWCx15wpgnLvA2pxULaMLYrHfqWLZSC/yAKSlPD5DG1Sya2DDkomK3GTq32gmU0GPciZKw==}
 
-  '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz':
-    resolution: {integrity: sha512-tgnxaSZJ4bvhOgyguxce8F97IzTo8UMYAPCa1ovkO3bUVflOf2cR9IpSPGrs7s/s09PXt2vAw+Sha9ZzO7kibA==, tarball: file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz}
-    version: 1.17.4
+  '@restatedev/restate-sdk@1.17.4':
+    resolution: {integrity: sha512-uuMOjtcXrcowBCsA2S3J8yuzxdrc9KJPZatlW7N3QiPz9VKfUSL7JIIPsWG6v7vmohli8JzoWdJGN8YtqVW8jA==}
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     resolution: {integrity: sha512-aWR+XKH9+rW7m5fWq/5360J3mHycrx/o6xZM2DQFdJnTMdyP7/WzxPjhtLbVWdKo2y612/4U1bWqb3HQhiF7vg==}
@@ -6047,7 +6041,7 @@ snapshots:
 
   '@restatedev/restate-sdk-core@1.17.4': {}
 
-  '@restatedev/restate-sdk@file:packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz':
+  '@restatedev/restate-sdk@1.17.4':
     dependencies:
       '@restatedev/restate-sdk-core': 1.17.4
 

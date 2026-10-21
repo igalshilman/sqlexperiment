@@ -203,8 +203,9 @@ Each part is a directory with its README, a workspace of its own; the
 
 - [`core/`](core): the storage ([`sqlite-kv`](core/sqlite-kv/README.md)) every
   SDK builds on.
-- [`typescript/`](typescript/README.md): the Node.js addon, the patched SDK
-  and the [`restate-agents`](typescript/packages/integrations/README.md) integrations.
+- [`typescript/`](typescript/README.md): the Node.js addon,
+  [`restate-sql`](typescript/packages/sql/README.md) (SQL in virtual objects, on the
+  published SDK) and the [`restate-agents`](typescript/packages/integrations/README.md) integrations.
 - [`python/`](python/README.md): the same for Python.
 - [`rust/`](rust/README.md): the patched Rust SDK, and
   [`functions`](rust/functions/README.md), the runtime for durable functions.
@@ -218,7 +219,7 @@ Each part is a directory with its README, a workspace of its own; the
 |                | Version                                                                                                   |
 | -------------- | --------------------------------------------------------------------------------------------------------- |
 | Restate server | 1.8 or later                                                                                              |
-| TypeScript SDK | 1.17.4 with [the patches](typescript/packages/sdk-typescript/README.md); `make` builds it                 |
+| TypeScript SDK | 1.17.4, as published, with [`restate-sql`](typescript/packages/sql/README.md)                             |
 | Python SDK     | 1.0.5 with [the patches](python/sdk/README.md), on the released shared core 8.1.0; `make` builds it       |
 | Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), on the released shared core 8.1.0; `make sdk-rs` builds it |
 
@@ -234,7 +235,7 @@ tool below, on macOS and Linux ([`flake.nix`](flake.nix)):
 
 ```sh
 nix develop       # or `direnv allow`, with use flake in .envrc
-make              # build everything: the crate, the addon, the patched SDK, the pnpm and uv workspaces
+make              # build everything: the crate, the addon, the pnpm and uv workspaces, the patched Python SDK
 make test         # every test that needs no Restate server
 make test-ts T=langgraph   # the TypeScript tests (vitest in typescript/tests), optionally filtered
 make test-sdk-py  # the patched Python SDK's own tests

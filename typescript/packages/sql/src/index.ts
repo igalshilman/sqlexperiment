@@ -19,6 +19,7 @@
 //
 // See README.md.
 import * as restate from '@restatedev/restate-sdk';
+import { hookSelector } from './selector.ts';
 import { SqlAttempt, type SqlHost, type SqlSession, type SqlTransaction, withSql } from './session.ts';
 
 // The SDK, but what this module declares in its place.
@@ -146,8 +147,12 @@ function withDatabase(fn: Fn<never>, shared: boolean) {
   return (ctx: restate.ObjectContext | restate.ObjectSharedContext, input: never) => {
     // A context with a database already, such as a test's: the handler uses it.
     if ('db' in ctx) return fn(ctx as never, input);
-    const attempt = new SqlAttempt(host(ctx, shared));
-    return withSql(() => fn(sqlContext(ctx, attempt) as never, input), attempt);
+    const sql = host(ctx, shared);
+    // One loop drives the attempt's awaits (see selector.ts), until it ends.
+    const unhook = hookSelector(ctx);
+    sql.invocationEndPromise.promise.catch(unhook);
+    const attempt = new SqlAttempt(sql);
+    return withSql(() => fn(sqlContext(ctx, attempt) as never, input), attempt).finally(unhook);
   };
 }
 

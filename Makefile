@@ -2,7 +2,7 @@
 #
 #   core/        the sqlite-kv crate
 #   typescript/  the pnpm workspace: the Node.js addon, restate-sql, the
-#                patched SDK, the integrations, their tests and the examples
+#                integrations, their tests and the examples
 #   python/      the uv workspace: the Python extension, the patched SDK, the
 #                integrations and their tests (examples-python/ beside it)
 #   rust/        the patched Rust SDK, and durable functions on it
@@ -16,7 +16,6 @@
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
-SDK_TARBALL := typescript/packages/sdk-typescript/.build/restatedev-restate-sdk-1.17.4.tgz
 CORE := core/sqlite-kv
 FUNCTIONS := rust/functions
 # CPython for WASI, with its standard library: the engine of durable Python.
@@ -56,8 +55,8 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core functions functions-python python-engine addon sdk-ts sdk-py sdk-rs js py wheels examples-rust \
-	test test-core test-addon test-sdk-ts test-ts test-sdk-py test-sdk-rs test-sql-py test-agents-py test-functions \
+.PHONY: all help core functions functions-python python-engine addon sdk-py sdk-rs js py wheels examples-rust \
+	test test-core test-addon test-ts test-sdk-py test-sdk-rs test-sql-py test-agents-py test-functions \
 	crash-test concurrency-test tools-test crash-test-py concurrency-test-py lint lint-core lint-ts lint-py lint-functions format clean
 
 # --- Build
@@ -86,13 +85,8 @@ addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)
 $(ADDON): $(wildcard typescript/packages/sql-node/src/*.rs $(CORE)/src/*.rs $(CORE)/src/*/*.rs) typescript/packages/sql-node/Cargo.toml $(CORE)/Cargo.toml
 	cd typescript/packages/sql-node && npm run build
 
-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK (typescript/packages/sdk-typescript)
-
-$(SDK_TARBALL): $(wildcard typescript/packages/sdk-typescript/patches/*.patch) typescript/packages/sdk-typescript/setup.sh
-	typescript/packages/sdk-typescript/setup.sh
-
-js: $(ADDON) $(SDK_TARBALL) ## The pnpm workspace, installed with the patched SDK and the addon
-	cd typescript && pnpm install --force
+js: $(ADDON) ## The pnpm workspace, installed with the addon
+	cd typescript && pnpm install
 
 sdk-py: $(SDK_PY) ## The patched Python SDK's sources (python/sdk), for the uv workspace to build
 
@@ -123,7 +117,7 @@ examples-rust: ## The Rust example: the core crate's lookup
 
 # --- Test
 
-test: test-core test-addon test-sdk-ts test-ts test-sdk-py test-sql-py test-agents-py ## Every test that needs no Restate server
+test: test-core test-addon test-ts test-sdk-py test-sql-py test-agents-py ## Every test that needs no Restate server
 
 test-core: ## The core crate, with the simulation campaigns
 	cd $(CORE) && $(CARGO) test --locked
@@ -131,9 +125,6 @@ test-core: ## The core crate, with the simulation campaigns
 
 test-addon: $(ADDON) ## The Node.js addon
 	cd typescript/packages/sql-node && npm test
-
-test-sdk-ts: $(SDK_TARBALL) ## The patched TypeScript SDK's own tests
-	cd typescript/packages/sdk-typescript/.build/sdk-typescript/packages/libs/restate-sdk && npx vitest run
 
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
 	cd typescript/tests && pnpm exec vitest run $(T)
@@ -224,6 +215,6 @@ endif
 	mv $@.tmp $@
 
 clean: ## Remove build outputs
-	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) typescript/packages/sdk-typescript/.build python/sdk/.build \
+	rm -rf $(CARGO_TARGET_DIR) dist $(ADDON) python/sdk/.build \
 		typescript/node_modules typescript/*/node_modules typescript/packages/*/node_modules examples-typescript/node_modules \
 		python/.venv python/sqlite-kv/python/sqlite_kv/*.so
