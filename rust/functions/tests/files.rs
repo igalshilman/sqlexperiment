@@ -38,16 +38,15 @@ async fn files_are_saved_with_the_commit_and_stay_from_run_to_run() {
     let (extensions, dir) = offered();
     let store = Store::default();
     let catalog = programs(NOTES);
-    // The first turn writes, and commits: the commit names a checkpoint, its
-    // blobs written before it.
+    // The first turn writes, and commits: the commit holds the manifest, the
+    // files' blobs written before it.
     let mut run = attempt(&store, &catalog, json!({"write": true}), &extensions).await;
-    let checkpoint = store.record("fs")["checkpoint"].clone();
-    assert!(checkpoint.is_string(), "{}", store.record("fs"));
-    assert!(
-        blobs(&dir)
-            .await
-            .contains(&checkpoint.as_str().unwrap().to_owned())
-    );
+    let manifest = store.record("fs/manifest");
+    let blob = manifest["notes/a.txt"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(blobs(&dir).await.contains(&blob), "{manifest}");
     drop(run);
 
     // Another attempt: the files as the commit left them.
@@ -189,8 +188,8 @@ export async function main(_, ctx) {
     )
     .await;
     assert_eq!(done, json!(["a.txt"]));
-    // The last checkpoint's manifest, and "two": nothing else.
-    assert_eq!(blobs(&dir).await.len(), 2, "{:?}", blobs(&dir).await);
+    // "two", the only file left: nothing else.
+    assert_eq!(blobs(&dir).await.len(), 1, "{:?}", blobs(&dir).await);
 }
 
 #[tokio::test]

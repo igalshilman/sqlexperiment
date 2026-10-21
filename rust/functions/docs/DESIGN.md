@@ -627,7 +627,7 @@ A scope's store holds one journal, a sqlite-kv namespace
 | `memory`            | Record                    | Its memory: JSON, below                                                  |
 | `memory/<golden>`   | Paged file over golden    | The pages of the run's memory that differ from its program's golden one |
 | `db`                | Paged file                | SQL: the scope's KV, a table `kv(key TEXT PRIMARY KEY, value TEXT)`      |
-| `<extension>`       | Record                    | Each extension's (§9)                                                    |
+| `<extension>/…`     | Records and paged files   | Each extension's part of the journal (`fs/manifest`, say)                |
 
 Programs and their golden images are not stored: the process supplies them
 (§5.5). The records, in camelCase JSON:
@@ -869,8 +869,8 @@ its record:
 1. its KV writes, the SQL transaction its first KV request began;
 2. its memory's pages that changed, into the file over golden (§5.3);
 3. the run's state, as the record `run`, with the pending requests; the
-   memory's, as the record `memory`; and each extension's record that
-   changed.
+   memory's, as the record `memory`; and what each extension changed in
+   its part of the journal (its records and files under `<name>/`).
 
 Writes land in any order (§1), so nothing may be its own put: a turn's pages
 and a commit that names them could not be ordered. The record carries the
