@@ -1,6 +1,6 @@
 # Build and test everything, part by part:
 #
-#   core/        the journal crate
+#   core/        the journal crate (core/journal), and SQL on it (core/sql)
 #   typescript/  the pnpm workspace: the Node.js addon, restate-fns, the
 #                integrations, their tests and the examples
 #   python/      the uv workspace: the Python extension, restate-fns, the
@@ -17,7 +17,8 @@
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
-CORE := core/journal
+# The journal, and SQL on it.
+CORE := core/journal core/sql
 FUNCTIONS := rust/functions
 # CPython for WASI, with its standard library: the engine of durable Python.
 PY_ENGINE := $(CARGO_TARGET_DIR)/pywasm/out/python.wasm
@@ -66,8 +67,8 @@ all: core addon js py ## Build everything
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
 
-core: ## The journal crate
-	cd $(CORE) && $(CARGO) build --locked --release
+core: ## The journal crate and the SQL crate
+	for crate in $(CORE); do (cd $$crate && $(CARGO) build --locked --release) || exit 1; done
 
 functions: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/functions): a binary serving the durable functions of examples-functions/ (or FUNCTIONS_PROGRAMS)
 	cd $(FUNCTIONS) && $(CARGO) build --locked --release
@@ -82,7 +83,7 @@ $(PY_ENGINE): $(FUNCTIONS)/python/build.sh $(FUNCTIONS)/python/reactor.c
 
 addon: $(ADDON) ## The Node.js addon (typescript/packages/sql-node)
 
-$(ADDON): $(wildcard typescript/packages/sql-node/src/*.rs $(CORE)/src/*.rs $(CORE)/src/*/*.rs) typescript/packages/sql-node/Cargo.toml $(CORE)/Cargo.toml
+$(ADDON): $(wildcard typescript/packages/sql-node/src/*.rs $(addsuffix /src/*.rs,$(CORE)) $(addsuffix /src/*/*.rs,$(CORE))) typescript/packages/sql-node/Cargo.toml $(addsuffix /Cargo.toml,$(CORE))
 	cd typescript/packages/sql-node && npm run build
 
 js: $(ADDON) ## The pnpm workspace, installed with the addon
@@ -107,16 +108,15 @@ wheels: ## Python wheels in dist/, for a Linux container (manylinux_2_28, CPytho
 	uv build --wheel python/fns -o dist
 	uv build --wheel python/agents -o dist
 
-examples-rust: ## The Rust example: the core crate's lookup
-	cd $(CORE) && $(CARGO) build --locked --release --features simulation --example lookup
+examples-rust: ## The Rust example: the SQL crate's lookup
+	cd core/sql && $(CARGO) build --locked --release --features simulation --example lookup
 
 # --- Test
 
 test: test-core test-addon test-ts test-py ## Every test that needs no Restate server
 
-test-core: ## The core crate, with the simulation campaigns
-	cd $(CORE) && $(CARGO) test --locked
-	cd $(CORE) && $(CARGO) test --locked --features simulation
+test-core: ## The journal and SQL crates, with the simulation campaigns
+	for crate in $(CORE); do (cd $$crate && $(CARGO) test --locked && $(CARGO) test --locked --features simulation) || exit 1; done
 
 test-addon: $(ADDON) ## The Node.js addon
 	cd typescript/packages/sql-node && npm test

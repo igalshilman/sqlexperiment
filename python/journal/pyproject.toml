@@ -21,4 +21,6 @@ cache-keys = [
   { file = "src/**/*.rs" },
   { file = "../../core/journal/Cargo.toml" },
   { file = "../../core/journal/src/**/*.rs" },
+  { file = "../../core/sql/Cargo.toml" },
+  { file = "../../core/sql/src/**/*.rs" },
 ]
