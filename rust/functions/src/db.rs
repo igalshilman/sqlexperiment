@@ -17,8 +17,8 @@
 use crate::{model::MAX_INPUT, transaction::Participant};
 use anyhow::{Context, Result, bail, ensure};
 use journal::Journal;
-use sql::{Sql, Value as SqlValue};
 use serde_json::{Map, Number, Value, json};
+use sql::{Sql, Value as SqlValue};
 
 /// The scope's KV, a table of its database: values are JSON.
 const KV_TABLE: &str = "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL)";

@@ -7,8 +7,8 @@ use functions::{
     View,
 };
 use journal::{Journal, kv::KvStore, simulation::MemoryKv};
-use sql::{Sql, Value as SqlValue};
 use serde_json::{Value, json};
+use sql::{Sql, Value as SqlValue};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, OnceLock},
