@@ -29,11 +29,9 @@ varints unless stated otherwise.
 | Directory         | Count, then per file: its id (ascending, as the gap after the previous id, less one), its name's length (at most 255) and UTF-8 bytes, then `0` and its value as a part (a record), `1` and its length in 512-byte units, at most 2^44 bytes (a paged file), or `2`, its length so, and its base's id (a paged file with a base); names are unique |
 | Transaction count | At most the version, and 2^20                                                                                                                                                                                                                                                                                                                      |
 | Transactions      | Each: its change count, then per paged file it changed (ascending ids, each once): the file's id, its length after the transaction in 512-byte units, its part count and its parts (segments of that file's pages)                                                                                                                                 |
-| Chain count       | At most 2^20                                                                                                                                                                                                                                                                                                                                       |
-| Chain             | The host's values, each a part                                                                                                                                                                                                                                                                                                                     |
 
 A part is `0`, a length and inline bytes (a segment of at most 1 MiB, or a
-chain value or record of at most 16 MiB), or `1`, the number of a stored value
+record of at most 16 MiB), or `1`, the number of a stored value
 (below the next segment, not in the garbage) and the bytes' index in it. A
 paged file's length in the directory is its length after the last
 transaction that changed it. Nothing may follow. A missing record means
@@ -64,9 +62,9 @@ replaced whole by a commit that sets it. One of at most the inline budget
 written by the commit that sets it. Checkpoints keep them. A record never
 set reads as empty.
 
-The chain is the host's (`Session::seal`): opaque values in the order it
-appended them since it last restarted the chain. Checkpoints keep it. A
-stored value may hold log segments and chain values together (a seal).
+A commit (`Session::seal`) sets records and writes paged files with its
+SQL, in the same put. A stored value holds a large transaction's segment, a
+large record, or the record's inline log sealed into one (a seal).
 
 ## Log segments
 
@@ -84,7 +82,7 @@ sealed (the record's inline log, in order).
 The frame's dictionary is a raw prefix: the previous image of each entry with
 an image, in entry order, where it has one. A page's previous image is its
 latest in the log before this segment (since the last checkpoint), in the
-same file: replay rebuilds them from an empty chain. A segment is at most 1 MiB.
+same file: replay rebuilds them from the checkpoint on. A segment is at most 1 MiB.
 
 ## Pages
 

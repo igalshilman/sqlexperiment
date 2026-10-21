@@ -133,7 +133,6 @@ fn record() -> io::Result<Commit> {
             logged(2 * 4096, vec![Part::Stored(7, 0), Part::Stored(7, 1)]),
             logged(3 * 4096, Vec::new()),
         ],
-        chain: vec![Part::Inline(Bytes::from_static(b"vm0")), Part::Stored(8, 0)],
     })
 }
 
@@ -156,11 +155,11 @@ fn commit_records_round_trip() -> io::Result<()> {
         bytes[..38],
         *b"SC15\x09\x02\x0c\x03\x04\x01\x01\x05\x03\x00\x02db\x01\x18\x00\x03out\x00\x00\x01x\x02\x03big\x00\x01\x08\x01\x03"
     );
-    // Then the chain: 2 parts, inline `vm0`, and value 8's first.
-    assert!(bytes.ends_with(b"\x02\x00\x03vm0\x01\x08\x00"));
-    // A chain part may not name garbage.
+    // The last transaction ends it: one change, of file 0, 24 units, no parts.
+    assert!(bytes.ends_with(b"\x01\x00\x18\x00"));
+    // A record's part may not name garbage.
     let mut named = commit.clone();
-    named.chain[1] = Part::Stored(4, 0);
+    named.directory.get_mut(&4).unwrap().kind = Kind::Record(Part::Stored(4, 0));
     assert!(Commit::decode(&named.encode()).is_err());
     Ok(())
 }

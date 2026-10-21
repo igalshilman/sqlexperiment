@@ -1,7 +1,6 @@
 //! Public API and fault campaigns, built only with `--features simulation`.
 mod block_io;
 mod cache;
-mod chain;
 mod durability;
 mod errors;
 mod failpoints;
@@ -11,4 +10,5 @@ mod limits;
 mod log;
 mod publication;
 mod races;
+mod records;
 mod sql;

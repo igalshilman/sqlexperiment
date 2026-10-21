@@ -74,7 +74,7 @@ impl Store {
         let mut db = block(Session::open_with_options(self.kv.clone(), options)).unwrap();
         let bytes = serde_json::to_vec(value).unwrap();
         db.record(name).set(bytes.into());
-        block(db.seal(None)).unwrap();
+        block(db.seal()).unwrap();
     }
 
     /// Pages of the run's memory that differ from golden, as the memory

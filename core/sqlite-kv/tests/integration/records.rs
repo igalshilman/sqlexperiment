@@ -1,8 +1,8 @@
-//! The host's chain and records: values a turn commits with its SQL, in one
+//! The host's records: named values a turn commits with its SQL, in one
 //! commit record (`Session::seal`).
 use bytes::Bytes;
 use sqlite_kv::{
-    ChainUpdate, Durability, NamespaceCache, Result, Session, StorageOptions,
+    Durability, NamespaceCache, Result, Session, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
@@ -22,49 +22,36 @@ fn value(i: usize) -> Bytes {
     Bytes::from((0..len).map(|n| (n * 31 + i) as u8).collect::<Vec<_>>())
 }
 
-/// Turn `i`'s update: every fifth restarts the chain, every eleventh clears
-/// it.
-fn update(i: usize) -> ChainUpdate {
-    match (i % 11, i % 5) {
-        (10, _) => ChainUpdate::Clear,
-        (_, 4) => ChainUpdate::Restart(value(i)),
-        _ => ChainUpdate::Append(value(i)),
-    }
-}
-
-/// The chain after turns `0..turns`.
-fn expected(turns: usize) -> Vec<Bytes> {
-    let mut chain = Vec::new();
-    for i in 0..turns {
-        match update(i) {
-            ChainUpdate::Append(value) => chain.push(value),
-            ChainUpdate::Restart(value) => chain = vec![value],
-            ChainUpdate::Clear => chain.clear(),
-        }
-    }
-    chain
+/// The record `turn` after turns `0..turns`: the last one's value.
+fn expected(turns: usize) -> Bytes {
+    turns.checked_sub(1).map(value).unwrap_or_default()
 }
 
 /// A turn: a row (every other turn, in a transaction; the others open none),
-/// its number as the record `effects`, every third its value as the record
-/// `state` (small, sealed, or stored), its update.
+/// its number as the record `effects`, its value as the record `turn` (small,
+/// sealed, or stored), and every eleventh empties the record `state`, every
+/// third sets it to its value.
 async fn turn(db: &mut Session, i: usize) -> Result<()> {
     if i.is_multiple_of(2) {
         db.execute("BEGIN").await?;
         db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     }
     db.record("effects").set(Bytes::from(format!("turn {i}")));
-    if i.is_multiple_of(3) {
+    db.record("turn").set(value(i));
+    if i % 11 == 10 {
+        db.record("state").set(Bytes::new());
+    } else if i.is_multiple_of(3) {
         db.record("state").set(value(i));
     }
-    db.seal(Some(update(i))).await.map(drop)
+    db.seal().await.map(drop)
 }
 
 /// The record `state` after turns `0..turns`.
 fn state(turns: usize) -> Bytes {
     (0..turns)
         .rev()
-        .find(|i| i.is_multiple_of(3))
+        .find(|i| i.is_multiple_of(3) || i % 11 == 10)
+        .filter(|i| i % 11 != 10)
         .map(value)
         .unwrap_or_default()
 }
@@ -75,7 +62,7 @@ async fn rows(db: &mut Session) -> Result<i64> {
 }
 
 #[test]
-fn a_turn_commits_its_chain_and_records_with_its_sql() -> Result<()> {
+fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
     futures::executor::block_on(async {
         for cached in [false, true] {
             let cache = cached.then(fresh_namespace);
@@ -84,14 +71,18 @@ fn a_turn_commits_its_chain_and_records_with_its_sql() -> Result<()> {
             db.execute("CREATE TABLE t(n INTEGER)").await?;
             for i in 0..60 {
                 turn(&mut db, i).await?;
-                assert_eq!(db.chain(), expected(i + 1), "turn {i}");
+                assert_eq!(db.record("turn").get(), expected(i + 1), "turn {i}");
                 if i % 7 == 6 {
                     // Another session reads the same turn: the record, and the
                     // stored values it names.
                     drop(db);
                     let mut other =
                         Session::open_with_options(store.clone(), options(None)).await?;
-                    assert_eq!(other.chain(), expected(i + 1), "turn {i}, reopened");
+                    assert_eq!(
+                        other.record("turn").get(),
+                        expected(i + 1),
+                        "turn {i}, reopened"
+                    );
                     assert_eq!(other.effects(), format!("turn {i}").as_bytes());
                     assert_eq!(other.record("state").get(), state(i + 1));
                     assert_eq!(rows(&mut other).await?, (i / 2 + 1) as i64);
@@ -132,8 +123,8 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
             if i % 3 == 0 {
                 db.execute("BEGIN").await?;
             }
-            let append = ChainUpdate::Append(Bytes::from(vec![i as u8; 64]));
-            db.seal(Some(append)).await?;
+            db.record("turn").set(Bytes::from(vec![i as u8; 64]));
+            db.seal().await?;
         }
         assert_eq!(db.version(), version + 100);
         // Without SQL nothing checkpointed: no page keys beyond the first
@@ -142,14 +133,13 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
         assert_eq!(pages(&store), 0);
         drop(db);
         let db = Session::open_with_options(store.clone(), options(None)).await?;
-        assert_eq!(db.chain().len(), 100);
-        assert_eq!(db.chain()[99], vec![99u8; 64]);
+        assert_eq!(db.record("turn").get(), vec![99u8; 64]);
         Ok(())
     })
 }
 
 /// Crash a run of turns at every sync, keeping each prefix of the writes the
-/// sync would have stored. The chain, the effects and the rows are those of
+/// sync would have stored. The records and the rows are those of
 /// the last acknowledged turn, or of the interrupted one, together.
 #[test]
 fn every_acknowledged_turn_survives_a_crash_at_any_write() -> Result<()> {
@@ -214,10 +204,14 @@ async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
         // only to read, as the cache follows one history, and the forks are
         // each another.
         let db = Session::open_with_options(store.clone(), options(cache.clone())).await?;
-        let turns = match db.chain() == expected(acknowledged) {
+        let turns = match db.record("turn").get() == expected(acknowledged) {
             true => acknowledged,
             false => {
-                assert_eq!(db.chain(), expected(acknowledged + 1), "{case}");
+                assert_eq!(
+                    db.record("turn").get(),
+                    expected(acknowledged + 1),
+                    "{case}"
+                );
                 acknowledged + 1
             }
         };
@@ -236,7 +230,7 @@ async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
         turn(&mut db, turns).await?;
         drop(db);
         let db = Session::open_with_options(store.clone(), options(None)).await?;
-        assert_eq!(db.chain(), expected(turns + 1), "{case}");
+        assert_eq!(db.record("turn").get(), expected(turns + 1), "{case}");
         assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
     }
     Ok(Some(writes + 1))

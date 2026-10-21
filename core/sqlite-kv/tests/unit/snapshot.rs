@@ -747,7 +747,7 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
             for round in 0..12u64 {
                 let size = PREFETCH_PAGES * 4096;
                 let (_, next) = snapshot
-                    .commit(sql_writes(rewrite.clone(), size), Default::default(), None)
+                    .commit(sql_writes(rewrite.clone(), size), Default::default())
                     .await?;
                 model.apply(&rewrite, size);
                 snapshot = next;
@@ -782,7 +782,7 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             for round in 0..12 {
                 let (changes, size) = dirty(round);
                 let (report, after) = snapshot
-                    .commit(sql_writes(changes.clone(), size), Default::default(), None)
+                    .commit(sql_writes(changes.clone(), size), Default::default())
                     .await?;
                 assert_eq!(report.checkpointed_pages, 0);
                 model.apply(&changes, size);
@@ -801,7 +801,7 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             store.reset_stats();
             let (changes, size) = dirty(12);
             let (report, after) = snapshot
-                .commit(sql_writes(changes.clone(), size), Default::default(), None)
+                .commit(sql_writes(changes.clone(), size), Default::default())
                 .await?;
             model.apply(&changes, size);
             let distinct = model.pages.len();

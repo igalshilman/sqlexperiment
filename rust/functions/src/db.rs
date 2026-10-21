@@ -59,7 +59,7 @@ impl Db {
     /// turn's transaction.
     pub async fn seal(&mut self) -> Result<sqlite_kv::SaveReport> {
         self.began = false;
-        self.session.seal(None).await.map_err(sql)
+        self.session.seal().await.map_err(sql)
     }
 
     /// The guest trapped: what its open `ctx.db.transaction` did is undone,

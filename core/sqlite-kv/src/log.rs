@@ -56,8 +56,6 @@ pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_NAME_BYTES: usize = 255;
 /// Most records a commit record may name.
 pub(crate) const MAX_FILES: u32 = 1 << 16;
-/// Bytes of a value in the host's chain.
-pub const MAX_CHAIN_VALUE_BYTES: usize = 16 * 1024 * 1024;
 const MAGIC: usize = 4;
 const ZSTD_LEVEL: i32 = 3;
 /// Largest version, epoch or segment number a stored record may name, far
@@ -290,8 +288,7 @@ pub(crate) fn stored_value(segments: &[Bytes]) -> Bytes {
     out.into()
 }
 
-/// The segments of a `log/<n>` value: log segments, or values of the host's
-/// chain.
+/// The segments of a `log/<n>` value: log segments, or a record's value.
 pub(crate) fn stored_segments(bytes: &Bytes) -> io::Result<Vec<Bytes>> {
     let value = || invalid("log segment");
     if bytes.len() < MAGIC || &bytes[..MAGIC] != LOG_MAGIC {
@@ -306,9 +303,7 @@ pub(crate) fn stored_segments(bytes: &Bytes) -> io::Result<Vec<Bytes>> {
     for _ in 0..count {
         let len = get_varint(bytes, &mut at).ok_or_else(value)? as usize;
         let end = at.checked_add(len).filter(|&end| end <= bytes.len());
-        let end = end
-            .filter(|_| len <= MAX_CHAIN_VALUE_BYTES)
-            .ok_or_else(value)?;
+        let end = end.filter(|_| len <= MAX_RECORD_BYTES).ok_or_else(value)?;
         segments.push(bytes.slice(at..end));
         at = end;
     }
@@ -318,17 +313,7 @@ pub(crate) fn stored_segments(bytes: &Bytes) -> io::Result<Vec<Bytes>> {
     Ok(segments)
 }
 
-/// A stored value holding a record's first inline parts: `log` of the log's,
-/// then `chain` of the chain's.
-#[derive(Clone, Debug)]
-pub(crate) struct Sealed {
-    pub n: u64,
-    pub log: usize,
-    pub chain: usize,
-}
-
-/// Where a segment of a committed transaction, or a value of the host's
-/// chain, is.
+/// Where a segment of a committed transaction, or a record's value, is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Part {
     /// In the commit record.
@@ -398,7 +383,7 @@ pub(crate) struct Logged {
 /// bytes, then 0 and its part (a record) or 1 and its size in 512-byte units
 /// (a paged file); then the transaction count, and per transaction its change
 /// count, per change its file's id, its size in 512-byte units and its part
-/// count and parts; then the chain's part count and parts. A part is 0 and
+/// count and parts. A part is 0 and
 /// the bytes' length and bytes (inline), or 1, the stored value's number and
 /// the part's index in it (stored).
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -419,9 +404,6 @@ pub(crate) struct Commit {
     pub directory: BTreeMap<u32, Entry>,
     /// The log since the last checkpoint, in order.
     pub log: Vec<Logged>,
-    /// The host's chain: opaque values it appends to, or restarts, with its
-    /// commits (a VM's page batches, say). Checkpoints keep it.
-    pub chain: Vec<Part>,
 }
 
 /// Reads a commit record: each method fails on a malformed or implausible
@@ -542,10 +524,6 @@ impl Commit {
                 }
             }
         }
-        put_varint(&mut out, self.chain.len() as u64);
-        for part in &self.chain {
-            put_part(&mut out, part);
-        }
         out.into()
     }
 
@@ -635,11 +613,6 @@ impl Commit {
             }
             log.push(Logged { changes });
         }
-        let chain_count = r.bounded(MAX_TRANSACTIONS)?;
-        let mut chain = Vec::with_capacity(chain_count.min(1024) as usize);
-        for _ in 0..chain_count {
-            chain.push(r.part(MAX_CHAIN_VALUE_BYTES, next_segment, &garbage)?);
-        }
         let sized = sizes.iter().all(|(file, size)| {
             matches!(&directory[file].kind, Kind::Paged { size: held, .. } if held == size)
         });
@@ -654,13 +627,7 @@ impl Commit {
             next_file,
             directory,
             log,
-            chain,
         })
-    }
-
-    /// The parts a seal takes, in order: the log's then the chain's.
-    fn sealable(&self) -> impl Iterator<Item = &Part> {
-        self.log_parts().chain(&self.chain)
     }
 
     /// The log's parts, in order.
@@ -670,7 +637,7 @@ impl Commit {
             .flat_map(|change| &change.parts)
     }
 
-    /// Every part: the sealable ones, then the records'.
+    /// Every part: the log's, then the records'.
     pub(crate) fn parts(&self) -> impl Iterator<Item = &Part> {
         let records = self
             .directory
@@ -679,7 +646,7 @@ impl Commit {
                 Kind::Record(part) => Some(part),
                 Kind::Paged { .. } => None,
             });
-        self.sealable().chain(records)
+        self.log_parts().chain(records)
     }
 
     /// The id of the file named `name`.
@@ -706,9 +673,9 @@ impl Commit {
         })
     }
 
-    /// Bytes of the inline parts, the log's and the chain's.
+    /// Bytes of the log's inline parts.
     pub(crate) fn inline_bytes(&self) -> usize {
-        self.sealable()
+        self.log_parts()
             .map(|part| match part {
                 Part::Inline(bytes) => bytes.len(),
                 Part::Stored(..) => 0,
@@ -733,29 +700,26 @@ impl Commit {
         pages
     }
 
-    /// Name `sealed` in place of the inline parts it holds.
-    pub(crate) fn name(&mut self, sealed: &Sealed) {
+    /// Name the stored value `n` in place of the log's first `count` inline
+    /// parts, which it holds.
+    pub(crate) fn name(&mut self, n: u64, count: usize) {
         let inline = |part: &&mut Part| matches!(part, Part::Inline(_));
         let log = (self.log.iter_mut())
             .flat_map(|t| &mut t.changes)
             .flat_map(|change| &mut change.parts);
-        let log = log.filter(inline).take(sealed.log);
-        let chain = self.chain.iter_mut().filter(inline).take(sealed.chain);
-        for (index, part) in log.chain(chain).enumerate() {
-            *part = Part::Stored(sealed.n, index as u32);
+        for (index, part) in log.filter(inline).take(count).enumerate() {
+            *part = Part::Stored(n, index as u32);
         }
     }
 
-    /// The inline parts, the log's and then the chain's.
-    pub(crate) fn inline_parts(&self) -> (Vec<Bytes>, Vec<Bytes>) {
-        let inline = |part: &Part| match part {
-            Part::Inline(bytes) => Some(bytes.clone()),
-            Part::Stored(..) => None,
-        };
-        (
-            self.log_parts().filter_map(inline).collect(),
-            self.chain.iter().filter_map(inline).collect(),
-        )
+    /// The log's inline parts, in order.
+    pub(crate) fn inline_parts(&self) -> Vec<Bytes> {
+        self.log_parts()
+            .filter_map(|part| match part {
+                Part::Inline(bytes) => Some(bytes.clone()),
+                Part::Stored(..) => None,
+            })
+            .collect()
     }
 
     /// The stored values the record names, by number.
@@ -881,16 +845,15 @@ pub(crate) type Values = BTreeMap<u64, Bytes>;
 /// Records' values by name.
 pub(crate) type Records = BTreeMap<String, Bytes>;
 
-/// What a commit record holds, read: the log replayed, the chain's values,
-/// the records' values, and every stored value the record names.
+/// What a commit record holds, read: the log replayed, the records' values,
+/// and every stored value the record names.
 pub(crate) struct Replayed {
     pub log: Log,
-    pub chain: Vec<Bytes>,
     pub records: Records,
     pub values: Values,
 }
 
-/// Replay `commit`'s log and read its chain and records: the inline parts, and the stored
+/// Replay `commit`'s log and read its records: the inline parts, and the stored
 /// values it names, those not in `known` read together.
 pub(crate) async fn replay(
     store: &dyn KvStore,
@@ -951,11 +914,6 @@ pub(crate) async fn replay(
             last.pages.extend(undecoded);
         }
     }
-    let chain = commit
-        .chain
-        .iter()
-        .map(resolve)
-        .collect::<io::Result<_>>()?;
     let mut records = Records::new();
     for entry in commit.directory.values() {
         if let Kind::Record(part) = &entry.kind {
@@ -964,7 +922,6 @@ pub(crate) async fn replay(
     }
     Ok(Replayed {
         log,
-        chain,
         records,
         values: known,
     })

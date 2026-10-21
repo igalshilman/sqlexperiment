@@ -27,8 +27,11 @@ and ask the owner only critical questions.
   pages (the old file opened without its base). A settled run writes holes
   for its pages rather than `set_len(0)`, which on a based file would write
   a hole for every page up to the memory's length. `codec.rs` and the chain's
-  use in the runtime are gone; `vm::VERSION` is 13. The chain itself is
-  still in sqlite-kv, unused by the runtime.
+  use in the runtime are gone; `vm::VERSION` is 13.
+- **The chain is removed from sqlite-kv** (`ChainUpdate`, `Session::chain`,
+  the record's chain fields; `Session::seal()` takes no argument). The crash
+  campaign that covered it now covers records alone
+  (`tests/integration/records.rs`).
 - **Measured after step 4** (in-memory store, medians):
 
   | | Before | After |

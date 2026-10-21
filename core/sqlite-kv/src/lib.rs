@@ -106,7 +106,7 @@
 //!
 //! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger saves span several.
 //! A record's value is capped at [`MAX_RECORD_BYTES`], its name at
-//! [`MAX_NAME_BYTES`], a chain value at [`MAX_CHAIN_VALUE_BYTES`].
+//! [`MAX_NAME_BYTES`].
 //! A session's private changes and a statement's result rows are capped by
 //! [`StorageOptions::max_private_bytes`] and [`StorageOptions::max_result_bytes`].
 //! The backend is assumed to return what was stored; decoding checks structure
@@ -126,11 +126,11 @@ mod snapshot;
 
 pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
 pub use hint::MAX_HINT_PAGES;
-pub use log::{Base, MAX_CHAIN_VALUE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES};
+pub use log::{Base, MAX_NAME_BYTES, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::PageCompression;
 pub use snapshot::{
-    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, ChainUpdate, Durability, INLINE_LOG_BYTES,
-    MAX_PRIVATE_BYTES, MAX_RESULT_BYTES, SaveReport, StorageOptions,
+    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, Durability, INLINE_LOG_BYTES, MAX_PRIVATE_BYTES,
+    MAX_RESULT_BYTES, SaveReport, StorageOptions,
 };
 /// SQL values, as returned in rows and bound as parameters.
 pub use turso_core::{Numeric, Value};
@@ -188,9 +188,8 @@ pub struct Session {
     records: Arc<Mutex<log::Records>>,
     files: Arc<Mutex<snapshot::Writes>>,
     /// The statement running is a [`Self::seal`]: it commits even without
-    /// SQL changes, with this chain update.
+    /// SQL changes.
     sealing: bool,
-    chain: Option<ChainUpdate>,
     /// Set when a [`Self::transaction`] future is dropped or unwinds before
     /// finishing, which may leave its SQL transaction open.
     abandoned: Arc<AtomicBool>,
@@ -321,7 +320,6 @@ impl Session {
                 records: Arc::default(),
                 files: Arc::default(),
                 sealing: false,
-                chain: None,
                 abandoned: Arc::default(),
                 schema_bytes: Some(warm.schema_bytes),
                 schema_changed: false,
@@ -347,7 +345,6 @@ impl Session {
             records: Arc::default(),
             files: Arc::default(),
             sealing: false,
-            chain: None,
             abandoned: Arc::default(),
             schema_bytes: None,
             schema_changed: false,
@@ -528,17 +525,16 @@ impl Session {
     /// commit alone, without the SQL engine.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
         self.record(EFFECTS).set(effects);
-        self.seal(None).await.map(drop)
+        self.seal().await.map(drop)
     }
 
     /// `COMMIT` the open transaction, with [`Durability::Commit`], with every
-    /// record set since the last commit and, with `chain`, a change to the
-    /// host's chain, in one put: a host's turn, committing its SQL, its state
-    /// and what its turn changed (a VM's page batch, say) together. See
-    /// [`ChainUpdate`] and [`Self::chain`]. A `COMMIT` that fails changes
+    /// record set and file written since the last commit, in one put: a
+    /// host's turn, committing its SQL, its state and what its turn changed
+    /// (a VM's memory, say) together. A `COMMIT` that fails changes
     /// nothing, and discards the records set since the last commit; with no
     /// transaction open, the rest commits alone. `Ok` holds what it wrote.
-    pub async fn seal(&mut self, chain: Option<ChainUpdate>) -> Result<SaveReport> {
+    pub async fn seal(&mut self) -> Result<SaveReport> {
         if self.durability != Durability::Commit {
             return Err("a seal needs Durability::Commit".into());
         }
@@ -552,15 +548,13 @@ impl Session {
             // Until the commit is acknowledged its outcome is unknown.
             self.poisoned = true;
             let (files, records) = self.take_pending();
-            let report = self.io.publish_with(files, records, chain).await?;
+            let report = self.io.publish_with(files, records).await?;
             self.poisoned = false;
             return Ok(report);
         }
         self.sealing = true;
-        self.chain = chain;
         let result = self.execute("COMMIT").await;
         self.sealing = false;
-        self.chain = None;
         match result {
             Ok(()) => Ok(std::mem::take(&mut self.last_report)),
             Err(error) => {
@@ -573,12 +567,6 @@ impl Session {
     /// The record `effects` (see [`Self::commit_with`]).
     pub fn effects(&self) -> Bytes {
         self.record(EFFECTS).get()
-    }
-
-    /// The host's chain, as this session holds the database: each value, in
-    /// order, from the last restart. Empty if no commit changed it.
-    pub fn chain(&self) -> Vec<Bytes> {
-        self.io.snapshot().chain().to_vec()
     }
 
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
@@ -672,9 +660,7 @@ impl Session {
         // so a failure must not leave it for reuse.
         self.poisoned = true;
         let (files, records) = self.take_pending();
-        let report = (self.io)
-            .publish_with(files, records, self.chain.take())
-            .await?;
+        let report = self.io.publish_with(files, records).await?;
         self.last_report = report.clone();
         // Resident already, unless the page size grew. The commit is durable
         // either way; a failure here only ends the session.
