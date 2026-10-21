@@ -77,8 +77,13 @@
 //! # Limits
 //!
 //! A session's private changes and a statement's result rows are capped by
-//! [`SqlOptions::max_private_bytes`] and [`SqlOptions::max_result_bytes`].
-//! Simulation support requires the opt-in `simulation` feature.
+//! [`SqlOptions::max_private_bytes`] and [`SqlOptions::max_result_bytes`]:
+//! going past either ends the session.
+//!
+//! # Features
+//!
+//! `simulation` turns on the journal's in-memory store, fault injection and
+//! latency simulator, and this crate's test helpers.
 pub mod io;
 
 /// SQL values, as returned in rows and bound as parameters.
@@ -112,10 +117,10 @@ pub const MAX_RESULT_BYTES: usize = 64 << 20;
 #[derive(Clone, Debug)]
 pub struct SqlOptions {
     /// Most bytes of changes not yet flushed and private engine WAL a session
-    /// may hold; a write beyond it fails its statement.
+    /// may hold; a write beyond it ends the session.
     pub max_private_bytes: usize,
     /// Most bytes of result rows one statement may collect; beyond it the
-    /// statement fails.
+    /// session ends.
     pub max_result_bytes: usize,
 }
 
@@ -406,20 +411,25 @@ impl Sql {
 
     /// `COMMIT` the open transaction, if any, and move what the SQL committed
     /// into the journal's file `db`, for the journal's next commit to make
-    /// durable. A `COMMIT` that fails changes nothing, and discards what the
-    /// journal holds since its last commit.
+    /// durable.
+    ///
+    /// A `COMMIT` that fails with an SQL error (a deferred constraint) changes
+    /// nothing: the transaction stays open, for the caller to roll back. Any
+    /// other failure ends the session and discards what the journal holds
+    /// since its last commit, since the file `db` may hold part of the move.
     pub async fn flush(&mut self) -> Result<()> {
-        let open = self.in_transaction();
-        let result = match open {
+        let result = match self.in_transaction() {
             true => self.execute("COMMIT").await,
             false => Ok(()),
         };
         let result = match result {
             Ok(()) if self.io.has_changes() => self.move_pages().await,
+            Ok(()) => self.measure_changed_schema().await,
             result => result,
         };
         match &result {
             Ok(()) => self.participant.set_unflushed(false),
+            Err(_) if self.is_usable() => {}
             Err(_) => self.participant.journal().discard(),
         }
         result
@@ -520,6 +530,12 @@ impl Sql {
             self.poisoned = true;
             return Err(error.into());
         }
+        self.measure_changed_schema().await
+    }
+
+    /// Weigh the schema again after a statement that may have changed it,
+    /// for parking the engine; even one rolled back, which moved no pages.
+    async fn measure_changed_schema(&mut self) -> Result<()> {
         if self.schema_changed && self.participant.journal().options().cache.is_some() {
             // Without a size the engine is just not parked.
             self.schema_bytes = self.measure_schema().await.ok();
@@ -528,9 +544,9 @@ impl Sql {
         Ok(())
     }
 
-    /// The database's version: the transactions ever committed, as this
-    /// session holds the database (opened on, or committed itself); an open
-    /// transaction does not change it.
+    /// The journal's version: the commits ever made, as this session holds
+    /// the journal (opened on, or committed itself); SQL not yet committed by
+    /// the journal does not change it.
     pub fn version(&self) -> u64 {
         self.participant.journal().version()
     }
@@ -575,7 +591,9 @@ impl Sql {
     ) -> Result<(Vec<String>, Rows)> {
         self.participant.set_unflushed(true);
         let result = self.run_statements(sql, params).await;
-        self.participant.set_unflushed(self.io.has_changes());
+        // The engine keeps an open transaction's pages to itself until
+        // `COMMIT`: it holds changes all the same.
+        (self.participant).set_unflushed(self.io.has_changes() || self.in_transaction());
         result
     }
 
@@ -608,9 +626,16 @@ impl Sql {
             remaining = &remaining[end..];
             if let Some(values) = params.take() {
                 // Refused before anything runs, so the session stays usable.
-                if connection.consume_stmt(remaining)?.is_some() {
-                    self.poisoned = false;
-                    return Err("parameters bind to a single statement".into());
+                match connection.consume_stmt(remaining) {
+                    Ok(None) => {}
+                    Ok(Some(_)) => {
+                        self.poisoned = false;
+                        return Err("parameters bind to a single statement".into());
+                    }
+                    Err(error) => {
+                        self.poisoned = false;
+                        return Err(error.into());
+                    }
                 }
                 if values.len() != statement.parameters_count() {
                     self.poisoned = false;
@@ -701,7 +726,8 @@ impl Sql {
 
 impl Drop for Sql {
     fn drop(&mut self) {
-        // A clean read-only session leaves its engine for the next one.
+        // A session that ends clean (every change flushed and committed)
+        // leaves its engine for the next one.
         self.park();
         if !self.parked {
             self.io.shutdown();

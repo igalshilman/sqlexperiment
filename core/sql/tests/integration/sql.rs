@@ -213,6 +213,13 @@ fn parameters_bind_values_not_text() -> Result<()> {
                 .await
                 .is_err()
         );
+        // A syntax error in the text after it is an SQL error too.
+        assert!(
+            db.execute_with("SELECT ?; SELEC", [Value::from_i64(1)])
+                .await
+                .is_err()
+        );
+        assert!(db.is_usable());
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(1)

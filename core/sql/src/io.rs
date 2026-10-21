@@ -254,6 +254,7 @@ impl KvIo {
             && !state.dirty.keys().any(|(file, _)| *file == 0)
             && progress.inflight == 0
             && !progress.stopped
+            && !self.failed()
     }
 
     /// Continue a clean adapter on `file` of a newly opened journal at the
@@ -410,9 +411,11 @@ impl KvIo {
 
     async fn write(&self, file: usize, pos: u64, bytes: &[u8]) -> io::Result<usize> {
         // Count the blocks this write may add: one write can be a large batch.
+        // Only the WAL's writes count: a checkpoint copies committed WAL
+        // pages into the database's, which must not fail a flush.
         let limit = self.max_private_bytes.load(Ordering::SeqCst);
         let held = self.state.lock().unwrap().dirty.len() * BLOCK_SIZE;
-        if held + bytes.len() + 2 * BLOCK_SIZE > limit {
+        if file == 1 && held + bytes.len() + 2 * BLOCK_SIZE > limit {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
                 "private changes exceed SqlOptions::max_private_bytes",
