@@ -11,9 +11,6 @@ private view; `Sql::flush(&mut wal)` moves what SQL committed into a WAL; the
 WAL's `flush` makes it durable. With a page cache, a session that ends cleanly
 leaves its engine warm for the namespace's next one.
 
-An experiment, not a production backend: see the state's
-[design](../state/docs/DESIGN.md).
-
 ## Use
 
 Implement `state::kv::KvStore` over your store, then:
