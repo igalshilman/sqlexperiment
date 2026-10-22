@@ -1,13 +1,13 @@
-//! A turn's transaction: participants set their records, the host seals
-//! them in one put, and tells them; a participant that fails to prepare
-//! abandons the turn, which runs again from the last seal.
+//! A turn's transaction: participants set their records in one WAL, the
+//! host flushes it in one put, and tells them; a participant that fails to
+//! prepare abandons the turn, which runs again from the last seal.
 mod common;
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use common::{Store, attempt, programs, settle};
 use functions::{
-    Attached, Extension, Extensions, Outcome, Participant, Record, Run, ScopeBlobs, Volume,
+    Attached, Extension, Extensions, Outcome, Participant, Record, Run, ScopeBlobs, State, Wal,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -15,8 +15,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// An extension that counts the seals it takes part in, and logs what the
-/// host tells it.
+/// An extension that counts the seals it takes part in, in its record
+/// (`counter/state`), and logs what the host tells it.
 #[derive(Clone, Default)]
 struct Counter {
     log: Arc<Mutex<Vec<String>>>,
@@ -30,43 +30,55 @@ impl Counter {
     }
 }
 
+/// The extension's part of one attempt at a run.
 struct Counting {
     counter: Counter,
     record: Record,
+    /// As this turn leaves it.
     count: u64,
+    /// As the last seal holds it, which an aborted turn returns to.
+    sealed: u64,
 }
 
 #[async_trait]
 impl Extension for Counter {
-    async fn attach(&self, _blobs: ScopeBlobs, volume: Volume) -> Result<Box<dyn Attached>> {
-        let record = volume.record("state");
+    /// Every attempt starts here: from the count the scope's last seal holds.
+    async fn attach(&self, _blobs: ScopeBlobs, state: State) -> Result<Box<dyn Attached>> {
+        let record = state.record("state");
         let saved: Value = serde_json::from_slice(&record.get()).unwrap_or(Value::Null);
+        let count = saved["count"].as_u64().unwrap_or(0);
         Ok(Box::new(Counting {
             counter: self.clone(),
             record,
-            count: saved["count"].as_u64().unwrap_or(0),
+            count,
+            sealed: count,
         }))
     }
 }
 
 #[async_trait]
 impl Participant for Counting {
-    async fn prepare(&mut self) -> Result<()> {
+    /// Before the seal: one more, set in the WAL. Its flush makes the count
+    /// durable with the run's memory, its tables and every other
+    /// participant, in one put.
+    async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         if self.counter.fail.swap(false, Ordering::SeqCst) {
             bail!("Injected prepare failure");
         }
         self.count += 1;
-        let record = json!({"count": self.count});
-        self.record.set(serde_json::to_vec(&record)?.into());
+        let bytes = serde_json::to_vec(&json!({"count": self.count}))?;
+        (self.record.set(wal, bytes.into())).map_err(anyhow::Error::from_boxed)?;
         Ok(())
     }
 
     fn committed(&mut self) {
+        self.sealed = self.count;
         let mut log = self.counter.log.lock().unwrap();
         log.push(format!("committed {}", self.count));
     }
 
     fn aborted(&mut self) {
+        self.count = self.sealed;
         self.counter.log.lock().unwrap().push("aborted".into());
     }
 }

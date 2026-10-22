@@ -6,10 +6,10 @@
 //! - [`restate`]: each program as a virtual object; its handlers drive the
 //!   runtime and wait on Restate for the run's calls and timers.
 //! - [`Run`], [`Runtime`], [`Programs`]: the runtime. A run keeps its VM live
-//!   from turn to turn, and commits each turn to its [`Scope`]'s database (in
-//!   Restate, kept in the object's state).
+//!   from turn to turn, and flushes each turn to its [`Scope`]'s state (in
+//!   Restate, kept in the object's).
 //! - [`Extensions`]: what programs use beside their memory and their
-//!   scope's database, under one contract with the run's commit: calls in
+//!   scope's database, under one contract with the run's seal: calls in
 //!   the turn, operations after it, and state saved with it. [`Llm`] (the
 //!   model gateway) and [`Files`] (a checkpointed filesystem) are; so is
 //!   each [`Binding`], an operation alone, such as [`Fetch`].
@@ -50,13 +50,13 @@ pub use extension::{Attached, Extension, Extensions, HostCall, Making, Tables};
 pub use fetch::{Fetch, FetchPolicy};
 pub use files::Files;
 pub use llm::{Llm, Provider};
-pub use model::{GuestError, Operation, Outcome, RpcTarget, State, Status, View};
+pub use model::{GuestError, Operation, Outcome, Progress, RpcTarget, Status, View};
 pub use program::{Program, Programs};
 pub use restate::{bind, embedded, endpoint, faults, page_cache};
 pub use run::Run;
 pub use signals::{FunctionSignals, Resolved, Signal, Waiting};
 pub use store::Scope;
-pub use transaction::{Blobs, DirBlobs, Participant, Record, ScopeBlobs, Volume};
+pub use transaction::{Blobs, DirBlobs, Participant, Record, ScopeBlobs, State, Wal};
 pub use vm::{Language, Limits, Runtime};
 pub use workspace::Workspace;
 

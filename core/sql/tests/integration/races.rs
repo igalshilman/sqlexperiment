@@ -5,14 +5,14 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, FutureExt, Shared},
 };
-use std::{
-    io,
-    sync::{Arc, Mutex},
-};
-use volume::{
+use state::{
     NamespaceCache, Result, StorageOptions,
     kv::KvStore,
     simulation::{MemoryKv, fresh_namespace},
+};
+use std::{
+    io,
+    sync::{Arc, Mutex},
 };
 
 fn opts(cache: &NamespaceCache, durability: Durability) -> Setup {
@@ -110,7 +110,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
             writer
                 .execute("UPDATE t SET v = 'new250' WHERE id = 250")
                 .await?;
-            // Checkpoints the previous commit: page/<leaf of 250> and the cache.
+            // Checkpoints the previous flush: page/<leaf of 250> and the cache.
             writer
                 .execute("UPDATE t SET v = 'new1' WHERE id = 1")
                 .await?;
@@ -130,7 +130,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         assert!(!db.reused_engine());
         let seen = value(&mut db, 250).await?;
         let seen = seen[..seen.len().min(6)].to_owned();
-        // A neighbour on the same leaf, committed on top of what the cache served.
+        // A neighbour on the same leaf, flushed on top of what the cache served.
         db.execute("UPDATE t SET v = substr(v, 1, 6) || '!' WHERE id = 250")
             .await?;
         drop(db);
@@ -139,7 +139,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         assert_eq!(
             (seen.as_str(), durable.as_str()),
             ("new250", "new250!"),
-            "cached / durable value of an acknowledged commit"
+            "cached / durable value of an acknowledged flush"
         );
         Ok(())
     })

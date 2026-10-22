@@ -5,6 +5,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either, select},
 };
+use state::{Result, StorageOptions, kv::KvStore, simulation::MemoryKv};
 use std::{
     io,
     sync::{
@@ -12,7 +13,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use volume::{Result, StorageOptions, kv::KvStore, simulation::MemoryKv};
 
 struct ControlledKv {
     inner: MemoryKv,

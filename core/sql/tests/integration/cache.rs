@@ -1,10 +1,10 @@
 use crate::host::{Db, Durability};
-use std::sync::Arc;
-use volume::{
+use state::{
     NamespaceCache, Result, StorageOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, fresh_namespace},
 };
+use std::sync::Arc;
 
 fn cached(cache: &NamespaceCache) -> StorageOptions {
     StorageOptions {
@@ -97,8 +97,8 @@ async fn count(db: &mut Db) -> Result<i64> {
 /// A clean save or read-only session leaves its engine to the next session; a
 /// session with unsaved changes, an error, or a write by anyone else does not.
 #[test]
-fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> {
-    use volume::simulation::{Effect, Failpoint, FaultKv, Operation};
+fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
+    use state::simulation::{Effect, Failpoint, FaultKv, Operation};
     futures::executor::block_on(async {
         let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
         let cache = fresh_namespace();
@@ -157,7 +157,7 @@ fn warm_engines_continue_only_from_an_unchanged_committed_state() -> Result<()> 
             assert!(db.reused_engine(), "warm again once unchanged");
         }
 
-        // A save that fails before committing leaves nothing to reuse.
+        // A save that fails leaves nothing to reuse.
         let mut db = Db::open(store.clone(), owner(&cache)).await?;
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
@@ -216,7 +216,7 @@ fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
 #[test]
 fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
     futures::executor::block_on(async {
-        let cache = volume::simulation::shared_cache();
+        let cache = state::simulation::shared_cache();
         let stores: Vec<Arc<dyn KvStore>> = (0..2)
             .map(|_| Arc::new(MemoryKv::default()) as Arc<dyn KvStore>)
             .collect();
@@ -254,7 +254,7 @@ fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
 /// Pages evicted from memory are served from disk.
 #[test]
 fn evicted_pages_are_read_from_disk() -> Result<()> {
-    use volume::simulation::{cache_config, open_cache};
+    use state::simulation::{cache_config, open_cache};
     futures::executor::block_on(async {
         let cache = open_cache(cache_config(64 << 10, 64 << 20));
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
@@ -275,7 +275,7 @@ fn evicted_pages_are_read_from_disk() -> Result<()> {
 /// Parked engines are bounded by memory across namespaces.
 #[test]
 fn parked_engines_are_bounded() -> Result<()> {
-    use volume::{
+    use state::{
         PageCacheConfig,
         simulation::{cache_config, open_cache},
     };
@@ -297,7 +297,7 @@ fn parked_engines_are_bounded() -> Result<()> {
 }
 
 /// A read-only session that overlaps a save must not park its older engine
-/// under the newer commit: the next session would read and save stale state.
+/// under the newer flush: the next session would read and save stale state.
 #[test]
 fn an_overlapping_session_never_parks_a_stale_engine() -> Result<()> {
     futures::executor::block_on(async {
@@ -319,7 +319,7 @@ fn an_overlapping_session_never_parks_a_stale_engine() -> Result<()> {
         db.execute("INSERT INTO t VALUES (2)").await?;
         db.save().await?;
         let mut cold = Db::open(store, StorageOptions::default()).await?;
-        assert_eq!(count(&mut cold).await?, 2, "no commit lost");
+        assert_eq!(count(&mut cold).await?, 2, "no flush lost");
         Ok(())
     })
 }
@@ -361,12 +361,12 @@ fn connection_state_never_reaches_the_next_session() -> Result<()> {
 /// A reused engine starts with fresh connection counters, exactly like a cold
 /// one, so the same SQL gives the same answer either way.
 #[test]
-fn a_reused_engine_has_fresh_connection_counters() -> volume::Result<()> {
+fn a_reused_engine_has_fresh_connection_counters() -> state::Result<()> {
     futures::executor::block_on(async {
-        let store = std::sync::Arc::new(volume::simulation::MemoryKv::default());
-        let options = volume::StorageOptions {
-            cache: Some(volume::simulation::fresh_namespace()),
-            ..volume::StorageOptions::default()
+        let store = std::sync::Arc::new(state::simulation::MemoryKv::default());
+        let options = state::StorageOptions {
+            cache: Some(state::simulation::fresh_namespace()),
+            ..state::StorageOptions::default()
         };
         let mut db = Db::open(store.clone(), options.clone()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
@@ -384,12 +384,12 @@ fn a_reused_engine_has_fresh_connection_counters() -> volume::Result<()> {
 
 /// Evicting a namespace's state from the LRU while a session still holds its
 /// handle must not give the next session a second, independent state: the two
-/// would not see each other's commits and could both write one log position.
+/// would not see each other's flushes and could both write one log position.
 #[test]
 fn an_evicted_namespace_keeps_one_state_while_in_use() -> Result<()> {
-    use volume::simulation::{cache_config, open_cache};
+    use state::simulation::{cache_config, open_cache};
     futures::executor::block_on(async {
-        let cache = open_cache(volume::PageCacheConfig {
+        let cache = open_cache(state::PageCacheConfig {
             namespaces: 1,
             ..cache_config(1 << 20, 64 << 20)
         });
@@ -424,7 +424,7 @@ fn an_evicted_namespace_keeps_one_state_while_in_use() -> Result<()> {
 /// room of several small ones.
 #[test]
 fn parked_engines_are_weighed_by_schema() -> Result<()> {
-    use volume::{
+    use state::{
         PageCacheConfig,
         simulation::{cache_config, open_cache},
     };

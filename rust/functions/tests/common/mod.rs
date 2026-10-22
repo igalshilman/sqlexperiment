@@ -8,12 +8,12 @@ use functions::{
 };
 use serde_json::{Value, json};
 use sql::{Sql, Value as SqlValue};
+use state::{State, kv::KvStore, simulation::MemoryKv};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
-use volume::{Volume, kv::KvStore, simulation::MemoryKv};
 
 /// A scope's store in memory: what the tests read back from it.
 #[derive(Clone, Default)]
@@ -42,14 +42,14 @@ impl Store {
     }
 
     fn open(&self) -> Sql {
-        let volume = block(Volume::open(self.kv.clone())).unwrap();
-        block(Sql::open(&volume)).unwrap()
+        let state = block(State::open(self.kv.clone())).unwrap();
+        block(Sql::open(&state)).unwrap()
     }
 
     /// The record `name` (`run`, `memory`, an extension's), as the scope's
     /// last seal holds it: JSON, or null if none set it.
     pub fn record(&self, name: &str) -> Value {
-        let bytes = block(Volume::open(self.kv.clone()))
+        let bytes = block(State::open(self.kv.clone()))
             .unwrap()
             .record(name)
             .get();
@@ -59,17 +59,18 @@ impl Store {
         }
     }
 
-    /// Seals written in the scope: its database's version.
+    /// Seals flushed in the scope: its state's version.
     pub fn seals(&self) -> u64 {
         self.open().version()
     }
 
     /// Seal `value` as the record `name`, as if a turn did.
     pub fn set_record(&self, name: &str, value: &Value) {
-        let volume = block(Volume::open(self.kv.clone())).unwrap();
+        let state = block(State::open(self.kv.clone())).unwrap();
+        let mut wal = state.wal();
         let bytes = serde_json::to_vec(value).unwrap();
-        volume.record(name).set(bytes.into());
-        block(volume.commit()).unwrap();
+        state.record(name).set(&mut wal, bytes.into()).unwrap();
+        block(wal.flush()).unwrap();
     }
 
     /// Pages of the run's memory that differ from golden, as the memory
@@ -230,7 +231,7 @@ pub fn finish(run: &mut Run) -> Result<View> {
 
 /// An attempt at run "r" of `catalog`'s program "v1", `main(input)`, in
 /// `store`, offered `extensions`: the run started, or the one its last
-/// commit holds.
+/// seal holds.
 pub async fn attempt(
     store: &Store,
     catalog: &Arc<Programs>,

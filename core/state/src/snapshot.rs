@@ -73,12 +73,26 @@ use std::{
 /// Logical page replacements of one file, by page number; `None` is a hole.
 pub(crate) type Changes = BTreeMap<u64, Option<Page>>;
 
-/// What a commit writes to one paged file: its size after it, and the pages
-/// it changed.
+/// What a WAL writes to one paged file: the pages it changed, and its size:
+/// set ([`crate::File::set_len`]), or else only what the pages written need
+/// (the file's length when the WAL first wrote it, grown by its writes),
+/// which a flush keeps a longer file past.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Written {
     pub size: u64,
     pub pages: Changes,
+    /// `size` was set, rather than grown by writes.
+    pub sized: bool,
+}
+
+impl Written {
+    /// The file's size after the flush, the file being `current` bytes now.
+    pub fn size_after(&self, current: u64) -> u64 {
+        match self.sized {
+            true => self.size,
+            false => self.size.max(current),
+        }
+    }
 }
 
 /// What a commit writes to paged files, by name.
@@ -142,7 +156,7 @@ impl Default for StorageOptions {
 
 /// What a commit wrote: its log and record bytes, and the pages its checkpoint, if any, wrote.
 #[derive(Clone, Debug, Default)]
-pub struct CommitReport {
+pub struct FlushReport {
     /// Pages written in place by this commit's checkpoint; 0 when it did not
     /// checkpoint.
     pub checkpointed_pages: usize,
@@ -372,9 +386,19 @@ impl Snapshot {
         }
     }
 
-    /// The records' values, by name (see [`crate::Volume::record`]).
+    /// The records' values, by name (see [`crate::State::record`]).
     pub fn records(&self) -> &Records {
         &self.records
+    }
+
+    /// Whether the directory's file `name` is paged, or a record; `None` for
+    /// a name it does not hold.
+    pub(crate) fn is_paged(&self, name: &str) -> Option<bool> {
+        let id = self.commit.file_id(name)?;
+        Some(matches!(
+            self.commit.directory[&id].kind,
+            Kind::Paged { .. }
+        ))
     }
 
     /// The base the file `file` was opened with; `Err` for a file made with
@@ -563,7 +587,7 @@ impl Snapshot {
         &self,
         mut writes: Writes,
         mut records: Records,
-    ) -> io::Result<(CommitReport, Self)> {
+    ) -> io::Result<(FlushReport, Self)> {
         self.check(&writes, &records)?;
         // A record never set reads as empty.
         records.retain(|name, value| {
@@ -572,11 +596,12 @@ impl Snapshot {
                 .map_or(!value.is_empty(), |v| v != value)
         });
         writes.retain(|name, written| {
-            !written.pages.is_empty() || written.size != self.file_size(name)
+            let current = self.file_size(name);
+            !written.pages.is_empty() || written.size_after(current) != current
         });
         let changed = !writes.is_empty();
         if !changed && records.is_empty() {
-            let report = CommitReport::default();
+            let report = FlushReport::default();
             let after = self.continued(self.commit.clone(), self.commit_bytes.clone());
             return Ok((report, after.registered()));
         }
@@ -587,7 +612,7 @@ impl Snapshot {
             && cache.committed() != Some(self.version())
         {
             return Err(io::Error::other(
-                "another session committed since this one opened; reopen",
+                "another state flushed since this one opened; reopen",
             ));
         }
         let mut commit = self.commit.clone();
@@ -616,7 +641,15 @@ impl Snapshot {
                 commit.directory[&id].kind,
                 Kind::Paged { base: Some(_), .. }
             );
-            for (page, image) in written.pages {
+            let current = self.file_size(&name);
+            let size = written.size_after(current);
+            let mut pages = written.pages;
+            // Pages past a set length that the WAL did not know of (another
+            // WAL's, flushed since) become holes too: regrowing reads zeros.
+            for page in size.div_ceil(PAGE)..current.div_ceil(PAGE) {
+                pages.entry(page).or_insert(None);
+            }
+            for (page, image) in pages {
                 let image = match (based, base) {
                     (true, None) if image.is_some() => {
                         return refuse(format!("{name:?} has a base: open it with it"));
@@ -627,7 +660,7 @@ impl Snapshot {
                 };
                 images.insert(page_id(id, page), image);
             }
-            sizes.insert(id, written.size);
+            sizes.insert(id, size);
         }
         let bases = self.bases(&commit);
         let mut segments = log::encode_transaction(&images, &self.log.chain, &bases)?;
@@ -729,7 +762,7 @@ impl Snapshot {
         }
         let checkpointed_pages = checkpoint.as_ref().map_or(0, |c| c.images.len());
         if let Some(cache) = cache {
-            // The checkpoint's pages first: a volume that opens on the new
+            // The checkpoint's pages first: a state that opens on the new
             // record must not find a page as it was before the checkpoint.
             // (One opening on the old record replays the log over them.)
             if let Some(checkpoint) = &checkpoint {
@@ -753,7 +786,7 @@ impl Snapshot {
             }
             cache.keep_values(&after.commit.stored_values(), named);
         }
-        let report = CommitReport {
+        let report = FlushReport {
             checkpointed_pages,
             logged_bytes,
             record_bytes,

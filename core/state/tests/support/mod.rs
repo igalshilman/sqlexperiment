@@ -1,12 +1,14 @@
 //! Shared by the simulation tests: a seeded random source, a file base, a
-//! session holding a volume's files, and a reference model of its content.
+//! session holding a state's files, and a reference model of its content.
 #![allow(dead_code)]
 use bytes::Bytes;
+use state::{
+    Base, File, FlushReport, PAGE_SIZE, Page, Result, State, StorageOptions, Wal, kv::KvStore,
+};
 use std::{
     collections::BTreeMap,
     sync::{Arc, OnceLock},
 };
-use volume::{Base, File, PAGE_SIZE, Page, Result, StorageOptions, Volume, kv::KvStore};
 
 /// A deterministic random source (splitmix64).
 pub struct Rng(u64);
@@ -91,7 +93,7 @@ pub const FILES: [&str; 3] = ["db", "aux", "vm"];
 /// The records.
 pub const RECORDS: [&str; 3] = ["progress", "outbox", "state"];
 
-/// A change to a volume and to its model alike.
+/// A change to a state (in a WAL) and to its model alike.
 #[derive(Clone, Debug)]
 pub enum Op {
     Set(&'static str, Bytes),
@@ -127,50 +129,60 @@ impl Op {
     }
 }
 
-/// A volume and handles on its files.
+/// A state and handles on its files.
 pub struct Session {
-    pub volume: Volume,
+    pub state: State,
     files: BTreeMap<&'static str, File>,
 }
 
 impl Session {
-    /// Open the volume, and its files (`vm` with its base).
+    /// Open the state, and its files (`vm` with its base).
     pub async fn open(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        Self::of(Volume::open_with_options(store, options).await?)
+        Self::of(State::open_with_options(store, options).await?)
     }
 
-    /// Open a reader beside the owner (see [`Volume::open_reader`]).
+    /// Open a reader beside the owner (see [`State::open_reader`]).
     pub async fn reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        Self::of(Volume::open_reader(store, options).await?)
+        Self::of(State::open_reader(store, options).await?)
     }
 
-    fn of(volume: Volume) -> Result<Self> {
+    fn of(state: State) -> Result<Self> {
         let mut files = BTreeMap::new();
         for name in FILES {
             let file = match name {
-                "vm" => volume.file_with_base(name, golden())?,
-                _ => volume.file(name)?,
+                "vm" => state.file_with_base(name, golden())?,
+                _ => state.file(name)?,
             };
             files.insert(name, file);
         }
-        Ok(Self { volume, files })
+        Ok(Self { state, files })
     }
 
     pub fn file(&self, name: &str) -> &File {
         &self.files[name]
     }
 
-    pub fn apply(&self, op: &Op) -> Result<()> {
+    /// Make the change `op` in `wal`, a WAL of this state.
+    pub fn apply(&self, wal: &mut Wal, op: &Op) -> Result<()> {
         match op {
-            Op::Set(name, value) => self.volume.record(name).set(value.clone()),
-            Op::Write(name, index, image) => self.file(name).write(*index, image.clone())?,
-            Op::SetLen(name, len) => self.file(name).set_len(*len)?,
+            Op::Set(name, value) => self.state.record(name).set(wal, value.clone()),
+            Op::Write(name, index, image) => self.file(name).write(wal, *index, image.clone()),
+            Op::SetLen(name, len) => self.file(name).set_len(wal, *len),
         }
-        Ok(())
+    }
+
+    /// Flush `ops`, in a WAL of their own.
+    pub async fn flush(&self, ops: &[Op]) -> Result<FlushReport> {
+        let mut wal = self.state.wal();
+        for op in ops {
+            self.apply(&mut wal, op)?;
+        }
+        wal.flush().await
     }
 }
 
-/// What a volume should hold: its records and its files' pages.
+/// What a state should hold, as last flushed: its records and its files'
+/// pages.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Model {
     records: BTreeMap<String, Bytes>,
@@ -239,9 +251,10 @@ impl Model {
     }
 
     /// How `session` differs from the model; `None` when it reads the same.
+    /// A session reads its state as last flushed, so compare after a flush.
     pub async fn differs(&self, session: &Session) -> Result<Option<String>> {
         for name in RECORDS {
-            let held = session.volume.record(name).get();
+            let held = session.state.record(name).get();
             if held != self.record(name) {
                 return Ok(Some(format!("record {name}: {} bytes", held.len())));
             }

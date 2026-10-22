@@ -1,10 +1,10 @@
 //! The session the language bindings expose (the Node.js addon, the Python
 //! extension), over a key/value store the host implements in its language.
 //!
-//! Unlike [`Sql`], a [`Session`] commits the volume itself: a call that
-//! leaves no SQL transaction open flushes and commits before it returns, so
-//! every SQL commit is durable when its call resolves. The host's
-//! `transaction()` runs its body between [`Session::begin`] and
+//! Unlike [`Sql`], a [`Session`] flushes the state itself: a call that
+//! leaves no SQL transaction open moves the SQL into a WAL and flushes it
+//! before it returns, so every SQL commit is durable when its call resolves.
+//! The host's `transaction()` runs its body between [`Session::begin`] and
 //! [`Session::commit`] or [`Session::rollback`]; meanwhile a statement that
 //! ends the transaction ends the session, rather than commit the body halfway.
 //!
@@ -15,6 +15,7 @@
 use crate::{Result, Rows, Sql, Value};
 use bytes::Bytes;
 use futures::lock::{Mutex, MutexGuard};
+use state::{PageCache, PageCacheConfig, State, StorageOptions, kv::KvStore};
 use std::{
     io,
     path::PathBuf,
@@ -23,7 +24,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use volume::{PageCache, PageCacheConfig, StorageOptions, Volume, kv::KvStore};
 
 /// The record a commit's effects are in.
 const EFFECTS: &str = "effects";
@@ -32,7 +32,7 @@ const EFFECTS: &str = "effects";
 pub struct Session {
     /// `None` once the session has ended.
     sql: Mutex<Option<Sql>>,
-    /// A reader's session: it never commits.
+    /// A reader's session: it never flushes.
     reader: bool,
     /// Inside a `transaction()` body, from `begin` to its `commit` or
     /// `rollback`.
@@ -40,12 +40,15 @@ pub struct Session {
     /// Whether the session can still run SQL, as of the last call that ended:
     /// read without the lock, which a running call holds.
     usable: AtomicBool,
+    /// The effects [`Self::commit`] set, for the call's flush to put in the
+    /// same WAL as the SQL.
+    effects: std::sync::Mutex<Option<Bytes>>,
 }
 
 impl Session {
     /// Open the database of `namespace` over `store`, with the process-wide
     /// page cache. A `reader` reads the namespace beside its owner (see
-    /// [`Volume::open_reader`]): without the cache, writing nothing to the
+    /// [`State::open_reader`]): without the cache, writing nothing to the
     /// store, and [`Self::is_current`] says whether what it read is still the
     /// stored state.
     pub async fn open(store: Arc<dyn KvStore>, namespace: &str, reader: bool) -> Result<Self> {
@@ -67,15 +70,16 @@ impl Session {
         options: StorageOptions,
         reader: bool,
     ) -> Result<Self> {
-        let volume = match reader {
-            true => Volume::open_reader(store, options).await?,
-            false => Volume::open_with_options(store, options).await?,
+        let state = match reader {
+            true => State::open_reader(store, options).await?,
+            false => State::open_with_options(store, options).await?,
         };
         Ok(Self {
-            sql: Mutex::new(Some(Sql::open(&volume).await?)),
+            sql: Mutex::new(Some(Sql::open(&state).await?)),
             reader,
             in_body: AtomicBool::new(false),
             usable: AtomicBool::new(true),
+            effects: std::sync::Mutex::new(None),
         })
     }
 
@@ -117,17 +121,15 @@ impl Session {
                 if self.reader {
                     return Err("a reader commits no effects".into());
                 }
-                if effects.len() > volume::MAX_RECORD_BYTES {
-                    let (size, limit) = (effects.len(), volume::MAX_RECORD_BYTES);
+                if effects.len() > state::MAX_RECORD_BYTES {
+                    let (size, limit) = (effects.len(), state::MAX_RECORD_BYTES);
                     return Err(format!("effects of {size} bytes exceed {limit}").into());
                 }
             }
             if session.in_transaction() {
                 session.execute("COMMIT").await?;
             }
-            if let Some(effects) = effects {
-                session.volume().record(EFFECTS).set(effects);
-            }
+            *self.effects.lock().unwrap() = effects;
             Ok(())
         })
         .await
@@ -157,12 +159,12 @@ impl Session {
     pub async fn effects(&self) -> Result<Bytes> {
         let sql = self.sql.lock().await;
         let session = sql.as_ref().ok_or(CLOSED)?;
-        Ok(session.volume().record(EFFECTS).get())
+        Ok(session.state().record(EFFECTS).get())
     }
 
     /// Whether the store still holds the state this reader opened on, so
     /// that what it read is: if not, read again in a new session (see
-    /// [`Volume::is_current`]).
+    /// [`State::is_current`]).
     pub async fn is_current(&self) -> Result<bool> {
         let sql = self.sql.lock().await;
         sql.as_ref().ok_or(CLOSED)?.is_current().await
@@ -192,11 +194,12 @@ impl Session {
 
     /// Run `call` on the open session, then settle it. A statement that
     /// ended the transaction of a `transaction()` body ends the session.
-    /// Otherwise a call that leaves no SQL transaction open commits the
-    /// volume, even after an SQL error (the statements before it stand): what
-    /// the SQL committed, with the effects set, durable before the call
-    /// returns. A reader commits nothing, and a session that a failure ended
-    /// cannot. A call dropped before it returns ends the session.
+    /// Otherwise a call that leaves no SQL transaction open flushes the
+    /// state, even after an SQL error (the statements before it stand): what
+    /// the SQL committed, with the effects set, in one WAL, durable before
+    /// the call returns. A reader flushes nothing, and a session that a
+    /// failure ended cannot. A call dropped before it returns ends the
+    /// session.
     async fn call<T>(&self, call: impl AsyncFnOnce(&mut Sql) -> Result<T>) -> Result<T> {
         let mut running = Running {
             sql: self.sql.lock().await,
@@ -205,6 +208,7 @@ impl Session {
         };
         let session = running.sql.as_mut().ok_or(CLOSED)?;
         let result = call(session).await;
+        let effects = self.effects.lock().unwrap().take();
         if self.in_body.load(Ordering::Acquire) && !session.in_transaction() {
             self.in_body.store(false, Ordering::Release);
             // `running` ends the session as it drops. A storage error that
@@ -214,13 +218,13 @@ impl Session {
                 _ => Err("a statement ended the transaction of transaction(), whose body must not: the session has ended".into()),
             };
         }
-        let committed = match !self.reader && session.is_usable() && !session.in_transaction() {
-            true => commit_volume(session).await,
+        let flushed = match !self.reader && session.is_usable() && !session.in_transaction() {
+            true => flush(session, effects).await,
             false => Ok(()),
         };
         self.usable.store(session.is_usable(), Ordering::Release);
         running.returned = true;
-        committed.and(result)
+        flushed.and(result)
     }
 }
 
@@ -247,9 +251,15 @@ const CLOSED: &str = "the database is closed";
 /// The error of a call that would commit after a failure ended the session.
 const ENDED: &str = "a failure ended the session";
 
-async fn commit_volume(session: &mut Sql) -> Result<()> {
-    session.flush().await?;
-    session.volume().commit().await?;
+/// What the SQL committed, and `effects` if any, durable in one WAL.
+async fn flush(session: &mut Sql, effects: Option<Bytes>) -> Result<()> {
+    let state = session.state();
+    let mut wal = state.wal();
+    session.flush(&mut wal).await?;
+    if let Some(effects) = effects {
+        state.record(EFFECTS).set(&mut wal, effects)?;
+    }
+    wal.flush().await?;
     Ok(())
 }
 

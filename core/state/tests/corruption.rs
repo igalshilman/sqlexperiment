@@ -1,14 +1,14 @@
 //! Corrupted stored values: truncated, bit-flipped or garbage, at the
 //! commit record, a stored log value, a page or the working-set hint. Open
-//! and reads fail or read what was committed, never panic; the hint is only
-//! advice, so whatever it holds, the volume reads as committed.
+//! and reads fail or read what was flushed, never panic; the hint is only
+//! advice, so whatever it holds, the state reads as flushed.
 #![cfg(feature = "simulation")]
 mod support;
 
 use futures::FutureExt;
+use state::{Result, StorageOptions, kv::KvStore, simulation::*};
 use std::{panic::AssertUnwindSafe, sync::Arc};
 use support::*;
-use volume::{Result, StorageOptions, kv::KvStore, simulation::*};
 
 fn options() -> StorageOptions {
     StorageOptions {
@@ -21,8 +21,8 @@ fn options() -> StorageOptions {
 }
 
 /// A namespace with every kind of key: checkpointed pages, a hint, stored
-/// log values and records, and a log the record holds.
-async fn committed() -> Result<(MemoryKv, Model)> {
+/// log values and records, and a log the commit record holds.
+async fn flushed() -> Result<(MemoryKv, Model)> {
     let memory = MemoryKv::default();
     let mut model = Model::default();
     let mut rng = Rng::new(0xbad);
@@ -32,10 +32,7 @@ async fn committed() -> Result<(MemoryKv, Model)> {
             session.file(name).read(1).await?;
         }
         let ops: Vec<Op> = (0..10).map(|_| Op::random(&mut rng)).collect();
-        for op in &ops {
-            session.apply(op)?;
-        }
-        session.volume.commit().await?;
+        session.flush(&ops).await?;
         model = model.applied(&ops);
     }
     Ok((memory, model))
@@ -69,7 +66,7 @@ fn corruptions(value: &[u8], rng: &mut Rng) -> Vec<(String, Vec<u8>)> {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Read {
     Failed,
-    AsCommitted,
+    AsFlushed,
     Otherwise,
 }
 
@@ -85,15 +82,15 @@ async fn read(store: Arc<dyn KvStore>, model: &Model, cached: bool) -> Read {
     };
     match read.await {
         Err(_) => Read::Failed,
-        Ok(true) => Read::AsCommitted,
+        Ok(true) => Read::AsFlushed,
         Ok(false) => Read::Otherwise,
     }
 }
 
 #[test]
-fn corrupted_values_fail_reads_or_read_as_committed_and_never_panic() -> Result<()> {
+fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()> {
     futures::executor::block_on(async {
-        let (memory, model) = committed().await?;
+        let (memory, model) = flushed().await?;
         let keys = memory.keys();
         for prefix in ["v15/commit", "v15/log/", "v15/page/", "v15/hint"] {
             assert!(
@@ -121,7 +118,7 @@ fn corrupted_values_fail_reads_or_read_as_committed_and_never_panic() -> Result<
                     let flipped = corruption.starts_with("bit");
                     let kind = key.split('/').nth(1).unwrap();
                     match (&read, kind) {
-                        (Read::AsCommitted, _) => {}
+                        (Read::AsFlushed, _) => {}
                         (Read::Failed, "commit" | "log" | "page") => {}
                         (Read::Otherwise, "commit" | "log" | "page") if flipped => {}
                         _ => panic!("{case}: {read:?}"),

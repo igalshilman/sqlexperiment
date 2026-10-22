@@ -1,9 +1,9 @@
 [package]
-name = "volume"
+name = "state"
 version = "0.11.0"
 edition = "2024"
 publish = false
-description = "A durable volume over an asynchronous key/value store: records and paged files, committed together, with a log and checkpoints"
+description = "Transactional state over an asynchronous key/value store: records and paged files, changed through a WAL that a flush makes durable in one put, with a log and checkpoints"
 
 [features]
 default = []

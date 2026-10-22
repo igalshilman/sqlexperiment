@@ -3,10 +3,10 @@
 What every SDK here builds on: the storage. (The Restate SDKs' shared core,
 which runs a handler without journal replay since 8.1.0, is used as released.)
 
-| Path                          | What                                                                                                                                                                                                              |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`volume/`](volume/README.md) | **The volume.** Records and paged files over an asynchronous key/value store, committed together in one put, for namespaces with one owner at a time: a Rust crate.                                               |
-| [`sql/`](sql/README.md)       | **SQL on the volume**: SQLite-compatible SQL in the volume's file `db`, committed with it. The [Node.js addon](../typescript/packages/sql/README.md) and the [Python extension](../python/sql/README.md) wrap it. |
+| Path                        | What                                                                                                                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`state/`](state/README.md) | **The state.** Records and paged files over an asynchronous key/value store, changed through a WAL that a flush makes durable in one put, for namespaces with one owner at a time: a Rust crate.              |
+| [`sql/`](sql/README.md)     | **SQL on the state**: SQLite-compatible SQL in the state's file `db`, flushed with it. The [Node.js addon](../typescript/packages/sql/README.md) and the [Python extension](../python/sql/README.md) wrap it. |
 
 ## Build and test
 

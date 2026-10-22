@@ -13,7 +13,7 @@ name = "sql_python"
 crate-type = ["cdylib"]
 
 [dependencies]
-volume = { path = "../../core/volume" }
+state = { path = "../../core/state" }
 sql = { path = "../../core/sql" }
 pyo3 = { version = "0.30", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.30", features = ["tokio-runtime"] }

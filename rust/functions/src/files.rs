@@ -22,7 +22,8 @@
 use crate::{
     GuestError, Operation, Outcome,
     extension::{Attached, Extension, HostCall, Making, Tables},
-    transaction::{Participant, Record, ScopeBlobs, Volume, hash, random},
+    store::storage_error,
+    transaction::{Participant, Record, ScopeBlobs, State, Wal, hash, random},
 };
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -50,9 +51,8 @@ impl Files {
 #[async_trait]
 impl Extension for Files {
     /// The scope's files, as its records `manifest` and `running` keep them.
-    async fn attach(&self, blobs: ScopeBlobs, volume: Volume) -> Result<Box<dyn Attached>> {
-        let (manifest_record, running_record) =
-            (volume.record("manifest"), volume.record("running"));
+    async fn attach(&self, blobs: ScopeBlobs, state: State) -> Result<Box<dyn Attached>> {
+        let (manifest_record, running_record) = (state.record("manifest"), state.record("running"));
         let manifest = match manifest_record.get() {
             bytes if bytes.is_empty() => BTreeMap::new(),
             bytes => serde_json::from_slice(&bytes)?,
@@ -266,7 +266,7 @@ impl Attached for Checkpointed {
 impl Participant for Checkpointed {
     /// The turn's changes, as a checkpoint: its blobs written, and its
     /// manifest in the seal.
-    async fn prepare(&mut self) -> Result<()> {
+    async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         if self.changes.is_empty() && self.running == self.saved_running {
             return Ok(());
         }
@@ -285,13 +285,13 @@ impl Participant for Checkpointed {
             }
         }
         if manifest != self.manifest {
-            self.manifest_record
-                .set(serde_json::to_vec(&manifest)?.into());
+            let bytes = serde_json::to_vec(&manifest)?;
+            (self.manifest_record.set(wal, bytes.into())).map_err(storage_error)?;
             self.manifest = manifest;
         }
         if self.running != self.saved_running {
             let running = self.running.clone().unwrap_or_default();
-            self.running_record.set(running.into());
+            (self.running_record.set(wal, running.into())).map_err(storage_error)?;
             self.saved_running = self.running.clone();
         }
         Ok(())

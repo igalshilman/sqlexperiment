@@ -1,29 +1,30 @@
 //! Extensions: what a program uses beside its memory and its scope's
-//! database, under one contract with the run's commit.
+//! database, under one contract with the run's seal.
 //!
 //! An extension, offered as `name`, gives programs up to three things:
 //!
 //! - **Calls in the turn**, `<name>.<op>`: the guest's host calls, answered
-//!   now. They may change only what the turn has not committed yet: the
-//!   turn's tables, or the extension's own uncommitted state.
+//!   now. They may change only what the turn has not sealed yet: the
+//!   turn's tables, or the extension's own unsealed state.
 //! - **Operations**, `<name>` or `<name>.<op>`: issued in a turn, made by the
-//!   host after the commit that issued them (at least once, under the same
+//!   host after the seal that issued them (at least once, under the same
 //!   ID), and delivered in a later turn. An operation has three hooks:
 //!   [`Attached::issued`], in its turn; [`Attached::operation`], as it is
 //!   made; [`Attached::delivered`], in the turn its outcome arrives, before
 //!   the program sees it.
 //! - **State kept by the turn's transaction**: an attached extension is a
 //!   [`Participant`]: it keeps its state in its part of the scope's
-//!   [`Volume`] (records and files named under `<name>/`), and its large
-//!   state in the scope's blobs, which its records name. The next attempt,
-//!   on any machine, reads them back from [`Extension::attach`].
+//!   [`State`] (records and files named under `<name>/`), written through
+//!   the seal's [`Wal`], and its large state in the scope's blobs, which its
+//!   records name. The next attempt, on any machine, reads them back from
+//!   [`Extension::attach`].
 //!
 //! What a seal keeps of an extension belongs to the scope, as its tables
 //! do: it carries over from one run to the next.
 use crate::{
     GuestError, Operation, Outcome,
     db::Db,
-    transaction::{Blobs, Participant, ScopeBlobs, Volume},
+    transaction::{Blobs, Participant, ScopeBlobs, State, Wal},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -50,7 +51,7 @@ pub struct HostCall {
 pub type Making = BoxFuture<'static, Result<Value, GuestError>>;
 
 /// The scope's tables: in a turn, in its transaction; as an operation is
-/// made, as the last commit left them.
+/// made, as the last seal left them.
 pub struct Tables<'a> {
     pub(crate) db: &'a mut Db,
 }
@@ -71,16 +72,16 @@ impl Tables<'_> {
 #[async_trait]
 pub trait Extension: Send + Sync + 'static {
     /// Its part of a run in the scope `blobs` are of: as the scope's last
-    /// seal left its `volume` (empty if none did), or new.
-    async fn attach(&self, blobs: ScopeBlobs, volume: Volume) -> Result<Box<dyn Attached>>;
+    /// seal left its `state` (empty if none did), or new.
+    async fn attach(&self, blobs: ScopeBlobs, state: State) -> Result<Box<dyn Attached>>;
 }
 
 /// An extension's part of one attempt at a run: a participant in each of
 /// its turns' transactions.
 ///
-/// Its records and files are in the volume it was attached with; an
-/// [`Sql`](sql::Sql) it opens there flushes in its `prepare`, as the
-/// run's own tables do.
+/// Its records and files are in the state it was attached with, and it
+/// changes them in the WAL its `prepare` is given; an [`Sql`](sql::Sql) it
+/// opens there flushes into that WAL, as the run's own tables do.
 #[async_trait]
 pub trait Attached: Participant {
     /// In the turn: the host call `op`, `<name>.<op>`.
@@ -104,8 +105,8 @@ pub trait Attached: Participant {
         false
     }
 
-    /// After the commit: make `call`, reading what it needs from `tables` (as
-    /// the commit left them) now.
+    /// After the seal: make `call`, reading what it needs from `tables` (as
+    /// the seal left them) now.
     async fn operation(
         &mut self,
         call: HostCall,
@@ -176,12 +177,12 @@ pub(crate) struct Attachments(BTreeMap<String, Box<dyn Attached>>);
 
 impl Attachments {
     /// Each of `extensions`, in the scope `db` is of, with its part of the
-    /// volume.
+    /// state.
     pub async fn attach(extensions: &Extensions, blobs: &ScopeBlobs, db: &Db) -> Result<Self> {
         let mut attached = BTreeMap::new();
         for (name, extension) in &extensions.offered {
-            let volume = db.volume().scoped(&format!("{name}/"));
-            let part = extension.attach(blobs.clone(), volume).await?;
+            let state = db.state().scoped(&format!("{name}/"));
+            let part = extension.attach(blobs.clone(), state).await?;
             attached.insert(name.clone(), part);
         }
         Ok(Self(attached))
@@ -193,10 +194,10 @@ impl Attachments {
         self.0.get_mut(name)
     }
 
-    /// Each extension's part of the seal.
-    pub async fn prepare(&mut self) -> Result<()> {
+    /// Each extension's part of the seal, into `wal`.
+    pub async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         for part in self.0.values_mut() {
-            part.prepare().await?;
+            part.prepare(wal).await?;
         }
         Ok(())
     }
@@ -206,12 +207,12 @@ impl Attachments {
         self.0.values_mut().for_each(|part| part.ended());
     }
 
-    /// The seal is written: each extension's part of it stands.
+    /// The seal is flushed: each extension's part of it stands.
     pub fn committed(&mut self) {
         self.0.values_mut().for_each(|part| part.committed());
     }
 
-    /// The seal was not written: each extension's part of it goes.
+    /// The seal was not flushed: each extension's part of it goes.
     pub fn aborted(&mut self) {
         self.0.values_mut().for_each(|part| part.aborted());
     }

@@ -3,17 +3,19 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use sql::Sql;
+use state::{Result, State, kv::KvStore};
 use std::{
     collections::BTreeMap,
     io,
     sync::{Arc, Mutex},
 };
-use volume::{Result, Volume, kv::KvStore};
 
-/// Flush and commit `db`'s volume, ending the session.
-async fn save(mut db: Sql) -> volume::Result<volume::CommitReport> {
-    db.flush().await?;
-    db.volume().commit().await
+/// Flush `db`'s SQL in a WAL of its state, and the WAL, ending the session.
+async fn save(mut db: Sql) -> state::Result<state::FlushReport> {
+    let state = db.state();
+    let mut wal = state.wal();
+    db.flush(&mut wal).await?;
+    wal.flush().await
 }
 
 #[derive(Default)]
@@ -43,19 +45,19 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let mut db = require_send(Sql::open(&Volume::open(store.clone()).await?)).await?;
+        let mut db = require_send(Sql::open(&State::open(store.clone()).await?)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
         save(db).await?;
-        let mut db = Sql::open(&Volume::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&State::open(store.clone()).await?).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
         );
         db.execute("UPDATE t SET value='changed'").await?;
         drop(db);
-        let mut db = Sql::open(&Volume::open(store).await?).await?;
+        let mut db = Sql::open(&State::open(store).await?).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
@@ -68,16 +70,16 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
     })
 }
 
-/// A transaction and records, durable together at the volume's commit.
+/// A transaction and a record, durable together at the WAL's flush.
 #[test]
-fn a_volume_commit_with_an_immediately_ready_backend() -> Result<()> {
+fn a_wal_flush_with_an_immediately_ready_backend() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(Store::default());
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let volume = Volume::open(store.clone()).await?;
-        let mut db = Sql::open(&volume).await?;
+        let state = State::open(store.clone()).await?;
+        let mut db = Sql::open(&state).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         require_send(db.transaction(async |db| {
@@ -85,13 +87,16 @@ fn a_volume_commit_with_an_immediately_ready_backend() -> Result<()> {
             db.execute("INSERT INTO t VALUES (2, 'world')").await
         }))
         .await?;
-        db.flush().await?;
-        volume.record("note").set(Bytes::from_static(b"two rows"));
-        require_send(volume.commit()).await?;
+        let mut wal = state.wal();
+        db.flush(&mut wal).await?;
+        state
+            .record("note")
+            .set(&mut wal, Bytes::from_static(b"two rows"))?;
+        require_send(wal.flush()).await?;
         drop(db);
-        let volume = Volume::open(store).await?;
-        assert_eq!(volume.record("note").get(), &b"two rows"[..]);
-        let mut db = Sql::open(&volume).await?;
+        let state = State::open(store).await?;
+        assert_eq!(state.record("note").get(), &b"two rows"[..]);
+        let mut db = Sql::open(&state).await?;
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(2)

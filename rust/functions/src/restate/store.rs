@@ -9,6 +9,7 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use restate_sdk::context::RawState;
+use state::kv::KvStore;
 use std::{
     collections::HashMap,
     io,
@@ -17,7 +18,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use volume::kv::KvStore;
 
 pub(crate) struct StateQueue {
     state: RawState,

@@ -1,14 +1,14 @@
 //! `Durability::Commit`: every SQL commit is durable when its statement returns.
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
-use std::sync::Arc;
-use volume::{
+use state::{
     NamespaceCache, Result, StorageOptions,
     simulation::{
         Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, MonitorKv, Operation, fresh_namespace,
         logged_transactions,
     },
 };
+use std::sync::Arc;
 
 fn options(cache: Option<NamespaceCache>) -> Setup {
     Setup(
@@ -39,12 +39,12 @@ fn statements_are_durable_without_save() -> Result<()> {
         assert_eq!(
             store.stats().kind("commit").puts,
             1,
-            "one commit per statement"
+            "one flush per statement"
         );
         db.execute("INSERT INTO t VALUES(1, 0)").await?;
         assert_eq!(store.stats().kind("commit").puts, 2);
         db.query("SELECT * FROM t").await?;
-        assert_eq!(store.stats().kind("commit").puts, 2, "reads commit nothing");
+        assert_eq!(store.stats().kind("commit").puts, 2, "reads flush nothing");
         drop(db);
         store.crash();
 
@@ -146,11 +146,11 @@ fn a_long_session_checkpoints_and_reads_its_writes() -> Result<()> {
 /// With an owner cache, a write transaction costs one round trip until the
 /// log is long enough to checkpoint.
 #[test]
-fn a_commit_is_one_round_trip_with_a_cache() -> Result<()> {
+fn a_flush_is_one_round_trip_with_a_cache() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
         let cache = fresh_namespace();
-        // A log the record holds inline: no commit seals it.
+        // A log the record holds inline: no flush seals it.
         let options = options(Some(cache)).with(|o| StorageOptions {
             checkpoint_after: 32,
             inline_log_bytes: usize::MAX,
@@ -162,7 +162,7 @@ fn a_commit_is_one_round_trip_with_a_cache() -> Result<()> {
         for i in 0..20 {
             store.reset();
             db.execute(&format!("INSERT INTO t VALUES({i}, 0)")).await?;
-            assert_eq!(store.round_trips(), 1, "commit {i}");
+            assert_eq!(store.round_trips(), 1, "flush {i}");
         }
         store.reset();
         assert_eq!(count(&mut db).await?, 20);
@@ -171,7 +171,7 @@ fn a_commit_is_one_round_trip_with_a_cache() -> Result<()> {
     })
 }
 
-/// Crash a commit-per-transaction run at every sync, keeping each prefix of
+/// Crash a flush-per-transaction run at every sync, keeping each prefix of
 /// the writes the sync would have stored. Every transaction acknowledged
 /// before the crash survives, the one it interrupted may or may not, and
 /// nothing else appears.
@@ -378,7 +378,7 @@ fn an_abandoned_transaction_poisons_the_session() -> Result<()> {
     })
 }
 
-/// A session that only reads, open while another commits, keeps reading the
+/// A session that only reads, open while another flushes, keeps reading the
 /// state it opened at: checkpoints do not write images it has not replayed.
 /// Once it ends, checkpoints catch up.
 #[test]
@@ -441,7 +441,7 @@ fn an_overlapping_reader_keeps_its_view() -> Result<()> {
     })
 }
 
-/// Two sessions of one owner that both write: the second commit would land at
+/// Two sessions of one owner that both write: the second flush would land at
 /// the log position the first already used, so it is refused.
 #[test]
 fn a_second_concurrent_writer_is_refused() -> Result<()> {
@@ -465,7 +465,7 @@ fn a_second_concurrent_writer_is_refused() -> Result<()> {
                 }
                 Durability::Commit => second.execute("INSERT INTO t VALUES(2, 0)").await,
             };
-            assert!(refused.unwrap_err().to_string().contains("another session"));
+            assert!(refused.unwrap_err().to_string().contains("another state"));
             let mut db = Db::open(store.clone(), opts()).await?;
             assert_eq!(count(&mut db).await?, 1, "{durability:?}");
         }
@@ -473,7 +473,7 @@ fn a_second_concurrent_writer_is_refused() -> Result<()> {
     })
 }
 
-/// An engine parked while another session goes on committing holds no
+/// An engine parked while another session goes on flushing holds no
 /// reader position: checkpoints keep the log short.
 #[test]
 fn a_parked_engine_does_not_hold_back_checkpoints() -> Result<()> {
@@ -488,7 +488,7 @@ fn a_parked_engine_does_not_hold_back_checkpoints() -> Result<()> {
         let mut idle = Db::open(store.clone(), opts()).await?;
         let mut writer = Db::open(store.clone(), opts()).await?;
         idle.query("SELECT count(*) FROM t").await?;
-        drop(idle); // parks: nothing was committed since it opened
+        drop(idle); // parks: nothing was flushed since it opened
         for i in 0..30 {
             writer
                 .execute(&format!("INSERT INTO t VALUES({i}, 0)"))
@@ -533,7 +533,7 @@ fn effects_commit_with_their_transaction() -> Result<()> {
         );
         db.execute("ROLLBACK").await?;
         assert_eq!(db.effects(), &b"sends 1"[..]);
-        // Commits without effects keep them, through checkpoints.
+        // Flushes without effects keep them, through checkpoints.
         for i in 0..10 {
             db.execute(&format!("INSERT INTO p VALUES({i})")).await?;
         }
@@ -558,42 +558,46 @@ fn effects_commit_with_their_transaction() -> Result<()> {
     })
 }
 
-/// Records under the default durability: set with the session's SQL, durable
-/// at save, discarded with a dropped session. A large one is a stored value
-/// of its own, which the commit that replaces it lists as garbage.
+/// Records under the default durability: set in the turn's WAL, unchanged
+/// until the save makes them durable, discarded with a dropped session. A
+/// large one is a stored value of its own, which the flush that replaces it
+/// lists as garbage.
 #[test]
-fn records_commit_at_save() -> Result<()> {
+fn records_flush_at_save() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let stored = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/log/")).count();
-        let db = Db::open(store.clone(), StorageOptions::default()).await?;
-        let state = db.volume().record("state");
-        assert!(state.get().is_empty());
-        state.set(Bytes::from_static(b"one"));
-        assert_eq!(state.get(), &b"one"[..]);
-        drop(db); // discarded
         let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
-        assert!(db.volume().record("state").get().is_empty());
+        let large = db.state().record("large");
+        assert!(large.get().is_empty());
+        large.set(db.wal(), Bytes::from_static(b"one"))?;
+        assert!(large.get().is_empty(), "unchanged until the flush");
+        drop(db); // discarded, with its WAL
+        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        assert!(db.state().record("large").get().is_empty());
         db.execute("CREATE TABLE t(n)").await?;
-        db.volume().record("state").set(Bytes::from(vec![7; 5000]));
-        db.volume().record("small").set(Bytes::from_static(b"s"));
+        let (large, small) = (db.state().record("large"), db.state().record("small"));
+        large.set(db.wal(), Bytes::from(vec![7; 5000]))?;
+        small.set(db.wal(), Bytes::from_static(b"s"))?;
         db.save().await?;
         assert_eq!(stored(&store), 1, "the large record, stored first");
 
-        let db = Db::open(store.clone(), StorageOptions::default()).await?;
-        assert_eq!(db.volume().record("state").get(), vec![7; 5000]);
-        assert_eq!(db.volume().record("small").get(), &b"s"[..]);
-        db.volume().record("state").set(Bytes::from_static(b"two"));
+        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        assert_eq!(db.state().record("large").get(), vec![7; 5000]);
+        assert_eq!(db.state().record("small").get(), &b"s"[..]);
+        db.state()
+            .record("large")
+            .set(db.wal(), Bytes::from_static(b"two"))?;
         db.save().await?;
-        // The replaced value is garbage, which the next commit deletes.
-        let db = Db::open(store.clone(), StorageOptions::default()).await?;
-        assert_eq!(db.volume().record("state").get(), &b"two"[..]);
-        db.volume().record("small").set(Bytes::new());
+        // The replaced value is garbage, which the next flush deletes.
+        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        assert_eq!(db.state().record("large").get(), &b"two"[..]);
+        db.state().record("small").set(db.wal(), Bytes::new())?;
         db.save().await?;
         assert_eq!(stored(&store), 0);
         let db = Db::open(store.clone(), StorageOptions::default()).await?;
-        assert!(db.volume().record("small").get().is_empty());
-        assert_eq!(db.volume().record("state").get(), &b"two"[..]);
+        assert!(db.state().record("small").get().is_empty());
+        assert_eq!(db.state().record("large").get(), &b"two"[..]);
         Ok(())
     })
 }

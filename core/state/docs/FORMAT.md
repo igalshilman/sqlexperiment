@@ -21,7 +21,7 @@ varints unless stated otherwise.
 | Field             | Encoding                                                                                                                                                                                                                                                                                                                                           |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Magic             | `SC15`                                                                                                                                                                                                                                                                                                                                             |
-| Version           | Commits ever made; at most 2^62                                                                                                                                                                                                                                                                                                                    |
+| Version           | Flushes ever made; at most 2^62                                                                                                                                                                                                                                                                                                                    |
 | Epoch             | Checkpoints ever recorded; at most 2^62                                                                                                                                                                                                                                                                                                            |
 | Next segment      | The number the next stored value gets; at most 2^62                                                                                                                                                                                                                                                                                                |
 | Garbage           | Count, then ascending numbers, each from the one before: stored values the record does not name, to delete; below the next                                                                                                                                                                                                                         |
@@ -38,10 +38,10 @@ transaction that changed it. Nothing may follow. A missing record means
 version 0, epoch 0 and no files.
 
 The files are records and paged files. The SQL database is the paged file
-`db`; others are the host's (`Volume::file`). A file is never deleted, only
+`db`; others are the host's (`State::file`). A file is never deleted, only
 emptied, and its id is never reused.
 
-A paged file with a base (`Volume::file_with_base`) is over a golden image
+A paged file with a base (`State::file_with_base`) is over a golden image
 the host holds, named by the base's id: a hole, or a page absent from the
 store, reads as the base's page (zeros past its end); a page equal to its
 base's page is written as a hole; and a page's first image in the log is
@@ -51,26 +51,26 @@ the record and other files, and write the file's holes and length, but not
 its images; a checkpoint waits until every such file's logged images are
 decoded, or replaced by holes.
 
-The transactions are the log since the last checkpoint, in commit order.
+The transactions are the log since the last checkpoint, in flush order.
 Pages they change are authoritative from the log; any other page of a file is
-read at `page/<file>/<n>`, and is a hole (zeros) if absent. A commit without
+read at `page/<file>/<n>`, and is a hole (zeros) if absent. A flush without
 page changes adds none.
 
-The records are the host's (`Volume::record`): named whole values, each
-replaced whole by a commit that sets it. One of at most the inline budget
+The records are the host's (`State::record`): named whole values, each
+replaced whole by a flush that sets it. One of at most the inline budget
 (1 KiB by default) is inline; a larger one is a stored value of its own,
-written by the commit that sets it. Checkpoints keep them. A record never
+written by the flush that sets it. Checkpoints keep them. A record never
 set reads as empty.
 
-A commit (`Volume::commit`) sets records and writes paged files with its
-SQL, in the same put. A stored value holds a large transaction's segment, a
-large record, or the record's inline log sealed into one (a seal).
+A flush (`Wal::flush`) sets the WAL's records and writes its paged files, the
+SQL's among them, in the same put. A stored value holds a large transaction's
+segment, a large record, or the record's inline log sealed into one (a seal).
 
 ## Log segments
 
 A transaction's changed pages, in segments of at most 240 entries. A stored
 value at `log/<n>` is `SL15`, the segment count, then each segment's length
-and bytes: one segment of a large transaction, or the segments a commit
+and bytes: one segment of a large transaction, or the segments a flush
 sealed (the record's inline log, in order).
 
 | Field       | Encoding                                                                                                                                                           |
@@ -105,4 +105,4 @@ An absent `page/<n>` is a zero-filled hole.
 
 Readers ignore a malformed hint.
 
-See [DESIGN.md](DESIGN.md) for commit, replay, checkpoint and recovery rules.
+See [DESIGN.md](DESIGN.md) for flush, replay, checkpoint and recovery rules.
