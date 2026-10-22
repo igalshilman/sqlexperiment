@@ -627,7 +627,7 @@ A scope's store holds one volume, a `volume` namespace
 | `memory`          | Record                  | Its memory: JSON, below                                                 |
 | `memory/<golden>` | Paged file over golden  | The pages of the run's memory that differ from its program's golden one |
 | `db`              | Paged file              | SQL: the scope's KV, a table `kv(key TEXT PRIMARY KEY, value TEXT)`     |
-| `<extension>/…`   | Records and paged files | Each extension's part of the volume (`fs/manifest`, say)               |
+| `<extension>/…`   | Records and paged files | Each extension's part of the volume (`fs/manifest`, say)                |
 
 Programs and their golden images are not stored: the process supplies them
 (§5.5). The records, in camelCase JSON:

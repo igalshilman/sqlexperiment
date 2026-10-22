@@ -233,8 +233,9 @@ every result and the reopened state agree.
 Exclusive ownership and settlement of outstanding requests remain host
 requirements. A namespace must use one stable key with `PageCache::namespace`;
 sessions that overlap must share it (without a cache they must not overlap).
-Real-backend
-latency and process crash/power-loss validation remain future work.
+Power-loss validation and latency on a
+replicated Restate cluster remain future work; [latency against one local
+Restate server](../../sql/benches/RESTATE_RESULTS.md) is measured.
 
 See [format](FORMAT.md), [design](DESIGN.md), and
 [benchmark methodology and evidence](../../sql/benches/README.md).
