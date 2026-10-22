@@ -54,7 +54,12 @@ fn a_commit_refuses_what_it_cannot_store_and_the_journal_goes_on() -> Result<()>
 fn a_journal_commits_one_at_a_time() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(Stalled(Arc::new(MemoryKv::default())));
-        let journal = Journal::open(store).await?;
+        // With a cache, an open needs no sync, which this store never completes.
+        let options = StorageOptions {
+            cache: Some(fresh_namespace()),
+            ..StorageOptions::default()
+        };
+        let journal = Journal::open_with_options(store, options).await?;
         journal.record("n").set("1".into());
         let mut first = Box::pin(journal.commit());
         assert!((&mut first).now_or_never().is_none(), "waits on the sync");

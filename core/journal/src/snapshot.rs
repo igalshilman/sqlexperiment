@@ -45,8 +45,10 @@
 //!
 //! Read the commit record, then the stored segments it names, if any, and
 //! replay its log. With a cache that saw the same record, nothing changed
-//! since. An owner whose last commit had an unknown outcome syncs alongside,
-//! so that its cache keeps only durable state. A cold open (no cached pages)
+//! since. An owner whose last commit had an unknown outcome, or that has no
+//! cache to tell, syncs alongside, so that what it reads is durable: a
+//! commit, even one that changed nothing, then never acknowledges state a
+//! crash can still take back. A cold open (no cached pages)
 //! fetches a small database whole, or the pages the working-set hint lists,
 //! alongside.
 use crate::{
@@ -215,8 +217,13 @@ impl Readahead {
 }
 
 impl Snapshot {
-    /// Open the namespace: see the module documentation.
-    pub async fn open(store: Arc<dyn KvStore>, options: StorageOptions) -> io::Result<Self> {
+    /// Open the namespace: see the module documentation. A `reader` writes
+    /// nothing, and so syncs nothing either.
+    pub async fn open(
+        store: Arc<dyn KvStore>,
+        options: StorageOptions,
+        reader: bool,
+    ) -> io::Result<Self> {
         let cache = options.cache.as_ref();
         // An owner that knows nothing reads the working-set hint with the record.
         let read_hint = async {
@@ -227,12 +234,14 @@ impl Snapshot {
         };
         // After a commit with an unknown outcome, what open reads may be this
         // owner's writes that a crash can still lose: a sync makes them
-        // durable before the cache keeps anything of them.
+        // durable before the session (and the cache) trusts anything of them.
+        // An owner without a cache cannot tell, and always syncs.
         let unsettled = cache.and_then(NamespaceCache::unsettled);
+        let settle = !reader && (cache.is_none() || unsettled.is_some());
         let settle = async {
-            match unsettled {
-                Some(_) => store.sync().await,
-                None => Ok(()),
+            match settle {
+                true => store.sync().await,
+                false => Ok(()),
             }
         };
         let (commit_bytes, hint, ()) = futures::try_join!(store.get(COMMIT), read_hint, settle)?;

@@ -237,7 +237,28 @@ impl Journal {
         store: Arc<dyn KvStore>,
         options: StorageOptions,
     ) -> Result<Self> {
-        let snapshot = Snapshot::open(store, options.clone()).await?;
+        Self::open_as(store, options, false).await
+    }
+
+    /// Open a reader of a namespace that another owns, alongside it: a
+    /// journal that writes nothing to the store (its changes stay private,
+    /// and it refuses to commit) and keeps no cache. It reads the state as of
+    /// open, unless the owner checkpoints meanwhile: [`Self::is_current`],
+    /// once it has read, says whether it did.
+    pub async fn open_reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
+        let options = StorageOptions {
+            cache: None,
+            ..options
+        };
+        Self::open_as(store, options, true).await
+    }
+
+    async fn open_as(
+        store: Arc<dyn KvStore>,
+        options: StorageOptions,
+        reader: bool,
+    ) -> Result<Self> {
+        let snapshot = Snapshot::open(store, options.clone(), reader).await?;
         let mut idle = match &options.cache {
             Some(cache) if snapshot.unchanged => cache.take_idle(),
             _ => HashMap::new(),
@@ -251,27 +272,12 @@ impl Journal {
                 files: Mutex::default(),
                 participants: Mutex::default(),
                 idle: Mutex::new(idle),
-                reader: AtomicBool::new(false),
+                reader: AtomicBool::new(reader),
                 poisoned: AtomicBool::new(false),
                 committing: AtomicBool::new(false),
             }),
             prefix: Arc::from(""),
         })
-    }
-
-    /// Open a reader of a namespace that another owns, alongside it: a
-    /// journal that writes nothing to the store (its changes stay private,
-    /// and it refuses to commit) and keeps no cache. It reads the state as of
-    /// open, unless the owner checkpoints meanwhile: [`Self::is_current`],
-    /// once it has read, says whether it did.
-    pub async fn open_reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        let options = StorageOptions {
-            cache: None,
-            ..options
-        };
-        let journal = Self::open_with_options(store, options).await?;
-        journal.shared.reader.store(true, Ordering::SeqCst);
-        Ok(journal)
     }
 
     /// The options this journal opened with.

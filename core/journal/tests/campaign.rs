@@ -258,6 +258,11 @@ impl World {
             match found {
                 Ok((session, n)) => {
                     trace(|| format!("reopened on state {n} of {}", candidates.len()));
+                    // What an owner reads is durable: it syncs at open unless
+                    // its cache knows every commit it made settled.
+                    if !self.memory.unsynced().is_empty() {
+                        return Err("a reopen read writes no sync made durable".into());
+                    }
                     self.observed(candidates[n].clone());
                     return Ok(session);
                 }
@@ -337,11 +342,10 @@ impl World {
                 acknowledged.as_ref().map(|_| "acknowledged")
             )
         });
-        if let Some(report) = acknowledged {
+        if acknowledged.is_some() {
             // One that wrote syncs; an unchanged one writes nothing, and
-            // syncs nothing either.
-            let synced = self.memory.unsynced().is_empty();
-            if report.record_bytes > 0 && !synced {
+            // needs no sync: its session's open synced what it read.
+            if !self.memory.unsynced().is_empty() {
                 return Err("an acknowledged commit left writes unsynced".into());
             }
             self.observed(pending);
