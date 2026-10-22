@@ -31,7 +31,7 @@ pub fn cache_config(memory: usize, disk: usize) -> PageCacheConfig {
     static CLEANED: std::sync::Once = std::sync::Once::new();
     CLEANED.call_once(remove_stale_cache_files);
     let file = std::env::temp_dir().join(format!(
-        "volume-cache-{}-{}",
+        "state-cache-{}-{}",
         std::process::id(),
         DIRS.fetch_add(1, Relaxed)
     ));
@@ -47,7 +47,7 @@ fn remove_stale_cache_files() {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("volume-cache-")) else {
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("state-cache-")) else {
             continue;
         };
         let pid = rest.split('-').next().unwrap_or_default();

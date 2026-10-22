@@ -31,7 +31,7 @@ it is stored. Writes are stored in the order they were made: until a sync
 resolves, a crash may lose the last of them, never one without the ones after
 it (as a Restate object's state does). A `set` or `clear` that
 throws fails the next `sync`. A database's writes are its commit record and
-pages (see the crate's [format](../../../core/volume/docs/FORMAT.md)): a
+pages (see the crate's [format](../../../core/state/docs/FORMAT.md)): a
 transaction commits with one put of the record, so a commit is durable once a
 sync after it resolves.
 

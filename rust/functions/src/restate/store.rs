@@ -17,7 +17,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use volume::kv::KvStore;
+use state::kv::KvStore;
 
 pub(crate) struct StateQueue {
     state: RawState,

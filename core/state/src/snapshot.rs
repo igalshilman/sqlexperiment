@@ -142,7 +142,7 @@ impl Default for StorageOptions {
 
 /// What a commit wrote: its log and record bytes, and the pages its checkpoint, if any, wrote.
 #[derive(Clone, Debug, Default)]
-pub struct CommitReport {
+pub struct FlushReport {
     /// Pages written in place by this commit's checkpoint; 0 when it did not
     /// checkpoint.
     pub checkpointed_pages: usize,
@@ -372,9 +372,19 @@ impl Snapshot {
         }
     }
 
-    /// The records' values, by name (see [`crate::Volume::record`]).
+    /// The records' values, by name (see [`crate::State::record`]).
     pub fn records(&self) -> &Records {
         &self.records
+    }
+
+    /// Whether the directory's file `name` is paged, or a record; `None` for
+    /// a name it does not hold.
+    pub(crate) fn is_paged(&self, name: &str) -> Option<bool> {
+        let id = self.commit.file_id(name)?;
+        Some(matches!(
+            self.commit.directory[&id].kind,
+            Kind::Paged { .. }
+        ))
     }
 
     /// The base the file `file` was opened with; `Err` for a file made with
@@ -563,7 +573,7 @@ impl Snapshot {
         &self,
         mut writes: Writes,
         mut records: Records,
-    ) -> io::Result<(CommitReport, Self)> {
+    ) -> io::Result<(FlushReport, Self)> {
         self.check(&writes, &records)?;
         // A record never set reads as empty.
         records.retain(|name, value| {
@@ -576,7 +586,7 @@ impl Snapshot {
         });
         let changed = !writes.is_empty();
         if !changed && records.is_empty() {
-            let report = CommitReport::default();
+            let report = FlushReport::default();
             let after = self.continued(self.commit.clone(), self.commit_bytes.clone());
             return Ok((report, after.registered()));
         }
@@ -729,7 +739,7 @@ impl Snapshot {
         }
         let checkpointed_pages = checkpoint.as_ref().map_or(0, |c| c.images.len());
         if let Some(cache) = cache {
-            // The checkpoint's pages first: a volume that opens on the new
+            // The checkpoint's pages first: a state that opens on the new
             // record must not find a page as it was before the checkpoint.
             // (One opening on the old record replays the log over them.)
             if let Some(checkpoint) = &checkpoint {
@@ -753,7 +763,7 @@ impl Snapshot {
             }
             cache.keep_values(&after.commit.stored_values(), named);
         }
-        let report = CommitReport {
+        let report = FlushReport {
             checkpointed_pages,
             logged_bytes,
             record_bytes,

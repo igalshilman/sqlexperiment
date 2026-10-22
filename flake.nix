@@ -1,5 +1,5 @@
 {
-  description = "SQL in Restate virtual objects: the volume and SQL crates, their Node.js addon and Python extension, the patched Restate TypeScript SDK, the agent integrations and the examples";
+  description = "SQL in Restate virtual objects: the state and SQL crates, their Node.js addon and Python extension, the patched Restate TypeScript SDK, the agent integrations and the examples";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -57,7 +57,7 @@
               curl
               gnumake
 
-              # The TLA+ check (core/volume/spec/check.sh); the benchmark scripts
+              # The TLA+ check (core/state/spec/check.sh); the benchmark scripts
               # run on the Python above.
               jdk_headless
             ]

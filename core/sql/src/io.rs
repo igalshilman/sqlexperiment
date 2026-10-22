@@ -1,19 +1,22 @@
-//! Bridge between engine byte-addressed files and the volume's file `db`.
+//! Bridge between engine byte-addressed files and the state's file `db`.
 //!
-//! The engine sees two virtual files: [`DB_PATH`] and its private WAL. The database
-//! reads through the volume's file; its dirty pages and the entire WAL live in
-//! `State` until `KvIo::move_into_file`. Full-page writes avoid a backing read; partial writes merge with the
-//! visible page. Truncation records explicit holes and clears a partial tail so
-//! regrowing a file never exposes bytes from before.
+//! The engine sees two virtual files: [`DB_PATH`] and its private engine WAL.
+//! The database reads through the state's file; its dirty pages and the
+//! entire engine WAL live in `Private` until `KvIo::flush_into` copies the
+//! pages into a [`Wal`] of the state, where they stay, read ahead of the
+//! file, until the state flushes that WAL. Full-page writes avoid a backing
+//! read; partial writes merge with the visible page. Truncation records
+//! explicit holes and clears a partial tail so regrowing a file never
+//! exposes bytes from before.
 //!
 //! File methods enqueue work without calling KV. [`KvIo::drive`] polls backend
 //! futures on the host executor. Adjacent reads overlap in bounded batches; writes,
 //! truncation and sync serialize the queue into ordered phases. Within a read batch,
 //! completion order may differ from submission order. A single multi-page file read
-//! fetches its pages sequentially. This layer does not prefetch: the volume does
+//! fetches its pages sequentially. This layer does not prefetch: the state does
 //! (a small database whole, or the working-set hint, at open; readahead after
 //! consecutive misses), and cross-session reuse comes from the optional
-//! [`volume::PageCache`].
+//! [`state::PageCache`].
 //!
 //! Read buffers are staged privately until the read succeeds. `Completing` retires
 //! in-flight accounting and aborts incomplete engine callbacks even if a dequeued
@@ -31,9 +34,10 @@
 //! file mutation or wait with no queued work returns an error instead of blocking
 //! or spinning. Normal engine I/O is driven by the asynchronous pump.
 //!
-//! File sync is only a private-overlay ordering barrier. A complete private
-//! checkpoint moves the database's pages into the volume's file, which the
-//! volume's commit makes durable. The engine WAL never becomes a durable KV object.
+//! File sync is only a private-overlay ordering barrier. After a complete
+//! private checkpoint, `flush_into` copies the database's pages into a WAL,
+//! which the state's flush makes durable. The engine WAL never becomes a
+//! durable KV object.
 use bytes::BytesMut;
 use futures::future::join_all;
 use std::{
@@ -49,10 +53,10 @@ use turso_core::{
     Buffer, Clock, Completion, CompletionError, File, IO, LimboError, MonotonicInstant, OpenFlags,
     WallClockInstant,
 };
-use volume::{File as VolumeFile, Page};
+use state::{File as StateFile, Page, Wal};
 
 /// Logical database-page and overlay-block size; encoded KV values may be smaller.
-pub const BLOCK_SIZE: usize = volume::PAGE_SIZE;
+pub const BLOCK_SIZE: usize = state::PAGE_SIZE;
 /// Engine-visible virtual database name, not a filesystem or KV key.
 pub const DB_PATH: &str = "object.db";
 /// Engine-visible private WAL name; this file is never fetched from KV.
@@ -79,6 +83,15 @@ fn writable(page: Page) -> BytesMut {
     page.try_into_mut()
         .unwrap_or_else(|shared| BytesMut::from(&shared[..]))
 }
+/// Blocks of the first database page `first` starts: as many as its page
+/// size takes.
+fn header_blocks(first: &Page) -> u64 {
+    let page_size = match u16::from_be_bytes([first[16], first[17]]) {
+        1 => 65536,
+        size => usize::from(size),
+    };
+    page_size.div_ceil(BLOCK_SIZE).max(1) as u64
+}
 /// Split `len` bytes at `pos` into per-block pieces:
 /// `(block index, offset in block, offset in buffer, piece length)`.
 fn blocks(pos: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize, usize)> {
@@ -96,21 +109,25 @@ fn blocks(pos: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize, usiz
     })
 }
 
-/// Mutable session overlay indexed by `(file number, logical block number)`
-/// ([`DB`] or [`WAL`]). A missing entry falls through to the volume's file
-/// for the database, and reads zeros for the WAL; `Some(None)` is an explicit
-/// zero-filled hole that masks old data after truncation. Sizes track the
-/// private view.
+/// The session's private view: the engine's changes, indexed by `(file
+/// number, logical block number)` ([`DB`] or [`WAL`]). A missing entry falls
+/// through to the state's file for the database, and reads zeros for the
+/// engine WAL; `Some(None)` is an explicit zero-filled hole that masks old
+/// data after truncation. Sizes track the private view.
 #[derive(Default)]
-struct State {
+struct Private {
     sizes: [u64; 2],
-    /// The blocks of the original first database page, retained for synchronous
-    /// engine metadata reads. Overlay entries, including explicit holes, always
-    /// override these bytes.
+    /// The blocks of the first database page as the state holds it, retained
+    /// for synchronous engine metadata reads. Dirty and flushed entries,
+    /// including explicit holes, always override these bytes.
     header: Vec<Page>,
     /// Pages are shared with readers; a partial write updates a page in place
     /// when nothing else holds it.
     dirty: BTreeMap<(usize, u64), Option<Page>>,
+    /// Database pages copied into a WAL ([`KvIo::flush_into`]) that the state
+    /// has not flushed yet: read after the dirty ones, ahead of the file,
+    /// which does not hold them until then.
+    flushed: BTreeMap<u64, Option<Page>>,
     #[cfg(feature = "simulation")]
     written: [u64; 2],
 }
@@ -166,103 +183,109 @@ impl Drop for Completing<'_> {
 /// The queue lock orders engine mutations; it does not implement a
 /// distributed ownership lock.
 pub struct KvIo {
-    /// The volume's file `db`; replaced when a warm engine continues on a
-    /// new volume, and `None` while the engine is parked.
-    file: Mutex<Option<VolumeFile>>,
+    /// The state's file `db`; replaced when a warm engine continues on a
+    /// new state, and `None` while the engine is parked.
+    file: Mutex<Option<StateFile>>,
     /// See [`crate::SqlOptions::max_private_bytes`].
     max_private_bytes: AtomicUsize,
-    state: Mutex<State>,
+    private: Mutex<Private>,
     queue: Mutex<VecDeque<Pending>>,
     driver: futures::lock::Mutex<()>,
     progress: Mutex<Progress>,
     /// A request or synchronous engine read failed: the engine's state after
     /// the error is unknown.
     failed: AtomicBool,
-    /// The volume of [`Self::mount`], which [`Self::publish`] commits.
+    /// The state of [`Self::mount`], which [`Self::publish`] flushes.
     #[cfg(feature = "simulation")]
-    volume: Mutex<Option<volume::Volume>>,
+    state: Mutex<Option<state::State>>,
     #[cfg(all(test, feature = "simulation"))]
     fault: Mutex<Option<test_faults::Fault>>,
 }
 
 impl KvIo {
-    /// An adapter over `file`, the volume's file `db`.
-    pub fn new(file: VolumeFile, max_private_bytes: usize) -> Arc<Self> {
-        let state = State {
+    /// An adapter over `file`, the state's file `db`.
+    pub fn new(file: StateFile, max_private_bytes: usize) -> Arc<Self> {
+        let private = Private {
             sizes: [file.len(), 0],
-            ..State::default()
+            ..Private::default()
         };
         Arc::new(Self {
             file: Mutex::new(Some(file)),
             max_private_bytes: AtomicUsize::new(max_private_bytes),
-            state: Mutex::new(state),
+            private: Mutex::new(private),
             queue: Mutex::default(),
             driver: futures::lock::Mutex::new(()),
             progress: Mutex::default(),
             failed: AtomicBool::default(),
             #[cfg(feature = "simulation")]
-            volume: Mutex::new(None),
+            state: Mutex::new(None),
             #[cfg(all(test, feature = "simulation"))]
             fault: Mutex::new(None),
         })
     }
 
-    /// Open the namespace's volume, and an adapter over its file `db`.
+    /// Open the namespace's state, and an adapter over its file `db`.
     #[cfg(feature = "simulation")]
-    pub async fn mount(store: Arc<dyn volume::kv::KvStore>) -> io::Result<Arc<Self>> {
-        Self::mount_with_options(store, volume::StorageOptions::default()).await
+    pub async fn mount(store: Arc<dyn state::kv::KvStore>) -> io::Result<Arc<Self>> {
+        Self::mount_with_options(store, state::StorageOptions::default()).await
     }
 
     /// [`Self::mount`] with explicit storage options.
     #[cfg(feature = "simulation")]
     pub async fn mount_with_options(
-        store: Arc<dyn volume::kv::KvStore>,
-        options: volume::StorageOptions,
+        store: Arc<dyn state::kv::KvStore>,
+        options: state::StorageOptions,
     ) -> io::Result<Arc<Self>> {
-        let volume =
-            (volume::Volume::open_with_options(store, options).await).map_err(io::Error::other)?;
-        let file = volume.file(crate::DB_FILE).map_err(io::Error::other)?;
+        let state =
+            (state::State::open_with_options(store, options).await).map_err(io::Error::other)?;
+        let file = state.file(crate::DB_FILE).map_err(io::Error::other)?;
         let io = Self::new(file, crate::MAX_PRIVATE_BYTES);
-        *io.volume.lock().unwrap() = Some(volume);
+        *io.state.lock().unwrap() = Some(state);
         Ok(io)
     }
 
-    /// Move the private pages into the file and commit the volume of
-    /// [`Self::mount`].
+    /// Flush the private pages, in one WAL of the state of [`Self::mount`].
     #[cfg(feature = "simulation")]
-    pub async fn publish(&self) -> io::Result<volume::CommitReport> {
-        self.move_into_file().await?;
-        let volume = self.volume.lock().unwrap().clone();
-        let volume = volume.ok_or_else(|| invalid("not mounted"))?;
-        volume.commit().await.map_err(io::Error::other)
+    pub async fn publish(&self) -> io::Result<state::FlushReport> {
+        let state = self.state.lock().unwrap().clone();
+        let state = state.ok_or_else(|| invalid("not mounted"))?;
+        let mut wal = state.wal();
+        self.flush_into(&mut wal)?;
+        let report = wal.flush().await.map_err(io::Error::other)?;
+        self.settle_flushed();
+        Ok(report)
     }
 
-    /// Let go of the volume while the engine is parked: it reads nothing
+    /// Let go of the state while the engine is parked: it reads nothing
     /// until [`Self::resume`] gives it the next one.
     pub(crate) fn release(&self) {
         *self.file.lock().unwrap() = None;
     }
 
-    fn file(&self) -> io::Result<VolumeFile> {
+    fn file(&self) -> io::Result<StateFile> {
         let file = self.file.lock().unwrap().clone();
         file.ok_or_else(|| invalid("the engine is parked"))
     }
 
-    /// No private changes, no private WAL and no outstanding I/O: the engine's
-    /// view equals the committed state it was opened or saved at.
+    /// No private changes, none in a WAL the state has not flushed, no
+    /// engine WAL and no outstanding I/O: the engine's view equals the state
+    /// it was opened or last flushed at.
     pub(crate) fn is_clean(&self) -> bool {
         if self.has_changes() || self.failed() {
+            return false;
+        }
+        if !self.private.lock().unwrap().flushed.is_empty() {
             return false;
         }
         let progress = self.progress.lock().unwrap();
         progress.inflight == 0 && !progress.stopped
     }
 
-    /// Continue a clean adapter on `file` of a newly opened volume at the
-    /// same committed state, keeping the engine that uses it warm.
+    /// Continue a clean adapter on `file` of a newly opened state at the
+    /// same flushed state, keeping the engine that uses it warm.
     pub(crate) async fn resume(
         &self,
-        file: VolumeFile,
+        file: StateFile,
         max_private_bytes: usize,
     ) -> io::Result<()> {
         if !self.is_clean() {
@@ -270,9 +293,9 @@ impl KvIo {
         }
         self.max_private_bytes
             .store(max_private_bytes, Ordering::SeqCst);
-        *self.state.lock().unwrap() = State {
+        *self.private.lock().unwrap() = Private {
             sizes: [file.len(), 0],
-            ..State::default()
+            ..Private::default()
         };
         *self.file.lock().unwrap() = Some(file);
         self.prepare_engine().await
@@ -284,32 +307,28 @@ impl KvIo {
     pub(crate) async fn prepare_engine(&self) -> io::Result<()> {
         let first = self.block(DB, 0).await?;
         // The first page spans several blocks when the page size is larger.
-        let page_size = match u16::from_be_bytes([first[16], first[17]]) {
-            1 => 65536,
-            size => usize::from(size),
-        };
-        let blocks = page_size.div_ceil(BLOCK_SIZE).max(1) as u64;
+        let blocks = header_blocks(&first);
         let rest = futures::future::try_join_all((1..blocks).map(|n| self.block(DB, n))).await?;
         let mut header = vec![first];
         header.extend(rest);
-        self.state.lock().unwrap().header = header;
+        self.private.lock().unwrap().header = header;
         Ok(())
     }
 
     /// Snapshot local database/WAL traffic counters; these are not durable KV bytes.
     #[cfg(feature = "simulation")]
     pub fn stats(&self) -> crate::IoStats {
-        let state = self.state.lock().unwrap();
+        let private = self.private.lock().unwrap();
         crate::IoStats {
-            database_bytes_written: state.written[DB],
-            private_wal_bytes_written: state.written[WAL],
-            database_len: state.sizes[DB],
-            private_wal_len: state.sizes[WAL],
+            database_bytes_written: private.written[DB],
+            private_wal_bytes_written: private.written[WAL],
+            database_len: private.sizes[DB],
+            private_wal_len: private.sizes[WAL],
         }
     }
 
     pub(crate) fn wal_len(&self) -> u64 {
-        self.state.lock().unwrap().sizes[WAL]
+        self.private.lock().unwrap().sizes[WAL]
     }
 
     fn enqueue(&self, op: Operation, completion: Completion) -> turso_core::Result<Completion> {
@@ -360,14 +379,17 @@ impl KvIo {
     }
 
     fn resident_block(&self, file: usize, index: u64) -> Option<Page> {
-        let state = self.state.lock().unwrap();
-        if let Some(page) = state.dirty.get(&(file, index)) {
+        let private = self.private.lock().unwrap();
+        if let Some(page) = private.dirty.get(&(file, index)) {
             return Some(page.clone().unwrap_or_else(zero));
         }
         if file == WAL {
             return Some(zero());
         }
-        state.header.get(index as usize).cloned()
+        if let Some(page) = private.flushed.get(&index) {
+            return Some(page.clone().unwrap_or_else(zero));
+        }
+        private.header.get(index as usize).cloned()
     }
 
     async fn block(&self, file: usize, index: u64) -> io::Result<Page> {
@@ -407,7 +429,7 @@ impl KvIo {
     /// Zero `output` and return how many of its bytes lie inside the file.
     fn readable(&self, file: usize, pos: u64, output: &mut [u8]) -> usize {
         output.fill(0);
-        let size = self.state.lock().unwrap().sizes[file];
+        let size = self.private.lock().unwrap().sizes[file];
         size.saturating_sub(pos).min(output.len() as u64) as usize
     }
 
@@ -416,7 +438,10 @@ impl KvIo {
         // Only the WAL's writes count: a checkpoint copies committed WAL
         // pages into the database's, which must not fail a flush.
         let limit = self.max_private_bytes.load(Ordering::SeqCst);
-        let held = self.state.lock().unwrap().dirty.len() * BLOCK_SIZE;
+        let held = {
+            let private = self.private.lock().unwrap();
+            (private.dirty.len() + private.flushed.len()) * BLOCK_SIZE
+        };
         if file == WAL && held + bytes.len() + 2 * BLOCK_SIZE > limit {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
@@ -431,7 +456,7 @@ impl KvIo {
             if len == BLOCK_SIZE {
                 // A full block needs no read before overwrite.
                 let page = Page::copy_from_slice(piece);
-                self.state
+                self.private
                     .lock()
                     .unwrap()
                     .dirty
@@ -440,7 +465,7 @@ impl KvIo {
             }
             // A partial write to a dirty page (most WAL frames) updates it in place
             // when nothing else shares the buffer.
-            if let Some(slot @ Some(_)) = self.state.lock().unwrap().dirty.get_mut(&(file, index)) {
+            if let Some(slot @ Some(_)) = self.private.lock().unwrap().dirty.get_mut(&(file, index)) {
                 let mut page = writable(slot.take().unwrap());
                 page[start..start + len].copy_from_slice(piece);
                 *slot = Some(page.freeze());
@@ -448,32 +473,32 @@ impl KvIo {
             }
             let mut page = writable(self.block(file, index).await?);
             page[start..start + len].copy_from_slice(piece);
-            self.state
+            self.private
                 .lock()
                 .unwrap()
                 .dirty
                 .insert((file, index), Some(page.freeze()));
         }
         if !bytes.is_empty() {
-            let mut state = self.state.lock().unwrap();
-            state.sizes[file] = state.sizes[file].max(end);
+            let mut private = self.private.lock().unwrap();
+            private.sizes[file] = private.sizes[file].max(end);
             #[cfg(feature = "simulation")]
             {
-                state.written[file] += bytes.len() as u64;
+                private.written[file] += bytes.len() as u64;
             }
         }
         Ok(bytes.len())
     }
 
     async fn truncate_file(&self, file: usize, len: u64) -> io::Result<()> {
-        let old_size = self.state.lock().unwrap().sizes[file];
+        let old_size = self.private.lock().unwrap().sizes[file];
         if len < old_size {
             let tail = (len % BLOCK_SIZE as u64) as usize;
             if tail != 0 {
                 let index = len / BLOCK_SIZE as u64;
                 let mut page = writable(self.block(file, index).await?);
                 page[tail..].fill(0);
-                self.state
+                self.private
                     .lock()
                     .unwrap()
                     .dirty
@@ -481,12 +506,12 @@ impl KvIo {
             }
             let first = len.div_ceil(BLOCK_SIZE as u64);
             let last = old_size.div_ceil(BLOCK_SIZE as u64);
-            let mut state = self.state.lock().unwrap();
+            let mut private = self.private.lock().unwrap();
             for index in first..last {
-                state.dirty.insert((file, index), None);
+                private.dirty.insert((file, index), None);
             }
         }
-        self.state.lock().unwrap().sizes[file] = len;
+        self.private.lock().unwrap().sizes[file] = len;
         Ok(())
     }
 
@@ -592,41 +617,70 @@ impl KvIo {
         }
     }
 
-    /// Whether the engine changed the database since the last move, or holds
-    /// WAL a checkpoint has not moved into it.
+    /// Whether the engine changed the database since the last flush into a
+    /// WAL, or holds engine WAL a checkpoint has not moved into it.
     pub(crate) fn has_changes(&self) -> bool {
-        let state = self.state.lock().unwrap();
-        state.sizes[WAL] != 0 || state.dirty.keys().any(|(file, _)| *file == DB)
+        let private = self.private.lock().unwrap();
+        private.sizes[WAL] != 0 || private.dirty.keys().any(|(file, _)| *file == DB)
     }
 
-    /// Move the database's private pages into the volume's file, once no
-    /// SQL transaction remains and the private WAL is truncated; the
-    /// volume's commit makes them durable. The adapter goes on reading
-    /// them through the file.
-    pub(crate) async fn move_into_file(&self) -> io::Result<()> {
+    /// Copy the database's private pages into the state's file `db`, in
+    /// `wal`, once no SQL transaction remains and the engine WAL is
+    /// truncated. They stay in the private view, read ahead of the file,
+    /// until the state flushes the WAL ([`Self::settle_flushed`]) or drops
+    /// it ([`Self::settle_discarded`]): the file does not hold them before.
+    /// Pages a pending WAL already holds go in again, so that whichever WAL
+    /// the state flushes carries them all. After an error the WAL may hold
+    /// part of the copy: drop it.
+    pub(crate) fn flush_into(&self, wal: &mut Wal) -> io::Result<()> {
         if self.pending_count() != 0 {
-            return Err(invalid("cannot move pages with pending I/O"));
+            return Err(invalid("cannot flush pages with pending I/O"));
         }
         let file = self.file()?;
-        let (dirty, size) = {
-            let mut state = self.state.lock().unwrap();
-            if state.sizes[WAL] != 0 {
-                return Err(invalid("the private WAL is not checkpointed"));
-            }
-            // Read again through the file below.
-            state.header.clear();
-            let dirty: BTreeMap<u64, Option<Page>> = std::mem::take(&mut state.dirty)
-                .into_iter()
-                .filter(|((file, _), _)| *file == DB)
-                .map(|((_, block), page)| (block, page))
+        let mut private = self.private.lock().unwrap();
+        if private.sizes[WAL] != 0 {
+            return Err(invalid("the engine WAL is not checkpointed"));
+        }
+        let (database, rest): (BTreeMap<_, _>, BTreeMap<_, _>) =
+            (std::mem::take(&mut private.dirty).into_iter()).partition(|((file, _), _)| *file == DB);
+        private.dirty = rest;
+        for ((_, block), page) in database {
+            private.flushed.insert(block, page);
+        }
+        for (block, page) in &private.flushed {
+            file.write(wal, *block, page.clone())
+                .map_err(io::Error::other)?;
+        }
+        file.set_len(wal, private.sizes[DB])
+            .map_err(io::Error::other)
+    }
+
+    /// The state flushed the WAL the pages were copied into: the file holds
+    /// them, and the engine reads them from it.
+    pub(crate) fn settle_flushed(&self) {
+        let mut private = self.private.lock().unwrap();
+        let flushed = std::mem::take(&mut private.flushed);
+        // A new first page: its blocks are the header the engine reads
+        // synchronously, as many as its page size takes.
+        if let Some(first) = flushed.get(&0) {
+            let first = first.clone().unwrap_or_else(zero);
+            let old = std::mem::take(&mut private.header);
+            private.header = (0..header_blocks(&first))
+                .map(|index| match flushed.get(&index) {
+                    Some(block) => block.clone().unwrap_or_else(zero),
+                    None => old.get(index as usize).cloned().unwrap_or_else(zero),
+                })
                 .collect();
-            (dirty, state.sizes[DB])
-        };
-        let moved = (dirty.into_iter())
-            .try_for_each(|(block, page)| file.write(block, page))
-            .and_then(|()| file.set_len(size));
-        moved.map_err(io::Error::other)?;
-        self.prepare_engine().await
+        }
+    }
+
+    /// The WAL the pages were copied into was dropped: they are private
+    /// changes again, for the next flush (a page changed since stands).
+    pub(crate) fn settle_discarded(&self) {
+        let mut private = self.private.lock().unwrap();
+        for (block, page) in std::mem::take(&mut private.flushed) {
+            private.dirty.entry((DB, block)).or_insert(page);
+        }
     }
 }
 
@@ -794,7 +848,7 @@ impl File for KvFile {
         self.io.enqueue(Operation::Sync, c)
     }
     fn size(&self) -> turso_core::Result<u64> {
-        Ok(self.io.state.lock().unwrap().sizes[self.file])
+        Ok(self.io.private.lock().unwrap().sizes[self.file])
     }
     fn truncate(&self, len: u64, c: Completion) -> turso_core::Result<Completion> {
         self.io.enqueue(

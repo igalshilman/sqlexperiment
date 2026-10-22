@@ -147,7 +147,7 @@ impl PageCache {
             .build()
             .map_err(io::Error::other)?;
         let pages = HybridCacheBuilder::new()
-            .with_name("volume-pages")
+            .with_name("state-pages")
             .memory(config.memory)
             .with_weighter(|_, page: &Page| page.len() + ENTRY_OVERHEAD)
             .storage()
@@ -266,7 +266,7 @@ impl NamespaceCache {
         if owner.epoch != Some(epoch) {
             owner.clear(&self.shared.ids);
         }
-        // Idle state may hold volume handles, whose drop takes this lock.
+        // Idle state may hold state handles, whose drop takes this lock.
         drop(owner);
         drop(stale);
         false
