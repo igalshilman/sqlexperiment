@@ -113,6 +113,8 @@ the owner cache.
 
 ## Docs
 
+- [Overview](docs/OVERVIEW.md): the volume as transactional state with a
+  WAL, who uses it, and a toy durable functions extension on it
 - [Design](docs/DESIGN.md): the model, invariants, commit, open, failures,
   cache and costs
 - [Storage format](docs/FORMAT.md): exact encodings
