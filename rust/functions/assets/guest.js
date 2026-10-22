@@ -309,7 +309,7 @@
     return response;
   }
 
-  // An HTTP request, sent by the host under its policy (the binding `fetch`):
+  // An HTTP request, sent by the host under its policy (the extension `fetch`):
   // the request stays in the heap until it is answered, and is sent again
   // after a crash. No cookies are kept: a program sends its own.
   function fetch(input, init = {}) {
@@ -364,7 +364,7 @@
     validate(value);
     return value;
   }
-  // A model call through the host's gateway (the binding `llm`): `params` is
+  // A model call through the host's gateway (the extension `llm`): `params` is
   // a request in its format, with `<provider>/<model>` as its model.
   function complete(params) {
     if (!params || typeof params !== 'object' || Array.isArray(params) || 'conversation' in params)
@@ -481,10 +481,10 @@
         return request(withOptions({ kind: 'rpc', target }, options), callInput(input));
       },
     }),
-    // The host binding `name`, such as `fetch`; its input is read
-    // as an RPC's is.
+    // The operation `name` of an extension, `<extension>` or
+    // `<extension>.<op>`, such as `fetch`; its input is read as an RPC's is.
     call(name, input = null, options) {
-      if (typeof name !== 'string' || !name) throw new TypeError('A binding name is a nonempty string');
+      if (typeof name !== 'string' || !name) throw new TypeError('An operation name is a nonempty string');
       validate(name);
       return request(withOptions({ kind: 'call', name }, options), callInput(input));
     },

@@ -1,6 +1,6 @@
 //! The scope's database, as a turn sees it: one SQL transaction, begun at the
-//! turn's first statement and committed with the turn (its state and page
-//! batch, one put). `ctx.kv` is a table in it, and `ctx.db.sql` runs in it.
+//! turn's first statement and committed with the turn (its state and pages,
+//! one put). `ctx.kv` is a table in it, and `ctx.db.sql` runs in it.
 //!
 //! The guest reaches it synchronously, through the VM's host call (see
 //! [`crate::vm`]), with one JSON request and one JSON answer. A statement
@@ -14,7 +14,7 @@
 //! spans a commit. Statements that end or nest transactions themselves
 //! (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...) are refused: they would commit the
 //! SQL without the turn.
-use crate::{model::MAX_INPUT, transaction::Participant};
+use crate::{model::MAX_INPUT, store::storage_error, transaction::Participant};
 use anyhow::{Context, Result, bail, ensure};
 use journal::Journal;
 use serde_json::{Map, Number, Value, json};
@@ -25,10 +25,6 @@ const KV_TABLE: &str = "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, valu
 /// Statements that would end or nest the turn's transaction.
 const TRANSACTION_CONTROL: [&str; 6] =
     ["begin", "commit", "end", "rollback", "savepoint", "release"];
-
-fn sql(error: Box<dyn std::error::Error + Send + Sync>) -> anyhow::Error {
-    anyhow::anyhow!(error)
-}
 
 /// The scope's database, and where this turn's transaction stands.
 pub struct Db {
@@ -76,7 +72,7 @@ impl Db {
     }
 
     async fn internal(&mut self, statement: &str) -> Result<()> {
-        self.sql.execute(statement).await.map_err(sql)
+        self.sql.execute(statement).await.map_err(storage_error)
     }
 
     async fn kv_table(&mut self) -> Result<()> {
@@ -93,7 +89,11 @@ impl Db {
         self.kv_table().await?;
         let select = "SELECT value FROM kv WHERE key = ?";
         let key = SqlValue::build_text(key.to_owned());
-        let rows = self.sql.query_with(select, [key]).await.map_err(sql)?;
+        let rows = self
+            .sql
+            .query_with(select, [key])
+            .await
+            .map_err(storage_error)?;
         let text = match rows.first().and_then(|row| row.first()) {
             None => return Ok(Value::Null),
             Some(SqlValue::Text(text)) => text.as_str(),
@@ -117,7 +117,7 @@ impl Db {
                 .execute_with("DELETE FROM kv WHERE key = ?", [key])
                 .await,
         }
-        .map_err(sql)?;
+        .map_err(storage_error)?;
         Ok(Value::Null)
     }
 
@@ -127,7 +127,11 @@ impl Db {
         let params = (params.iter().map(to_sql).collect::<Result<Vec<_>, _>>())
             .map_err(|message| anyhow::anyhow!(message))?;
         self.begin().await?;
-        let rows = self.sql.query_with(statement, params).await.map_err(sql)?;
+        let rows = self
+            .sql
+            .query_with(statement, params)
+            .await
+            .map_err(storage_error)?;
         Ok((rows.into_iter())
             .map(|row| row.into_iter().map(from_sql).collect())
             .collect())
@@ -198,7 +202,7 @@ impl Db {
                     .collect(),
             ))),
             Err(error) if self.sql.is_usable() => Ok(Err(error.to_string())),
-            Err(error) => Err(sql(error)),
+            Err(error) => Err(storage_error(error)),
         }
     }
 }
@@ -292,7 +296,7 @@ impl Participant for Db {
     async fn prepare(&mut self) -> Result<()> {
         ensure!(self.savepoints == 0, "A transaction is still open");
         self.began = false;
-        self.sql.flush().await.map_err(sql)
+        self.sql.flush().await.map_err(storage_error)
     }
 }
 

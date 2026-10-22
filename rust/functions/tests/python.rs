@@ -109,10 +109,10 @@ async def main(input, ctx):
 /// run started in one process carries on in another.
 #[test]
 fn every_runtime_evaluates_a_python_program_alike() -> Result<()> {
-    use functions::{Program, Programs, Run, Runtime};
+    use functions::{Language, Program, Programs, Run, Runtime};
     use std::sync::Arc;
-    let compiled = Program::compile_python(&runtime(), "v1", COUNTER)?;
-    let again = Program::compile_python(&Arc::new(Runtime::new()?), "v1", COUNTER)?;
+    let compiled = Program::compile(&runtime(), Language::Python, "v1", COUNTER)?;
+    let again = Program::compile(&Arc::new(Runtime::new()?), Language::Python, "v1", COUNTER)?;
     let again = Arc::new(Programs::new(runtime()).with(again)?);
     let compiled = Arc::new(Programs::new(runtime()).with(compiled)?);
     let run = |catalogs: [&Arc<Programs>; 3]| -> Result<Store> {

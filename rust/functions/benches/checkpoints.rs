@@ -3,7 +3,7 @@
 //! with its VM live from turn to turn, and once restoring it at every turn, as
 //! a new attempt would. Results go to bench-<mode>.json.
 use anyhow::{Result, ensure};
-use functions::{Outcome, Program, Programs, Run, Runtime, Scope, Status};
+use functions::{Language, Outcome, Program, Programs, Run, Runtime, Scope, Status};
 use journal::simulation::MemoryKv;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Instant};
@@ -65,7 +65,7 @@ fn main() -> Result<()> {
         // reproducible images.
         for repeat in 0..4 {
             let before = Instant::now();
-            let program = Program::compile(&runtime, name, source)?;
+            let program = Program::compile(&runtime, Language::JavaScript, name, source)?;
             let program_ms = before.elapsed().as_secs_f64() * 1000.0;
             let programs = Arc::new(Programs::new(runtime.clone()).with(program)?);
             for restored in [false, true] {
@@ -140,8 +140,8 @@ fn main() -> Result<()> {
         "os":std::env::consts::OS,"wasmtime":"49.0.3",
         "compile_ms":compile_ms,"capture_mode":mode,
         "notes":["Optimized Rust; one warm-up and three repetitions; a store in memory, not a network or a disk.",
-        "A live turn delivers to the VM kept from the last one: execution, capture, compression and the writes. A restored turn starts a new attempt first: reading the commit and its batches, and a new Wasm instance.",
-        "written_bytes: the turn's batch, its commit, and the writes and deletes that follow it.",
+        "A live turn delivers to the VM kept from the last one: execution, capture, compression and the writes. A restored turn starts a new attempt first: reading the commit and its pages, and a new Wasm instance.",
+        "written_bytes: the turn's pages, its commit, and the writes and deletes that follow it.",
         "Native mode examines the pages the kernel saw written (userfaultfd write protection, PAGEMAP_SCAN); barriers mode, those marked by Wasm write barriers and host writes. Full-scan mode examines all pages."],"rows":rows});
     let output = serde_json::to_string_pretty(&output)?;
     std::fs::write(format!("bench-{mode}.json"), &output)?;

@@ -209,23 +209,28 @@ impl Fetch {
 
     async fn fetch(self, call: HostCall) -> Result<Value, GuestError> {
         let request: Request = serde_json::from_value(call.input)
-            .map_err(|error| type_error(format!("Invalid fetch request: {error}")))?;
-        let mut url = Url::parse(&request.url)
-            .map_err(|error| type_error(format!("Invalid URL {:?}: {error}", request.url)))?;
+            .map_err(|error| GuestError::type_error(format!("Invalid fetch request: {error}")))?;
+        let mut url = Url::parse(&request.url).map_err(|error| {
+            GuestError::type_error(format!("Invalid URL {:?}: {error}", request.url))
+        })?;
         let mut method = Method::from_bytes(request.method.to_ascii_uppercase().as_bytes())
-            .map_err(|_| type_error(format!("Invalid method {:?}", request.method)))?;
+            .map_err(|_| GuestError::type_error(format!("Invalid method {:?}", request.method)))?;
         if matches!(method.as_str(), "CONNECT" | "TRACE" | "TRACK") {
-            return Err(type_error(format!("Method {method} is not allowed")));
+            return Err(GuestError::type_error(format!(
+                "Method {method} is not allowed"
+            )));
         }
         let mut headers = HeaderMap::new();
         for (name, value) in &request.headers {
             let name = HeaderName::try_from(name.as_str())
-                .map_err(|_| type_error(format!("Invalid header name {name:?}")))?;
+                .map_err(|_| GuestError::type_error(format!("Invalid header name {name:?}")))?;
             if FORBIDDEN_HEADERS.contains(&name.as_str()) || name.as_str().starts_with("proxy-") {
-                return Err(type_error(format!("Header {name} is set by the host")));
+                return Err(GuestError::type_error(format!(
+                    "Header {name} is set by the host"
+                )));
             }
             let value = HeaderValue::try_from(value.as_str())
-                .map_err(|_| type_error(format!("Invalid value for header {name}")))?;
+                .map_err(|_| GuestError::type_error(format!("Invalid value for header {name}")))?;
             headers.append(name, value);
         }
         let mut body = match (request.body, request.body_base64, request.json) {
@@ -233,24 +238,29 @@ impl Fetch {
             (None, Some(encoded), None) => Some(
                 BASE64
                     .decode(encoded)
-                    .map_err(|_| type_error("Invalid request body"))?
+                    .map_err(|_| GuestError::type_error("Invalid request body"))?
                     .into(),
             ),
             (None, None, Some(json)) => Some(serde_json::to_vec(&json).unwrap().into()),
             (None, None, None) => None,
-            _ => return Err(type_error("A request has one body")),
+            _ => return Err(GuestError::type_error("A request has one body")),
         };
 
         let mut redirects = 0;
         loop {
             if url.scheme() != "http" && url.scheme() != "https" {
-                return Err(type_error(format!("Cannot fetch a {} URL", url.scheme())));
+                return Err(GuestError::type_error(format!(
+                    "Cannot fetch a {} URL",
+                    url.scheme()
+                )));
             }
             if !url.username().is_empty() || url.password().is_some() {
-                return Err(type_error("A URL with credentials cannot be fetched"));
+                return Err(GuestError::type_error(
+                    "A URL with credentials cannot be fetched",
+                ));
             }
             if !self.policy.allows(&url) {
-                return Err(type_error(format!(
+                return Err(GuestError::type_error(format!(
                     "Requests to {} are not allowed",
                     url.origin().ascii_serialization()
                 )));
@@ -272,15 +282,15 @@ impl Fetch {
                 && request.redirect != "manual"
             {
                 if request.redirect == "error" {
-                    return Err(type_error(format!("{url} redirects")));
+                    return Err(GuestError::type_error(format!("{url} redirects")));
                 }
                 redirects += 1;
                 if redirects > MAX_REDIRECTS {
-                    return Err(type_error("Too many redirects"));
+                    return Err(GuestError::type_error("Too many redirects"));
                 }
                 let next = (location.to_str().ok())
                     .and_then(|location| url.join(location).ok())
-                    .ok_or_else(|| type_error("Invalid redirect location"))?;
+                    .ok_or_else(|| GuestError::type_error("Invalid redirect location"))?;
                 // As browsers do: a 303, or a POST's 301 or 302, becomes a GET.
                 if (status == StatusCode::SEE_OTHER && method != Method::HEAD)
                     || (matches!(status.as_u16(), 301 | 302) && method == Method::POST)
@@ -338,8 +348,11 @@ impl Binding for Fetch {
         let timeout = self.policy.timeout;
         let fetch = self.clone().fetch(call);
         Box::pin(async move {
-            (tokio::time::timeout(timeout, fetch).await)
-                .unwrap_or_else(|_| Err(type_error("fetch failed: the request timed out")))
+            (tokio::time::timeout(timeout, fetch).await).unwrap_or_else(|_| {
+                Err(GuestError::type_error(
+                    "fetch failed: the request timed out",
+                ))
+            })
         })
     }
 }
@@ -363,14 +376,10 @@ fn follow() -> String {
     "follow".into()
 }
 
-fn type_error(message: impl Into<String>) -> GuestError {
-    GuestError::new("TypeError", message)
-}
-
 /// A network failure, as `fetch` reports it: a `TypeError`. A timeout says so.
 fn network_error(error: reqwest::Error) -> GuestError {
     if error.is_timeout() {
-        return type_error("fetch failed: the request timed out");
+        return GuestError::type_error("fetch failed: the request timed out");
     }
     let mut message = format!("fetch failed: {error}");
     let mut source = std::error::Error::source(&error);
@@ -378,7 +387,7 @@ fn network_error(error: reqwest::Error) -> GuestError {
         message.push_str(&format!(": {cause}"));
         source = cause.source();
     }
-    type_error(message)
+    GuestError::type_error(message)
 }
 
 /// Resolves names, and keeps the public addresses only, unless private

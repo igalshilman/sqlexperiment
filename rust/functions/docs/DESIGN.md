@@ -211,11 +211,11 @@ trait Store {
     async fn delete(&self, key: &str) -> Result<()>;
 }
 
-Program::compile(runtime, name, source) -> Result<Program>   // golden creation
-Programs::new(shared_runtime).compile(name, source)?
+Program::compile(runtime, language, name, source) -> Result<Program>   // golden creation
+Programs::new(shared_runtime).compile(name, source)?   // or compile_python
 Run::start(&programs, &scope, key, run, program, handler, input, now).await -> Result<Run>
-run.deliver(&store, operation_id, outcome, now).await -> Result<View>
-run.deliver_all(&store, vec![(operation_id, outcome), ...], now).await -> Result<View>
+run.deliver(operation_id, outcome, now).await -> Result<View>
+run.deliver_all(vec![(operation_id, outcome), ...], now).await -> Result<View>
 run.view() -> View
 ```
 

@@ -474,10 +474,11 @@ class Context:
         return self._bridge.scope
 
     async def call(self, name, input=None, *, idempotency_key=None):
-        """The host binding `name`, such as `fetch`, with `input`,
-        which is read as an RPC's is."""
+        """The operation `name` of an extension, `<extension>` or
+        `<extension>.<op>`, such as `fetch`, with `input`, which is read as
+        an RPC's is."""
         if not isinstance(name, str) or not name:
-            raise TypeError("A binding name is a nonempty string")
+            raise TypeError("An operation name is a nonempty string")
         operation = {"kind": "call", "name": name, **_idempotency(idempotency_key)}
         return await self._bridge.request(operation, input)
 

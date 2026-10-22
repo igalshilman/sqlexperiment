@@ -2,7 +2,7 @@
 //! turn commits, and what a new attempt restores.
 use anyhow::Result;
 use common::*;
-use functions::{Limits, Operation, Outcome, Program, Programs, Run, Runtime, Status};
+use functions::{Language, Limits, Operation, Outcome, Program, Programs, Run, Runtime, Status};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
@@ -80,8 +80,13 @@ fn a_live_run_and_a_restored_one_end_alike() -> Result<()> {
 /// they end exactly as in one process alone.
 #[test]
 fn every_runtime_evaluates_a_program_alike() -> Result<()> {
-    let compiled = Program::compile(&runtime(), "v1", PROGRAM)?;
-    let again = Program::compile(&Arc::new(Runtime::new()?), "v1", PROGRAM)?;
+    let compiled = Program::compile(&runtime(), Language::JavaScript, "v1", PROGRAM)?;
+    let again = Program::compile(
+        &Arc::new(Runtime::new()?),
+        Language::JavaScript,
+        "v1",
+        PROGRAM,
+    )?;
     assert_eq!(again.version(), compiled.version());
     let again = Arc::new(Programs::new(runtime()).with(again)?);
     let compiled = Arc::new(Programs::new(runtime()).with(compiled)?);
@@ -237,7 +242,7 @@ fn programs_are_checked_and_failures_end_runs() -> Result<()> {
         assert!(Programs::new(runtime()).compile("bad", source).is_err());
     }
     let main = "export async function main(){}";
-    assert!(Program::compile(&runtime(), "not a name", main).is_err());
+    assert!(Program::compile(&runtime(), Language::JavaScript, "not a name", main).is_err());
     assert!(
         Programs::new(runtime())
             .compile("v1", main)?
@@ -526,7 +531,7 @@ fn a_losing_request_may_fail_later() -> Result<()> {
 }
 
 /// A scope's KV: a turn's reads see its own writes, the scope's runs share
-/// it, and a new run replaces the scope's last one, collecting its batches.
+/// it, and a new run replaces the scope's last one, collecting its pages.
 #[test]
 fn a_scope_shares_its_kv_between_runs() -> Result<()> {
     let first = r#"export async function main(_,ctx){

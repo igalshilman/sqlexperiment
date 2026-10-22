@@ -45,10 +45,11 @@ models through the host's gateway, [`Llm`](src/llm.rs): any provider's, in
 one format, with conversations kept in the scope's database
 ([docs/LLM.md](docs/LLM.md)); and the web with `fetch`, under a
 [`FetchPolicy`](src/fetch.rs) that says where requests may go and which
-secrets the host adds ([docs/FETCH.md](docs/FETCH.md)). Both are host
-bindings, operations the host makes for a program ([`Binding`](src/bindings.rs),
-[docs/HOST.md](docs/HOST.md) §6), among the deployment's
-[`Extensions`](src/extension.rs).
+secrets the host adds ([docs/FETCH.md](docs/FETCH.md)). Both are among the
+deployment's [`Extensions`](src/extension.rs), what programs use beside their
+memory and their database; `fetch` is the simplest kind, a
+[`Binding`](src/bindings.rs): one operation the host makes for a program
+([docs/HOST.md](docs/HOST.md) §6).
 
 ## How it works
 

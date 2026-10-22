@@ -41,12 +41,12 @@ enum Entry {
 }
 
 /// A read-only tree of files, by path relative to `/` ("" is the root).
-pub(crate) struct Files {
+pub(crate) struct Filesystem {
     /// Each entry, with its inode: its place in the tree's order.
     entries: BTreeMap<String, (Entry, u64)>,
 }
 
-impl Files {
+impl Filesystem {
     /// Every file under `dir`, read now, mounted at `at` (say `lib/python3.15`).
     pub(crate) fn load(dir: &Path, at: &str) -> Result<Self> {
         let mut files = BTreeMap::new();
@@ -163,8 +163,8 @@ impl Fds {
     }
 }
 
-fn files<'a>(c: &'a Caller<'_, Host>) -> Result<&'a Files> {
-    c.data().files.as_deref().context("No filesystem")
+fn filesystem<'a>(c: &'a Caller<'_, Host>) -> Result<&'a Filesystem> {
+    c.data().filesystem.as_deref().context("No filesystem")
 }
 
 fn read_bytes(c: &mut Caller<'_, Host>, ptr: i32, len: i32) -> Result<Vec<u8>> {
@@ -235,7 +235,7 @@ fn file_bytes(c: &Caller<'_, Host>, fd: u32) -> Result<Readable> {
     let Some(open) = c.data().fds.open.get(&fd) else {
         return Ok(Err(if fd <= 2 { ESPIPE } else { EBADF }));
     };
-    Ok(match files(c)?.get(&open.path) {
+    Ok(match filesystem(c)?.get(&open.path) {
         Some((Entry::File(bytes), _)) => Ok((bytes.clone(), open.offset)),
         Some((Entry::Dir(_), _)) => Err(EISDIR),
         None => Err(EBADF),
@@ -308,7 +308,7 @@ pub(crate) fn link(linker: &mut Linker<Host>) -> Result<()> {
                 1 | 2 => CHARACTER_DEVICE,
                 _ => match c.data().fds.path(fd).map(str::to_string) {
                     None => return Ok(EBADF),
-                    Some(path) => match files(&c)?.get(&path) {
+                    Some(path) => match filesystem(&c)?.get(&path) {
                         Some((Entry::File(_), _)) => REGULAR_FILE,
                         Some((Entry::Dir(_), _)) => DIRECTORY,
                         None => return Ok(EBADF),
@@ -340,7 +340,7 @@ pub(crate) fn link(linker: &mut Linker<Host>) -> Result<()> {
                 let Some(path) = c.data().fds.path(fd).map(str::to_string) else {
                     return Ok(EBADF);
                 };
-                let Some((entry, inode)) = files(&c)?.get(&path) else {
+                let Some((entry, inode)) = filesystem(&c)?.get(&path) else {
                     return Ok(EBADF);
                 };
                 filestat(entry, inode)
@@ -356,7 +356,7 @@ pub(crate) fn link(linker: &mut Linker<Host>) -> Result<()> {
             let Some(path) = read_path(&mut c, fd, path, len)? else {
                 return Ok(ENOENT);
             };
-            let Some((entry, inode)) = files(&c)?.get(&path) else {
+            let Some((entry, inode)) = filesystem(&c)?.get(&path) else {
                 return Ok(ENOENT);
             };
             let stat = filestat(entry, inode);
@@ -380,7 +380,7 @@ pub(crate) fn link(linker: &mut Linker<Host>) -> Result<()> {
             let Some(path) = read_path(&mut c, fd, path, len)? else {
                 return Ok(ENOENT);
             };
-            let is_dir = match files(&c)?.get(&path) {
+            let is_dir = match filesystem(&c)?.get(&path) {
                 None if oflags & O_CREAT != 0 => return Ok(EROFS),
                 None => return Ok(ENOENT),
                 Some((Entry::Dir(_), _)) => true,
@@ -476,7 +476,7 @@ pub(crate) fn link(linker: &mut Linker<Host>) -> Result<()> {
             let Some(path) = c.data().fds.path(fd as u32).map(str::to_string) else {
                 return Ok(EBADF);
             };
-            let files = files(&c)?;
+            let files = filesystem(&c)?;
             let Some((Entry::Dir(children), _)) = files.get(&path) else {
                 return Ok(ENOTDIR);
             };
@@ -521,7 +521,7 @@ pub(crate) fn link(linker: &mut Linker<Host>) -> Result<()> {
          _buf_len: i32,
          _used: i32| {
             Ok(match read_path(&mut c, fd, path, len)? {
-                Some(path) if files(&c)?.get(&path).is_some() => EINVAL,
+                Some(path) if filesystem(&c)?.get(&path).is_some() => EINVAL,
                 _ => ENOENT,
             })
         },
@@ -544,58 +544,40 @@ pub(crate) fn link(linker: &mut Linker<Host>) -> Result<()> {
             Ok(SUCCESS)
         },
     )?;
-    // Writing, sockets and polling are not there.
-    for (name, errno) in [
-        ("fd_datasync", EBADF),
-        ("fd_sync", EBADF),
-        ("fd_fdstat_set_flags", ENOTSUP),
-        ("fd_filestat_set_size", EROFS),
-        ("fd_filestat_set_times", EROFS),
-        ("fd_pwrite", EBADF),
-        ("path_create_directory", EROFS),
-        ("path_filestat_set_times", EROFS),
-        ("path_link", EROFS),
-        ("path_remove_directory", EROFS),
-        ("path_rename", EROFS),
-        ("path_symlink", EROFS),
-        ("path_unlink_file", EROFS),
-        ("poll_oneoff", ENOSYS),
-        ("sock_accept", ENOTSUP),
-        ("sock_recv", ENOTSUP),
-        ("sock_send", ENOTSUP),
-        ("sock_shutdown", ENOTSUP),
-    ] {
-        let ty = stub_type(linker.engine(), name);
+    // Writing, sockets and polling are not there: each fails with its errno.
+    use wasmtime::ValType::{I32, I64};
+    let unsupported: [(&str, &[wasmtime::ValType], i32); 18] = [
+        ("fd_datasync", &[I32], EBADF),
+        ("fd_sync", &[I32], EBADF),
+        ("fd_fdstat_set_flags", &[I32, I32], ENOTSUP),
+        ("fd_filestat_set_size", &[I32, I64], EROFS),
+        ("fd_filestat_set_times", &[I32, I64, I64, I32], EROFS),
+        ("fd_pwrite", &[I32, I32, I32, I64, I32], EBADF),
+        ("path_create_directory", &[I32, I32, I32], EROFS),
+        (
+            "path_filestat_set_times",
+            &[I32, I32, I32, I32, I64, I64, I32],
+            EROFS,
+        ),
+        ("path_link", &[I32, I32, I32, I32, I32, I32, I32], EROFS),
+        ("path_remove_directory", &[I32, I32, I32], EROFS),
+        ("path_rename", &[I32, I32, I32, I32, I32, I32], EROFS),
+        ("path_symlink", &[I32, I32, I32, I32, I32], EROFS),
+        ("path_unlink_file", &[I32, I32, I32], EROFS),
+        ("poll_oneoff", &[I32, I32, I32, I32], ENOSYS),
+        ("sock_accept", &[I32, I32, I32], ENOTSUP),
+        ("sock_recv", &[I32, I32, I32, I32, I32, I32], ENOTSUP),
+        ("sock_send", &[I32, I32, I32, I32, I32], ENOTSUP),
+        ("sock_shutdown", &[I32, I32], ENOTSUP),
+    ];
+    for (name, params, errno) in unsupported {
+        let ty = wasmtime::FuncType::new(linker.engine(), params.iter().cloned(), [I32]);
         linker.func_new(WASI, name, ty, move |_, _, results| {
             results[0] = wasmtime::Val::I32(errno);
             Ok(())
         })?;
     }
     Ok(())
-}
-
-/// The WASI signature of an unsupported function: its parameters, and an errno.
-fn stub_type(engine: &wasmtime::Engine, name: &str) -> wasmtime::FuncType {
-    use wasmtime::ValType::{I32, I64};
-    let params: &[wasmtime::ValType] = match name {
-        "fd_datasync" | "fd_sync" => &[I32],
-        "fd_fdstat_set_flags" => &[I32, I32],
-        "fd_filestat_set_size" => &[I32, I64],
-        "fd_filestat_set_times" => &[I32, I64, I64, I32],
-        "fd_pwrite" => &[I32, I32, I32, I64, I32],
-        "path_create_directory" | "path_remove_directory" | "path_unlink_file" => &[I32, I32, I32],
-        "path_filestat_set_times" => &[I32, I32, I32, I32, I64, I64, I32],
-        "path_link" => &[I32, I32, I32, I32, I32, I32, I32],
-        "path_rename" => &[I32, I32, I32, I32, I32, I32],
-        "path_symlink" => &[I32, I32, I32, I32, I32],
-        "poll_oneoff" => &[I32, I32, I32, I32],
-        "sock_accept" => &[I32, I32, I32],
-        "sock_recv" => &[I32, I32, I32, I32, I32, I32],
-        "sock_send" => &[I32, I32, I32, I32, I32],
-        "sock_shutdown" => &[I32, I32],
-        _ => unreachable!("{name}"),
-    };
-    wasmtime::FuncType::new(engine, params.iter().cloned(), [I32])
 }
 
 #[cfg(test)]

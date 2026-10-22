@@ -90,7 +90,7 @@ pub trait Attached: Participant {
         op: &str,
         _input: Value,
     ) -> Result<Value, GuestError> {
-        Err(GuestError::new("TypeError", format!("No call {op}")))
+        Err(GuestError::type_error(format!("No call {op}")))
     }
 
     /// In the turn: the program issued `operation`. An error rejects it now.
@@ -206,10 +206,12 @@ impl Attachments {
         self.0.values_mut().for_each(|part| part.ended());
     }
 
+    /// The seal is written: each extension's part of it stands.
     pub fn committed(&mut self) {
         self.0.values_mut().for_each(|part| part.committed());
     }
 
+    /// The seal was not written: each extension's part of it goes.
     pub fn aborted(&mut self) {
         self.0.values_mut().for_each(|part| part.aborted());
     }
@@ -220,6 +222,7 @@ impl Attachments {
         self.0.values().map(|part| part.holds()).collect()
     }
 
+    /// The run waits, and may move: each extension releases what is live.
     pub fn park(&mut self) {
         self.0.values_mut().for_each(|part| part.park());
     }

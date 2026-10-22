@@ -88,9 +88,8 @@ async fn new_guest_string(c: &mut Caller<'_, Host>, text: &str) -> Result<i32> {
 }
 
 /// The guest's one host function, `__host(operation, request)`: two strings
-/// in, a JSON string out, answered from the scope's database (see
-/// [`crate::db`]). It may await storage; the guest waits on its fiber. The
-/// returned value is the caller's to free.
+/// in, a JSON string out ([`host_answer`]). It may await storage; the guest
+/// waits on its fiber. The returned value is the caller's to free.
 async fn host_call(
     c: &mut Caller<'_, Host>,
     name: (i32, i32),
@@ -222,7 +221,7 @@ impl QuickJs {
         );
         self.limits(vm).await?;
         self.host_function(vm).await?;
-        self.eval(vm, BOOTSTRAP, false).await?;
+        self.eval(vm, BOOTSTRAP).await?;
         self.eval_module(vm, source).await?;
         self.drain(vm).await
     }
@@ -267,10 +266,8 @@ impl QuickJs {
         self.eval(
             vm,
             "__durable.bind(globalThis.__namespace); delete globalThis.__namespace",
-            false,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Define the global `__host`, the guest's one host function, which the
@@ -372,7 +369,8 @@ impl QuickJs {
         result
     }
 
-    async fn eval(&self, vm: &mut Vm, code: &str, stringify: bool) -> Result<Option<String>> {
+    /// Evaluate `code` as a script, for its effects.
+    async fn eval(&self, vm: &mut Vm, code: &str) -> Result<()> {
         let code_ptr = self.alloc(vm, code.as_bytes()).await?;
         let filename = self.alloc(vm, b"program.js").await?;
         let value = self
@@ -386,16 +384,11 @@ impl QuickJs {
         self.free.call_async(&mut vm.store, filename).await?;
         ensure!(value != 0, "Missing evaluated value");
         let is_exception = self.is_exception.call_async(&mut vm.store, value).await? != 0;
-        let result = if !is_exception && stringify {
-            Some(self.string(vm, value).await?)
-        } else {
-            None
-        };
         self.free_value.call_async(&mut vm.store, value).await?;
         if is_exception {
             bail!("Guest exception: {}", self.exception(vm).await?)
         }
-        Ok(result)
+        Ok(())
     }
 
     /// Call a bridge hook, `__durable.<name>(argument)`, with an optional

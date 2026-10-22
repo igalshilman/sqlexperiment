@@ -155,7 +155,7 @@ impl Attached for Checkpointed {
             "fs.write" => {
                 let path = path(&input)?;
                 let Some(content) = input["content"].as_str() else {
-                    return Err(type_error("A file's content is a string"));
+                    return Err(GuestError::type_error("A file's content is a string"));
                 };
                 self.unchanging()?;
                 self.changes.insert(path, Change::Text(content.to_owned()));
@@ -178,7 +178,7 @@ impl Attached for Checkpointed {
                     .collect();
                 Ok(json!(paths))
             }
-            _ => Err(type_error(format!("No call {op}"))),
+            _ => Err(GuestError::type_error(format!("No call {op}"))),
         }
     }
 
@@ -189,7 +189,7 @@ impl Attached for Checkpointed {
             return Ok(());
         };
         if name != "fs.exec" {
-            return Err(type_error(format!("No operation {name}")));
+            return Err(GuestError::type_error(format!("No operation {name}")));
         }
         if self.running.is_some() {
             return Err(GuestError::new("Error", "A command is already running"));
@@ -205,7 +205,7 @@ impl Attached for Checkpointed {
         _tables: &mut Tables<'_>,
     ) -> Result<Making, GuestError> {
         let Some(command) = call.input["command"].as_str().map(str::to_owned) else {
-            return Err(type_error("A command is a string"));
+            return Err(GuestError::type_error("A command is a string"));
         };
         let timeout = match call.input["timeout"].as_f64() {
             Some(seconds) if seconds > 0.0 => Duration::from_secs_f64(seconds).min(MAX_TIMEOUT),
@@ -373,19 +373,15 @@ async fn files_in(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
 /// The input's `path`, normalized: relative, without `.` or `..`.
 fn path(input: &Value) -> Result<String, GuestError> {
     let Some(path) = input["path"].as_str() else {
-        return Err(type_error("A path is a string"));
+        return Err(GuestError::type_error("A path is a string"));
     };
     let parts: Vec<&str> = (path.split('/'))
         .filter(|part| !part.is_empty() && *part != ".")
         .collect();
     if parts.is_empty() || parts.contains(&"..") || path.starts_with('/') || path.len() > 1024 {
-        return Err(type_error(format!(
+        return Err(GuestError::type_error(format!(
             "Invalid path {path:?}: relative, without .."
         )));
     }
     Ok(parts.join("/"))
-}
-
-fn type_error(message: impl Into<String>) -> GuestError {
-    GuestError::new("TypeError", message)
 }

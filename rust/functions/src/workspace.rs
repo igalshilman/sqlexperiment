@@ -35,6 +35,7 @@ const MAX_READ: usize = 100_000;
 const DEFAULT_TIMEOUT: u64 = 120;
 const MAX_TIMEOUT: u64 = 600;
 
+/// The `workspace` object: each key a directory under `root`.
 pub struct Workspace {
     root: PathBuf,
 }
@@ -113,10 +114,13 @@ impl Workspace {
         let Bash { command, timeout } = input.into_inner();
         let dir = self.dir(ctx.key()).await?;
         let timeout = Duration::from_secs(timeout.unwrap_or(DEFAULT_TIMEOUT).min(MAX_TIMEOUT));
-        ctx.run(|| run(&dir, &command, timeout))
-            .name("bash")
-            .await
-            .map_err(Into::into)
+        ctx.run(|| async {
+            let (exit, output) = run_command(&dir, &command, timeout).await?;
+            Ok(Json(Ran { exit, output }))
+        })
+        .name("bash")
+        .await
+        .map_err(Into::into)
     }
 
     /// The text of the file at `path`.
@@ -173,17 +177,10 @@ impl Workspace {
     }
 }
 
-/// Run `command` in `dir` until it exits or `timeout` passes, and then kill
-/// it with everything it started.
-async fn run(dir: &Path, command: &str, timeout: Duration) -> HandlerResult<Json<Ran>> {
-    let (exit, output) = run_command(dir, command, timeout).await?;
-    Ok(Json(Ran { exit, output }))
-}
-
 /// Run `command` with bash in `dir`, with a clean environment, until it
 /// exits or `timeout` passes, and then kill it with everything it started:
 /// its exit code (-1 if killed), and its output, stdout then stderr, cut to
-/// 30 KB.
+/// [`MAX_OUTPUT`].
 pub(crate) async fn run_command(
     dir: &Path,
     command: &str,

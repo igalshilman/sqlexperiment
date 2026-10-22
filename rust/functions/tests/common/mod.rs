@@ -41,12 +41,6 @@ impl Store {
         self.kv.stats().bytes_written as usize
     }
 
-    /// Puts and deletes so far.
-    pub fn writes(&self) -> usize {
-        let stats = self.kv.stats();
-        (stats.puts + stats.deletes) as usize
-    }
-
     fn open(&self) -> Sql {
         let journal = block(Journal::open(self.kv.clone())).unwrap();
         block(Sql::open(&journal)).unwrap()
@@ -140,14 +134,8 @@ pub fn block<F: Future>(future: F) -> F::Output {
 
 /// Run "r" of `source`'s program "v1" in `store`: started, or another attempt.
 pub fn start(store: &Store, source: &str, input: Value, now: u64) -> Result<Run> {
-    start_in(&store.scope(), source, input, now)
-}
-
-/// Run "r" of Python `source`'s program "v1" in `store`: started, or another
-/// attempt.
-pub fn start_python(store: &Store, source: &str, input: Value, now: u64) -> Result<Run> {
     block(Run::start(
-        &catalog(Language::Python, source),
+        &programs(source),
         &store.scope(),
         "s",
         "r",
@@ -158,11 +146,12 @@ pub fn start_python(store: &Store, source: &str, input: Value, now: u64) -> Resu
     ))
 }
 
-/// [`start`], in `scope`.
-pub fn start_in(scope: &Scope, source: &str, input: Value, now: u64) -> Result<Run> {
+/// Run "r" of Python `source`'s program "v1" in `store`: started, or another
+/// attempt.
+pub fn start_python(store: &Store, source: &str, input: Value, now: u64) -> Result<Run> {
     block(Run::start(
-        &programs(source),
-        scope,
+        &catalog(Language::Python, source),
+        &store.scope(),
         "s",
         "r",
         "v1",
@@ -211,10 +200,10 @@ pub fn kv(store: &Store, key: &str) -> Option<Value> {
 /// request's ID; null for anything else.
 pub fn answer(run: &mut Run, operation: &Operation) -> Outcome {
     match operation {
-        Operation::Rpc { id, .. } => match block(run.input(id)).expect("the input") {
-            Ok(input) => Outcome::success(json!({"id": id, "input": input})),
-            Err(error) => Outcome::failure(error.name, error.message),
-        },
+        Operation::Rpc { id, .. } => {
+            let input = block(run.input(id)).expect("the input");
+            Outcome::from_result(input.map(|input| json!({"id": id, "input": input})))
+        }
         _ => Outcome::success(Value::Null),
     }
 }
@@ -285,13 +274,10 @@ pub async fn settle(run: &mut Run) -> Value {
         let operation = view.state.pending[0].clone();
         let (outcome, now) = match &operation {
             Operation::Sleep { deadline, .. } => (Outcome::success(Value::Null), *deadline),
-            _ => match make(run, operation.id()).await {
-                Ok(value) => (Outcome::success(value), view.state.now + 1),
-                Err(error) => (
-                    Outcome::failure(error.name, error.message),
-                    view.state.now + 1,
-                ),
-            },
+            _ => {
+                let made = make(run, operation.id()).await;
+                (Outcome::from_result(made), view.state.now + 1)
+            }
         };
         run.deliver(operation.id(), outcome, now).await.unwrap();
     }

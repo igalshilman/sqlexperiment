@@ -4,10 +4,11 @@
 //! The reactor exports a small call surface: start the interpreter, run
 //! source, call one of the bridge's entry points with a string and read back
 //! the string it returns. Python code reaches the host through one import,
-//! `durable.host`, which answers database requests synchronously.
+//! `durable.host`, which answers host calls (the database's, extensions')
+//! synchronously.
 use crate::model::MAX_INPUT;
 use crate::vm::{Host, Vm, caller_memory, caller_write, host_answer};
-use crate::wasi::Files;
+use crate::wasi::Filesystem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use wasmtime::error::Context as _;
@@ -21,7 +22,7 @@ const STDLIB: &str = "lib/python3.15";
 /// The built engine: the reactor's Wasm and the standard library's sources.
 pub(crate) struct Build {
     pub(crate) wasm: Vec<u8>,
-    pub(crate) files: Arc<Files>,
+    pub(crate) filesystem: Arc<Filesystem>,
 }
 
 impl Build {
@@ -39,10 +40,10 @@ impl Build {
                 dir.display()
             )
         })?;
-        let files = Files::load(&dir.join("lib"), STDLIB)?;
+        let filesystem = Filesystem::load(&dir.join("lib"), STDLIB)?;
         Ok(Self {
             wasm,
-            files: Arc::new(files),
+            filesystem: Arc::new(filesystem),
         })
     }
 }
