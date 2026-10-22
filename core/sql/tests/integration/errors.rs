@@ -1,12 +1,14 @@
 //! Errors: SQL errors leave a session usable; anything else ends it.
-use crate::host::{Db, Durability, Setup};
+use crate::{
+    host::{Db, Durability, Setup},
+    reference::{oracle, run, text},
+};
 use journal::{
     Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
 use sql::Value;
 use std::sync::Arc;
-use turso_core::{Connection, Database, IO, MemoryIO, SqliteDialect, StepResult};
 
 fn options(durability: Durability) -> Setup {
     Setup(
@@ -157,40 +159,6 @@ fn storage_errors_end_the_session() -> Result<()> {
     })
 }
 
-/// A reference engine on plain memory, outside this crate's storage.
-fn oracle() -> Arc<Connection> {
-    let io: Arc<dyn IO> = Arc::new(MemoryIO::new());
-    Database::open_file(io, "oracle.db", Arc::new(SqliteDialect))
-        .unwrap()
-        .connect()
-        .unwrap()
-}
-
-fn run_oracle(connection: &Arc<Connection>, sql: &str) -> std::result::Result<Vec<String>, String> {
-    let mut remaining = sql;
-    let mut rows = Vec::new();
-    loop {
-        let (mut statement, end) = match connection.consume_stmt(remaining) {
-            Ok(Some(prepared)) => prepared,
-            Ok(None) => return Ok(rows),
-            Err(error) => return Err(error.to_string()),
-        };
-        remaining = &remaining[end..];
-        rows.clear();
-        loop {
-            match statement.step().map_err(|error| error.to_string())? {
-                StepResult::Row => rows.push(format!(
-                    "{:?}",
-                    statement.row().unwrap().get_values().collect::<Vec<_>>()
-                )),
-                StepResult::Done => break,
-                StepResult::IO => statement._io().step().map_err(|error| error.to_string())?,
-                other => return Err(format!("{other:?}")),
-            }
-        }
-    }
-}
-
 /// Random statements, about a third of them failing, run on a session and on
 /// a reference engine: every outcome and every state agree, including after a
 /// reopen from storage.
@@ -210,7 +178,7 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
             let reference = oracle();
             let schema = "CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER CHECK (n >= 0))";
             db.execute(schema).await?;
-            run_oracle(&reference, schema).unwrap();
+            run(&reference, schema).unwrap();
             let mut open = false;
             for step in 0..400 {
                 let sql = match next(10) {
@@ -227,7 +195,7 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
                     ),
                     _ => "SELECT id, n FROM t ORDER BY id".to_owned(),
                 };
-                let expected = run_oracle(&reference, &sql);
+                let expected = run(&reference, &sql).map(|rows| text(&rows));
                 let got = db.query(&sql).await;
                 assert_eq!(
                     expected.is_ok(),
@@ -236,19 +204,15 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
                 );
                 assert!(db.is_usable(), "step {step}: {sql}");
                 if let (Ok(expected), Ok(got)) = (&expected, &got) {
-                    let got: Vec<String> = got
-                        .iter()
-                        .map(|row| format!("{:?}", row.iter().collect::<Vec<_>>()))
-                        .collect();
-                    assert_eq!(&got, expected, "step {step}: {sql}");
+                    assert_eq!(&text(got), expected, "step {step}: {sql}");
                 }
                 open = !reference.get_auto_commit();
             }
             if open {
                 db.execute("COMMIT").await?;
-                run_oracle(&reference, "COMMIT").unwrap();
+                run(&reference, "COMMIT").unwrap();
             }
-            let expected = run_oracle(&reference, "SELECT id, n FROM t ORDER BY id").unwrap();
+            let expected = text(&run(&reference, "SELECT id, n FROM t ORDER BY id").unwrap());
             if durability == Durability::Save {
                 db.save().await?;
             } else {
@@ -256,12 +220,7 @@ fn sql_errors_match_a_reference_engine() -> Result<()> {
             }
             store.crash();
             let mut db = Db::open(store, options(durability)).await?;
-            let got: Vec<String> = db
-                .query("SELECT id, n FROM t ORDER BY id")
-                .await?
-                .iter()
-                .map(|row| format!("{:?}", row.iter().collect::<Vec<_>>()))
-                .collect();
+            let got = text(&db.query("SELECT id, n FROM t ORDER BY id").await?);
             assert_eq!(got, expected, "{durability:?} after reopen");
         }
         Ok(())

@@ -287,7 +287,10 @@ overrides it, and the log always does when it holds the page. Open compares
 the record it reads with the one it remembers: the same bytes, and this owner
 continues as it left; another record of the same epoch keeps the pages (the
 log covers whatever changed); another epoch drops them all. A save whose
-outcome is unknown forgets the record, so the next open reads afresh.
+outcome is unknown forgets the record, so the next open reads afresh. That open
+also syncs, alongside its reads: it may read the save's writes, visible but not
+yet durable, and a crash that lost them would let another history reach the
+same epoch with other pages, which the cache would then serve as current.
 
 **Keys are never reused.** The disk tier writes in the background, and a delete
 does not stop a write already queued. So a cache key is (generation, page,
@@ -374,7 +377,12 @@ checkpoint. Measurements: [log shipping](../../sql/benches/LOG_RESULTS.md),
   sees; the TLA+ specification does not model compression.
 - **Validation.** A monitor checks every write of the simulator's crash
   and handover campaigns against the rules above, and the campaigns crash at
-  every sync keeping each prefix of its writes. The TLA+ specification
+  every sync keeping each prefix of its writes. A seeded random campaign over
+  the public API (`tests/campaign.rs`; `JOURNAL_SEEDS=<n>` runs more seeds)
+  mixes changes to records and files, faults, cancellations, crashes, reopens
+  and owners, and compares every reopen with a model; other tests drop a
+  commit after every number of polls, corrupt every stored value, and fuzz the
+  decoders. The TLA+ specification
   ([spec/README.md](../spec/README.md)) models this protocol over a store
   that keeps writes in order, with the owner cache, and TLC checks it in
   small bounds. The Restate crash tests kill processes;

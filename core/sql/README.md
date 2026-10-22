@@ -86,3 +86,11 @@ cargo run --locked --features simulation --example lookup
 
 The `simulation` feature turns on the journal's in-memory KV store, fault
 injection and latency simulator, used by most tests and all benchmarks.
+
+The randomized campaign (`tests/integration/campaign.rs`) runs a few seeds by
+default; run more, or replay a failing one with a trace:
+
+```sh
+SQL_CAMPAIGN_SEEDS=1000 cargo test --locked --release --features simulation --test integration campaign
+SQL_CAMPAIGN_SEED=17 SQL_CAMPAIGN_TRACE=1 cargo test --locked --features simulation --test integration campaign -- --nocapture
+```

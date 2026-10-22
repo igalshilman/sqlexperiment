@@ -14,7 +14,7 @@
 //! [`Session::close`], or a failure; later calls fail.
 use crate::{Result, Rows, Sql, Value};
 use bytes::Bytes;
-use futures::lock::Mutex;
+use futures::lock::{Mutex, MutexGuard};
 use journal::{Journal, PageCache, PageCacheConfig, StorageOptions, kv::KvStore};
 use std::{
     io,
@@ -49,16 +49,27 @@ impl Session {
     /// store, and [`Self::is_current`] says whether what it read is still the
     /// stored state.
     pub async fn open(store: Arc<dyn KvStore>, namespace: &str, reader: bool) -> Result<Self> {
+        let cache = match reader {
+            true => None,
+            false => Some(page_cache().await?.namespace(namespace)),
+        };
+        let options = StorageOptions {
+            cache,
+            ..StorageOptions::default()
+        };
+        Self::open_with_options(store, options, reader).await
+    }
+
+    /// [`Self::open`] with explicit [`StorageOptions`], the page cache
+    /// included (a reader keeps none).
+    pub async fn open_with_options(
+        store: Arc<dyn KvStore>,
+        options: StorageOptions,
+        reader: bool,
+    ) -> Result<Self> {
         let journal = match reader {
-            true => Journal::open_reader(store, StorageOptions::default()).await?,
-            false => {
-                let cache = Some(page_cache().await?.namespace(namespace));
-                let options = StorageOptions {
-                    cache,
-                    ..StorageOptions::default()
-                };
-                Journal::open_with_options(store, options).await?
-            }
+            true => Journal::open_reader(store, options).await?,
+            false => Journal::open_with_options(store, options).await?,
         };
         Ok(Self {
             sql: Mutex::new(Some(Sql::open(&journal).await?)),
@@ -97,6 +108,11 @@ impl Session {
     pub async fn commit(&self, effects: Option<Bytes>) -> Result<()> {
         self.call(async |session| {
             self.in_body.store(false, Ordering::Release);
+            // Nothing commits on a session a failure ended: the effects would
+            // stay pending, and the call would resolve as if they committed.
+            if !session.is_usable() {
+                return Err(ENDED.into());
+            }
             if let Some(effects) = &effects {
                 if self.reader {
                     return Err("a reader commits no effects".into());
@@ -131,8 +147,8 @@ impl Session {
     }
 
     /// Whether the session can still run SQL: an SQL error leaves it usable,
-    /// a storage error ends it. A call that is running does not change the
-    /// answer until it ends.
+    /// a storage error or a cancelled call ends it. A call that is running
+    /// does not change the answer until it ends.
     pub fn is_usable(&self) -> bool {
         self.usable.load(Ordering::Acquire)
     }
@@ -160,7 +176,7 @@ impl Session {
         self.usable.store(false, Ordering::Release);
         let session = session.ok_or(CLOSED)?;
         if !session.is_usable() {
-            return Err("a failure ended the session".into());
+            return Err(ENDED.into());
         }
         if session.in_transaction() {
             return Err("a transaction was left open: its changes are lost".into());
@@ -180,15 +196,18 @@ impl Session {
     /// journal, even after an SQL error (the statements before it stand): what
     /// the SQL committed, with the effects set, durable before the call
     /// returns. A reader commits nothing, and a session that a failure ended
-    /// cannot.
+    /// cannot. A call dropped before it returns ends the session.
     async fn call<T>(&self, call: impl AsyncFnOnce(&mut Sql) -> Result<T>) -> Result<T> {
-        let mut sql = self.sql.lock().await;
-        let session = sql.as_mut().ok_or(CLOSED)?;
+        let mut running = Running {
+            sql: self.sql.lock().await,
+            usable: &self.usable,
+            returned: false,
+        };
+        let session = running.sql.as_mut().ok_or(CLOSED)?;
         let result = call(session).await;
         if self.in_body.load(Ordering::Acquire) && !session.in_transaction() {
             self.in_body.store(false, Ordering::Release);
-            self.usable.store(false, Ordering::Release);
-            sql.take();
+            // `running` ends the session as it drops.
             return Err("a statement ended the transaction of transaction(), whose body must not: the session has ended".into());
         }
         let committed = match !self.reader && session.is_usable() && !session.in_transaction() {
@@ -196,12 +215,33 @@ impl Session {
             false => Ok(()),
         };
         self.usable.store(session.is_usable(), Ordering::Release);
+        running.returned = true;
         committed.and(result)
+    }
+}
+
+/// A call holding the session: unless it returns, its state is unknown (a
+/// cancelled statement, a commit whose outcome is unknown), and dropping
+/// this ends the session.
+struct Running<'a> {
+    sql: MutexGuard<'a, Option<Sql>>,
+    usable: &'a AtomicBool,
+    returned: bool,
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        if !self.returned {
+            self.usable.store(false, Ordering::Release);
+            self.sql.take();
+        }
     }
 }
 
 /// The error of a call after the session ended.
 const CLOSED: &str = "the database is closed";
+/// The error of a call that would commit after a failure ended the session.
+const ENDED: &str = "a failure ended the session";
 
 async fn commit_journal(session: &mut Sql) -> Result<()> {
     session.flush().await?;

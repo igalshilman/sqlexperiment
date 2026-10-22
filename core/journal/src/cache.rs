@@ -35,6 +35,12 @@
 //! session can tell another committed since it opened) and what participants
 //! left idle at that commit (SQL's engine, say), for the next session.
 //!
+//! A commit whose outcome is unknown leaves writes this owner can read but a
+//! crash can still lose. Were the next open to trust them, the cache could
+//! keep pages and stored values of a history that never became durable, under
+//! an epoch that another history reaches later with other pages. So that open
+//! syncs first ([`NamespaceCache::unsettled`]): what it reads is durable.
+//!
 //! Namespace states are kept for a bounded number of namespaces, and idle
 //! state within a byte budget, least recently used first; forgetting either
 //! only makes a namespace cold.
@@ -232,6 +238,10 @@ struct Owner {
     /// Stored log values a durable record named, by number: a number is never
     /// reused once named, so they stay valid while a record names them.
     values: crate::log::Values,
+    /// Commits with an unknown outcome so far, and how many of them a sync
+    /// has settled since.
+    unknown: u64,
+    settled: u64,
 }
 
 impl NamespaceCache {
@@ -306,8 +316,26 @@ impl NamespaceCache {
     /// unknown. Cached pages stay: a checkpoint that landed moved the epoch,
     /// which the next open sees.
     pub(crate) fn forget(&self) {
-        let stale = self.forget_locked(&mut self.owner());
+        let mut owner = self.owner();
+        owner.unknown += 1;
+        let stale = self.forget_locked(&mut owner);
+        drop(owner);
         drop(stale);
+    }
+
+    /// The commits with an unknown outcome so far, if a sync has not settled
+    /// them all: their writes may be visible and yet not durable, so an open
+    /// syncs before the cache keeps what it reads.
+    pub(crate) fn unsettled(&self) -> Option<u64> {
+        let owner = self.owner();
+        (owner.unknown != owner.settled).then_some(owner.unknown)
+    }
+
+    /// A sync succeeded after the first `unknown` commits with an unknown
+    /// outcome (see [`Self::unsettled`]).
+    pub(crate) fn settled(&self, unknown: u64) {
+        let mut owner = self.owner();
+        owner.settled = owner.settled.max(unknown);
     }
 
     /// The stored log values this owner holds, of those in `named`.
@@ -487,6 +515,8 @@ impl Owner {
             hint: None,
             readers: BTreeMap::new(),
             values: crate::log::Values::new(),
+            unknown: 0,
+            settled: 0,
         }
     }
 

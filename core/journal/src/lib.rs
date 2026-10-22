@@ -634,8 +634,12 @@ impl File {
             return Err(format!("invalid file length {len}").into());
         }
         self.change(|written| {
+            // Every page past it a hole: those written since the last commit
+            // too, as an earlier shrink may have cut committed pages there.
             let kept = len.div_ceil(PAGE);
-            written.pages.retain(|&page, _| page < kept);
+            for (_, image) in written.pages.range_mut(kept..) {
+                *image = None;
+            }
             for page in kept..written.size.div_ceil(PAGE) {
                 written.pages.insert(page, None);
             }
