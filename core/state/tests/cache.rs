@@ -3,17 +3,19 @@
 #![cfg(feature = "simulation")]
 mod support;
 
-use state::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
+use state::{Result, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
 /// Options that checkpoint at every flush.
-fn options(cache: Option<&NamespaceCache>) -> StorageOptions {
-    StorageOptions {
+fn options(cache: Option<&Namespace>) -> Setup {
+    Setup {
+        options: StateOptions {
+            checkpoint_after: 0,
+            inline_log_bytes: 256,
+            ..StateOptions::default()
+        },
         cache: cache.cloned(),
-        checkpoint_after: 0,
-        inline_log_bytes: 256,
-        ..StorageOptions::default()
     }
 }
 
@@ -30,7 +32,7 @@ fn failing_sync() -> Failpoint {
 /// Flush `ops` in a new session; the model follows.
 async fn flush(
     store: &Arc<dyn KvStore>,
-    cache: Option<&NamespaceCache>,
+    cache: Option<&Namespace>,
     model: &mut Model,
     ops: &[Op],
 ) -> Result<()> {
@@ -114,9 +116,9 @@ fn a_reader_beside_a_checkpointing_owner_knows_when_it_is_stale() -> Result<()> 
                 .map(|_| Op::random(&mut rng))
                 .collect();
             flush(&store, Some(&owner), &mut model, &ops).await?;
-            let lazy = StorageOptions {
+            let lazy = StateOptions {
                 prefetch_pages: rng.below(2) * 16,
-                ..StorageOptions::default()
+                ..StateOptions::default()
             };
             let reader = Session::reader(store.clone(), lazy).await?;
             let opened = model.clone();

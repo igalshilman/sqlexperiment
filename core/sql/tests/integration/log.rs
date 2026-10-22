@@ -1,11 +1,11 @@
 use crate::host::Db;
-use state::{Result, StorageOptions, simulation::MemoryKv};
+use state::{Result, StateOptions, simulation::MemoryKv};
 use std::sync::Arc;
 
-fn options(checkpoint_after: u32) -> StorageOptions {
-    StorageOptions {
+fn options(checkpoint_after: u32) -> StateOptions {
+    StateOptions {
         checkpoint_after,
-        ..StorageOptions::default()
+        ..StateOptions::default()
     }
 }
 
@@ -67,7 +67,7 @@ fn sql_sessions_match_a_model_across_checkpoint_policies() -> Result<()> {
             let mut db = Db::open(Arc::new(store.clone()), options(policy)).await?;
             assert_eq!(summary(&mut db).await?, expected, "round {round}");
         }
-        let mut db = Db::open(Arc::new(store.clone()), StorageOptions::default()).await?;
+        let mut db = Db::open(Arc::new(store.clone()), StateOptions::default()).await?;
         let rows = db
             .query("SELECT count(*) FROM t INDEXED BY by_payload WHERE payload > ''")
             .await?;

@@ -5,7 +5,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either, select},
 };
-use state::{Result, StorageOptions, kv::KvStore, simulation::MemoryKv};
+use state::{Result, StateOptions, kv::KvStore, simulation::MemoryKv};
 use std::{
     io,
     sync::{
@@ -53,7 +53,7 @@ async fn populated() -> Result<Arc<ControlledKv>> {
         fail_reads: AtomicBool::new(false),
         gate: Mutex::new(None),
     });
-    let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+    let mut db = Db::open(store.clone(), StateOptions::default()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
         .await?;
     db.execute("INSERT INTO t VALUES(1,10)").await?;
@@ -61,25 +61,25 @@ async fn populated() -> Result<Arc<ControlledKv>> {
     db.save().await?;
     // A save that checkpoints the log, so reading `t` goes to the backend,
     // then one that leaves the schema page in the log, for open to read.
-    let all = StorageOptions {
+    let all = StateOptions {
         checkpoint_after: 0,
-        ..StorageOptions::default()
+        ..StateOptions::default()
     };
     let mut db = Db::open(store.clone(), all).await?;
     db.execute("CREATE TABLE other(x)").await?;
     db.save().await?;
-    let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+    let mut db = Db::open(store.clone(), StateOptions::default()).await?;
     db.execute("CREATE TABLE another(x)").await?;
     db.save().await?;
     Ok(store)
 }
 
 /// Page reads happen during the query, not at open.
-fn no_prefetch() -> StorageOptions {
-    StorageOptions {
+fn no_prefetch() -> StateOptions {
+    StateOptions {
         prefetch_pages: 0,
         hint_pages: 0,
-        ..StorageOptions::default()
+        ..StateOptions::default()
     }
 }
 
@@ -95,7 +95,7 @@ fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
         }
         drop(db);
         store.fail_reads.store(false, Ordering::SeqCst);
-        let mut db = Db::open(store, StorageOptions::default()).await?;
+        let mut db = Db::open(store, StateOptions::default()).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
         Ok(())
     })
@@ -127,7 +127,7 @@ fn cancellation_during_pending_kv_read_poison_session_without_publishing() -> Re
         );
         drop(db);
         assert_eq!(store.inner.stats().puts, 0);
-        let mut db = Db::open(store, StorageOptions::default()).await?;
+        let mut db = Db::open(store, StateOptions::default()).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
         Ok(())
     })

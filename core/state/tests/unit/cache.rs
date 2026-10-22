@@ -1,5 +1,5 @@
 use super::*;
-use crate::simulation::{fresh_namespace, shared_cache};
+use crate::simulation::{fresh_namespace_cache, shared_cache};
 
 fn value(n: usize) -> Page {
     Page::from(vec![n as u8; n])
@@ -8,7 +8,7 @@ fn value(n: usize) -> Page {
 #[test]
 fn namespaces_never_share_pages() {
     futures::executor::block_on(async {
-        let (a, b) = (fresh_namespace(), fresh_namespace());
+        let (a, b) = (fresh_namespace_cache(), fresh_namespace_cache());
         a.insert(1, value(4));
         assert_eq!(a.get(1).await, Some(value(4)));
         assert_eq!(b.get(1).await, None, "same page and meta, other namespace");
@@ -24,7 +24,7 @@ fn namespaces_never_share_pages() {
 #[test]
 fn replaced_and_removed_pages_get_new_keys() {
     futures::executor::block_on(async {
-        let cache = fresh_namespace();
+        let cache = fresh_namespace_cache();
         cache.insert(1, value(4));
         let old = cache.key(1);
         cache.replace(1, value(5));
@@ -44,7 +44,7 @@ fn replaced_and_removed_pages_get_new_keys() {
 fn another_record_forgets_the_commit_and_another_epoch_the_pages() {
     futures::executor::block_on(async {
         let record = |n: u8| Page::from(vec![b'S', b'C', b'1', b'4', n]);
-        let cache = fresh_namespace();
+        let cache = fresh_namespace_cache();
         assert!(!cache.validate(None, 0), "a fresh owner knows nothing");
         assert!(!cache.knows_pages());
         cache.record(None, 0, Some(0));
@@ -83,16 +83,12 @@ fn another_record_forgets_the_commit_and_another_epoch_the_pages() {
 /// engine does); dropping the last `PageCache` still frees everything.
 #[test]
 fn dropping_the_cache_frees_idle_state() -> crate::Result<()> {
-    use crate::{StorageOptions, kv::KvStore, simulation::*};
+    use crate::{kv::KvStore, simulation::*};
     futures::executor::block_on(async {
         let cache = open_cache(cache_config(1 << 20, 16 << 20));
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
         let namespace = cache.namespace("parked");
-        let options = StorageOptions {
-            cache: Some(namespace.clone()),
-            ..StorageOptions::default()
-        };
-        let state = crate::State::open_with_options(store, options).await?;
+        let state = crate::State::open(store).cached(&cache, "parked").await?;
         let freed = Arc::new(());
         let idle = (namespace, freed.clone());
         assert!(state.join("engine")?.park(idle, 1).is_ok());

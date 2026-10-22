@@ -1,7 +1,7 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
 use sql::Sql;
 use state::{
-    Result, State, StorageOptions,
+    Result, State, StateOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
 };
 use std::sync::Arc;
@@ -105,28 +105,28 @@ fn sum(s: &Stats) -> Traffic {
 }
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Sql::open(
-        &State::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?,
-    )
-    .await?;
+    let mut db = Sql::open(&State::open(Arc::new(store.clone())).await?).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x%10, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
     save(db).await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
-    let mut db =
-        Sql::open(&State::open_with_options(Arc::new(store.clone()), checkpoint_all()).await?)
-            .await?;
+    let mut db = Sql::open(
+        &State::open(Arc::new(store.clone()))
+            .options(checkpoint_all())
+            .await?,
+    )
+    .await?;
     db.execute("CREATE TABLE other(x)").await?;
     save(db).await?;
     store.crash();
     Ok(store)
 }
-fn checkpoint_all() -> StorageOptions {
-    StorageOptions {
+fn checkpoint_all() -> StateOptions {
+    StateOptions {
         checkpoint_after: 0,
-        ..StorageOptions::default()
+        ..StateOptions::default()
     }
 }
 
@@ -369,7 +369,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
         let mut db =
-            Sql::open(&State::open_with_options(store.clone(), checkpoint_all()).await?).await?;
+            Sql::open(&State::open(store.clone()).options(checkpoint_all()).await?).await?;
         db.execute(&format!(
             "UPDATE t SET payload=printf('%0{}d',0) WHERE id={}",
             case.payload,

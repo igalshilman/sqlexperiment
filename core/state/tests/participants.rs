@@ -1,7 +1,7 @@
 //! Participants: one per name, a flush refused while one holds changes not
 //! yet in a WAL, and idle state handed to the next state.
 #![cfg(feature = "simulation")]
-use state::{Result, State, StorageOptions, kv::KvStore, simulation::*};
+use state::{Result, State, kv::KvStore, simulation::*};
 use std::sync::Arc;
 
 #[test]
@@ -45,11 +45,8 @@ fn a_flush_waits_for_unflushed_participants() -> Result<()> {
 fn idle_state_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
     futures::executor::block_on(async {
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
-        let options = || StorageOptions {
-            cache: Some(shared_cache().namespace("idle-state")),
-            ..StorageOptions::default()
-        };
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let open = || State::open(store.clone()).cached(shared_cache(), "idle-state");
+        let state = open().await?;
         let mut wal = state.wal();
         wal.set(&state.record("n"), "1".into())?;
         wal.flush().await?;
@@ -57,7 +54,7 @@ fn idle_state_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
         engine.park(7u32, 1).unwrap();
         drop((engine, state));
 
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = open().await?;
         let engine = state.join("engine")?;
         assert_eq!(engine.take_idle::<u32>(), Some(7));
         // A WAL changes nothing until it flushes: the state is still at the
@@ -70,13 +67,13 @@ fn idle_state_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
         drop((engine, state));
 
         // Another state of the owner flushes: what was idle is stale.
-        let state = State::open_with_options(store.clone(), options()).await?;
-        let other = State::open_with_options(store.clone(), options()).await?;
+        let state = open().await?;
+        let other = open().await?;
         let mut wal = other.wal();
         wal.set(&other.record("n"), "3".into())?;
         wal.flush().await?;
         drop((state, other));
-        let state = State::open_with_options(store, options()).await?;
+        let state = open().await?;
         assert_eq!(state.join("engine")?.take_idle::<u32>(), None);
         Ok(())
     })

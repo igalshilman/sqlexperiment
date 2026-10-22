@@ -1,19 +1,23 @@
+use crate::host::StateSetup;
 use crate::host::{Db, Durability};
+use state::simulation::Namespace;
 use state::{
-    NamespaceCache, Result, StorageOptions,
+    Result, StateOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, fresh_namespace},
 };
 use std::sync::Arc;
 
-fn cached(cache: &NamespaceCache) -> StorageOptions {
-    StorageOptions {
+fn cached(cache: &Namespace) -> StateSetup {
+    StateSetup {
+        options: StateOptions {
+            ..StateOptions::default()
+        },
         cache: Some(cache.clone()),
-        ..StorageOptions::default()
     }
 }
 
-async fn create(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<()> {
+async fn create(store: Arc<dyn KvStore>, options: StateSetup) -> Result<()> {
     let mut db = Db::open(store, options).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT)")
         .await?;
@@ -23,7 +27,7 @@ async fn create(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<()> 
     Ok(())
 }
 
-async fn payload_sum(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<i64> {
+async fn payload_sum(store: Arc<dyn KvStore>, options: StateSetup) -> Result<i64> {
     let mut db = Db::open(store, options).await?;
     let rows = db.query("SELECT sum(length(payload) + id) FROM t").await?;
     Ok(rows[0][0].as_int().unwrap())
@@ -46,7 +50,7 @@ fn an_owner_cache_serves_reopened_sessions_in_one_round_trip() -> Result<()> {
 
         store.inner.reset_stats();
         assert_eq!(
-            payload_sum(store.clone(), StorageOptions::default()).await?,
+            payload_sum(store.clone(), StateOptions::default().into()).await?,
             expected
         );
         assert!(store.inner.stats().kind("page").gets > 0);
@@ -65,9 +69,9 @@ fn other_writers_never_leave_the_cache_stale() -> Result<()> {
         let mut expected = 400 * 900 + 400 * 401 / 2;
         assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
         for (round, checkpoint_after) in [(0, 0), (1, 100), (2, 100), (3, 0)] {
-            let other = StorageOptions {
+            let other = StateOptions {
                 checkpoint_after,
-                ..StorageOptions::default()
+                ..StateOptions::default()
             };
             let mut db = Db::open(store.clone(), other).await?;
             db.execute(&format!(
@@ -82,10 +86,12 @@ fn other_writers_never_leave_the_cache_stale() -> Result<()> {
     })
 }
 
-fn owner(cache: &NamespaceCache) -> StorageOptions {
-    StorageOptions {
+fn owner(cache: &Namespace) -> StateSetup {
+    StateSetup {
+        options: StateOptions {
+            ..StateOptions::default()
+        },
         cache: Some(cache.clone()),
-        ..StorageOptions::default()
     }
 }
 async fn count(db: &mut Db) -> Result<i64> {
@@ -140,9 +146,9 @@ fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
 
         // Another writer appends, then checkpoints: both force a fresh engine.
         for checkpoint_after in [100, 0] {
-            let other = StorageOptions {
+            let other = StateOptions {
                 checkpoint_after,
-                ..StorageOptions::default()
+                ..StateOptions::default()
             };
             let mut db = Db::open(store.clone(), other).await?;
             db.execute("INSERT INTO t SELECT max(id) + 1 FROM t")
@@ -189,8 +195,11 @@ fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
             let other = fresh_namespace();
             for n in 0..saves {
                 // Its fifth save checkpoints.
-                let options = StorageOptions {
-                    checkpoint_after: 4,
+                let options = StateSetup {
+                    options: StateOptions {
+                        checkpoint_after: 4,
+                        ..StateOptions::default()
+                    },
                     ..cached(&other)
                 };
                 let mut db = Db::open(store.clone(), options).await?;
@@ -220,10 +229,12 @@ fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
         let stores: Vec<Arc<dyn KvStore>> = (0..2)
             .map(|_| Arc::new(MemoryKv::default()) as Arc<dyn KvStore>)
             .collect();
-        let options = |n: usize| StorageOptions {
-            cache: Some(cache.namespace(&format!("shared-{n}"))),
-            checkpoint_after: 0,
-            ..StorageOptions::default()
+        let options = |n: usize| StateSetup {
+            options: StateOptions {
+                checkpoint_after: 0,
+                ..StateOptions::default()
+            },
+            cache: Some(Namespace::new(cache, &format!("shared-{n}"))),
         };
         // The same history shape, so the same meta, with different values.
         for (n, store) in stores.iter().enumerate() {
@@ -258,7 +269,7 @@ fn evicted_pages_are_read_from_disk() -> Result<()> {
     futures::executor::block_on(async {
         let cache = open_cache(cache_config(64 << 10, 64 << 20));
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
-        let namespace = cache.namespace("spilled");
+        let namespace = Namespace::new(&cache, "spilled");
         create(store.clone(), cached(&namespace)).await?;
         assert!(cache.memory_bytes() <= 64 << 10);
         store.inner.reset_stats();
@@ -286,10 +297,10 @@ fn parked_engines_are_bounded() -> Result<()> {
         });
         let store: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
         let other: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
-        let a = || owner(&cache.namespace("a"));
+        let a = || owner(&Namespace::new(&cache, "a"));
         drop(Db::open(store.clone(), a()).await?);
         assert!(Db::open(store.clone(), a()).await?.reused_engine());
-        drop(Db::open(other, owner(&cache.namespace("b"))).await?);
+        drop(Db::open(other, owner(&Namespace::new(&cache, "b"))).await?);
         let db = Db::open(store, a()).await?;
         assert!(!db.reused_engine(), "evicted by b's engine");
         Ok(())
@@ -318,7 +329,7 @@ fn an_overlapping_session_never_parks_a_stale_engine() -> Result<()> {
         assert_eq!(count(&mut db).await?, 1);
         db.execute("INSERT INTO t VALUES (2)").await?;
         db.save().await?;
-        let mut cold = Db::open(store, StorageOptions::default()).await?;
+        let mut cold = Db::open(store, StateOptions::default()).await?;
         assert_eq!(count(&mut cold).await?, 2, "no flush lost");
         Ok(())
     })
@@ -364,9 +375,9 @@ fn connection_state_never_reaches_the_next_session() -> Result<()> {
 fn a_reused_engine_has_fresh_connection_counters() -> state::Result<()> {
     futures::executor::block_on(async {
         let store = std::sync::Arc::new(state::simulation::MemoryKv::default());
-        let options = state::StorageOptions {
+        let options = StateSetup {
+            options: state::StateOptions::default(),
             cache: Some(state::simulation::fresh_namespace()),
-            ..state::StorageOptions::default()
         };
         let mut db = Db::open(store.clone(), options.clone()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
@@ -375,7 +386,7 @@ fn a_reused_engine_has_fresh_connection_counters() -> state::Result<()> {
         let counters = "SELECT last_insert_rowid(), changes(), total_changes()";
         let mut warm = Db::open(store.clone(), options).await?;
         assert!(warm.reused_engine());
-        let mut cold = Db::open(store, StorageOptions::default()).await?;
+        let mut cold = Db::open(store, StateOptions::default()).await?;
         assert_eq!(warm.query(counters).await?, cold.query(counters).await?);
         assert_eq!(warm.query(counters).await?[0][0].as_int(), Some(0));
         Ok(())
@@ -394,27 +405,29 @@ fn an_evicted_namespace_keeps_one_state_while_in_use() -> Result<()> {
             ..cache_config(1 << 20, 64 << 20)
         });
         let store = Arc::new(MemoryKv::default());
-        let options = |namespace: NamespaceCache| {
+        let options = |namespace: Namespace| {
             (
-                StorageOptions {
+                StateSetup {
+                    options: StateOptions {
+                        ..StateOptions::default()
+                    },
                     cache: Some(namespace),
-                    ..StorageOptions::default()
                 },
                 Durability::Commit,
             )
         };
-        let mut first = Db::open(store.clone(), options(cache.namespace("a"))).await?;
+        let mut first = Db::open(store.clone(), options(Namespace::new(&cache, "a"))).await?;
         first
             .execute("CREATE TABLE t(id INTEGER PRIMARY KEY)")
             .await?;
         for other in 0..1000 {
-            cache.namespace(&format!("other-{other}")); // evicts "a"
+            Namespace::new(&cache, &format!("other-{other}")); // evicts "a"
         }
-        let mut second = Db::open(store.clone(), options(cache.namespace("a"))).await?;
+        let mut second = Db::open(store.clone(), options(Namespace::new(&cache, "a"))).await?;
         second.execute("INSERT INTO t VALUES(1)").await?;
         assert!(first.execute("INSERT INTO t VALUES(2)").await.is_err());
         drop((first, second));
-        let mut db = Db::open(store, StorageOptions::default()).await?;
+        let mut db = Db::open(store, StateOptions::default()).await?;
         assert_eq!(db.query("SELECT id FROM t").await?.len(), 1);
         Ok(())
     })
@@ -434,7 +447,7 @@ fn parked_engines_are_weighed_by_schema() -> Result<()> {
             ..cache_config(1 << 20, 16 << 20)
         });
         let open = |name: &str, store: &Arc<dyn KvStore>| {
-            Db::open(store.clone(), owner(&cache.namespace(name)))
+            Db::open(store.clone(), owner(&Namespace::new(&cache, name)))
         };
         let small: Vec<Arc<dyn KvStore>> = (0..4)
             .map(|_| Arc::new(MemoryKv::default()) as Arc<dyn KvStore>)

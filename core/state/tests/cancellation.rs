@@ -6,7 +6,7 @@
 mod support;
 
 use futures::task::noop_waker_ref;
-use state::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
+use state::{Result, StateOptions, kv::KvStore, simulation::*};
 use std::{
     pin::pin,
     sync::Arc,
@@ -15,12 +15,14 @@ use std::{
 use support::*;
 
 /// Every flush checkpoints, and large transactions go to stored values.
-fn options(cache: Option<NamespaceCache>) -> StorageOptions {
-    StorageOptions {
+fn options(cache: Option<Namespace>) -> Setup {
+    Setup {
+        options: StateOptions {
+            checkpoint_after: 0,
+            inline_log_bytes: 200,
+            ..StateOptions::default()
+        },
         cache,
-        checkpoint_after: 0,
-        inline_log_bytes: 200,
-        ..StorageOptions::default()
     }
 }
 

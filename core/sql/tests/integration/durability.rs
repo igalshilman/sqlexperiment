@@ -1,8 +1,10 @@
 //! `Durability::Commit`: every SQL commit is durable when its statement returns.
+use crate::host::StateSetup;
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
+use state::simulation::Namespace;
 use state::{
-    NamespaceCache, Result, StorageOptions,
+    Result, StateOptions,
     simulation::{
         Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, MonitorKv, Operation, fresh_namespace,
         logged_transactions,
@@ -10,11 +12,13 @@ use state::{
 };
 use std::sync::Arc;
 
-fn options(cache: Option<NamespaceCache>) -> Setup {
+fn options(cache: Option<Namespace>) -> Setup {
     Setup(
-        StorageOptions {
+        StateSetup {
+            options: StateOptions {
+                ..StateOptions::default()
+            },
             cache,
-            ..StorageOptions::default()
         },
         Durability::Commit,
     )
@@ -151,7 +155,7 @@ fn a_flush_is_one_round_trip_with_a_cache() -> Result<()> {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
         let cache = fresh_namespace();
         // A log the record holds inline: no flush seals it.
-        let options = options(Some(cache)).with(|o| StorageOptions {
+        let options = options(Some(cache)).with(|o| StateOptions {
             checkpoint_after: 32,
             inline_log_bytes: usize::MAX,
             ..o
@@ -199,7 +203,7 @@ async fn run_case(cached: bool, nth: usize) -> Result<Option<usize>> {
     let cache = cached.then(fresh_namespace);
     // Seals and checkpoints happen within the run.
     let options = |cache| {
-        options(cache).with(|o| StorageOptions {
+        options(cache).with(|o| StateOptions {
             checkpoint_after: 8,
             inline_log_bytes: 512,
             ..o
@@ -286,8 +290,8 @@ fn every_statement_of_a_string_runs() -> Result<()> {
         for durability in [Durability::Save, Durability::Commit] {
             let store = Arc::new(MemoryKv::default());
             let options = (
-                StorageOptions {
-                    ..StorageOptions::default()
+                StateOptions {
+                    ..StateOptions::default()
                 },
                 durability,
             );
@@ -387,7 +391,7 @@ fn an_overlapping_reader_keeps_its_view() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let namespace = fresh_namespace();
         let opts = || {
-            options(Some(namespace.clone())).with(|o| StorageOptions {
+            options(Some(namespace.clone())).with(|o| StateOptions {
                 checkpoint_after: 4,
                 prefetch_pages: 0,
                 hint_pages: 0,
@@ -567,13 +571,13 @@ fn records_flush_at_save() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let stored = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/log/")).count();
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         let large = db.state().record("large");
         assert!(large.get().is_empty());
         db.wal().set(&large, Bytes::from_static(b"one"))?;
         assert!(large.get().is_empty(), "unchanged until the flush");
         drop(db); // discarded, with its WAL
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         assert!(db.state().record("large").get().is_empty());
         db.execute("CREATE TABLE t(n)").await?;
         let (large, small) = (db.state().record("large"), db.state().record("small"));
@@ -582,20 +586,20 @@ fn records_flush_at_save() -> Result<()> {
         db.save().await?;
         assert_eq!(stored(&store), 1, "the large record, stored first");
 
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         assert_eq!(db.state().record("large").get(), vec![7; 5000]);
         assert_eq!(db.state().record("small").get(), &b"s"[..]);
         let large = db.state().record("large");
         db.wal().set(&large, Bytes::from_static(b"two"))?;
         db.save().await?;
         // The replaced value is garbage, which the next flush deletes.
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         assert_eq!(db.state().record("large").get(), &b"two"[..]);
         let small = db.state().record("small");
         db.wal().set(&small, Bytes::new())?;
         db.save().await?;
         assert_eq!(stored(&store), 0);
-        let db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let db = Db::open(store.clone(), StateOptions::default()).await?;
         assert!(db.state().record("small").get().is_empty());
         assert_eq!(db.state().record("large").get(), &b"two"[..]);
         Ok(())

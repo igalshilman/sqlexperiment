@@ -11,7 +11,7 @@
 //! median of the repeats.
 use sql::Sql;
 use state::{
-    PageCacheConfig, Result, State, StorageOptions,
+    PageCache, PageCacheConfig, Result, State, StateOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
@@ -75,11 +75,11 @@ async fn baseline() -> Result<(MemoryKv, u64)> {
     .await?;
     save(db).await?;
     // Checkpoint the bulk load into page keys, as a steady state would.
-    let all = StorageOptions {
+    let all = StateOptions {
         checkpoint_after: 0,
-        ..StorageOptions::default()
+        ..StateOptions::default()
     };
-    let mut db = Sql::open(&State::open_with_options(kv.clone(), all).await?).await?;
+    let mut db = Sql::open(&State::open(kv.clone()).options(all).await?).await?;
     db.execute("CREATE TABLE other(x)").await?;
     save(db).await?;
     let pages = Sql::open(&State::open(kv).await?)
@@ -103,9 +103,9 @@ fn row(state: &mut u64) -> u64 {
     }
 }
 
-async fn session(store: &Store, options: &StorageOptions, n: u64, state: &mut u64) -> Result<()> {
+async fn session(store: &Store, cache: &PageCache, n: u64, state: &mut u64) -> Result<()> {
     let kv: Arc<dyn KvStore> = store.clone();
-    let mut db = Sql::open(&State::open_with_options(kv, options.clone()).await?).await?;
+    let mut db = Sql::open(&State::open(kv).cached(cache, "bench").await?).await?;
     for _ in 0..4 {
         let id = row(state);
         let rows = db
@@ -145,20 +145,16 @@ async fn run(base: &MemoryKv, mode: &str, capacity: usize) -> Result<Sample> {
         decoded: mode == "decoded",
         ..cache_config(capacity, 1 << 30)
     });
-    let options = StorageOptions {
-        cache: Some(cache.namespace("bench")),
-        ..StorageOptions::default()
-    };
     let mut state = 7;
     for n in 0..WARMUP {
-        session(&store, &options, n + 1, &mut state).await?;
+        session(&store, &cache, n + 1, &mut state).await?;
     }
     store.reset();
     store.inner.reset_stats();
     let (allocations, allocated) = (ALLOCATIONS.load(Relaxed), ALLOCATED.load(Relaxed));
     let started = Instant::now();
     for n in 0..SESSIONS {
-        session(&store, &options, n, &mut state).await?;
+        session(&store, &cache, n, &mut state).await?;
     }
     let micros = started.elapsed().as_micros();
     Ok(Sample {

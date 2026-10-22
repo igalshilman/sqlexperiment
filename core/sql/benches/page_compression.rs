@@ -3,7 +3,7 @@
 //! All payloads are deterministic synthetic data; no network or replication model.
 use sql::Sql;
 use state::{
-    PageCompression, Result, State, StorageOptions,
+    PageCompression, Result, State, StateOptions,
     kv::KvStore,
     page_codec,
     simulation::{MemoryKv, Stats},
@@ -93,18 +93,21 @@ fn hex(bytes: &[u8]) -> String {
 }
 /// No working-set hint: when checkpoints happen depends on encoded sizes, so a
 /// hint would differ between codecs and blur the comparison.
-fn options(page_compression: PageCompression) -> StorageOptions {
-    StorageOptions {
+fn options(page_compression: PageCompression) -> StateOptions {
+    StateOptions {
         page_compression,
         hint_pages: 0,
-        ..StorageOptions::default()
+        ..StateOptions::default()
     }
 }
 async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db =
-        Sql::open(&State::open_with_options(Arc::new(store.clone()), options(codec)).await?)
-            .await?;
+    let mut db = Sql::open(
+        &State::open(Arc::new(store.clone()))
+            .options(options(codec))
+            .await?,
+    )
+    .await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload BLOB)")
         .await?;
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
@@ -122,11 +125,11 @@ async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     db.execute("COMMIT").await?;
     save(db).await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
-    let all = StorageOptions {
+    let all = StateOptions {
         checkpoint_after: 0,
         ..options(codec)
     };
-    let mut db = Sql::open(&State::open_with_options(Arc::new(store.clone()), all).await?).await?;
+    let mut db = Sql::open(&State::open(Arc::new(store.clone())).options(all).await?).await?;
     db.execute("CREATE TABLE other(x)").await?;
     save(db).await?;
     store.crash();
@@ -190,8 +193,12 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
     let case = sample.case;
     let store = Arc::new(base.fork());
     let start = Instant::now();
-    let mut db =
-        Sql::open(&State::open_with_options(store.clone(), options(sample.codec)).await?).await?;
+    let mut db = Sql::open(
+        &State::open(store.clone())
+            .options(options(sample.codec))
+            .await?,
+    )
+    .await?;
     let middle = case.rows / 2;
     let read_ids: Vec<_> = match sample.operation {
         "cold_pk" => vec![middle],
@@ -255,8 +262,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
         } else {
             PageCompression::Raw
         };
-        let mut db =
-            Sql::open(&State::open_with_options(store.clone(), options(other)).await?).await?;
+        let mut db = Sql::open(&State::open(store.clone()).options(options(other)).await?).await?;
         assert_eq!(
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"

@@ -4,7 +4,7 @@ use crate::{
     format::{COMMIT, HINT, LOG_PREFIX, PAGE_PREFIX},
     simulation::{
         Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, MonitorKv, Operation, cache_config,
-        fresh_namespace, open_cache,
+        fresh_namespace_cache, open_cache,
     },
 };
 
@@ -37,17 +37,20 @@ fn page(n: u64) -> Page {
     p[..8].copy_from_slice(&n.to_le_bytes());
     p.into()
 }
-fn options(checkpoint_after: u32, cache: Option<&NamespaceCache>) -> StorageOptions {
-    StorageOptions {
+fn options(checkpoint_after: u32, cache: Option<&NamespaceCache>) -> Settings {
+    let options = StateOptions {
         checkpoint_after,
+        ..StateOptions::default()
+    };
+    settings(options, cache)
+}
+fn settings(options: StateOptions, cache: Option<&NamespaceCache>) -> Settings {
+    Settings {
+        options,
         cache: cache.cloned(),
-        ..StorageOptions::default()
     }
 }
-async fn open<S: KvStore + 'static>(
-    store: &Arc<S>,
-    options: &StorageOptions,
-) -> io::Result<Snapshot> {
+async fn open<S: KvStore + 'static>(store: &Arc<S>, options: &Settings) -> io::Result<Snapshot> {
     Snapshot::open(store.clone(), options.clone(), false).await
 }
 
@@ -131,10 +134,14 @@ fn a_save_is_one_put_and_a_checkpointed_page_one_get() -> io::Result<()> {
 
         // Checkpointing the whole log moves pages to their keys (a hole is a
         // delete) and empties the record's log, in a new epoch.
-        let all = StorageOptions {
-            prefetch_pages: 0,
-            ..options(0, None)
-        };
+        let all = settings(
+            StateOptions {
+                prefetch_pages: 0,
+                checkpoint_after: 0,
+                ..StateOptions::default()
+            },
+            None,
+        );
         let snapshot = open(&store, &all).await?;
         let report = snapshot
             .publish(Changes::from([(3, None)]), 4 * 4096)
@@ -200,7 +207,7 @@ fn checkpoints_follow_the_log_without_a_cache() -> io::Result<()> {
 fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
-        let cache = fresh_namespace();
+        let cache = fresh_namespace_cache();
         let opts = options(2, Some(&cache));
         let mut model = Model::default();
         for round in 0..16 {
@@ -220,7 +227,7 @@ fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
             assert_collected(&store.inner).await?;
         }
         // A restarted owner starts from the durable record.
-        let restarted = options(2, Some(&fresh_namespace()));
+        let restarted = options(2, Some(&fresh_namespace_cache()));
         assert!(model.check(&open(&store, &restarted).await?).await?);
         assert!(model.check(&open(&store, &options(2, None)).await?).await?);
         Ok(())
@@ -231,7 +238,7 @@ fn an_owner_cache_makes_opens_and_saves_one_round_trip() -> io::Result<()> {
 fn another_writer_is_refreshed_or_overridden_in_the_cache() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
-        let cache = fresh_namespace();
+        let cache = fresh_namespace_cache();
         let owner = options(0, Some(&cache));
         let other = options(0, None);
         let mut model = Model::default();
@@ -294,10 +301,14 @@ fn large_transactions_are_stored_and_failed_ones_leave_only_debris() -> io::Resu
             3,
         ))));
         let memory = || store.inner.inner.inner.clone();
-        let large = StorageOptions {
-            inline_log_bytes: 0,
-            ..options(4, None)
-        };
+        let large = settings(
+            StateOptions {
+                inline_log_bytes: 0,
+                checkpoint_after: 4,
+                ..StateOptions::default()
+            },
+            None,
+        );
         let big = |n: u64| -> Changes { (0..300).map(|i| (i, Some(page(i + n)))).collect() };
         let snapshot = open(&store, &large).await?;
         store.reset();
@@ -368,14 +379,18 @@ fn a_save_is_crash_safe_at_every_write() -> io::Result<()> {
             (true, 4, true),
         ];
         for (cached, saves, large) in scenarios {
-            let cache = cached.then(fresh_namespace);
+            let cache = cached.then(fresh_namespace_cache);
             let (base, old) = prepared(cache.as_ref(), saves).await?;
             let store = Arc::new(FaultKv::new(base.fork(), 0));
-            let opts = StorageOptions {
-                page_compression: PageCompression::Raw,
-                inline_log_bytes: if large { 0 } else { usize::MAX },
-                ..options(1, cache.as_ref())
-            };
+            let opts = settings(
+                StateOptions {
+                    page_compression: PageCompression::Raw,
+                    inline_log_bytes: if large { 0 } else { usize::MAX },
+                    checkpoint_after: 1,
+                    ..StateOptions::default()
+                },
+                cache.as_ref(),
+            );
             let snapshot = open(&store, &opts).await?;
             let _gate = store.arm(Failpoint {
                 operation: Operation::Sync,
@@ -406,7 +421,7 @@ fn a_save_is_crash_safe_at_every_write() -> io::Result<()> {
                     // cache follows one history, and the forks are each
                     // another.
                     opts.cache = match restarted {
-                        true => cached.then(fresh_namespace),
+                        true => cached.then(fresh_namespace_cache),
                         false => cache.clone(),
                     };
                     let reopened = open(&store, &opts).await?;
@@ -418,7 +433,7 @@ fn a_save_is_crash_safe_at_every_write() -> io::Result<()> {
                     assert!(committed || kept < writes, "a stored commit was lost");
                     let mut model = if committed { new.clone() } else { old.clone() };
                     drop(reopened);
-                    opts.cache = cached.then(fresh_namespace);
+                    opts.cache = cached.then(fresh_namespace_cache);
                     let (changes, size) = dirty(51);
                     open(&store, &opts)
                         .await?
@@ -427,7 +442,7 @@ fn a_save_is_crash_safe_at_every_write() -> io::Result<()> {
                     model.apply(&changes, size);
                     // The follow-up commit survives a crash.
                     memory.crash();
-                    opts.cache = cached.then(fresh_namespace);
+                    opts.cache = cached.then(fresh_namespace_cache);
                     assert!(model.check(&open(&store, &opts).await?).await?);
                     assert_collected(&memory).await?;
                     assert_eq!(store.violations(), Vec::<String>::new());
@@ -461,7 +476,7 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
             decoded: true,
             ..cache_config(8 * 4096, 64 << 20)
         });
-        let mut caches = [fresh_namespace(), decoded.namespace("decoded")];
+        let mut caches = [fresh_namespace_cache(), decoded.namespace("decoded")];
         let mut model = Model::default();
         let (mut kept, mut dropped, mut round) = (0, 0, 0);
         for tenure in 0..400 {
@@ -499,7 +514,7 @@ fn owners_handing_over_never_read_stale_pages() -> io::Result<()> {
                     store.inner.inner.crash_keeping(random(writes + 1) as usize);
                 }
                 if random(4) == 0 {
-                    caches[owner] = fresh_namespace();
+                    caches[owner] = fresh_namespace_cache();
                 }
                 let opts = options(1, Some(&caches[owner]));
                 let reopened = open(&store, &opts).await?;
@@ -557,10 +572,14 @@ async fn checkpointed(pages: u64) -> io::Result<MemoryKv> {
 fn a_cold_open_prefetches_a_small_database() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(checkpointed(PREFETCH_PAGES).await?));
-        let without = StorageOptions {
-            prefetch_pages: 0,
-            ..options(4, None)
-        };
+        let without = settings(
+            StateOptions {
+                prefetch_pages: 0,
+                checkpoint_after: 4,
+                ..StateOptions::default()
+            },
+            None,
+        );
         store.reset();
         open(&store, &without).await?;
         let plain = store.round_trips();
@@ -624,10 +643,14 @@ fn a_cold_open_fetches_the_working_set_hint() -> io::Result<()> {
         assert_eq!(cold_gets(snapshot, vec![5, 9, 33]).await?, 0);
 
         // Disabled, or with a malformed hint, opens read nothing extra.
-        let off = StorageOptions {
-            hint_pages: 0,
-            ..options(4, None)
-        };
+        let off = settings(
+            StateOptions {
+                hint_pages: 0,
+                checkpoint_after: 4,
+                ..StateOptions::default()
+            },
+            None,
+        );
         assert_eq!(cold_gets(open(&store, &off).await?, vec![5]).await?, 1);
         store
             .inner
@@ -672,11 +695,15 @@ fn sequential_reads_fetch_ahead() -> io::Result<()> {
 fn an_owner_opens_and_saves_in_one_round_trip() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
-        let cache = fresh_namespace();
-        let opts = StorageOptions {
-            inline_log_bytes: usize::MAX,
-            ..options(16, Some(&cache))
-        };
+        let cache = fresh_namespace_cache();
+        let opts = settings(
+            StateOptions {
+                inline_log_bytes: usize::MAX,
+                checkpoint_after: 16,
+                ..StateOptions::default()
+            },
+            Some(&cache),
+        );
         for round in 0..40u64 {
             store.reset();
             store.inner.reset_stats();
@@ -703,11 +730,15 @@ fn an_owner_opens_and_saves_in_one_round_trip() -> io::Result<()> {
 fn a_commit_seals_the_inline_log_into_a_stored_value() -> io::Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
-        let cache = fresh_namespace();
-        let opts = StorageOptions {
-            inline_log_bytes: 6 * 1024,
-            ..options(1000, Some(&cache))
-        };
+        let cache = fresh_namespace_cache();
+        let opts = settings(
+            StateOptions {
+                inline_log_bytes: 6 * 1024,
+                checkpoint_after: 1000,
+                ..StateOptions::default()
+            },
+            Some(&cache),
+        );
         // Pages of noise: about 2 KiB of log each.
         let noisy = |seed: u64| -> Page {
             let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
@@ -757,7 +788,7 @@ fn a_commit_seals_the_inline_log_into_a_stored_value() -> io::Result<()> {
 fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
     futures::executor::block_on(async {
         for cached in [false, true] {
-            let cache = cached.then(fresh_namespace);
+            let cache = cached.then(fresh_namespace_cache);
             let store = Arc::new(checkpointed(PREFETCH_PAGES).await?);
             let opts = options(1, cache.as_ref());
             let mut model = Model::default();
@@ -794,12 +825,16 @@ fn a_continued_snapshot_matches_a_reopen() -> io::Result<()> {
 fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
     futures::executor::block_on(async {
         for cached in [false, true] {
-            let cache = cached.then(fresh_namespace);
+            let cache = cached.then(fresh_namespace_cache);
             let store = Arc::new(MemoryKv::default());
-            let opts = StorageOptions {
-                checkpoint_log_bytes: usize::MAX,
-                ..options(64, cache.as_ref())
-            };
+            let opts = settings(
+                StateOptions {
+                    checkpoint_log_bytes: usize::MAX,
+                    checkpoint_after: 64,
+                    ..StateOptions::default()
+                },
+                cache.as_ref(),
+            );
             let mut model = Model::default();
             let mut snapshot = open(&store, &opts).await?;
             for round in 0..12 {
@@ -815,10 +850,8 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             assert_eq!(record(&store).await?.log.len(), 12);
 
             // The next commit checkpoints.
-            let checkpointing = StorageOptions {
-                checkpoint_after: 0,
-                ..opts.clone()
-            };
+            let mut checkpointing = opts.clone();
+            checkpointing.options.checkpoint_after = 0;
             drop(snapshot);
             let snapshot = open(&store, &checkpointing).await?;
             store.reset_stats();
@@ -839,7 +872,7 @@ fn a_checkpoint_writes_each_page_once_and_empties_the_log() -> io::Result<()> {
             assert_eq!((commit.version, commit.epoch), (13, 1));
             assert!(commit.log.is_empty());
             assert!(model.check(&after).await?);
-            let cold = StorageOptions {
+            let cold = Settings {
                 cache: None,
                 ..opts.clone()
             };

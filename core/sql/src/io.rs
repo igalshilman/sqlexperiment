@@ -227,17 +227,17 @@ impl KvIo {
     /// Open the namespace's state, and an adapter over its file `db`.
     #[cfg(feature = "simulation")]
     pub async fn mount(store: Arc<dyn state::kv::KvStore>) -> io::Result<Arc<Self>> {
-        Self::mount_with_options(store, state::StorageOptions::default()).await
+        Self::mount_with_options(store, state::StateOptions::default()).await
     }
 
-    /// [`Self::mount`] with explicit storage options.
+    /// [`Self::mount`] with explicit state options.
     #[cfg(feature = "simulation")]
     pub async fn mount_with_options(
         store: Arc<dyn state::kv::KvStore>,
-        options: state::StorageOptions,
+        options: state::StateOptions,
     ) -> io::Result<Arc<Self>> {
-        let state =
-            (state::State::open_with_options(store, options).await).map_err(io::Error::other)?;
+        let state = state::State::open(store).options(options).await;
+        let state = state.map_err(io::Error::other)?;
         let file = state.file(crate::DB_FILE).map_err(io::Error::other)?;
         let io = Self::new(file, crate::MAX_PRIVATE_BYTES);
         *io.state.lock().unwrap() = Some(state);

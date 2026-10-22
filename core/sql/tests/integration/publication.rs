@@ -2,22 +2,26 @@
 //! outcome, with and without a crash and an owner cache. The save is atomic, the
 //! database stays consistent and the next save works.
 use crate::host::Db;
+use crate::host::StateSetup;
+use state::simulation::Namespace;
 use state::{
-    NamespaceCache, Result, StorageOptions,
+    Result, StateOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
 
-fn options(cache: Option<&NamespaceCache>) -> StorageOptions {
-    StorageOptions {
+fn options(cache: Option<&Namespace>) -> StateSetup {
+    StateSetup {
+        options: StateOptions {
+            checkpoint_after: 0,
+            ..StateOptions::default()
+        },
         cache: cache.cloned(),
-        checkpoint_after: 0,
-        ..StorageOptions::default()
     }
 }
 
 /// Every save checkpoints the log.
-async fn baseline(cache: Option<&NamespaceCache>) -> Result<MemoryKv> {
+async fn baseline(cache: Option<&Namespace>) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
     let mut db = Db::open(kv.clone(), options(cache)).await?;
@@ -34,7 +38,7 @@ async fn baseline(cache: Option<&NamespaceCache>) -> Result<MemoryKv> {
 }
 
 /// Returns whether the update `n = 7000` is visible; it must be all or nothing.
-async fn changed(store: Arc<FaultKv>, options: StorageOptions) -> Result<bool> {
+async fn changed(store: Arc<FaultKv>, options: StateSetup) -> Result<bool> {
     let mut db = Db::open(store, options).await?;
     let rows = db
         .query("SELECT count(*), sum(n = 7000), sum(length(payload)) FROM t")

@@ -52,7 +52,7 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
             let base = Arc::new(MemoryKv::default());
             // Flush two pages, then checkpoint them so reads reach the backend.
             // No prefetch or hint at open: the reads under test reach the backend.
-            let all = state::StorageOptions {
+            let all = state::StateOptions {
                 checkpoint_after: 0,
                 prefetch_pages: 0,
                 hint_pages: 0,

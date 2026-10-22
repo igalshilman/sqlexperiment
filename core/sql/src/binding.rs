@@ -15,7 +15,7 @@
 use crate::{Result, Rows, Sql, Value};
 use bytes::Bytes;
 use futures::lock::{Mutex, MutexGuard};
-use state::{PageCache, PageCacheConfig, State, StorageOptions, kv::KvStore};
+use state::{PageCache, PageCacheConfig, State, kv::KvStore};
 use std::{
     io,
     path::PathBuf,
@@ -46,37 +46,28 @@ pub struct Session {
 }
 
 impl Session {
-    /// Open the database of `namespace` over `store`, with the process-wide
-    /// page cache. A `reader` reads the namespace beside its owner (see
-    /// [`State::open_reader`]): without the cache, writing nothing to the
-    /// store, and [`Self::is_current`] says whether what it read is still the
-    /// stored state.
+    /// Open the database of `namespace` over `store`, kept warm in the
+    /// process-wide page cache. A `reader` reads the namespace beside its
+    /// owner (see [`state::Open::reader`]): without the cache, writing
+    /// nothing to the store, and [`Self::is_current`] says whether what it
+    /// read is still the stored state.
     pub async fn open(store: Arc<dyn KvStore>, namespace: &str, reader: bool) -> Result<Self> {
-        let cache = match reader {
-            true => None,
-            false => Some(page_cache().await?.namespace(namespace)),
+        let state = match reader {
+            true => State::open(store).reader().await?,
+            false => {
+                State::open(store)
+                    .cached(&page_cache().await?, namespace)
+                    .await?
+            }
         };
-        let options = StorageOptions {
-            cache,
-            ..StorageOptions::default()
-        };
-        Self::open_with_options(store, options, reader).await
+        Self::new(state).await
     }
 
-    /// [`Self::open`] with explicit [`StorageOptions`], the page cache
-    /// included (a reader keeps none).
-    pub async fn open_with_options(
-        store: Arc<dyn KvStore>,
-        options: StorageOptions,
-        reader: bool,
-    ) -> Result<Self> {
-        let state = match reader {
-            true => State::open_reader(store, options).await?,
-            false => State::open_with_options(store, options).await?,
-        };
+    /// A session of the database in `state`, however it was opened.
+    pub async fn new(state: State) -> Result<Self> {
         Ok(Self {
             sql: Mutex::new(Some(Sql::open(&state).await?)),
-            reader,
+            reader: state.is_reader(),
             in_body: AtomicBool::new(false),
             usable: AtomicBool::new(true),
             effects: std::sync::Mutex::new(None),
@@ -272,16 +263,10 @@ async fn page_cache() -> io::Result<PageCache> {
     if let Some(cache) = &*cache {
         return Ok(cache.clone());
     }
-    let named = std::env::var_os("RESTATE_SQL_CACHE_FILE").map(PathBuf::from);
-    let file = named.clone().unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("restate-sql-{}.cache", std::process::id()))
-    });
-    let opened = PageCache::open(PageCacheConfig::new(&file, 256 << 20, 1 << 30)).await?;
-    // The cache keeps the file open, and nothing else uses the temporary one:
-    // unlinked now, it goes away with the process however it ends, rather
-    // than staying behind (where unlinking an open file is refused, it stays).
-    if named.is_none() {
-        let _ = std::fs::remove_file(&file);
-    }
+    let opened = PageCache::open(PageCacheConfig {
+        file: std::env::var_os("RESTATE_SQL_CACHE_FILE").map(PathBuf::from),
+        ..PageCacheConfig::new(256 << 20, 1 << 30)
+    })
+    .await?;
     Ok(cache.insert(opened).clone())
 }

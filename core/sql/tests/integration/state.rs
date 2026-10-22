@@ -1,15 +1,16 @@
 //! A state and its participants: the SQL as one of them, its records and
 //! files beside it, made durable together by a WAL's flush.
+use crate::host::StateSetup;
 use bytes::Bytes;
 use sql::Sql;
 use state::{
-    Result, State, StorageOptions,
+    Result, State, StateOptions,
     simulation::{MemoryKv, fresh_namespace},
 };
 use std::sync::Arc;
 
-fn options() -> StorageOptions {
-    StorageOptions::default()
+fn options() -> StateOptions {
+    StateOptions::default()
 }
 
 async fn rows(sql: &mut Sql) -> Result<i64> {
@@ -23,7 +24,7 @@ async fn rows(sql: &mut Sql) -> Result<i64> {
 fn a_flush_makes_every_participant_durable_together() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = StateSetup::from(options()).open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
         sql.execute("INSERT INTO t VALUES(1)").await?;
@@ -44,7 +45,7 @@ fn a_flush_makes_every_participant_durable_together() -> Result<()> {
         drop(sql);
         drop(state);
 
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = StateSetup::from(options()).open(store.clone()).await?;
         assert_eq!(state.record("progress").get(), &b"one"[..]);
         assert_eq!(state.file("pages")?.read(0).await?.unwrap()[0], 1);
         let mut sql = Sql::open(&state).await?;
@@ -57,7 +58,7 @@ fn a_flush_makes_every_participant_durable_together() -> Result<()> {
         drop(wal);
         drop(sql);
         drop(state);
-        let state = State::open_with_options(store, options()).await?;
+        let state = StateSetup::from(options()).open(store).await?;
         let mut sql = Sql::open(&state).await?;
         assert_eq!(rows(&mut sql).await?, 1);
         assert_eq!(sql.state().record("progress").get(), &b"one"[..]);
@@ -71,7 +72,7 @@ fn a_flush_makes_every_participant_durable_together() -> Result<()> {
 fn a_flush_refuses_sql_not_flushed() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = StateSetup::from(options()).open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
         let refused = state.wal().flush().await.unwrap_err().to_string();
@@ -89,7 +90,7 @@ fn a_flush_refuses_sql_not_flushed() -> Result<()> {
 fn a_state_needs_no_sql_and_takes_one() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = StateSetup::from(options()).open(store.clone()).await?;
         let mut wal = state.wal();
         wal.set(&state.record("only"), Bytes::from_static(b"records"))?;
         wal.flush().await?;
@@ -110,11 +111,11 @@ fn the_idle_engine_waits_for_the_next_sql() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let cache = fresh_namespace();
-        let options = || StorageOptions {
+        let options = || StateSetup {
+            options: options(),
             cache: Some(cache.clone()),
-            ..options()
         };
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = options().open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
         let mut wal = state.wal();
@@ -123,10 +124,10 @@ fn the_idle_engine_waits_for_the_next_sql() -> Result<()> {
         drop(sql);
         drop(state);
         // A state without SQL leaves the engine where it was.
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = options().open(store.clone()).await?;
         assert_eq!(state.version(), 1);
         drop(state);
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = options().open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         assert!(sql.reused_engine());
         sql.execute("INSERT INTO t VALUES(1)").await?;
@@ -144,7 +145,7 @@ fn the_idle_engine_waits_for_the_next_sql() -> Result<()> {
 fn a_flush_refuses_an_open_sql_transaction() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = StateSetup::from(options()).open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
         let mut wal = state.wal();
@@ -168,7 +169,7 @@ fn a_flush_refuses_an_open_sql_transaction() -> Result<()> {
 fn a_failed_commit_at_flush_keeps_what_was_flushed() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = StateSetup::from(options()).open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         sql.execute("PRAGMA foreign_keys = ON").await?;
         sql.execute("CREATE TABLE parent(id INTEGER PRIMARY KEY)")
@@ -192,7 +193,7 @@ fn a_failed_commit_at_flush_keeps_what_was_flushed() -> Result<()> {
         wal.flush().await?;
         drop(sql);
         drop(state);
-        let state = State::open_with_options(store, options()).await?;
+        let state = StateSetup::from(options()).open(store).await?;
         let mut sql = Sql::open(&state).await?;
         assert_eq!(rows(&mut sql).await?, 1);
         Ok(())
@@ -206,7 +207,7 @@ fn a_failed_commit_at_flush_keeps_what_was_flushed() -> Result<()> {
 fn a_query_reads_the_rows_flushed_into_a_wal_before_the_wal_flushes() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = StateSetup::from(options()).open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
         sql.execute("INSERT INTO t VALUES(1)").await?;
@@ -230,11 +231,11 @@ fn a_session_is_clean_once_the_state_flushed_its_wal() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let cache = fresh_namespace();
-        let options = || StorageOptions {
+        let options = || StateSetup {
+            options: options(),
             cache: Some(cache.clone()),
-            ..options()
         };
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = options().open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         sql.execute("CREATE TABLE t(n INTEGER); INSERT INTO t VALUES(1)")
             .await?;
@@ -242,7 +243,7 @@ fn a_session_is_clean_once_the_state_flushed_its_wal() -> Result<()> {
         sql.flush(&mut wal).await?;
         wal.flush().await?;
         drop((sql, state));
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = options().open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         assert!(sql.reused_engine(), "clean after the flush");
         assert_eq!(rows(&mut sql).await?, 1);
@@ -250,7 +251,7 @@ fn a_session_is_clean_once_the_state_flushed_its_wal() -> Result<()> {
         let mut wal = state.wal();
         sql.flush(&mut wal).await?;
         drop((sql, wal, state));
-        let state = State::open_with_options(store, options()).await?;
+        let state = options().open(store).await?;
         let mut sql = Sql::open(&state).await?;
         assert!(!sql.reused_engine(), "the state had not flushed the WAL");
         assert_eq!(rows(&mut sql).await?, 1);
@@ -264,7 +265,7 @@ fn a_session_is_clean_once_the_state_flushed_its_wal() -> Result<()> {
 fn a_dropped_wal_leaves_the_sql_pages_to_the_next_flush() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let state = State::open_with_options(store.clone(), options()).await?;
+        let state = StateSetup::from(options()).open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         sql.execute("CREATE TABLE t(n INTEGER); INSERT INTO t VALUES(1)")
             .await?;
@@ -279,7 +280,7 @@ fn a_dropped_wal_leaves_the_sql_pages_to_the_next_flush() -> Result<()> {
         assert_eq!(state.version(), 1);
         drop(sql);
         drop(state);
-        let state = State::open_with_options(store, options()).await?;
+        let state = StateSetup::from(options()).open(store).await?;
         let mut sql = Sql::open(&state).await?;
         assert_eq!(rows(&mut sql).await?, 1);
         Ok(())

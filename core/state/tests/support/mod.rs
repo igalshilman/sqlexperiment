@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 use bytes::Bytes;
 use state::{
-    Base, File, FlushReport, PAGE_SIZE, Page, Result, State, StorageOptions, Wal, kv::KvStore,
+    Base, File, FlushReport, PAGE_SIZE, Page, Result, State, Wal, kv::KvStore, simulation::Setup,
 };
 use std::{
     collections::BTreeMap,
@@ -137,13 +137,13 @@ pub struct Session {
 
 impl Session {
     /// Open the state, and its files (`vm` with its base).
-    pub async fn open(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        Self::of(State::open_with_options(store, options).await?)
+    pub async fn open(store: Arc<dyn KvStore>, setup: impl Into<Setup>) -> Result<Self> {
+        Self::of(setup.into().open(store).await?)
     }
 
-    /// Open a reader beside the owner (see [`State::open_reader`]).
-    pub async fn reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        Self::of(State::open_reader(store, options).await?)
+    /// Open a reader beside the owner (see [`state::Open::reader`]).
+    pub async fn reader(store: Arc<dyn KvStore>, setup: impl Into<Setup>) -> Result<Self> {
+        Self::of(setup.into().open(store).reader().await?)
     }
 
     fn of(state: State) -> Result<Self> {

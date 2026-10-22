@@ -5,7 +5,8 @@
 //! extension do.
 use bytes::Bytes;
 use sql::{Sql, SqlOptions, Value};
-use state::{FlushReport, Result, State, StorageOptions, Wal, kv::KvStore};
+pub use state::simulation::Setup as StateSetup;
+use state::{FlushReport, Result, StateOptions, Wal, kv::KvStore};
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -21,13 +22,15 @@ pub enum Durability {
     Commit,
 }
 
-/// How to open a [`Db`]: storage options, and when to flush.
-pub struct Setup(pub StorageOptions, pub Durability);
+/// How to open a [`Db`]: its state's options and cache, and when to flush.
+pub struct Setup(pub StateSetup, pub Durability);
 
 impl Setup {
     /// These options, changed by `change`.
-    pub fn with(self, change: impl FnOnce(StorageOptions) -> StorageOptions) -> Self {
-        Self(change(self.0), self.1)
+    pub fn with(self, change: impl FnOnce(StateOptions) -> StateOptions) -> Self {
+        let Self(StateSetup { options, cache }, durability) = self;
+        let options = change(options);
+        Self(StateSetup { options, cache }, durability)
     }
 
     /// These options, flushed as `durability` says.
@@ -36,15 +39,27 @@ impl Setup {
     }
 }
 
-impl From<StorageOptions> for Setup {
-    fn from(options: StorageOptions) -> Self {
-        Self(options, Durability::Save)
+impl From<StateSetup> for Setup {
+    fn from(state: StateSetup) -> Self {
+        Self(state, Durability::Save)
     }
 }
 
-impl From<(StorageOptions, Durability)> for Setup {
-    fn from((options, durability): (StorageOptions, Durability)) -> Self {
-        Self(options, durability)
+impl From<StateOptions> for Setup {
+    fn from(options: StateOptions) -> Self {
+        StateSetup::from(options).into()
+    }
+}
+
+impl From<(StateSetup, Durability)> for Setup {
+    fn from((state, durability): (StateSetup, Durability)) -> Self {
+        Self(state, durability)
+    }
+}
+
+impl From<(StateOptions, Durability)> for Setup {
+    fn from((options, durability): (StateOptions, Durability)) -> Self {
+        Self(options.into(), durability)
     }
 }
 
@@ -82,8 +97,8 @@ impl Db {
         setup: impl Into<Setup>,
         limits: SqlOptions,
     ) -> Result<Self> {
-        let Setup(options, durability) = setup.into();
-        let state = State::open_with_options(store, options).await?;
+        let Setup(setup, durability) = setup.into();
+        let state = setup.open(store).await?;
         Ok(Self {
             sql: Sql::open_with_options(&state, limits).await?,
             wal: state.wal(),

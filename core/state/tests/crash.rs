@@ -5,7 +5,7 @@
 #![cfg(feature = "simulation")]
 mod support;
 
-use state::{Base, NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
+use state::{Base, Result, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
@@ -13,14 +13,16 @@ const COMMIT: &str = "v15/commit";
 /// Flushes in the sequence.
 const STEPS: u64 = 10;
 
-fn options(cache: Option<NamespaceCache>) -> StorageOptions {
-    StorageOptions {
+fn options(cache: Option<Namespace>) -> Setup {
+    Setup {
+        options: StateOptions {
+            checkpoint_after: 3,
+            inline_log_bytes: 150,
+            prefetch_pages: 0,
+            hint_pages: 8,
+            ..StateOptions::default()
+        },
         cache,
-        checkpoint_after: 3,
-        inline_log_bytes: 150,
-        prefetch_pages: 0,
-        hint_pages: 8,
-        ..StorageOptions::default()
     }
 }
 
@@ -54,7 +56,7 @@ fn changes(step: u64) -> Vec<Op> {
 }
 
 /// Open a session and read a few pages, for the working-set hint.
-async fn session(store: Arc<dyn KvStore>, cache: Option<NamespaceCache>) -> Result<Session> {
+async fn session(store: Arc<dyn KvStore>, cache: Option<Namespace>) -> Result<Session> {
     let session = Session::open(store, options(cache)).await?;
     for name in FILES {
         session.file(name).read(0).await?;

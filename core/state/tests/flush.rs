@@ -6,10 +6,7 @@
 #![cfg(feature = "simulation")]
 use bytes::Bytes;
 use futures::{FutureExt, future::BoxFuture};
-use state::{
-    MAX_NAME_BYTES, MAX_RECORD_BYTES, Page, Result, State, StorageOptions, kv::KvStore,
-    simulation::*,
-};
+use state::{MAX_NAME_BYTES, MAX_RECORD_BYTES, Page, Result, State, kv::KvStore, simulation::*};
 use std::{io, sync::Arc};
 
 fn page(n: u8) -> Page {
@@ -290,11 +287,8 @@ fn a_state_flushes_one_at_a_time() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(Stalled(Arc::new(MemoryKv::default())));
         // With a cache, an open needs no sync, which this store never completes.
-        let options = StorageOptions {
-            cache: Some(fresh_namespace()),
-            ..StorageOptions::default()
-        };
-        let state = State::open_with_options(store, options).await?;
+        let namespace = fresh_namespace();
+        let state = (State::open(store).cached(&namespace.cache, &namespace.key)).await?;
         let mut wal = state.wal();
         wal.set(&state.record("n"), "1".into())?;
         let mut first = Box::pin(wal.flush());
@@ -313,15 +307,12 @@ fn a_state_flushes_one_at_a_time() -> Result<()> {
 fn a_cancelled_flush_ends_the_state_and_no_other_flushes_on_top() -> Result<()> {
     futures::executor::block_on(async {
         let memory = Arc::new(MemoryKv::default());
-        let cache = fresh_namespace();
-        let options = || StorageOptions {
-            cache: Some(cache.clone()),
-            ..StorageOptions::default()
-        };
-        let stalled: Arc<dyn KvStore> = Arc::new(Stalled(memory.clone()));
-        let state = State::open_with_options(stalled, options()).await?;
+        let namespace = fresh_namespace();
+        let open =
+            |store: Arc<dyn KvStore>| State::open(store).cached(&namespace.cache, &namespace.key);
+        let state = open(Arc::new(Stalled(memory.clone()))).await?;
         // Another state of the owner, opened on the same flush.
-        let other = State::open_with_options(memory.clone(), options()).await?;
+        let other = open(memory.clone()).await?;
         let mut wal = state.wal();
         let receipt = wal.receipt();
         wal.set(&state.record("n"), "1".into())?;
@@ -350,15 +341,11 @@ fn idle_state_heavier_than_the_budget_is_not_kept_and_evicts_nothing() -> Result
         });
         let stores: Vec<Arc<dyn KvStore>> =
             vec![Arc::new(MemoryKv::default()), Arc::new(MemoryKv::default())];
-        let options = |namespace: &str| StorageOptions {
-            cache: Some(cache.namespace(namespace)),
-            ..StorageOptions::default()
-        };
         for ((namespace, value, weight), store) in [("light", 1u32, 10), ("heavy", 2, 101)]
             .into_iter()
             .zip(&stores)
         {
-            let state = State::open_with_options(store.clone(), options(namespace)).await?;
+            let state = State::open(store.clone()).cached(&cache, namespace).await?;
             let mut wal = state.wal();
             wal.set(&state.record("n"), "1".into())?;
             wal.flush().await?;
@@ -369,7 +356,7 @@ fn idle_state_heavier_than_the_budget_is_not_kept_and_evicts_nothing() -> Result
             .into_iter()
             .zip(&stores)
         {
-            let state = State::open_with_options(store.clone(), options(namespace)).await?;
+            let state = State::open(store.clone()).cached(&cache, namespace).await?;
             assert_eq!(
                 state.join("engine")?.take_idle::<u32>(),
                 expected,

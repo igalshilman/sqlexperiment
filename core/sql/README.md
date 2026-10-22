@@ -16,18 +16,14 @@ leaves its engine warm for the namespace's next one.
 Implement `state::kv::KvStore` over your store, then:
 
 ```rust,ignore
-use state::{State, PageCache, PageCacheConfig, StorageOptions};
+use state::{PageCache, PageCacheConfig, State};
 use sql::Sql;
 
-// Once per process: a page cache in memory and on a local disk file.
-let cache = PageCache::open(PageCacheConfig::new("/var/cache/pages", 256 << 20, 8 << 30)).await?;
+// Once per process: 256 MiB of pages in memory, 8 GiB in a temporary file.
+let cache = PageCache::open(PageCacheConfig::new(256 << 20, 8 << 30)).await?;
 
-// Per session, with the namespace's stable key.
-let options = StorageOptions {
-    cache: Some(cache.namespace("object-42")),
-    ..StorageOptions::default()
-};
-let state = State::open_with_options(store, options).await?;
+// Per session, kept warm in the cache under the namespace's stable key.
+let state = State::open(store).cached(&cache, "object-42").await?;
 let mut db = Sql::open(&state).await?;
 db.transaction(async |db| {                    // one SQL transaction, or rolled back
     db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?;

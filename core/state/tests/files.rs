@@ -68,14 +68,16 @@ impl state::Base for Zeros {
 fn a_checkpoint_never_exposes_a_page_fetched_under_a_based_log() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let options = |checkpoint_after| state::StorageOptions {
+        let options = |checkpoint_after| state::StateOptions {
             checkpoint_after,
             inline_log_bytes: 0,
-            ..state::StorageOptions::default()
+            ..state::StateOptions::default()
         };
         // Page 1 checkpointed at its key, then changed in the log.
         for (n, checkpoint_after) in [(1, 0), (2, 8)] {
-            let state = State::open_with_options(store.clone(), options(checkpoint_after)).await?;
+            let state = State::open(store.clone())
+                .options(options(checkpoint_after))
+                .await?;
             let mut wal = state.wal();
             wal.write(
                 &state.file_with_base("vm", Arc::new(Zeros))?,
@@ -84,7 +86,7 @@ fn a_checkpoint_never_exposes_a_page_fetched_under_a_based_log() -> Result<()> {
             )?;
             wal.flush().await?;
         }
-        let state = State::open_with_options(store, options(0)).await?;
+        let state = State::open(store).options(options(0)).await?;
         let vm = state.file_with_base("vm", Arc::new(Zeros))?;
         assert_eq!(byte(&vm, 1).await?, Some(2));
         let mut wal = state.wal();
