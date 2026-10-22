@@ -98,7 +98,7 @@ async def test_an_interrupted_run_is_finished_before_the_next_message():
 
 async def test_the_model_gets_the_instructions():
     teller = Teller()
-    obj = openai_agents.agent("teller", model=AgentsTeller(teller), instructions="You are a teller.")
+    obj = openai_agents.agent("teller", model=AgentsTeller(teller), system="You are a teller.")
     await Object().invoke(obj.handlers["chat"].fn, "hello")
     assert teller.systems == ["You are a teller."]
 
@@ -201,7 +201,7 @@ def desk(bank: Bank, teller: Teller):
         name="refunds",
         instructions="You handle refunds.",
         model=AgentsTeller(teller),
-        tools=openai_agents.function_tools([bank.restate_tool()]),
+        tools=openai_agents.tools([bank.restate_tool()]),
     )
     triage = Agent(name="triage", instructions="You triage.", model=AgentsTeller(teller), handoffs=[refunds])
     obj = openai_agents.agent("desk", triage)

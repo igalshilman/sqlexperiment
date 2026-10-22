@@ -64,7 +64,7 @@ from restate_agents.object import Object, context
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
 
-__all__ = ["CANCELLED", "DEFAULT_MODEL", "SqlCheckpointSaver", "agent", "langchain_tools", "prompt", "tool_node"]
+__all__ = ["CANCELLED", "DEFAULT_MODEL", "SqlCheckpointSaver", "agent", "prompt", "tool_node", "tools"]
 
 # Marks a prompt's message in the thread (in its additional_kwargs, which models do not read).
 PROMPT = "restate_agents_prompt"
@@ -190,14 +190,14 @@ def tool_node(tools: Tools) -> Callable[[dict[str, Any], RunnableConfig], Awaita
     return run_tools
 
 
-def langchain_tools(tools: Tools) -> list[BaseTool]:
+def tools(given: Tools) -> list[BaseTool]:
     """
-    ``tools`` as LangChain tools, for a model of your own graph to call
-    (``model.bind_tools(langgraph.langchain_tools(tools))``), in a node:
-    ``tool``s, Restate's tools, LangChain tools, or functions of the
-    invocation's context giving them.
+    ``given`` as LangChain tools, for a model of your own graph to call
+    (``model.bind_tools(langgraph.tools([...]))``), in a node: ``tool``s,
+    Restate's tools, LangChain tools, or functions of the invocation's
+    context giving them.
     """
-    return _langchain_tools(tools, context())
+    return _langchain_tools(given, context())
 
 
 def _usual(model: Model | Callable[[ObjectContext], Model] | None, system: str | None, tools: Tools) -> StateGraph:

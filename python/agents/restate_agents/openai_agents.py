@@ -16,9 +16,9 @@ response::
 
 The usual agent is an ``Agent`` with ``model`` (``openai/model-id``, or a
 model of the SDK), or else MODEL if it is OpenAI's, or else the SDK's
-default, with OPENAI_API_KEY; ``instructions``; and ``tools``. Or bring an
+default, with OPENAI_API_KEY; ``system``, its instructions; and ``tools``. Or bring an
 ``Agent`` of your own (handoffs, guardrails, output types and all), whose
-tools may include those here through ``function_tools([...])``.
+tools may include those here through ``tools([...])``.
 
 The handler is not replayed: a retried attempt (a crash, a lost connection)
 runs again from the start, and the run carries on from the stored items:
@@ -62,7 +62,7 @@ from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
 
-__all__ = ["CANCELLED", "agent", "function_tools", "prompt"]
+__all__ = ["CANCELLED", "agent", "prompt", "tools"]
 
 # The tables of the conversations' messages and answers, of their items, and of the agent each is with.
 PROMPTS, ITEMS, CURRENT = "openai_agents_prompts", "openai_agents_items", "openai_agents_current"
@@ -73,7 +73,7 @@ def agent(
     openai_agent: Agent[Any] | Callable[[ObjectContext], Agent[Any]] | None = None,
     *,
     model: str | Model | Callable[[ObjectContext], str | Model] | None = None,
-    instructions: str | None = None,
+    system: str | None = None,
     tools: Sequence[Tool | Any] = (),
     **options: Any,
 ) -> Object:
@@ -88,20 +88,18 @@ def agent(
 
     The usual agent takes ``model``: ``openai/model-id``, a model of the SDK,
     or a function of the invocation's context giving either;
-    ``instructions``; and ``tools``: ``tool``s, Restate's tools, and the
+    ``system``, its instructions; and ``tools``: ``tool``s, Restate's tools, and the
     SDK's tools. Or ``openai_agent``: an ``Agent`` of your own, or a function
     of the context giving one.
 
     ``options``: those of ``restate.VirtualObject``. Add handlers of your own
     with ``@agent.handler``.
     """
-    if openai_agent is not None and (model is not None or instructions is not None or tools):
-        raise TypeError(
-            f"{name}: an agent takes an Agent, or the usual agent's model, instructions and tools; not both"
-        )
+    if openai_agent is not None and (model is not None or system is not None or tools):
+        raise TypeError(f"{name}: an agent takes an Agent, or the usual agent's model, system and tools; not both")
     if not callable(model):
         _model_of(model)
-    usual = Agent(name=name, instructions=instructions, tools=function_tools(tools)) if openai_agent is None else None
+    usual = Agent(name=name, instructions=system, tools=_tools(tools)) if openai_agent is None else None
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         if usual is not None:
@@ -122,14 +120,18 @@ def agent(
     return turns.agent(name, answer, transcript, **options)
 
 
-def function_tools(given: Sequence[Tool | Any]) -> list[Any]:
+def tools(given: Sequence[Tool | Any]) -> list[Any]:
     """
     ``given`` as the SDK's tools, for an ``Agent`` of your own::
 
-        Agent(name="support", tools=function_tools([call(status), signal("approval", ...)]))
+        Agent(name="support", tools=openai_agents.tools([call(status), signal("approval", ...)]))
 
     ``given``: ``tool``s, Restate's tools, and the SDK's tools, as they are.
     """
+    return _tools(given)
+
+
+def _tools(given: Sequence[Tool | Any]) -> list[Any]:
     return [_function_tool(t) if isinstance(t, Tool) else t for t in given]
 
 

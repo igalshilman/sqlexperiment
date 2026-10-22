@@ -15,8 +15,8 @@ object's database, stored a step at a time::
 
 The usual agent is a Pydantic AI ``Agent`` with ``model`` (``provider/model-id``,
 or a Pydantic AI model), or else MODEL, or else anthropic/claude-sonnet-5-5,
-with ANTHROPIC_API_KEY; ``instructions``; and ``tools``. Or bring an ``Agent``
-of your own: ``agent(name, Agent(...))``, with ``toolset(tools)`` for the
+with ANTHROPIC_API_KEY; ``system``; and ``tools``. Or bring an ``Agent``
+of your own: ``agent(name, Agent(...))``, with ``tools([...])`` for the
 tools here (``tool``, ``call``, ``signal``, ...).
 
 The handler is not replayed: a retried attempt (a crash, a lost connection)
@@ -61,7 +61,6 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models import Model, ModelRequestContext
-from pydantic_ai.toolsets import FunctionToolset
 from restate_fns import ObjectContext
 
 from restate_agents import turns
@@ -70,7 +69,7 @@ from restate_agents.object import Object, context
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
 
-__all__ = ["CANCELLED", "DEFAULT_MODEL", "agent", "prompt", "toolset"]
+__all__ = ["CANCELLED", "DEFAULT_MODEL", "agent", "prompt", "tools"]
 
 # The metadata of the conversation's messages (which models do not read): a
 # prompt's request, the request of the tool results that the messages steered
@@ -87,7 +86,7 @@ def agent(
     pydantic_agent: Agent[Any, Any] | Callable[[ObjectContext], Agent[Any, Any]] | None = None,
     *,
     model: str | Model | Callable[[ObjectContext], str | Model] | None = None,
-    instructions: str | None = None,
+    system: str | None = None,
     tools: Tools = (),
     **options: Any,
 ) -> Object:
@@ -102,7 +101,8 @@ def agent(
 
     The usual agent takes ``model``: ``provider/model-id`` (Pydantic AI's
     providers, such as ``anthropic`` or ``openai``), a Pydantic AI model, or a
-    function of the invocation's context giving either; ``instructions``; and
+    function of the invocation's context giving either; ``system``, its
+    instructions; and
     ``tools``: ``tool``s, Restate's tools, and Pydantic AI's tools or tool
     functions. Or ``pydantic_agent``: an ``Agent`` of your own, or a function
     of the context giving one, whose output is text.
@@ -110,11 +110,9 @@ def agent(
     ``options``: those of ``restate.VirtualObject``. Add handlers of your own
     with ``@agent.handler``.
     """
-    if pydantic_agent is not None and (model is not None or instructions is not None or tools):
-        raise TypeError(
-            f"{name}: an agent takes an Agent, or the usual agent's model, instructions and tools; not both"
-        )
-    usual = _usual(instructions, tools) if pydantic_agent is None else None
+    if pydantic_agent is not None and (model is not None or system is not None or tools):
+        raise TypeError(f"{name}: an agent takes an Agent, or the usual agent's model, system and tools; not both")
+    usual = _usual(system, tools) if pydantic_agent is None else None
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         if usual is not None:
@@ -174,15 +172,19 @@ async def prompt(ctx: Any, agent: Agent[Any, Any], text: str, *, thread: str | N
         return await _run(conversation, agent, [*history, request], id, run)
 
 
-def toolset(tools: Tools) -> FunctionToolset[Any]:
+def tools(given: Tools) -> list[PydanticTool[Any]]:
     """
-    ``tools`` as a Pydantic AI toolset, for an ``Agent`` of your own::
+    ``given`` as Pydantic AI's tools, for an ``Agent`` of your own::
 
-        Agent("anthropic:claude-sonnet-5-5", toolsets=[toolset([refund, call(status)])])
+        Agent("anthropic:claude-sonnet-5-5", tools=pydantic_ai.tools([refund, call(status)]))
 
-    ``tools``: ``tool``s, Restate's tools, and Pydantic AI's tools or tool functions.
+    ``given``: ``tool``s, Restate's tools, and Pydantic AI's tools or tool functions, as they are.
     """
-    return FunctionToolset([_pydantic(t) if isinstance(t, Tool) else t for t in tools])
+    return _tools(given)
+
+
+def _tools(given: Tools) -> list[Any]:
+    return [_pydantic(t) if isinstance(t, Tool) else t for t in given]
 
 
 class _Conversation:
@@ -325,14 +327,9 @@ def _has_results(message: ModelMessage) -> bool:
     )
 
 
-def _usual(instructions: str | None, tools: Tools) -> Agent[None, str]:
+def _usual(system: str | None, given: Tools) -> Agent[None, str]:
     """The usual agent: its model given each run."""
-    own = [t for t in tools if isinstance(t, Tool)]
-    return Agent(
-        instructions=instructions,
-        tools=[t for t in tools if not isinstance(t, Tool)],
-        toolsets=[toolset(own)] if own else None,
-    )
+    return Agent(instructions=system, tools=_tools(given))
 
 
 def _model(model: str | Model | Callable[[ObjectContext], str | Model] | None, ctx: ObjectContext) -> str | Model:

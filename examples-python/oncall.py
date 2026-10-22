@@ -74,7 +74,7 @@ async def note(ctx, call_id, entry: str) -> str:
 responder = adk.agent(
     "oncall",
     model="google/gemini-2.5-flash",
-    instruction=(
+    system=(
         "You respond to incidents. Check the health of checkout, payments and inventory, note what you find, "
         "page the engineer on call and wait for them, note what they say. Once the incident is resolved, "
         "schedule its review and note it."

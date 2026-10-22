@@ -62,7 +62,7 @@ def team(system: str, tools: list) -> Callable:
     """A team's node: its model, with its instructions and tools."""
 
     async def answer(state: Desk) -> dict:
-        with_tools = model.bind_tools(langgraph.langchain_tools(tools))
+        with_tools = model.bind_tools(langgraph.tools(tools))
         return {"messages": [await with_tools.ainvoke([SystemMessage(system), *state["messages"]])]}
 
     return answer

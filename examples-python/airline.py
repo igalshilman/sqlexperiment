@@ -29,8 +29,7 @@ from datetime import timedelta
 import restate_fns as restate
 from agents import Agent
 from pydantic import BaseModel
-from restate_agents import call, serve, signal, tool, workflow
-from restate_agents.openai_agents import agent, function_tools
+from restate_agents import call, openai_agents, serve, signal, tool, workflow
 
 # A plain Restate service: the flights, a stand-in for the airline's systems.
 flights = restate.Service("flights")
@@ -48,7 +47,6 @@ async def options(ctx: restate.Context, flight: str) -> str:
 class Change(BaseModel):
     """A change of flight: the booking's flight, the new one, and its fee."""
 
-    traveller: str
     flight: str
     to: str
     fee: float
@@ -84,7 +82,7 @@ changes = Agent(
         "You change travellers' flights. Look up the options, offer them, and once the traveller chose, "
         "ask them to confirm the fee (even if it is none), rebook, and record the booking."
     ),
-    tools=function_tools(
+    tools=openai_agents.tools(
         [
             call(options),
             signal("fee", description="Ask the traveller to confirm the change, and its fee, and wait.", input=Change),
@@ -100,7 +98,7 @@ triage = Agent(
     handoffs=[changes],
 )
 
-airline = agent("airline", triage)
+airline = openai_agents.agent("airline", triage)
 
 
 @airline.handler(kind="shared")

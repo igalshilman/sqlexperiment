@@ -4,12 +4,7 @@ Agent frameworks in Restate virtual objects, in Python: each object (one per
 key) keeps the agent's state in its SQL database (`ctx.db`, of
 [`restate-fns`](../fns/README.md)), and each message is answered once per
 invocation, however often an attempt crashes. The Python counterpart of
-[`restate-agents`](../../typescript/packages/integrations/README.md), with
-[Claude](#claude) (the Anthropic SDK), [Claude Code](#claude-code) (the
-Claude Agent SDK), [Codex](#codex), [LiteLLM](#litellm) (any model),
-[LangGraph](#langgraph),
-[Pydantic AI](#pydantic-ai), the [OpenAI Agents SDK](#openai-agents-sdk) and
-[Google ADK](#google-adk).
+[`restate-agents`](../../typescript/packages/integrations/README.md).
 
 ```python
 from restate_agents import claude, serve, tool
@@ -29,6 +24,32 @@ serve(assistant)
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
 curl localhost:8080/assistant/alice/messages   # the conversation so far
 ```
+
+## Choose a framework
+
+The same agent runs on each: `<framework>.agent(name, model=, system=,
+tools=)`, with the same handlers (`chat`, `messages`, `status`, `stop`,
+`steer`, `pending`, `signal`, `notifications`, `watch`) and Restate's tools.
+Where the framework has agents of its own (LangGraph, Pydantic AI, the
+OpenAI Agents SDK, ADK), yours can go in its place, with
+`<framework>.tools([...])` for Restate's tools. `<framework>.prompt(ctx, ...)`
+answers a prompt in a handler of your own, once.
+
+| Import                                | Framework                          | Choose it when                                                                | Its example                                                  |
+| ------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| [`claude`](#claude)                   | The Anthropic SDK                  | You want Claude with nothing in between: the lightest, the API's own messages | [`chat.py`](../../examples-python/chat.py)                   |
+| [`litellm`](#litellm)                 | LiteLLM                            | You want the same, on any model: OpenAI's, Gemini, Bedrock, a local one       | [`release_notes.py`](../../examples-python/release_notes.py) |
+| [`langgraph`](#langgraph)             | LangGraph                          | You use LangChain, or want a graph of your own, its steps Restate's           | [`writer.py`](../../examples-python/writer.py)               |
+| [`pydantic_ai`](#pydantic-ai)         | Pydantic AI                        | You want typed outputs, and an `Agent` of your own                            | [`trips.py`](../../examples-python/trips.py)                 |
+| [`openai_agents`](#openai-agents-sdk) | The OpenAI Agents SDK              | You want handoffs between agents, guardrails, OpenAI's models                 | [`airline.py`](../../examples-python/airline.py)             |
+| [`adk`](#google-adk)                  | Google's Agent Development Kit     | You want Gemini, ADK's sub-agents and callbacks                               | [`oncall.py`](../../examples-python/oncall.py)               |
+| [`claude_agent`](#claude-code)        | Claude Code (the Claude Agent SDK) | You want a coding agent: Claude Code's own tools in a workspace               | [`coder.py`](../../examples-python/coder.py)                 |
+| [`codex`](#codex)                     | Codex (`codex app-server`)         | You want OpenAI's coding agent: its tools in a workspace, in its sandbox      | [`coder_codex.py`](../../examples-python/coder_codex.py)     |
+
+`system` is the whole system prompt for Claude, LiteLLM, LangGraph, Pydantic
+AI, the OpenAI Agents SDK and ADK, and is added to the framework's own for
+Claude Code and Codex. `model` is `provider/model-id`; without one, an
+agent takes `MODEL`, or its framework's default.
 
 ## Claude
 
@@ -252,7 +273,7 @@ context from `restate_agents.context()`, and run their tools with
 `langgraph.tool_node(tools)`: LangGraph's `ToolNode`, for `@tool`s, Restate's
 tools and LangChain's, which then takes the messages steered to the turn
 (and a node's model binds them with
-`model.bind_tools(langgraph.langchain_tools(tools))`)
+`model.bind_tools(langgraph.tools(tools))`)
 ([`examples-python/triage.py`](../../examples-python/triage.py),
 [`examples-python/writer.py`](../../examples-python/writer.py)):
 
@@ -380,41 +401,40 @@ and LangGraph carries on from the last step it stored.
 
 ## Pydantic AI
 
-`pydantic_ai.agent(name, model=, instructions=, tools=)` is the same virtual
+`pydantic_ai.agent(name, model=, system=, tools=)` is the same virtual
 object (`chat`, `messages`, `status`, `stop`, `steer`, `pending`, `signal`)
 on [Pydantic AI](https://ai.pydantic.dev):
 
 ```python
-from restate_agents import serve, tool
-from restate_agents.pydantic_ai import agent
+from restate_agents import pydantic_ai, serve
 
-assistant = agent("assistant", instructions="Answer briefly.", tools=[get_weather])
+assistant = pydantic_ai.agent("assistant", system="Answer briefly.", tools=[get_weather])
 serve(assistant)
 ```
 
-| Option         | What                                                                                                                                                                                                                   |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`        | `provider/model-id` (any of Pydantic AI's providers whose package is installed: `anthropic` is), a Pydantic AI model, or a function of the context giving one. Default: `MODEL`, or else `anthropic/claude-sonnet-5-5` |
-| `instructions` | The instructions                                                                                                                                                                                                       |
-| `tools`        | `tool`s, Restate's tools, and Pydantic AI's tools or tool functions (`RunContext` and all)                                                                                                                             |
+| Option   | What                                                                                                                                                                                                                   |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`  | `provider/model-id` (any of Pydantic AI's providers whose package is installed: `anthropic` is), a Pydantic AI model, or a function of the context giving one. Default: `MODEL`, or else `anthropic/claude-sonnet-5-5` |
+| `system` | The system prompt (Pydantic AI's instructions)                                                                                                                                                                         |
+| `tools`  | `tool`s, Restate's tools, and Pydantic AI's tools or tool functions (`RunContext` and all)                                                                                                                             |
 
 Or bring an `Agent` of your own, whose tools include Restate's through
-`toolset(tools)`; and ask it from handlers of your own with `prompt(ctx,
+`pydantic_ai.tools([...])`; and ask it from handlers of your own with `pydantic_ai.prompt(ctx,
 agent, text, **run)` (`run`: `Agent.run`'s options, such as `output_type` or
 `deps`), each prompt answered once
 ([`examples-python/trips.py`](../../examples-python/trips.py)):
 
 ```python
 from pydantic_ai import Agent
-from restate_agents.pydantic_ai import agent, prompt, toolset
+from restate_agents import pydantic_ai
 
-planner = Agent("anthropic:claude-sonnet-5-5", tools=[weather], toolsets=[toolset([signal("approval")])])
-trips = agent("trips", planner)
+planner = Agent("anthropic:claude-sonnet-5-5", tools=[weather, *pydantic_ai.tools([signal("approval", ...)])])
+trips = pydantic_ai.agent("trips", planner)
 
 
 @trips.handler
 async def plan(ctx) -> Plan:
-    return await prompt(ctx, planner, "Write down the trip we planned, day by day.", output_type=Plan)
+    return await pydantic_ai.prompt(ctx, planner, "Write down the trip we planned, day by day.", output_type=Plan)
 ```
 
 Through crashes, as with LangGraph: the conversation (a row per message, in
@@ -428,7 +448,7 @@ answer to the model; any other error fails the attempt.
 
 ## OpenAI Agents SDK
 
-`openai_agents.agent(name, model=, instructions=, tools=)` is the same virtual
+`openai_agents.agent(name, model=, system=, tools=)` is the same virtual
 object (`chat`, `messages`, `status`, `stop`, `steer`, `pending`, `signal`)
 on the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)
 ([`examples-python/airline.py`](../../examples-python/airline.py): a handoff, and Restate's tools):
@@ -436,18 +456,18 @@ on the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)
 ```python
 from restate_agents import openai_agents, serve
 
-assistant = openai_agents.agent("assistant", instructions="Answer briefly.", tools=[get_weather])
+assistant = openai_agents.agent("assistant", system="Answer briefly.", tools=[get_weather])
 serve(assistant)
 ```
 
-| Option         | What                                                                                                                                                             |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`        | `openai/model-id`, a model of the SDK, or a function of the context giving one; or else `MODEL`, if it is OpenAI's; or else the SDK's default (`OPENAI_API_KEY`) |
-| `instructions` | The instructions                                                                                                                                                 |
-| `tools`        | `tool`s, Restate's tools, and the SDK's tools (`@function_tool`, hosted tools)                                                                                   |
+| Option   | What                                                                                                                                                             |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`  | `openai/model-id`, a model of the SDK, or a function of the context giving one; or else `MODEL`, if it is OpenAI's; or else the SDK's default (`OPENAI_API_KEY`) |
+| `system` | The system prompt (the Agent's instructions)                                                                                                                     |
+| `tools`  | `tool`s, Restate's tools, and the SDK's tools (`@function_tool`, hosted tools)                                                                                   |
 
 Or bring an `Agent` of your own (handoffs, guardrails, an output type),
-whose tools include Restate's through `function_tools([...])`; and ask it
+whose tools include Restate's through `openai_agents.tools([...])`; and ask it
 from handlers of your own with `openai_agents.prompt(ctx, agent, text,
 **run)` (`run`: `Runner.run`'s options, such as `context`, `max_turns` or
 `run_config`), each prompt answered once, its typed output too.
@@ -471,26 +491,26 @@ takes no `hooks` of yours: give an `Agent` its own (`Agent.hooks`).
 
 ## Google ADK
 
-`adk.agent(name, model=, instruction=, tools=)` is the same virtual object
+`adk.agent(name, model=, system=, tools=)` is the same virtual object
 on Google's [Agent Development Kit](https://google.github.io/adk-docs/)
 ([`examples-python/oncall.py`](../../examples-python/oncall.py): an incident responder on Restate's tools):
 
 ```python
 from restate_agents import adk, serve
 
-assistant = adk.agent("assistant", model="google/gemini-2.5-flash", instruction="Answer briefly.", tools=[get_weather])
+assistant = adk.agent("assistant", model="google/gemini-2.5-flash", system="Answer briefly.", tools=[get_weather])
 serve(assistant)
 ```
 
-| Option        | What                                                                                                                                                   |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `model`       | `google/model-id`, an ADK model, or a function of the context giving one; or else `MODEL`, if it is Google's; or else ADK's default (`GOOGLE_API_KEY`) |
-| `instruction` | The instruction                                                                                                                                        |
-| `tools`       | `tool`s, Restate's tools, and ADK's tools (functions, `FunctionTool`s, ...)                                                                            |
+| Option   | What                                                                                                                                                   |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `model`  | `google/model-id`, an ADK model, or a function of the context giving one; or else `MODEL`, if it is Google's; or else ADK's default (`GOOGLE_API_KEY`) |
+| `system` | The system prompt (ADK's instruction)                                                                                                                  |
+| `tools`  | `tool`s, Restate's tools, and ADK's tools (functions, `FunctionTool`s, ...)                                                                            |
 
 Or bring an agent of your own (sub-agents, callbacks, an output schema), or
 an `App` (its plugins), whose tools include Restate's through
-`adk_tools([...])`; and ask it from handlers of your own with
+`adk.tools([...])`; and ask it from handlers of your own with
 `adk.prompt(ctx, agent, text, **run)` (`run`: `Runner.run_async`'s options),
 each prompt answered once.
 

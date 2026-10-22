@@ -102,7 +102,7 @@ async def test_an_interrupted_run_is_finished_before_the_next_message():
 
 async def test_the_model_gets_the_instructions():
     teller = Teller()
-    chat, _ = agent(Bank(), teller, instructions="You are a teller.")
+    chat, _ = agent(Bank(), teller, system="You are a teller.")
     await Object().invoke(chat, "hello")
     assert teller.systems == ["You are a teller."]
 
@@ -289,9 +289,9 @@ async def test_a_structured_output_is_answered_once():
     assert asked == 1
 
 
-async def test_an_agent_of_your_own_gets_restates_tools_as_a_toolset():
+async def test_an_agent_of_your_own_gets_restates_tools():
     bank = Bank()
-    own = Agent(pydantic_ai_model(Teller()), toolsets=[pydantic_ai.toolset([bank.restate_tool()])])
+    own = Agent(pydantic_ai_model(Teller()), tools=pydantic_ai.tools([bank.restate_tool()]))
     chat = pydantic_ai.agent("teller", own).handlers["chat"].fn
     assert await Object().invoke(chat, "move 5 from 1 to 2") == "Done: moved 5 from 1 to 2"
     assert list(bank.moves.values()) == [(1, 2, 5)]
@@ -299,4 +299,4 @@ async def test_an_agent_of_your_own_gets_restates_tools_as_a_toolset():
 
 def test_an_agent_takes_an_agent_or_the_usual_options():
     with pytest.raises(TypeError, match="not both"):
-        pydantic_ai.agent("shouter", shouter([]), instructions="Shout.")
+        pydantic_ai.agent("shouter", shouter([]), system="Shout.")

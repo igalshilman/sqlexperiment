@@ -22,7 +22,7 @@ researcher = langgraph.agent(
 
 writer = pydantic_ai.agent(
     "writer",
-    instructions="You write clear, warm prose from the notes you are given. Keep it short.",
+    system="You write clear, warm prose from the notes you are given. Keep it short.",
 )
 
 editor = claude.agent(
