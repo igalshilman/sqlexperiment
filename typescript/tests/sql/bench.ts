@@ -1,8 +1,9 @@
 // SQL in virtual objects against a real Restate server: throughput, latency
 // and what the objects store, for a few workloads and for databases of 1, 10
 // and 100 MB. A benchmark, not a test: it measures the storage protocol end
-// to end, with the SDK and the server. Payloads are random, so they do not
-// compress.
+// to end, with the SDK and the server. Rows hold what an agent stores: model
+// replies, tool calls and tool output, as generated text that compresses
+// about as such text does; with PAYLOAD=random, random bytes, which do not.
 //
 //   RESTATE_SERVER=/path/to/restate-server node sql/bench.ts [out.json]
 //
@@ -16,12 +17,62 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import * as restate from 'restate-fns';
 import { row } from './sql.ts';
 
-const SCHEMA = `CREATE TABLE IF NOT EXISTS rows(id INTEGER PRIMARY KEY, v BLOB);
+const SCHEMA = `CREATE TABLE IF NOT EXISTS rows(id INTEGER PRIMARY KEY, v);
   CREATE TABLE IF NOT EXISTS counter(id INTEGER PRIMARY KEY, n INTEGER);
   CREATE TABLE IF NOT EXISTS history(at INTEGER PRIMARY KEY, n INTEGER)`;
+
+// Words of model replies and tool output, for generated text.
+const WORDS = `the a to of and in is for that this with it on be as are can file function
+  error test run value return code line we will I let me check update change add use need
+  first then now next should would could here which when if not by from or an at so all
+  build output result first step config path type string number list object request response
+  call tool user assistant message model context state database query table row column key
+  handler service invocation retry commit page log cache read write open close start end
+  failed passed warning info debug src lib index main module import export const async await`.split(/\s+/);
+const TOOLS = ['read_file', 'edit_file', 'run_command', 'search', 'list_dir', 'fetch_url'];
+const pick = <T>(xs: T[]) => xs[Math.floor(Math.random() * xs.length)]!;
+const sentence = () => {
+  const words = Array.from({ length: 6 + Math.floor(Math.random() * 14) }, () => pick(WORDS));
+  return `${words.join(' ')}.`;
+};
+const hexId = () => randomBytes(8).toString('hex');
+
+/** One message of an agent's transcript, of about `bytes` bytes, as JSON. */
+function agentMessage(bytes: number): string {
+  const text = () => {
+    let out = '';
+    while (out.length < bytes) out += `${sentence()} `;
+    return out.slice(0, bytes);
+  };
+  const lines = () => {
+    let out = '';
+    for (let n = 1; out.length < bytes; n++) {
+      out += `${pick(['src', 'lib', 'tests'])}/${pick(WORDS)}_${pick(WORDS)}.ts:${n * 7}: ${pick(['error', 'warning', 'info'])} ${sentence()}\n`;
+    }
+    return out.slice(0, bytes);
+  };
+  switch (Math.floor(Math.random() * 3)) {
+    case 0:
+      return JSON.stringify({ role: 'assistant', id: hexId(), content: text() });
+    case 1: {
+      const args = { path: `src/${pick(WORDS)}/${pick(WORDS)}.ts`, query: sentence(), body: text() };
+      return JSON.stringify({
+        role: 'assistant',
+        id: hexId(),
+        tool_call: { id: hexId(), name: pick(TOOLS), arguments: args },
+      });
+    }
+    default:
+      return JSON.stringify({ role: 'tool', tool_call_id: hexId(), name: pick(TOOLS), output: lines() });
+  }
+}
+
+/** A row's value of about `bytes` bytes: a message, or random bytes with PAYLOAD=random. */
+const payload = (bytes: number) => (process.env.PAYLOAD === 'random' ? randomBytes(bytes) : agentMessage(bytes));
 
 /** The benchmark's object: each key a database. */
 export const bench = restate.object({
@@ -30,7 +81,7 @@ export const bench = restate.object({
     /** Insert one row of `bytes` bytes, an autocommit statement. */
     insert: async (ctx: restate.ObjectContext, bytes: number) => {
       await ctx.db.execute(SCHEMA);
-      await ctx.db.execute('INSERT INTO rows(v) VALUES(randomblob(?))', [bytes]);
+      await ctx.db.execute('INSERT INTO rows(v) VALUES(?)', [payload(bytes)]);
     },
     /** Increment a counter and record it, in one transaction; returns it. */
     count: (ctx: restate.ObjectContext) =>
@@ -45,20 +96,12 @@ export const bench = restate.object({
     bulk: (ctx: restate.ObjectContext, [rows, bytes]: [number, number]) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
-        for (let i = 0; i < rows; i++) await db.execute('INSERT INTO rows(v) VALUES(randomblob(?))', [bytes]);
+        for (let i = 0; i < rows; i++) await db.execute('INSERT INTO rows(v) VALUES(?)', [payload(bytes)]);
       }),
-    /** Append `rows` rows of `bytes` random bytes each, in one statement. */
-    load: async (ctx: restate.ObjectContext, [rows, bytes]: [number, number]) => {
-      await ctx.db.execute(SCHEMA);
-      await ctx.db.execute(
-        `WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < ?)
-         INSERT INTO rows(v) SELECT randomblob(?) FROM s`,
-        [rows, bytes],
-      );
-    },
-    /** Rewrite row `id` with new random bytes of the same length. */
+    /** Rewrite row `id` with a new value of about the same length. */
     update: async (ctx: restate.ObjectContext, id: number) => {
-      await ctx.db.execute('UPDATE rows SET v = randomblob(length(v)) WHERE id = ?', [id]);
+      const [length] = await row<[number]>(ctx.db, 'SELECT length(v) FROM rows WHERE id = ?', [id]);
+      await ctx.db.execute('UPDATE rows SET v = ? WHERE id = ?', [payload(length), id]);
     },
     /** Row `id`'s length, from the exclusive handler: the owner's session. */
     get: async (ctx: restate.ObjectContext, id: number) =>
@@ -254,11 +297,11 @@ async function drive(out?: string) {
   const sized = (mb: number) => `${run}-${mb}mb`;
   const anyRow = (mb: number) => () => 1 + Math.floor(Math.random() * mb * ROWS_PER_MB);
   for (const mb of SIZES) {
-    const [key, row] = [() => sized(mb), anyRow(mb)];
-    phases.push(await phase(`${mb} MB: load, 1 MB per call`, 'load', [ROWS_PER_MB, 1024], mb, 1, key, key()));
-    phases.push(await phase(`${mb} MB: update a row, warm`, 'update', row, 200, 1, key, key()));
-    phases.push(await phase(`${mb} MB: read a row, warm`, 'get', row, 200, 1, key, key()));
-    phases.push(await phase(`${mb} MB: read a row, shared handler`, 'peek', row, 50, 1, key, key()));
+    const [key, rowId] = [() => sized(mb), anyRow(mb)];
+    phases.push(await phase(`${mb} MB: load, 1 MB per call`, 'bulk', [ROWS_PER_MB, 1024], mb, 1, key, key()));
+    phases.push(await phase(`${mb} MB: update a row, warm`, 'update', rowId, 200, 1, key, key()));
+    phases.push(await phase(`${mb} MB: read a row, warm`, 'get', rowId, 200, 1, key, key()));
+    phases.push(await phase(`${mb} MB: read a row, shared handler`, 'peek', rowId, 50, 1, key, key()));
   }
   // The first calls after a restart of the objects: an empty page cache. A
   // call to another key first opens the server's connection to them.
@@ -266,9 +309,11 @@ async function drive(out?: string) {
     await start();
     await phase('warm-up after a restart', 'count', null, 1, 1, () => `${run}-hot`);
     for (const mb of SIZES) {
-      const [key, row] = [() => sized(mb), anyRow(mb)];
-      phases.push(await phase(`${mb} MB: read a row, cold process (${round})`, 'get', row, 1, 1, key, key()));
-      phases.push(await phase(`${mb} MB: update a row, after a cold read (${round})`, 'update', row, 1, 1, key, key()));
+      const [key, rowId] = [() => sized(mb), anyRow(mb)];
+      phases.push(await phase(`${mb} MB: read a row, cold process (${round})`, 'get', rowId, 1, 1, key, key()));
+      phases.push(
+        await phase(`${mb} MB: update a row, after a cold read (${round})`, 'update', rowId, 1, 1, key, key()),
+      );
     }
   }
   if (out) writeFileSync(out, JSON.stringify(phases, null, 2));
