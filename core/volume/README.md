@@ -105,8 +105,8 @@ reads correctly:
   fences a former attempt's writes.
 - **Writes in issue order.** A crash keeps a prefix of the writes since the
   last sync, never a write without the ones before it.
-- **Reliable storage.** The backend returns what was stored. Values are
-  checked for structure and bounds, not checksummed.
+- **Reliable storage.** Restate returns what was stored. Values are checked
+  for structure and bounds, not checksummed.
 
 [The design](docs/DESIGN.md) has the exact invariants, the failure table and
 the owner cache.

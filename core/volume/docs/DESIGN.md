@@ -359,19 +359,18 @@ checkpoint. Measurements: [log shipping](../../sql/benches/LOG_RESULTS.md),
   log), and the checkpoint thresholds trade the log's length against
   checkpoints, which write each changed page. A cold open reads the whole
   log, up to `checkpoint_log_bytes`.
-- **Fencing.** Exclusive ownership is assumed. A delayed write from a former
-  owner could overwrite newer data. A conditional put of the record would
-  close that gap.
+- **Fencing.** Restate provides it: a former attempt's writes never land
+  after a newer owner's, so the volume adds none.
 - **Memory.** A session's private changes (`max_private_bytes`, 256 MiB) and a
   statement's result rows (`max_result_bytes`, 64 MiB) are capped; exceeding
   either fails the statement. Replay holds each
   logged page's latest image. Parked engines share a byte budget, by a
   measured estimate.
-- **Integrity.** Storage is assumed reliable: a value reads back as written.
-  Decoding checks structure and bounds versions, segment numbers, sizes and page
+- **Integrity.** Restate provides it: a value reads back as written, so pages
+  carry no checksum. Decoding checks structure and bounds versions, segment numbers, sizes and page
   numbers, so a bug cannot overflow arithmetic or size a huge view. A log
   segment's zstd frame has a checksum, which also catches a segment decoded
-  against the wrong previous images; pages have none.
+  against the wrong previous images.
 - **Format.** Only v15, with no migration.
 - **Compression.** The simulator's monitor decodes every record it
   sees; the TLA+ specification does not model compression.
