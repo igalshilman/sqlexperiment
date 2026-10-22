@@ -14,8 +14,6 @@ namespace's next state. [SQL](../sql/README.md) is one, on the file `db`; the
 durable functions runtime adds a program's memory (a file) and its run's
 state (a record).
 
-An experiment, not a production backend: see [the design](docs/DESIGN.md).
-
 ## Use
 
 Implement `kv::KvStore` over your store, then:
