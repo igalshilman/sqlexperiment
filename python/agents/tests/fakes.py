@@ -235,7 +235,7 @@ class MessagesServer:
     The teller, as Anthropic's Messages API over HTTP (streaming), for the
     Claude Code CLI: at ``url``, while ``start``ed. It reads the messages as
     LangChain's: Claude Code's ``restate`` tools by their own names, a message
-    steered to the turn (``claude_agent.STEERED``) as a steered message, and
+    steered to the turn (``harness.STEERED``) as a steered message, and
     a message carried on after a crash as the message it carries on.
     """
 
@@ -318,7 +318,8 @@ class MessagesServer:
             self.server.shutdown()
 
     def answer(self, body: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
-        from restate_agents.claude_agent import CARRY_ON, SERVER, STEERED
+        from restate_agents.claude_agent import SERVER
+        from restate_agents.harness import CARRY_ON, STEERED
 
         prefix = f"mcp__{SERVER}__"
         messages = body.get("messages", [])
@@ -360,6 +361,110 @@ class MessagesServer:
         ]
         text = [{"type": "text", "text": str(reply.content)}] if reply.content else []
         return [*text, *calls], "tool_use" if calls else "end_turn"
+
+
+class ResponsesServer:
+    """
+    The teller, as OpenAI's Responses API over HTTP (streaming), for Codex:
+    at ``url``, while ``start``ed; ``config`` is Codex's configuration of it
+    as a model provider. It reads the input as LangChain's messages: Codex's
+    instructions as system messages, a message steered to the turn
+    (``harness.STEERED``) as a steered message, and a message carried on
+    after a crash as the message it carries on.
+    """
+
+    def __init__(self, teller: Teller) -> None:
+        self.teller = teller
+        self.requests: list[dict[str, Any]] = []
+        self.server: ThreadingHTTPServer | None = None
+
+    @property
+    def config(self) -> dict[str, Any]:
+        assert self.server is not None
+        url = f"http://127.0.0.1:{self.server.server_port}/v1"
+        provider = {"name": "teller", "base_url": url, "wire_api": "responses", "env_key": "TELLER_API_KEY"}
+        return {"model_providers": {"teller": provider}, "model_provider": "teller", "model": "teller"}
+
+    def start(self) -> ResponsesServer:
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args: Any) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                encoded = json.dumps({"data": [], "models": []}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def do_POST(self) -> None:
+                body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+                items = fake.answer(body)
+                self.send_response(200)
+                self.send_header("content-type", "text/event-stream")
+                self.end_headers()
+                id = f"resp_{uuid.uuid4().hex}"
+                self.event("response.created", response={"id": id})
+                for i, item in enumerate(items):
+                    self.event("response.output_item.added", output_index=i, item=item)
+                    self.event("response.output_item.done", output_index=i, item=item)
+                usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                self.event("response.completed", response={"id": id, "output": items, "usage": usage})
+
+            def event(self, type: str, **data: Any) -> None:
+                self.wfile.write(f"event: {type}\ndata: {json.dumps({'type': type, **data})}\n\n".encode())
+                self.wfile.flush()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        return self
+
+    def stop(self) -> None:
+        if self.server is not None:
+            self.server.shutdown()
+
+    def answer(self, body: dict[str, Any]) -> list[dict[str, Any]]:
+        from restate_agents.harness import CARRY_ON, STEERED
+
+        self.requests.append(body)
+        said: list[BaseMessage] = []
+        for item in body.get("input", []):
+            kind = item.get("type")
+            if kind == "message":
+                text = "".join(c.get("text", "") for c in item.get("content") or [])
+                if item["role"] in ("developer", "system"):
+                    said.append(SystemMessage(text))
+                elif item["role"] == "assistant":
+                    said.append(AIMessage(content=text))
+                elif text.startswith(STEERED):
+                    said.append(HumanMessage(text.removeprefix(STEERED), id="turn:steer:"))
+                elif not text.startswith("<"):
+                    said.append(HumanMessage(text.removeprefix(CARRY_ON)))
+            elif kind == "function_call":
+                call = {"name": item["name"], "args": json.loads(item["arguments"]), "id": item["call_id"]}
+                said.append(AIMessage(content="", tool_calls=[call]))
+            elif kind == "function_call_output":
+                output = item["output"]
+                if not isinstance(output, str):
+                    output = "".join(part.get("text", "") for part in output)
+                said.append(ToolMessage(output, tool_call_id=item["call_id"]))
+        reply = self.teller._answer(said)
+        calls = [
+            {
+                "type": "function_call",
+                "id": f"fc_{uuid.uuid4().hex}",
+                "call_id": c["id"],
+                "name": c["name"],
+                "arguments": json.dumps(c["args"]),
+            }
+            for c in reply.tool_calls
+        ]
+        text = [{"type": "output_text", "text": str(reply.content)}]
+        message = {"type": "message", "id": f"msg_{uuid.uuid4().hex}", "role": "assistant", "content": text}
+        return calls or [message]
 
 
 class Bank:

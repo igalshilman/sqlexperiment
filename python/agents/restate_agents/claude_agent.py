@@ -43,7 +43,7 @@ import tempfile
 import uuid
 from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -59,10 +59,10 @@ from claude_agent_sdk import (
 )
 from restate_fns import ObjectContext
 
-from restate_agents import turns
+from restate_agents import harness, turns
 from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_id_of, model_of
 from restate_agents.object import Object, service
-from restate_agents.tools import Tool, text_of
+from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
 
 __all__ = ["CANCELLED", "DEFAULT_MODEL", "agent", "prompt", "reset"]
@@ -70,18 +70,11 @@ __all__ = ["CANCELLED", "DEFAULT_MODEL", "agent", "prompt", "reset"]
 # The MCP server that serves the agent's tools to Claude Code: a tool ``t`` is ``mcp__restate__t`` there.
 SERVER = "restate"
 
+# The tables of the conversations, of their tool calls, and of Claude Code's sessions.
+PROMPTS, CALLS = "claude_agent_prompts", "claude_agent_calls"
+
 # Claude Code's own tools that an agent with a workspace may use without asking.
 WORKSPACE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
-
-# What a retried attempt asks Claude Code, to finish a message that a crash cut off.
-CARRY_ON = (
-    "Your work on my last message was cut off (the process stopped), so it may have no answer yet. "
-    "Carry on from where you stopped, and answer it. The tool calls that finished have their results: "
-    "do not make them again. My message was:\n\n"
-)
-
-# How a message steered to the turn reaches the model, after a tool call's result.
-STEERED = "The user added, while you worked: "
 
 
 def agent(
@@ -166,8 +159,6 @@ async def prompt(
     invocation's first prompt has its id, the next ``<id>:2``, and so on.
     """
     thread = thread or ctx.key()
-    prompts = _Prompts(ctx.db, thread)
-    id = turns.prompt_id(ctx)
     run = _Run(
         ctx,
         thread,
@@ -177,26 +168,7 @@ async def prompt(
         workspace=workspace,
         options=options or {},
     )
-    while True:
-        rows = await prompts.load()
-        if (asked := next((r for r in rows if r.prompt == id), None)) is not None:
-            turns.taken(asked.steered)
-            if asked.answer is not None:
-                return asked.answer
-        pending = next((r for r in rows if r.answer is None), None)
-        if pending is None:
-            pending = await prompts.add(id, text)
-            message = text
-        else:
-            # A turn that a crash cut off (this one's, or an earlier one's): finish it first.
-            message = CARRY_ON + pending.text
-        try:
-            answer = await run.answer(pending, message)
-        except restate.TerminalError as error:
-            if error.status_code == 409:
-                await prompts.answer(pending.prompt, CANCELLED)
-            raise
-        await prompts.answer(pending.prompt, answer)
+    return await harness.answer_once(ctx, harness.Prompts(ctx.db, PROMPTS, thread), text, run.answer)
 
 
 async def reset(ctx: Any, handoff: str | None = None, *, thread: str | None = None) -> None:
@@ -211,69 +183,10 @@ async def reset(ctx: Any, handoff: str | None = None, *, thread: str | None = No
             await claude_agent.reset(ctx, handoff)
     """
     thread = thread or ctx.key()
-    prompts = _Prompts(ctx.db, thread)
-    if any(r.answer is None for r in await prompts.load()):
-        raise restate.TerminalError("a message is being answered: change the conversation once it is")
+    await harness.Prompts(ctx.db, PROMPTS, thread).idle()
     id = turns.prompt_id(ctx)
     await _Threads(ctx.db).start(thread, _session_of(f"{service()}/{thread}/{id}"), handoff)
     await turns.publish()
-
-
-@dataclass
-class _Prompt:
-    """A message of the conversation: its prompt's id, its text, its answer once there is one, and what was steered."""
-
-    prompt: str
-    text: str
-    answer: str | None = None
-    steered: list[str] = field(default_factory=list)
-
-
-class _Prompts:
-    """The messages of the conversation ``thread``, in order, in the object's database."""
-
-    TABLE = "claude_agent_prompts"
-
-    def __init__(self, db: Any, thread: str) -> None:
-        self.db = db
-        self.thread = thread
-
-    async def load(self) -> list[_Prompt]:
-        if not await has_table(self.db, self.TABLE):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE} (
-                  thread TEXT NOT NULL,
-                  prompt TEXT NOT NULL,
-                  text TEXT NOT NULL,
-                  answer TEXT,
-                  steered TEXT NOT NULL DEFAULT '[]',
-                  PRIMARY KEY (thread, prompt)
-                )
-            """)
-        rows = await self.db.query(
-            f"SELECT prompt, text, answer, steered FROM {self.TABLE} WHERE thread = ? ORDER BY rowid", [self.thread]
-        )
-        return [_Prompt(prompt, text, answer, json.loads(steered)) for prompt, text, answer, steered in rows]
-
-    async def add(self, prompt: str, text: str) -> _Prompt:
-        await self.db.execute(
-            f"INSERT INTO {self.TABLE} (thread, prompt, text) VALUES (?, ?, ?)", [self.thread, prompt, text]
-        )
-        return _Prompt(prompt, text)
-
-    async def answer(self, prompt: str, answer: str) -> None:
-        await self.db.execute(
-            f"UPDATE {self.TABLE} SET answer = ? WHERE thread = ? AND prompt = ?", [answer, self.thread, prompt]
-        )
-        await turns.publish()
-
-    async def steer(self, prompt: str, ids: Sequence[str]) -> None:
-        await self.db.execute(
-            f"UPDATE {self.TABLE} SET steered = (SELECT json_group_array(value) FROM "
-            f"(SELECT value FROM json_each(steered) UNION ALL SELECT value FROM json_each(?))) "
-            "WHERE thread = ? AND prompt = ?",
-            [json.dumps(list(ids)), self.thread, prompt],
-        )
 
 
 class _Threads:
@@ -378,55 +291,6 @@ class _Store:
         return [subpath for (subpath,) in rows]
 
 
-class _Calls:
-    """
-    The tool calls of each prompt, with their output once they finished: a
-    call made again in a later attempt, with the same input, is the earlier
-    one (its id, its output).
-    """
-
-    TABLE = "claude_agent_calls"
-
-    def __init__(self, db: Any, prompt: str) -> None:
-        self.db = db
-        self.prompt = prompt
-        self.attempt = uuid.uuid4().hex
-
-    async def _table(self) -> None:
-        if not await has_table(self.db, self.TABLE):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE} (
-                  id TEXT PRIMARY KEY,
-                  prompt TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  input TEXT NOT NULL,
-                  output TEXT,
-                  attempt TEXT NOT NULL
-                )
-            """)
-
-    async def start(self, id: str, name: str, input: dict[str, Any]) -> tuple[str, str | None]:
-        """The id of call ``id`` (an earlier attempt's, if it made it), and its output if it finished."""
-        await self._table()
-        given = json.dumps(input, sort_keys=True)
-        earlier = await self.db.query(
-            f"SELECT id, output FROM {self.TABLE} WHERE prompt = ? AND name = ? AND input = ? AND attempt != ? "
-            "ORDER BY rowid LIMIT 1",
-            [self.prompt, name, given, self.attempt],
-        )
-        if earlier:
-            [(id, output)] = earlier
-            await self.db.execute(f"UPDATE {self.TABLE} SET attempt = ? WHERE id = ?", [self.attempt, id])
-            return id, output
-        await self.db.execute(
-            f"INSERT INTO {self.TABLE} VALUES (?, ?, ?, ?, NULL, ?)", [id, self.prompt, name, given, self.attempt]
-        )
-        return id, None
-
-    async def end(self, id: str, output: str) -> None:
-        await self.db.execute(f"UPDATE {self.TABLE} SET output = ? WHERE id = ?", [output, id])
-
-
 @dataclass
 class _Run:
     """A prompt's run: Claude Code, resumed on the conversation's session, with the tools here."""
@@ -444,7 +308,7 @@ class _Run:
     def fail(self, error: BaseException) -> None:
         self.failure = self.failure or error
 
-    async def answer(self, pending: _Prompt, message: str) -> str:
+    async def answer(self, pending: harness.Prompt, message: str) -> str:
         """The answer to ``message``, of the prompt ``pending``."""
         threads = _Threads(self.ctx.db)
         session, handoff = await threads.get(self.thread)
@@ -453,47 +317,33 @@ class _Run:
         if handoff and not resume:
             message = f"Before this conversation: {handoff}\n\n{message}"
         ids: dict[tuple[str, str], deque[str]] = defaultdict(deque)
-        calls = _Calls(self.ctx.db, pending.prompt)
-        prompts = _Prompts(self.ctx.db, self.thread)
+        calls = harness.Calls(self.ctx.db, CALLS, pending.prompt)
+        prompts = harness.Prompts(self.ctx.db, PROMPTS, self.thread)
 
         async def before(input: dict[str, Any], tool_use_id: str | None, _: Any) -> dict[str, Any]:
             if tool_use_id:
-                ids[(input["tool_name"], _canonical(input["tool_input"]))].append(tool_use_id)
+                ids[(input["tool_name"], harness.canonical(input["tool_input"]))].append(tool_use_id)
             return {}
 
         async def after(input: dict[str, Any], tool_use_id: str | None, _: Any) -> dict[str, Any]:
             try:
-                steered = await turns.steering(self.ctx)
-                if steered:
-                    await prompts.steer(pending.prompt, [s.id for s in steered])
-                    turns.taken(s.id for s in steered)
+                steered = await harness.steer(self.ctx, prompts, pending)
             except BaseException as error:
                 self.fail(error)
                 return {}
             if not steered:
                 return {}
-            context = "\n\n".join(STEERED + s.text for s in steered)
+            context = "\n\n".join(steered)
             return {"hookSpecificOutput": {"hookEventName": input["hook_event_name"], "additionalContext": context}}
 
         def served(tool: Tool) -> SdkMcpTool[Any]:
             async def handler(args: dict[str, Any]) -> dict[str, Any]:
                 if self.failure is not None:
                     return _result("Error: the turn is ending", error=True)
-                waiting = ids[(f"mcp__{SERVER}__{tool.name}", _canonical(args))]
-                given = waiting.popleft() if waiting else uuid.uuid4().hex
-                try:
-                    id, output = await calls.start(given, tool.name, args)
-                    if output is None:
-                        output = text_of(await tool.invoke(args, id))
-                        await calls.end(id, output)
-                except restate.TerminalError as error:
-                    if error.status_code == 409:
-                        self.fail(error)
-                    return _result(error.message, error=True)
-                except Exception as error:
-                    self.fail(error)
-                    return _result(f"Error: {error}", error=True)
-                return _result(output)
+                waiting = ids[(f"mcp__{SERVER}__{tool.name}", harness.canonical(args))]
+                id = waiting.popleft() if waiting else uuid.uuid4().hex
+                output, error = await calls.run(tool, id, args, self.fail)
+                return _result(output, error)
 
             return SdkMcpTool(tool.name, tool.description, tool.input.model_json_schema(), handler)
 
@@ -501,7 +351,7 @@ class _Run:
         config = tempfile.mkdtemp(prefix="restate-agents-claude-")
         options = ClaudeAgentOptions(
             model=self.model,
-            cwd=str(self.workspace) if self.workspace is not None else _nowhere(),
+            cwd=str(self.workspace) if self.workspace is not None else harness.nowhere(),
             system_prompt={"type": "preset", "preset": "claude_code", "append": self.system}
             if self.system
             else {"type": "preset", "preset": "claude_code"},
@@ -552,10 +402,6 @@ def _result(text: str, error: bool = False) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], **({"is_error": True} if error else {})}
 
 
-def _canonical(input: Any) -> str:
-    return json.dumps(input, sort_keys=True)
-
-
 def _transcribe(transcript: Transcript, entry: dict[str, Any]) -> None:
     """A transcript entry of Claude Code, as ``messages`` gives it: its users' and assistant's messages."""
     message = entry.get("message")
@@ -577,10 +423,3 @@ def _transcribe(transcript: Transcript, entry: dict[str, Any]) -> None:
             if isinstance(output, list):
                 output = "".join(b.get("text", "") for b in output if b.get("type") == "text")
             transcript.result(block["tool_use_id"], output or "", bool(block.get("is_error")))
-
-
-def _nowhere() -> str:
-    """The working directory of an agent without a workspace: an empty directory of its own."""
-    path = Path(tempfile.gettempdir()) / "restate-agents" / "no-workspace"
-    path.mkdir(parents=True, exist_ok=True)
-    return str(path)
