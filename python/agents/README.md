@@ -6,8 +6,8 @@ key) keeps the agent's state in its SQL database (`ctx.db`, of
 invocation, however often an attempt crashes. The Python counterpart of
 [`restate-agents`](../../typescript/packages/integrations/README.md), with
 [Claude](#claude) (the Anthropic SDK), [Claude Code](#claude-code) (the
-Claude Agent SDK), [Codex](#codex), [LangGraph](#langgraph) and
-[Pydantic AI](#pydantic-ai).
+Claude Agent SDK), [Codex](#codex), [LangGraph](#langgraph),
+[Pydantic AI](#pydantic-ai) and the [OpenAI Agents SDK](#openai-agents-sdk).
 
 ```python
 from restate_agents import claude, serve, tool
@@ -395,6 +395,44 @@ attempt that finds it answered returns the answer (a structured output too)
 without asking the model again. A tool's `restate.TerminalError` is its
 answer to the model; any other error fails the attempt.
 
+## OpenAI Agents SDK
+
+`openai_agents.agent(name, model=, instructions=, tools=)` is the same virtual
+object (`chat`, `messages`, `status`, `stop`, `steer`, `pending`, `signal`)
+on the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)
+([`examples-python/chat_openai_agents.py`](../../examples-python/chat_openai_agents.py)):
+
+```python
+from restate_agents import openai_agents, serve
+
+assistant = openai_agents.agent("assistant", instructions="Answer briefly.", tools=[get_weather])
+serve(assistant)
+```
+
+| Option         | What                                                                                                                                                             |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`        | `openai/model-id`, a model of the SDK, or a function of the context giving one; or else `MODEL`, if it is OpenAI's; or else the SDK's default (`OPENAI_API_KEY`) |
+| `instructions` | The instructions                                                                                                                                                 |
+| `tools`        | `tool`s, Restate's tools, and the SDK's tools (`@function_tool`, hosted tools)                                                                                   |
+
+Or bring an `Agent` of your own (handoffs, guardrails, an output type),
+whose tools include Restate's through `function_tools([...])`; and ask it
+from handlers of your own with `openai_agents.prompt(ctx, agent, text,
+**run)` (`run`: `Runner.run`'s options, such as `context`, `max_turns` or
+`run_config`), each prompt answered once, its typed output too.
+
+Through crashes, as with Pydantic AI: the conversation (an item per row, in
+`openai_agents_items`) is stored before each model request (the run's
+`call_model_input_filter`) and with each response (its `on_llm_end` hook),
+so the model's tool calls are stored before any tool runs. A retried attempt
+runs the stored calls again, with their ids (the tool's `on_invoke_tool`),
+without asking the model again, then carries on. Each prompt's answer is
+stored with it (`openai_agents_prompts`). A tool's `restate.TerminalError` is
+its answer to the model; any other error fails the attempt (the SDK's
+`@function_tool`s answer their errors to the model, as they do anywhere).
+A message steered to the turn joins it after its next tool call. The run
+takes no `hooks` of yours: give an `Agent` its own (`Agent.hooks`).
+
 ## Turns
 
 The message `chat` answers is a turn. While it answers, `status` says so
@@ -530,6 +568,9 @@ async def chat(ctx, message: str) -> str:
   `codex app-server`, calling the teller as the Responses API
   ([`tests/fakes.py`](tests/fakes.py), `ResponsesServer`, a model provider
   of Codex's configuration).
+- [`tests/test_openai_agents.py`](tests/test_openai_agents.py): the same,
+  for the OpenAI Agents SDK (the teller as an SDK model), with an `Agent`
+  of your own and its typed output, each answered once.
 - [`tests/test_pydantic_ai.py`](tests/test_pydantic_ai.py): the same, for
   the Pydantic AI agent (the teller as a Pydantic AI model), and agents of
   your own, prompts of your own and a structured output, each answered once.

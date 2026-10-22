@@ -13,6 +13,7 @@ dependencies = [
   "pydantic-ai-slim[anthropic]>=2.57",
   "claude-agent-sdk>=0.2.172",
   "openai-codex-cli-bin>=0.163",
+  "openai-agents>=0.24",
 ]
 
 [build-system]
