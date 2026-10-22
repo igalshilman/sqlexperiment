@@ -332,3 +332,97 @@ fn implausible_numbers_are_rejected() -> io::Result<()> {
     assert!(entries(&segment).is_err(), "page index out of range");
     Ok(())
 }
+
+/// A seeded xorshift step.
+fn next(seed: &mut u64) -> u64 {
+    *seed ^= *seed << 13;
+    *seed ^= *seed >> 7;
+    *seed ^= *seed << 17;
+    *seed
+}
+
+/// `bytes` with a few random changes: a bit flipped, a byte replaced or
+/// inserted, or the rest cut.
+fn mutated(seed: &mut u64, bytes: &[u8]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    for _ in 0..1 + next(seed) % 3 {
+        let at = (next(seed) as usize) % (out.len() + 1);
+        match (next(seed) % 4, at < out.len()) {
+            (0, true) => out[at] ^= 1 << (next(seed) % 8),
+            (1, true) => out[at] = next(seed) as u8,
+            (2, _) => out.insert(at, next(seed) as u8),
+            _ => out.truncate(at),
+        }
+    }
+    out
+}
+
+/// A base of zeros but for page 1.
+struct Golden;
+
+impl Base for Golden {
+    fn id(&self) -> u64 {
+        1
+    }
+    fn page(&self, index: u64) -> Option<&[u8]> {
+        static PAGE: [u8; BLOCK_SIZE] = [3; BLOCK_SIZE];
+        (index == 1).then_some(&PAGE[..])
+    }
+}
+
+/// The decoders never panic, whatever they read: records, segments and
+/// stored values, mutated or random. A record that decodes encodes back to
+/// itself, and what open derives from it is bounded.
+#[test]
+fn decoders_never_panic_on_arbitrary_bytes() -> io::Result<()> {
+    let mut seed = 0x51ce_d00d_5eed_0001;
+    let record = record()?.encode();
+    let images = Images::from([(1, Some(varied(5, 100))), (2, None), (7, Some(image(3)))]);
+    let previous = chain(Images::from([(1, Some(varied(5, 0)))]));
+    let segment = encode_transaction(&images, &previous)?.remove(0);
+    let stored = stored_value(&[segment.clone(), Bytes::from_static(b"value")]);
+    let valid = [record, segment, stored];
+    let (mut records, mut segments) = (0, 0);
+    for i in 0..30_000 {
+        let bytes = Bytes::from(match i % 4 {
+            0 => {
+                let magic = [&b"SC15"[..], b"SL15", b""][i % 3];
+                let len = next(&mut seed) % 64;
+                let random = (0..len).map(|_| next(&mut seed) as u8);
+                magic.iter().copied().chain(random).collect()
+            }
+            _ => mutated(&mut seed, &valid[i % 3]),
+        });
+        if let Ok(commit) = Commit::decode(&bytes) {
+            records += 1;
+            assert_eq!(Commit::decode(&commit.encode())?, commit);
+            let _ = (
+                commit.inline_pages(),
+                commit.stored_values(),
+                commit.inline_bytes(),
+            );
+            assert!(commit.paged().all(|(_, size)| size <= MAX_DATABASE_BYTES));
+        }
+        for base in [None, Some(&Golden as &dyn Base)] {
+            if let Ok(images) = super::decode_segment(&bytes, &previous, 0, base) {
+                segments += 1;
+                assert!(
+                    images
+                        .values()
+                        .flatten()
+                        .all(|page| page.len() == BLOCK_SIZE)
+                );
+            }
+        }
+        let _ = entries(&bytes);
+        if let Ok(parts) = stored_segments(&bytes) {
+            assert!(parts.iter().map(Bytes::len).sum::<usize>() < bytes.len());
+        }
+    }
+    // Some mutations keep a value valid (a changed name, say).
+    assert!(
+        records > 0 && segments > 0,
+        "{records} records, {segments} segments"
+    );
+    Ok(())
+}

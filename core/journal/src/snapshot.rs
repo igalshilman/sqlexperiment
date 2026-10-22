@@ -45,8 +45,10 @@
 //!
 //! Read the commit record, then the stored segments it names, if any, and
 //! replay its log. With a cache that saw the same record, nothing changed
-//! since. A cold open (no cached pages) fetches a small database whole, or the
-//! pages the working-set hint lists, alongside.
+//! since. An owner whose last commit had an unknown outcome syncs alongside,
+//! so that its cache keeps only durable state. A cold open (no cached pages)
+//! fetches a small database whole, or the pages the working-set hint lists,
+//! alongside.
 use crate::{
     PAGE,
     cache::{NamespaceCache, PageKey, Reader},
@@ -223,7 +225,20 @@ impl Snapshot {
                 false => Ok(None),
             }
         };
-        let (commit_bytes, hint) = futures::try_join!(store.get(COMMIT), read_hint)?;
+        // After a commit with an unknown outcome, what open reads may be this
+        // owner's writes that a crash can still lose: a sync makes them
+        // durable before the cache keeps anything of them.
+        let unsettled = cache.and_then(NamespaceCache::unsettled);
+        let settle = async {
+            match unsettled {
+                Some(_) => store.sync().await,
+                None => Ok(()),
+            }
+        };
+        let (commit_bytes, hint, ()) = futures::try_join!(store.get(COMMIT), read_hint, settle)?;
+        if let (Some(cache), Some(unknown)) = (cache, unsettled) {
+            cache.settled(unknown);
+        }
         let commit = match &commit_bytes {
             Some(bytes) => Commit::decode(bytes)?,
             None => Commit::default(),
@@ -817,6 +832,13 @@ impl Snapshot {
         let mut with = self.continued(self.commit.clone(), self.commit_bytes.clone());
         if let Some(id) = id {
             with.log.decode_file(id, &*base)?;
+            // Pages fetched ahead that its log now covers are stale once a
+            // checkpoint drops them from the log (see `with_fetched`).
+            let Self { fetched, log, .. } = &mut with;
+            fetched
+                .get_mut()
+                .unwrap()
+                .retain(|page, _| !log.images.contains_key(page));
         }
         with.bases.insert(name.to_owned(), base);
         Ok(with.registered())

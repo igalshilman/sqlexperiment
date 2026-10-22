@@ -82,3 +82,49 @@ fn seeded_page_roundtrips_and_arbitrary_inputs_are_bounded() -> io::Result<()> {
     }
     Ok(())
 }
+
+/// Decoding never panics on a mutated encoding of any tag, with or without
+/// the base a tag 3 page needs, or with a base of the wrong size; what
+/// decodes is one page.
+#[test]
+fn mutated_encodings_of_every_tag_never_panic() -> io::Result<()> {
+    let mut seed = 0x0dd5_eed0_c0de_c0de;
+    let base: Vec<u8> = (0..PAGE_SIZE).map(|i| (i / 7) as u8).collect();
+    let mut page = base.clone();
+    for byte in &mut page[100..900] {
+        *byte = random(&mut seed);
+    }
+    let encodings = [
+        encode(&page, PageCompression::Raw)?,
+        encode(&page, PageCompression::Lz4)?,
+        encode(&page, PageCompression::Zstd)?,
+        encode_against(&page, &base, PageCompression::Zstd)?,
+    ];
+    assert_eq!(
+        encodings.iter().map(|e| e[0]).collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
+    for i in 0..8000 {
+        let mut bytes = encodings[i % 4].clone();
+        for _ in 0..1 + random(&mut seed) % 4 {
+            let at = (random(&mut seed) as usize * 31 + i) % bytes.len().max(1);
+            match random(&mut seed) % 4 {
+                0 if at < bytes.len() => bytes[at] ^= 1 << (random(&mut seed) % 8),
+                1 if at < bytes.len() => bytes[at] = random(&mut seed),
+                2 => bytes.insert(at.min(bytes.len()), random(&mut seed)),
+                _ => bytes.truncate(at),
+            }
+        }
+        let bytes = bytes::Bytes::from(bytes);
+        let decoded = [
+            decode_bytes(&bytes),
+            decode_against(&bytes, None),
+            decode_against(&bytes, Some(&base)),
+            decode_against(&bytes, Some(&base[..100])),
+        ];
+        for page in decoded.into_iter().flatten() {
+            assert_eq!(page.len(), PAGE_SIZE);
+        }
+    }
+    Ok(())
+}

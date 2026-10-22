@@ -62,3 +62,39 @@ fn usage_stays_bounded_with_many_interior_pages() {
         "interior first"
     );
 }
+
+/// Whatever the bytes, a hint decodes to at most the limit of ascending
+/// pages, or not at all.
+#[test]
+fn arbitrary_bytes_decode_to_a_bounded_ascending_list_or_none() {
+    let mut seed = 0x4171_0000_5eed_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let valid = encode(&[0, 1, 2, 130, 70_000, u64::from(u32::MAX) * 3]);
+    let mut decoded = 0;
+    for i in 0..20_000 {
+        let mut bytes = match i % 3 {
+            0 => b"SH15".to_vec(),
+            _ => valid.clone(),
+        };
+        for _ in 0..1 + next() % 4 {
+            let at = (next() as usize) % (bytes.len() + 1);
+            match next() % 3 {
+                0 if at < bytes.len() => bytes[at] ^= 1 << (next() % 8),
+                1 => bytes.insert(at, next() as u8),
+                _ => bytes.truncate(at.max(4)),
+            }
+        }
+        let limit = [0, 3, 32, MAX_HINT_PAGES, usize::MAX][i % 5];
+        if let Some(pages) = decode(&bytes, limit) {
+            decoded += 1;
+            assert!(pages.len() <= limit.min(MAX_HINT_PAGES));
+            assert!(pages.is_sorted(), "{pages:?}");
+        }
+    }
+    assert!(decoded > 0);
+}
