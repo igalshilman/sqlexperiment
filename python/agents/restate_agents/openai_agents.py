@@ -64,8 +64,8 @@ from restate_agents.turns import CANCELLED
 
 __all__ = ["CANCELLED", "agent", "function_tools", "prompt"]
 
-# The tables of the conversations' messages and answers, and of their items.
-PROMPTS, ITEMS = "openai_agents_prompts", "openai_agents_items"
+# The tables of the conversations' messages and answers, of their items, and of the agent each is with.
+PROMPTS, ITEMS, CURRENT = "openai_agents_prompts", "openai_agents_items", "openai_agents_current"
 
 
 def agent(
@@ -231,18 +231,29 @@ async def _run(ctx: Any, agent: Agent[Any], pending: harness.Prompt, items: _Ite
         # The model answered, and a crash came before the answer was stored.
         return _output(agent, _text(history[-1]))
     context = run.get("context")
+    # The agent the conversation is with: the root, or the one a handoff gave it to.
+    current = _Current(items.db, items.thread)
+    everyone = _agents(agent)
+    agent = everyone.get(await current.get() or agent.name, agent)
     if unanswered := _unanswered(history):
-        # The model's calls, stored before a crash cut their tools off: run them again, with their ids.
         found = {t.name: t for t in await agent.get_all_tools(RunContextWrapper(context))}
-        for call in unanswered:
-            tool = found.get(call["name"])
-            if not isinstance(tool, FunctionTool):
-                raise restate.TerminalError(f"cannot carry on with the call of {call['name']}: not a function tool")
-            given = ToolContext(
-                context, tool_name=call["name"], tool_call_id=call["call_id"], tool_arguments=call["arguments"]
-            )
-            output = await _unwrap(tool.on_invoke_tool(given, call["arguments"]))
-            history.append({"type": "function_call_output", "call_id": call["call_id"], "output": text_of(output)})
+        if all(isinstance(found.get(c["name"]), FunctionTool) for c in unanswered):
+            # The model's calls, stored before a crash cut their tools off: run them again, with their ids.
+            for call in unanswered:
+                tool = found[call["name"]]
+                given = ToolContext(
+                    context, tool_name=call["name"], tool_call_id=call["call_id"], tool_arguments=call["arguments"]
+                )
+                output = await _unwrap(tool.on_invoke_tool(given, call["arguments"]))
+                history.append({"type": "function_call_output", "call_id": call["call_id"], "output": text_of(output)})
+        else:
+            # A reply that cannot be carried on (a handoff, a hosted tool's call): its agent is asked again.
+            cut = tags.get(history.index(unanswered[0]))
+            if cut is not None:
+                agent = everyone.get(cut.split(":", 2)[2], agent)
+            kept = [n for n in range(len(history)) if cut is None or tags.get(n) != cut]
+            history = [history[n] for n in kept]
+            tags = {i: tags[n] for i, n in enumerate(kept) if n in tags}
         await items.save(history, tags)
     seen: list[dict[str, Any]] = list(history)
 
@@ -263,10 +274,13 @@ async def _run(ctx: Any, agent: Agent[Any], pending: harness.Prompt, items: _Ite
         return ModelInputData(input=input, instructions=given.instructions)
 
     class Hooks(RunHooks[Any]):
+        async def on_agent_start(self, context: Any, agent: Any) -> None:
+            await current.set(agent.name)
+
         async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
             nonlocal seen
             reply = list(response.to_input_items())
-            tag = f"response:{uuid.uuid4().hex}"
+            tag = f"response:{uuid.uuid4().hex}:{agent.name}"
             tags.update({n: tag for n in range(len(seen), len(seen) + len(reply))})
             seen = [*seen, *reply]
             await items.save(seen, tags)
@@ -277,6 +291,45 @@ async def _run(ctx: Any, agent: Agent[Any], pending: harness.Prompt, items: _Ite
     config = dataclasses.replace(config, call_model_input_filter=before)
     result = await _unwrap(Runner.run(agent, history, hooks=Hooks(), run_config=config, **run))
     return result.final_output
+
+
+class _Current:
+    """The agent a conversation is with, by name, in the object's database: none, for the root."""
+
+    def __init__(self, db: Any, thread: str) -> None:
+        self.db = db
+        self.thread = thread
+        self.name: str | None = None
+
+    async def get(self) -> str | None:
+        if not await has_table(self.db, CURRENT):
+            await self.db.execute(
+                f"CREATE TABLE IF NOT EXISTS {CURRENT} (thread TEXT PRIMARY KEY, agent TEXT NOT NULL)"
+            )
+        rows = await self.db.query(f"SELECT agent FROM {CURRENT} WHERE thread = ?", [self.thread])
+        self.name = rows[0][0] if rows else None
+        return self.name
+
+    async def set(self, name: str) -> None:
+        if name != self.name:
+            await self.db.execute(f"INSERT OR REPLACE INTO {CURRENT} VALUES (?, ?)", [self.thread, name])
+            self.name = name
+
+
+def _agents(root: Agent[Any]) -> dict[str, Agent[Any]]:
+    """The agents that ``root`` and its handoffs reach, by name."""
+    found: dict[str, Agent[Any]] = {}
+    waiting = [root]
+    while waiting:
+        agent = waiting.pop()
+        if agent.name in found:
+            continue
+        found[agent.name] = agent
+        for handoff in agent.handoffs:
+            target = handoff if isinstance(handoff, Agent) else getattr(handoff, "_agent_ref", lambda: None)()
+            if isinstance(target, Agent):
+                waiting.append(target)
+    return found
 
 
 async def _unwrap(work: Any) -> Any:

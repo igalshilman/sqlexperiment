@@ -215,7 +215,7 @@ serve(assistant)
 invocation's context, or async ones. A model LiteLLM knows no provider of
 fails when the agent is defined. `litellm.prompt(ctx, text, ...)`,
 `litellm.compact(ctx, instructions)` and `litellm.reset(ctx, handoff)` are
-those of Claude ([`examples-python/chat_litellm.py`](../../examples-python/chat_litellm.py)).
+those of Claude ([`examples-python/release_notes.py`](../../examples-python/release_notes.py): two models, one drafting and one reviewing).
 
 ## LangGraph
 
@@ -431,7 +431,7 @@ answer to the model; any other error fails the attempt.
 `openai_agents.agent(name, model=, instructions=, tools=)` is the same virtual
 object (`chat`, `messages`, `status`, `stop`, `steer`, `pending`, `signal`)
 on the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)
-([`examples-python/chat_openai_agents.py`](../../examples-python/chat_openai_agents.py)):
+([`examples-python/airline.py`](../../examples-python/airline.py): a handoff, and Restate's tools):
 
 ```python
 from restate_agents import openai_agents, serve
@@ -452,12 +452,17 @@ from handlers of your own with `openai_agents.prompt(ctx, agent, text,
 **run)` (`run`: `Runner.run`'s options, such as `context`, `max_turns` or
 `run_config`), each prompt answered once, its typed output too.
 
+A handoff holds: the conversation's next message goes to the agent it was
+handed off to (kept in `openai_agents_current`).
+
 Through crashes, as with Pydantic AI: the conversation (an item per row, in
 `openai_agents_items`) is stored before each model request (the run's
 `call_model_input_filter`) and with each response (its `on_llm_end` hook),
 so the model's tool calls are stored before any tool runs. A retried attempt
 runs the stored calls again, with their ids (the tool's `on_invoke_tool`),
-without asking the model again, then carries on. Each prompt's answer is
+without asking the model again, then carries on; a stored reply whose calls
+cannot be run again (a handoff, a hosted tool's) is dropped, and the agent
+that made it is asked again. Each prompt's answer is
 stored with it (`openai_agents_prompts`). A tool's `restate.TerminalError` is
 its answer to the model; any other error fails the attempt (the SDK's
 `@function_tool`s answer their errors to the model, as they do anywhere).
@@ -468,7 +473,7 @@ takes no `hooks` of yours: give an `Agent` its own (`Agent.hooks`).
 
 `adk.agent(name, model=, instruction=, tools=)` is the same virtual object
 on Google's [Agent Development Kit](https://google.github.io/adk-docs/)
-([`examples-python/chat_adk.py`](../../examples-python/chat_adk.py)):
+([`examples-python/oncall.py`](../../examples-python/oncall.py): an incident responder on Restate's tools):
 
 ```python
 from restate_agents import adk, serve
@@ -639,7 +644,8 @@ async def chat(ctx, message: str) -> str:
   of Codex's configuration).
 - [`tests/test_openai_agents.py`](tests/test_openai_agents.py): the same,
   for the OpenAI Agents SDK (the teller as an SDK model), with an `Agent`
-  of your own and its typed output, each answered once.
+  of your own and its typed output, each answered once, and a handoff that
+  holds for the next messages, with a crash at each of its state requests.
 - [`tests/test_adk.py`](tests/test_adk.py): the same, for Google ADK (the
   teller as an ADK model), with an agent of your own in a thread of its own.
 - [`tests/test_litellm.py`](tests/test_litellm.py): the same, for the
