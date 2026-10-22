@@ -429,3 +429,45 @@ fn a_reader_sees_one_committed_state_beside_its_owner() -> Result<()> {
         Ok(())
     })
 }
+
+/// A storage fault inside a `transaction()` body is reported as itself, never
+/// as the body ending its transaction (as it would be should the engine roll
+/// back on the fault), and ends the session.
+#[test]
+fn a_storage_fault_in_a_transaction_body_is_reported_as_itself() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = baseline().await?;
+        let statements = [
+            "SELECT sum(length(body)) FROM t",
+            "UPDATE t SET body = printf('%06000d', id) WHERE id % 3 = 0",
+        ];
+        let mut cases = 0;
+        for statement in statements {
+            let store = Arc::new(FaultKv::new(memory.fork(), 0));
+            let session = open(store.clone(), None).await?;
+            session.begin().await?;
+            let (events, result) = probe(&store, session.query(statement, None)).await;
+            result?;
+            for plan in every_failure(&events).into_iter().filter(|p| !p.cancel) {
+                let store = Arc::new(FaultKv::new(memory.fork(), 0));
+                let session = open(store.clone(), None).await?;
+                session.begin().await?;
+                let (hit, ended) = under(&store, plan, session.query(statement, None)).await;
+                let Ended::Returned(Err(error)) = ended else {
+                    continue;
+                };
+                assert!(hit, "{statement}: failed without its fault: {error}");
+                cases += 1;
+                let message = error.to_string();
+                assert!(
+                    !message.contains("ended the transaction"),
+                    "{statement}: a storage fault reported as {message:?}"
+                );
+                assert!(!session.is_usable(), "{statement}: the session went on");
+                assert!(session.query("SELECT 1", None).await.is_err());
+            }
+        }
+        assert!(cases > 0, "no fault failed a statement");
+        Ok(())
+    })
+}
