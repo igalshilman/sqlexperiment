@@ -60,14 +60,18 @@ outstanding requests and open a new one; a failed commit's outcome is unknown.
 - [Python extension](../../python/sql/README.md): the same in Python, in
   `python/sql/`
 
+Both expose `binding::Session`: a session that commits the journal after each
+call that leaves no SQL transaction open, with the transaction calls behind
+their `transaction()`.
+
 ## Layout
 
-| Path                  | What                                                                            |
-| --------------------- | ------------------------------------------------------------------------------- |
-| `src/`                | The crate: `Sql`, and the adapter (`io`) from the engine's files to the journal |
-| `tests/`              | SQL, and the journal's storage, crash and cache campaigns under SQL workloads   |
-| `examples/`           | `lookup`: a small database, opened and queried                                  |
-| [`benches/`](benches) | Benchmarks of SQL workloads on the journal, and their results                   |
+| Path                  | What                                                                                                               |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `src/`                | The crate: `Sql`, the adapter (`io`) from the engine's files to the journal, and the bindings' session (`binding`) |
+| `tests/`              | SQL, and the journal's storage, crash and cache campaigns under SQL workloads                                      |
+| `examples/`           | `lookup`: a small database, opened and queried                                                                     |
+| [`benches/`](benches) | Benchmarks of SQL workloads on the journal, and their results                                                      |
 
 ## Build and test
 

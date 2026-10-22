@@ -1851,8 +1851,6 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "sql",
- "tokio",
- "turso_core",
 ]
 
 [[package]]

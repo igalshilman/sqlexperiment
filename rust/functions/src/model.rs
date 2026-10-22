@@ -1,9 +1,15 @@
+//! The runtime's data: what crosses between host and guest ([`Operation`],
+//! [`Outcome`], the guest's [`Report`]), what a seal keeps of a run
+//! ([`RunRecord`], [`MemoryRecord`]), what the host learns of it ([`View`]),
+//! memory images ([`Image`]), and the limits every part checks.
 use crate::cow::Golden;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub(crate) const PAGE: usize = 4096;
+/// A page of zeros: what memory past golden's end reads as.
+pub(crate) static ZERO_PAGE: [u8; PAGE] = [0; PAGE];
 pub(crate) const MAX_MEMORY: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_INPUT: usize = 1024 * 1024;
 // WASI clock_time_get converts milliseconds to unsigned 64-bit nanoseconds.
@@ -14,7 +20,8 @@ pub(crate) fn validate_time(now: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Host/guest results are JSON; arbitrary values remain in the QuickJS heap.
+/// How a request settled, as the guest sees it: JSON either way. Other
+/// values stay in the guest's heap.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Outcome {
@@ -35,6 +42,11 @@ impl GuestError {
             message: message.into(),
         }
     }
+
+    /// A `TypeError`: the program called something the wrong way.
+    pub fn type_error(message: impl Into<String>) -> Self {
+        Self::new("TypeError", message)
+    }
 }
 
 impl Outcome {
@@ -47,10 +59,14 @@ impl Outcome {
     pub fn failure(name: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Failure {
             ok: false,
-            error: GuestError {
-                name: name.into(),
-                message: message.into(),
-            },
+            error: GuestError::new(name, message),
+        }
+    }
+    /// The outcome of what answered with `result`: its value, or its error.
+    pub fn from_result(result: Result<Value, GuestError>) -> Self {
+        match result {
+            Ok(value) => Self::success(value),
+            Err(error) => Self::Failure { ok: false, error },
         }
     }
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
@@ -196,9 +212,10 @@ pub(crate) struct Report {
     pub outcome: Option<Outcome>,
 }
 
-/// Pointers are offsets into the same pinned Wasm binary's linear memory.
-/// The indirect function table is reconstructed by instantiating that binary;
-/// extensions and mutable reference tables are not supported by this experiment.
+/// What an image keeps outside memory: the stack pointer, and QuickJS's
+/// runtime and context (0 for Python). Pointers are offsets into the same
+/// pinned Wasm binary's linear memory; instantiating that binary rebuilds the
+/// indirect function table, which the snapshot ABI forbids changing.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct VmMeta {
     pub stack: i32,
@@ -206,7 +223,8 @@ pub(crate) struct VmMeta {
     pub context: i32,
 }
 
-/// Captured page contents. The transient tracker memory is never persisted.
+/// What a turn changed against its run's image ([`crate::vm::Vm::capture`]):
+/// the metadata, the memory's length, and each page that differs, by index.
 pub(crate) struct Capture {
     pub meta: VmMeta,
     pub memory_len: usize,
@@ -242,21 +260,17 @@ impl Image {
         debug_assert!(len >= self.len);
         self.len = len;
     }
+    /// Page `index` of the image.
     pub fn page(&self, index: u32) -> &[u8] {
-        static ZERO: [u8; PAGE] = [0; PAGE];
         match self.changed.get(&index) {
             Some(page) => page,
-            None => {
-                let at = index as usize * PAGE;
-                self.golden.bytes().get(at..at + PAGE).unwrap_or(&ZERO)
-            }
+            None => self.original(index),
         }
     }
     /// Golden's page `index`, or zeros beyond it.
     pub fn original(&self, index: u32) -> &[u8] {
-        static ZERO: [u8; PAGE] = [0; PAGE];
         let at = index as usize * PAGE;
-        self.golden.bytes().get(at..at + PAGE).unwrap_or(&ZERO)
+        self.golden.bytes().get(at..at + PAGE).unwrap_or(&ZERO_PAGE)
     }
     pub fn set(&mut self, index: u32, page: &[u8]) {
         if page == self.original(index) {
@@ -287,10 +301,7 @@ impl Image {
         let golden = self.golden.bytes();
         memory[..golden.len()].copy_from_slice(golden);
         memory[golden.len()..].fill(0);
-        for (index, page) in &self.changed {
-            let at = *index as usize * PAGE;
-            memory[at..at + PAGE].copy_from_slice(page);
-        }
+        self.write_changed(memory);
     }
 }
 

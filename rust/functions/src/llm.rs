@@ -156,12 +156,12 @@ impl Llm {
         let request = call.input;
         let model = request["model"].as_str().unwrap_or_default();
         let (name, model) = model.split_once('/').ok_or_else(|| {
-            type_error(format!(
+            GuestError::type_error(format!(
                 "A model is <provider>/<model>, such as anthropic/claude-opus-5-5, not {model:?}"
             ))
         })?;
         let provider = (self.providers.get(name))
-            .ok_or_else(|| type_error(format!("No provider {name:?}")))?;
+            .ok_or_else(|| GuestError::type_error(format!("No provider {name:?}")))?;
         if let Api::Local(binding) = &provider.api {
             return binding
                 .call(HostCall {
@@ -275,12 +275,12 @@ impl Attached for Asking {
     ) -> Result<Value, GuestError> {
         let named = || match input["conversation"].as_str() {
             Some(name) if !name.is_empty() => Ok(name.to_owned()),
-            _ => Err(type_error("A conversation has a name")),
+            _ => Err(GuestError::type_error("A conversation has a name")),
         };
         let answer = match op {
             "llm.append" => {
                 let messages = (input["messages"].as_array())
-                    .ok_or_else(|| type_error("messages is an array"))?;
+                    .ok_or_else(|| GuestError::type_error("messages is an array"))?;
                 conversations::append(tables, &named()?, messages)
                     .await
                     .map(|()| Value::Null)
@@ -292,7 +292,7 @@ impl Attached for Asking {
             "llm.clear" => conversations::clear(tables, &named()?)
                 .await
                 .map(|()| Value::Null),
-            _ => return Err(type_error(format!("No call {op}"))),
+            _ => return Err(GuestError::type_error(format!("No call {op}"))),
         };
         answer.map_err(|error| GuestError::new("Error", format!("{error:#}")))
     }
@@ -393,10 +393,6 @@ mod conversations {
     }
 }
 
-fn type_error(message: impl Into<String>) -> GuestError {
-    GuestError::new("TypeError", message)
-}
-
 /// A message's content as blocks: a string is one text block.
 fn blocks(content: &Value) -> Vec<Value> {
     match content {
@@ -415,7 +411,7 @@ fn merge(mut body: Value, request: &Value) -> Result<Value, GuestError> {
                 body[key] = value.clone();
             }
         }
-        _ => return Err(type_error("options is an object")),
+        _ => return Err(GuestError::type_error("options is an object")),
     }
     Ok(body)
 }
@@ -520,7 +516,7 @@ mod openai {
                     messages.push(message);
                 }
                 role => {
-                    return Err(type_error(format!(
+                    return Err(GuestError::type_error(format!(
                         "A message's role is user or assistant, not {role:?}"
                     )));
                 }

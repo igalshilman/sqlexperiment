@@ -1,4 +1,4 @@
-// OpenCode on the object's database: `openOpenCode(db, options)` boots
+// OpenCode on the object's database: `openOpenCode(db, fence, options)` boots
 // OpenCode 2.0's embedded host (@opencode/sdk) with its database in a
 // SQL session, `ctx.db`.
 //
@@ -168,12 +168,9 @@ export interface OpenOptions {
   resume?: boolean;
 }
 
-/** OpenCode's client, whose calls return Effects. */
-export type Client = OpenCode.Interface;
-
-/** A booted OpenCode: `call` runs one of `client`'s calls; `close` shuts it down. */
+/** A booted OpenCode: `call` runs one of `client`'s calls (which return Effects); `close` shuts it down. */
 export interface Host {
-  client: Client;
+  client: OpenCode.Interface;
   call<A, E, R>(effect: Effect.Effect<A, E, R>): Promise<A>;
   close(): Promise<void>;
 }

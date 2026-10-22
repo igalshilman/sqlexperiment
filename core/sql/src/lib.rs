@@ -15,8 +15,9 @@
 //! committed into the file `db`, still private; the journal refuses to commit
 //! while SQL holds changes not flushed. Dropping the journal discards it all.
 //! The host decides when to commit: after each SQL transaction (as SQLite
-//! does, and as the Node.js addon and the Python extension do), or once per
-//! turn of everything that took part (as the durable functions runtime does).
+//! does, and as the Node.js addon and the Python extension do, through
+//! [`binding::Session`]), or once per turn of everything that took part (as
+//! the durable functions runtime does).
 //!
 //! | Layer | Representation | Survives dropping the journal? |
 //! |---|---|---|
@@ -84,6 +85,7 @@
 //!
 //! `simulation` turns on the journal's in-memory store, fault injection and
 //! latency simulator, and this crate's test helpers.
+pub mod binding;
 pub mod io;
 
 /// SQL values, as returned in rows and bound as parameters.
@@ -145,7 +147,8 @@ pub struct IoStats {
 
 /// Adapter, engine and journal errors returned to the host task.
 pub type Result<T> = journal::Result<T>;
-type Rows = Vec<Vec<Value>>;
+/// Result rows, each a value per column.
+pub type Rows = Vec<Vec<Value>>;
 
 /// The SQL engine over a journal's file `db`: one private SQL view, driven
 /// entirely by the caller's async task.
@@ -171,7 +174,6 @@ pub struct Sql {
     /// schema), which would otherwise carry over to the next session.
     reusable: bool,
     /// The engine continued from a previous session.
-    #[cfg_attr(not(feature = "simulation"), allow(dead_code))]
     reused: bool,
     /// A [`Self::transaction`] body is running.
     in_body: bool,
@@ -223,20 +225,6 @@ impl WarmEngine {
     /// Estimated memory: the buffer pool, and the parsed schema.
     fn weight(&self) -> usize {
         ENGINE_BYTES + 16 * self.schema_bytes
-    }
-}
-
-/// Abort queued requests before a suspended statement is destroyed. This guard
-/// is created after the statement so cancellation retires completions first.
-struct Running<'a> {
-    io: &'a KvIo,
-    complete: bool,
-}
-impl Drop for Running<'_> {
-    fn drop(&mut self) {
-        if !self.complete {
-            self.io.shutdown();
-        }
     }
 }
 
@@ -373,8 +361,7 @@ impl Sql {
     /// Cached execution yields every 64 steps; one engine call cannot be preempted.
     /// An engine helper requiring synchronous nonresident I/O returns an error.
     pub async fn query(&mut self, sql: &str) -> Result<Rows> {
-        self.screen(sql);
-        self.run(sql, None).await
+        self.run(sql, None).await.map(|(_, rows)| rows)
     }
 
     /// [`Self::query`] for one statement with its parameters (`?`, `?N`,
@@ -385,8 +372,8 @@ impl Sql {
         sql: &str,
         params: impl IntoIterator<Item = Value>,
     ) -> Result<Rows> {
-        self.screen(sql);
-        self.run(sql, Some(params.into_iter().collect())).await
+        let params = params.into_iter().collect();
+        self.run(sql, Some(params)).await.map(|(_, rows)| rows)
     }
 
     /// [`Self::query`] (without `params`) or [`Self::query_with`], also
@@ -396,8 +383,12 @@ impl Sql {
         sql: &str,
         params: Option<Vec<Value>>,
     ) -> Result<(Vec<String>, Rows)> {
-        self.screen(sql);
-        self.run_columns(sql, params).await
+        self.run(sql, params).await
+    }
+
+    /// Execute SQL, discarding the result rows; see [`Self::query`].
+    pub async fn execute(&mut self, sql: &str) -> Result<()> {
+        self.query(sql).await.map(|_| ())
     }
 
     /// [`Self::query_with`], discarding the result rows.
@@ -575,20 +566,11 @@ impl Sql {
             || !self.participant.journal().is_usable()
     }
 
-    /// Run each statement of `sql`, applying the transaction rules after each:
-    /// inside a [`Self::transaction`] body the transaction must stay open.
-    /// With `params`, `sql` must be one statement.
-    async fn run(&mut self, sql: &str, params: Option<Vec<Value>>) -> Result<Rows> {
-        self.run_columns(sql, params).await.map(|(_, rows)| rows)
-    }
-
-    /// [`Self::run`], with the column names of the last statement. Until it
-    /// returns, the journal counts SQL as holding changes not flushed.
-    async fn run_columns(
-        &mut self,
-        sql: &str,
-        params: Option<Vec<Value>>,
-    ) -> Result<(Vec<String>, Rows)> {
+    /// Run the caller's `sql` (see [`Self::run_statements`]), returning the
+    /// column names and rows of its last statement. Until it returns, the
+    /// journal counts SQL as holding changes not flushed.
+    async fn run(&mut self, sql: &str, params: Option<Vec<Value>>) -> Result<(Vec<String>, Rows)> {
+        self.screen(sql);
         self.participant.set_unflushed(true);
         let result = self.run_statements(sql, params).await;
         // The engine keeps an open transaction's pages to itself until
@@ -597,6 +579,9 @@ impl Sql {
         result
     }
 
+    /// Run each statement of `sql`, applying the transaction rules after each:
+    /// inside a [`Self::transaction`] body the transaction must stay open.
+    /// With `params`, `sql` must be one statement.
     async fn run_statements(
         &mut self,
         sql: &str,
@@ -694,12 +679,6 @@ impl Sql {
         };
         self.poisoned = false;
         Ok(rows)
-    }
-
-    /// Execute one statement and discard its collected result rows.
-    /// This has the same private-write, error and cancellation behavior as [`Self::query`].
-    pub async fn execute(&mut self, sql: &str) -> Result<()> {
-        self.query(sql).await.map(|_| ())
     }
 
     /// Merge the private engine WAL into the private database overlay and truncate it.
@@ -823,6 +802,22 @@ impl<E: Into<Box<dyn std::error::Error + Send + Sync>>> From<E> for Failure {
     }
 }
 
+/// Abort queued requests before a suspended statement is destroyed. This guard
+/// is created after the statement so cancellation retires completions first.
+struct Running<'a> {
+    io: &'a KvIo,
+    complete: bool,
+}
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.io.shutdown();
+        }
+    }
+}
+
+/// Step `statement` to its end, driving its I/O and collecting its rows, at
+/// most `max_bytes` of them.
 async fn query_engine(
     io: &KvIo,
     mut statement: turso_core::Statement,

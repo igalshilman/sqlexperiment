@@ -8,7 +8,7 @@ use crate::extension::{Attachments, Tables};
 use crate::model::{Capture, Image, MAX_INPUT, MAX_MEMORY, PAGE, Report, VmMeta, fingerprint};
 use crate::python::{self, Python};
 use crate::quickjs::{self, QuickJs};
-use crate::wasi::{Fds, Files};
+use crate::wasi::{Fds, Filesystem};
 use crate::{heap, instrument::instrument, tracking::Tracker};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -37,7 +37,7 @@ const POOL: u32 = 1000;
 /// Bump it with anything an image depends on: the Wasm, the bridges
 /// (`guest.js`, `guest.py`), the limits, the imports' behavior, the VM
 /// metadata.
-pub(crate) const VERSION: u64 = 13;
+pub(crate) const VERSION: u64 = 14;
 
 /// The language a program is written in, and so the engine it runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,7 +138,8 @@ struct PythonModule {
     /// The interpreter started and the bridge run, made once: each program's
     /// golden image is this, with the program loaded.
     base: OnceLock<std::result::Result<Image, String>>,
-    files: Arc<Files>,
+    /// The standard library, which every Python VM reads.
+    filesystem: Arc<Filesystem>,
     /// Where the allocator's heap starts: after the stack and static data.
     heap: usize,
 }
@@ -208,7 +209,7 @@ pub(crate) struct Host {
     extensions: Option<Arc<Mutex<Attachments>>>,
     /// A Python VM's filesystem, its open files, and the host's answer
     /// waiting to be read.
-    pub(crate) files: Option<Arc<Files>>,
+    pub(crate) filesystem: Option<Arc<Filesystem>>,
     pub(crate) fds: Fds,
     pub(crate) answer: Vec<u8>,
 }
@@ -311,7 +312,7 @@ impl Runtime {
                         )?)?,
                         data: Arc::new(Golden::new(data)),
                     },
-                    files: build.files,
+                    filesystem: build.filesystem,
                     heap,
                     base: OnceLock::new(),
                 })
@@ -668,8 +669,9 @@ fn mark_host_range(bitmap: &mut [u8], offset: usize, len: usize) -> Result<()> {
     Ok(())
 }
 
-/// The scope's database's answer to a guest's host call, as JSON (see
-/// [`crate::db`]). It may await storage; the guest waits on its fiber.
+/// The answer to a guest's host call `operation`, as JSON: an extension's
+/// call, `<name>.<op>`, or else the scope's database's (see [`crate::db`]).
+/// It may await storage; the guest waits on its fiber.
 pub(crate) async fn host_answer(
     c: &mut Caller<'_, Host>,
     operation: &str,
@@ -791,7 +793,7 @@ impl Vm {
                 .build(),
             db: None,
             extensions: None,
-            files: python.map(|python| python.files.clone()),
+            filesystem: python.map(|python| python.filesystem.clone()),
             fds: Fds::default(),
             answer: Vec::new(),
         };
@@ -871,26 +873,29 @@ impl Vm {
             chunks: None,
         })
     }
+
     /// Let the guest's host calls reach `db`, and `extensions`.
     pub(crate) fn attach(&mut self, db: Arc<Mutex<Db>>, extensions: Arc<Mutex<Attachments>>) {
         let host = self.store.data_mut();
         host.db = Some(db);
         host.extensions = Some(extensions);
     }
+
     /// Begin a turn at logical time `now`, its clock started.
-    pub(crate) fn begin_turn(&mut self, now: u64) -> Result<()> {
+    pub(crate) fn begin_turn(&mut self, now: u64) {
         let host = self.store.data_mut();
         host.now = now;
         host.began = Instant::now();
-        Ok(())
     }
+
     /// Whether the turn has run past [`Limits::checkpoint`]: time to stop at
     /// the next safe boundary, so a long run of local requests goes on in the
     /// next turn instead of running out of time.
-    pub(crate) fn tired(&self) -> Result<bool> {
+    pub(crate) fn tired(&self) -> bool {
         let host = self.store.data();
-        Ok(host.began.elapsed() > host.time.checkpoint)
+        host.began.elapsed() > host.time.checkpoint
     }
+
     /// The captured pages are committed: track writes anew.
     pub(crate) fn committed(&mut self) -> Result<()> {
         let len = self.memory.data_size(&self.store);
@@ -903,6 +908,7 @@ impl Vm {
         }
         Ok(())
     }
+
     /// The pages written since the last commit, in order.
     fn written(&self) -> Result<Vec<usize>> {
         let len = self.memory.data_size(&self.store);
@@ -918,6 +924,7 @@ impl Vm {
             Writes::Nothing => (0..len / PAGE).collect(),
         })
     }
+
     pub(crate) async fn restore(&mut self, image: &Image) -> Result<()> {
         ensure!(
             image.len() <= MAX_MEMORY && image.len().is_multiple_of(65536),
@@ -956,6 +963,7 @@ impl Vm {
             Guest::Python(_) => Ok(()),
         }
     }
+
     /// Call a bridge hook, `__durable.<name>(argument)`, with an optional
     /// string argument; the string it returns.
     pub(crate) async fn call(&mut self, name: &str, argument: Option<&str>) -> Result<String> {
@@ -964,15 +972,18 @@ impl Vm {
             Guest::Python(python) => python.call(self, name, argument).await,
         }
     }
+
     pub(crate) async fn invoke(&mut self, name: &str, value: &serde_json::Value) -> Result<()> {
         self.call(name, Some(&serde_json::to_string(value)?))
             .await?;
         Ok(())
     }
+
     /// What the guest issued since it last reported, and where it stands.
     pub(crate) async fn inspect(&mut self) -> Result<Report> {
         Ok(serde_json::from_str(&self.call("inspect", None).await?)?)
     }
+
     /// Run the guest's ready work (jobs, tasks) until none is left.
     pub(crate) async fn drain(&mut self) -> Result<()> {
         match self.guest.clone() {
@@ -980,6 +991,7 @@ impl Vm {
             Guest::Python(python) => python.call(self, "drain", None).await.map(drop),
         }
     }
+
     pub(crate) fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<()> {
         self.memory.write(&mut self.store, offset, bytes)?;
         if let Writes::Barriers(dirty) = &self.writes {
@@ -987,8 +999,9 @@ impl Vm {
         }
         Ok(())
     }
+
     async fn snapshot(&mut self) -> Result<Image> {
-        // Only golden registration needs a complete copy of guest memory.
+        // Only a golden image needs a complete copy of guest memory.
         let meta = self.metadata().await?;
         let heap = self.heap;
         let memory = self.memory.data_mut(&mut self.store);
@@ -1000,6 +1013,7 @@ impl Vm {
         ensure!(memory.len() <= MAX_MEMORY, "Image exceeds limit");
         Ok(Image::golden(meta, memory))
     }
+
     /// What changed since `base`, with the dead bytes of the pages it compares
     /// zeroed first: the stack below its pointer (between calls no frame is
     /// live there), and free heap chunks. The turn's leftover frames and the
@@ -1080,6 +1094,7 @@ impl Vm {
             examined_pages,
         })
     }
+
     async fn metadata(&mut self) -> Result<VmMeta> {
         let (runtime, context) = match self.guest.clone() {
             Guest::QuickJs(quickjs) => quickjs.pointers(self).await?,

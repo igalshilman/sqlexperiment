@@ -9,22 +9,19 @@
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
 //! is stored. The object's state keeps writes in issue order, so a crash
 //! loses only a suffix of them (see [`journal::kv`]): a statement that
-//! commits queues its writes, then completes at one `sync`. A process-wide
-//! page cache is built in.
+//! commits queues its writes, then completes at one `sync`. The session itself,
+//! its commits and the process-wide page cache, is [`sql::binding::Session`].
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use journal::kv::KvStore;
-use journal::{Journal, PageCache, PageCacheConfig, StorageOptions};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
-use sql::{Sql, Value};
+use sql::binding::Session;
+use sql::{Numeric, Value};
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, OnceCell, oneshot};
-use turso_core::Numeric;
+use tokio::sync::oneshot;
 
 const GET: u32 = 0;
 const SET: u32 = 1;
@@ -61,11 +58,13 @@ struct PyStore {
     dispatch: Py<PyAny>,
 }
 
-fn failed(error: impl std::fmt::Display) -> io::Error {
+fn io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
 impl PyStore {
+    /// Schedule `dispatch(op, key, value, reply)` on the event loop; `reply`
+    /// is `None` for a write, which answers nothing.
     fn schedule(
         &self,
         op: u32,
@@ -86,9 +85,10 @@ impl PyStore {
             )?;
             Ok::<_, PyErr>(())
         })
-        .map_err(failed)
+        .map_err(io_error)
     }
 
+    /// A request that answers: a read, or a sync.
     async fn request(&self, op: u32, key: &str) -> io::Result<Option<Bytes>> {
         let (sender, receiver) = oneshot::channel();
         let reply = Reply {
@@ -97,8 +97,8 @@ impl PyStore {
         self.schedule(op, key, None, Some(reply))?;
         match receiver.await {
             Ok(Ok(value)) => Ok(value.map(Bytes::from)),
-            Ok(Err(error)) => Err(failed(error)),
-            Err(_) => Err(failed("the store dropped the request")),
+            Ok(Err(error)) => Err(io_error(error)),
+            Err(_) => Err(io_error("the store dropped the request")),
         }
     }
 }
@@ -121,57 +121,18 @@ impl KvStore for PyStore {
     }
 }
 
-/// The page cache shared by the process's databases: 256 MiB of memory and
-/// 1 GiB of disk, in a file under the temporary directory, or the file
-/// `RESTATE_SQL_CACHE_FILE` names.
-static CACHE: OnceCell<PageCache> = OnceCell::const_new();
-
-async fn page_cache() -> PyResult<&'static PageCache> {
-    CACHE
-        .get_or_try_init(async || {
-            let named = std::env::var_os("RESTATE_SQL_CACHE_FILE").map(PathBuf::from);
-            let file = named.clone().unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("restate-sql-{}.cache", std::process::id()))
-            });
-            let cache = PageCache::open(PageCacheConfig::new(&file, 256 << 20, 1 << 30)).await?;
-            // The cache keeps the file open, and nothing else uses the
-            // temporary one: unlinked now, it goes away with the process
-            // however it ends (where unlinking an open file is refused, it
-            // stays).
-            if named.is_none() {
-                let _ = std::fs::remove_file(&file);
-            }
-            Ok::<_, io::Error>(cache)
-        })
-        .await
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-}
-
-fn sql_error(error: Box<dyn std::error::Error + Send + Sync>) -> PyErr {
+fn error(error: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
 }
 
-fn closed() -> PyErr {
-    PyRuntimeError::new_err("the database is closed")
-}
-
-/// One session of a namespace's database: SQL on the namespace's journal,
-/// for an object's handler without Restate's journal. Every SQL commit is
-/// durable when its call returns: a call that leaves no SQL transaction open
-/// commits the journal.
+/// One session of a namespace's database (see [`Session`]): every SQL commit
+/// is durable when its call completes.
 #[pyclass(frozen)]
-struct Database {
-    session: Arc<Mutex<Option<Sql>>>,
-    state: Arc<State>,
-}
+struct Database(Arc<Session>);
 
 /// Open the database of `namespace` over the store behind `dispatch`, which
 /// runs on `event_loop`; see `restate_sql/__init__.py` for the store object it
-/// is built from.
-///
-/// A `reader` reads the namespace beside its owner (see `Journal::open_reader`):
-/// it writes nothing to the store, and `is_current` says whether what it read
-/// is still the stored state.
+/// is built from, and [`Session::open`] for a `reader`.
 #[pyfunction]
 #[pyo3(signature = (namespace, dispatch, event_loop, reader = false))]
 fn open<'py>(
@@ -186,24 +147,8 @@ fn open<'py>(
         dispatch,
     });
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let cache = match reader {
-            true => None,
-            false => Some(page_cache().await?.namespace(&namespace)),
-        };
-        let options = StorageOptions {
-            cache,
-            ..StorageOptions::default()
-        };
-        let journal = match reader {
-            true => Journal::open_reader(store, options).await,
-            false => Journal::open_with_options(store, options).await,
-        }
-        .map_err(sql_error)?;
-        let session = Sql::open(&journal).await.map_err(sql_error)?;
-        Ok(Database {
-            session: Arc::new(Mutex::new(Some(session))),
-            state: Arc::new(State::new(reader)),
-        })
+        let session = Session::open(store, &namespace, reader).await;
+        Ok(Database(Arc::new(session.map_err(error)?)))
     })
 }
 
@@ -220,16 +165,9 @@ impl Database {
         params: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let params = params.map(|params| sql_params(&params)).transpose()?;
-        let (session, state) = (self.session.clone(), self.state.clone());
+        let session = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut open = session.lock().await;
-            let session = open.as_mut().ok_or_else(closed)?;
-            let rows = match params {
-                Some(params) => session.query_with(&sql, params).await,
-                None => session.query(&sql).await,
-            };
-            let rows = settle(&mut open, &state, rows).await;
-            let rows = rows.map_err(sql_error)?;
+            let (_, rows) = session.query(&sql, params).await.map_err(error)?;
             Python::attach(|py| python_rows(py, rows))
         })
     }
@@ -244,13 +182,9 @@ impl Database {
         params: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let params = params.map(|params| sql_params(&params)).transpose()?;
-        let (session, state) = (self.session.clone(), self.state.clone());
+        let session = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut open = session.lock().await;
-            let session = open.as_mut().ok_or_else(closed)?;
-            let result = session.query_columns(&sql, params).await;
-            let result = settle(&mut open, &state, result).await;
-            let (columns, rows) = result.map_err(sql_error)?;
+            let (columns, rows) = session.query(&sql, params).await.map_err(error)?;
             Python::attach(|py| {
                 let rows = python_rows(py, rows)?;
                 Ok(
@@ -261,204 +195,74 @@ impl Database {
         })
     }
 
-    /// `BEGIN` the transaction of a `transaction()` body: until its `commit`
-    /// or `rollback`, a statement that ends it ends the session.
+    /// See [`Session::begin`].
     fn begin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (session, state) = (self.session.clone(), self.state.clone());
+        let session = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut open = session.lock().await;
-            let session = open.as_mut().ok_or_else(closed)?;
-            let result = session.execute("BEGIN").await;
-            if result.is_ok() {
-                state.body.store(true, Ordering::Release);
-            }
-            let result = settle(&mut open, &state, result).await;
-            result.map_err(sql_error)
+            session.begin().await.map_err(error)
         })
     }
 
-    /// `COMMIT` the transaction of a `transaction()` body; with `effects`,
-    /// they commit with it, as the record `effects`, in the same put, even if
-    /// the transaction changed nothing. A `COMMIT` that fails leaves the
-    /// transaction open, for `rollback`.
+    /// See [`Session::commit`].
     #[pyo3(signature = (effects=None))]
     fn commit<'py>(
         &self,
         py: Python<'py>,
         effects: Option<Vec<u8>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let (session, state) = (self.session.clone(), self.state.clone());
+        let session = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut open = session.lock().await;
-            let session = open.as_mut().ok_or_else(closed)?;
-            state.body.store(false, Ordering::Release);
-            let result = commit(session, state.reader, effects.map(Bytes::from)).await;
-            let result = settle(&mut open, &state, result).await;
-            result.map_err(sql_error)
+            let effects = effects.map(Bytes::from);
+            session.commit(effects).await.map_err(error)
         })
     }
 
-    /// `ROLLBACK` the transaction of a `transaction()` body, if it is still
-    /// open.
+    /// See [`Session::rollback`].
     fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (session, state) = (self.session.clone(), self.state.clone());
+        let session = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut open = session.lock().await;
-            let session = open.as_mut().ok_or_else(closed)?;
-            state.body.store(false, Ordering::Release);
-            let result = rollback(session).await;
-            let result = settle(&mut open, &state, result).await;
-            result.map_err(sql_error)
+            session.rollback().await.map_err(error)
         })
     }
 
-    /// Whether the session can still run SQL: an SQL error leaves it usable,
-    /// a storage error ends it. A call that is running does not change the
-    /// answer until it ends.
+    /// See [`Session::is_usable`].
     fn is_usable(&self) -> bool {
-        self.state.usable.load(Ordering::Acquire)
+        self.0.is_usable()
     }
 
-    /// The effects of the last commit that set them.
+    /// See [`Session::effects`].
     fn effects<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let session = self.session.clone();
+        let session = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let open = session.lock().await;
-            let session = open.as_ref().ok_or_else(closed)?;
-            let effects = session.journal().record(EFFECTS).get();
+            let effects = session.effects().await.map_err(error)?;
             Python::attach(|py| Ok(PyBytes::new(py, &effects).unbind()))
         })
     }
 
-    /// Whether the store still holds the state this reader opened on, so
-    /// that what it read is: if not, read again in a new session (see
-    /// `Journal::is_current`).
+    /// See [`Session::is_current`].
     fn is_current<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let session = self.session.clone();
+        let session = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let open = session.lock().await;
-            let session = open.as_ref().ok_or_else(closed)?;
-            session.is_current().await.map_err(sql_error)
+            session.is_current().await.map_err(error)
         })
     }
 
-    /// End the session after the calls before it, leaving its engine to the
-    /// next one. It fails if they left a transaction open, whose changes are
-    /// lost, or a failure ended the session.
+    /// See [`Session::save`].
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (session, state) = (self.session.clone(), self.state.clone());
+        let session = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let session = session.lock().await.take();
-            state.usable.store(false, Ordering::Release);
-            save(session.ok_or_else(closed)?).map_err(sql_error)
+            session.save().await.map_err(error)
         })
     }
 
-    /// End the session, whatever state it is in.
+    /// See [`Session::close`].
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (session, state) = (self.session.clone(), self.state.clone());
+        let session = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            session.lock().await.take();
-            state.usable.store(false, Ordering::Release);
+            session.close().await;
             Ok(())
         })
     }
-}
-
-/// The record a commit's effects are in.
-const EFFECTS: &str = "effects";
-
-type SqlResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-/// What a session's calls share besides the session.
-struct State {
-    /// A reader's session: it never commits.
-    reader: bool,
-    /// Inside a `transaction()` body, from `begin` to its `commit` or
-    /// `rollback`.
-    body: AtomicBool,
-    /// Whether the session can still run SQL, as of the last call that ended:
-    /// read without the lock, which a running call holds.
-    usable: AtomicBool,
-}
-
-impl State {
-    fn new(reader: bool) -> Self {
-        Self {
-            reader,
-            body: AtomicBool::new(false),
-            usable: AtomicBool::new(true),
-        }
-    }
-}
-
-/// End a call. A statement that ended the transaction of a `transaction()`
-/// body ends the session, rather than commit the body halfway. Otherwise, a
-/// call that leaves no SQL transaction open commits the journal: what the SQL
-/// committed, with the effects set, durable before the call returns. A
-/// reader commits nothing, and a session that a failure ended cannot.
-async fn settle<T>(open: &mut Option<Sql>, state: &State, result: SqlResult<T>) -> SqlResult<T> {
-    let Some(session) = open.as_mut() else {
-        return result;
-    };
-    if state.body.load(Ordering::Acquire) && !session.in_transaction() {
-        state.body.store(false, Ordering::Release);
-        state.usable.store(false, Ordering::Release);
-        open.take();
-        return Err("a statement ended the transaction of transaction(), whose body must not: the session has ended".into());
-    }
-    // Even after an SQL error: the statements before it stand.
-    let committed = match !state.reader && session.is_usable() && !session.in_transaction() {
-        true => commit_journal(session).await,
-        false => Ok(()),
-    };
-    state.usable.store(session.is_usable(), Ordering::Release);
-    committed.and(result)
-}
-
-async fn commit_journal(session: &mut Sql) -> SqlResult<()> {
-    session.flush().await?;
-    session.journal().commit().await?;
-    Ok(())
-}
-
-/// `COMMIT`, then set `effects`: a `COMMIT` that fails sets none.
-async fn commit(session: &mut Sql, reader: bool, effects: Option<Bytes>) -> SqlResult<()> {
-    if let Some(effects) = &effects {
-        if reader {
-            return Err("a reader commits no effects".into());
-        }
-        if effects.len() > journal::MAX_RECORD_BYTES {
-            let (size, limit) = (effects.len(), journal::MAX_RECORD_BYTES);
-            return Err(format!("effects of {size} bytes exceed {limit}").into());
-        }
-    }
-    if session.in_transaction() {
-        session.execute("COMMIT").await?;
-    }
-    if let Some(effects) = effects {
-        session.journal().record(EFFECTS).set(effects);
-    }
-    Ok(())
-}
-
-/// `ROLLBACK` the open transaction, unless a failure ended the session.
-async fn rollback(session: &mut Sql) -> SqlResult<()> {
-    match session.is_usable() && session.in_transaction() {
-        true => session.execute("ROLLBACK").await,
-        false => Ok(()),
-    }
-}
-
-/// End `session`, which leaves its engine to the next one when it is clean.
-fn save(session: Sql) -> SqlResult<()> {
-    if !session.is_usable() {
-        return Err("a failure ended the session".into());
-    }
-    if session.in_transaction() {
-        return Err("a transaction was left open: its changes are lost".into());
-    }
-    Ok(())
 }
 
 /// SQL values from Python: `None`, `bool` (0 or 1), `int` (64 bits),

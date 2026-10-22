@@ -87,7 +87,7 @@ export function setStoreWrapper(wrap: Wrap) {
 }
 
 /** The end of an attempt, as `invocationEndPromise` rejects with it, for the requests that would otherwise wait for it. */
-export class AttemptEnd {
+class AttemptEnd {
   #ended: Error | undefined;
   readonly #waiting = new Set<(error: Error) => void>();
   readonly #listeners = new Set<() => void>();
@@ -132,6 +132,11 @@ export class AttemptEnd {
 // database's pages and log by name (`dev.restate.tooling.journal.hidden.name.prefix`).
 const named = (key: string): restate.EntryOptions => ({ name: key });
 
+// A shared handler's reader writes nothing.
+const refusedWrite = () => {
+  throw new Error('a shared handler writes no state');
+};
+
 /**
  * The object's state as an ordered store: `get` is a state get, `set` and
  * `clear` are state writes, which return at once and which the runtime
@@ -140,11 +145,6 @@ const named = (key: string): restate.EntryOptions => ({ name: key });
  * rejects, so the session that made it ends instead of holding its lock for
  * the life of the process.
  */
-// A shared handler's reader writes nothing.
-const refusedWrite = () => {
-  throw new Error('a shared handler writes no state');
-};
-
 function objectStore(ctx: SqlHost, end: AttemptEnd): SqlStore {
   // TODO: read with protocol v8's ephemeral get, left out of the journal, once
   // a Restate release ships v8 and the SDK lets a library make one (FUTURE.md
@@ -166,7 +166,7 @@ function objectStore(ctx: SqlHost, end: AttemptEnd): SqlStore {
  * repeat, rejects as a {@link TerminalError}, unless the session has ended (a
  * storage error, which is retried).
  */
-export class SqlErrors {
+class SqlErrors {
   readonly #errors = new WeakSet<object>();
   readonly #usable: () => boolean;
 
@@ -273,7 +273,7 @@ function storedSend(send: restate.GenericSend<unknown>): Outgoing['sends'][numbe
 }
 
 /** How a handler ended. */
-export type Outcome<T> = { value: T } | { error: unknown };
+type Outcome<T> = { value: T } | { error: unknown };
 
 function settle<T>(outcome: Outcome<T>): T {
   if ('error' in outcome) throw outcome.error;
@@ -435,20 +435,18 @@ export class SqlAttempt {
       const error = this.#errors.classify(outcome.error, db.isUsable());
       // The handler's error stands: what it committed is stored, and an
       // outbox left full is made again by the next open.
-      const end = async () => {
-        await this.#flush(db);
-        await db.save();
-      };
-      await (db.isUsable() ? end() : db.close()).catch(() => db.close().catch(() => {}));
+      await this.#save(db).catch(() => db.close().catch(() => {}));
       throw error;
     }
-    if (db.isUsable()) {
-      await this.#flush(db);
-      await db.save();
-    } else {
-      await db.close();
-    }
+    await this.#save(db);
     return outcome.value;
+  }
+
+  /** Empty the outbox and save the session; one a storage error ended only closes. */
+  async #save(db: Database) {
+    if (!db.isUsable()) return db.close();
+    await this.#flush(db);
+    await db.save();
   }
 }
 

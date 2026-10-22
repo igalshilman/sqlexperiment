@@ -226,8 +226,8 @@ struct Owner {
     /// The hint this owner last wrote, to skip rewriting an unchanged one.
     hint: Option<Vec<u8>>,
     /// Versions of open sessions (as a multiset): each reads pages outside its
-    /// log from the page keys and this cache, so a checkpoint may not write
-    /// images of transactions after the oldest of them.
+    /// log from the page keys and this cache, so a checkpoint waits until no
+    /// other session is open.
     readers: BTreeMap<u64, usize>,
     /// Stored log values a durable record named, by number: a number is never
     /// reused once named, so they stay valid while a record names them.
@@ -333,25 +333,21 @@ impl NamespaceCache {
             .extend(values.into_iter().filter(|(n, _)| named.contains(n)));
     }
 
-    /// Register an open session at version `next`; see [`Reader`].
-    pub(crate) fn reader(&self, next: u64) -> Reader {
-        *self.owner().readers.entry(next).or_default() += 1;
+    /// Register an open session at `version`; see [`Reader`].
+    pub(crate) fn reader(&self, version: u64) -> Reader {
+        *self.owner().readers.entry(version).or_default() += 1;
         Reader {
             cache: self.clone(),
-            next,
+            version,
         }
     }
 
-    /// The oldest position of an open session other than one at `own`: a
-    /// checkpoint may write only images of transactions that end at or before it.
-    pub(crate) fn oldest_reader(&self, own: u64) -> Option<u64> {
+    /// Whether a session is open other than one at version `own`: then a
+    /// checkpoint would overwrite pages it reads.
+    pub(crate) fn other_readers(&self, own: u64) -> bool {
         let owner = self.owner();
-        let mut readers = owner.readers.iter();
-        let (&oldest, &count) = readers.next()?;
-        if oldest != own || count > 1 {
-            return Some(oldest);
-        }
-        readers.next().map(|(&next, _)| next)
+        let open: usize = owner.readers.values().sum();
+        open > usize::from(owner.readers.contains_key(&own))
     }
 
     /// Forget the commit record and what was idle at it, which the caller
@@ -408,7 +404,9 @@ impl NamespaceCache {
         parked.lock().unwrap().take_all(id)
     }
 
-    fn key(&self, page: u64) -> PageKey {
+    /// The key the page's value is cached under now: take it before reading
+    /// the backend, for [`Self::insert_read`].
+    pub(crate) fn key(&self, page: u64) -> PageKey {
         let owner = self.owner();
         PageKey {
             generation: owner.generation,
@@ -426,18 +424,14 @@ impl NamespaceCache {
         }
     }
 
-    /// The key a value read from the backend now would be cached under.
-    pub(crate) fn token(&self, page: u64) -> PageKey {
-        self.key(page)
-    }
-
-    /// Cache a value read from the backend after taking `token`, unless the
-    /// page was replaced or invalidated meanwhile: the value may predate that.
-    pub(crate) fn insert_read(&self, token: PageKey, value: Page) {
+    /// Cache a value read from the backend under `key`, taken before the
+    /// read, unless the page was replaced or invalidated meanwhile: the value
+    /// may predate that.
+    pub(crate) fn insert_read(&self, key: PageKey, value: Page) {
         let owner = self.owner();
-        let current = owner.versions.get(&token.page).copied().unwrap_or(0);
-        if owner.generation == token.generation && current == token.version {
-            self.shared.pages.insert(token, value);
+        let current = owner.versions.get(&key.page).copied().unwrap_or(0);
+        if owner.generation == key.generation && current == key.version {
+            self.shared.pages.insert(key, value);
         }
     }
 
@@ -474,8 +468,8 @@ impl NamespaceCache {
     }
 
     /// The generation of its page keys; it changes when every page is dropped.
-    #[cfg(any(test, feature = "simulation"))]
-    pub fn generation(&self) -> u64 {
+    #[cfg(all(test, feature = "simulation"))]
+    pub(crate) fn generation(&self) -> u64 {
         self.owner().generation
     }
 }
@@ -519,16 +513,16 @@ fn random_start() -> u64 {
 /// An open session's registration at its version; dropping it ends it.
 pub(crate) struct Reader {
     cache: NamespaceCache,
-    next: u64,
+    version: u64,
 }
 
 impl Drop for Reader {
     fn drop(&mut self) {
         let mut owner = self.cache.owner();
-        if let Some(count) = owner.readers.get_mut(&self.next) {
+        if let Some(count) = owner.readers.get_mut(&self.version) {
             *count -= 1;
             if *count == 0 {
-                owner.readers.remove(&self.next);
+                owner.readers.remove(&self.version);
             }
         }
     }

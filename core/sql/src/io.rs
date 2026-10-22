@@ -1,8 +1,8 @@
 //! Bridge between engine byte-addressed files and the journal's file `db`.
 //!
-//! The engine sees two virtual files: [`DB_PATH`] and [`WAL_PATH`]. The database
+//! The engine sees two virtual files: [`DB_PATH`] and its private WAL. The database
 //! reads through the journal's file; its dirty pages and the entire WAL live in
-//! `State` until [`KvIo::move_into_file`]. Full-page writes avoid a backing read; partial writes merge with the
+//! `State` until `KvIo::move_into_file`. Full-page writes avoid a backing read; partial writes merge with the
 //! visible page. Truncation records explicit holes and clears a partial tail so
 //! regrowing a file never exposes bytes from before.
 //!
@@ -42,7 +42,7 @@ use std::{
     io,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use turso_core::io::{FileId, FileSyncType, clock::DefaultClock};
@@ -56,16 +56,18 @@ pub const BLOCK_SIZE: usize = journal::PAGE_SIZE;
 /// Engine-visible virtual database name, not a filesystem or KV key.
 pub const DB_PATH: &str = "object.db";
 /// Engine-visible private WAL name; this file is never fetched from KV.
-pub const WAL_PATH: &str = "object.db-wal";
+const WAL_PATH: &str = "object.db-wal";
 /// Maximum number of engine reads driven concurrently.
 const MAX_READS_IN_FLIGHT: usize = 16;
+/// The virtual files, by number: the index of [`DB`] and [`WAL`] here.
 const FILES: [&str; 2] = [DB_PATH, WAL_PATH];
+/// The database's file number.
+const DB: usize = 0;
+/// The private WAL's file number.
+const WAL: usize = 1;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
-}
-fn engine_error(message: impl Into<String>) -> LimboError {
-    LimboError::InternalError(message.into())
 }
 /// One shared zero-filled page for holes and the unwritten WAL.
 fn zero() -> Page {
@@ -94,10 +96,11 @@ fn blocks(pos: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize, usiz
     })
 }
 
-/// Mutable session overlay indexed by `(file number, logical block number)`.
-/// File 0 is the database and file 1 is its private WAL. A missing entry falls
-/// through to the journal's file for file 0; `Some(None)` is an explicit zero-filled
-/// hole that masks old data after truncation. Sizes track the private view.
+/// Mutable session overlay indexed by `(file number, logical block number)`
+/// ([`DB`] or [`WAL`]). A missing entry falls through to the journal's file
+/// for the database, and reads zeros for the WAL; `Some(None)` is an explicit
+/// zero-filled hole that masks old data after truncation. Sizes track the
+/// private view.
 #[derive(Default)]
 struct State {
     sizes: [u64; 2],
@@ -174,7 +177,7 @@ pub struct KvIo {
     progress: Mutex<Progress>,
     /// A request or synchronous engine read failed: the engine's state after
     /// the error is unknown.
-    failed: std::sync::atomic::AtomicBool,
+    failed: AtomicBool,
     /// The journal of [`Self::mount`], which [`Self::publish`] commits.
     #[cfg(feature = "simulation")]
     journal: Mutex<Option<journal::Journal>>,
@@ -196,7 +199,7 @@ impl KvIo {
             queue: Mutex::default(),
             driver: futures::lock::Mutex::new(()),
             progress: Mutex::default(),
-            failed: Default::default(),
+            failed: AtomicBool::default(),
             #[cfg(feature = "simulation")]
             journal: Mutex::new(None),
             #[cfg(all(test, feature = "simulation"))]
@@ -248,13 +251,11 @@ impl KvIo {
     /// No private changes, no private WAL and no outstanding I/O: the engine's
     /// view equals the committed state it was opened or saved at.
     pub(crate) fn is_clean(&self) -> bool {
-        let state = self.state.lock().unwrap();
+        if self.has_changes() || self.failed() {
+            return false;
+        }
         let progress = self.progress.lock().unwrap();
-        state.sizes[1] == 0
-            && !state.dirty.keys().any(|(file, _)| *file == 0)
-            && progress.inflight == 0
-            && !progress.stopped
-            && !self.failed()
+        progress.inflight == 0 && !progress.stopped
     }
 
     /// Continue a clean adapter on `file` of a newly opened journal at the
@@ -267,7 +268,8 @@ impl KvIo {
         if !self.is_clean() {
             return Err(invalid("cannot resume an adapter with private changes"));
         }
-        (self.max_private_bytes).store(max_private_bytes, Ordering::SeqCst);
+        self.max_private_bytes
+            .store(max_private_bytes, Ordering::SeqCst);
         *self.state.lock().unwrap() = State {
             sizes: [file.len(), 0],
             ..State::default()
@@ -280,14 +282,14 @@ impl KvIo {
     /// metadata reads during connection setup and SQL preparation. Fetching it
     /// happens asynchronously before entering the engine; dirty pages take priority.
     pub(crate) async fn prepare_engine(&self) -> io::Result<()> {
-        let first = self.block(0, 0).await?;
+        let first = self.block(DB, 0).await?;
         // The first page spans several blocks when the page size is larger.
         let page_size = match u16::from_be_bytes([first[16], first[17]]) {
             1 => 65536,
             size => usize::from(size),
         };
         let blocks = page_size.div_ceil(BLOCK_SIZE).max(1) as u64;
-        let rest = futures::future::try_join_all((1..blocks).map(|n| self.block(0, n))).await?;
+        let rest = futures::future::try_join_all((1..blocks).map(|n| self.block(DB, n))).await?;
         let mut header = vec![first];
         header.extend(rest);
         self.state.lock().unwrap().header = header;
@@ -299,15 +301,15 @@ impl KvIo {
     pub fn stats(&self) -> crate::IoStats {
         let state = self.state.lock().unwrap();
         crate::IoStats {
-            database_bytes_written: state.written[0],
-            private_wal_bytes_written: state.written[1],
-            database_len: state.sizes[0],
-            private_wal_len: state.sizes[1],
+            database_bytes_written: state.written[DB],
+            private_wal_bytes_written: state.written[WAL],
+            database_len: state.sizes[DB],
+            private_wal_len: state.sizes[WAL],
         }
     }
 
     pub(crate) fn wal_len(&self) -> u64 {
-        self.state.lock().unwrap().sizes[1]
+        self.state.lock().unwrap().sizes[WAL]
     }
 
     fn enqueue(&self, op: Operation, completion: Completion) -> turso_core::Result<Completion> {
@@ -325,17 +327,17 @@ impl KvIo {
 
     /// Whether any request or synchronous engine read failed.
     pub(crate) fn failed(&self) -> bool {
-        self.failed.load(std::sync::atomic::Ordering::SeqCst)
+        self.failed.load(Ordering::SeqCst)
     }
 
     fn fail(&self) {
-        self.failed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.failed.store(true, Ordering::SeqCst);
     }
 
     /// An error for the engine, recorded as a failure of this adapter.
     fn engine_error(&self, message: impl Into<String>) -> LimboError {
         self.fail();
-        engine_error(message)
+        LimboError::InternalError(message.into())
     }
 
     pub(crate) fn shutdown(&self) {
@@ -362,7 +364,7 @@ impl KvIo {
         if let Some(page) = state.dirty.get(&(file, index)) {
             return Some(page.clone().unwrap_or_else(zero));
         }
-        if file == 1 {
+        if file == WAL {
             return Some(zero());
         }
         state.header.get(index as usize).cloned()
@@ -415,7 +417,7 @@ impl KvIo {
         // pages into the database's, which must not fail a flush.
         let limit = self.max_private_bytes.load(Ordering::SeqCst);
         let held = self.state.lock().unwrap().dirty.len() * BLOCK_SIZE;
-        if file == 1 && held + bytes.len() + 2 * BLOCK_SIZE > limit {
+        if file == WAL && held + bytes.len() + 2 * BLOCK_SIZE > limit {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
                 "private changes exceed SqlOptions::max_private_bytes",
@@ -594,7 +596,7 @@ impl KvIo {
     /// WAL a checkpoint has not moved into it.
     pub(crate) fn has_changes(&self) -> bool {
         let state = self.state.lock().unwrap();
-        state.sizes[1] != 0 || state.dirty.keys().any(|(file, _)| *file == 0)
+        state.sizes[WAL] != 0 || state.dirty.keys().any(|(file, _)| *file == DB)
     }
 
     /// Move the database's private pages into the journal's file, once no
@@ -608,17 +610,17 @@ impl KvIo {
         let file = self.file()?;
         let (dirty, size) = {
             let mut state = self.state.lock().unwrap();
-            if state.sizes[1] != 0 {
+            if state.sizes[WAL] != 0 {
                 return Err(invalid("the private WAL is not checkpointed"));
             }
             // Read again through the file below.
             state.header.clear();
             let dirty: BTreeMap<u64, Option<Page>> = std::mem::take(&mut state.dirty)
                 .into_iter()
-                .filter(|((file, _), _)| *file == 0)
+                .filter(|((file, _), _)| *file == DB)
                 .map(|((_, block), page)| (block, page))
                 .collect();
-            (dirty, state.sizes[0])
+            (dirty, state.sizes[DB])
         };
         let moved = (dirty.into_iter())
             .try_for_each(|(block, page)| file.write(block, page))
@@ -696,9 +698,9 @@ impl IO for KvIo {
     }
 }
 
-/// Thin Arc holder, avoiding self-referential backend/file ownership.
-/// Engine `IO` facade that opens virtual handles sharing the same adapter.
-/// The wrapped adapter owns queue ordering, private bytes and file access.
+/// The engine's `IO`: opens [`DB_PATH`] and the private WAL as handles on the
+/// one shared [`KvIo`], which owns queue ordering, private bytes and file
+/// access. A separate type, since a handle needs the adapter's `Arc`.
 pub struct MountedIo(pub Arc<KvIo>);
 impl Clock for MountedIo {
     fn current_time_monotonic(&self) -> MonotonicInstant {
@@ -730,7 +732,7 @@ impl IO for MountedIo {
     }
 }
 
-/// Virtual database/WAL handle retaining the shared adapter and file selector.
+/// A handle on a virtual file ([`DB`] or [`WAL`]) of the shared adapter.
 struct KvFile {
     io: Arc<KvIo>,
     file: usize,

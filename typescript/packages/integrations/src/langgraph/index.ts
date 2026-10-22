@@ -52,9 +52,6 @@ import { SqlCheckpointSaver } from './checkpointer.ts';
 
 export { SqlCheckpointSaver };
 
-/** The default model, of Anthropic. */
-export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
-
 const State = Annotation.Root({
   ...MessagesAnnotation.spec,
   /** The id of the prompt being answered. */
@@ -147,7 +144,7 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): StructuredToolInterface
 
 /** An agent's options: `chat` and `prompt` take them. */
 export interface Options {
-  /** The model: `anthropic/model-id` (MODEL, or else {@link DEFAULT_MODEL}), or a chat model that calls tools. */
+  /** The model: `anthropic/model-id` (MODEL, or else anthropic/claude-sonnet-5-5), or a chat model that calls tools. */
   model?: string | BaseChatModel;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
@@ -164,10 +161,7 @@ export const prompt = async (
   text: string,
   { model, system, tools = [] }: Options = {},
 ): Promise<string> => {
-  const llm =
-    typeof model === 'object'
-      ? model
-      : new ChatAnthropic({ model: modelIdOf(modelOf(model, DEFAULT_MODEL), 'anthropic') });
+  const llm = typeof model === 'object' ? model : new ChatAnthropic({ model: modelIdOf(modelOf(model), 'anthropic') });
   const app = graph(
     ctx,
     llm,

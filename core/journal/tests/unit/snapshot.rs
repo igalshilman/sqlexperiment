@@ -8,6 +8,19 @@ use crate::{
     },
 };
 
+/// Writes to the file `db` only.
+fn db_writes(pages: Changes, size: u64) -> Writes {
+    Writes::from([("db".to_owned(), Written { size, pages })])
+}
+
+impl Snapshot {
+    /// Commit `dirty` pages of the file `db`, now `size` bytes, as one
+    /// transaction.
+    async fn publish(&self, dirty: Changes, size: u64) -> io::Result<CommitReport> {
+        Ok(self.commit(db_writes(dirty, size), Records::new()).await?.0)
+    }
+}
+
 /// First eight bytes of a page as its number, for readable assertions.
 fn number(page: Option<Page>) -> Option<u64> {
     page.map(|p| u64::from_le_bytes(p[..8].try_into().unwrap()))
@@ -28,7 +41,7 @@ async fn open<S: KvStore + 'static>(
     store: &Arc<S>,
     options: &StorageOptions,
 ) -> io::Result<Snapshot> {
-    Snapshot::open_with_options(store.clone(), options.clone()).await
+    Snapshot::open(store.clone(), options.clone()).await
 }
 
 /// The expected database: pages and size.

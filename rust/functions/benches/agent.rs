@@ -142,8 +142,8 @@ fn main() -> Result<()> {
     let output = json!({"steps": STEPS, "ended": ended, "notes": [
         "request_bytes: the step's request to the model, the whole conversation so far, read from the scope's database as the host makes the call.",
         "request_read_ms: the time to read it.",
-        "stored_bytes: what the step's two turns stored (batches, commits); Scope, no network.",
-        "restore_ms: a new attempt after the step, reading the commit and its batches into a new VM."],
+        "stored_bytes: what the step's two turns stored (pages, commits); Scope, no network.",
+        "restore_ms: a new attempt after the step, reading the commit and its pages into a new VM."],
         "rows": rows});
     std::fs::write("bench-agent.json", serde_json::to_string_pretty(&output)?)?;
     Ok(())

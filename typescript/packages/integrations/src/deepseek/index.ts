@@ -83,17 +83,7 @@ const textTool = <const S extends ParameterSchemaSpec>(options: {
   });
 
 /** The default model. */
-export const DEFAULT_MODEL = 'deepseek/deepseek-flash';
-
-/** Run a tool's `body`, whose error also goes to `fail`. */
-async function guard<T>(fail: (error: unknown) => void, body: () => Promise<T>): Promise<T> {
-  try {
-    return await body();
-  } catch (e) {
-    fail(e);
-    throw e;
-  }
-}
+const DEFAULT_MODEL = 'deepseek/deepseek-flash';
 
 /** The harness, its session in `db`: the services an agent loop needs, the persistence and its checkpoints. */
 async function boot(db: restate.SqlSession, system?: string): Promise<Context> {
@@ -221,7 +211,7 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): ToolDefinition =>
 
 /** An agent's options: `chat` and `prompt` take them. */
 export interface Options {
-  /** The model, as `deepseek/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
+  /** The model, as `deepseek/model-id`: MODEL, or else deepseek/deepseek-flash. */
   model?: string;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
@@ -261,13 +251,17 @@ export const prompt = async (
           const definition = isTool(t) ? native(t, ctx) : t;
           agentCtx.tools.register({
             ...definition,
-            execute: (args, exec) =>
-              guard(fail, async () => {
+            execute: async (args, exec) => {
+              try {
                 await toolCallStarted(ctx);
                 const result = await definition.execute(args, exec);
                 await toolCallEnded(ctx, steerable);
                 return result;
-              }),
+              } catch (error) {
+                fail(error);
+                throw error;
+              }
+            },
           });
         }),
     };

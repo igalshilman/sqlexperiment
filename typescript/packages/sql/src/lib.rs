@@ -7,23 +7,19 @@
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
 //! is stored. The object's state keeps writes in issue order, so a crash
 //! loses only a suffix of them (see [`journal::kv`]): a statement that
-//! commits queues its writes, then resolves at one `sync`. A process-wide
-//! page cache is built in.
+//! commits queues its writes, then resolves at one `sync`. The session itself,
+//! its commits and the process-wide page cache, is [`sql::binding::Session`].
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use journal::kv::KvStore;
-use journal::{Journal, PageCache, PageCacheConfig, StorageOptions};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use sql::{Sql, Value};
+use sql::binding::Session;
+use sql::{Numeric, Value};
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, OnceCell};
-use turso_core::Numeric;
 
 const GET: u32 = 0;
 const SET: u32 = 1;
@@ -38,23 +34,23 @@ struct JsQueue {
     dispatch: Dispatch,
 }
 
-fn failed(error: impl std::fmt::Display) -> io::Error {
+fn io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
 impl JsQueue {
+    /// A request that answers: a read, or a sync.
     async fn request(&self, op: u32, key: &str) -> io::Result<Option<Bytes>> {
         let promise = self
             .dispatch
             .call_async_catch((op, key.to_owned(), None))
             .await
-            .map_err(failed)?;
-        let value = promise.await.map_err(failed)?;
+            .map_err(io_error)?;
+        let value = promise.await.map_err(io_error)?;
         Ok(value.map(|value| Bytes::copy_from_slice(&value)))
     }
-}
 
-impl JsQueue {
+    /// Queue a write: a `set`, or a `clear` when `value` is `None`.
     fn queue(&self, key: &str, value: Option<Bytes>) -> io::Result<()> {
         let (op, value) = match value {
             Some(value) => (SET, Some(Buffer::from(value.to_vec()))),
@@ -65,7 +61,7 @@ impl JsQueue {
             ThreadsafeFunctionCallMode::NonBlocking,
         ) {
             Status::Ok => Ok(()),
-            status => Err(failed(format!("store call failed: {status}"))),
+            status => Err(io_error(format!("store call failed: {status}"))),
         }
     }
 }
@@ -88,52 +84,18 @@ impl KvStore for JsQueue {
     }
 }
 
-/// The page cache shared by the process's databases: 256 MiB of memory and
-/// 1 GiB of disk, in a file under the temporary directory, or the file
-/// `RESTATE_SQL_CACHE_FILE` names.
-static CACHE: OnceCell<PageCache> = OnceCell::const_new();
-
-async fn page_cache() -> Result<&'static PageCache> {
-    CACHE
-        .get_or_try_init(async || {
-            let named = std::env::var_os("RESTATE_SQL_CACHE_FILE").map(PathBuf::from);
-            let file = named.clone().unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("restate-sql-{}.cache", std::process::id()))
-            });
-            let cache = PageCache::open(PageCacheConfig::new(&file, 256 << 20, 1 << 30)).await?;
-            // The cache keeps the file open, and nothing else uses the
-            // temporary one: unlinked now, it goes away with the process
-            // however it ends, rather than staying behind (where unlinking an
-            // open file is refused, it stays).
-            if named.is_none() {
-                let _ = std::fs::remove_file(&file);
-            }
-            Ok::<_, io::Error>(cache)
-        })
-        .await
-        .map_err(|e| Error::from_reason(e.to_string()))
-}
-
-fn sql_error(error: Box<dyn std::error::Error + Send + Sync>) -> Error {
+fn error(error: impl std::fmt::Display) -> Error {
     Error::from_reason(error.to_string())
 }
 
-/// One session of a namespace's database: SQL on the namespace's journal,
-/// for an object's handler without Restate's journal. Every SQL commit is
-/// durable when its call returns: a call that leaves no SQL transaction open
-/// commits the journal.
+/// One session of a namespace's database (see [`Session`]): every SQL commit
+/// is durable when its call resolves.
 #[napi]
-pub struct Database {
-    session: Arc<Mutex<Option<Sql>>>,
-    state: Arc<State>,
-}
+pub struct Database(Arc<Session>);
 
 /// Open the database of `namespace` over the store behind `dispatch`; see
-/// `index.js` for the store object it is built from.
-///
-/// A `reader` reads the namespace beside its owner (see `Journal::open_reader`):
-/// it writes nothing to the store, and `isCurrent` says whether what it read
-/// is still the stored state.
+/// `index.js` for the store object it is built from, and [`Session::open`]
+/// for a `reader`.
 #[napi(ts_return_type = "Promise<Database>")]
 pub fn open<'env>(
     env: &'env Env,
@@ -148,25 +110,8 @@ pub fn open<'env>(
         .build()?;
     let store = Arc::new(JsQueue { dispatch });
     env.spawn_future(async move {
-        let reader = reader.unwrap_or(false);
-        let cache = match reader {
-            true => None,
-            false => Some(page_cache().await?.namespace(&namespace)),
-        };
-        let options = StorageOptions {
-            cache,
-            ..StorageOptions::default()
-        };
-        let journal = match reader {
-            true => Journal::open_reader(store.clone(), options).await,
-            false => Journal::open_with_options(store.clone(), options).await,
-        }
-        .map_err(sql_error)?;
-        let session = Sql::open(&journal).await.map_err(sql_error)?;
-        Ok(Database {
-            session: Arc::new(Mutex::new(Some(session))),
-            state: Arc::new(State::new(reader)),
-        })
+        let session = Session::open(store, &namespace, reader.unwrap_or(false)).await;
+        Ok(Database(Arc::new(session.map_err(error)?)))
     })
 }
 
@@ -183,21 +128,7 @@ impl Database {
         sql: String,
         params: Option<Vec<SqlValue>>,
     ) -> Result<Vec<Vec<SqlValue>>> {
-        let mut open = self.session.lock().await;
-        let session = open.as_mut().ok_or_else(closed)?;
-        let rows = match params {
-            Some(params) => {
-                let params = params.into_iter().map(|p| p.0);
-                session.query_with(&sql, params).await
-            }
-            None => session.query(&sql).await,
-        };
-        let rows = settle(&mut open, &self.state, rows).await;
-        Ok(rows
-            .map_err(sql_error)?
-            .into_iter()
-            .map(|row| row.into_iter().map(SqlValue).collect())
-            .collect())
+        Ok(self.query_columns(sql, params).await?.rows)
     }
 
     /// [`Self::query`], also returning the column names of the statement whose
@@ -211,13 +142,8 @@ impl Database {
         sql: String,
         params: Option<Vec<SqlValue>>,
     ) -> Result<QueryResult> {
-        let mut open = self.session.lock().await;
-        let session = open.as_mut().ok_or_else(closed)?;
         let params = params.map(|params| params.into_iter().map(|p| p.0).collect());
-        let result = session.query_columns(&sql, params).await;
-        let (columns, rows) = settle(&mut open, &self.state, result)
-            .await
-            .map_err(sql_error)?;
+        let (columns, rows) = self.0.query(&sql, params).await.map_err(error)?;
         Ok(QueryResult {
             columns,
             rows: rows
@@ -227,194 +153,55 @@ impl Database {
         })
     }
 
-    /// `BEGIN` the transaction of a `transaction()` body: until its `commit`
-    /// or `rollback`, a statement that ends it ends the session.
+    /// See [`Session::begin`].
     #[napi]
     pub async fn begin(&self) -> Result<()> {
-        let mut open = self.session.lock().await;
-        let session = open.as_mut().ok_or_else(closed)?;
-        let result = session.execute("BEGIN").await;
-        if result.is_ok() {
-            self.state.body.store(true, Ordering::Release);
-        }
-        settle(&mut open, &self.state, result)
-            .await
-            .map_err(sql_error)
+        self.0.begin().await.map_err(error)
     }
 
-    /// `COMMIT` the transaction of a `transaction()` body; with `effects`,
-    /// they commit with it, as the record `effects`, in the same put, even if
-    /// the transaction changed nothing. A `COMMIT` that fails leaves the
-    /// transaction open, for `rollback`.
+    /// See [`Session::commit`].
     #[napi]
     pub async fn commit(&self, effects: Option<Buffer>) -> Result<()> {
-        let mut open = self.session.lock().await;
-        let session = open.as_mut().ok_or_else(closed)?;
-        self.state.body.store(false, Ordering::Release);
         let effects = effects.map(|effects| Bytes::copy_from_slice(&effects));
-        let result = commit(session, self.state.reader, effects).await;
-        settle(&mut open, &self.state, result)
-            .await
-            .map_err(sql_error)
+        self.0.commit(effects).await.map_err(error)
     }
 
-    /// `ROLLBACK` the transaction of a `transaction()` body, if it is still
-    /// open.
+    /// See [`Session::rollback`].
     #[napi]
     pub async fn rollback(&self) -> Result<()> {
-        let mut open = self.session.lock().await;
-        let session = open.as_mut().ok_or_else(closed)?;
-        self.state.body.store(false, Ordering::Release);
-        let result = rollback(session).await;
-        settle(&mut open, &self.state, result)
-            .await
-            .map_err(sql_error)
+        self.0.rollback().await.map_err(error)
     }
 
-    /// Whether the session can still run SQL: an SQL error leaves it usable,
-    /// a storage error ends it. A call that is running does not change the
-    /// answer until it ends.
+    /// See [`Session::is_usable`].
     #[napi]
     pub fn is_usable(&self) -> bool {
-        self.state.usable.load(Ordering::Acquire)
+        self.0.is_usable()
     }
 
-    /// The effects of the last commit that set them.
+    /// See [`Session::effects`].
     #[napi]
     pub async fn effects(&self) -> Result<Buffer> {
-        let open = self.session.lock().await;
-        let session = open.as_ref().ok_or_else(closed)?;
-        Ok(Buffer::from(
-            session.journal().record(EFFECTS).get().to_vec(),
-        ))
+        let effects = self.0.effects().await.map_err(error)?;
+        Ok(Buffer::from(effects.to_vec()))
     }
 
-    /// Whether the store still holds the state this reader opened on, so
-    /// that what it read is: if not, read again in a new session (see
-    /// `Journal::is_current`).
+    /// See [`Session::is_current`].
     #[napi]
     pub async fn is_current(&self) -> Result<bool> {
-        let open = self.session.lock().await;
-        let session = open.as_ref().ok_or_else(closed)?;
-        session.is_current().await.map_err(sql_error)
+        self.0.is_current().await.map_err(error)
     }
 
-    /// End the session after the calls before it, leaving its engine to the
-    /// next one. It fails if they left a transaction open, whose changes are
-    /// lost, or a failure ended the session.
+    /// See [`Session::save`].
     #[napi]
     pub async fn save(&self) -> Result<()> {
-        let session = self.session.lock().await.take();
-        self.state.usable.store(false, Ordering::Release);
-        save(session.ok_or_else(closed)?).map_err(sql_error)
+        self.0.save().await.map_err(error)
     }
 
-    /// End the session, whatever state it is in.
+    /// See [`Session::close`].
     #[napi]
     pub async fn close(&self) {
-        self.session.lock().await.take();
-        self.state.usable.store(false, Ordering::Release);
+        self.0.close().await
     }
-}
-
-fn closed() -> Error {
-    Error::from_reason("the database is closed")
-}
-
-/// The record a commit's effects are in.
-const EFFECTS: &str = "effects";
-
-type SqlResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-/// What a session's calls share besides the session.
-struct State {
-    /// A reader's session: it never commits.
-    reader: bool,
-    /// Inside a `transaction()` body, from `begin` to its `commit` or
-    /// `rollback`.
-    body: AtomicBool,
-    /// Whether the session can still run SQL, as of the last call that ended:
-    /// read without the lock, which a running call holds.
-    usable: AtomicBool,
-}
-
-impl State {
-    fn new(reader: bool) -> Self {
-        Self {
-            reader,
-            body: AtomicBool::new(false),
-            usable: AtomicBool::new(true),
-        }
-    }
-}
-
-/// End a call. A statement that ended the transaction of a `transaction()`
-/// body ends the session, rather than commit the body halfway. Otherwise, a
-/// call that leaves no SQL transaction open commits the journal: what the SQL
-/// committed, with the effects set, durable before the call returns. A
-/// reader commits nothing, and a session that a failure ended cannot.
-async fn settle<T>(open: &mut Option<Sql>, state: &State, result: SqlResult<T>) -> SqlResult<T> {
-    let Some(session) = open.as_mut() else {
-        return result;
-    };
-    if state.body.load(Ordering::Acquire) && !session.in_transaction() {
-        state.body.store(false, Ordering::Release);
-        state.usable.store(false, Ordering::Release);
-        open.take();
-        return Err("a statement ended the transaction of transaction(), whose body must not: the session has ended".into());
-    }
-    // Even after an SQL error: the statements before it stand.
-    let committed = match !state.reader && session.is_usable() && !session.in_transaction() {
-        true => commit_journal(session).await,
-        false => Ok(()),
-    };
-    state.usable.store(session.is_usable(), Ordering::Release);
-    committed.and(result)
-}
-
-async fn commit_journal(session: &mut Sql) -> SqlResult<()> {
-    session.flush().await?;
-    session.journal().commit().await?;
-    Ok(())
-}
-
-/// `COMMIT`, then set `effects`: a `COMMIT` that fails sets none.
-async fn commit(session: &mut Sql, reader: bool, effects: Option<Bytes>) -> SqlResult<()> {
-    if let Some(effects) = &effects {
-        if reader {
-            return Err("a reader commits no effects".into());
-        }
-        if effects.len() > journal::MAX_RECORD_BYTES {
-            let (size, limit) = (effects.len(), journal::MAX_RECORD_BYTES);
-            return Err(format!("effects of {size} bytes exceed {limit}").into());
-        }
-    }
-    if session.in_transaction() {
-        session.execute("COMMIT").await?;
-    }
-    if let Some(effects) = effects {
-        session.journal().record(EFFECTS).set(effects);
-    }
-    Ok(())
-}
-
-/// `ROLLBACK` the open transaction, unless a failure ended the session.
-async fn rollback(session: &mut Sql) -> SqlResult<()> {
-    match session.is_usable() && session.in_transaction() {
-        true => session.execute("ROLLBACK").await,
-        false => Ok(()),
-    }
-}
-
-/// End `session`, which leaves its engine to the next one when it is clean.
-fn save(session: Sql) -> SqlResult<()> {
-    if !session.is_usable() {
-        return Err("a failure ended the session".into());
-    }
-    if session.in_transaction() {
-        return Err("a transaction was left open: its changes are lost".into());
-    }
-    Ok(())
 }
 
 /// Rows with the column names of their statement.

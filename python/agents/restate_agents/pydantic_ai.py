@@ -65,14 +65,12 @@ from pydantic_ai.toolsets import FunctionToolset
 from restate_fns import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import Messages, MessagesRequest, Transcript, has_table, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_of
 from restate_agents.object import Object, context
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
 
 __all__ = ["CANCELLED", "DEFAULT_MODEL", "agent", "prompt", "toolset"]
-
-DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
 
 # The metadata of the conversation's messages (which models do not read): a
 # prompt's request, the request of the tool results that the messages steered
@@ -117,7 +115,6 @@ def agent(
             f"{name}: an agent takes an Agent, or the usual agent's model, instructions and tools; not both"
         )
     usual = _usual(instructions, tools) if pydantic_agent is None else None
-    obj = Object(name, **options)
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         if usual is not None:
@@ -125,11 +122,10 @@ def agent(
         chosen = pydantic_agent if isinstance(pydantic_agent, Agent) else pydantic_agent(ctx)
         return await prompt(ctx, chosen, message)
 
-    async def messages(ctx: ObjectContext, request: MessagesRequest | None = None) -> Messages:
-        """The conversation so far, with the tool calls."""
+    async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
         if not await has_table(ctx.db, "pydantic_ai_messages"):
-            return transcript.page(request)
+            return transcript
         for m in await _Conversation(ctx.db, ctx.key()).load():
             for part in m.parts:
                 if isinstance(part, UserPromptPart):
@@ -140,11 +136,9 @@ def agent(
                     transcript.call(part.tool_call_id, part.tool_name, part.args_as_dict())
                 elif isinstance(part, ToolReturnPart | RetryPromptPart) and part.tool_call_id:
                     transcript.result(part.tool_call_id, part.model_response_str(), isinstance(part, RetryPromptPart))
-        return transcript.page(request)
+        return transcript
 
-    turns.chat(obj, answer)
-    obj.handler("messages", kind="shared")(messages)
-    return obj
+    return turns.agent(name, answer, transcript, **options)
 
 
 async def prompt(ctx: Any, agent: Agent[Any, Any], text: str, *, thread: str | None = None, **run: Any) -> Any:
@@ -346,7 +340,7 @@ def _model(model: str | Model | Callable[[ObjectContext], str | Model] | None, c
     chosen = model(ctx) if callable(model) and not isinstance(model, Model) else model
     if isinstance(chosen, Model):
         return chosen
-    named = model_of(chosen, DEFAULT_MODEL)
+    named = model_of(chosen)
     return named if ":" in named else named.replace("/", ":", 1)
 
 
@@ -354,7 +348,6 @@ def _pydantic(t: Tool) -> PydanticTool[Any]:
     """``t`` as a Pydantic AI tool, which gets its tool call's id."""
 
     async def run(ctx: RunContext[Any], **args: Any) -> Any:
-        input = t.input.model_validate(args)
-        return await t.run({name: getattr(input, name) for name in type(input).model_fields}, ctx.tool_call_id or "")
+        return await t.invoke(args, ctx.tool_call_id or "")
 
     return PydanticTool.from_schema(run, t.name, t.description, t.input.model_json_schema(), takes_ctx=True)

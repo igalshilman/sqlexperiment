@@ -1,13 +1,16 @@
-// What the integrations share.
+// What the integrations share: their options (`Configure`, the model), the
+// ids of an invocation's prompts, the `chat` handler with its turn (status,
+// cancellation, steering, publishing for the clients that follow it), and
+// the `messages` handler with its `Transcript`.
 import * as restate from 'restate-fns';
-import { type Steer, signals, signalsOf } from './signals.ts';
+import { agentOf, type Steer, signals, signalsOf } from './signals.ts';
 
 /**
  * A value, or a function of the invocation's context that gives it: the
  * same for every message, or each user's (from the object's database, say).
  *
  *   pi.chat({ model: 'anthropic/claude-sonnet-5-5' })
- *   pi.chat(async (ctx) => ({ model: await modelOf(ctx) }))
+ *   pi.chat(async (ctx) => ({ model: await userModel(ctx) }))
  */
 export type Configure<T> = T | ((ctx: restate.ObjectContext) => T | Promise<T>);
 
@@ -29,11 +32,14 @@ export const nextPromptId = (ctx: restate.ObjectContext) => {
   return n === 1 ? ctx.request().id : `${ctx.request().id}:${n}`;
 };
 
+/** The default model of the frameworks that take Anthropic's (all but the DeepSeek Harness). */
+export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
+
 /**
  * The model, as `provider/model-id` (such as `anthropic/claude-sonnet-5-5`):
  * `model`, or else MODEL, or else the framework's default.
  */
-export const modelOf = (model: string | undefined, fallback: string) => model || process.env.MODEL || fallback;
+export const modelOf = (model: string | undefined, fallback = DEFAULT_MODEL) => model || process.env.MODEL || fallback;
 
 /**
  * The error code of a message the model's provider refused (a missing or
@@ -119,15 +125,14 @@ export interface Steerable {
 }
 
 /** The `signals` object of the agent of `ctx`. */
-const signalsOfAgent = (ctx: restate.ObjectContext) =>
-  ctx.objectClient(signals, signalsOf(ctx.request().target.service, ctx.key));
+const signalsOfAgent = (ctx: restate.ObjectContext) => ctx.objectClient(signals, signalsOf(ctx));
 
 /**
  * The conversation of `ctx` changed (see `watch` in object.ts): its revision
  * increases, and the clients that follow it read it again. It is a call to
  * Restate, so it also sends what the handler wrote before, for them to read.
  */
-export const publish = async (ctx: restate.ObjectContext) => {
+const publish = async (ctx: restate.ObjectContext) => {
   await signalsOfAgent(ctx).publish();
 };
 
@@ -201,12 +206,11 @@ export const chatHandler = (answer: (ctx: restate.ObjectContext, message: string
       const taken = new Set<string>();
       steerings.set(ctx, taken);
       await publish(ctx);
-      const agent = { service: ctx.request().target.service, key: ctx.key };
       const end = async (cancelled = false) => {
         ctx.clear(TURN);
         ctx
-          .objectSendClient(signals, signalsOf(agent.service, agent.key))
-          .close({ agent, turn: invocationId, taken: [...taken], cancelled });
+          .objectSendClient(signals, signalsOf(ctx))
+          .close({ agent: agentOf(ctx), turn: invocationId, taken: [...taken], cancelled });
         await publish(ctx);
       };
       const turn = new AbortController();

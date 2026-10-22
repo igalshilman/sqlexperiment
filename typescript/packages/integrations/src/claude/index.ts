@@ -43,9 +43,6 @@ import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { Conversation } from './conversation.ts';
 
-/** The default model. */
-export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
-
 /** The id of the tool call a tool runs for: the runner always passes it. */
 export const callId = (context?: BetaToolRunContext) => {
   if (!context) throw new Error('a tool call without its context');
@@ -150,7 +147,7 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): BetaRunnableTool =>
 
 /** An agent's options: `chat` and `prompt` take them. */
 export interface Options {
-  /** The model, as `anthropic/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
+  /** The model, as `anthropic/model-id`: MODEL, or else anthropic/claude-sonnet-5-5. */
   model?: string;
   /** The system prompt. */
   system?: string;
@@ -176,7 +173,7 @@ export const prompt = async (
 ): Promise<string> => {
   const agent = {
     client: client ?? (shared ??= new Anthropic()),
-    model: modelIdOf(modelOf(named, DEFAULT_MODEL), 'anthropic'),
+    model: modelIdOf(modelOf(named), 'anthropic'),
     maxTokens,
     system,
     tools: tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
@@ -216,7 +213,7 @@ export const prompt = async (
  * (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
 export const chat = (options: Configure<Options> = {}) => {
-  if (typeof options === 'object') modelIdOf(modelOf(options.model, DEFAULT_MODEL), 'anthropic');
+  if (typeof options === 'object') modelIdOf(modelOf(options.model), 'anthropic');
   return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
 

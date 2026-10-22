@@ -24,11 +24,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 pub use journal::{Journal, Record};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 /// Something a turn's transaction keeps.
 #[async_trait]
@@ -189,36 +185,7 @@ impl Blobs for DirBlobs {
     }
 }
 
-/// Blobs in memory, for tests.
-#[derive(Default)]
-pub struct MemoryBlobs(Mutex<BTreeMap<(String, String), Vec<u8>>>);
-
-#[async_trait]
-impl Blobs for MemoryBlobs {
-    async fn put(&self, scope: &str, name: &str, bytes: &[u8]) -> Result<()> {
-        let mut blobs = self.0.lock().unwrap();
-        blobs.insert((scope.to_owned(), name.to_owned()), bytes.to_vec());
-        Ok(())
-    }
-
-    async fn get(&self, scope: &str, name: &str) -> Result<Option<Vec<u8>>> {
-        let blobs = self.0.lock().unwrap();
-        Ok(blobs.get(&(scope.to_owned(), name.to_owned())).cloned())
-    }
-
-    async fn list(&self, scope: &str) -> Result<Vec<String>> {
-        let blobs = self.0.lock().unwrap();
-        let names = blobs.keys().filter(|(owner, _)| owner == scope);
-        Ok(names.map(|(_, name)| name.clone()).collect())
-    }
-
-    async fn delete(&self, scope: &str, name: &str) -> Result<()> {
-        let mut blobs = self.0.lock().unwrap();
-        blobs.remove(&(scope.to_owned(), name.to_owned()));
-        Ok(())
-    }
-}
-
+/// A blob's name: its content's SHA-256, in hex.
 pub(crate) fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -226,6 +193,7 @@ pub(crate) fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// A random number, to name temporary files.
 pub(crate) fn random() -> u64 {
     let mut bytes = [0; 8];
     getrandom::fill(&mut bytes).expect("randomness");

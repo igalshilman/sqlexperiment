@@ -1,6 +1,6 @@
 //! The working-set hint: which pages a cold open should fetch.
 //!
-//! An owner records the pages its sessions read. Checkpointing saves write the
+//! An owner records the pages its sessions read. Checkpointing commits write the
 //! most useful ones to `v15/hint`; a cold open reads that key together with
 //! the commit record and fetches the listed pages alongside replay, so its
 //! first queries find them without a round trip per B-tree level.

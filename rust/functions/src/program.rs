@@ -23,19 +23,10 @@ pub struct Program {
 }
 
 impl Program {
-    /// Evaluate JavaScript `source`, a module exporting functions
-    /// `(input, ctx)`.
-    pub fn compile(runtime: &Runtime, name: &str, source: &str) -> Result<Self> {
-        Self::compile_in(runtime, Language::JavaScript, name, source)
-    }
-
-    /// Evaluate Python `source`, a module defining functions
+    /// Evaluate `source`, a module in `language`: in JavaScript, exporting
+    /// functions `(input, ctx)`; in Python, defining functions
     /// `async def handler(input, ctx)`.
-    pub fn compile_python(runtime: &Runtime, name: &str, source: &str) -> Result<Self> {
-        Self::compile_in(runtime, Language::Python, name, source)
-    }
-
-    pub fn compile_in(
+    pub fn compile(
         runtime: &Runtime,
         language: Language,
         name: &str,
@@ -73,10 +64,6 @@ impl Program {
         &self.handlers
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     pub fn language(&self) -> Language {
         self.language
     }
@@ -109,13 +96,13 @@ impl Programs {
 
     /// Add a program compiled from JavaScript `source`.
     pub fn compile(self, name: &str, source: &str) -> Result<Self> {
-        let program = Program::compile(&self.runtime, name, source)?;
+        let program = Program::compile(&self.runtime, Language::JavaScript, name, source)?;
         self.with(program)
     }
 
     /// Add a program compiled from Python `source`.
     pub fn compile_python(self, name: &str, source: &str) -> Result<Self> {
-        let program = Program::compile_python(&self.runtime, name, source)?;
+        let program = Program::compile(&self.runtime, Language::Python, name, source)?;
         self.with(program)
     }
 
@@ -145,6 +132,7 @@ impl Programs {
     }
 }
 
+/// A program's name, which names its object: letters, digits, - and _.
 fn identifier(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty()

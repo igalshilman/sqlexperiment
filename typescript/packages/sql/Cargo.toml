@@ -14,13 +14,10 @@ crate-type = ["cdylib"]
 [dependencies]
 journal = { path = "../../../core/journal" }
 sql = { path = "../../../core/sql" }
-# Its value type, as pinned by sql.
-turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
 napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
 napi-derive = "3"
 bytes = "1.10"
 futures = "0.3"
-tokio = { version = "1", features = ["sync", "rt-multi-thread"] }
 
 [build-dependencies]
 napi-build = "2"

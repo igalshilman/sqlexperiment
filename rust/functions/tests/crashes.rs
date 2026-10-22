@@ -2,7 +2,7 @@
 //! sync, the store keeps a prefix (as Restate keeps a prefix of an attempt's
 //! journal). Another attempt starts over what is left, through the process's
 //! owner cache or as a new process. Every such attempt must end exactly as
-//! the run without a crash: the same outcome, the same KV, no batch left
+//! the run without a crash: the same outcome, the same KV, no page left
 //! behind.
 use anyhow::Result;
 use common::*;

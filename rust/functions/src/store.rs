@@ -51,8 +51,11 @@ impl Scope {
             inline_log_bytes: 1024,
             ..StorageOptions::default()
         };
-        Journal::open_with_options(self.store.clone(), options)
-            .await
-            .map_err(|error| anyhow::anyhow!(error))
+        (Journal::open_with_options(self.store.clone(), options).await).map_err(storage_error)
     }
+}
+
+/// An error of the scope's storage (its journal, or SQL on it).
+pub(crate) fn storage_error(error: Box<dyn std::error::Error + Send + Sync>) -> anyhow::Error {
+    anyhow::anyhow!(error)
 }

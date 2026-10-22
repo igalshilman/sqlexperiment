@@ -49,7 +49,6 @@ struct Control {
     signal: Option<oneshot::Sender<()>>,
     events: Vec<Event>,
     active: usize,
-    max_active: usize,
 }
 
 /// Each delayed request remains a local future: dropping it settles it. Real
@@ -84,7 +83,6 @@ impl FaultKv {
         c.seen = 0;
         c.signal = Some(tx);
         c.events.clear();
-        c.max_active = 0;
         rx
     }
     pub fn disarm(&self) {
@@ -98,9 +96,6 @@ impl FaultKv {
     }
     pub fn active(&self) -> usize {
         self.control.lock().unwrap().active
-    }
-    pub fn max_active(&self) -> usize {
-        self.control.lock().unwrap().max_active
     }
 
     /// Count `operation` on `key`, and return the failpoint it hits, if any.
@@ -142,11 +137,7 @@ impl FaultKv {
         request: impl Future<Output = io::Result<T>>,
     ) -> io::Result<T> {
         let (plan, ordinal) = self.hit(operation, key);
-        {
-            let mut c = self.control.lock().unwrap();
-            c.active += 1;
-            c.max_active = c.max_active.max(c.active);
-        }
+        self.control.lock().unwrap().active += 1;
         let _active = Active(self);
         // Stable differing delays perturb concurrent completion order without a
         // wall clock, a runtime dependency, or sleeps.

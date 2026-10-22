@@ -4,7 +4,7 @@
 //! once a commit record that holds it is durable. The record holds the log
 //! since the last checkpoint: each committed transaction's changed pages, as
 //! segments. A small transaction's segments are inline in the record, so a
-//! save is one put. A large one's are put at `log/<n>`, immutable keys, before
+//! commit is one put. A large one's are put at `log/<n>`, immutable keys, before
 //! the record that names them. So are the inline ones once they outgrow
 //! [`crate::StorageOptions::inline_log_bytes`]: a commit seals them into one
 //! stored value, and the record keeps only their names. Every commit rewrites
@@ -166,7 +166,7 @@ pub(crate) fn encode_transaction(
 }
 
 /// One segment of `file`'s `entries` (page numbers in the file).
-pub(crate) fn encode_segment(
+fn encode_segment(
     file: u32,
     entries: &[(u64, &Option<Page>)],
     chain: &Chain,
@@ -380,12 +380,12 @@ pub(crate) struct Logged {
 /// segment number, the garbage's count and its numbers (ascending, each from
 /// the one before), the next file id, the directory's count, and per file
 /// its id (ascending, as the gap after the one before), its name's length and
-/// bytes, then 0 and its part (a record) or 1 and its size in 512-byte units
-/// (a paged file); then the transaction count, and per transaction its change
-/// count, per change its file's id, its size in 512-byte units and its part
-/// count and parts. A part is 0 and
-/// the bytes' length and bytes (inline), or 1, the stored value's number and
-/// the part's index in it (stored).
+/// bytes, then 0 and its part (a record), 1 and its size in 512-byte units (a
+/// paged file), or 2, its size and its base's id (a paged file with a base);
+/// then the transaction count, and per transaction its change count, per
+/// change its file's id, its size in 512-byte units and its part count and
+/// parts. A part is 0 and the bytes' length and bytes (inline), or 1, the
+/// stored value's number and the part's index in it (stored).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub(crate) struct Commit {
     /// Transactions ever committed: the namespace's version.
@@ -752,17 +752,11 @@ fn put_part(out: &mut Vec<u8>, part: &Part) {
     }
 }
 
-/// A committed transaction in the replayed log.
-pub(crate) struct Transaction {
-    /// Pages it changed, by id.
-    pub pages: Vec<u64>,
-    /// Encoded bytes of its segments.
-    pub bytes: usize,
-}
-
 /// The log as replayed from a commit record.
+#[derive(Clone)]
 pub(crate) struct Log {
-    pub transactions: Vec<Transaction>,
+    /// Committed transactions in the log.
+    pub transactions: usize,
     /// Latest committed image of every page the log changes.
     pub images: Images,
     /// Encoded bytes of the log's segments.
@@ -777,7 +771,7 @@ pub(crate) struct Log {
 impl Log {
     pub(crate) fn new() -> Self {
         Self {
-            transactions: Vec::new(),
+            transactions: 0,
             images: Images::new(),
             bytes: 0,
             chain: Chain::default(),
@@ -827,18 +821,13 @@ impl Log {
 
     /// Add a committed transaction.
     pub(crate) fn append(&mut self, images: Images, bytes: usize) {
-        self.transactions.push(Transaction {
-            pages: images.keys().copied().collect(),
-            bytes,
-        });
+        self.transactions += 1;
         self.chain.images.extend(images.clone());
         self.images.extend(images);
         self.bytes += bytes;
     }
 }
 
-/// Replay the log a commit record holds: its stored segments are read
-/// together, then every segment decodes in order against the ones before it.
 /// Stored values by number, as `log/<n>` holds them.
 pub(crate) type Values = BTreeMap<u64, Bytes>;
 
@@ -854,7 +843,8 @@ pub(crate) struct Replayed {
 }
 
 /// Replay `commit`'s log and read its records: the inline parts, and the stored
-/// values it names, those not in `known` read together.
+/// values it names, those not in `known` read together. Every segment decodes
+/// in order against the ones before it; a file with a base waits for it.
 pub(crate) async fn replay(
     store: &dyn KvStore,
     commit: &Commit,
@@ -893,15 +883,13 @@ pub(crate) async fn replay(
         .collect();
     for transaction in &commit.log {
         let mut images = Images::new();
-        let mut undecoded = Vec::new();
         let mut bytes = 0;
         for change in &transaction.changes {
             for part in &change.parts {
                 let segment = resolve(part)?;
                 bytes += segment.len();
                 if based.contains(&change.file) {
-                    let (pages, _) = entries(&segment)?;
-                    undecoded.extend(pages.iter().map(|&(page, _)| page_id(change.file, page)));
+                    entries(&segment)?; // malformed fails open, as decoding would
                     log.undecoded.entry(change.file).or_default().push(segment);
                     continue;
                 }
@@ -910,9 +898,6 @@ pub(crate) async fn replay(
             }
         }
         log.append(images, bytes);
-        if let Some(last) = log.transactions.last_mut() {
-            last.pages.extend(undecoded);
-        }
     }
     let mut records = Records::new();
     for entry in commit.directory.values() {
@@ -928,7 +913,7 @@ pub(crate) async fn replay(
 }
 
 /// The values at `log/<n>` for each of `numbers`, read together.
-pub(crate) async fn read_values(store: &dyn KvStore, numbers: &[u64]) -> io::Result<Vec<Bytes>> {
+async fn read_values(store: &dyn KvStore, numbers: &[u64]) -> io::Result<Vec<Bytes>> {
     let keys: Vec<_> = numbers.iter().map(|&n| log_key(n)).collect();
     let values = try_join_all(keys.iter().map(|key| store.get(key))).await?;
     values

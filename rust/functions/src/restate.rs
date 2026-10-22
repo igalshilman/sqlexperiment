@@ -1,13 +1,13 @@
-//! Durable JavaScript in Restate virtual objects. A program is a static
-//! JavaScript module, embedded in the binary, served as a virtual object of
-//! its name: each function it exports is a handler. Each key is a scope,
-//! whose calls share its SQL database (`ctx.db`, and `ctx.kv` in it); each
-//! call starts from the module as evaluated, and its memory lasts for the call.
+//! Programs as Restate virtual objects. A program is a static JavaScript or
+//! Python module, embedded in the binary, served as a virtual object of its
+//! name: each function it exports is a handler. Each key is a scope, whose
+//! calls share its SQL database (`ctx.db`, and `ctx.kv` in it); each call
+//! starts from the module as evaluated, and its memory lasts for the call.
 //!
 //! `<program>/<key>/<export>` calls `export(input, ctx)` in its handler,
 //! exclusive and without journal replay, and returns its outcome. The
-//! JavaScript runs until it waits; the handler commits the changed pages,
-//! the SQL and the call's requests (a turn), in one write of the object's
+//! program runs until it waits; the handler commits the changed pages, the
+//! SQL and the call's requests (a turn), in one write of the object's
 //! database, then waits on Restate itself for the first request to complete,
 //! and delivers it in the next turn, to the same live VM:
 //!
@@ -20,26 +20,28 @@
 //! | `ctx.kv.*`, `ctx.db.*`     | Nothing: answered in the turn, from the object's database    |
 //!
 //! A call's input stays in the guest's heap until the call is answered: the
-//! handler reads it when it makes the call, so the commit holds none, and a
-//! binding's call is journaled nowhere. A request's idempotency key is the
-//! guest's, if it set one, or else its operation ID: the same on every
+//! handler reads it when it makes the call, so the commit holds none, and an
+//! extension's operation is journaled nowhere. A request's idempotency key is
+//! the guest's, if it set one, or else its operation ID: the same on every
 //! attempt, since a request is made only once the turn that issued it has
 //! committed.
 //!
 //! A retried attempt replays nothing: it restores the last committed image and
 //! makes its requests again, under the same idempotency keys, so a call
-//! made before the crash is attached to, not made again (a binding that
-//! does not deduplicate is called again). The call ends when
+//! made before the crash is attached to, not made again (an extension's
+//! operation that does not deduplicate is made again). The call ends when
 //! its function settles: requests still outstanding (a race's loser) are
 //! dropped, and their continuations never run; a signal no one gave is
 //! forgotten.
 //!
 //! Besides its functions, each object has `pending`, the signals its runs
 //! wait for, and `signal`, which gives one: by its wait's id, or else to the
-//! oldest wait for its name ([`crate::Signal`]).
+//! oldest wait for its name ([`Signal`]).
 use crate::{
     Budget, Extensions, FunctionSignals, Making, Operation, Outcome, Programs, Run, Runtime, Scope,
-    Signal, Waiting as Wait, signals::FunctionSignalsClient, signals_of, vm,
+    budget::Lease,
+    signals::{FunctionSignalsClient, Signal, Waiting, signals_of},
+    vm,
 };
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use restate_sdk::{
@@ -93,8 +95,11 @@ pub mod faults {
     }
 }
 
+/// The handlers every object has, besides its program's functions.
+pub const BUILT_IN: [&str; 2] = ["pending", "signal"];
+
 /// A program, served as a virtual object of its name: a key is an object.
-pub struct JsObject {
+struct ProgramObject {
     program: String,
     programs: Arc<Programs>,
     /// The objects' databases this process owned, kept between attempts.
@@ -104,12 +109,7 @@ pub struct JsObject {
     extensions: Extensions,
 }
 
-/// A request the handler waits on: its outcome, and the time to deliver it at.
-type Waiting<'ctx> = Pin<Box<dyn DurableFuture<Output = (Outcome, u64)> + Send + 'ctx>>;
-/// A binding's call, which the handler makes itself: its operation and outcome.
-type Calling = BoxFuture<'static, (String, Outcome)>;
-
-impl JsObject {
+impl ProgramObject {
     /// The object as Restate sees it: one exclusive handler per exported
     /// function, taking and returning JSON.
     fn definition(self) -> anyhow::Result<ServiceDefinition> {
@@ -160,14 +160,9 @@ impl JsObject {
             }
         }
     }
-}
 
-/// The handlers every object has, besides its program's functions.
-pub const BUILT_IN: [&str; 2] = ["pending", "signal"];
-
-impl JsObject {
-    /// `pending` (the waits of this object's runs, as [`Wait`]) or `signal`
-    /// (give one, [`Signal`]), through `function_signals`.
+    /// `pending` (the waits of this object's runs, as [`Waiting`]) or
+    /// `signal` (give one, [`Signal`]), through `function_signals`.
     async fn signals(
         &self,
         ctx: SharedObjectContext<'_>,
@@ -192,10 +187,86 @@ impl JsObject {
         let resolved = signals.resolve(Json(signal)).call().await?.into_inner();
         Ok(Json(serde_json::to_value(resolved)?))
     }
+
+    /// Start the run `run_id` with `input`, then run turns until `handler`
+    /// settles, each delivering what arrived while the run waited.
+    ///
+    /// Each turn first reserves its memory in the budget; the run then holds
+    /// what it keeps live until it parks, which it may while it waits.
+    async fn drive<'ctx>(
+        &self,
+        ctx: &'ctx ObjectContext<'ctx>,
+        run_id: &str,
+        handler: &str,
+        input: Value,
+    ) -> HandlerResult<Outcome> {
+        // One store for the whole attempt: its handler is the object's only
+        // writer meanwhile, so what it read or wrote stays true.
+        let store = Arc::new(StateQueue::new(ctx.raw_state()));
+        let namespace = format!("{}/{}", self.program, ctx.key());
+        let scope = (Scope::new(store.clone()).cached(self.cache.namespace(&namespace)))
+            .extended(self.extensions.clone());
+        let mut lease = self.budget.lease();
+        lease.reserve(self.budget.peak(&self.program)).await;
+        let started = Run::start(
+            &self.programs,
+            &scope,
+            ctx.key(),
+            run_id,
+            &self.program,
+            handler,
+            input,
+            now(),
+        )
+        .await;
+        let mut run = committed(&store, started)?;
+        self.budget.record(&self.program, run.turn_peak());
+        lease.hold(run.resident());
+        let signals_key = signals_of(&self.program, ctx.key());
+        let mut in_flight = InFlight::new();
+        loop {
+            let state = run.view().state;
+            if let Some(outcome) = state.outcome {
+                in_flight.forget_signals(ctx, signals_key);
+                return Ok(outcome);
+            }
+            // Making a call reads its input from the heap: a run that is not
+            // live restores first, within the budget, as for a delivery.
+            if in_flight.reads_heap(&state.pending) && run.resident() == 0 {
+                lease
+                    .reserve(self.budget.peak(&self.program).max(run.footprint()))
+                    .await;
+            }
+            let answered = in_flight
+                .make(ctx, &signals_key, &store, &mut run, &state.pending)
+                .await?;
+            lease.hold(run.resident());
+            let (outcomes, at) = match answered {
+                Some(answer) => (vec![answer], 0),
+                None => in_flight.arrived(&mut run, &mut lease).await?,
+            };
+            let peak = self.budget.peak(&self.program).max(run.footprint());
+            if !lease.try_reserve(peak) {
+                // Wait parked: a run that waits to fit holding its memory
+                // could keep the turns before it from ever fitting.
+                run.park();
+                lease.hold(0);
+                lease.reserve(peak).await;
+            }
+            for (operation, _) in &outcomes {
+                in_flight.signals.remove(operation);
+            }
+            let delivered = run.deliver_all(outcomes, now().max(at)).await;
+            self.budget.record(&self.program, run.turn_peak());
+            lease.hold(run.resident());
+            committed(&store, delivered)?;
+        }
+    }
 }
 
-/// Routes each of the object's handlers to [`JsObject::call`], or a built-in one to [`JsObject::signals`].
-struct Dispatch(Arc<JsObject>);
+/// Routes each of the object's handlers to [`ProgramObject::call`], or a
+/// built-in one to [`ProgramObject::signals`].
+struct Dispatch(Arc<ProgramObject>);
 
 impl restate_sdk::service::Service for Dispatch {
     type Future = macro_support::ServiceBoxFuture;
@@ -229,181 +300,155 @@ impl restate_sdk::service::Service for Dispatch {
     }
 }
 
-impl JsObject {
-    /// Start the call with `input`, then run turns until `handler` settles,
-    /// each waiting for the first of the call's requests to complete.
-    async fn drive<'ctx>(
-        &self,
+/// A request Restate completes (a call, a timer, a signal's wait): its
+/// outcome, and the time to deliver it at.
+type RestateFuture<'ctx> = Pin<Box<dyn DurableFuture<Output = (Outcome, u64)> + Send + 'ctx>>;
+/// An extension's operation, which the handler makes itself: its ID and
+/// outcome.
+type ExtensionFuture = BoxFuture<'static, (String, Outcome)>;
+
+/// The requests this attempt has made for its run, until they are delivered.
+struct InFlight<'ctx> {
+    /// Restate's futures, and the operation of each, by its index.
+    restate: DurableFuturesUnordered<RestateFuture<'ctx>>,
+    operations: Vec<String>,
+    extensions: FuturesUnordered<ExtensionFuture>,
+    /// Every operation made, delivered or not: none is made twice.
+    made: HashSet<String>,
+    /// The signals waited for, until delivered: those left when the run
+    /// settles are forgotten.
+    signals: HashSet<String>,
+}
+
+impl<'ctx> InFlight<'ctx> {
+    fn new() -> Self {
+        Self {
+            restate: DurableFuturesUnordered::new(),
+            operations: Vec::new(),
+            extensions: FuturesUnordered::new(),
+            made: HashSet::new(),
+            signals: HashSet::new(),
+        }
+    }
+
+    /// Whether making `pending` reads a call's input from the run's heap.
+    fn reads_heap(&self, pending: &[Operation]) -> bool {
+        (pending.iter())
+            .filter(|operation| !self.made.contains(operation.id()))
+            .any(|operation| matches!(operation, Operation::Rpc { .. } | Operation::Call { .. }))
+    }
+
+    /// Make each of `pending` not made yet. One the host answers now (a
+    /// wakeup, or a call that fails before it is made) is not made: the
+    /// first such is returned, to deliver in the next turn on its own.
+    async fn make(
+        &mut self,
         ctx: &'ctx ObjectContext<'ctx>,
-        run: &str,
-        handler: &str,
-        input: Value,
-    ) -> HandlerResult<Outcome> {
-        // One store for the whole attempt: its handler is the object's only
-        // writer meanwhile, so what it read or wrote stays true.
-        let store = Arc::new(StateQueue::new(ctx.raw_state()));
-        let namespace = format!("{}/{}", self.program, ctx.key());
-        let scope = (Scope::new(store.clone()).cached(self.cache.namespace(&namespace)))
-            .extended(self.extensions.clone());
-        // Each turn first reserves what it may take; then the run holds its
-        // memory until it parks.
-        let mut lease = self.budget.lease();
-        lease.reserve(self.budget.peak(&self.program)).await;
-        let started = Run::start(
-            &self.programs,
-            &scope,
-            ctx.key(),
-            run,
-            &self.program,
-            handler,
-            input,
-            now(),
-        )
-        .await;
-        let mut run = committed(&store, started)?;
-        self.budget.record(&self.program, run.turn_peak());
-        lease.hold(run.resident());
-        let mut waiting = DurableFuturesUnordered::<Waiting<'ctx>>::new();
-        let mut operations: Vec<String> = Vec::new();
-        let mut calls = FuturesUnordered::<Calling>::new();
-        let mut awaited: HashSet<String> = HashSet::new();
-        // The signals this attempt waits for, until delivered: those left
-        // when the run settles are forgotten.
-        let mut signals: HashSet<String> = HashSet::new();
-        loop {
-            let state = run.view().state;
-            if let Some(outcome) = state.outcome {
-                if !signals.is_empty() {
-                    let ids: Vec<String> = signals.into_iter().collect();
-                    ctx.object_client::<FunctionSignalsClient>(signals_of(
-                        &self.program,
-                        ctx.key(),
-                    ))
-                    .forget(Json(ids))
-                    .send();
+        signals_key: &str,
+        store: &StateQueue,
+        run: &mut Run,
+        pending: &[Operation],
+    ) -> HandlerResult<Option<(String, Outcome)>> {
+        let mut answered = None;
+        for operation in pending {
+            let id = operation.id();
+            if self.made.contains(id) {
+                continue;
+            }
+            let made = match operation {
+                Operation::Resume { .. } => Err(Outcome::success(Value::Null)),
+                Operation::Sleep { deadline, .. } => Ok(Made::Restate(sleep(ctx, *deadline))),
+                Operation::Signal { name, input, .. } => {
+                    self.signals.insert(id.to_owned());
+                    let key = signals_key.to_owned();
+                    Ok(Made::Restate(signal(ctx, key, operation, name, input)))
                 }
-                return Ok(outcome);
-            }
-            // Making a call reads its input from the heap: a run that is not
-            // live restores first, within the budget, as for a delivery.
-            let reads = (state.pending.iter())
-                .filter(|operation| !awaited.contains(operation.id()))
-                .any(|operation| {
-                    matches!(operation, Operation::Rpc { .. } | Operation::Call { .. })
-                });
-            if reads && run.resident() == 0 {
-                lease
-                    .reserve(self.budget.peak(&self.program).max(run.footprint()))
-                    .await;
-            }
-            // Answer the requests the host can answer now, one per turn; make
-            // the others, and wait on them.
-            let mut now_ready = None;
-            for operation in &state.pending {
-                let id = operation.id();
-                if awaited.contains(id) {
+                Operation::Rpc { target, .. } => (run.input(id).await)
+                    .map_err(|error| failed(store, error))?
+                    .map(|input| Made::Restate(rpc(ctx, operation, target, input)))
+                    .map_err(|error| Outcome::from_result(Err(error))),
+                Operation::Call { .. } => (run.operation(id).await)
+                    .map_err(|error| failed(store, error))?
+                    .map(|making| Made::Extension(extension(id, making)))
+                    .map_err(|error| Outcome::from_result(Err(error))),
+                // Answered in the turn: never pending.
+                Operation::KvGet { .. } | Operation::KvSet { .. } | Operation::KvDelete { .. } => {
                     continue;
                 }
-                let made = match operation {
-                    Operation::Resume { .. } => Err(Outcome::success(Value::Null)),
-                    Operation::Sleep { deadline, .. } => Ok(Made::Waiting(sleep(ctx, *deadline))),
-                    Operation::Signal { name, input, .. } => {
-                        signals.insert(id.to_owned());
-                        let key = signals_of(&self.program, ctx.key());
-                        Ok(Made::Waiting(signal(ctx, key, operation, name, input)))
-                    }
-                    Operation::Rpc { target, .. } => (run.input(id).await)
-                        .map_err(|error| failed(&store, error))?
-                        .map(|input| Made::Waiting(rpc(ctx, operation, target, input)))
-                        .map_err(|error| Outcome::failure(error.name, error.message)),
-                    Operation::Call { .. } => (run.operation(id).await)
-                        .map_err(|error| failed(&store, error))?
-                        .map(|making| Made::Calling(calling(id, making)))
-                        .map_err(|error| Outcome::failure(error.name, error.message)),
-                    // Answered in the turn: never pending.
-                    Operation::KvGet { .. }
-                    | Operation::KvSet { .. }
-                    | Operation::KvDelete { .. } => {
-                        continue;
-                    }
-                };
-                match made {
-                    Ok(Made::Waiting(future)) => {
-                        waiting.push(future);
-                        operations.push(id.to_owned());
-                        awaited.insert(id.to_owned());
-                    }
-                    Ok(Made::Calling(call)) => {
-                        calls.push(call);
-                        awaited.insert(id.to_owned());
-                    }
-                    Err(outcome) => {
-                        now_ready.get_or_insert((id.to_owned(), outcome, 0));
-                    }
-                }
-            }
-            lease.hold(run.resident());
-            let (outcomes, at) = match now_ready {
-                Some((operation, outcome, at)) => (vec![(operation, outcome)], at),
-                None => {
-                    if waiting.is_empty() && calls.is_empty() {
-                        return Err(TerminalError::new("The run waits on nothing").into());
-                    }
-                    // While it waits, the run may park to free its memory.
-                    let park = lease.wait();
-                    let (first, mut at) = loop {
-                        tokio::select! {
-                            ready = waiting.next(), if !waiting.is_empty() => {
-                                let (index, (outcome, at)) = ready?.expect("a request to wait on");
-                                break ((operations[index].clone(), outcome), at);
-                            }
-                            Some(called) = calls.next() => break (called, 0),
-                            () = park.notified(), if run.resident() > 0 => {
-                                run.park();
-                                lease.hold(0);
-                            }
-                        }
-                    };
-                    lease.woken();
-                    // What else has arrived goes in the same turn, and commits
-                    // with it.
-                    let mut outcomes = vec![first];
-                    while let Some(ready) = futures::FutureExt::now_or_never(waiting.next()) {
-                        let Some((index, (outcome, ready_at))) = ready? else {
-                            break;
-                        };
-                        outcomes.push((operations[index].clone(), outcome));
-                        at = at.max(ready_at);
-                    }
-                    while let Some(Some(called)) = futures::FutureExt::now_or_never(calls.next()) {
-                        outcomes.push(called);
-                    }
-                    (outcomes, at)
-                }
             };
-            let peak = self.budget.peak(&self.program).max(run.footprint());
-            if !lease.try_reserve(peak) {
-                // Wait parked: a run that waits to fit holding its memory
-                // could keep the turns before it from ever fitting.
-                run.park();
-                lease.hold(0);
-                lease.reserve(peak).await;
+            match made {
+                Ok(Made::Restate(future)) => {
+                    self.restate.push(future);
+                    self.operations.push(id.to_owned());
+                    self.made.insert(id.to_owned());
+                }
+                Ok(Made::Extension(future)) => {
+                    self.extensions.push(future);
+                    self.made.insert(id.to_owned());
+                }
+                Err(outcome) => {
+                    answered.get_or_insert((id.to_owned(), outcome));
+                }
             }
-            for (operation, _) in &outcomes {
-                signals.remove(operation);
+        }
+        Ok(answered)
+    }
+
+    /// Wait for the first outcome, parking the run if the budget asks it to
+    /// meanwhile; then take what else has arrived, to deliver in the same
+    /// turn: the outcomes, and the latest time among them.
+    async fn arrived(
+        &mut self,
+        run: &mut Run,
+        lease: &mut Lease,
+    ) -> HandlerResult<(Vec<(String, Outcome)>, u64)> {
+        if self.restate.is_empty() && self.extensions.is_empty() {
+            return Err(TerminalError::new("The run waits on nothing").into());
+        }
+        let park = lease.wait();
+        let (first, mut at) = loop {
+            tokio::select! {
+                ready = self.restate.next(), if !self.restate.is_empty() => {
+                    let (index, (outcome, at)) = ready?.expect("a request to wait on");
+                    break ((self.operations[index].clone(), outcome), at);
+                }
+                Some(made) = self.extensions.next() => break (made, 0),
+                () = park.notified(), if run.resident() > 0 => {
+                    run.park();
+                    lease.hold(0);
+                }
             }
-            let delivered = run.deliver_all(outcomes, now().max(at)).await;
-            self.budget.record(&self.program, run.turn_peak());
-            lease.hold(run.resident());
-            committed(&store, delivered)?;
+        };
+        lease.woken();
+        let mut outcomes = vec![first];
+        while let Some(ready) = futures::FutureExt::now_or_never(self.restate.next()) {
+            let Some((index, (outcome, ready_at))) = ready? else {
+                break;
+            };
+            outcomes.push((self.operations[index].clone(), outcome));
+            at = at.max(ready_at);
+        }
+        while let Some(Some(made)) = futures::FutureExt::now_or_never(self.extensions.next()) {
+            outcomes.push(made);
+        }
+        Ok((outcomes, at))
+    }
+
+    /// The run settled: the signals it still waits for are forgotten.
+    fn forget_signals(self, ctx: &ObjectContext<'_>, signals_key: String) {
+        if !self.signals.is_empty() {
+            let ids: Vec<String> = self.signals.into_iter().collect();
+            (ctx.object_client::<FunctionSignalsClient>(signals_key))
+                .forget(Json(ids))
+                .send();
         }
     }
 }
 
-/// A request, made: a future of Restate's, or a binding's call.
+/// A request, made: a future of Restate's, or an extension's operation.
 enum Made<'ctx> {
-    Waiting(Waiting<'ctx>),
-    Calling(Calling),
+    Restate(RestateFuture<'ctx>),
+    Extension(ExtensionFuture),
 }
 
 /// A turn's result. Once it committed, the crash a test injects, if any.
@@ -430,7 +475,7 @@ fn rpc<'ctx>(
     operation: &Operation,
     target: &crate::RpcTarget,
     input: Value,
-) -> Waiting<'ctx> {
+) -> RestateFuture<'ctx> {
     let target = match &target.key {
         Some(key) => RequestTarget::object(&target.service, key, &target.handler),
         None => RequestTarget::service(&target.service, &target.handler),
@@ -455,16 +500,10 @@ fn rpc<'ctx>(
     Box::pin(call)
 }
 
-/// An extension's operation, made: its outcome, as the guest sees it.
-fn calling(id: &str, making: Making) -> Calling {
+/// An extension's operation `id`, made: its outcome, as the guest sees it.
+fn extension(id: &str, making: Making) -> ExtensionFuture {
     let id = id.to_owned();
-    Box::pin(async move {
-        let outcome = match making.await {
-            Ok(value) => Outcome::success(value),
-            Err(error) => Outcome::failure(error.name, error.message),
-        };
-        (id, outcome)
-    })
+    Box::pin(async move { (id, Outcome::from_result(making.await)) })
 }
 
 /// A wait for the signal `name`, in `function_signals` under `key`: the
@@ -476,8 +515,8 @@ fn signal<'ctx>(
     operation: &Operation,
     name: &str,
     input: &Value,
-) -> Waiting<'ctx> {
-    let waiting = Wait {
+) -> RestateFuture<'ctx> {
+    let waiting = Waiting {
         id: operation.id().to_owned(),
         name: name.to_owned(),
         input: input.clone(),
@@ -499,7 +538,7 @@ fn signal<'ctx>(
 }
 
 /// A timer until `deadline`.
-fn sleep<'ctx>(ctx: &'ctx ObjectContext<'ctx>, deadline: u64) -> Waiting<'ctx> {
+fn sleep<'ctx>(ctx: &'ctx ObjectContext<'ctx>, deadline: u64) -> RestateFuture<'ctx> {
     let timer = ctx
         .sleep(Duration::from_millis(deadline.saturating_sub(now())))
         .map(move |result| {
@@ -533,7 +572,7 @@ pub fn embedded() -> anyhow::Result<Arc<Programs>> {
     }
     let mut programs = Programs::new(Arc::new(runtime));
     for (name, language, source) in shipped::PROGRAMS {
-        let program = crate::Program::compile_in(programs.runtime(), *language, name, source)
+        let program = crate::Program::compile(programs.runtime(), *language, name, source)
             .with_context(|| format!("Program {name}"))?;
         programs = programs.with(program)?;
     }
@@ -574,7 +613,7 @@ pub fn bind(
     extensions: &Extensions,
 ) -> anyhow::Result<restate_sdk::endpoint::Builder> {
     for name in programs.names() {
-        let object = JsObject {
+        let object = ProgramObject {
             program: name.to_owned(),
             programs: programs.clone(),
             cache: cache.clone(),

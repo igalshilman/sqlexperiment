@@ -49,7 +49,7 @@ fn main() -> Result<()> {
             (Language::Python, python),
         ] {
             let before = Instant::now();
-            let program = Program::compile_in(&runtime, language, name, source)?;
+            let program = Program::compile(&runtime, language, name, source)?;
             let golden_ms = before.elapsed().as_secs_f64() * 1000.0;
             let programs = Arc::new(Programs::new(runtime.clone()).with(program)?);
             for restored in [false, true] {

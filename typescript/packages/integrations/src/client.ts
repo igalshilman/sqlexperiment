@@ -84,7 +84,13 @@ export interface FollowOptions {
   timeoutSeconds?: number;
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** After `error`, wait a second to try again: false, to stop instead, once `signal` aborted. */
+async function retrying(error: unknown, signal: AbortSignal | undefined): Promise<boolean> {
+  if (signal?.aborted) return false;
+  console.warn('follow: retrying', error);
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  return true;
+}
 
 /**
  * The conversation of the agent `definition` (such as `agent('assistant')`)
@@ -125,10 +131,8 @@ export async function* follow(
       last = messages.at(-1)?.id ?? last;
       yield { status, messages };
     } catch (error) {
-      if (signal?.aborted) return;
-      console.warn('follow: retrying', error);
-      await sleep(1000);
-      continue;
+      if (await retrying(error, signal)) continue;
+      return;
     }
     // One wait, retried with the same idempotency key.
     const window = crypto.randomUUID();
@@ -137,9 +141,7 @@ export async function* follow(
         await followed.watch({ afterRevision: revision, timeoutSeconds }, opts(window));
         break;
       } catch (error) {
-        if (signal?.aborted) return;
-        console.warn('follow: retrying', error);
-        await sleep(1000);
+        if (!(await retrying(error, signal))) return;
       }
     }
   }

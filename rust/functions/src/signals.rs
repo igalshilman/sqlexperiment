@@ -11,10 +11,10 @@
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// The name of the object that keeps the programs' waits.
-pub const SIGNALS: &str = "function_signals";
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// The key of the waits of `program`'s object `key`.
 pub fn signals_of(program: &str, key: &str) -> String {
@@ -57,6 +57,7 @@ pub struct Resolved {
     pub resolved: Option<String>,
 }
 
+/// A wait, and the awakeable that resolves it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Listening {
     #[serde(flatten)]
@@ -64,10 +65,14 @@ struct Listening {
     awakeable: String,
 }
 
-/// The waits, oldest first; the signals kept for the next wait, by name.
+/// The object's state: the waits, oldest first; the signals kept for the
+/// next wait, by name.
 const WAITING: &str = "waiting";
 const KEPT: &str = "kept";
+type Kept = BTreeMap<String, Vec<Value>>;
 
+/// The `function_signals` object: the waits of every program's objects, each
+/// under its key ([`signals_of`]).
 pub struct FunctionSignals;
 
 #[restate_sdk::object(name = "function_signals")]
@@ -106,7 +111,7 @@ impl FunctionSignals {
         let Some(at) = at else {
             if let (true, None, Some(name)) = (signal.keep, &signal.id, &signal.name) {
                 let mut kept = ctx
-                    .get::<Json<std::collections::BTreeMap<String, Vec<Value>>>>(KEPT)
+                    .get::<Json<Kept>>(KEPT)
                     .await?
                     .map(Json::into_inner)
                     .unwrap_or_default();
@@ -141,7 +146,7 @@ impl FunctionSignals {
     ) -> HandlerResult<()> {
         let listening = listening.into_inner();
         let mut kept = ctx
-            .get::<Json<std::collections::BTreeMap<String, Vec<Value>>>>(KEPT)
+            .get::<Json<Kept>>(KEPT)
             .await?
             .map(Json::into_inner)
             .unwrap_or_default();

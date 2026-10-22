@@ -83,12 +83,9 @@ export interface Pi {
 const textOf = (content: Message['content']): string =>
   typeof content === 'string' ? content : content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
 
-/** The default model, as `provider/model-id`. */
-export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
-
 /** An agent's options: `chat`, `prompt` and `withPi` take them. */
 export interface Options {
-  /** The model, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
+  /** The model, as `provider/model-id`: MODEL, or else anthropic/claude-sonnet-5-5. */
   model?: string;
   /** A pi-ai model registry; by default, one of the model's provider. */
   models?: MutableModels;
@@ -139,8 +136,7 @@ export const withPi = async <T>(
   { model: named, models, system, tools = [], workspace }: Options,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
-  const db = ctx.db;
-  const model = modelOf(named, DEFAULT_MODEL);
+  const model = modelOf(named);
   const [provider = '', modelId = ''] = model.split('/');
   models ??= await modelsOf(provider);
   // A tool's error fails the attempt, which Restate retries (pi-durable would
@@ -149,10 +145,9 @@ export const withPi = async <T>(
   const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
   const { promise: failure, reject: failed } = Promise.withResolvers<never>();
   failure.catch(() => {});
-  // A cancelled invocation aborts the conversation's work instead (below):
-  // pi-durable ends the turn, and the tool call with it.
+  // A cancelled invocation, whenever it comes, aborts the conversation's
+  // work instead (below): pi-durable ends the turn, and the tool call with it.
   let cancelled: restate.CancelledError | undefined;
-  // A cancellation, whenever it comes, aborts the conversation's work (below).
   const turn = cancellationOf(ctx);
   const onCancel = () => {
     cancelled = turn!.reason as restate.CancelledError;
@@ -206,7 +201,7 @@ export const withPi = async <T>(
     // Tell the model where the coding tools work.
     registry.install(defineExtension({ name: 'workspace', sections: [section('cwd', () => workspace)] }));
   }
-  const harness = await Harness.open(await openSqlKvStorage(db), { models, registry, env }, context);
+  const harness = await Harness.open(await openSqlKvStorage(ctx.db), { models, registry, env }, context);
   try {
     // The root conversation keeps the model it was created with: on another
     // one now (`model` or MODEL changed), it moves to this one.

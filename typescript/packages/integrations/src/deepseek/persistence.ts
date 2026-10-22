@@ -52,6 +52,7 @@ interface Stored {
   count: number;
 }
 
+/** The harness's session persistence (a cordis plugin, `{ db }`): see the top of this file. */
 export class SqlSessionPersistence extends SessionPersistence {
   // Plain fields, not private ones: cordis hands out the service through a proxy.
   db: SqlSession;

@@ -1,6 +1,6 @@
-// For tests: an attempt's session over a context of their own, and the
-// store's fault injection.
-export { AttemptEnd, setStoreWrapper, SqlAttempt, SqlErrors, withSql } from './session.ts';
-export type { Outcome, SqlHost, SqlStore } from './session.ts';
-export { hookSelector, PromiseSelector } from './selector.ts';
-export type { DoProgressResult, Selectable, SelectorDriver, UnresolvedFuture } from './selector.ts';
+// For tests: an attempt's session over a context of their own, the store's
+// fault injection, and the selector on its own.
+export { setStoreWrapper, SqlAttempt, withSql } from './session.ts';
+export type { SqlHost, SqlStore } from './session.ts';
+export { PromiseSelector } from './selector.ts';
+export type { DoProgressResult, Selectable, UnresolvedFuture } from './selector.ts';
