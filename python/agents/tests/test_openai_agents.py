@@ -193,3 +193,40 @@ async def test_an_agent_of_your_own_and_its_typed_output_answered_once():
     asked = teller.calls
     assert await alice.invoke(obj.handlers["plan"].fn, invocation="p1") == Plan(days=3)
     assert teller.calls == asked
+
+
+def desk(bank: Bank, teller: Teller):
+    """A triage agent that hands refunds off to the refunds agent, which moves the money."""
+    refunds = Agent(
+        name="refunds",
+        instructions="You handle refunds.",
+        model=AgentsTeller(teller),
+        tools=openai_agents.function_tools([bank.restate_tool()]),
+    )
+    triage = Agent(name="triage", instructions="You triage.", model=AgentsTeller(teller), handoffs=[refunds])
+    obj = openai_agents.agent("desk", triage)
+    return obj.handlers["chat"].fn
+
+
+async def test_a_handoff_holds_for_the_next_messages():
+    bank, teller, alice = world()
+    chat = desk(bank, teller)
+    await alice.invoke(chat, "use transfer_to_refunds {}")
+    assert teller.systems[-1] == "You handle refunds."
+    # The next message goes to the refunds agent, which has the transfer tool.
+    assert await alice.invoke(chat, "move 5 from 1 to 2") == "Done: moved 5 from 1 to 2"
+    assert teller.systems[-1] == "You handle refunds." and "You triage." not in teller.systems[-2:]
+    assert list(bank.moves.values()) == [(1, 2, 5)]
+
+
+async def test_a_crash_at_any_state_request_of_a_handoff_hands_off_once():
+    probe, chat = Object(), desk(Bank(), Teller())
+    expected = await probe.invoke(chat, "use transfer_to_refunds {}")
+    requests = probe.requests
+    for at in range(1, requests + 1):
+        bank, teller, alice = world()
+        chat = desk(bank, teller)
+        alice.crash_at = at
+        assert await alice.invoke(chat, "use transfer_to_refunds {}") == expected, f"crash at request {at}"
+        assert await alice.invoke(chat, "move 5 from 1 to 2") == "Done: moved 5 from 1 to 2", f"crash at request {at}"
+        assert list(bank.moves.values()) == [(1, 2, 5)], f"crash at request {at}"
