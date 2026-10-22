@@ -9,15 +9,18 @@ of their own, unless it was cancelled.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import weakref
 from collections.abc import Awaitable, Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 
 import restate_fns as restate
 
+from restate_agents import log
 from restate_agents.common import CHECK_MODEL, Messages, MessagesRequest, Transcript, refused
 from restate_agents.object import TURN, Object, Turn, context, service
 from restate_agents.signals import Agent, CloseRequest, Steer, signals_of
@@ -66,16 +69,28 @@ async def steering(ctx: Any) -> list[Steer]:
 
 async def publish() -> None:
     """
-    The conversation changed (a framework stored a message, say): the clients
-    that follow it (``watch``) read it again. It is a call, so what the
-    handler stored before is stored before they read it. Outside an agent's
-    handler (a checkpointer's test, say), it does nothing.
+    The conversation changed (a framework stored a message, say): its log
+    takes the change, and the clients that follow it (``watch``, ``sync``)
+    read it again. It is a call, so what the handler stored before is stored
+    before they read it. Outside an agent's handler (a checkpointer's test,
+    say), it does nothing.
     """
     try:
         ctx, name = context(), service()
     except RuntimeError:
         return
+    if (transcript := _transcripts.get(name)) is not None:
+        # One write at a time: a framework's tasks (tool calls in parallel, an SDK's own) publish at once.
+        async with _writing.setdefault(ctx, asyncio.Lock()):
+            await log.sync(ctx.db, (await transcript(ctx)).messages())
     await ctx.object_call(publish_change, key=signals_of(name, ctx.key()), arg=None)
+
+
+# The transcript of each agent, by its object's name: what its log is kept in step with.
+_transcripts: dict[str, Callable[[restate.ObjectContext], Awaitable[Transcript]]] = {}
+
+# The log's writes of each attempt, by its context.
+_writing: weakref.WeakKeyDictionary[Any, asyncio.Lock] = weakref.WeakKeyDictionary()
 
 
 def taken(ids: Iterable[str]) -> None:
@@ -92,18 +107,63 @@ def agent(
 ) -> Object:
     """
     An agent's object: ``chat``, which ``answer`` answers, a turn at a time;
-    and ``messages``, its conversation as ``transcript`` gives it.
+    and ``messages`` and ``sync``, its conversation as ``transcript`` gives
+    it, from the log that each change takes (``publish``).
     ``options``: those of ``Object``.
     """
     obj = Object(name, **options)
     _chat(obj, answer)
+    _transcripts[name] = transcript
 
     async def messages(ctx: restate.ObjectContext, request: MessagesRequest | None = None) -> Messages:
-        """The conversation so far, with the tool calls."""
-        return (await transcript(ctx)).page(request)
+        """The conversation so far, with the tool calls: a page of it, or what is new or changed since a cursor."""
+        return await log.page(ctx.db, request)
+
+    async def sync(ctx: restate.ObjectContext, request: SyncRequest | None = None) -> Synced:
+        """
+        The conversation since ``cursor`` (by default, all of it), what the
+        agent is doing, and the revision; with ``revision``, once there is a
+        newer one, or at the timeout (``timeoutSeconds``: 50 by default, at
+        most 60). A client follows the conversation by sending each answer's
+        ``revision`` and ``cursor`` back, at once while it has ``more``.
+        """
+        request = request or {}
+
+        async def own(handler: str, arg: Any = None) -> Any:
+            answer = await ctx.generic_call(name, handler, arg=json.dumps(arg).encode(), key=ctx.key())
+            return json.loads(answer)
+
+        if (revision := request.get("revision")) is not None:
+            await own("watch", {"afterRevision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)})
+        # The revision first: a change after it shows in the next sync.
+        notifications = await own("notifications")
+        status = await own("status")
+        page = await log.page(ctx.db, {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)})
+        return Synced(revision=notifications["revision"], status=status, **page)
 
     obj.handler("messages", kind="shared")(messages)
+    obj.handler("sync", kind="shared")(sync)
     return obj
+
+
+class SyncRequest(TypedDict, total=False):
+    """
+    What ``sync`` reads: what is new or changed since ``cursor`` (default 0,
+    all of it), at most ``limit`` messages (default 100); once the revision is
+    past ``revision``, if given, or at ``timeoutSeconds``.
+    """
+
+    cursor: int
+    revision: int
+    timeoutSeconds: float
+    limit: int
+
+
+class Synced(Messages):
+    """What ``sync`` answers: the messages since the cursor, as ``messages`` gives them, the status and the revision."""
+
+    revision: int
+    status: dict[str, Any]
 
 
 def _chat(obj: Object, answer: Callable[[restate.ObjectContext, str], Awaitable[str]]) -> None:

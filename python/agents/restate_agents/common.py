@@ -95,24 +95,35 @@ class ChatMessage(TypedDict):
     """A message of a conversation, as an agent's ``messages`` handler returns it."""
 
     id: int
-    """Its position in the conversation, from 0; ``before`` and ``after`` take it."""
+    """Its id, from 0, in the order of the conversation; the same however it changes. ``before`` takes it."""
     role: Literal["user", "assistant"]
     parts: list[TextPart | ToolPart]
 
 
 class MessagesRequest(TypedDict, total=False):
-    """Which messages to read: the latest ``limit`` (default 50), or those before or after a message (its ``id``)."""
+    """
+    Which messages to read: the latest ``limit`` (default 50), or those before
+    a message (its ``id``), for a page of the conversation; or those new or
+    changed since a ``cursor``, to follow it.
+    """
 
     limit: int
     before: int
-    after: int
+    cursor: int
 
 
 class Messages(TypedDict):
-    """A page of messages, oldest first, and whether there are more (older ones, or with ``after``, newer ones)."""
+    """
+    A page of messages: oldest first, and whether there are older ones; or,
+    with a ``cursor``, those new or changed since it, by when they changed,
+    and whether there are more of them. Keep them by ``id``: a message comes
+    again once it changed (its tool call's output came, say). ``cursor``: the
+    cursor to read on from.
+    """
 
     messages: list[ChatMessage]
     more: bool
+    cursor: int
 
 
 @dataclass
@@ -146,17 +157,6 @@ class Transcript:
             if error:
                 self._calls[id]["error"] = True
 
-    def page(self, request: MessagesRequest | None = None) -> Messages:
-        """The page of ``request``."""
-        request = request or {}
-        limit = request.get("limit", 50)
-        all = [
-            ChatMessage(id=id, role=m["role"], parts=m["parts"])
-            for id, m in enumerate(m for m in self._messages if m["parts"])
-        ]
-        if "after" in request:
-            newer = all[request["after"] + 1 :]
-            return Messages(messages=newer[:limit], more=len(newer) > limit)
-        end = len(all) if "before" not in request else max(0, min(request["before"], len(all)))
-        start = max(0, end - limit)
-        return Messages(messages=all[start:end], more=start > 0)
+    def messages(self) -> list[dict[str, Any]]:
+        """Its messages, in order (each ``{role, parts}``): those with parts."""
+        return [{"role": m["role"], "parts": m["parts"]} for m in self._messages if m["parts"]]

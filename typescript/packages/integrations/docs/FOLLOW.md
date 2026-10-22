@@ -70,9 +70,10 @@ The same, on what we have:
    it also sends the turn's writes: a reader sees the tool call it announces
    (which fixes the delay above).
 4. **`follow()` in `restate-agents/client`**: on Restate's client, an async
-   iterator of `{ status, messages }` (each new message, and the status),
-   from a cursor (`messages`' `after`), until its signal aborts. A network
-   failure retries, a window's retry keeps its idempotency key.
+   iterator of `{ status, messages, cursor }` (each new or changed message,
+   and the status), from a cursor, until its signal aborts: a loop of
+   `sync`s (below). A network failure retries, a window's retry keeps its
+   idempotency key.
    [`examples-typescript/ui`](../../../../examples-typescript/ui/app.ts) uses it instead of polling.
 
 What a client then does:
@@ -83,6 +84,26 @@ for await (const { status, messages } of follow(restate, agent('support'), 'alic
   render(status, messages);
 }
 ```
+
+### A log, read with a cursor, and `sync`
+
+As the reference keeps a public history apart from the model's context, the
+conversation as clients read it is a log in the object's database
+(`agent_log`, `log.ts`), which each publish takes the framework's
+transcript into (`transcribing` in `common.ts`, through the framework as the
+turn holds it open):
+
+- Each message has an `id` that never changes, and a `seq`, its last
+  change's sequence number: the cursor. A message that grows (a tool call
+  with its output) keeps its `id` and takes a new `seq`; a transcript that
+  is replaced (compacted, reset) leaves its messages in the log, and the ones
+  after them are new.
+- `messages({ cursor })` gives what is new or changed since a cursor, and the
+  next one; `messages({ limit, before })` a page by `id`, and the cursor to
+  follow on from.
+- `sync({ cursor, revision, timeoutSeconds })` is `watch`, then the revision,
+  the status and the messages since the cursor, in one request: as the
+  reference's web app has `snapshot` and `sync` for a page and its long poll.
 
 ### Cost
 

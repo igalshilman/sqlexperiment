@@ -63,6 +63,8 @@ import {
   type Steerable,
   toolCallEnded,
   toolCallStarted,
+  type Transcript,
+  transcribing,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -213,36 +215,40 @@ export const withPi = async <T>(
       }
       return root;
     };
-    return await Promise.race([
-      failure.catch(async (error: unknown) => {
-        if (error instanceof restate.CancelledError) await (await conversation()).abort(context);
-        throw error;
-      }),
-      work({
-        harness,
-        context,
-        conversation,
-        async prompt(text, id = nextPromptId(ctx)) {
-          const root = await conversation();
-          const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
-          const settled = await submission.wait(context);
-          if (settled.status !== 'done' || settled.answer === undefined) {
-            // A prompt the cancellation's abort ended fails with the cancellation.
-            if (cancelled) throw cancelled;
-            const reason = settled.reason ?? 'unknown';
-            const check =
-              reason === 'model_error' || reason === 'no_model' ? ` (the model ${model}: ${CHECK_MODEL})` : '';
-            throw new restate.TerminalError(`prompt ${id} unanswered: ${reason}${check}`);
-          }
-          const { answer } = settled;
-          const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
-          const reply = entry?.model?.at(-1);
-          if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
-          await settleSteering(ctx, steerable);
-          return textOf(reply.content);
-        },
-      }),
-    ]);
+    // The log reads the root conversation through this Harness, while it is open.
+    const read = async (transcript: Transcript) => transcribe(await harness.root(context), context, transcript);
+    return await transcribing(ctx, read, () =>
+      Promise.race([
+        failure.catch(async (error: unknown) => {
+          if (error instanceof restate.CancelledError) await (await conversation()).abort(context);
+          throw error;
+        }),
+        work({
+          harness,
+          context,
+          conversation,
+          async prompt(text, id = nextPromptId(ctx)) {
+            const root = await conversation();
+            const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
+            const settled = await submission.wait(context);
+            if (settled.status !== 'done' || settled.answer === undefined) {
+              // A prompt the cancellation's abort ended fails with the cancellation.
+              if (cancelled) throw cancelled;
+              const reason = settled.reason ?? 'unknown';
+              const check =
+                reason === 'model_error' || reason === 'no_model' ? ` (the model ${model}: ${CHECK_MODEL})` : '';
+              throw new restate.TerminalError(`prompt ${id} unanswered: ${reason}${check}`);
+            }
+            const { answer } = settled;
+            const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
+            const reply = entry?.model?.at(-1);
+            if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
+            await settleSteering(ctx, steerable);
+            return textOf(reply.content);
+          },
+        }),
+      ]),
+    );
   } finally {
     turn?.removeEventListener('abort', onCancel);
     await harness.close(withoutAbortSignal(context));
@@ -272,31 +278,24 @@ export const chat = (options: Configure<Options> = {}) => {
  * with the tool calls, from pi-durable's entries. It answers while a message
  * is answered, with the entries committed so far.
  */
-export const messages = () =>
-  messagesHandler(async (ctx, transcript) => {
-    const context = BACKGROUND_CONTEXT;
-    // Reading needs no model, nor MODEL's provider: an empty registry.
-    const options = { models: createModels(), registry: createRegistry() };
-    const harness = await Harness.open(await openSqlKvStorage(ctx.db), options, context);
-    try {
-      const root = await harness.root(context);
-      for (let cursor: Parameters<typeof root.entries>[2]; ;) {
-        const page = await root.entries({ order: 'ascending' }, 100, cursor, context);
-        for (const m of page.items.flatMap((entry) => entry.model ?? [])) {
-          if (m.role === 'user') transcript.say('user', textOf(m.content));
-          if (m.role === 'assistant') {
-            transcript.say('assistant', textOf(m.content));
-            for (const c of m.content) if (c.type === 'toolCall') transcript.call(c.id, c.name, c.arguments);
-          }
-          if (m.role === 'toolResult') transcript.result(m.toolCallId, textOf(m.content), m.isError);
-        }
-        cursor = page.next;
-        if (cursor === undefined) return;
+export const messages = () => messagesHandler();
+
+/** The conversation of `root`, from pi-durable's entries, as `messages` gives it. */
+const transcribe = async (root: Conversation, context: Context, transcript: Transcript) => {
+  for (let cursor: Parameters<typeof root.entries>[2]; ;) {
+    const page = await root.entries({ order: 'ascending' }, 100, cursor, context);
+    for (const m of page.items.flatMap((entry) => entry.model ?? [])) {
+      if (m.role === 'user') transcript.say('user', textOf(m.content));
+      if (m.role === 'assistant') {
+        transcript.say('assistant', textOf(m.content));
+        for (const c of m.content) if (c.type === 'toolCall') transcript.call(c.id, c.name, c.arguments);
       }
-    } finally {
-      await harness.close(context);
+      if (m.role === 'toolResult') transcript.result(m.toolCallId, textOf(m.content), m.isError);
     }
-  });
+    cursor = page.next;
+    if (cursor === undefined) return;
+  }
+};
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({

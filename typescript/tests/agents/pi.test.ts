@@ -129,13 +129,32 @@ describe('pi.messages', () => {
         said(3, 'assistant', 'Hi, I am Alice / What is my name?'),
       ],
       more: false,
+      cursor: expect.any(Number),
     });
     expect(await alice.invoke(pi.messages(), 'read2', { limit: 1, before: 3 })).toEqual({
       messages: [said(2, 'user', 'What is my name?')],
       more: true,
+      cursor: expect.any(Number),
     });
   });
+
+  it('keeps what was said through a reset, and follows on after it with new ids', async () => {
+    const alice = object('alice');
+    await alice.invoke(pi.chat(), 'inv1', 'Hi, I am Alice');
+    const { cursor } = await alice.invoke(pi.messages(), 'read', {});
+    await alice.invoke(reset, 'inv2', undefined);
+    await alice.invoke(pi.chat(), 'inv3', 'Who am I?');
+    // The model starts over (it does not know Alice); clients still read what was said.
+    const since = await alice.invoke(pi.messages(), 'read2', { cursor });
+    expect(since.messages).toEqual([said(2, 'user', 'Who am I?'), said(3, 'assistant', 'Who am I?')]);
+    const all = await alice.invoke(pi.messages(), 'read3', {});
+    expect(all.messages.map((m: { id: number }) => m.id)).toEqual([0, 1, 2, 3]);
+  });
 });
+
+/** A handler that starts the conversation over. */
+const reset = (ctx: restate.ObjectContext) =>
+  pi.withPi(ctx, {}, async ({ conversation, context }) => (await conversation()).reset(undefined, context));
 
 /** A handler that prompts twice. */
 const twice = async (ctx: restate.ObjectContext) => [

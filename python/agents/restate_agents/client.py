@@ -50,10 +50,12 @@ class Followed:
     """What the agent is doing now: ``{"answering": ..., "waiting": [...]}``."""
     messages: list[ChatMessage]
     """
-    The messages new or changed since the last time, oldest first: a message
-    may come again, changed (a tool call with its output, say), with its
-    ``id``, which a UI keeps them by.
+    The messages new or changed since the last time, by when they changed: a
+    message may come again, changed (a tool call with its output, say), with
+    its ``id``, which a UI keeps them by, and orders them by.
     """
+    cursor: int
+    """Where this leaves off: ``follow(cursor=...)`` carries on from here, later or elsewhere."""
 
 
 class AgentClient:
@@ -89,14 +91,36 @@ class AgentClient:
         """The answer to the message sent as ``invocation_id``, once there is one."""
         return await self._request("GET", f"{self.ingress}/restate/invocation/{invocation_id}/attach", timeout=None)
 
-    async def messages(self, *, limit: int = 50, before: int | None = None, after: int | None = None) -> Messages:
-        """A page of the conversation: the latest ``limit`` messages, or those ``before`` or ``after`` an ``id``."""
+    async def messages(self, *, limit: int = 50, before: int | None = None, cursor: int | None = None) -> Messages:
+        """
+        A page of the conversation: the latest ``limit`` messages, or those
+        ``before`` an ``id``; or those new or changed since ``cursor``. Each
+        page has the cursor to read on from.
+        """
         request: dict[str, int] = {"limit": limit}
         if before is not None:
             request["before"] = before
-        if after is not None:
-            request["after"] = after
+        if cursor is not None:
+            request["cursor"] = cursor
         return await self._post("messages", request)
+
+    async def sync(
+        self,
+        *,
+        cursor: int = 0,
+        revision: int | None = None,
+        timeout_seconds: float = 50,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        The messages new or changed since ``cursor``, what the agent is doing,
+        and the revision, in one request; with ``revision``, once there is a
+        newer one, or at the timeout.
+        """
+        request: dict[str, Any] = {"cursor": cursor, "timeoutSeconds": timeout_seconds}
+        if revision is not None:
+            request["revision"] = revision
+        return await self._post("sync", request, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
 
     async def status(self) -> dict[str, Any]:
         """What the agent is doing: the message it answers, if any, and what its tools wait for."""
@@ -133,45 +157,35 @@ class AgentClient:
         changed = await self._post("watch", watch, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
         return changed["revision"]
 
-    async def follow(self, *, after: int = -1, timeout_seconds: float = 50) -> AsyncIterator[Followed]:
+    async def follow(self, *, cursor: int = 0, timeout_seconds: float = 50) -> AsyncIterator[Followed]:
         """
         The conversation as it changes: what the agent is doing and the
-        messages after ``after`` (an ``id``; by default all of them), then each
-        change, for as long as you read it.
+        messages since ``cursor`` (by default, all of them), then each change,
+        for as long as you read it.
 
-        It reads the revision, then the status and the messages since the last
-        it gave, then waits for a newer revision, which waits in Restate. A
-        network failure does not end it: it tries again, and a wait it retries
-        keeps its idempotency key, so it joins the wait already there.
+        Each change is one ``sync``, which waits in Restate for the next. A
+        network failure does not end it: it tries again, and a sync it retries
+        keeps its idempotency key, so it joins the one already waiting.
         """
-        # The last message given: it is read again, as it may have changed.
-        last = after
+        revision: int | None = None
         while True:
-            try:
-                # The revision first: a change after it ends the wait below.
-                revision = await self.notifications()
-                status = await self.status()
-                messages: list[ChatMessage] = []
-                more = True
-                while more:
-                    page = await self.messages(after=messages[-1]["id"] if messages else max(last - 1, -1), limit=100)
-                    messages += page["messages"]
-                    more = page["more"]
-            except httpx.TransportError as error:
-                log.warning("follow: retrying after %s", error)
-                await asyncio.sleep(1)
-                continue
-            last = messages[-1]["id"] if messages else last
-            yield Followed(status=status, messages=messages)
-            # One wait, retried with the same idempotency key.
+            # One sync, retried with the same idempotency key.
             window = uuid.uuid4().hex
             while True:
                 try:
-                    await self.watch(revision, timeout_seconds=timeout_seconds, idempotency_key=window)
+                    synced = await self.sync(
+                        cursor=cursor, revision=revision, timeout_seconds=timeout_seconds, idempotency_key=window
+                    )
                     break
                 except httpx.TransportError as error:
                     log.warning("follow: retrying after %s", error)
                     await asyncio.sleep(1)
+            # Nothing changed (the wait timed out): wait again.
+            if synced["revision"] != revision or synced["messages"]:
+                yield Followed(status=synced["status"], messages=synced["messages"], cursor=synced["cursor"])
+            cursor = synced["cursor"]
+            # With more to read, at once; else once something changes.
+            revision = None if synced["more"] else synced["revision"]
 
     async def _post(
         self, handler: str, body: Any = None, *, idempotency_key: str | None = None, timeout: float | None = 30

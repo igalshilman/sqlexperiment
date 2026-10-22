@@ -123,7 +123,7 @@ describe('the Claude agent', () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
-    expect(await c.read(claude.messages())).toEqual({ messages: SAID, more: false });
+    expect(await c.read(claude.messages())).toEqual({ messages: SAID, more: false, cursor: expect.any(Number) });
   });
 
   it('gives the conversation a page at a time', async () => {
@@ -131,15 +131,33 @@ describe('the Claude agent', () => {
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
     // The latest, then older ones before the oldest so far.
-    expect(await c.read(claude.messages(), { limit: 2 })).toEqual({ messages: SAID.slice(4), more: true });
+    expect(await c.read(claude.messages(), { limit: 2 })).toEqual({
+      messages: SAID.slice(4),
+      more: true,
+      cursor: expect.any(Number),
+    });
     expect(await c.read(claude.messages(), { limit: 3, before: 4 })).toEqual({
       messages: SAID.slice(1, 4),
       more: true,
+      cursor: expect.any(Number),
     });
-    expect(await c.read(claude.messages(), { before: 1 })).toEqual({ messages: SAID.slice(0, 1), more: false });
-    // Newer ones after the newest so far.
-    expect(await c.read(claude.messages(), { after: 2, limit: 2 })).toEqual({ messages: SAID.slice(3, 5), more: true });
-    expect(await c.read(claude.messages(), { after: 5 })).toEqual({ messages: [], more: false });
+    expect(await c.read(claude.messages(), { before: 1 })).toEqual({
+      messages: SAID.slice(0, 1),
+      more: false,
+      cursor: expect.any(Number),
+    });
+    // What is new or changed since a cursor, a page at a time, then nothing more.
+    const first = await c.read(claude.messages(), { cursor: 0, limit: 4 });
+    expect(first.more).toBe(true);
+    const rest = await c.read(claude.messages(), { cursor: first.cursor });
+    expect(rest.more).toBe(false);
+    const latest = new Map([...first.messages, ...rest.messages].map((m) => [m.id, m]));
+    expect([...latest.values()].toSorted((a, b) => a.id - b.id)).toEqual(SAID);
+    expect(await c.read(claude.messages(), { cursor: rest.cursor })).toEqual({
+      messages: [],
+      more: false,
+      cursor: rest.cursor,
+    });
   });
 
   it('answers a message once per invocation', async () => {

@@ -176,12 +176,17 @@ def test_compact_and_reset_take_their_input_as_text_or_nothing():
     assert call(f"notebook/{k}/chat", "hello") == (200, "You said: hello")
     status, summary = request("POST", f"{INGRESS}/notebook/{k}/compact", None)
     assert status == 200 and summary.startswith("You said: Summarize our conversation"), summary
+    # Clients read what was said, then the summary.
     status, page = call(f"notebook/{k}/messages")
-    assert [m["parts"][0]["text"] for m in page["messages"]][1] == "Understood: I will carry on from there."
+    assert [m["parts"][0]["text"] for m in page["messages"]][-1] == "Understood: I will carry on from there."
     plain = urllib.request.Request(f"{INGRESS}/notebook/{k}/reset", b"Alice likes short answers", method="POST")
     with urllib.request.urlopen(plain, timeout=30) as response:
         assert response.status == 200
     status, page = call(f"notebook/{k}/messages")
-    assert page["messages"][0]["parts"][0]["text"] == "Before this conversation: Alice likes short answers"
+    assert page["messages"][-2]["parts"][0]["text"] == "Before this conversation: Alice likes short answers"
+    # A reset without a handoff adds nothing to read.
     assert request("POST", f"{INGRESS}/notebook/{k}/reset", None)[0] == 200
-    assert call(f"notebook/{k}/messages") == (200, {"messages": [], "more": False})
+    assert call(f"notebook/{k}/messages", {"cursor": page["cursor"]}) == (
+        200,
+        {"messages": [], "more": False, "cursor": page["cursor"]},
+    )

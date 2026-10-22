@@ -115,7 +115,7 @@ describe('the DeepSeek Harness agent', () => {
     await c.attempt('inv2', 'audit the books');
     // Its teller calls tools without a word, unlike the others' "On it.".
     const said = [SAID[0], { ...SAID[1]!, parts: SAID[1]!.parts.slice(1) }, ...SAID.slice(2)];
-    expect(await c.read(deepseek.messages())).toEqual({ messages: said, more: false });
+    expect(await c.read(deepseek.messages())).toEqual({ messages: said, more: false, cursor: expect.any(Number) });
   });
 
   it('answers a message once per invocation', async () => {

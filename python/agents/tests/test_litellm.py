@@ -215,5 +215,5 @@ async def test_prompts_compact_and_reset_of_handlers_of_your_own():
     summary = await alice.invoke(obj.handlers["compact"].fn, "Keep it short")
     assert summary.startswith("You said: Summarize our conversation")
     page = await alice.invoke(obj.handlers["messages"].fn, None)
-    assert [m["role"] for m in page["messages"]] == ["user", "assistant"]
-    assert page["messages"][0]["parts"][0]["text"].endswith(summary)
+    assert [m["role"] for m in page["messages"]][-2:] == ["user", "assistant"]
+    assert page["messages"][-2]["parts"][0]["text"].endswith(summary)

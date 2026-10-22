@@ -83,10 +83,11 @@ $('composer').addEventListener('submit', (event) => {
 });
 // The conversation and the agent's status, as they change: the tool calls
 // show up as the agent makes them. A message that comes again (a tool call
-// with its output) replaces the one of its id.
+// with its output) replaces the one of its id; they show in the order of
+// their ids, the conversation's.
 const messages = new Map<number, ChatMessage>();
 for await (const change of follow(restate, agent('support'), user)) {
   for (const m of change.messages) messages.set(m.id, m);
   renderStatus(change.status);
-  renderMessages([...messages.values()]);
+  renderMessages([...messages.values()].toSorted((a, b) => a.id - b.id));
 }

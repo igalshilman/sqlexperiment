@@ -318,13 +318,19 @@ async def test_compact_summarizes_the_conversation_in_place_of_it():
     obj = assistant(client)
     alice = Object()
     await alice.invoke(obj.handlers["chat"].fn, "hello")
+    before = (await alice.invoke(obj.handlers["messages"].fn, None))["cursor"]
     summary = await alice.invoke(obj.handlers["compact"].fn, "Keep the greetings", invocation="c1")
     assert summary.startswith("You said: Summarize our conversation so far") and summary.endswith("Keep the greetings")
+    # The conversation as clients read it keeps what was said, and the summary after it; a follower gets the summary.
     page = await alice.invoke(obj.handlers["messages"].fn, None)
     assert [m["parts"][0]["text"] for m in page["messages"]] == [
+        "hello",
+        "You said: hello",
         f"Our conversation so far, summarized:\n\n{summary}",
         "Understood: I will carry on from there.",
     ]
+    since = await alice.invoke(obj.handlers["messages"].fn, {"cursor": before})
+    assert [m["id"] for m in since["messages"]] == [2, 3] and since["cursor"] == page["cursor"]
     # The same invocation again, such as a retried attempt: the same summary, the model not asked again.
     asked = len(client.requests)
     assert await alice.invoke(obj.handlers["compact"].fn, "Keep the greetings", invocation="c1") == summary
@@ -341,11 +347,14 @@ async def test_reset_starts_over_with_a_handoff_or_without():
     await alice.invoke(obj.handlers["chat"].fn, "hello")
     await alice.invoke(obj.handlers["reset"].fn, "Alice likes short answers")
     page = await alice.invoke(obj.handlers["messages"].fn, None)
-    assert page["messages"][0]["parts"][0]["text"] == "Before this conversation: Alice likes short answers"
+    assert page["messages"][-2]["parts"][0]["text"] == "Before this conversation: Alice likes short answers"
+    # The model starts over from the handoff; the conversation as clients read it keeps what was said.
+    await alice.invoke(obj.handlers["chat"].fn, "hi")
+    assert len(client.requests[-1]["messages"]) == 3
     await alice.invoke(obj.handlers["reset"].fn, "")
-    assert (await alice.invoke(obj.handlers["messages"].fn, None))["messages"] == []
     assert await alice.invoke(obj.handlers["chat"].fn, "hello") == "You said: hello"
     assert client.requests[-1]["messages"] == [{"role": "user", "content": "hello"}]
+    assert len((await alice.invoke(obj.handlers["messages"].fn, None))["messages"]) == 8
 
 
 def test_a_handler_takes_its_input_as_a_message():
