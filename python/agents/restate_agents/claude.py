@@ -44,9 +44,8 @@ runs again from the start, with the stored messages:
 from __future__ import annotations
 
 import inspect
-import json
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import restate_fns as restate
@@ -54,8 +53,9 @@ from anthropic import AsyncAnthropic
 from pydantic import ValidationError
 from restate_fns import ObjectContext
 
-from restate_agents import turns
+from restate_agents import conversation, turns
 from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_id_of, model_of
+from restate_agents.conversation import Conversation, answer_of, idle, pending_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
@@ -75,6 +75,9 @@ DECLINED = "Declined: the model would not answer this."
 # ``@beta_tool``), which gets its input only; or a tool the API runs (a dict,
 # such as ``{"type": "web_search_20260209", "name": "web_search"}``).
 Tools = Sequence[Tool | Any]
+
+# The conversations, in the object's database.
+TABLE = "claude_messages"
 
 
 def agent(
@@ -125,9 +128,9 @@ def agent(
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
-        if not await has_table(ctx.db, "claude_messages"):
+        if not await has_table(ctx.db, TABLE):
             return transcript
-        for row in await _Conversation(ctx.db, ctx.key()).load():
+        for row in await Conversation(ctx.db, TABLE, ctx.key()).load():
             content = row.message["content"]
             transcript.say(row.message["role"], _text(content))
             for block in [] if isinstance(content, str) else content:
@@ -165,7 +168,7 @@ async def prompt(
     invocation's first prompt has its id, the next ``<id>:2``, and so on.
     """
     run = _Run.of(
-        _Conversation(ctx.db, thread or ctx.key()),
+        Conversation(ctx.db, TABLE, thread or ctx.key()),
         model=model,
         client=client,
         request=request,
@@ -176,10 +179,10 @@ async def prompt(
     while True:
         rows = await run.conversation.load()
         turns.taken(steered for row in rows if row.prompt == id for steered in row.steered)
-        if (answered := _answer(rows, id)) is not None:
+        if (answered := answer_of(rows, id)) is not None:
             return answered
         # A prompt that a crash cut off (this one's, or an earlier one's) is finished first.
-        pending = rows[-1].prompt if rows and rows[-1].answer is None else None
+        pending = pending_of(rows)
         if pending is None:
             await run.conversation.append(id, {"role": "user", "content": text})
             pending = id
@@ -187,7 +190,7 @@ async def prompt(
             await run.answer(ctx, pending, [row.message for row in await run.conversation.load()])
         except restate.TerminalError as error:
             if error.status_code == 409:
-                await run.conversation.cancel(pending)
+                await _cancel(run.conversation, pending)
             raise
 
 
@@ -214,22 +217,19 @@ async def compact(
     from it. It is compacted once per invocation, however often an attempt
     runs.
     """
-    conversation = _Conversation(ctx.db, thread or ctx.key())
+    thread_of = Conversation(ctx.db, TABLE, thread or ctx.key())
     id = turns.prompt_id(ctx)
-    rows = await conversation.load()
-    if (done := _answer(rows, id)) is not None:
+    rows = await thread_of.load()
+    if (done := answer_of(rows, id)) is not None:
         return done
     if not rows:
         return ""
-    _idle(rows)
-    asking = (
-        "Summarize our conversation so far, in place of it: what was asked and answered, and what to carry on with."
-    )
-    run = _Run.of(conversation, model=model, client=client, request=request)
-    ask = {"role": "user", "content": f"{asking} {instructions or ''}".strip()}
+    idle(rows)
+    run = _Run.of(thread_of, model=model, client=client, request=request)
+    ask = {"role": "user", "content": f"{conversation.SUMMARIZE} {instructions or ''}".strip()}
     reply = await run.reply([*(row.message for row in rows), ask])
     summary = _text([block.model_dump(exclude_none=True) for block in reply.content])
-    await conversation.replace(id, f"Our conversation so far, summarized:\n\n{summary}", answer=summary)
+    await thread_of.replace(id, f"{conversation.SUMMARIZED}{summary}", answer=summary)
     return summary
 
 
@@ -243,120 +243,24 @@ async def reset(ctx: Any, handoff: str | None = None, *, thread: str | None = No
         async def reset(ctx, handoff: str) -> None:
             await claude.reset(ctx, handoff)
     """
-    conversation = _Conversation(ctx.db, thread or ctx.key())
-    _idle(await conversation.load())
-    note = f"Before this conversation: {handoff}" if handoff else ""
-    await conversation.replace(turns.prompt_id(ctx), note, answer=handoff or "")
+    await conversation.reset(Conversation(ctx.db, TABLE, thread or ctx.key()), ctx, handoff)
 
 
-def _answer(rows: list[_Row], prompt: str) -> str | None:
-    """The answer to ``prompt``, if it was answered."""
-    return next((row.answer for row in rows if row.prompt == prompt and row.answer is not None), None)
-
-
-def _idle(rows: list[_Row]) -> None:
-    """Refuse to change a conversation whose last message is still being answered."""
-    if rows and rows[-1].answer is None:
-        raise restate.TerminalError("a message is being answered: change the conversation once it is")
-
-
-@dataclass
-class _Row:
-    """A message of the conversation: its prompt, the answer if it answers it, and the messages steered into it."""
-
-    prompt: str
-    message: dict[str, Any]
-    answer: str | None = None
-    steered: list[str] = field(default_factory=list)
-
-
-class _Conversation:
-    """A conversation in the object's database: the API's messages, a row each, in order."""
-
-    SCHEMA = """
-    CREATE TABLE IF NOT EXISTS claude_messages (
-      thread TEXT NOT NULL,
-      n INTEGER NOT NULL,
-      prompt TEXT NOT NULL,
-      message TEXT NOT NULL,
-      answer TEXT,
-      steered TEXT,
-      PRIMARY KEY (thread, n)
-    )
+async def _cancel(thread: Conversation, prompt: str) -> None:
     """
-
-    def __init__(self, db: Any, thread: str) -> None:
-        self.db = db
-        self.thread = thread
-        self.length = 0
-
-    async def load(self) -> list[_Row]:
-        if not await has_table(self.db, "claude_messages"):
-            await self.db.execute(self.SCHEMA)
-        rows = await self.db.query(
-            "SELECT prompt, message, answer, steered FROM claude_messages WHERE thread = ? ORDER BY n", [self.thread]
-        )
-        self.length = len(rows)
-        return [
-            _Row(prompt, json.loads(message), answer, json.loads(steered or "[]"))
-            for prompt, message, answer, steered in rows
-        ]
-
-    async def append(
-        self, prompt: str, *messages: dict[str, Any], answer: str | None = None, steered: Sequence[str] = ()
-    ) -> None:
-        """Store ``messages`` of ``prompt`` in one transaction: the last with its ``answer``, and ``steered``."""
-        async with self.db.transaction() as tx:
-            for i, message in enumerate(messages):
-                last = i == len(messages) - 1
-                await tx.execute(
-                    "INSERT INTO claude_messages VALUES (?, ?, ?, ?, ?, ?)",
-                    [
-                        self.thread,
-                        self.length,
-                        prompt,
-                        json.dumps(message),
-                        answer if last else None,
-                        json.dumps(list(steered)) if last and steered else None,
-                    ],
-                )
-                self.length += 1
-        await turns.publish()
-
-    async def replace(self, prompt: str, note: str, *, answer: str) -> None:
-        """
-        The conversation, in place of all it was, in one transaction: ``note``
-        and its acknowledgment, as ``prompt``'s, answered ``answer``; or
-        nothing, without a note.
-        """
-        messages = [{"role": "user", "content": note}, {"role": "assistant", "content": _CARRY_ON}] if note else []
-        async with self.db.transaction() as tx:
-            await tx.execute("DELETE FROM claude_messages WHERE thread = ?", [self.thread])
-            for n, message in enumerate(messages):
-                await tx.execute(
-                    "INSERT INTO claude_messages VALUES (?, ?, ?, ?, ?, NULL)",
-                    [self.thread, n, prompt, json.dumps(message), answer if n == len(messages) - 1 else None],
-                )
-        self.length = len(messages)
-        await turns.publish()
-
-    async def cancel(self, prompt: str) -> None:
-        """
-        End ``prompt``, which was cancelled: a result for each tool call of its
-        last reply that has none, then ``CANCELLED`` as its answer.
-        """
-        rows = await self.load()
-        last = rows[-1].message if rows else None
-        calls = (
-            [b for b in last["content"] if b["type"] == "tool_use"]
-            if last and last["role"] == "assistant" and isinstance(last["content"], list)
-            else []
-        )
-        results = [
-            {"type": "tool_result", "tool_use_id": c["id"], "content": CANCELLED, "is_error": True} for c in calls
-        ]
-        replies = [{"role": "user", "content": results}] if results else []
-        await self.append(prompt, *replies, {"role": "assistant", "content": CANCELLED}, answer=CANCELLED)
+    End ``prompt``, which was cancelled: a result for each tool call of its
+    last reply that has none, then ``CANCELLED`` as its answer.
+    """
+    rows = await thread.load()
+    last = rows[-1].message if rows else None
+    calls = (
+        [b for b in last["content"] if b["type"] == "tool_use"]
+        if last and last["role"] == "assistant" and isinstance(last["content"], list)
+        else []
+    )
+    results = [{"type": "tool_result", "tool_use_id": c["id"], "content": CANCELLED, "is_error": True} for c in calls]
+    replies = [{"role": "user", "content": results}] if results else []
+    await thread.append(prompt, *replies, {"role": "assistant", "content": CANCELLED}, answer=CANCELLED)
 
 
 @dataclass
@@ -368,12 +272,12 @@ class _Run:
     system: str | None
     tools: list[Tool | Any]
     request: dict[str, Any]
-    conversation: _Conversation
+    conversation: Conversation
 
     @classmethod
     def of(
         cls,
-        conversation: _Conversation,
+        conversation: Conversation,
         *,
         model: str | None,
         client: AsyncAnthropic | None,
@@ -467,9 +371,6 @@ def _text(content: str | list[dict[str, Any]]) -> str:
         return content
     return "".join(block.get("text", "") for block in content if block.get("type") == "text")
 
-
-# The model's acknowledgment of a summary or a handoff, which the conversation then carries on from.
-_CARRY_ON = "Understood: I will carry on from there."
 
 # The client of the agents without one of their own, made when first used.
 _shared: AsyncAnthropic | None = None
