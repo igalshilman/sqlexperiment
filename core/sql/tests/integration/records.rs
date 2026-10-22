@@ -1,12 +1,12 @@
-//! The host's records: named values a turn commits with its SQL, in one
-//! commit record (`Sql::seal`).
+//! The host's records: named values a turn flushes with its SQL, in one
+//! commit record.
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
-use std::sync::Arc;
-use volume::{
+use state::{
     NamespaceCache, Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
+use std::sync::Arc;
 
 fn options(cache: Option<NamespaceCache>) -> Setup {
     Setup(
@@ -18,7 +18,7 @@ fn options(cache: Option<NamespaceCache>) -> Setup {
     )
 }
 
-/// Turn `i`'s value: small, past the inline budget so that commits seal, or
+/// Turn `i`'s value: small, past the inline budget so that flushes seal, or
 /// past it alone, so that it is stored first.
 fn value(i: usize) -> Bytes {
     let len = [100, 1500, 9000][i % 3];
@@ -39,23 +39,22 @@ async fn turn(db: &mut Db, i: usize) -> Result<()> {
         db.execute("BEGIN").await?;
         db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     }
-    db.volume()
+    let state = db.state();
+    let wal = db.wal();
+    state
         .record("effects")
-        .set(Bytes::from(format!("turn {i}")));
-    db.volume().record("turn").set(value(i));
+        .set(wal, Bytes::from(format!("turn {i}")))?;
+    state.record("turn").set(wal, value(i))?;
     if i % 11 == 10 {
-        db.volume().record("state").set(Bytes::new());
+        state.record("progress").set(wal, Bytes::new())?;
     } else if i.is_multiple_of(3) {
-        db.volume().record("state").set(value(i));
+        state.record("progress").set(wal, value(i))?;
     }
-    // With Durability::Commit the flush sealed, and this commit has
-    // nothing left to write.
-    db.flush().await?;
-    db.volume().commit().await.map(drop)
+    db.flush().await.map(drop)
 }
 
 /// The record `state` after turns `0..turns`.
-fn state(turns: usize) -> Bytes {
+fn progress(turns: usize) -> Bytes {
     (0..turns)
         .rev()
         .find(|i| i.is_multiple_of(3) || i % 11 == 10)
@@ -70,7 +69,7 @@ async fn rows(db: &mut Db) -> Result<i64> {
 }
 
 #[test]
-fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
+fn a_turn_flushes_its_records_with_its_sql() -> Result<()> {
     futures::executor::block_on(async {
         for cached in [false, true] {
             let cache = cached.then(fresh_namespace);
@@ -79,23 +78,19 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
             db.execute("CREATE TABLE t(n INTEGER)").await?;
             for i in 0..60 {
                 turn(&mut db, i).await?;
-                assert_eq!(
-                    db.volume().record("turn").get(),
-                    expected(i + 1),
-                    "turn {i}"
-                );
+                assert_eq!(db.state().record("turn").get(), expected(i + 1), "turn {i}");
                 if i % 7 == 6 {
                     // Another session reads the same turn: the record, and the
                     // stored values it names.
                     drop(db);
                     let mut other = Db::open(store.clone(), options(None)).await?;
                     assert_eq!(
-                        other.volume().record("turn").get(),
+                        other.state().record("turn").get(),
                         expected(i + 1),
                         "turn {i}, reopened"
                     );
                     assert_eq!(other.effects(), format!("turn {i}").as_bytes());
-                    assert_eq!(other.volume().record("state").get(), state(i + 1));
+                    assert_eq!(other.state().record("progress").get(), progress(i + 1));
                     assert_eq!(rows(&mut other).await?, (i / 2 + 1) as i64);
                     drop(other);
                     db = Db::open(store.clone(), options(cache.clone())).await?;
@@ -104,7 +99,7 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
             // A turn without SQL changes adds no log transaction: checkpoints
             // stay with the SQL.
             assert_eq!(store.violations(), Vec::<String>::new());
-            // What no record names is garbage, and the next commit deletes it:
+            // What no record names is garbage, and the next flush deletes it:
             // a few stored values stay, not one per turn.
             db.execute("BEGIN").await?;
             db.commit_with(Bytes::from_static(b"done")).await?;
@@ -120,7 +115,7 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
     })
 }
 
-/// A turn of no SQL, in a transaction or without one, is one commit, and adds
+/// A turn of no SQL, in a transaction or without one, is one flush, and adds
 /// nothing to the log.
 #[test]
 fn turns_without_sql_leave_the_log_alone() -> Result<()> {
@@ -133,20 +128,19 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
             if i % 3 == 0 {
                 db.execute("BEGIN").await?;
             }
-            db.volume()
+            db.state()
                 .record("turn")
-                .set(Bytes::from(vec![i as u8; 64]));
+                .set(db.wal(), Bytes::from(vec![i as u8; 64]))?;
             db.flush().await?;
-            db.volume().commit().await?;
         }
         assert_eq!(db.version(), version + 100);
         // Without SQL nothing checkpointed: no page keys beyond the first
-        // commit's.
+        // flush's.
         let pages = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/page/")).count();
         assert_eq!(pages(&store), 0);
         drop(db);
         let db = Db::open(store.clone(), options(None)).await?;
-        assert_eq!(db.volume().record("turn").get(), vec![99u8; 64]);
+        assert_eq!(db.state().record("turn").get(), vec![99u8; 64]);
         Ok(())
     })
 }
@@ -194,7 +188,6 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
     let mut db = Db::open(store.clone(), options(cache.clone())).await?;
     db.execute("CREATE TABLE t(n INTEGER)").await?;
     db.flush().await?;
-    db.volume().commit().await?;
     let _signal = store.arm(Failpoint {
         operation: Operation::Sync,
         key_prefix: String::new(),
@@ -226,11 +219,11 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
         // only to read, as the cache follows one history, and the forks are
         // each another.
         let db = Db::open(store.clone(), options(cache.clone())).await?;
-        let turns = match db.volume().record("turn").get() == expected(acknowledged) {
+        let turns = match db.state().record("turn").get() == expected(acknowledged) {
             true => acknowledged,
             false => {
                 assert_eq!(
-                    db.volume().record("turn").get(),
+                    db.state().record("turn").get(),
                     expected(acknowledged + 1),
                     "{case}"
                 );
@@ -246,14 +239,18 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
                 "{case}"
             );
         }
-        assert_eq!(db.volume().record("state").get(), state(turns), "{case}");
+        assert_eq!(
+            db.state().record("progress").get(),
+            progress(turns),
+            "{case}"
+        );
         assert_eq!(rows(&mut db).await?, turns.div_ceil(2) as i64, "{case}");
         // The namespace takes turns again.
         turn(&mut db, turns).await?;
         drop(db);
         let db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(
-            db.volume().record("turn").get(),
+            db.state().record("turn").get(),
             expected(turns + 1),
             "{case}"
         );
@@ -262,26 +259,26 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
     Ok(Some(writes + 1))
 }
 
-/// A scoped volume names its records and files under its prefix, and
-/// commits with the session.
+/// A scoped state names its records and files under its prefix, and
+/// flushes with the session.
 #[test]
-fn a_scoped_volume_is_part_of_the_session_s() -> Result<()> {
+fn a_scoped_state_is_part_of_the_session_s() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let mut db = Db::open(store.clone(), options(None)).await?;
-        let fs = db.volume().scoped("fs/");
-        fs.record("manifest").set(Bytes::from_static(b"m"));
+        let fs = db.state().scoped("fs/");
+        fs.record("manifest")
+            .set(db.wal(), Bytes::from_static(b"m"))?;
         fs.scoped("blobs/")
             .file("a")?
-            .write(0, Some(vec![7; 4096].into()))?;
+            .write(db.wal(), 0, Some(vec![7; 4096].into()))?;
         db.flush().await?;
-        db.volume().commit().await?;
         drop(db);
         let db = Db::open(store, options(None)).await?;
-        let volume = db.volume();
-        assert_eq!(volume.record("fs/manifest").get(), &b"m"[..]);
-        assert_eq!(volume.scoped("fs/").record("manifest").get(), &b"m"[..]);
-        let file = volume.file("fs/blobs/a")?;
+        let state = db.state();
+        assert_eq!(state.record("fs/manifest").get(), &b"m"[..]);
+        assert_eq!(state.scoped("fs/").record("manifest").get(), &b"m"[..]);
+        let file = state.file("fs/blobs/a")?;
         assert_eq!(file.len(), 4096);
         assert_eq!(file.read(0).await?.unwrap()[0], 7);
         Ok(())

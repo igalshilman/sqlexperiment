@@ -1,24 +1,29 @@
+//! A cold indexed lookup over an in-memory KV store: how little of a stored
+//! database one query fetches. Run with
+//! `cargo run --release --features simulation --example lookup`.
 use sql::Sql;
+use state::{Result, State, simulation::MemoryKv};
 use std::sync::Arc;
-use volume::{Result, Volume, simulation::MemoryKv};
 
-/// Flush and commit `db`'s volume, ending the session.
-async fn save(mut db: Sql) -> volume::Result<volume::CommitReport> {
-    db.flush().await?;
-    db.volume().commit().await
+/// Flush `db`'s SQL in a WAL of its state, and the WAL, ending the session.
+async fn save(mut db: Sql) -> state::Result<state::FlushReport> {
+    let state = db.state();
+    let mut wal = state.wal();
+    db.flush(&mut wal).await?;
+    wal.flush().await
 }
 
 fn main() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open(&Volume::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&State::open(store.clone()).await?).await?;
         db.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY, email TEXT NOT NULL, payload TEXT NOT NULL)").await?;
         db.execute("CREATE UNIQUE INDEX accounts_email ON accounts(email)")
             .await?;
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < 12000) INSERT INTO accounts SELECT x, printf('user%05d@example.com', x), printf('%0500d', x) FROM n").await?;
         let local = db.io_stats();
         assert_eq!(store.stats().puts, 0);
-        // A large save: commit to the log, then checkpoint into page keys and meta.
+        // A large save: the log in the commit record, then a checkpoint into page keys.
         save(db).await?;
         let saved = store.stats();
         store.crash();
@@ -34,7 +39,7 @@ fn main() -> Result<()> {
         let stored_bytes = store.stored_bytes();
         store.reset_stats();
         // New engine, pager, file handles and I/O adapter; only KV bytes survive.
-        let mut cold = Sql::open(&Volume::open(store.clone()).await?).await?;
+        let mut cold = Sql::open(&State::open(store.clone()).await?).await?;
         let query =
             "SELECT id, length(payload) FROM accounts WHERE email = 'user07321@example.com'";
         let plan = cold.query(&format!("EXPLAIN QUERY PLAN {query}")).await?;

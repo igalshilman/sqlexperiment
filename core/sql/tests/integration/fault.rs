@@ -1,14 +1,14 @@
 //! Injecting a storage fault, or a cancellation, into one call.
 use futures::future::{Either, select};
+use state::{
+    Result,
+    simulation::{Effect, Event, Failpoint, FaultKv, Operation},
+};
 use std::{
     pin::pin,
     sync::Arc,
     task::{Context, Poll, Wake, Waker},
     thread::{self, Thread},
-};
-use volume::{
-    Result,
-    simulation::{Effect, Event, Failpoint, FaultKv, Operation},
 };
 
 /// The failpoint at the `nth` `operation` on a key that starts with `prefix`.

@@ -2,11 +2,11 @@
 //! outcome, with and without a crash and an owner cache. The save is atomic, the
 //! database stays consistent and the next save works.
 use crate::host::Db;
-use std::sync::Arc;
-use volume::{
+use state::{
     NamespaceCache, Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, fresh_namespace},
 };
+use std::sync::Arc;
 
 fn options(cache: Option<&NamespaceCache>) -> StorageOptions {
     StorageOptions {
@@ -84,9 +84,9 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                                 store.inner.crash();
                                 cache = cached.then(fresh_namespace);
                             }
-                            let committed = changed(store.clone(), options(cache.as_ref())).await?;
+                            let durable = changed(store.clone(), options(cache.as_ref())).await?;
                             if result.is_ok() {
-                                assert!(committed, "acknowledged save was lost");
+                                assert!(durable, "acknowledged save was lost");
                             }
                             // The next save works and survives a crash.
                             let mut db = Db::open(store.clone(), options(cache.as_ref())).await?;

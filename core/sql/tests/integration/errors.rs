@@ -4,11 +4,11 @@ use crate::{
     reference::{oracle, run, text},
 };
 use sql::Value;
-use std::sync::Arc;
-use volume::{
+use state::{
     Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
+use std::sync::Arc;
 
 fn options(durability: Durability) -> Setup {
     Setup(

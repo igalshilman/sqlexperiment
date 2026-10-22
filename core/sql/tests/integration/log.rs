@@ -1,6 +1,6 @@
 use crate::host::Db;
+use state::{Result, StorageOptions, simulation::MemoryKv};
 use std::sync::Arc;
-use volume::{Result, StorageOptions, simulation::MemoryKv};
 
 fn options(checkpoint_after: u32) -> StorageOptions {
     StorageOptions {

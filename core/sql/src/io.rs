@@ -40,6 +40,7 @@
 //! durable KV object.
 use bytes::BytesMut;
 use futures::future::join_all;
+use state::{File as StateFile, Page, Wal};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
@@ -53,7 +54,6 @@ use turso_core::{
     Buffer, Clock, Completion, CompletionError, File, IO, LimboError, MonotonicInstant, OpenFlags,
     WallClockInstant,
 };
-use state::{File as StateFile, Page, Wal};
 
 /// Logical database-page and overlay-block size; encoded KV values may be smaller.
 pub const BLOCK_SIZE: usize = state::PAGE_SIZE;
@@ -283,11 +283,7 @@ impl KvIo {
 
     /// Continue a clean adapter on `file` of a newly opened state at the
     /// same flushed state, keeping the engine that uses it warm.
-    pub(crate) async fn resume(
-        &self,
-        file: StateFile,
-        max_private_bytes: usize,
-    ) -> io::Result<()> {
+    pub(crate) async fn resume(&self, file: StateFile, max_private_bytes: usize) -> io::Result<()> {
         if !self.is_clean() {
             return Err(invalid("cannot resume an adapter with private changes"));
         }
@@ -465,7 +461,8 @@ impl KvIo {
             }
             // A partial write to a dirty page (most WAL frames) updates it in place
             // when nothing else shares the buffer.
-            if let Some(slot @ Some(_)) = self.private.lock().unwrap().dirty.get_mut(&(file, index)) {
+            if let Some(slot @ Some(_)) = self.private.lock().unwrap().dirty.get_mut(&(file, index))
+            {
                 let mut page = writable(slot.take().unwrap());
                 page[start..start + len].copy_from_slice(piece);
                 *slot = Some(page.freeze());
@@ -642,7 +639,8 @@ impl KvIo {
             return Err(invalid("the engine WAL is not checkpointed"));
         }
         let (database, rest): (BTreeMap<_, _>, BTreeMap<_, _>) =
-            (std::mem::take(&mut private.dirty).into_iter()).partition(|((file, _), _)| *file == DB);
+            (std::mem::take(&mut private.dirty).into_iter())
+                .partition(|((file, _), _)| *file == DB);
         private.dirty = rest;
         for ((_, block), page) in database {
             private.flushed.insert(block, page);

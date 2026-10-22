@@ -1,6 +1,6 @@
 use crate::host::Db;
+use state::{Result, StorageOptions, simulation::MemoryKv};
 use std::sync::Arc;
-use volume::{Result, StorageOptions, simulation::MemoryKv};
 
 #[test]
 fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {
@@ -48,7 +48,7 @@ fn dropping_overlay_preserves_saved_state_and_sql_rollback_works() -> Result<()>
 
         let mut discarded = Db::open(store.clone(), StorageOptions::default()).await?;
         discarded.execute("UPDATE t SET n=99").await?;
-        drop(discarded); // committed locally, never published
+        drop(discarded); // committed in SQL, never flushed
         let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
         db.execute("BEGIN").await?;
@@ -62,8 +62,8 @@ fn dropping_overlay_preserves_saved_state_and_sql_rollback_works() -> Result<()>
     })
 }
 
-/// A flush commits the open SQL transaction, for the volume's commit to
-/// make durable.
+/// A flush commits the open SQL transaction, for the WAL's flush to make
+/// durable.
 #[test]
 fn a_flush_commits_the_open_transaction() -> Result<()> {
     futures::executor::block_on(async {
@@ -169,8 +169,8 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
 fn large_page_sizes_reopen_after_a_save() -> Result<()> {
     futures::executor::block_on(async {
         for page_size in [8192, 65536] {
-            let store: Arc<dyn volume::kv::KvStore> =
-                Arc::new(volume::simulation::MemoryKv::default());
+            let store: Arc<dyn state::kv::KvStore> =
+                Arc::new(state::simulation::MemoryKv::default());
             let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
             db.execute(&format!("PRAGMA page_size = {page_size}"))
                 .await?;

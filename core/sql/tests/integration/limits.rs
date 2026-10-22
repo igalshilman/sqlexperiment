@@ -1,8 +1,8 @@
 //! Memory limits: private changes and result rows.
 use crate::host::Db;
 use sql::SqlOptions;
+use state::{Result, StorageOptions, simulation::MemoryKv};
 use std::sync::Arc;
-use volume::{Result, StorageOptions, simulation::MemoryKv};
 
 #[test]
 fn private_changes_are_bounded() -> Result<()> {
@@ -58,8 +58,8 @@ fn result_rows_are_bounded() -> Result<()> {
     })
 }
 
-/// The limit is on private changes, not on moving committed ones into the
-/// volume: a flush, which copies the WAL into the database's pages, passes.
+/// The limit is on private changes, not on moving committed ones into a
+/// WAL: a flush, which copies the engine WAL into the database's pages, passes.
 #[test]
 fn a_transaction_within_the_limit_flushes() -> Result<()> {
     futures::executor::block_on(async {

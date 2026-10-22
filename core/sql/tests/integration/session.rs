@@ -4,12 +4,12 @@
 use crate::fault::{Ended, every_failure, failpoint, probe, under};
 use bytes::Bytes;
 use sql::{Sql, binding::Session};
-use std::sync::Arc;
-use volume::{
+use state::{
     NamespaceCache, Result, StorageOptions,
     kv::KvStore,
     simulation::{Effect, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
+use std::sync::Arc;
 
 /// Pages read from the store as queries need them; the log checkpointed often.
 fn options(cache: Option<NamespaceCache>) -> StorageOptions {
@@ -302,17 +302,17 @@ async fn crash_at_sync(cached: bool, nth: usize) -> Result<Option<usize>> {
 
 /// The result of `sql` on a store, through a plain session.
 async fn expected(store: MemoryKv, sql: &str) -> Result<String> {
-    let volume = volume::Volume::open_with_options(Arc::new(store), options(None)).await?;
-    let mut session = Sql::open(&volume).await?;
+    let state = state::State::open_with_options(Arc::new(store), options(None)).await?;
+    let mut session = Sql::open(&state).await?;
     Ok(format!("{:?}", session.query(sql).await?))
 }
 
-/// A reader beside its owner, who commits and checkpoints meanwhile, some
-/// commits failing, while some of the reader's reads fail too. What a reader
+/// A reader beside its owner, who flushes and checkpoints meanwhile, some
+/// flushes failing, while some of the reader's reads fail too. What a reader
 /// reads is the state it opened on, as long as `is_current` says so; once
-/// the owner commits, it no longer does.
+/// the owner flushes, it no longer does.
 #[test]
-fn a_reader_sees_one_committed_state_beside_its_owner() -> Result<()> {
+fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
     futures::executor::block_on(async {
         let memory = MemoryKv::default();
         let owner_store = Arc::new(FaultKv::new(memory.clone(), 0));
@@ -368,12 +368,9 @@ fn a_reader_sees_one_committed_state_beside_its_owner() -> Result<()> {
                 format!("{:?}", first.1),
                 expected(snapshot.fork(), queries[0]).await?
             );
-            assert!(
-                reader.is_current().await?,
-                "round {round}: nobody committed"
-            );
-            // The owner commits `round % 4` times, one commit failing.
-            let mut committed = false;
+            assert!(reader.is_current().await?, "round {round}: nobody flushed");
+            // The owner flushes `round % 4` times, one flush failing.
+            let mut flushed = false;
             for k in 0..round % 4 {
                 let sql = format!(
                     "UPDATE t SET n = n + 1, body = printf('%05000d', {round}) WHERE id % 7 = {k} AND n >= 0; UPDATE t SET n = n - 1 WHERE id % 7 = {k} AND n < 0"
@@ -393,13 +390,13 @@ fn a_reader_sees_one_committed_state_beside_its_owner() -> Result<()> {
                     owner = open(owner_store.clone(), Some(cache.clone())).await?;
                 } else {
                     owner.query(&sql, None).await?;
-                    committed = true;
+                    flushed = true;
                 }
             }
-            if committed {
+            if flushed {
                 assert!(
                     !reader.is_current().await?,
-                    "round {round}: the owner committed"
+                    "round {round}: the owner flushed"
                 );
             }
             // The reader reads on.
@@ -423,7 +420,7 @@ fn a_reader_sees_one_committed_state_beside_its_owner() -> Result<()> {
             reader.close().await;
         }
         println!(
-            "reader: {current} current reads, {stale} after the owner committed, {faults} faults"
+            "reader: {current} current reads, {stale} after the owner flushed, {faults} faults"
         );
         assert!(current > 0 && stale > 0 && faults > 0);
         Ok(())

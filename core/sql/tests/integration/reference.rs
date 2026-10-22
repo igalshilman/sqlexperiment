@@ -1,6 +1,7 @@
 //! A reference engine on plain memory, outside this crate's storage, and the
 //! state of a database as text, to compare a session's with it.
 use sql::{Rows, Sql, Value};
+use state::Result;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     sync::{
@@ -9,7 +10,6 @@ use std::{
     },
 };
 use turso_core::{Connection, Database, IO, MemoryIO, SqliteDialect, StepResult};
-use volume::Result;
 
 /// A new, empty reference engine.
 pub fn oracle() -> Arc<Connection> {
@@ -92,7 +92,7 @@ fn tables(schema: &Rows) -> Vec<String> {
 
 /// The schema and every table's rows of the database `query` runs SQL on,
 /// as text.
-pub async fn state_of(mut query: impl AsyncFnMut(&str) -> Result<Rows>) -> Result<String> {
+pub async fn dump_of(mut query: impl AsyncFnMut(&str) -> Result<Rows>) -> Result<String> {
     let schema = query(SCHEMA).await?;
     let mut state = text(&schema);
     for table in tables(&schema) {
@@ -103,13 +103,13 @@ pub async fn state_of(mut query: impl AsyncFnMut(&str) -> Result<Rows>) -> Resul
     Ok(state.join("\n"))
 }
 
-/// [`state_of`] a session's database.
-pub async fn state(sql: &mut Sql) -> Result<String> {
-    state_of(async |query| sql.query(query).await).await
+/// [`dump_of`] a session's database.
+pub async fn dump(sql: &mut Sql) -> Result<String> {
+    dump_of(async |query| sql.query(query).await).await
 }
 
-/// [`state`] of the reference engine.
-pub fn reference_state(connection: &Arc<Connection>) -> String {
+/// [`dump`] of the reference engine.
+pub fn reference_dump(connection: &Arc<Connection>) -> String {
     let schema = run(connection, SCHEMA).unwrap();
     let mut state = text(&schema);
     for query in tables(&schema) {

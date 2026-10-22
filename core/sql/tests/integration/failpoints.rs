@@ -3,12 +3,12 @@ use futures::{
     FutureExt,
     future::{Either, select},
 };
-use std::sync::Arc;
-use volume::{
+use state::{
     Result, StorageOptions,
     kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
+use std::sync::Arc;
 
 async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();
@@ -159,17 +159,17 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
     })
 }
 
-/// A commit that fails, at a write of its checkpoint or at its sync, has an
+/// A flush that fails, at a write of its checkpoint or at its sync, has an
 /// unknown outcome: after a crash it is there only if the sync stored it.
 #[test]
-fn a_failed_commit_is_there_only_if_its_sync_stored_it() -> Result<()> {
+fn a_failed_flush_is_there_only_if_its_sync_stored_it() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
         for (operation, prefix) in [(Operation::Put, "v15/page/"), (Operation::Sync, "")] {
             for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
-                // The save checkpoints the log once it has committed.
+                // The save checkpoints the log once it has put the record.
                 let mut db = Db::open(store.clone(), all()).await?;
                 db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
                     .await?;
@@ -183,7 +183,7 @@ fn a_failed_commit_is_there_only_if_its_sync_stored_it() -> Result<()> {
                 cases += 1;
             }
         }
-        println!("commit failures: {cases} cases");
+        println!("flush failures: {cases} cases");
         Ok(())
     })
 }

@@ -3,17 +3,19 @@ use futures::{
     FutureExt,
     future::{Either, select},
 };
-use volume::simulation::MemoryKv;
+use state::simulation::MemoryKv;
 
-/// Flush and commit `db`'s volume, ending the session.
-async fn save(mut db: Sql) -> crate::Result<volume::CommitReport> {
-    db.flush().await?;
-    db.volume().commit().await
+/// Flush `db`'s SQL in a WAL of its state, and the WAL, ending the session.
+async fn save(mut db: Sql) -> crate::Result<state::FlushReport> {
+    let state = db.state();
+    let mut wal = state.wal();
+    db.flush(&mut wal).await?;
+    wal.flush().await
 }
 
 async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Sql::open(&volume::Volume::open(Arc::new(store.clone())).await?).await?;
+    let mut db = Sql::open(&state::State::open(Arc::new(store.clone())).await?).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
         .await?;
     db.execute("INSERT INTO t VALUES(1,10,printf('%09000d',1))")
@@ -24,7 +26,7 @@ async fn baseline() -> Result<MemoryKv> {
 }
 
 async fn changed(store: MemoryKv) -> Result<Sql> {
-    let mut db = Sql::open(&volume::Volume::open(Arc::new(store)).await?).await?;
+    let mut db = Sql::open(&state::State::open(Arc::new(store)).await?).await?;
     db.execute("UPDATE t SET n=20, payload=printf('%09000d',2)")
         .await?;
     assert!(db.io_stats().private_wal_len > 0);
@@ -67,7 +69,7 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
                     }
                     assert_eq!(store.stats().puts, 0);
                     store.crash();
-                    let mut db = Sql::open(&volume::Volume::open(Arc::new(store)).await?).await?;
+                    let mut db = Sql::open(&state::State::open(Arc::new(store)).await?).await?;
                     assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
                     assert_eq!(
                         db.query("PRAGMA integrity_check").await?[0][0].to_string(),
@@ -84,20 +86,21 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
     })
 }
 
+/// The adapter moves pages into a WAL only once the engine WAL is
+/// checkpointed; refused, it leaves the WAL empty.
 #[test]
-fn publication_rejects_nonempty_private_wal() -> Result<()> {
+fn a_flush_into_a_wal_rejects_an_engine_wal_not_checkpointed() -> Result<()> {
     futures::executor::block_on(async {
         let store = baseline().await?;
         let db = changed(store.clone()).await?;
         store.reset_stats();
+        let mut wal = db.state().wal();
+        let error = db.io.flush_into(&mut wal).unwrap_err().to_string();
         assert!(
-            db.io
-                .publish()
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("the private WAL is not checkpointed")
+            error.contains("the engine WAL is not checkpointed"),
+            "{error}"
         );
+        assert!(wal.is_empty());
         assert_eq!(store.stats().puts, 0);
         Ok(())
     })
@@ -107,7 +110,7 @@ fn publication_rejects_nonempty_private_wal() -> Result<()> {
 fn cached_queries_yield_to_host_and_cancellation_poisons_the_view() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open(&volume::Volume::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&state::State::open(store.clone()).await?).await?;
         db.execute("CREATE TABLE t(n INTEGER)").await?;
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<200) INSERT INTO t SELECT x FROM n").await?;
         let expected = db.query("SELECT n FROM t ORDER BY n").await?;
@@ -139,7 +142,7 @@ fn cached_queries_yield_to_host_and_cancellation_poisons_the_view() -> Result<()
 fn host_driver_handles_cold_schema_stats_and_cache_eviction() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open(&volume::Volume::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&state::State::open(store.clone()).await?).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
             .await?;
         db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -150,7 +153,7 @@ fn host_driver_handles_cold_schema_stats_and_cache_eviction() -> Result<()> {
         db.execute("ANALYZE").await?;
         save(db).await?;
         store.crash();
-        let mut db = Sql::open(&volume::Volume::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&state::State::open(store.clone()).await?).await?;
         assert!(!db.query("SELECT * FROM sqlite_stat1").await?.is_empty());
         db.execute("PRAGMA cache_size=5").await?;
         db.execute("PRAGMA shrink_memory").await?;
@@ -172,7 +175,7 @@ fn host_driver_handles_cold_schema_stats_and_cache_eviction() -> Result<()> {
         db.execute("DROP INDEX by_n").await?;
         db.checkpoint().await?;
         save(db).await?;
-        let mut db = Sql::open(&volume::Volume::open(store).await?).await?;
+        let mut db = Sql::open(&state::State::open(store).await?).await?;
         assert_eq!(
             db.query("SELECT extra FROM t WHERE id=75").await?[0][0].as_int(),
             Some(12)

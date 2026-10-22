@@ -3,16 +3,16 @@
 use crate::{
     fault::poll_at_most,
     host::{Db, Durability, Setup},
-    reference::{integrity, state},
+    reference::{dump, integrity},
 };
 use bytes::Bytes;
 use sql::{Sql, binding::Session};
-use std::sync::Arc;
-use volume::{
-    NamespaceCache, Result, StorageOptions, Volume,
+use state::{
+    NamespaceCache, Result, State, StorageOptions,
     kv::KvStore,
     simulation::{MemoryKv, fresh_namespace},
 };
+use std::sync::Arc;
 
 /// Pages read from the store as queries need them; the log checkpointed often.
 fn options(cache: Option<NamespaceCache>) -> StorageOptions {
@@ -39,11 +39,13 @@ async fn baseline() -> Result<MemoryKv> {
     .await?;
     db.execute("WITH RECURSIVE x(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM x WHERE i < 19) INSERT INTO t SELECT i, i, substr(printf('%07000d', i), 1, 100 + (i % 5) * 1500) FROM x")
         .await?;
-    db.volume().record("effects").set(Bytes::from("before"));
+    db.state()
+        .record("effects")
+        .set(db.wal(), Bytes::from("before"))?;
     for k in 0..3 {
         db.execute(&format!("CREATE TABLE a{k}(x)")).await?;
     }
-    // Commits that leave the first page alone, so that the log no longer
+    // Flushes that leave the first page alone, so that the log no longer
     // holds it: it is read from the store.
     for k in 0..6 {
         db.execute(&format!("UPDATE t SET n = {k} WHERE id = 1"))
@@ -55,18 +57,19 @@ async fn baseline() -> Result<MemoryKv> {
 /// The state of a store and its effects, through a plain session; its
 /// database checks out.
 async fn observe(store: MemoryKv) -> Result<(String, Bytes)> {
-    let volume = Volume::open_with_options(Arc::new(store), options(None)).await?;
-    let mut sql = Sql::open(&volume).await?;
+    let state = State::open_with_options(Arc::new(store), options(None)).await?;
+    let mut sql = Sql::open(&state).await?;
     assert_eq!(integrity(&mut sql).await?, "ok");
-    Ok((state(&mut sql).await?, volume.record("effects").get()))
+    Ok((dump(&mut sql).await?, state.record("effects").get()))
 }
 
 /// A call to cancel, on a session it opens and prepares.
 #[derive(Clone, Copy, Debug)]
 enum Call {
-    /// A statement through [`Sql`], committed after it (`Durability::Commit`).
+    /// A statement through [`Sql`], flushed after it (`Durability::Commit`).
     Statement,
-    /// A turn's commit: [`Sql::flush`], a record set, [`Volume::commit`].
+    /// A turn's flush: [`Sql::flush`] into a WAL, a record set in it, and
+    /// [`state::Wal::flush`].
     Turn,
     /// [`Session::query`] of a write, which commits before it returns.
     SessionWrite,
@@ -107,11 +110,11 @@ impl Call {
         let store: Arc<dyn KvStore> = Arc::new(store);
         let mut open = match self {
             Call::Statement | Call::Turn => {
-                let setup = Setup(options(cache), Durability::Commit);
-                let setup = setup.mode(match self {
+                let durability = match self {
                     Call::Turn => Durability::Save,
                     _ => Durability::Commit,
-                });
+                };
+                let setup = Setup(options(cache), durability);
                 Open::Sql(Db::open(store, setup).await?)
             }
             _ => Open::Session(Session::open_with_options(store, options(cache), false).await?),
@@ -136,9 +139,10 @@ impl Call {
         match (self, open) {
             (Call::Statement, Open::Sql(db)) => db.execute(UPDATE).await,
             (Call::Turn, Open::Sql(db)) => {
-                db.flush().await?;
-                db.volume().record("effects").set(Bytes::from("after"));
-                db.volume().commit().await.map(drop)
+                db.state()
+                    .record("effects")
+                    .set(db.wal(), Bytes::from("after"))?;
+                db.flush().await.map(drop)
             }
             (Call::SessionWrite, Open::Session(session)) => {
                 session.query(UPDATE, None).await.map(drop)
@@ -215,11 +219,11 @@ fn a_call_cancelled_after_any_number_of_polls_ends_its_session() -> Result<()> {
                     // The process goes on: the next session of the owner,
                     // through its cache, sees what the store holds.
                     if cached {
-                        let volume =
-                            Volume::open_with_options(Arc::new(memory), options(cache)).await?;
-                        let mut sql = Sql::open(&volume).await?;
+                        let state =
+                            State::open_with_options(Arc::new(memory), options(cache)).await?;
+                        let mut sql = Sql::open(&state).await?;
                         assert_eq!(
-                            state(&mut sql).await?,
+                            dump(&mut sql).await?,
                             current.0,
                             "{case}: through the cache"
                         );

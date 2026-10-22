@@ -1,26 +1,27 @@
-//! A host of the volume, as the tests use it: SQL on a volume of its own,
-//! committed when the host saves ([`Durability::Save`]) or after each SQL
+//! A host of the state, as the tests use it: SQL on a state of its own, and
+//! the turn's WAL, which the host sets records and writes files in. It
+//! flushes when the host saves ([`Durability::Save`]) or after each SQL
 //! transaction ([`Durability::Commit`]), as the Node.js addon and the Python
 //! extension do.
 use bytes::Bytes;
 use sql::{Sql, SqlOptions, Value};
+use state::{FlushReport, Result, State, StorageOptions, Wal, kv::KvStore};
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-use volume::{CommitReport, Result, StorageOptions, Volume, kv::KvStore};
 
-/// When the host commits the volume.
+/// When the host flushes the state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durability {
-    /// At [`Db::save`]: the session's SQL as one commit.
+    /// At [`Db::save`]: the session's SQL as one flush.
     Save,
     /// After each statement that leaves no SQL transaction open: every SQL
     /// commit durable when its statement returns.
     Commit,
 }
 
-/// How to open a [`Db`]: storage options, and when to commit.
+/// How to open a [`Db`]: storage options, and when to flush.
 pub struct Setup(pub StorageOptions, pub Durability);
 
 impl Setup {
@@ -29,7 +30,7 @@ impl Setup {
         Self(change(self.0), self.1)
     }
 
-    /// These options, committed as `durability` says.
+    /// These options, flushed as `durability` says.
     pub fn mode(self, durability: Durability) -> Self {
         Self(self.0, durability)
     }
@@ -47,9 +48,11 @@ impl From<(StorageOptions, Durability)> for Setup {
     }
 }
 
-/// SQL on a volume of its own.
+/// SQL on a state of its own, and the WAL of its turn.
 pub struct Db {
     sql: Sql,
+    /// The turn's WAL: what the host sets beside the SQL, flushed with it.
+    wal: Wal,
     durability: Durability,
 }
 
@@ -80,27 +83,41 @@ impl Db {
         limits: SqlOptions,
     ) -> Result<Self> {
         let Setup(options, durability) = setup.into();
-        let volume = Volume::open_with_options(store, options).await?;
+        let state = State::open_with_options(store, options).await?;
         Ok(Self {
-            sql: Sql::open_with_options(&volume, limits).await?,
+            sql: Sql::open_with_options(&state, limits).await?,
+            wal: state.wal(),
             durability,
         })
     }
 
-    /// Flush and commit, and end the session (leaving its engine).
-    pub async fn save(mut self) -> Result<CommitReport> {
-        self.sql.flush().await?;
-        self.sql.volume().commit().await
+    /// The turn's WAL, to set records and write files in: [`Self::flush`]
+    /// makes them durable with the SQL.
+    pub fn wal(&mut self) -> &mut Wal {
+        &mut self.wal
     }
 
-    /// With [`Durability::Commit`], commit what the call committed in SQL.
+    /// Flush the SQL into the turn's WAL, and the WAL: what the SQL committed
+    /// and what the host set, durable in one put. The next turn starts a new
+    /// WAL; one whose SQL flush fails keeps this one.
+    pub async fn flush(&mut self) -> Result<FlushReport> {
+        self.sql.flush(&mut self.wal).await?;
+        let wal = std::mem::replace(&mut self.wal, self.sql.state().wal());
+        wal.flush().await
+    }
+
+    /// Flush, and end the session (leaving its engine).
+    pub async fn save(mut self) -> Result<FlushReport> {
+        self.flush().await
+    }
+
+    /// With [`Durability::Commit`], flush what the call committed in SQL.
     async fn settle<T>(&mut self, result: Result<T>) -> Result<T> {
         if self.durability == Durability::Commit
             && self.sql.is_usable()
             && !self.sql.in_transaction()
         {
-            self.sql.flush().await?;
-            self.sql.volume().commit().await?;
+            self.flush().await?;
         }
         result
     }
@@ -132,17 +149,18 @@ impl Db {
     }
 
     /// `COMMIT` the open transaction with `effects` as the record `effects`,
-    /// and commit: what the addon's `commit(effects)` does.
+    /// in one flush: what the addon's `commit(effects)` does.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
-        // After the flush: a `COMMIT` that fails takes nothing from the volume.
-        self.sql.flush().await?;
-        self.sql.volume().record("effects").set(effects);
-        self.sql.volume().commit().await.map(drop)
+        // After the SQL flush: a `COMMIT` that fails sets no effects.
+        self.sql.flush(&mut self.wal).await?;
+        let record = self.sql.state().record("effects");
+        record.set(&mut self.wal, effects)?;
+        self.flush().await.map(drop)
     }
 
-    /// The record `effects`.
+    /// The record `effects`, as last flushed.
     pub fn effects(&self) -> Bytes {
-        self.sql.volume().record("effects").get()
+        self.sql.state().record("effects").get()
     }
 
     pub async fn transaction<T>(

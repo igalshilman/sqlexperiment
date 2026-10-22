@@ -1,19 +1,19 @@
 //! Engine reuse: a session that ends badly (a fault, a cancellation, an open
 //! transaction) never leaves the next session a dirty engine; one that ends
-//! cleanly leaves it, and the next session sees exactly the committed state.
+//! cleanly leaves it, and the next session sees exactly the flushed state.
 use crate::{
     fault::{failpoint, poll_at_most, under},
     host::{Db, Durability, Setup},
-    reference::{integrity, state},
+    reference::{dump, integrity},
 };
 use bytes::Bytes;
 use sql::{Sql, binding::Session};
-use std::sync::Arc;
-use volume::{
-    NamespaceCache, Result, StorageOptions, Volume,
+use state::{
+    NamespaceCache, Result, State, StorageOptions,
     kv::KvStore,
     simulation::{Effect, FaultKv, MemoryKv, Operation, fresh_namespace},
 };
+use std::sync::Arc;
 
 fn owner(cache: &NamespaceCache) -> Setup {
     Setup(
@@ -26,11 +26,11 @@ fn owner(cache: &NamespaceCache) -> Setup {
     )
 }
 
-/// The committed state, through a session without the cache.
-async fn committed(store: Arc<dyn KvStore>) -> Result<String> {
-    let mut sql = Sql::open(&Volume::open(store).await?).await?;
+/// The flushed state, through a session without the cache.
+async fn flushed(store: Arc<dyn KvStore>) -> Result<String> {
+    let mut sql = Sql::open(&State::open(store).await?).await?;
     assert_eq!(integrity(&mut sql).await?, "ok");
-    state(&mut sql).await
+    dump(&mut sql).await
 }
 
 /// A store with a table of 40 rows, some past a page, and an owner whose
@@ -67,10 +67,10 @@ enum Ending {
     CancelledWrite(usize),
     /// Dropped after this many polls of a long write in a transaction.
     CancelledInTransaction(usize),
-    /// A commit fails at its first request of the kind, with the effect.
-    FailedCommit(Operation, Effect),
-    /// A commit is dropped at its sync.
-    CancelledCommit,
+    /// A flush fails at its first request of the kind, with the effect.
+    FailedFlush(Operation, Effect),
+    /// A flush is dropped at its sync.
+    CancelledFlush,
     /// Dropped with its transaction open.
     OpenTransaction,
     /// A table created, filled and altered, then rolled back.
@@ -104,12 +104,12 @@ impl Ending {
                     .await?;
                 cancel(db.execute(LONG_WRITE), polls);
             }
-            Ending::FailedCommit(operation, effect) => {
+            Ending::FailedFlush(operation, effect) => {
                 let plan = failpoint(operation, "", 1, effect, false);
                 let (hit, ended) = under(store, plan, db.execute(LONG_WRITE)).await;
                 assert!(hit && ended.failed(), "{self:?}");
             }
-            Ending::CancelledCommit => {
+            Ending::CancelledFlush => {
                 let plan = failpoint(Operation::Sync, "", 1, Effect::None, true);
                 let (hit, ended) = under(store, plan, db.execute(LONG_WRITE)).await;
                 assert!(hit && ended.failed(), "{self:?}");
@@ -153,16 +153,16 @@ fn cancel<T>(call: impl Future<Output = Result<T>>, polls: usize) {
 
 /// Each way a session can end, after continuing a parked engine: the next
 /// session continues the engine only after a clean ending, and sees exactly
-/// the committed state, which it goes on from.
+/// the flushed state, which it goes on from.
 #[test]
 fn the_next_session_continues_only_a_clean_engine() -> Result<()> {
     futures::executor::block_on(async {
         let mut endings = vec![
-            Ending::FailedCommit(Operation::Put, Effect::None),
-            Ending::FailedCommit(Operation::Put, Effect::After),
-            Ending::FailedCommit(Operation::Sync, Effect::None),
-            Ending::FailedCommit(Operation::Sync, Effect::After),
-            Ending::CancelledCommit,
+            Ending::FailedFlush(Operation::Put, Effect::None),
+            Ending::FailedFlush(Operation::Put, Effect::After),
+            Ending::FailedFlush(Operation::Sync, Effect::None),
+            Ending::FailedFlush(Operation::Sync, Effect::After),
+            Ending::CancelledFlush,
             Ending::OpenTransaction,
             Ending::RolledBackSchema,
             Ending::RolledBackSavepoint,
@@ -180,27 +180,27 @@ fn the_next_session_continues_only_a_clean_engine() -> Result<()> {
             assert!(db.reused_engine(), "{ending:?}");
             ending.run(&mut db, &store).await?;
             drop(db);
-            let expected = committed(store.clone()).await?;
+            let expected = flushed(store.clone()).await?;
             let mut db = Db::open(store.clone(), owner(&cache)).await?;
             assert_eq!(db.reused_engine(), ending.parks(), "{ending:?}");
-            assert_eq!(state(&mut db).await?, expected, "{ending:?}");
+            assert_eq!(dump(&mut db).await?, expected, "{ending:?}");
             assert_eq!(integrity(&mut db).await?, "ok", "{ending:?}");
-            // It goes on: what it commits on top is what the store holds.
+            // It goes on: what it flushes on top is what the store holds.
             db.execute("UPDATE t SET n = n * 2, body = body || 'z' WHERE id % 3 = 0; INSERT INTO t VALUES(200, 0, 'after'); CREATE TABLE u(x)")
                 .await?;
-            let after = state(&mut db).await?;
+            let after = dump(&mut db).await?;
             drop(db);
-            assert_eq!(committed(store.clone()).await?, after, "{ending:?}");
+            assert_eq!(flushed(store.clone()).await?, after, "{ending:?}");
         }
         Ok(())
     })
 }
 
 /// The same through the bindings' session: a cancelled call, a failed
-/// commit, a transaction left open, `save` after a failure, and a clean
-/// `save` hand the next session exactly the committed state.
+/// flush, a transaction left open, `save` after a failure, and a clean
+/// `save` hand the next session exactly the flushed state.
 #[test]
-fn a_session_hands_on_only_the_committed_state() -> Result<()> {
+fn a_session_hands_on_only_the_flushed_state() -> Result<()> {
     futures::executor::block_on(async {
         for case in 0..6 {
             let (store, cache) = parked().await?;
@@ -245,9 +245,9 @@ fn a_session_hands_on_only_the_committed_state() -> Result<()> {
                 }
             }
             drop(session);
-            let expected = committed(store.clone()).await?;
+            let expected = flushed(store.clone()).await?;
             let session = open().await?;
-            let mut seen = session_state(&session).await?;
+            let mut seen = session_dump(&session).await?;
             assert_eq!(seen, expected, "case {case}");
             session
                 .query(
@@ -255,14 +255,14 @@ fn a_session_hands_on_only_the_committed_state() -> Result<()> {
                     None,
                 )
                 .await?;
-            seen = session_state(&session).await?;
+            seen = session_dump(&session).await?;
             session.save().await?;
-            assert_eq!(committed(store.clone()).await?, seen, "case {case}");
+            assert_eq!(flushed(store.clone()).await?, seen, "case {case}");
         }
         Ok(())
     })
 }
 
-async fn session_state(session: &Session) -> Result<String> {
-    crate::reference::state_of(async |sql| Ok(session.query(sql, None).await?.1)).await
+async fn session_dump(session: &Session) -> Result<String> {
+    crate::reference::dump_of(async |sql| Ok(session.query(sql, None).await?.1)).await
 }

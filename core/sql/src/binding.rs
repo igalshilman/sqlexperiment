@@ -15,6 +15,7 @@
 use crate::{Result, Rows, Sql, Value};
 use bytes::Bytes;
 use futures::lock::{Mutex, MutexGuard};
+use state::{PageCache, PageCacheConfig, State, StorageOptions, kv::KvStore};
 use std::{
     io,
     path::PathBuf,
@@ -23,7 +24,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use state::{PageCache, PageCacheConfig, State, StorageOptions, kv::KvStore};
 
 /// The record a commit's effects are in.
 const EFFECTS: &str = "effects";

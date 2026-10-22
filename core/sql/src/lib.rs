@@ -94,6 +94,7 @@ pub mod io;
 pub use turso_core::{Numeric, Value};
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
+use state::{Participant, Receipt, State, Wal};
 use std::{
     future::poll_fn,
     sync::{
@@ -107,7 +108,6 @@ use turso_core::{
     ConnectAsyncState, Connection, Database, IO, IOResult, OpenFlags, OpenOptions, SqliteDialect,
     StepResult, TempStore,
 };
-use state::{Participant, Receipt, State, Wal};
 
 /// The state's file SQL keeps its database in.
 pub const DB_FILE: &str = "db";
