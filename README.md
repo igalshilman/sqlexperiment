@@ -1,6 +1,6 @@
 # Durable functions on Restate
 
-An experiment in three layers, each on the one before:
+Three layers, each on the one before:
 
 1. **[Objects with SQL](#objects-with-sql)**: Restate virtual objects whose
    handlers run without journal replay, so a retried attempt runs again
