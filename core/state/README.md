@@ -6,8 +6,7 @@ one owner at a time: the state of a Restate object without Restate's journal
 paged **files** (4 KiB pages, read and written at random). The state is read;
 it changes only through a **WAL**, an owned value that collects the records set
 and pages written, and a **flush** makes everything in the WAL durable in one
-put, usually. It needs only `get`, `put` and `delete` from the backend, and has
-no SQL in it.
+put, usually. It needs only `get`, `put` and `delete` from the backend.
 
 What writes a WAL is a **participant**: it keeps changes of its own, moves
 them into a WAL before the flush, and may leave state idle for the
