@@ -1,14 +1,14 @@
 //! `Durability::Commit`: every SQL commit is durable when its statement returns.
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
-use journal::{
+use std::sync::Arc;
+use volume::{
     NamespaceCache, Result, StorageOptions,
     simulation::{
         Effect, Failpoint, FaultKv, LatencyKv, MemoryKv, MonitorKv, Operation, fresh_namespace,
         logged_transactions,
     },
 };
-use std::sync::Arc;
 
 fn options(cache: Option<NamespaceCache>) -> Setup {
     Setup(
@@ -567,33 +567,33 @@ fn records_commit_at_save() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let stored = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/log/")).count();
         let db = Db::open(store.clone(), StorageOptions::default()).await?;
-        let state = db.journal().record("state");
+        let state = db.volume().record("state");
         assert!(state.get().is_empty());
         state.set(Bytes::from_static(b"one"));
         assert_eq!(state.get(), &b"one"[..]);
         drop(db); // discarded
         let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
-        assert!(db.journal().record("state").get().is_empty());
+        assert!(db.volume().record("state").get().is_empty());
         db.execute("CREATE TABLE t(n)").await?;
-        db.journal().record("state").set(Bytes::from(vec![7; 5000]));
-        db.journal().record("small").set(Bytes::from_static(b"s"));
+        db.volume().record("state").set(Bytes::from(vec![7; 5000]));
+        db.volume().record("small").set(Bytes::from_static(b"s"));
         db.save().await?;
         assert_eq!(stored(&store), 1, "the large record, stored first");
 
         let db = Db::open(store.clone(), StorageOptions::default()).await?;
-        assert_eq!(db.journal().record("state").get(), vec![7; 5000]);
-        assert_eq!(db.journal().record("small").get(), &b"s"[..]);
-        db.journal().record("state").set(Bytes::from_static(b"two"));
+        assert_eq!(db.volume().record("state").get(), vec![7; 5000]);
+        assert_eq!(db.volume().record("small").get(), &b"s"[..]);
+        db.volume().record("state").set(Bytes::from_static(b"two"));
         db.save().await?;
         // The replaced value is garbage, which the next commit deletes.
         let db = Db::open(store.clone(), StorageOptions::default()).await?;
-        assert_eq!(db.journal().record("state").get(), &b"two"[..]);
-        db.journal().record("small").set(Bytes::new());
+        assert_eq!(db.volume().record("state").get(), &b"two"[..]);
+        db.volume().record("small").set(Bytes::new());
         db.save().await?;
         assert_eq!(stored(&store), 0);
         let db = Db::open(store.clone(), StorageOptions::default()).await?;
-        assert!(db.journal().record("small").get().is_empty());
-        assert_eq!(db.journal().record("state").get(), &b"two"[..]);
+        assert!(db.volume().record("small").get().is_empty());
+        assert_eq!(db.volume().record("state").get(), &b"two"[..]);
         Ok(())
     })
 }

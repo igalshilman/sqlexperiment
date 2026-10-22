@@ -9,11 +9,6 @@
 //! tier. The backend is strong, so nothing is
 //! confirmed. Output is CSV; traffic counters are deterministic, time is the
 //! median of the repeats.
-use journal::{
-    Journal, PageCacheConfig, Result, StorageOptions,
-    kv::KvStore,
-    simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
-};
 use sql::Sql;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -23,11 +18,16 @@ use std::{
     },
     time::Instant,
 };
+use volume::{
+    PageCacheConfig, Result, StorageOptions, Volume,
+    kv::KvStore,
+    simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
+};
 
-/// Flush and commit `db`'s journal, ending the session.
-async fn save(mut db: Sql) -> journal::Result<journal::CommitReport> {
+/// Flush and commit `db`'s volume, ending the session.
+async fn save(mut db: Sql) -> volume::Result<volume::CommitReport> {
     db.flush().await?;
-    db.journal().commit().await
+    db.volume().commit().await
 }
 
 struct Counting;
@@ -61,7 +61,7 @@ type Store = Arc<LatencyKv<MemoryKv>>;
 async fn baseline() -> Result<(MemoryKv, u64)> {
     let store = MemoryKv::default();
     let kv: Arc<dyn KvStore> = Arc::new(store.clone());
-    let mut db = Sql::open(&Journal::open(kv.clone()).await?).await?;
+    let mut db = Sql::open(&Volume::open(kv.clone()).await?).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, doc TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -77,10 +77,10 @@ async fn baseline() -> Result<(MemoryKv, u64)> {
         checkpoint_after: 0,
         ..StorageOptions::default()
     };
-    let mut db = Sql::open(&Journal::open_with_options(kv.clone(), all).await?).await?;
+    let mut db = Sql::open(&Volume::open_with_options(kv.clone(), all).await?).await?;
     db.execute("CREATE TABLE other(x)").await?;
     save(db).await?;
-    let pages = Sql::open(&Journal::open(kv).await?)
+    let pages = Sql::open(&Volume::open(kv).await?)
         .await?
         .io_stats()
         .database_len
@@ -103,7 +103,7 @@ fn row(state: &mut u64) -> u64 {
 
 async fn session(store: &Store, options: &StorageOptions, n: u64, state: &mut u64) -> Result<()> {
     let kv: Arc<dyn KvStore> = store.clone();
-    let mut db = Sql::open(&Journal::open_with_options(kv, options.clone()).await?).await?;
+    let mut db = Sql::open(&Volume::open_with_options(kv, options.clone()).await?).await?;
     for _ in 0..4 {
         let id = row(state);
         let rows = db

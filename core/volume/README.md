@@ -1,15 +1,15 @@
-# Journal
+# Volume
 
-A durable journal over an asynchronous key/value store, for namespaces with
+A durable volume over an asynchronous key/value store, for namespaces with
 one owner at a time: the state of a Restate object without Restate's journal
 (`journalReplay: false`). It keeps named **records** (small whole values) and
 paged **files** (4 KiB pages, read and written at random), and commits every
 change since the last commit in one put, usually. It needs only `get`, `put`
 and `delete` from the backend, and has no SQL in it.
 
-What uses a journal is a **participant**: it keeps changes of its own, moves
-them into the journal's files and records before a commit, and may leave state
-idle for the namespace's next journal. [SQL](../sql/README.md) is one, on the
+What uses a volume is a **participant**: it keeps changes of its own, moves
+them into the volume's files and records before a commit, and may leave state
+idle for the namespace's next volume. [SQL](../sql/README.md) is one, on the
 file `db`; the durable functions runtime adds a program's memory (a file) and
 its run's state (a record).
 
@@ -20,7 +20,7 @@ An experiment, not a production backend: see [the design](docs/DESIGN.md).
 Implement `kv::KvStore` over your store, then:
 
 ```rust,ignore
-use journal::{Journal, PageCache, PageCacheConfig, StorageOptions};
+use volume::{Volume, PageCache, PageCacheConfig, StorageOptions};
 
 // Once per process: a page cache in memory and on a local disk file.
 let cache = PageCache::open(PageCacheConfig::new("/var/cache/pages", 256 << 20, 8 << 30)).await?;
@@ -30,22 +30,22 @@ let options = StorageOptions {
     cache: Some(cache.namespace("object-42")),
     ..StorageOptions::default()
 };
-let journal = Journal::open_with_options(store, options).await?;
-journal.record("progress").set("step 7".into());
-journal.file("image")?.write(0, Some(page))?;
-journal.commit().await?; // the record and the page, durable together
+let volume = Volume::open_with_options(store, options).await?;
+volume.record("progress").set("step 7".into());
+volume.file("image")?.write(0, Some(page))?;
+volume.commit().await?; // the record and the page, durable together
 ```
 
-Nothing is durable before `Journal::commit`, and then everything changed since
+Nothing is durable before `Volume::commit`, and then everything changed since
 the last commit is, in one put. The host must guarantee one owner per
-namespace. A failed or cancelled commit ends the journal (`is_usable()`
+namespace. A failed or cancelled commit ends the volume (`is_usable()`
 returns false): its outcome is unknown, so settle outstanding requests and open
 a new one.
 
-A participant joins under a name (`journal.join("sql")`), one at a time per
-name. While it says it holds changes not yet in the journal
-(`set_unflushed(true)`), the journal refuses to commit. With a page cache, it
-may `park` state for the next journal of the namespace, which takes it back
+A participant joins under a name (`volume.join("sql")`), one at a time per
+name. While it says it holds changes not yet in the volume
+(`set_unflushed(true)`), the volume refuses to commit. With a page cache, it
+may `park` state for the next volume of the namespace, which takes it back
 (`take_idle`) when nothing changed since: the SQL crate keeps its engine warm
 this way.
 
@@ -119,7 +119,7 @@ the owner cache.
 - [Review and validation](docs/REVIEW.md): what was tested and how
 - [Protocol specification](spec/README.md): the protocol in TLA+, model-checked
   with TLC, and the monitor that checks the code against it
-- [SQL](../sql/README.md): SQLite-compatible SQL on a journal, with the
+- [SQL](../sql/README.md): SQLite-compatible SQL on a volume, with the
   storage tests and benchmarks that run SQL workloads
 
 ## Layout

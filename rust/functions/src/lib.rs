@@ -56,7 +56,7 @@ pub use restate::{bind, embedded, endpoint, faults, page_cache};
 pub use run::Run;
 pub use signals::{FunctionSignals, Resolved, Signal, Waiting};
 pub use store::Scope;
-pub use transaction::{Blobs, DirBlobs, Journal, Participant, Record, ScopeBlobs};
+pub use transaction::{Blobs, DirBlobs, Participant, Record, ScopeBlobs, Volume};
 pub use vm::{Language, Limits, Runtime};
 pub use workspace::Workspace;
 

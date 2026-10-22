@@ -16,9 +16,9 @@
 //! SQL without the turn.
 use crate::{model::MAX_INPUT, store::storage_error, transaction::Participant};
 use anyhow::{Context, Result, bail, ensure};
-use journal::Journal;
 use serde_json::{Map, Number, Value, json};
 use sql::{Sql, Value as SqlValue};
+use volume::Volume;
 
 /// The scope's KV, a table of its database: values are JSON.
 const KV_TABLE: &str = "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL)";
@@ -47,9 +47,9 @@ impl Db {
         }
     }
 
-    /// The scope's journal: the records and files sealed with its SQL.
-    pub fn journal(&self) -> Journal {
-        self.sql.journal()
+    /// The scope's volume: the records and files sealed with its SQL.
+    pub fn volume(&self) -> Volume {
+        self.sql.volume()
     }
 
     /// The guest trapped: what its open `ctx.db.transaction` did is undone,
@@ -291,7 +291,7 @@ fn unhex(hex: &str) -> Result<Vec<u8>, String> {
 /// SQL transaction, which the seal commits.
 #[async_trait::async_trait]
 impl Participant for Db {
-    /// The turn's transaction, committed and in the journal's file `db`;
+    /// The turn's transaction, committed and in the volume's file `db`;
     /// the next statement begins the next turn's.
     async fn prepare(&mut self) -> Result<()> {
         ensure!(self.savepoints == 0, "A transaction is still open");

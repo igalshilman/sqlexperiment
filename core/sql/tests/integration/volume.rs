@@ -1,12 +1,12 @@
-//! A journal and its participants: the SQL as one of them, its records and
-//! files beside it, made durable together by `Journal::commit`.
+//! A volume and its participants: the SQL as one of them, its records and
+//! files beside it, made durable together by `Volume::commit`.
 use bytes::Bytes;
-use journal::{
-    Journal, Result, StorageOptions,
-    simulation::{MemoryKv, fresh_namespace},
-};
 use sql::Sql;
 use std::sync::Arc;
+use volume::{
+    Result, StorageOptions, Volume,
+    simulation::{MemoryKv, fresh_namespace},
+};
 
 fn options() -> StorageOptions {
     StorageOptions::default()
@@ -17,61 +17,59 @@ async fn rows(sql: &mut Sql) -> Result<i64> {
     Ok(rows[0][0].as_int().unwrap())
 }
 
-/// Nothing a participant changes is durable until the journal commits, and
+/// Nothing a participant changes is durable until the volume commits, and
 /// then all of it is, in one put.
 #[test]
 fn a_commit_makes_every_participant_durable_together() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let journal = Journal::open_with_options(store.clone(), options()).await?;
-        let mut sql = Sql::open(&journal).await?;
+        let volume = Volume::open_with_options(store.clone(), options()).await?;
+        let mut sql = Sql::open(&volume).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
         sql.execute("INSERT INTO t VALUES(1)").await?;
         sql.flush().await?;
-        journal.record("state").set(Bytes::from_static(b"one"));
-        journal
-            .file("pages")?
-            .write(0, Some(vec![1; 4096].into()))?;
+        volume.record("state").set(Bytes::from_static(b"one"));
+        volume.file("pages")?.write(0, Some(vec![1; 4096].into()))?;
         // Flushed, not committed: the store holds nothing.
         assert!(store.keys().is_empty(), "{:?}", store.keys());
         let puts = store.stats().puts;
-        journal.commit().await?;
-        assert_eq!(journal.version(), 1);
+        volume.commit().await?;
+        assert_eq!(volume.version(), 1);
         assert_eq!(store.stats().puts - puts, 1, "one put");
         drop(sql);
-        drop(journal);
+        drop(volume);
 
-        let journal = Journal::open_with_options(store.clone(), options()).await?;
-        assert_eq!(journal.record("state").get(), &b"one"[..]);
-        assert_eq!(journal.file("pages")?.read(0).await?.unwrap()[0], 1);
-        let mut sql = Sql::open(&journal).await?;
+        let volume = Volume::open_with_options(store.clone(), options()).await?;
+        assert_eq!(volume.record("state").get(), &b"one"[..]);
+        assert_eq!(volume.file("pages")?.read(0).await?.unwrap()[0], 1);
+        let mut sql = Sql::open(&volume).await?;
         assert_eq!(rows(&mut sql).await?, 1);
         // A turn whose commit never happens leaves nothing.
         sql.execute("INSERT INTO t VALUES(2)").await?;
         sql.flush().await?;
-        journal.record("state").set(Bytes::from_static(b"two"));
+        volume.record("state").set(Bytes::from_static(b"two"));
         drop(sql);
-        drop(journal);
-        let journal = Journal::open_with_options(store, options()).await?;
-        let mut sql = Sql::open(&journal).await?;
+        drop(volume);
+        let volume = Volume::open_with_options(store, options()).await?;
+        let mut sql = Sql::open(&volume).await?;
         assert_eq!(rows(&mut sql).await?, 1);
-        assert_eq!(sql.journal().record("state").get(), &b"one"[..]);
+        assert_eq!(sql.volume().record("state").get(), &b"one"[..]);
         Ok(())
     })
 }
 
 /// SQL commits stay in the engine until a flush moves them into the file: a
-/// journal commit without one refuses, rather than leave them out.
+/// volume commit without one refuses, rather than leave them out.
 #[test]
 fn a_commit_refuses_sql_not_flushed() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let journal = Journal::open_with_options(store.clone(), options()).await?;
-        let mut sql = Sql::open(&journal).await?;
+        let volume = Volume::open_with_options(store.clone(), options()).await?;
+        let mut sql = Sql::open(&volume).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
-        let refused = journal.commit().await.unwrap_err().to_string();
+        let refused = volume.commit().await.unwrap_err().to_string();
         assert!(
-            refused.contains("\"sql\" has changes not yet in the journal"),
+            refused.contains("\"sql\" has changes not yet in the volume"),
             "{refused}"
         );
         assert!(store.keys().is_empty());
@@ -79,26 +77,26 @@ fn a_commit_refuses_sql_not_flushed() -> Result<()> {
     })
 }
 
-/// A journal is usable without SQL, and one SQL runs on it at most.
+/// A volume is usable without SQL, and one SQL runs on it at most.
 #[test]
-fn a_journal_needs_no_sql_and_takes_one() -> Result<()> {
+fn a_volume_needs_no_sql_and_takes_one() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let journal = Journal::open_with_options(store.clone(), options()).await?;
-        journal.record("only").set(Bytes::from_static(b"records"));
-        journal.commit().await?;
-        let sql = Sql::open(&journal).await?;
-        assert!(Sql::open(&journal).await.is_err());
+        let volume = Volume::open_with_options(store.clone(), options()).await?;
+        volume.record("only").set(Bytes::from_static(b"records"));
+        volume.commit().await?;
+        let sql = Sql::open(&volume).await?;
+        assert!(Sql::open(&volume).await.is_err());
         drop(sql);
-        let journal = Journal::open(store).await?;
-        assert_eq!(journal.record("only").get(), &b"records"[..]);
-        assert_eq!(journal.version(), 1);
+        let volume = Volume::open(store).await?;
+        assert_eq!(volume.record("only").get(), &b"records"[..]);
+        assert_eq!(volume.version(), 1);
         Ok(())
     })
 }
 
 /// With an owner cache, the engine a session leaves idle waits for the next
-/// journal's SQL, past a journal that opened no SQL.
+/// volume's SQL, past a volume that opened no SQL.
 #[test]
 fn the_idle_engine_waits_for_the_next_sql() -> Result<()> {
     futures::executor::block_on(async {
@@ -108,58 +106,58 @@ fn the_idle_engine_waits_for_the_next_sql() -> Result<()> {
             cache: Some(cache.clone()),
             ..options()
         };
-        let journal = Journal::open_with_options(store.clone(), options()).await?;
-        let mut sql = Sql::open(&journal).await?;
+        let volume = Volume::open_with_options(store.clone(), options()).await?;
+        let mut sql = Sql::open(&volume).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
         sql.flush().await?;
-        journal.commit().await?;
+        volume.commit().await?;
         drop(sql);
-        drop(journal);
-        // A journal without SQL leaves the engine where it was.
-        let journal = Journal::open_with_options(store.clone(), options()).await?;
-        assert_eq!(journal.version(), 1);
-        drop(journal);
-        let journal = Journal::open_with_options(store.clone(), options()).await?;
-        let mut sql = Sql::open(&journal).await?;
+        drop(volume);
+        // A volume without SQL leaves the engine where it was.
+        let volume = Volume::open_with_options(store.clone(), options()).await?;
+        assert_eq!(volume.version(), 1);
+        drop(volume);
+        let volume = Volume::open_with_options(store.clone(), options()).await?;
+        let mut sql = Sql::open(&volume).await?;
         assert!(sql.reused_engine());
         sql.execute("INSERT INTO t VALUES(1)").await?;
         sql.flush().await?;
-        journal.commit().await?;
+        volume.commit().await?;
         assert_eq!(rows(&mut sql).await?, 1);
         Ok(())
     })
 }
 
 /// An open SQL transaction holds changes too, though the engine keeps them to
-/// itself until `COMMIT`: the journal refuses to commit around it.
+/// itself until `COMMIT`: the volume refuses to commit around it.
 #[test]
 fn a_commit_refuses_an_open_sql_transaction() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let journal = Journal::open_with_options(store.clone(), options()).await?;
-        let mut sql = Sql::open(&journal).await?;
+        let volume = Volume::open_with_options(store.clone(), options()).await?;
+        let mut sql = Sql::open(&volume).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
         sql.flush().await?;
-        journal.commit().await?;
+        volume.commit().await?;
         sql.execute("BEGIN").await?;
         sql.execute("INSERT INTO t VALUES(1)").await?;
-        let refused = journal.commit().await.unwrap_err().to_string();
-        assert!(refused.contains("not yet in the journal"), "{refused}");
+        let refused = volume.commit().await.unwrap_err().to_string();
+        assert!(refused.contains("not yet in the volume"), "{refused}");
         sql.flush().await?;
-        journal.commit().await?;
+        volume.commit().await?;
         assert_eq!(rows(&mut sql).await?, 1);
         Ok(())
     })
 }
 
 /// A `COMMIT` that fails with an SQL error leaves its transaction open and
-/// takes nothing from the journal: what an earlier flush moved still commits.
+/// takes nothing from the volume: what an earlier flush moved still commits.
 #[test]
 fn a_failed_commit_at_flush_keeps_what_was_flushed() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let journal = Journal::open_with_options(store.clone(), options()).await?;
-        let mut sql = Sql::open(&journal).await?;
+        let volume = Volume::open_with_options(store.clone(), options()).await?;
+        let mut sql = Sql::open(&volume).await?;
         sql.execute("PRAGMA foreign_keys = ON").await?;
         sql.execute("CREATE TABLE parent(id INTEGER PRIMARY KEY)")
             .await?;
@@ -178,11 +176,11 @@ fn a_failed_commit_at_flush_keeps_what_was_flushed() -> Result<()> {
         assert!(sql.in_transaction(), "the transaction stays open");
         sql.execute("ROLLBACK").await?;
         sql.flush().await?;
-        journal.commit().await?;
+        volume.commit().await?;
         drop(sql);
-        drop(journal);
-        let journal = Journal::open_with_options(store, options()).await?;
-        let mut sql = Sql::open(&journal).await?;
+        drop(volume);
+        let volume = Volume::open_with_options(store, options()).await?;
+        let mut sql = Sql::open(&volume).await?;
         assert_eq!(rows(&mut sql).await?, 1);
         Ok(())
     })

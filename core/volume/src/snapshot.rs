@@ -372,7 +372,7 @@ impl Snapshot {
         }
     }
 
-    /// The records' values, by name (see [`crate::Journal::record`]).
+    /// The records' values, by name (see [`crate::Volume::record`]).
     pub fn records(&self) -> &Records {
         &self.records
     }
@@ -729,7 +729,7 @@ impl Snapshot {
         }
         let checkpointed_pages = checkpoint.as_ref().map_or(0, |c| c.images.len());
         if let Some(cache) = cache {
-            // The checkpoint's pages first: a journal that opens on the new
+            // The checkpoint's pages first: a volume that opens on the new
             // record must not find a page as it was before the checkpoint.
             // (One opening on the old record replays the log over them.)
             if let Some(checkpoint) = &checkpoint {

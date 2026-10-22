@@ -1,18 +1,18 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
-use journal::{
-    Journal, Result, StorageOptions,
-    simulation::{MemoryKv, Stats},
-};
 use sql::Sql;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use volume::{
+    Result, StorageOptions, Volume,
+    simulation::{MemoryKv, Stats},
+};
 
-/// Flush and commit `db`'s journal, ending the session.
-async fn save(mut db: Sql) -> journal::Result<journal::CommitReport> {
+/// Flush and commit `db`'s volume, ending the session.
+async fn save(mut db: Sql) -> volume::Result<volume::CommitReport> {
     db.flush().await?;
-    db.journal().commit().await
+    db.volume().commit().await
 }
 
 #[derive(Clone, Copy)]
@@ -24,7 +24,7 @@ struct Case {
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let mut db = Sql::open(
-        &Journal::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?,
+        &Volume::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?,
     )
     .await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER, note INTEGER, payload TEXT)").await?;
@@ -65,7 +65,7 @@ fn print_row(
 }
 async fn run(case: Case, repeats: usize) -> Result<()> {
     let base = baseline(case).await?;
-    let db_bytes = Sql::open(&Journal::open(Arc::new(base.fork())).await?)
+    let db_bytes = Sql::open(&Volume::open(Arc::new(base.fork())).await?)
         .await?
         .io_stats()
         .database_len;
@@ -89,7 +89,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             }
             let store = Arc::new(base.fork());
             let mut warm = if op == "warm_pk" {
-                let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
+                let mut db = Sql::open(&Volume::open(store.clone()).await?).await?;
                 db.query(&query).await?;
                 Some(db)
             } else {
@@ -99,7 +99,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             let start = Instant::now();
             let mut db = match warm.take() {
                 Some(db) => db,
-                None => Sql::open(&Journal::open(store.clone()).await?).await?,
+                None => Sql::open(&Volume::open(store.clone()).await?).await?,
             };
             match op {
                 "cold_pk" | "warm_pk" | "secondary_lookup" => {
@@ -147,7 +147,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
                             .await?;
                         if op == "ten_updates_ten_saves" && n < 10 {
                             save(db).await?;
-                            db = Sql::open(&Journal::open(store.clone()).await?).await?;
+                            db = Sql::open(&Volume::open(store.clone()).await?).await?;
                         }
                     }
                 }
@@ -167,7 +167,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             // Validate results after timing/count capture, with simulated loss of
             // all unacknowledged state and a fresh engine.
             store.crash();
-            let mut reopened = Sql::open(&Journal::open(store.clone()).await?).await?;
+            let mut reopened = Sql::open(&Volume::open(store.clone()).await?).await?;
             let count = reopened.query("SELECT count(*) FROM t").await?[0][0].to_string();
             let expected_count =
                 case.rows + usize::from(op == "insert") - usize::from(op == "delete");

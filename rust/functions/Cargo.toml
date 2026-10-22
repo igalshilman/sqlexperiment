@@ -26,7 +26,7 @@ restate-sdk = { path = "../sdk/.build/sdk-rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-journal = { path = "../../core/journal" }
+volume = { path = "../../core/volume" }
 sql = { path = "../../core/sql" }
 tokio = { version = "1", features = ["fs", "macros", "process", "rt-multi-thread", "time"] }
 tracing = "0.1"
@@ -46,7 +46,7 @@ zstd = "0.13"
 
 [dev-dependencies]
 futures-executor = "0.3.34"
-journal = { path = "../../core/journal", features = ["simulation"] }
+volume = { path = "../../core/volume", features = ["simulation"] }
 sql = { path = "../../core/sql", features = ["simulation"] }
 tempfile = "3"
 wat = "=1.258.0"

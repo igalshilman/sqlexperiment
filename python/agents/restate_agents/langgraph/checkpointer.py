@@ -1,5 +1,5 @@
 """
-A LangGraph checkpointer on a journal database: ``SqlCheckpointSaver``,
+A LangGraph checkpointer on the object's SQL database: ``SqlCheckpointSaver``,
 over a database session ``db`` (in Restate, ``ctx.db``), which has ``query``,
 ``execute`` and ``transaction()``.
 

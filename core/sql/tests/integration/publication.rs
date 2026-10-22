@@ -2,11 +2,11 @@
 //! outcome, with and without a crash and an owner cache. The save is atomic, the
 //! database stays consistent and the next save works.
 use crate::host::Db;
-use journal::{
+use std::sync::Arc;
+use volume::{
     NamespaceCache, Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, fresh_namespace},
 };
-use std::sync::Arc;
 
 fn options(cache: Option<&NamespaceCache>) -> StorageOptions {
     StorageOptions {

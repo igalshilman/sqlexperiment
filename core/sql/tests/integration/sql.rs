@@ -1,6 +1,6 @@
 use crate::host::Db;
-use journal::{Result, StorageOptions, simulation::MemoryKv};
 use std::sync::Arc;
+use volume::{Result, StorageOptions, simulation::MemoryKv};
 
 #[test]
 fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {
@@ -62,7 +62,7 @@ fn dropping_overlay_preserves_saved_state_and_sql_rollback_works() -> Result<()>
     })
 }
 
-/// A flush commits the open SQL transaction, for the journal's commit to
+/// A flush commits the open SQL transaction, for the volume's commit to
 /// make durable.
 #[test]
 fn a_flush_commits_the_open_transaction() -> Result<()> {
@@ -169,8 +169,8 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
 fn large_page_sizes_reopen_after_a_save() -> Result<()> {
     futures::executor::block_on(async {
         for page_size in [8192, 65536] {
-            let store: Arc<dyn journal::kv::KvStore> =
-                Arc::new(journal::simulation::MemoryKv::default());
+            let store: Arc<dyn volume::kv::KvStore> =
+                Arc::new(volume::simulation::MemoryKv::default());
             let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
             db.execute(&format!("PRAGMA page_size = {page_size}"))
                 .await?;

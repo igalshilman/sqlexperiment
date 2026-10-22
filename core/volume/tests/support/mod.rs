@@ -1,12 +1,12 @@
 //! Shared by the simulation tests: a seeded random source, a file base, a
-//! session holding a journal's files, and a reference model of its content.
+//! session holding a volume's files, and a reference model of its content.
 #![allow(dead_code)]
 use bytes::Bytes;
-use journal::{Base, File, Journal, PAGE_SIZE, Page, Result, StorageOptions, kv::KvStore};
 use std::{
     collections::BTreeMap,
     sync::{Arc, OnceLock},
 };
+use volume::{Base, File, PAGE_SIZE, Page, Result, StorageOptions, Volume, kv::KvStore};
 
 /// A deterministic random source (splitmix64).
 pub struct Rng(u64);
@@ -91,7 +91,7 @@ pub const FILES: [&str; 3] = ["db", "aux", "vm"];
 /// The records.
 pub const RECORDS: [&str; 3] = ["progress", "outbox", "state"];
 
-/// A change to a journal and to its model alike.
+/// A change to a volume and to its model alike.
 #[derive(Clone, Debug)]
 pub enum Op {
     Set(&'static str, Bytes),
@@ -127,33 +127,33 @@ impl Op {
     }
 }
 
-/// A journal and handles on its files.
+/// A volume and handles on its files.
 pub struct Session {
-    pub journal: Journal,
+    pub volume: Volume,
     files: BTreeMap<&'static str, File>,
 }
 
 impl Session {
-    /// Open the journal, and its files (`vm` with its base).
+    /// Open the volume, and its files (`vm` with its base).
     pub async fn open(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        Self::of(Journal::open_with_options(store, options).await?)
+        Self::of(Volume::open_with_options(store, options).await?)
     }
 
-    /// Open a reader beside the owner (see [`Journal::open_reader`]).
+    /// Open a reader beside the owner (see [`Volume::open_reader`]).
     pub async fn reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        Self::of(Journal::open_reader(store, options).await?)
+        Self::of(Volume::open_reader(store, options).await?)
     }
 
-    fn of(journal: Journal) -> Result<Self> {
+    fn of(volume: Volume) -> Result<Self> {
         let mut files = BTreeMap::new();
         for name in FILES {
             let file = match name {
-                "vm" => journal.file_with_base(name, golden())?,
-                _ => journal.file(name)?,
+                "vm" => volume.file_with_base(name, golden())?,
+                _ => volume.file(name)?,
             };
             files.insert(name, file);
         }
-        Ok(Self { journal, files })
+        Ok(Self { volume, files })
     }
 
     pub fn file(&self, name: &str) -> &File {
@@ -162,7 +162,7 @@ impl Session {
 
     pub fn apply(&self, op: &Op) -> Result<()> {
         match op {
-            Op::Set(name, value) => self.journal.record(name).set(value.clone()),
+            Op::Set(name, value) => self.volume.record(name).set(value.clone()),
             Op::Write(name, index, image) => self.file(name).write(*index, image.clone())?,
             Op::SetLen(name, len) => self.file(name).set_len(*len)?,
         }
@@ -170,7 +170,7 @@ impl Session {
     }
 }
 
-/// What a journal should hold: its records and its files' pages.
+/// What a volume should hold: its records and its files' pages.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Model {
     records: BTreeMap<String, Bytes>,
@@ -241,7 +241,7 @@ impl Model {
     /// How `session` differs from the model; `None` when it reads the same.
     pub async fn differs(&self, session: &Session) -> Result<Option<String>> {
         for name in RECORDS {
-            let held = session.journal.record(name).get();
+            let held = session.volume.record(name).get();
             if held != self.record(name) {
                 return Ok(Some(format!("record {name}: {} bytes", held.len())));
             }

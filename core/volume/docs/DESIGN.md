@@ -1,6 +1,6 @@
 # Design
 
-A journal over a Restate virtual object's state (a key/value namespace with
+A volume over a Restate virtual object's state (a key/value namespace with
 one owner at a time): records and paged files, committed together in one put.
 Its participants keep changes of their own and move them in before a commit;
 the main one is SQLite-compatible SQL (the [`sql`](../../sql/README.md) crate:
@@ -8,8 +8,8 @@ Turso's `turso_core` engine, unmodified) on the file `db`.
 
 Its host is an object without Restate's journal: a key, its own database,
 and calls to other objects or services, with at-least-once delivery. The
-database is the object's only durable record, and the journal is how it
-reaches the store: the host commits the journal (records, paged files and
+database is the object's only durable record, and the volume is how it
+reaches the store: the host commits the volume (records, paged files and
 the SQL's file `db`, in one put) when it chooses, after each SQL transaction
 as SQLite does, or once per turn of everything that takes part. The sections
 on SQL describe the `sql` crate, which keeps its engine's state private until
@@ -43,7 +43,7 @@ A namespace holds four kinds of keys:
 
 **Read rule.** Page _n_ of a paged file is its latest image in the record's
 log, else `page/<f>/<n>`, else zeros. The SQL database is the paged file
-`db`; the host's files (`Journal::file`) are others, written in the same
+`db`; the host's files (`Volume::file`) are others, written in the same
 transactions. Everything below says "page" for a page of any file: a page is
 a file and a number. A file with a base (a VM's memory over its golden image)
 reads its base's page where it has none; see `FORMAT.md`.
@@ -79,7 +79,7 @@ Exact encodings are in [FORMAT.md](FORMAT.md).
 
 SQL writes into a private view (dirty pages and a private engine WAL). Its
 flush checkpoints that private WAL inside the engine and moves the changed
-pages into the file `db`; the journal's commit then writes every file and
+pages into the file `db`; the volume's commit then writes every file and
 record changed since the last one:
 
 1. **Encode.** The changed pages as one transaction of segments (up to 240
@@ -124,19 +124,19 @@ record (the SDKs' `effects`): they ride in the same record put, so they are
 durable exactly when the transaction is, and stay, through checkpoints, until
 a later commit replaces them. The Restate SDKs keep a transaction's sends
 there, as its outbox, and make them once it commits. These are the record
-`effects`; a host may set any record (`Journal::record`) and write paged
-files of its own (`Journal::file`), committed by the next `Journal::commit`. A
+`effects`; a host may set any record (`Volume::record`) and write paged
+files of its own (`Volume::file`), committed by the next `Volume::commit`. A
 commit with no page changes adds no log transaction, so a host's turns do
 not checkpoint SQL.
 
 ## When a commit happens
 
-At `Journal::commit`, and only then. SQL statements and SQL `COMMIT` change
+At `Volume::commit`, and only then. SQL statements and SQL `COMMIT` change
 the engine's private view; `Sql::flush` commits an open SQL transaction and
 moves what the SQL committed into the file `db`, still private; the
-journal's commit makes it durable with every record and file changed since
-the last commit, in one put. A journal commit with SQL committed but not
-flushed is refused. Dropping the journal discards what it holds.
+volume's commit makes it durable with every record and file changed since
+the last commit, in one put. A volume commit with SQL committed but not
+flushed is refused. Dropping the volume discards what it holds.
 `Sql::transaction(closure)` wraps `BEGIN`/`COMMIT`, and rolls back when the
 closure returns `Err`.
 
@@ -198,12 +198,12 @@ saves gets. It stays out of the record, which is on the correctness path.
 
 ## Readers
 
-A reader (`Journal::open_reader`) reads a namespace that another owns,
+A reader (`Volume::open_reader`) reads a namespace that another owns,
 alongside it, such as a virtual object's shared handler beside the exclusive
 one. It writes nothing to the store: no cache, and its SQL changes stay in
-the session, and its journal refuses to commit. It opens like anyone, and
+the session, and its volume refuses to commit. It opens like anyone, and
 reads pages lazily, so a checkpoint by the owner meanwhile could give it a
-page newer than its log. `Journal::is_current` tells, once it has read: the
+page newer than its log. `Volume::is_current` tells, once it has read: the
 record unchanged. A checkpoint writes only pages its record's log covers, and
 moves the record after, so a reader that read an overwritten page finds the
 record changed. It is conservative: any commit since open makes the reader
@@ -224,7 +224,7 @@ it a record whose log replays over whatever else it kept.
 
 ## Engine integration
 
-How the [`sql`](../../sql/README.md) crate runs the SQL engine on the journal.
+How the [`sql`](../../sql/README.md) crate runs the SQL engine on the volume.
 The engine sees two virtual files, the database and its WAL, served by `KvIo`:
 
 - **Reads** of the database file go to the committed view: log image, then
@@ -254,8 +254,8 @@ The engine sees two virtual files, the database and its WAL, served by `KvIo`:
   a limit, a cancelled call, an engine anomaly) ends the session, and an error
   from a commit leaves its outcome unknown.
   `Sql::is_usable` says which happened.
-- **Sessions.** Nothing is durable before the journal's commit, and dropping
-  the journal discards what it holds since. Inside
+- **Sessions.** Nothing is durable before the volume's commit, and dropping
+  the volume discards what it holds since. Inside
   `Sql::transaction`, a statement that ends the transaction (`COMMIT`,
   `END`, `ROLLBACK`) fails and ends the session before anything is durable,
   and so does dropping or unwinding the transaction future.
@@ -378,7 +378,7 @@ checkpoint. Measurements: [log shipping](../../sql/benches/LOG_RESULTS.md),
 - **Validation.** A monitor checks every write of the simulator's crash
   and handover campaigns against the rules above, and the campaigns crash at
   every sync keeping each prefix of its writes. A seeded random campaign over
-  the public API (`tests/campaign.rs`; `JOURNAL_SEEDS=<n>` runs more seeds)
+  the public API (`tests/campaign.rs`; `VOLUME_SEEDS=<n>` runs more seeds)
   mixes changes to records and files, faults, cancellations, crashes, reopens
   and owners, and compares every reopen with a model; other tests drop a
   commit after every number of polls, corrupt every stored value, and fuzz the

@@ -59,8 +59,8 @@ use std::{
 };
 
 mod store;
-use journal::{PageCache, PageCacheConfig};
 use store::StateQueue;
+use volume::{PageCache, PageCacheConfig};
 
 /// Fault injection, for tests.
 #[doc(hidden)]

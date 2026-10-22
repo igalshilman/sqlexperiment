@@ -1,7 +1,7 @@
 //! A seeded, deterministic, randomized campaign: random SQL (tables, indexes,
 //! rows past a page, transactions that commit or roll back, statements that
 //! fail partway through a string) through the bindings' session and through
-//! `Sql` with a journal commit per turn, with random storage faults (an error
+//! `Sql` with a volume commit per turn, with random storage faults (an error
 //! before or after a request, a cancellation, a crash keeping any prefix of
 //! the writes) and reopens, over the protocol monitor, with and without the
 //! page cache, and with tiny checkpoint thresholds.
@@ -20,14 +20,14 @@ use crate::{
     reference::{integrity, reference_state, replay, run, state, state_of, text},
 };
 use bytes::Bytes;
-use journal::{
-    Journal, Result, StorageOptions,
-    kv::KvStore,
-    simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
-};
 use sql::{Rows, Sql, binding::Session};
 use std::{panic, sync::Arc};
 use turso_core::Connection;
+use volume::{
+    Result, StorageOptions, Volume,
+    kv::KvStore,
+    simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
+};
 
 /// Seeds to run by default: enough to cover each configuration.
 const DEFAULT_SEEDS: u64 = 4;
@@ -208,7 +208,7 @@ impl Model {
 
 /// How a seed runs.
 struct Config {
-    /// Through the bindings' session; otherwise `Sql`, a journal commit per turn.
+    /// Through the bindings' session; otherwise `Sql`, a volume commit per turn.
     session: bool,
     cached: bool,
     options: StorageOptions,
@@ -219,7 +219,7 @@ struct Config {
 /// The session the workload runs on.
 enum Open {
     Session(Session),
-    Turns { journal: Journal, sql: Sql },
+    Turns { volume: Volume, sql: Sql },
 }
 
 impl Open {
@@ -236,9 +236,7 @@ impl Open {
                 let state = state_of(async |sql| Ok(session.query(sql, None).await?.1)).await?;
                 Ok((state, session.effects().await?))
             }
-            Open::Turns { journal, sql } => {
-                Ok((state(sql).await?, journal.record("effects").get()))
-            }
+            Open::Turns { volume, sql } => Ok((state(sql).await?, volume.record("effects").get())),
         }
     }
 }
@@ -360,9 +358,9 @@ impl Campaign {
         Ok(match self.config.session {
             true => Open::Session(Session::open_with_options(store, options, false).await?),
             false => {
-                let journal = Journal::open_with_options(store, options).await?;
-                let sql = Sql::open(&journal).await?;
-                Open::Turns { journal, sql }
+                let volume = Volume::open_with_options(store, options).await?;
+                let sql = Sql::open(&volume).await?;
+                Open::Turns { volume, sql }
             }
         })
     }
@@ -635,7 +633,7 @@ impl Campaign {
     /// One call of a turn of `Sql`: a statement, a transaction, or the
     /// turn's commit; or the end of the session.
     async fn turn(&mut self, open: Open) -> Result<Open> {
-        let Open::Turns { journal, mut sql } = open else {
+        let Open::Turns { volume, mut sql } = open else {
             unreachable!()
         };
         let writes = self.writes();
@@ -687,8 +685,8 @@ impl Campaign {
                 self.model.pending_effects = Some(effects.clone());
                 let commit = async {
                     sql.flush().await?;
-                    journal.record("effects").set(effects);
-                    journal.commit().await.map(drop)
+                    volume.record("effects").set(effects);
+                    volume.commit().await.map(drop)
                 };
                 let (hit, ended) = self.call(2, "commit the turn", commit).await;
                 if matches!(ended, Ended::Returned(Ok(()))) {
@@ -699,12 +697,12 @@ impl Campaign {
             _ => {
                 self.log(|| "drop the session".into());
                 drop(sql);
-                drop(journal);
+                drop(volume);
                 self.end(false, "dropped").await?;
                 return self.open().await;
             }
         };
-        let open = Open::Turns { journal, sql };
+        let open = Open::Turns { volume, sql };
         self.settle_call(open, writes, hit, ended, expected, false)
             .await
     }
@@ -729,10 +727,10 @@ impl<T> Ended<T> {
 /// The state of the store and its effects, through a session without the
 /// cache; its database checks out.
 async fn observe(memory: MemoryKv) -> Result<(String, Bytes)> {
-    let journal = Journal::open(Arc::new(memory)).await?;
-    let mut sql = Sql::open(&journal).await?;
+    let volume = Volume::open(Arc::new(memory)).await?;
+    let mut sql = Sql::open(&volume).await?;
     assert_eq!(integrity(&mut sql).await?, "ok");
-    Ok((state(&mut sql).await?, journal.record("effects").get()))
+    Ok((state(&mut sql).await?, volume.record("effects").get()))
 }
 
 /// A value of `size` characters, past a page or several when large.

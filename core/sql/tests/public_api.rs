@@ -2,18 +2,18 @@
 //! instrumentation, forced yields or checkpoint fault hooks are required.
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use journal::{Journal, Result, kv::KvStore};
 use sql::Sql;
 use std::{
     collections::BTreeMap,
     io,
     sync::{Arc, Mutex},
 };
+use volume::{Result, Volume, kv::KvStore};
 
-/// Flush and commit `db`'s journal, ending the session.
-async fn save(mut db: Sql) -> journal::Result<journal::CommitReport> {
+/// Flush and commit `db`'s volume, ending the session.
+async fn save(mut db: Sql) -> volume::Result<volume::CommitReport> {
     db.flush().await?;
-    db.journal().commit().await
+    db.volume().commit().await
 }
 
 #[derive(Default)]
@@ -43,19 +43,19 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let mut db = require_send(Sql::open(&Journal::open(store.clone()).await?)).await?;
+        let mut db = require_send(Sql::open(&Volume::open(store.clone()).await?)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
         save(db).await?;
-        let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&Volume::open(store.clone()).await?).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
         );
         db.execute("UPDATE t SET value='changed'").await?;
         drop(db);
-        let mut db = Sql::open(&Journal::open(store).await?).await?;
+        let mut db = Sql::open(&Volume::open(store).await?).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
@@ -68,16 +68,16 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
     })
 }
 
-/// A transaction and records, durable together at the journal's commit.
+/// A transaction and records, durable together at the volume's commit.
 #[test]
-fn a_journal_commit_with_an_immediately_ready_backend() -> Result<()> {
+fn a_volume_commit_with_an_immediately_ready_backend() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(Store::default());
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let journal = Journal::open(store.clone()).await?;
-        let mut db = Sql::open(&journal).await?;
+        let volume = Volume::open(store.clone()).await?;
+        let mut db = Sql::open(&volume).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         require_send(db.transaction(async |db| {
@@ -86,12 +86,12 @@ fn a_journal_commit_with_an_immediately_ready_backend() -> Result<()> {
         }))
         .await?;
         db.flush().await?;
-        journal.record("note").set(Bytes::from_static(b"two rows"));
-        require_send(journal.commit()).await?;
+        volume.record("note").set(Bytes::from_static(b"two rows"));
+        require_send(volume.commit()).await?;
         drop(db);
-        let journal = Journal::open(store).await?;
-        assert_eq!(journal.record("note").get(), &b"two rows"[..]);
-        let mut db = Sql::open(&journal).await?;
+        let volume = Volume::open(store).await?;
+        assert_eq!(volume.record("note").get(), &b"two rows"[..]);
+        let mut db = Sql::open(&volume).await?;
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(2)

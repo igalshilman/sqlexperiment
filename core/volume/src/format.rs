@@ -11,7 +11,7 @@
 //! directory of files (records and paged files) and the log since the last
 //! checkpoint, inline or naming stored segments. Pages are overwritten in
 //! place by checkpoints and are only authoritative for pages absent from the
-//! log. The namespace must be dedicated to one journal.
+//! log. The namespace must be dedicated to one volume.
 pub(crate) const COMMIT: &str = "v15/commit";
 pub(crate) const COMMIT_MAGIC: &[u8; 4] = b"SC15";
 pub(crate) const HINT: &str = "v15/hint";

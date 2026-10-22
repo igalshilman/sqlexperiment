@@ -1,16 +1,16 @@
-//! A host of the journal, as the tests use it: SQL on a journal of its own,
+//! A host of the volume, as the tests use it: SQL on a volume of its own,
 //! committed when the host saves ([`Durability::Save`]) or after each SQL
 //! transaction ([`Durability::Commit`]), as the Node.js addon and the Python
 //! extension do.
 use bytes::Bytes;
-use journal::{CommitReport, Journal, Result, StorageOptions, kv::KvStore};
 use sql::{Sql, SqlOptions, Value};
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
+use volume::{CommitReport, Result, StorageOptions, Volume, kv::KvStore};
 
-/// When the host commits the journal.
+/// When the host commits the volume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durability {
     /// At [`Db::save`]: the session's SQL as one commit.
@@ -47,7 +47,7 @@ impl From<(StorageOptions, Durability)> for Setup {
     }
 }
 
-/// SQL on a journal of its own.
+/// SQL on a volume of its own.
 pub struct Db {
     sql: Sql,
     durability: Durability,
@@ -80,9 +80,9 @@ impl Db {
         limits: SqlOptions,
     ) -> Result<Self> {
         let Setup(options, durability) = setup.into();
-        let journal = Journal::open_with_options(store, options).await?;
+        let volume = Volume::open_with_options(store, options).await?;
         Ok(Self {
-            sql: Sql::open_with_options(&journal, limits).await?,
+            sql: Sql::open_with_options(&volume, limits).await?,
             durability,
         })
     }
@@ -90,7 +90,7 @@ impl Db {
     /// Flush and commit, and end the session (leaving its engine).
     pub async fn save(mut self) -> Result<CommitReport> {
         self.sql.flush().await?;
-        self.sql.journal().commit().await
+        self.sql.volume().commit().await
     }
 
     /// With [`Durability::Commit`], commit what the call committed in SQL.
@@ -100,7 +100,7 @@ impl Db {
             && !self.sql.in_transaction()
         {
             self.sql.flush().await?;
-            self.sql.journal().commit().await?;
+            self.sql.volume().commit().await?;
         }
         result
     }
@@ -134,15 +134,15 @@ impl Db {
     /// `COMMIT` the open transaction with `effects` as the record `effects`,
     /// and commit: what the addon's `commit(effects)` does.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
-        // After the flush: a `COMMIT` that fails takes nothing from the journal.
+        // After the flush: a `COMMIT` that fails takes nothing from the volume.
         self.sql.flush().await?;
-        self.sql.journal().record("effects").set(effects);
-        self.sql.journal().commit().await.map(drop)
+        self.sql.volume().record("effects").set(effects);
+        self.sql.volume().commit().await.map(drop)
     }
 
     /// The record `effects`.
     pub fn effects(&self) -> Bytes {
-        self.sql.journal().record("effects").get()
+        self.sql.volume().record("effects").get()
     }
 
     pub async fn transaction<T>(

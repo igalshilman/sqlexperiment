@@ -1,10 +1,10 @@
-use journal::{Result, simulation::MemoryKv};
 use sql::io::{BLOCK_SIZE, DB_PATH, KvIo, MountedIo};
 use std::sync::{
     Arc,
     atomic::{AtomicI32, Ordering},
 };
 use turso_core::{Buffer, Completion, IO, OpenFlags};
+use volume::{Result, simulation::MemoryKv};
 
 #[test]
 fn concurrent_drivers_preserve_submission_order() -> Result<()> {

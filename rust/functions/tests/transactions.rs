@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use common::{Store, attempt, programs, settle};
 use functions::{
-    Attached, Extension, Extensions, Journal, Outcome, Participant, Record, Run, ScopeBlobs,
+    Attached, Extension, Extensions, Outcome, Participant, Record, Run, ScopeBlobs, Volume,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -38,8 +38,8 @@ struct Counting {
 
 #[async_trait]
 impl Extension for Counter {
-    async fn attach(&self, _blobs: ScopeBlobs, journal: Journal) -> Result<Box<dyn Attached>> {
-        let record = journal.record("state");
+    async fn attach(&self, _blobs: ScopeBlobs, volume: Volume) -> Result<Box<dyn Attached>> {
+        let record = volume.record("state");
         let saved: Value = serde_json::from_slice(&record.get()).unwrap_or(Value::Null);
         Ok(Box::new(Counting {
             counter: self.clone(),

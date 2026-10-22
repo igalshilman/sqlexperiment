@@ -1,7 +1,7 @@
 //! The session the language bindings expose (the Node.js addon, the Python
 //! extension), over a key/value store the host implements in its language.
 //!
-//! Unlike [`Sql`], a [`Session`] commits the journal itself: a call that
+//! Unlike [`Sql`], a [`Session`] commits the volume itself: a call that
 //! leaves no SQL transaction open flushes and commits before it returns, so
 //! every SQL commit is durable when its call resolves. The host's
 //! `transaction()` runs its body between [`Session::begin`] and
@@ -15,7 +15,6 @@
 use crate::{Result, Rows, Sql, Value};
 use bytes::Bytes;
 use futures::lock::{Mutex, MutexGuard};
-use journal::{Journal, PageCache, PageCacheConfig, StorageOptions, kv::KvStore};
 use std::{
     io,
     path::PathBuf,
@@ -24,6 +23,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use volume::{PageCache, PageCacheConfig, StorageOptions, Volume, kv::KvStore};
 
 /// The record a commit's effects are in.
 const EFFECTS: &str = "effects";
@@ -45,7 +45,7 @@ pub struct Session {
 impl Session {
     /// Open the database of `namespace` over `store`, with the process-wide
     /// page cache. A `reader` reads the namespace beside its owner (see
-    /// [`Journal::open_reader`]): without the cache, writing nothing to the
+    /// [`Volume::open_reader`]): without the cache, writing nothing to the
     /// store, and [`Self::is_current`] says whether what it read is still the
     /// stored state.
     pub async fn open(store: Arc<dyn KvStore>, namespace: &str, reader: bool) -> Result<Self> {
@@ -67,12 +67,12 @@ impl Session {
         options: StorageOptions,
         reader: bool,
     ) -> Result<Self> {
-        let journal = match reader {
-            true => Journal::open_reader(store, options).await?,
-            false => Journal::open_with_options(store, options).await?,
+        let volume = match reader {
+            true => Volume::open_reader(store, options).await?,
+            false => Volume::open_with_options(store, options).await?,
         };
         Ok(Self {
-            sql: Mutex::new(Some(Sql::open(&journal).await?)),
+            sql: Mutex::new(Some(Sql::open(&volume).await?)),
             reader,
             in_body: AtomicBool::new(false),
             usable: AtomicBool::new(true),
@@ -117,8 +117,8 @@ impl Session {
                 if self.reader {
                     return Err("a reader commits no effects".into());
                 }
-                if effects.len() > journal::MAX_RECORD_BYTES {
-                    let (size, limit) = (effects.len(), journal::MAX_RECORD_BYTES);
+                if effects.len() > volume::MAX_RECORD_BYTES {
+                    let (size, limit) = (effects.len(), volume::MAX_RECORD_BYTES);
                     return Err(format!("effects of {size} bytes exceed {limit}").into());
                 }
             }
@@ -126,7 +126,7 @@ impl Session {
                 session.execute("COMMIT").await?;
             }
             if let Some(effects) = effects {
-                session.journal().record(EFFECTS).set(effects);
+                session.volume().record(EFFECTS).set(effects);
             }
             Ok(())
         })
@@ -157,12 +157,12 @@ impl Session {
     pub async fn effects(&self) -> Result<Bytes> {
         let sql = self.sql.lock().await;
         let session = sql.as_ref().ok_or(CLOSED)?;
-        Ok(session.journal().record(EFFECTS).get())
+        Ok(session.volume().record(EFFECTS).get())
     }
 
     /// Whether the store still holds the state this reader opened on, so
     /// that what it read is: if not, read again in a new session (see
-    /// [`Journal::is_current`]).
+    /// [`Volume::is_current`]).
     pub async fn is_current(&self) -> Result<bool> {
         let sql = self.sql.lock().await;
         sql.as_ref().ok_or(CLOSED)?.is_current().await
@@ -193,7 +193,7 @@ impl Session {
     /// Run `call` on the open session, then settle it. A statement that
     /// ended the transaction of a `transaction()` body ends the session.
     /// Otherwise a call that leaves no SQL transaction open commits the
-    /// journal, even after an SQL error (the statements before it stand): what
+    /// volume, even after an SQL error (the statements before it stand): what
     /// the SQL committed, with the effects set, durable before the call
     /// returns. A reader commits nothing, and a session that a failure ended
     /// cannot. A call dropped before it returns ends the session.
@@ -215,7 +215,7 @@ impl Session {
             };
         }
         let committed = match !self.reader && session.is_usable() && !session.in_transaction() {
-            true => commit_journal(session).await,
+            true => commit_volume(session).await,
             false => Ok(()),
         };
         self.usable.store(session.is_usable(), Ordering::Release);
@@ -247,9 +247,9 @@ const CLOSED: &str = "the database is closed";
 /// The error of a call that would commit after a failure ended the session.
 const ENDED: &str = "a failure ended the session";
 
-async fn commit_journal(session: &mut Sql) -> Result<()> {
+async fn commit_volume(session: &mut Sql) -> Result<()> {
     session.flush().await?;
-    session.journal().commit().await?;
+    session.volume().commit().await?;
     Ok(())
 }
 

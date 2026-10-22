@@ -1,29 +1,29 @@
-//! SQLite-compatible SQL on a [`Journal`]: Turso's Rust engine (`turso_core`,
-//! unmodified) over the journal's file `db`.
+//! SQLite-compatible SQL on a [`Volume`]: Turso's Rust engine (`turso_core`,
+//! unmodified) over the volume's file `db`.
 //!
 //! For a Restate object without Restate's journal (`journalReplay: false`),
-//! whose state is the journal's namespace. [`Sql`] takes part in the journal
-//! ([`journal::Participant`]): its statements change a private view,
+//! whose state is the volume's namespace. [`Sql`] takes part in the volume
+//! ([`volume::Participant`]): its statements change a private view,
 //! [`Sql::flush`] moves what SQL committed into the file `db`, and the
-//! journal's [`Journal::commit`] makes it durable, together with the
-//! journal's other files and records, in one put.
+//! volume's [`Volume::commit`] makes it durable, together with the
+//! volume's other files and records, in one put.
 //!
 //! # When SQL changes become durable
 //!
-//! At [`Journal::commit`], and only then. SQL statements, SQL `COMMIT` and
+//! At [`Volume::commit`], and only then. SQL statements, SQL `COMMIT` and
 //! [`Sql::checkpoint`] change a private view; [`Sql::flush`] moves what SQL
-//! committed into the file `db`, still private; the journal refuses to commit
-//! while SQL holds changes not flushed. Dropping the journal discards it all.
+//! committed into the file `db`, still private; the volume refuses to commit
+//! while SQL holds changes not flushed. Dropping the volume discards it all.
 //! The host decides when to commit: after each SQL transaction (as SQLite
 //! does, and as the Node.js addon and the Python extension do, through
 //! [`binding::Session`]), or once per turn of everything that took part (as
 //! the durable functions runtime does).
 //!
-//! | Layer | Representation | Survives dropping the journal? |
+//! | Layer | Representation | Survives dropping the volume? |
 //! |---|---|---|
 //! | SQL working state | Dirty 4096-byte pages and private engine WAL | No |
-//! | The file `db` | Pages flushed since the journal's last commit | No |
-//! | The journal | Its commit record and pages (see [`journal`]) | Yes, after an acknowledged commit |
+//! | The file `db` | Pages flushed since the volume's last commit | No |
+//! | The volume | Its commit record and pages (see [`volume`]) | Yes, after an acknowledged commit |
 //!
 //! An SQL error (syntax, a constraint, a missing table) undoes just that
 //! statement, as in SQLite, and the session goes on. A storage error, a
@@ -32,15 +32,15 @@
 //!
 //! # Engine reuse
 //!
-//! With a [`journal::PageCache`], a session that ends cleanly leaves its idle
-//! engine there ([`journal::Participant::park`]); the next session of the
+//! With a [`volume::PageCache`], a session that ends cleanly leaves its idle
+//! engine there ([`volume::Participant::park`]); the next session of the
 //! namespace reuses it when nothing changed, keeping the parsed schema and the
 //! engine's page cache.
 //!
 //! # Driving the engine
 //!
 //! The caller's task drives nonblocking engine open/connect state machines and
-//! statement steps, awaits queued journal reads, then resumes the engine.
+//! statement steps, awaits queued volume reads, then resumes the engine.
 //! Completions run on that task. No worker thread, command channel or
 //! background task is created. Cached queries yield to the executor after 64
 //! steps; an individual engine call is not preemptible. Queries on a session
@@ -61,16 +61,16 @@
 //!
 //! ```no_run
 //! # use std::sync::Arc;
-//! # use journal::{Journal, kv::KvStore};
+//! # use volume::{Volume, kv::KvStore};
 //! # use sql::Sql;
-//! # async fn example(store: Arc<dyn KvStore>) -> journal::Result<()> {
-//! let journal = Journal::open(store).await?;
-//! let mut sql = Sql::open(&journal).await?;
+//! # async fn example(store: Arc<dyn KvStore>) -> volume::Result<()> {
+//! let volume = Volume::open(store).await?;
+//! let mut sql = Sql::open(&volume).await?;
 //! sql.execute("CREATE TABLE messages(body TEXT)").await?;
 //! sql.execute("INSERT INTO messages VALUES('hello')").await?;
 //! sql.flush().await?;
-//! journal.record("seen").set("1 message".into());
-//! journal.commit().await?; // the table and the record, durable together
+//! volume.record("seen").set("1 message".into());
+//! volume.commit().await?; // the table and the record, durable together
 //! # Ok(())
 //! # }
 //! ```
@@ -83,7 +83,7 @@
 //!
 //! # Features
 //!
-//! `simulation` turns on the journal's in-memory store, fault injection and
+//! `simulation` turns on the volume's in-memory store, fault injection and
 //! latency simulator, and this crate's test helpers.
 pub mod binding;
 pub mod io;
@@ -92,7 +92,6 @@ pub mod io;
 pub use turso_core::{Numeric, Value};
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
-use journal::{Journal, Participant};
 use std::{
     future::poll_fn,
     sync::{
@@ -106,8 +105,9 @@ use turso_core::{
     ConnectAsyncState, Connection, Database, IO, IOResult, OpenFlags, OpenOptions, SqliteDialect,
     StepResult, TempStore,
 };
+use volume::{Participant, Volume};
 
-/// The journal's file SQL keeps its database in.
+/// The volume's file SQL keeps its database in.
 pub const DB_FILE: &str = "db";
 
 /// Default [`SqlOptions::max_private_bytes`].
@@ -145,12 +145,12 @@ pub struct IoStats {
     pub private_wal_len: u64,
 }
 
-/// Adapter, engine and journal errors returned to the host task.
-pub type Result<T> = journal::Result<T>;
+/// Adapter, engine and volume errors returned to the host task.
+pub type Result<T> = volume::Result<T>;
 /// Result rows, each a value per column.
 pub type Rows = Vec<Vec<Value>>;
 
-/// The SQL engine over a journal's file `db`: one private SQL view, driven
+/// The SQL engine over a volume's file `db`: one private SQL view, driven
 /// entirely by the caller's async task.
 ///
 /// The host advances engine state machines, awaits queued KV I/O and resumes the
@@ -158,7 +158,7 @@ pub type Rows = Vec<Vec<Value>>;
 /// Queries require exclusive access to this handle. An SQL error leaves the
 /// session usable; a storage error, a cancelled call or a failed commit ends
 /// it (see [`Self::is_usable`]): open a new one after settling backend requests.
-/// Its changes become durable only with the journal's [`Journal::commit`],
+/// Its changes become durable only with the volume's [`Volume::commit`],
 /// after [`Self::flush`]; dropping it leaves its engine to the next one.
 pub struct Sql {
     participant: Participant,
@@ -205,7 +205,7 @@ impl Drop for Abandon {
 }
 
 /// An idle engine and its adapter at a committed state, kept in the owner's
-/// [`journal::PageCache`] so the next session can skip opening an engine. Only the
+/// [`volume::PageCache`] so the next session can skip opening an engine. Only the
 /// database is kept: each session connects afresh, so no connection state
 /// (counters such as `last_insert_rowid()`, settings, attachments, the temp
 /// schema) carries over.
@@ -250,17 +250,17 @@ impl Sql {
         self.io.stats()
     }
 
-    /// Open the SQL database of `journal`, its file `db`, with default
+    /// Open the SQL database of `volume`, its file `db`, with default
     /// [`SqlOptions`]: an engine left idle by this owner's previous session
-    /// if the journal found one, or a new one. One `Sql` runs on a journal.
-    pub async fn open(journal: &Journal) -> Result<Self> {
-        Self::open_with_options(journal, SqlOptions::default()).await
+    /// if the volume found one, or a new one. One `Sql` runs on a volume.
+    pub async fn open(volume: &Volume) -> Result<Self> {
+        Self::open_with_options(volume, SqlOptions::default()).await
     }
 
     /// [`Self::open`] with explicit [`SqlOptions`].
-    pub async fn open_with_options(journal: &Journal, options: SqlOptions) -> Result<Self> {
-        let participant = journal.join("sql")?;
-        let file = journal.file(DB_FILE)?;
+    pub async fn open_with_options(volume: &Volume, options: SqlOptions) -> Result<Self> {
+        let participant = volume.join("sql")?;
+        let file = volume.file(DB_FILE)?;
         let warm = participant.take_idle::<WarmEngine>();
         let io = match &warm {
             Some(warm) => {
@@ -294,15 +294,15 @@ impl Sql {
         sql.connection = Some(connect(&sql.io, &database).await?);
         sql.database = Some(database);
         sql.poisoned = false;
-        if !sql.reused && journal.options().cache.is_some() {
+        if !sql.reused && volume.options().cache.is_some() {
             sql.schema_bytes = Some(sql.measure_schema().await?);
         }
         Ok(sql)
     }
 
-    /// The journal this SQL commits with.
-    pub fn journal(&self) -> Journal {
-        self.participant.journal().clone()
+    /// The volume this SQL commits with.
+    pub fn volume(&self) -> Volume {
+        self.participant.volume().clone()
     }
 
     /// Whether this session continued a previous session's engine.
@@ -335,7 +335,7 @@ impl Sql {
         }
         if let Some(database) = self.database.take() {
             // An idle engine reads nothing: it holds back no checkpoint, and the
-            // next open gives it the next journal's file.
+            // next open gives it the next volume's file.
             self.io.release();
             let warm = WarmEngine {
                 database,
@@ -353,7 +353,7 @@ impl Sql {
     ///
     /// There is no streaming cursor: the rows are limited to
     /// [`SqlOptions::max_result_bytes`]. SQL writes remain private until
-    /// [`Self::flush`] and the journal's commit. An SQL error (syntax, a constraint, a
+    /// [`Self::flush`] and the volume's commit. An SQL error (syntax, a constraint, a
     /// missing table) undoes that statement and leaves the session usable;
     /// earlier statements of `sql`, and an open transaction, stand. Any other
     /// error or a cancellation ends the session, and a failed commit's outcome
@@ -401,12 +401,12 @@ impl Sql {
     }
 
     /// `COMMIT` the open transaction, if any, and move what the SQL committed
-    /// into the journal's file `db`, for the journal's next commit to make
+    /// into the volume's file `db`, for the volume's next commit to make
     /// durable.
     ///
     /// A `COMMIT` that fails with an SQL error (a deferred constraint) changes
     /// nothing: the transaction stays open, for the caller to roll back. Any
-    /// other failure ends the session and discards what the journal holds
+    /// other failure ends the session and discards what the volume holds
     /// since its last commit, since the file `db` may hold part of the move.
     pub async fn flush(&mut self) -> Result<()> {
         let result = match self.in_transaction() {
@@ -421,7 +421,7 @@ impl Sql {
         match &result {
             Ok(()) => self.participant.set_unflushed(false),
             Err(_) if self.is_usable() => {}
-            Err(_) => self.participant.journal().discard(),
+            Err(_) => self.participant.volume().discard(),
         }
         result
     }
@@ -433,7 +433,7 @@ impl Sql {
 
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
     /// `Ok`, or `ROLLBACK` when it returns `Err`: committed in the SQL, for
-    /// a [`Self::flush`] and the journal's commit to make durable.
+    /// a [`Self::flush`] and the volume's commit to make durable.
     ///
     /// The body may run any statements except ones that end the transaction
     /// (`COMMIT`, `END`, `ROLLBACK`): those fail and poison the session before
@@ -513,7 +513,7 @@ impl Sql {
         Ok(bytes.unwrap_or(0).max(0) as usize)
     }
 
-    /// Move the committed SQL state into the journal's file `db`: its WAL
+    /// Move the committed SQL state into the volume's file `db`: its WAL
     /// into the file's pages. Nothing is durable yet.
     async fn move_pages(&mut self) -> Result<()> {
         self.checkpoint().await?;
@@ -528,7 +528,7 @@ impl Sql {
     /// Weigh the schema again after a statement that may have changed it,
     /// for parking the engine; even one rolled back, which moved no pages.
     async fn measure_changed_schema(&mut self) -> Result<()> {
-        if self.schema_changed && self.participant.journal().options().cache.is_some() {
+        if self.schema_changed && self.participant.volume().options().cache.is_some() {
             // Without a size the engine is just not parked.
             self.schema_bytes = self.measure_schema().await.ok();
             self.schema_changed = false;
@@ -536,20 +536,20 @@ impl Sql {
         Ok(())
     }
 
-    /// The journal's version: the commits ever made, as this session holds
-    /// the journal (opened on, or committed itself); SQL not yet committed by
-    /// the journal does not change it.
+    /// The volume's version: the commits ever made, as this session holds
+    /// the volume (opened on, or committed itself); SQL not yet committed by
+    /// the volume does not change it.
     pub fn version(&self) -> u64 {
-        self.participant.journal().version()
+        self.participant.volume().version()
     }
 
     /// Whether the store still holds the state this session opened on (see
-    /// [`Journal::open_reader`]): if it does not, what the session read may mix
+    /// [`Volume::open_reader`]): if it does not, what the session read may mix
     /// that state with a later checkpoint's pages, so read again in a new
     /// session. A session's own commits change the state, so this is for a
     /// session that has not committed.
     pub async fn is_current(&self) -> Result<bool> {
-        self.participant.journal().is_current().await
+        self.participant.volume().is_current().await
     }
 
     /// Whether the session can run more SQL. An SQL error (a syntax error, a
@@ -564,12 +564,12 @@ impl Sql {
     fn is_poisoned(&self) -> bool {
         self.poisoned
             || self.abandoned.load(Ordering::SeqCst)
-            || !self.participant.journal().is_usable()
+            || !self.participant.volume().is_usable()
     }
 
     /// Run the caller's `sql` (see [`Self::run_statements`]), returning the
     /// column names and rows of its last statement. Until it returns, the
-    /// journal counts SQL as holding changes not flushed.
+    /// volume counts SQL as holding changes not flushed.
     async fn run(&mut self, sql: &str, params: Option<Vec<Value>>) -> Result<(Vec<String>, Rows)> {
         self.screen(sql);
         self.participant.set_unflushed(true);

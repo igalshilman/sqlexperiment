@@ -3,12 +3,12 @@ use futures::{
     FutureExt,
     future::{Either, select},
 };
-use journal::{
+use std::sync::Arc;
+use volume::{
     Result, StorageOptions,
     kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
-use std::sync::Arc;
 
 async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();

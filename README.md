@@ -214,7 +214,7 @@ Each part is a directory with its README, a workspace of its own; the
 [`Makefile`](Makefile) builds and tests them all.
 
 - [`core/`](core): the storage every SDK builds on: the
-  [`journal`](core/journal/README.md) (records and paged files, committed in
+  [`volume`](core/volume/README.md) (records and paged files, committed in
   one put) and [`sql`](core/sql/README.md) on it.
 - [`typescript/`](typescript/README.md): the Node.js addon,
   [`restate-fns`](typescript/packages/fns/README.md) (SQL in virtual objects, on the

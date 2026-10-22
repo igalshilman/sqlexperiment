@@ -7,13 +7,13 @@ use crate::{
     reference::{integrity, state},
 };
 use bytes::Bytes;
-use journal::{
-    Journal, NamespaceCache, Result, StorageOptions,
+use sql::{Sql, binding::Session};
+use std::sync::Arc;
+use volume::{
+    NamespaceCache, Result, StorageOptions, Volume,
     kv::KvStore,
     simulation::{Effect, FaultKv, MemoryKv, Operation, fresh_namespace},
 };
-use sql::{Sql, binding::Session};
-use std::sync::Arc;
 
 fn owner(cache: &NamespaceCache) -> Setup {
     Setup(
@@ -28,7 +28,7 @@ fn owner(cache: &NamespaceCache) -> Setup {
 
 /// The committed state, through a session without the cache.
 async fn committed(store: Arc<dyn KvStore>) -> Result<String> {
-    let mut sql = Sql::open(&Journal::open(store).await?).await?;
+    let mut sql = Sql::open(&Volume::open(store).await?).await?;
     assert_eq!(integrity(&mut sql).await?, "ok");
     state(&mut sql).await
 }

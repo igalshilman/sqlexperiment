@@ -9,7 +9,7 @@
 //! scope's file over the program's golden memory), the scope's tables (the
 //! turn's SQL, KV included), and each extension. The host seals it in one
 //! put, the scope's database's commit. The image is the program's golden
-//! image with the file's pages that differ from it; the journal compresses
+//! image with the file's pages that differ from it; the volume compresses
 //! each against what it replaces (golden's, at first), so a turn writes
 //! little more than what it changed. Nothing is applied after a seal, and a
 //! crash before one loses the whole turn, which runs again.
@@ -30,11 +30,11 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use journal::{Base, File, Journal};
 use serde_json::{Value, json};
 use sql::Sql;
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::Mutex;
+use volume::{Base, File, Volume};
 
 /// An input, or an outcome, the guest is given: within [`MAX_INPUT`] as JSON.
 fn ensure_input_size<T: serde::Serialize>(input: &T) -> Result<()> {
@@ -52,8 +52,8 @@ fn memory_file(golden: &crate::cow::Golden) -> String {
 /// unusable: the attempt starts again, from the store.
 pub struct Run {
     programs: Arc<Programs>,
-    /// The scope's journal, which each turn commits.
-    journal: Journal,
+    /// The scope's volume, which each turn commits.
+    volume: Volume,
     /// The scope's database, this attempt's session of it, which the VM's
     /// host calls share.
     db: Arc<Mutex<Db>>,
@@ -166,7 +166,7 @@ impl Memory {
 
 #[async_trait]
 impl Participant for Memory {
-    /// The pages the turn changed, into the file (the journal writes one
+    /// The pages the turn changed, into the file (the volume writes one
     /// that is golden's again as a hole); a settled run's, as holes.
     async fn prepare(&mut self) -> Result<()> {
         let Turn { changed, settled } = self.turn.take().context("No turn to seal")?;
@@ -249,11 +249,11 @@ impl Run {
         );
         validate_time(now)?;
         ensure_input_size(&input)?;
-        let journal = scope.open().await?;
-        let db = Db::new(Sql::open(&journal).await.map_err(storage_error)?);
-        let (stored_run, stored_memory) = (journal.record("run"), journal.record("memory"));
+        let volume = scope.open().await?;
+        let db = Db::new(Sql::open(&volume).await.map_err(storage_error)?);
+        let (stored_run, stored_memory) = (volume.record("run"), volume.record("memory"));
         // What the scope's last seal kept of each extension, whichever run
-        // made it. The scope is the program's object key, as its journal
+        // made it. The scope is the program's object key, as its volume
         // is: another program's objects of the same key keep their own.
         let blobs = ScopeBlobs::new(scope.extensions.blobs.clone(), &format!("{program}/{key}"));
         let extensions = Attachments::attach(&scope.extensions, &blobs, &db).await?;
@@ -276,7 +276,7 @@ impl Run {
                     memory.file == memory_file(golden),
                     "The memory of another image"
                 );
-                let file = (journal.file_with_base(&memory.file, golden.clone() as Arc<dyn Base>))
+                let file = (volume.file_with_base(&memory.file, golden.clone() as Arc<dyn Base>))
                     .map_err(storage_error)?;
                 let memory = Memory {
                     record: memory,
@@ -293,7 +293,7 @@ impl Run {
             None => {
                 let stale = match sealed_memory {
                     Some(old) if !old.pages.is_empty() => {
-                        let file = journal.file(&old.file).map_err(storage_error)?;
+                        let file = volume.file(&old.file).map_err(storage_error)?;
                         Some((file, old.pages().collect()))
                     }
                     _ => None,
@@ -301,7 +301,7 @@ impl Run {
                 let compiled = programs.get(program)?;
                 let golden = compiled.image();
                 let name = memory_file(golden.golden_memory());
-                let file = (journal.file_with_base(&name, golden.golden_memory().clone()))
+                let file = (volume.file_with_base(&name, golden.golden_memory().clone()))
                     .map_err(storage_error)?;
                 let runtime = programs.runtime();
                 let mut vm = Vm::for_image(runtime, compiled.language(), &golden, run, now).await?;
@@ -345,7 +345,7 @@ impl Run {
         };
         let mut this = Self {
             programs: programs.clone(),
-            journal,
+            volume,
             db,
             extensions,
             blobs,
@@ -653,7 +653,7 @@ impl Run {
 
     /// The turn's transaction. Each participant prepares its part (the
     /// extensions first, then the run's state, its memory and its tables);
-    /// the journal puts the seal, one record, once the pages it names are
+    /// the volume puts the seal, one record, once the pages it names are
     /// stored; then each participant hears whether it committed. Only after
     /// that are the blobs no seal names collected, and the VM's write
     /// tracking reset: a crash anywhere before the put loses the whole turn,
@@ -671,7 +671,7 @@ impl Run {
             prepared = participant.prepare().await;
         }
         let sealed = match prepared {
-            Ok(()) => (self.journal.commit().await)
+            Ok(()) => (self.volume.commit().await)
                 .map(|report| {
                     written.logged_bytes = report.logged_bytes;
                     written.commit_bytes = report.record_bytes;

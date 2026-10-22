@@ -1,6 +1,6 @@
 # Build and test everything, part by part:
 #
-#   core/        the journal crate (core/journal), and SQL on it (core/sql)
+#   core/        the volume crate (core/volume), and SQL on it (core/sql)
 #   typescript/  the pnpm workspace: the Node.js addon, restate-fns, the
 #                integrations, their tests and the examples
 #   python/      the uv workspace: the Python extension, restate-fns, the
@@ -17,8 +17,8 @@
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
-# The journal, and SQL on it.
-CORE := core/journal core/sql
+# The volume, and SQL on it.
+CORE := core/volume core/sql
 FUNCTIONS := rust/functions
 # CPython for WASI, with its standard library: the engine of durable Python.
 PY_ENGINE := $(CARGO_TARGET_DIR)/pywasm/out/python.wasm
@@ -67,7 +67,7 @@ all: core addon js py ## Build everything
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
 
-core: ## The journal crate and the SQL crate
+core: ## The volume crate and the SQL crate
 	for crate in $(CORE); do (cd $$crate && $(CARGO) build --locked --release) || exit 1; done
 
 functions: $(SDK_RS) ## Durable JavaScript in Restate objects (rust/functions): a binary serving the durable functions of examples-functions/ (or FUNCTIONS_PROGRAMS)
@@ -115,7 +115,7 @@ examples-rust: ## The Rust example: the SQL crate's lookup
 
 test: test-core test-addon test-ts test-py ## Every test that needs no Restate server
 
-test-core: ## The journal and SQL crates, with the simulation campaigns
+test-core: ## The volume and SQL crates, with the simulation campaigns
 	for crate in $(CORE); do (cd $$crate && $(CARGO) test --locked && $(CARGO) test --locked --features simulation) || exit 1; done
 
 test-addon: $(ADDON) ## The Node.js addon

@@ -22,7 +22,7 @@
 use crate::{
     GuestError, Operation, Outcome,
     extension::{Attached, Extension, HostCall, Making, Tables},
-    transaction::{Journal, Participant, Record, ScopeBlobs, hash, random},
+    transaction::{Participant, Record, ScopeBlobs, Volume, hash, random},
 };
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -50,9 +50,9 @@ impl Files {
 #[async_trait]
 impl Extension for Files {
     /// The scope's files, as its records `manifest` and `running` keep them.
-    async fn attach(&self, blobs: ScopeBlobs, journal: Journal) -> Result<Box<dyn Attached>> {
+    async fn attach(&self, blobs: ScopeBlobs, volume: Volume) -> Result<Box<dyn Attached>> {
         let (manifest_record, running_record) =
-            (journal.record("manifest"), journal.record("running"));
+            (volume.record("manifest"), volume.record("running"));
         let manifest = match manifest_record.get() {
             bytes if bytes.is_empty() => BTreeMap::new(),
             bytes => serde_json::from_slice(&bytes)?,

@@ -8,7 +8,7 @@
 //!
 //! - **In the seal**: a [`Record`], a named whole value the commit record
 //!   holds, which the next transaction starts from (or a file of the scope's
-//!   [`Journal`]).
+//!   [`Volume`]).
 //! - **Before it, named by it**: bytes too large for a record go to the
 //!   scope's [`ScopeBlobs`] first; the record names them. A blob no record
 //!   names is garbage, which the host collects.
@@ -22,9 +22,9 @@
 //! a crash may skip: what a participant is, it recovers from the seal.
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-pub use journal::{Journal, Record};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+pub use volume::{Record, Volume};
 
 /// Something a turn's transaction keeps.
 #[async_trait]

@@ -3,17 +3,17 @@ name = "sql"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "SQLite-compatible SQL on a journal's file: Turso's engine, unmodified, committed with the journal"
+description = "SQLite-compatible SQL on a volume's file: Turso's engine, unmodified, committed with the volume"
 
 [features]
 default = []
-simulation = ["journal/simulation"]
+simulation = ["volume/simulation"]
 
 [lib]
 bench = false
 
 [dependencies]
-journal = { path = "../journal" }
+volume = { path = "../volume" }
 turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
 futures = "0.3"
 bytes = "1.10"
