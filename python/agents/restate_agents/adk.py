@@ -154,26 +154,19 @@ async def prompt(ctx: Any, agent: BaseAgent | App, text: str, *, thread: str | N
     invocation's first prompt has its id, the next ``<id>:2``, and so on.
     """
     thread = thread or ctx.key()
+    sessions = _Sessions(ctx, thread)
+
+    async def answer(pending: harness.Prompt, _: str) -> str:
+        return await _run(ctx, agent, sessions, pending, run)
+
+    async def cancelled(pending: harness.Prompt) -> None:
+        await sessions.cancel()
+
+    async def steered() -> list[str]:
+        return _steered(await sessions.events.load())
+
     prompts = harness.Prompts(ctx.db, PROMPTS, thread)
-    id = turns.prompt_id(ctx)
-    while True:
-        rows = await prompts.load()
-        if (asked := next((r for r in rows if r.prompt == id), None)) is not None and asked.answer is not None:
-            turns.taken(_steered(await _Events(ctx.db, thread).load()))
-            return asked.answer
-        # A prompt that a crash cut off (this one's, or an earlier one's) is finished first.
-        pending = next((r for r in rows if r.answer is None), None) or await prompts.add(id, text)
-        sessions = _Sessions(ctx, thread)
-        try:
-            answer = await _run(ctx, agent, sessions, pending, run)
-        except restate.TerminalError as error:
-            if error.status_code == 409:
-                await sessions.cancel()
-                await prompts.answer(pending.prompt, CANCELLED)
-            raise
-        await prompts.answer(pending.prompt, answer)
-        if pending.prompt == id:
-            return answer
+    return await harness.answer_once(ctx, prompts, text, answer, cancelled=cancelled, steered=steered)
 
 
 async def _run(

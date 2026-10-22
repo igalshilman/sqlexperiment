@@ -151,25 +151,19 @@ async def prompt(ctx: Any, agent: Agent[Any], text: str, *, thread: str | None =
     if "hooks" in run:
         raise TypeError("prompt runs the agent with hooks of its own: give hooks to the Agent (Agent.hooks)")
     thread = thread or ctx.key()
-    prompts = harness.Prompts(ctx.db, PROMPTS, thread)
-    items = _Items(ctx.db, thread)
-    id = turns.prompt_id(ctx)
-    while True:
-        rows = await prompts.load()
-        if (asked := next((r for r in rows if r.prompt == id), None)) is not None and asked.answer is not None:
-            turns.taken(_steered(await items.load()))
-            return _output(agent, asked.answer)
-        # A prompt that a crash cut off (this one's, or an earlier one's) is finished first.
-        pending = next((r for r in rows if r.answer is None), None) or await prompts.add(id, text)
-        try:
-            output = await _run(ctx, agent, pending, items, run)
-        except restate.TerminalError as error:
-            if error.status_code == 409:
-                await _cancel(items, prompts, pending.prompt)
-            raise
-        await prompts.answer(pending.prompt, output if isinstance(output, str) else to_json(output).decode())
-        if pending.prompt == id:
-            return output
+    prompts, items = harness.Prompts(ctx.db, PROMPTS, thread), _Items(ctx.db, thread)
+
+    async def answer(pending: harness.Prompt, _: str) -> str:
+        output = await _run(ctx, agent, pending, items, run)
+        return output if isinstance(output, str) else to_json(output).decode()
+
+    async def cancelled(pending: harness.Prompt) -> None:
+        await _cancel(items)
+
+    async def steered() -> list[str]:
+        return _steered(await items.load())
+
+    return _output(agent, await harness.answer_once(ctx, prompts, text, answer, cancelled=cancelled, steered=steered))
 
 
 class _Items:
@@ -342,11 +336,8 @@ async def _unwrap(work: Any) -> Any:
         raise
 
 
-async def _cancel(items: _Items, prompts: harness.Prompts, prompt: str) -> None:
-    """
-    End the run of ``prompt``, which was cancelled: a result for each tool
-    call without one, then ``CANCELLED`` as its answer.
-    """
+async def _cancel(items: _Items) -> None:
+    """End a cancelled run: a result for each tool call without one, then ``CANCELLED``."""
     stored = await items.load()
     tags = {n: tag for n, (tag, _) in enumerate(stored) if tag}
     history = [item for _, item in stored]
@@ -355,7 +346,6 @@ async def _cancel(items: _Items, prompts: harness.Prompts, prompt: str) -> None:
     ]
     history.append({"role": "assistant", "content": CANCELLED})
     await items.save(history, tags)
-    await prompts.answer(prompt, CANCELLED)
 
 
 def _unanswered(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
