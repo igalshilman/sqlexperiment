@@ -1,20 +1,20 @@
-//! Futures dropped after every number of polls: a commit cancelled midway
-//! ends its volume and lands wholly or not at all, and the volume reopens
-//! and goes on; one never polled did nothing; a cancelled open leaves the
-//! owner's cache usable.
+//! Futures dropped after every number of polls: a flush cancelled midway
+//! ends its state and lands wholly or not at all, and the state reopens
+//! and goes on; one never polled did nothing, and its WAL went with it; a
+//! cancelled open leaves the owner's cache usable.
 #![cfg(feature = "simulation")]
 mod support;
 
 use futures::task::noop_waker_ref;
+use state::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 use std::{
     pin::pin,
     sync::Arc,
     task::{Context, Poll},
 };
 use support::*;
-use volume::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 
-/// Every commit checkpoints, and large transactions go to stored values.
+/// Every flush checkpoints, and large transactions go to stored values.
 fn options(cache: Option<NamespaceCache>) -> StorageOptions {
     StorageOptions {
         cache,
@@ -34,7 +34,7 @@ fn poll_times<F: Future>(future: F, polls: usize) -> Option<F::Output> {
     })
 }
 
-/// A store after a few commits, and what it holds.
+/// A store after a few flushes, and what it holds.
 async fn prepared() -> Result<(MemoryKv, Model)> {
     let memory = MemoryKv::default();
     let mut model = Model::default();
@@ -42,17 +42,14 @@ async fn prepared() -> Result<(MemoryKv, Model)> {
     for _ in 0..4 {
         let session = Session::open(Arc::new(memory.clone()), options(None)).await?;
         let ops: Vec<Op> = (0..8).map(|_| Op::random(&mut rng)).collect();
-        for op in &ops {
-            session.apply(op)?;
-        }
-        session.volume.commit().await?;
+        session.flush(&ops).await?;
         model = model.applied(&ops);
     }
     Ok((memory, model))
 }
 
 #[test]
-fn a_commit_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> Result<()> {
+fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> Result<()> {
     futures::executor::block_on(async {
         let (prepared, old) = prepared().await?;
         let mut rng = Rng::new(0xd20);
@@ -62,35 +59,42 @@ fn a_commit_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> 
         for (cached, crash) in [(false, false), (false, true), (true, false), (true, true)] {
             let mut landed = [0; 2];
             for polls in 0.. {
-                // Slow requests: a commit takes several polls.
+                // Slow requests: a flush takes several polls.
                 let memory = prepared.fork();
                 let fault = FaultKv::new(memory.clone(), 5);
                 let store = Arc::new(MonitorKv::new(fault).with_base("vm", golden()));
                 let cache = cached.then(fresh_namespace);
                 let session = Session::open(store.clone(), options(cache.clone())).await?;
+                let mut wal = session.state.wal();
                 for op in &ops {
-                    session.apply(op)?;
+                    session.apply(&mut wal, op)?;
                 }
-                let volume = &session.volume;
-                match poll_times(volume.commit(), polls) {
+                let receipt = wal.receipt();
+                let state = &session.state;
+                match poll_times(wal.flush(), polls) {
                     Some(outcome) => {
                         outcome?;
-                        assert!(polls > 2, "a commit takes several polls");
+                        assert!(polls > 2, "a flush takes several polls");
                         break;
                     }
-                    // Never polled: it did nothing, and the changes wait.
+                    // Never polled: nothing happened, and the WAL went with
+                    // the future.
                     None if polls == 0 => {
-                        assert!(volume.is_usable());
+                        assert!(state.is_usable());
+                        assert!(receipt.is_discarded());
                         assert_eq!(memory.unsynced(), vec![]);
-                        volume.commit().await?;
-                        assert_eq!(new.differs(&session).await?, None);
+                        assert_eq!(old.differs(&session).await?, None);
                         continue;
                     }
                     None => {}
                 }
                 let case = format!("cached {cached}, crash {crash}, dropped after {polls} polls");
-                assert!(!volume.is_usable(), "{case}");
-                let error = volume.commit().await.unwrap_err().to_string();
+                assert!(!state.is_usable(), "{case}");
+                assert!(
+                    !receipt.is_flushed() && !receipt.is_discarded(),
+                    "{case}: an unknown outcome settles the receipt neither way"
+                );
+                let error = state.wal().flush().await.unwrap_err().to_string();
                 assert!(error.contains("ended"), "{case}: {error}");
                 drop(session);
                 if crash {
@@ -101,15 +105,14 @@ fn a_commit_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> 
                 assert!(whole || old.matches(&reopened).await?, "{case}");
                 landed[usize::from(whole)] += 1;
                 // It goes on, durably.
-                let after = Op::Set("state", "after".into());
-                reopened.apply(&after)?;
-                reopened.volume.commit().await?;
+                let after = [Op::Set("state", "after".into())];
+                reopened.flush(&after).await?;
                 drop(reopened);
                 memory.crash();
                 let reopened = Session::open(store.clone(), options(None)).await?;
                 let expected = if whole { &new } else { &old };
                 assert_eq!(
-                    expected.applied(&[after]).differs(&reopened).await?,
+                    expected.applied(&after).differs(&reopened).await?,
                     None,
                     "{case}"
                 );
@@ -129,7 +132,7 @@ fn a_commit_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> 
 }
 
 /// An owner's open dropped midway, at each poll: the next open reads the
-/// state, and commits.
+/// state, and flushes.
 #[test]
 fn an_open_cancelled_at_any_poll_leaves_the_cache_usable() -> Result<()> {
     futures::executor::block_on(async {
@@ -146,10 +149,9 @@ fn an_open_cancelled_at_any_poll_leaves_the_cache_usable() -> Result<()> {
             }
             let session = Session::open(store.clone(), options(Some(cache.clone()))).await?;
             assert_eq!(model.differs(&session).await?, None, "after {polls} polls");
-            let op = Op::random(&mut rng);
-            session.apply(&op)?;
-            session.volume.commit().await?;
-            model.apply(&op);
+            let ops = [Op::random(&mut rng)];
+            session.flush(&ops).await?;
+            model = model.applied(&ops);
         }
         Ok(())
     })

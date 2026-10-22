@@ -92,12 +92,12 @@ fn dropping_the_cache_frees_idle_state() -> crate::Result<()> {
             cache: Some(namespace.clone()),
             ..StorageOptions::default()
         };
-        let volume = crate::Volume::open_with_options(store, options).await?;
+        let state = crate::State::open_with_options(store, options).await?;
         let freed = Arc::new(());
         let idle = (namespace, freed.clone());
-        assert!(volume.join("engine")?.park(idle, 1).is_ok());
+        assert!(state.join("engine")?.park(idle, 1).is_ok());
         assert_eq!(cache.idle.lock().unwrap().parked.len(), 1);
-        drop(volume);
+        drop(state);
         let shared = Arc::downgrade(&cache.shared);
         drop(cache);
         assert!(shared.upgrade().is_none());

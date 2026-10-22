@@ -1,40 +1,48 @@
-//! Paged files: lengths and holes, across commits.
+//! Paged files: lengths and holes, across flushes.
 #![cfg(feature = "simulation")]
+use state::{Result, State, simulation::*};
 use std::sync::Arc;
-use volume::{Result, Volume, simulation::*};
 
-fn page(n: u8) -> volume::Page {
+fn page(n: u8) -> state::Page {
     vec![n; 4096].into()
 }
 
 /// The byte a page of [`page`] repeats, for readable assertions.
-async fn byte(file: &volume::File, n: u64) -> Result<Option<u8>> {
+async fn byte(file: &state::File, n: u64) -> Result<Option<u8>> {
     Ok(file.read(n).await?.map(|page| page[0]))
 }
 
-/// A file shrunk twice before a commit, then grown back: every page past
-/// the shorter length reads as zeros, also those only the first shrink cut.
+/// A file shrunk twice in one WAL, then grown back: once flushed, every
+/// page past the shorter length reads as zeros, also those only the first
+/// shrink cut.
 #[test]
-fn shrinking_twice_before_a_commit_leaves_no_page_behind() -> Result<()> {
+fn shrinking_twice_in_a_wal_leaves_no_page_behind() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let volume = Volume::open(store.clone()).await?;
-        let file = volume.file("db")?;
+        let state = State::open(store.clone()).await?;
+        let file = state.file("db")?;
+        let mut wal = state.wal();
         for n in 0..8 {
-            file.write(n, Some(page(n as u8 + 1)))?;
+            file.write(&mut wal, n, Some(page(n as u8 + 1)))?;
         }
-        volume.commit().await?;
-        file.set_len(6 * 4096)?;
-        file.set_len(2 * 4096)?;
-        file.set_len(8 * 4096)?;
-        for n in 2..8 {
-            assert_eq!(byte(&file, n).await?, None, "page {n} before the commit");
-        }
-        volume.commit().await?;
-        let reopened = Volume::open(store).await?;
-        let file = reopened.file("db")?;
+        wal.flush().await?;
+        let mut wal = state.wal();
+        file.set_len(&mut wal, 6 * 4096)?;
+        file.set_len(&mut wal, 2 * 4096)?;
+        file.set_len(&mut wal, 8 * 4096)?;
+        assert_eq!(
+            byte(&file, 7).await?,
+            Some(8),
+            "as flushed, until the WAL is"
+        );
+        wal.flush().await?;
         for n in 2..8 {
             assert_eq!(byte(&file, n).await?, None, "page {n}");
+        }
+        let reopened = State::open(store).await?;
+        let file = reopened.file("db")?;
+        for n in 2..8 {
+            assert_eq!(byte(&file, n).await?, None, "page {n}, reopened");
         }
         assert_eq!(byte(&file, 1).await?, Some(2));
         Ok(())
@@ -44,7 +52,7 @@ fn shrinking_twice_before_a_commit_leaves_no_page_behind() -> Result<()> {
 /// The base of the file `vm`: zeros.
 struct Zeros;
 
-impl volume::Base for Zeros {
+impl state::Base for Zeros {
     fn id(&self) -> u64 {
         1
     }
@@ -60,25 +68,26 @@ impl volume::Base for Zeros {
 fn a_checkpoint_never_exposes_a_page_fetched_under_a_based_log() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let options = |checkpoint_after| volume::StorageOptions {
+        let options = |checkpoint_after| state::StorageOptions {
             checkpoint_after,
             inline_log_bytes: 0,
-            ..volume::StorageOptions::default()
+            ..state::StorageOptions::default()
         };
         // Page 1 checkpointed at its key, then changed in the log.
         for (n, checkpoint_after) in [(1, 0), (2, 8)] {
-            let volume =
-                Volume::open_with_options(store.clone(), options(checkpoint_after)).await?;
-            volume
+            let state = State::open_with_options(store.clone(), options(checkpoint_after)).await?;
+            let mut wal = state.wal();
+            state
                 .file_with_base("vm", Arc::new(Zeros))?
-                .write(1, Some(page(n)))?;
-            volume.commit().await?;
+                .write(&mut wal, 1, Some(page(n)))?;
+            wal.flush().await?;
         }
-        let volume = Volume::open_with_options(store, options(0)).await?;
-        let vm = volume.file_with_base("vm", Arc::new(Zeros))?;
+        let state = State::open_with_options(store, options(0)).await?;
+        let vm = state.file_with_base("vm", Arc::new(Zeros))?;
         assert_eq!(byte(&vm, 1).await?, Some(2));
-        volume.file("db")?.write(0, Some(page(9)))?;
-        assert!(volume.commit().await?.checkpointed_pages > 0);
+        let mut wal = state.wal();
+        state.file("db")?.write(&mut wal, 0, Some(page(9)))?;
+        assert!(wal.flush().await?.checkpointed_pages > 0);
         assert_eq!(byte(&vm, 1).await?, Some(2), "after the checkpoint");
         Ok(())
     })

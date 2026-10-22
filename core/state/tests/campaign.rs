@@ -1,20 +1,24 @@
-//! A seeded random campaign over the public API: changes to several files
-//! (one with a base) and records, commits with tiny thresholds so that seals,
-//! checkpoints, garbage deletion and the working-set hint all happen, and
-//! random faults, cancellations, crashes and reopens by owners with and
+//! A seeded random campaign over the public API: WALs of changes to several
+//! files (one with a base) and records, flushed with tiny thresholds so that
+//! seals, checkpoints, garbage deletion and the working-set hint all happen,
+//! and random faults, cancellations, crashes and reopens by owners with and
 //! without a cache, every request checked by the protocol monitor. After
-//! each reopen the volume reads as the model: every acknowledged commit,
-//! and an unacknowledged one wholly or not at all.
+//! each reopen the state reads as the model: every acknowledged flush, and
+//! an unacknowledged one wholly or not at all.
 //!
 //! ```sh
 //! cargo test --features simulation --test campaign                  # a few seeds
-//! VOLUME_SEEDS=1000 cargo test --release --features simulation --test campaign
-//! VOLUME_SEED=17 cargo test --features simulation --test campaign  # one, as a failure prints it
+//! STATE_SEEDS=1000 cargo test --release --features simulation --test campaign
+//! STATE_SEED=17 cargo test --features simulation --test campaign  # one, as a failure prints it
 //! ```
 #![cfg(feature = "simulation")]
 mod support;
 
 use futures::task::noop_waker_ref;
+use state::{
+    FlushReport, NamespaceCache, PageCache, PageCacheConfig, PageCompression, Result,
+    StorageOptions, Wal, kv::KvStore, simulation::*,
+};
 use std::{
     sync::{
         Arc, OnceLock,
@@ -23,38 +27,34 @@ use std::{
     task::{Context, Poll},
 };
 use support::*;
-use volume::{
-    NamespaceCache, PageCache, PageCacheConfig, PageCompression, Result, StorageOptions,
-    kv::KvStore, simulation::*,
-};
 
-/// Seeds `cargo test` runs without `VOLUME_SEEDS`.
+/// Seeds `cargo test` runs without `STATE_SEEDS`.
 const SEEDS: u64 = 12;
-/// Commits per seed.
+/// Flushes per seed.
 const STEPS: usize = 40;
 
 type Store = MonitorKv<FaultKv>;
 
-/// The seeds to run: `VOLUME_SEED`, or the first `VOLUME_SEEDS`.
+/// The seeds to run: `STATE_SEED`, or the first `STATE_SEEDS`.
 fn seeds() -> Vec<u64> {
     let var = |name| {
         std::env::var(name)
             .ok()
             .map(|v: String| v.parse().expect(name))
     };
-    match (var("VOLUME_SEED"), var("VOLUME_SEEDS")) {
+    match (var("STATE_SEED"), var("STATE_SEEDS")) {
         (Some(seed), _) => vec![seed],
         (None, count) => (0..count.unwrap_or(SEEDS)).collect(),
     }
 }
 
 #[test]
-fn random_faults_never_lose_an_acknowledged_commit_or_split_one() {
+fn random_faults_never_lose_an_acknowledged_flush_or_split_one() {
     let mut totals = Totals::default();
     for seed in seeds() {
         let run = std::panic::catch_unwind(|| futures::executor::block_on(run(seed)));
         let rerun = format!(
-            "VOLUME_SEED={seed} cargo test --features simulation --test campaign -- --nocapture"
+            "STATE_SEED={seed} cargo test --features simulation --test campaign -- --nocapture"
         );
         match run {
             Ok(Ok(run)) => totals.add(&run),
@@ -82,8 +82,8 @@ fn random_faults_never_lose_an_acknowledged_commit_or_split_one() {
 /// What a run did, to check that the campaign covers what it should.
 #[derive(Debug, Default)]
 struct Totals {
-    commits: usize,
-    /// Unacknowledged commits found whole after a reopen, and found absent.
+    flushes: usize,
+    /// Unacknowledged flushes found whole after a reopen, and found absent.
     landed: usize,
     lost: usize,
     crashes: usize,
@@ -100,7 +100,7 @@ struct Totals {
 
 impl Totals {
     fn add(&mut self, run: &Totals) {
-        self.commits += run.commits;
+        self.flushes += run.flushes;
         self.landed += run.landed;
         self.lost += run.lost;
         self.crashes += run.crashes;
@@ -134,7 +134,7 @@ fn new_owner(rng: &mut Rng) -> NamespaceCache {
     }
 }
 
-/// One seed's world: the store, the owners, and what the volume may hold.
+/// One seed's world: the store, the owners, and what the state may hold.
 struct World {
     rng: Rng,
     store: Arc<Store>,
@@ -143,10 +143,10 @@ struct World {
     caches: [NamespaceCache; 2],
     /// The owner of the namespace: a process, or one without a cache.
     owner: Option<usize>,
-    /// The state as of the last acknowledged commit or reopen.
+    /// The state as of the last acknowledged flush or reopen.
     model: Model,
     /// The states a crash may go back to: the durable one, then each one
-    /// read or committed since the last sync.
+    /// read or flushed since the last sync.
     since_sync: Vec<Model>,
     totals: Totals,
 }
@@ -164,7 +164,7 @@ impl World {
             ]),
             cache,
             checkpoint_after: rng.below(4) as u32,
-            checkpoint_log_bytes: rng.pick(&[4 << 10, 32 << 10, volume::CHECKPOINT_LOG_BYTES]),
+            checkpoint_log_bytes: rng.pick(&[4 << 10, 32 << 10, state::CHECKPOINT_LOG_BYTES]),
             inline_log_bytes: rng.pick(&[0, 200, 1024, 8192]),
             prefetch_pages: rng.pick(&[0, 4, 16]),
             hint_pages: rng.pick(&[0, 8, 32]),
@@ -259,7 +259,7 @@ impl World {
                 Ok((session, n)) => {
                     trace(|| format!("reopened on state {n} of {}", candidates.len()));
                     // What an owner reads is durable: it syncs at open unless
-                    // its cache knows every commit it made settled.
+                    // its cache knows every flush it made settled.
                     if !self.memory.unsynced().is_empty() {
                         return Err("a reopen read writes no sync made durable".into());
                     }
@@ -273,7 +273,7 @@ impl World {
         }
     }
 
-    /// A reopen read `state`, or a commit made it.
+    /// A reopen read `state`, or a flush made it.
     fn observed(&mut self, state: Model) {
         if self.memory.unsynced().is_empty() {
             self.since_sync.clear();
@@ -282,7 +282,7 @@ impl World {
         self.model = state;
     }
 
-    /// One commit of a batch of random changes, perhaps with a fault, a
+    /// One flush of a WAL of random changes, perhaps with a fault, a
     /// cancellation, a crash or a reopen. Returns the session that goes on.
     async fn step(&mut self, mut session: Session) -> std::result::Result<Session, String> {
         // The backend may crash at any time, and with it the owner's session:
@@ -293,60 +293,63 @@ impl World {
             let candidates = self.since_sync.clone();
             session = self.reopen(&candidates).await?;
         }
+        let mut wal = session.state.wal();
         let mut pending = self.model.clone();
         for _ in 0..1 + self.rng.below(8) {
             let op = Op::random(&mut self.rng);
             trace(|| format!("  {}", describe(&op)));
-            text(session.apply(&op))?;
+            text(session.apply(&mut wal, &op))?;
             pending.apply(&op);
             if self.rng.percent(30) {
+                // The state reads as last flushed, whatever the WAL holds.
                 let name = self.rng.pick(&FILES);
-                let index = self.rng.below(pending.len(name).div_ceil(4096) + 2);
+                let index = self.rng.below(self.model.len(name).div_ceil(4096) + 2);
                 let read = text(session.file(name).read(index).await)?;
-                if read != pending.page(name, index) {
-                    return Err(format!("{name}: page {index} not as written"));
+                if read != self.model.page(name, index) {
+                    return Err(format!("{name}: page {index} not as flushed"));
                 }
             }
         }
         if self.rng.percent(5) {
             trace(|| "discard".into());
-            session.volume.discard();
+            wal = session.state.wal();
             pending = self.model.clone();
         }
         let outcome = match self.rng.below(10) {
-            0..=5 => Some(session.volume.commit().await),
+            0..=5 => wal.flush().await,
             6..=7 => {
                 let failpoint = self.failpoint();
                 let _signal = self.store.arm(failpoint);
-                let outcome = session.volume.commit().await;
+                let outcome = wal.flush().await;
                 self.store.disarm();
-                Some(outcome)
+                outcome
             }
-            _ => self.cancelled(&session),
-        };
-        let acknowledged = match outcome {
-            // Never polled: nothing happened, and the changes wait.
-            None => {
-                if !session.volume.is_usable() {
-                    return Err("a commit never polled ended the volume".into());
+            _ => match self.cancelled(wal) {
+                Some(outcome) => outcome,
+                // Never polled: nothing happened, and the WAL went with the
+                // future.
+                None => {
+                    if !session.state.is_usable() {
+                        return Err("a flush never polled ended the state".into());
+                    }
+                    return Ok(session);
                 }
-                Some(text(session.volume.commit().await)?)
-            }
-            Some(Ok(report)) => Some(report),
-            Some(Err(_)) => None,
+            },
         };
-        self.totals.commits += 1;
+        self.totals.flushes += 1;
         trace(|| {
-            format!(
-                "commit: {:?}",
-                acknowledged.as_ref().map(|_| "acknowledged")
-            )
+            let outcome = if outcome.is_ok() {
+                "acknowledged"
+            } else {
+                "unacknowledged"
+            };
+            format!("flush: {outcome}")
         });
-        if acknowledged.is_some() {
+        if outcome.is_ok() {
             // One that wrote syncs; an unchanged one writes nothing, and
             // needs no sync: its session's open synced what it read.
             if !self.memory.unsynced().is_empty() {
-                return Err("an acknowledged commit left writes unsynced".into());
+                return Err("an acknowledged flush left writes unsynced".into());
             }
             self.observed(pending);
             // The session goes on, or a new one (after a crash, perhaps)
@@ -364,9 +367,9 @@ impl World {
             let candidates = self.since_sync.clone();
             return self.reopen(&candidates).await;
         }
-        // The outcome is unknown: the volume ended.
-        if session.volume.is_usable() || session.volume.commit().await.is_ok() {
-            return Err("a failed commit left the volume usable".into());
+        // The outcome is unknown: the state ended.
+        if session.state.is_usable() || session.state.wal().flush().await.is_ok() {
+            return Err("a failed flush left the state usable".into());
         }
         drop(session);
         if self.rng.percent(50) {
@@ -384,7 +387,7 @@ impl World {
         Ok(session)
     }
 
-    /// A random failpoint; it may match nothing the commit does.
+    /// A random failpoint; it may match nothing the flush does.
     fn failpoint(&mut self) -> Failpoint {
         let rng = &mut self.rng;
         let operation = rng.pick(&[
@@ -406,14 +409,14 @@ impl World {
         }
     }
 
-    /// Poll a commit a random number of times, then drop it: `None` if it
-    /// was never polled.
-    fn cancelled(&mut self, session: &Session) -> Option<Result<volume::CommitReport>> {
+    /// Poll the flush of `wal` a random number of times, then drop it:
+    /// `None` if it was never polled.
+    fn cancelled(&mut self, wal: Wal) -> Option<Result<FlushReport>> {
         let polls = self.rng.below(12);
-        let mut commit = Box::pin(session.volume.commit());
+        let mut flush = Box::pin(wal.flush());
         let mut cx = Context::from_waker(noop_waker_ref());
         for _ in 0..polls {
-            if let Poll::Ready(outcome) = commit.as_mut().poll(&mut cx) {
+            if let Poll::Ready(outcome) = flush.as_mut().poll(&mut cx) {
                 return Some(outcome);
             }
         }
@@ -431,10 +434,10 @@ impl World {
     }
 }
 
-/// With `VOLUME_TRACE` set, print what a run does.
+/// With `STATE_TRACE` set, print what a run does.
 fn trace(line: impl FnOnce() -> String) {
     static ON: OnceLock<bool> = OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("VOLUME_TRACE").is_some()) {
+    if *ON.get_or_init(|| std::env::var_os("STATE_TRACE").is_some()) {
         eprintln!("{}", line());
     }
 }

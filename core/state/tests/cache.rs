@@ -3,11 +3,11 @@
 #![cfg(feature = "simulation")]
 mod support;
 
+use state::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
-use volume::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 
-/// Options that checkpoint after every commit.
+/// Options that checkpoint at every flush.
 fn options(cache: Option<&NamespaceCache>) -> StorageOptions {
     StorageOptions {
         cache: cache.cloned(),
@@ -27,8 +27,8 @@ fn failing_sync() -> Failpoint {
     }
 }
 
-/// Commit `ops` in a new session; the model follows.
-async fn commit(
+/// Flush `ops` in a new session; the model follows.
+async fn flush(
     store: &Arc<dyn KvStore>,
     cache: Option<&NamespaceCache>,
     model: &mut Model,
@@ -36,15 +36,12 @@ async fn commit(
 ) -> Result<()> {
     let session = Session::open(store.clone(), options(cache)).await?;
     assert_eq!(model.differs(&session).await?, None);
-    for op in ops {
-        session.apply(op)?;
-    }
-    session.volume.commit().await?;
+    session.flush(ops).await?;
     *model = model.applied(ops);
     Ok(())
 }
 
-/// Owner A's commit fails at its sync; A reopens and reads what the failed
+/// Owner A's flush fails at its sync; A reopens and reads what the failed
 /// checkpoint wrote (visible, not durable), caching its pages under the next
 /// epoch. A crash loses it all. Another process, B, takes over and
 /// checkpoints to that same epoch number with other pages. A, back with its
@@ -57,7 +54,7 @@ fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
         let store: Arc<dyn KvStore> = fault.clone();
         let (a, b) = (fresh_namespace(), fresh_namespace());
         let mut model = Model::default();
-        commit(
+        flush(
             &store,
             Some(&a),
             &mut model,
@@ -65,15 +62,15 @@ fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
         )
         .await?;
 
-        // A's checkpointing commit fails at its sync: its writes are visible.
+        // A's checkpointing flush fails at its sync: its writes are visible.
         let session = Session::open(store.clone(), options(Some(&a))).await?;
-        session.apply(&Op::Write("db", 0, Some(page(2))))?;
         let _gate = fault.arm(failing_sync());
-        assert!(session.volume.commit().await.is_err());
+        let write = [Op::Write("db", 0, Some(page(2)))];
+        assert!(session.flush(&write).await.is_err());
         fault.disarm();
         drop(session);
         // A reopens on them, and reads (and caches) the checkpointed page.
-        let failed = model.applied(&[Op::Write("db", 0, Some(page(2)))]);
+        let failed = model.applied(&write);
         let session = Session::open(store.clone(), options(Some(&a))).await?;
         assert_eq!(failed.differs(&session).await?, None);
         drop(session);
@@ -86,7 +83,7 @@ fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
         drop(session);
 
         // B, another process, checkpoints to the same epoch with another page.
-        commit(
+        flush(
             &store,
             Some(&b),
             &mut model,
@@ -100,7 +97,7 @@ fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
     })
 }
 
-/// A reader beside the owner, which commits and checkpoints meanwhile:
+/// A reader beside the owner, which flushes and checkpoints meanwhile:
 /// whatever the reader read that is not the state it opened on, it learns
 /// from `is_current`, and it never writes to the store.
 #[test]
@@ -116,7 +113,7 @@ fn a_reader_beside_a_checkpointing_owner_knows_when_it_is_stale() -> Result<()> 
             let ops: Vec<Op> = (0..1 + rng.below(6))
                 .map(|_| Op::random(&mut rng))
                 .collect();
-            commit(&store, Some(&owner), &mut model, &ops).await?;
+            flush(&store, Some(&owner), &mut model, &ops).await?;
             let lazy = StorageOptions {
                 prefetch_pages: rng.below(2) * 16,
                 ..StorageOptions::default()
@@ -124,13 +121,13 @@ fn a_reader_beside_a_checkpointing_owner_knows_when_it_is_stale() -> Result<()> 
             let reader = Session::reader(store.clone(), lazy).await?;
             let opened = model.clone();
             let mut differed = false;
-            let commits = rng.below(3);
+            let flushes = rng.below(3);
             for step in 0..4 {
-                if step < commits {
+                if step < flushes {
                     // Pages the reader reads often, and anything else.
                     let hot = Op::Write("db", rng.below(4), Some(varied(&mut rng)));
                     let ops = [hot, Op::random(&mut rng)];
-                    commit(&store, Some(&owner), &mut model, &ops).await?;
+                    flush(&store, Some(&owner), &mut model, &ops).await?;
                 }
                 for _ in 0..4 {
                     let (name, index) = match rng.percent(50) {
@@ -145,22 +142,23 @@ fn a_reader_beside_a_checkpointing_owner_knows_when_it_is_stale() -> Result<()> 
                 }
             }
             for name in RECORDS {
-                assert_eq!(reader.volume.record(name).get(), opened.record(name));
+                assert_eq!(reader.state.record(name).get(), opened.record(name));
             }
-            let is_current = reader.volume.is_current().await?;
+            let is_current = reader.state.is_current().await?;
             assert!(
                 !differed || !is_current,
                 "round {round}: read a replaced page"
             );
-            assert!(is_current || commits > 0, "round {round}");
+            assert!(is_current || flushes > 0, "round {round}");
             (stale, current) = match differed {
                 true => (stale + 1, current),
                 false => (stale, current + is_current as usize),
             };
-            // Its changes stay its own.
+            // Its WALs never flush.
             let keys = memory.keys();
-            reader.apply(&Op::Set("progress", "reader".into()))?;
-            assert!(reader.volume.commit().await.is_err());
+            let error = reader.flush(&[Op::Set("progress", "reader".into())]).await;
+            let error = error.unwrap_err().to_string();
+            assert!(error.contains("a reader writes nothing"), "{error}");
             assert_eq!(memory.keys(), keys);
         }
         assert!(
@@ -172,8 +170,8 @@ fn a_reader_beside_a_checkpointing_owner_knows_when_it_is_stale() -> Result<()> 
 }
 
 /// Two sessions of one owner overlap: the open one reads the state it opened
-/// on while the other commits, whose checkpoints wait until it ends; then it
-/// may not commit on top.
+/// on while the other flushes, whose checkpoints wait until it ends; then it
+/// may not flush on top.
 #[test]
 fn an_open_session_holds_back_checkpoints_and_reads_its_state() -> Result<()> {
     futures::executor::block_on(async {
@@ -184,7 +182,7 @@ fn an_open_session_holds_back_checkpoints_and_reads_its_state() -> Result<()> {
         let mut rng = Rng::new(0x0e7);
         for _ in 0..3 {
             let ops: Vec<Op> = (0..6).map(|_| Op::random(&mut rng)).collect();
-            commit(&store, Some(&cache), &mut model, &ops).await?;
+            flush(&store, Some(&cache), &mut model, &ops).await?;
         }
         let open = Session::open(store.clone(), options(Some(&cache))).await?;
         let opened = model.clone();
@@ -194,21 +192,18 @@ fn an_open_session_holds_back_checkpoints_and_reads_its_state() -> Result<()> {
                 Op::Write("db", n, Some(page(100 + n))),
                 Op::random(&mut rng),
             ];
-            for op in &ops {
-                writer.apply(op)?;
-            }
-            let report = writer.volume.commit().await?;
+            let report = writer.flush(&ops).await?;
             assert_eq!(report.checkpointed_pages, 0, "waits for the open session");
             model = model.applied(&ops);
             assert_eq!(opened.differs(&open).await?, None);
         }
-        open.apply(&Op::Set("progress", "late".into()))?;
-        let error = open.volume.commit().await.unwrap_err().to_string();
-        assert!(error.contains("another session committed"), "{error}");
+        let late = [Op::Set("progress", "late".into())];
+        let error = open.flush(&late).await.unwrap_err().to_string();
+        assert!(error.contains("another state flushed"), "{error}");
         drop(open);
-        writer.apply(&Op::Write("db", 0, Some(page(7))))?;
-        model.apply(&Op::Write("db", 0, Some(page(7))));
-        assert!(writer.volume.commit().await?.checkpointed_pages > 0);
+        let ops = [Op::Write("db", 0, Some(page(7)))];
+        assert!(writer.flush(&ops).await?.checkpointed_pages > 0);
+        model = model.applied(&ops);
         drop(writer);
         let session = Session::open(store, options(Some(&cache))).await?;
         assert_eq!(model.differs(&session).await?, None);

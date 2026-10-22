@@ -523,13 +523,7 @@ impl Participant {
     /// What this participant left idle at the end of the owner's previous
     /// state, if nothing changed since and it is a `T`.
     pub fn take_idle<T: Any + Send>(&self) -> Option<T> {
-        let idle = self
-            .state
-            .shared
-            .idle
-            .lock()
-            .unwrap()
-            .remove(&*self.name)?;
+        let idle = self.state.shared.idle.lock().unwrap().remove(&*self.name)?;
         idle.value.downcast().ok().map(|value| *value)
     }
 
@@ -658,10 +652,11 @@ impl File {
         Ok(snapshot.read(&self.name, page).await?)
     }
 
-    /// Write `image` (4096 bytes) at `page`, or a hole with `None`, growing
-    /// the file to include it, with `wal`'s flush. Refused, before the WAL
-    /// changes, is what no flush could store: a page past the largest file,
-    /// a name past [`MAX_NAME_BYTES`], or the name of a record.
+    /// Write `image` (4096 bytes) at `page`, or a hole with `None`, with
+    /// `wal`'s flush, which grows the file to include it if it is shorter
+    /// then. Refused, before the WAL changes, is what no flush could store:
+    /// a page past the largest file, a name past [`MAX_NAME_BYTES`], or the
+    /// name of a record.
     pub fn write(&self, wal: &mut Wal, page: u64, image: Option<Page>) -> Result<()> {
         if image.as_ref().is_some_and(|image| image.len() != PAGE_SIZE) {
             return Err("a page is 4096 bytes".into());
@@ -676,10 +671,10 @@ impl File {
         })
     }
 
-    /// Make the file `len` bytes, a multiple of 512, with `wal`'s flush:
-    /// pages wholly past it become holes, so regrowing it reads zeros (or
-    /// its base's pages). Bytes of a last, partial page past `len` stay as
-    /// written.
+    /// Make the file `len` bytes, a multiple of 512, with `wal`'s flush,
+    /// whatever its length is then: pages wholly past it become holes, so
+    /// regrowing it reads zeros (or its base's pages). Bytes of a last,
+    /// partial page past `len` stay as written.
     pub fn set_len(&self, wal: &mut Wal, len: u64) -> Result<()> {
         if !len.is_multiple_of(512) || len > log::MAX_DATABASE_BYTES {
             return Err(format!("invalid file length {len}").into());
@@ -695,6 +690,7 @@ impl File {
                 written.pages.insert(page, None);
             }
             written.size = len;
+            written.sized = true;
         })
     }
 
@@ -708,12 +704,12 @@ impl File {
             return Err(format!("{:?} is a record, not a paged file", self.name).into());
         }
         let size = self.len();
-        let written = (wal.files.entry(self.name.to_string())).or_insert_with(|| {
-            snapshot::Written {
+        let written =
+            (wal.files.entry(self.name.to_string())).or_insert_with(|| snapshot::Written {
                 size,
                 pages: Default::default(),
-            }
-        });
+                sized: false,
+            });
         f(written);
         Ok(())
     }

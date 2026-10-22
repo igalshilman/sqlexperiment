@@ -8,15 +8,22 @@ use crate::{
     },
 };
 
-/// Writes to the file `db` only.
+/// Writes to the file `db` only, setting its size.
 fn db_writes(pages: Changes, size: u64) -> Writes {
-    Writes::from([("db".to_owned(), Written { size, pages })])
+    Writes::from([(
+        "db".to_owned(),
+        Written {
+            size,
+            pages,
+            sized: true,
+        },
+    )])
 }
 
 impl Snapshot {
     /// Commit `dirty` pages of the file `db`, now `size` bytes, as one
     /// transaction.
-    async fn publish(&self, dirty: Changes, size: u64) -> io::Result<CommitReport> {
+    async fn publish(&self, dirty: Changes, size: u64) -> io::Result<FlushReport> {
         Ok(self.commit(db_writes(dirty, size), Records::new()).await?.0)
     }
 }
@@ -53,6 +60,10 @@ struct Model {
 impl Model {
     fn apply(&mut self, dirty: &Changes, size: u64) {
         self.pages.extend(dirty.clone());
+        // Pages past a shorter size are holes, as a flush makes them.
+        for index in size / BLOCK_SIZE as u64..self.size / BLOCK_SIZE as u64 {
+            self.pages.insert(index, None);
+        }
         self.size = size;
     }
     async fn check(&self, snapshot: &Snapshot) -> io::Result<bool> {
