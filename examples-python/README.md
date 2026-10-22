@@ -7,6 +7,9 @@ after `make py` at the repository's root. See [Run an example](#run-an-example).
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [`chat.py`](chat.py)                     | **Start here.** A durable chat agent on Claude (the Anthropic SDK), with a tool                                                                                          |
 | [`chat_langgraph.py`](chat_langgraph.py) | The same agent on LangGraph                                                                                                                                              |
+| [`chat_litellm.py`](chat_litellm.py)     | The same agent on any model (OpenAI's, Gemini, Ollama, ...), through LiteLLM                                                                                             |
+| [`coder.py`](coder.py)                   | A coding agent on Claude Code (the Claude Agent SDK): a workspace per key, and a person's review before it is done                                                       |
+| [`coder_codex.py`](coder_codex.py)       | The same coding agent on Codex (OpenAI's coding agent)                                                                                                                   |
 | [`memory.py`](memory.py)                 | An assistant that remembers facts about you in its own SQL table, through its tools, with handlers of your own                                                           |
 | [`support.py`](support.py)               | A support agent whose tools are Restate itself: a service, a manager's approval (a signal), a workflow                                                                   |
 | [`follow.py`](follow.py)                 | A conversation followed from a terminal as the agent works (`restate_agents.client`); a chat page for it is [`examples-typescript/ui`](../examples-typescript/ui/app.ts) |
@@ -60,7 +63,9 @@ curl localhost:8080/assistant/alice/messages                          # the conv
 ```
 
 The agents take `MODEL` (`anthropic/<model-id>`), or else Claude Sonnet,
-with `ANTHROPIC_API_KEY`; `notes.py` needs no key. Each
+with `ANTHROPIC_API_KEY`; `chat_litellm.py` takes any of LiteLLM's models
+(`MODEL=openai/gpt-5`, with `OPENAI_API_KEY`), and `coder_codex.py`,
+Codex's default model with `OPENAI_API_KEY`; `notes.py` needs no key. Each
 example's docstring has its requests.
 
 ## Run on Modal

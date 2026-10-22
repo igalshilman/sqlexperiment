@@ -82,10 +82,10 @@ participants move their changes into it, and decides when to flush. A
 participant joins the state under a name (`state::Participant`): it moves its
 pending changes into the WAL, as records and pages, before the flush.
 
-| Host                                                                                          | Participants                                                  | When it flushes                             |
-| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------- |
-| The Node.js addon `restate-sql` and Python extension `restate_sql` (`core/sql/src/binding.rs`) | `Sql`, on the file `db`                                       | After every SQL transaction, as SQLite does |
-| The durable functions runtime (`rust/functions`)                                              | Run state, VM memory, the scope's tables, and each extension | Once per turn: the seal                     |
+| Host                                                                                           | Participants                                                 | When it flushes                             |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------- |
+| The Node.js addon `restate-sql` and Python extension `restate_sql` (`core/sql/src/binding.rs`) | `Sql`, on the file `db`                                      | After every SQL transaction, as SQLite does |
+| The durable functions runtime (`rust/functions`)                                               | Run state, VM memory, the scope's tables, and each extension | Once per turn: the seal                     |
 
 **SQL.** `Sql` runs Turso's SQLite-compatible engine, unmodified, in three
 layers:
@@ -107,13 +107,13 @@ then reopens.
 transaction, the seal: one WAL that every participant prepares into, then
 flushed.
 
-| Participant      | Where it lives in the state                                          |
-| ---------------- | -------------------------------------------------------------------- |
-| Run state        | Record `run`                                                         |
-| VM memory        | Record `memory`, plus the changed pages of a file over the golden image |
-| Tables (`ctx.db`) | `Sql` on the file `db`                                              |
-| Each extension   | Its own records and files, named under `<name>/`                     |
-| Large bytes      | The scope's blob store, outside Restate; a record names each blob    |
+| Participant       | Where it lives in the state                                             |
+| ----------------- | ----------------------------------------------------------------------- |
+| Run state         | Record `run`                                                            |
+| VM memory         | Record `memory`, plus the changed pages of a file over the golden image |
+| Tables (`ctx.db`) | `Sql` on the file `db`                                                  |
+| Each extension    | Its own records and files, named under `<name>/`                        |
+| Large bytes       | The scope's blob store, outside Restate; a record names each blob       |
 
 ```
 turn n                      seal n                  after the seal
@@ -216,12 +216,12 @@ export async function main(input, ctx) {
 
 What each turn seals:
 
-| Turn                       | What runs                                                                  | What the seal holds                                           |
-| -------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| 1                          | `ctx.call('notary', …)` issues the operation; the program waits            | Memory, run state with the pending operation; `notary/count` unchanged |
-| Between turns              | The host makes `operation()`; a crash here repeats it under the same key   | Nothing new                                                   |
-| 2                          | `delivered()` increments the count; the program gets the receipt and returns | New memory pages, run state, `notary/count = 1`             |
-| Crash before turn 2's seal | A new attempt calls `attach()`, reads `count = 0`, and runs turn 2 again   | Unchanged                                                     |
+| Turn                       | What runs                                                                    | What the seal holds                                                    |
+| -------------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 1                          | `ctx.call('notary', …)` issues the operation; the program waits              | Memory, run state with the pending operation; `notary/count` unchanged |
+| Between turns              | The host makes `operation()`; a crash here repeats it under the same key     | Nothing new                                                            |
+| 2                          | `delivered()` increments the count; the program gets the receipt and returns | New memory pages, run state, `notary/count = 1`                        |
+| Crash before turn 2's seal | A new attempt calls `attach()`, reads `count = 0`, and runs turn 2 again     | Unchanged                                                              |
 
 The count can never be off by one: the increment and the program seeing the
 receipt are sealed together in turn 2.

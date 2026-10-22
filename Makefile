@@ -58,7 +58,7 @@ endif
 
 .PHONY: all help core functions functions-python python-engine addon sdk-rs js py wheels examples-rust \
 	test test-core test-addon test-ts test-py test-sdk-rs test-functions \
-	crash-test concurrency-test tools-test crash-test-py concurrency-test-py lint lint-core lint-ts lint-py lint-functions format clean
+	crash-test concurrency-test tools-test sql-bench crash-test-py concurrency-test-py lint lint-core lint-ts lint-py lint-functions format clean
 
 # --- Build
 
@@ -168,6 +168,9 @@ concurrency-test-py: py $(RESTATE_SERVER) ## Python: handlers without journal re
 
 crash-test-py: py $(RESTATE_SERVER) ## Python: a bank and an agent through crashes, against a Restate server
 	cd python && uv run --locked python tests/crash.py
+
+sql-bench: js $(RESTATE_SERVER) ## SQL in objects against a Restate server: latency, throughput and stored bytes, for databases up to 100 MB (core/sql/benches/RESTATE_RESULTS.md)
+	cd typescript/tests && node sql/bench.ts
 
 tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, workflow), against a Restate server
 	cd typescript/tests && node restate-tools.ts

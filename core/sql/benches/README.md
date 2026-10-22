@@ -4,6 +4,10 @@ These are standalone Cargo bench targets (`harness = false`), separate from test
 and examples. All use the current (v15) storage format and require the opt-in `simulation` feature. They count logical KV
 operations and bytes in MemoryKv; they do not model a real remote backend.
 
+Against a real Restate server, `make sql-bench` from the repository's root runs
+[the end-to-end benchmark](../../../typescript/tests/sql/bench.ts): see
+[RESTATE_RESULTS.md](RESTATE_RESULTS.md).
+
 Run from `core/sql`:
 
 ```sh

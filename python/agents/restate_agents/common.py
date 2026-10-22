@@ -64,7 +64,7 @@ def refused(error: BaseException) -> bool:
     Other errors (a tool's, an overloaded provider's) fail the attempt, and
     Restate retries it.
     """
-    if type(error).__name__ in _FOR_GOOD:
+    if any(kind.__name__ in _FOR_GOOD for kind in type(error).__mro__):
         return True
     if type(error).__name__ == "ModelHTTPError":  # Pydantic AI's, of any provider
         return getattr(error, "status_code", None) in (400, 401, 403, 404)

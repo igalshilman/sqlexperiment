@@ -69,11 +69,11 @@ transaction open, with the transaction calls behind their `transaction()`.
 
 ## Layout
 
-| Path                  | What                                                                                                              |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Path                  | What                                                                                                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `src/`                | The crate: `Sql`, the adapter (`io`) from the engine's files to the state, and the bindings' session (`binding`) |
 | `tests/`              | SQL, and the state's storage, crash and cache campaigns under SQL workloads                                      |
-| `examples/`           | `lookup`: a small database, opened and queried                                                                    |
+| `examples/`           | `lookup`: a small database, opened and queried                                                                   |
 | [`benches/`](benches) | Benchmarks of SQL workloads on the state, and their results                                                      |
 
 ## Build and test
