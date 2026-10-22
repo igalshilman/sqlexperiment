@@ -1,14 +1,14 @@
 //! Corrupted stored values: truncated, bit-flipped or garbage, at the
 //! commit record, a stored log value, a page or the working-set hint. Open
 //! and reads fail or read what was committed, never panic; the hint is only
-//! advice, so whatever it holds, the journal reads as committed.
+//! advice, so whatever it holds, the volume reads as committed.
 #![cfg(feature = "simulation")]
 mod support;
 
 use futures::FutureExt;
-use journal::{Result, StorageOptions, kv::KvStore, simulation::*};
 use std::{panic::AssertUnwindSafe, sync::Arc};
 use support::*;
+use volume::{Result, StorageOptions, kv::KvStore, simulation::*};
 
 fn options() -> StorageOptions {
     StorageOptions {
@@ -35,7 +35,7 @@ async fn committed() -> Result<(MemoryKv, Model)> {
         for op in &ops {
             session.apply(op)?;
         }
-        session.journal.commit().await?;
+        session.volume.commit().await?;
         model = model.applied(&ops);
     }
     Ok((memory, model))

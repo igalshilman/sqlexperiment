@@ -78,9 +78,9 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   time, then against its previous image. Dead bytes (the stack between
   calls, freed heap memory) are zeroed first, so garbage is not saved.
 - **One commit**: a turn is one put of the scope's
-  [journal](../../core/journal) record: its memory pages, its SQL
+  [volume](../../core/volume) record: its memory pages, its SQL
   (`ctx.kv` is a table too) and the run's state with its pending requests.
-  The journal syncs the pages it names before it puts the record, so a
+  The volume syncs the pages it names before it puts the record, so a
   crash never leaves a record naming pages that are not stored.
 - **No replay**: a retry restores the VM from the last commit and waits
   again on its requests under the same idempotency keys, attaching to calls

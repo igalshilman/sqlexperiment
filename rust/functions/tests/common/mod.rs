@@ -6,7 +6,6 @@ use functions::{
     Extensions, GuestError, Language, Limits, Operation, Outcome, Programs, Run, Runtime, Scope,
     View,
 };
-use journal::{Journal, kv::KvStore, simulation::MemoryKv};
 use serde_json::{Value, json};
 use sql::{Sql, Value as SqlValue};
 use std::{
@@ -14,6 +13,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
+use volume::{Volume, kv::KvStore, simulation::MemoryKv};
 
 /// A scope's store in memory: what the tests read back from it.
 #[derive(Clone, Default)]
@@ -42,14 +42,14 @@ impl Store {
     }
 
     fn open(&self) -> Sql {
-        let journal = block(Journal::open(self.kv.clone())).unwrap();
-        block(Sql::open(&journal)).unwrap()
+        let volume = block(Volume::open(self.kv.clone())).unwrap();
+        block(Sql::open(&volume)).unwrap()
     }
 
     /// The record `name` (`run`, `memory`, an extension's), as the scope's
     /// last seal holds it: JSON, or null if none set it.
     pub fn record(&self, name: &str) -> Value {
-        let bytes = block(Journal::open(self.kv.clone()))
+        let bytes = block(Volume::open(self.kv.clone()))
             .unwrap()
             .record(name)
             .get();
@@ -66,10 +66,10 @@ impl Store {
 
     /// Seal `value` as the record `name`, as if a turn did.
     pub fn set_record(&self, name: &str, value: &Value) {
-        let journal = block(Journal::open(self.kv.clone())).unwrap();
+        let volume = block(Volume::open(self.kv.clone())).unwrap();
         let bytes = serde_json::to_vec(value).unwrap();
-        journal.record(name).set(bytes.into());
-        block(journal.commit()).unwrap();
+        volume.record(name).set(bytes.into());
+        block(volume.commit()).unwrap();
     }
 
     /// Pages of the run's memory that differ from golden, as the memory

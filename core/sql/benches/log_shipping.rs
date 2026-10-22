@@ -6,18 +6,18 @@
 //! as a long-lived owner process would. The backend is strong: a read returns
 //! only durable values. Round trips come from `LatencyKv`'s virtual clock;
 //! operation and byte counts from `MemoryKv`. Output is CSV.
-use journal::{
-    Journal, NamespaceCache, PageCompression, Result, StorageOptions,
+use sql::Sql;
+use std::sync::Arc;
+use volume::{
+    NamespaceCache, PageCompression, Result, StorageOptions, Volume,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
-use sql::Sql;
-use std::sync::Arc;
 
-/// Flush and commit `db`'s journal, ending the session.
-async fn save(mut db: Sql) -> journal::Result<journal::CommitReport> {
+/// Flush and commit `db`'s volume, ending the session.
+async fn save(mut db: Sql) -> volume::Result<volume::CommitReport> {
     db.flush().await?;
-    db.journal().commit().await
+    db.volume().commit().await
 }
 
 #[derive(Clone, Copy)]
@@ -51,9 +51,9 @@ struct Policy {
 /// overrides them: `after:log_bytes[:inline_bytes]`, comma-separated.
 const POLICIES: [Policy; 2] = [
     Policy {
-        after: journal::CHECKPOINT_AFTER,
-        log_bytes: journal::CHECKPOINT_LOG_BYTES,
-        inline_bytes: journal::INLINE_LOG_BYTES,
+        after: volume::CHECKPOINT_AFTER,
+        log_bytes: volume::CHECKPOINT_LOG_BYTES,
+        inline_bytes: volume::INLINE_LOG_BYTES,
     },
     Policy {
         after: 16,
@@ -76,7 +76,7 @@ fn policies() -> Vec<Policy> {
             Policy {
                 after,
                 log_bytes,
-                inline_bytes: fields.next().unwrap_or(journal::INLINE_LOG_BYTES),
+                inline_bytes: fields.next().unwrap_or(volume::INLINE_LOG_BYTES),
             }
         })
         .collect()
@@ -111,7 +111,7 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
     let mut db = Sql::open(
-        &Journal::open_with_options(
+        &Volume::open_with_options(
             kv.clone(),
             StorageOptions {
                 page_compression: codec(),
@@ -135,7 +135,7 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     save(db).await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
     let mut db = Sql::open(
-        &Journal::open_with_options(
+        &Volume::open_with_options(
             kv,
             options(
                 Policy {
@@ -215,7 +215,7 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
     reset(store);
     let kv: Arc<dyn KvStore> = store.clone();
     let mut db =
-        Sql::open(&Journal::open_with_options(kv, options(phase.policy, phase.cache)).await?)
+        Sql::open(&Volume::open_with_options(kv, options(phase.policy, phase.cache)).await?)
             .await?;
     phase.print("open", store);
     reset(store);
@@ -265,7 +265,7 @@ async fn run(case: Case, policy: Policy, strong: bool, cached: bool, run: usize)
     let cache = cached.then(|| open_cache(cache_config(256 << 20, 1 << 30)).namespace("bench"));
     // Warm the owner state outside the measurement.
     let mut db =
-        Sql::open(&Journal::open_with_options(store.clone(), options(policy, &cache)).await?)
+        Sql::open(&Volume::open_with_options(store.clone(), options(policy, &cache)).await?)
             .await?;
     db.execute("UPDATE t SET a = a WHERE id = 1").await?;
     save(db).await?;
@@ -284,7 +284,7 @@ async fn run(case: Case, policy: Policy, strong: bool, cached: bool, run: usize)
         }
     }
     // Every write must be visible to a publish-every-save reader.
-    let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
+    let mut db = Sql::open(&Volume::open(store.clone()).await?).await?;
     let rows = db.query("SELECT count(*), sum(a) FROM t").await?;
     assert_eq!(rows[0][0].as_int(), Some((case.rows + ITERATIONS) as i64));
     Ok(())

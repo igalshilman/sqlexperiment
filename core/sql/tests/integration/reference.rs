@@ -1,6 +1,5 @@
 //! A reference engine on plain memory, outside this crate's storage, and the
 //! state of a database as text, to compare a session's with it.
-use journal::Result;
 use sql::{Rows, Sql, Value};
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
@@ -10,6 +9,7 @@ use std::{
     },
 };
 use turso_core::{Connection, Database, IO, MemoryIO, SqliteDialect, StepResult};
+use volume::Result;
 
 /// A new, empty reference engine.
 pub fn oracle() -> Arc<Connection> {

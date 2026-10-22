@@ -1,13 +1,13 @@
 //! A crash at every write of every commit of a sequence that sets records
 //! (inline and stored), writes several files (one with a base), shrinks one,
 //! seals the log, checkpoints and deletes garbage: each commit is atomic,
-//! durable once its record is, and the journal goes on.
+//! durable once its record is, and the volume goes on.
 #![cfg(feature = "simulation")]
 mod support;
 
-use journal::{Base, NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
+use volume::{Base, NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 
 const COMMIT: &str = "v15/commit";
 /// Commits in the sequence.
@@ -44,7 +44,7 @@ fn changes(step: u64) -> Vec<Op> {
     }
     if step % 3 == 2 {
         ops.push(Op::SetLen("aux", 512 * 9));
-        let base = golden().page(1).map(journal::Page::copy_from_slice);
+        let base = golden().page(1).map(volume::Page::copy_from_slice);
         ops.push(Op::Write("vm", 1, base));
     }
     if step % 4 == 3 {
@@ -91,7 +91,7 @@ fn a_commit_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
                     effect: Effect::None,
                     cancel: false,
                 });
-                assert!(failing.journal.commit().await.is_err());
+                assert!(failing.volume.commit().await.is_err());
                 fault.disarm();
                 drop(failing);
                 let writes = fault.inner.unsynced();
@@ -127,7 +127,7 @@ fn a_commit_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
                         Op::Write("db", 9, Some(page(99))),
                     ];
                     let after = session(store.clone(), cached.then(fresh_namespace), &next).await?;
-                    after.journal.commit().await?;
+                    after.volume.commit().await?;
                     drop(after);
                     memory.crash();
                     let reopened = Session::open(store.clone(), options(None)).await?;
@@ -142,7 +142,7 @@ fn a_commit_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
             }
             // The sequence goes on from the commit acknowledged.
             let store: Arc<dyn KvStore> = Arc::new(durable.clone());
-            session(store, None, &ops).await?.journal.commit().await?;
+            session(store, None, &ops).await?.volume.commit().await?;
             model = new;
         }
         // The sequence covers every kind of write a commit makes.

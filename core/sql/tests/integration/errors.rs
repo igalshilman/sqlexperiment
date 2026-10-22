@@ -3,12 +3,12 @@ use crate::{
     host::{Db, Durability, Setup},
     reference::{oracle, run, text},
 };
-use journal::{
+use sql::Value;
+use std::sync::Arc;
+use volume::{
     Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
-use sql::Value;
-use std::sync::Arc;
 
 fn options(durability: Durability) -> Setup {
     Setup(

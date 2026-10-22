@@ -5,14 +5,14 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, FutureExt, Shared},
 };
-use journal::{
-    NamespaceCache, Result, StorageOptions,
-    kv::KvStore,
-    simulation::{MemoryKv, fresh_namespace},
-};
 use std::{
     io,
     sync::{Arc, Mutex},
+};
+use volume::{
+    NamespaceCache, Result, StorageOptions,
+    kv::KvStore,
+    simulation::{MemoryKv, fresh_namespace},
 };
 
 fn opts(cache: &NamespaceCache, durability: Durability) -> Setup {

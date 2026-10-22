@@ -6,13 +6,13 @@ use crate::{
     reference::{integrity, state},
 };
 use bytes::Bytes;
-use journal::{
-    Journal, NamespaceCache, Result, StorageOptions,
+use sql::{Sql, binding::Session};
+use std::sync::Arc;
+use volume::{
+    NamespaceCache, Result, StorageOptions, Volume,
     kv::KvStore,
     simulation::{MemoryKv, fresh_namespace},
 };
-use sql::{Sql, binding::Session};
-use std::sync::Arc;
 
 /// Pages read from the store as queries need them; the log checkpointed often.
 fn options(cache: Option<NamespaceCache>) -> StorageOptions {
@@ -39,7 +39,7 @@ async fn baseline() -> Result<MemoryKv> {
     .await?;
     db.execute("WITH RECURSIVE x(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM x WHERE i < 19) INSERT INTO t SELECT i, i, substr(printf('%07000d', i), 1, 100 + (i % 5) * 1500) FROM x")
         .await?;
-    db.journal().record("effects").set(Bytes::from("before"));
+    db.volume().record("effects").set(Bytes::from("before"));
     for k in 0..3 {
         db.execute(&format!("CREATE TABLE a{k}(x)")).await?;
     }
@@ -55,10 +55,10 @@ async fn baseline() -> Result<MemoryKv> {
 /// The state of a store and its effects, through a plain session; its
 /// database checks out.
 async fn observe(store: MemoryKv) -> Result<(String, Bytes)> {
-    let journal = Journal::open_with_options(Arc::new(store), options(None)).await?;
-    let mut sql = Sql::open(&journal).await?;
+    let volume = Volume::open_with_options(Arc::new(store), options(None)).await?;
+    let mut sql = Sql::open(&volume).await?;
     assert_eq!(integrity(&mut sql).await?, "ok");
-    Ok((state(&mut sql).await?, journal.record("effects").get()))
+    Ok((state(&mut sql).await?, volume.record("effects").get()))
 }
 
 /// A call to cancel, on a session it opens and prepares.
@@ -66,7 +66,7 @@ async fn observe(store: MemoryKv) -> Result<(String, Bytes)> {
 enum Call {
     /// A statement through [`Sql`], committed after it (`Durability::Commit`).
     Statement,
-    /// A turn's commit: [`Sql::flush`], a record set, [`Journal::commit`].
+    /// A turn's commit: [`Sql::flush`], a record set, [`Volume::commit`].
     Turn,
     /// [`Session::query`] of a write, which commits before it returns.
     SessionWrite,
@@ -137,8 +137,8 @@ impl Call {
             (Call::Statement, Open::Sql(db)) => db.execute(UPDATE).await,
             (Call::Turn, Open::Sql(db)) => {
                 db.flush().await?;
-                db.journal().record("effects").set(Bytes::from("after"));
-                db.journal().commit().await.map(drop)
+                db.volume().record("effects").set(Bytes::from("after"));
+                db.volume().commit().await.map(drop)
             }
             (Call::SessionWrite, Open::Session(session)) => {
                 session.query(UPDATE, None).await.map(drop)
@@ -215,9 +215,9 @@ fn a_call_cancelled_after_any_number_of_polls_ends_its_session() -> Result<()> {
                     // The process goes on: the next session of the owner,
                     // through its cache, sees what the store holds.
                     if cached {
-                        let journal =
-                            Journal::open_with_options(Arc::new(memory), options(cache)).await?;
-                        let mut sql = Sql::open(&journal).await?;
+                        let volume =
+                            Volume::open_with_options(Arc::new(memory), options(cache)).await?;
+                        let mut sql = Sql::open(&volume).await?;
                         assert_eq!(
                             state(&mut sql).await?,
                             current.0,

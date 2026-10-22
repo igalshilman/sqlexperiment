@@ -1,28 +1,28 @@
-//! A durable journal over an asynchronous key/value store: paged files and
+//! A durable volume over an asynchronous key/value store: paged files and
 //! records, committed together in one put.
 //!
-//! A [`Journal`] is one namespace in a KV store: the state of a Restate
+//! A [`Volume`] is one namespace in a KV store: the state of a Restate
 //! object without Restate's journal, which keeps writes in issue order and
 //! makes them durable at a sync (see [`kv`]). It needs no multi-key
 //! transaction, compare-and-swap, listing operation or backend WAL API. Its
 //! [`File`]s are 4 KiB pages read and written at random, and its [`Record`]s
-//! whole values in the commit record; [`Journal::commit`] makes every change
+//! whole values in the commit record; [`Volume::commit`] makes every change
 //! durable at once.
 //!
-//! What uses a journal is a [`Participant`]: it keeps changes of its own, moves
-//! them into the journal's files and records before a commit, and may leave
-//! state idle for the namespace's next journal. The `sql` crate's database is
+//! What uses a volume is a [`Participant`]: it keeps changes of its own, moves
+//! them into the volume's files and records before a commit, and may leave
+//! state idle for the namespace's next volume. The `sql` crate's database is
 //! one, on the file `db`.
 //!
 //! # When changes become durable
 //!
-//! At [`Journal::commit`], and only then: the journal's one put makes every
+//! At [`Volume::commit`], and only then: the volume's one put makes every
 //! record set and file written since the last commit durable together.
-//! Dropping the journal discards them. The host decides when to commit: after
+//! Dropping the volume discards them. The host decides when to commit: after
 //! each SQL transaction (as SQLite does), or once per turn of everything that
 //! took part.
 //!
-//! | Layer | Representation | Survives dropping the journal? |
+//! | Layer | Representation | Survives dropping the volume? |
 //! |---|---|---|
 //! | Pending changes | Records set and pages written since the last commit | No |
 //! | Commit record | `commit`: the log since the last checkpoint, one transaction per commit, compressed against the previous images; a large one's segments at `log/<n>` | Yes, after an acknowledged commit |
@@ -58,10 +58,10 @@
 //! when the log is long, its checkpoint, and syncs once. Open reads the
 //! record, and the stored segments its log names, if any.
 //!
-//! Journals of one owner may overlap when they share a [`NamespaceCache`]:
-//! each reads the state it opened at (a checkpoint waits while another journal
+//! Volumes of one owner may overlap when they share a [`NamespaceCache`]:
+//! each reads the state it opened at (a checkpoint waits while another volume
 //! holds an older version), and a commit is refused if another
-//! journal committed since this one opened. Without a cache they must not
+//! volume committed since this one opened. Without a cache they must not
 //! overlap.
 //!
 //! [`StorageOptions::cache`] can hold a [`NamespaceCache`]: one namespace's handle
@@ -70,19 +70,19 @@
 //! record's epoch (its checkpoint count) is the one they belong to, and
 //! remembers the record this owner made durable, so a steady-state open and
 //! commit are each one round trip. A participant may leave idle state there
-//! ([`Participant::park`]); the next journal hands it back when nothing
+//! ([`Participant::park`]); the next volume hands it back when nothing
 //! changed. The disk tier's I/O runs on tokio.
 //!
 //! # Example
 //!
 //! ```no_run
 //! # use std::sync::Arc;
-//! # use journal::{Journal, kv::KvStore};
-//! # async fn example(store: Arc<dyn KvStore>) -> journal::Result<()> {
-//! let journal = Journal::open(store).await?;
-//! journal.record("progress").set("step 1".into());
-//! journal.file("image")?.write(0, Some(vec![7; 4096].into()))?;
-//! journal.commit().await?; // the record and the page, durable together
+//! # use volume::{Volume, kv::KvStore};
+//! # async fn example(store: Arc<dyn KvStore>) -> volume::Result<()> {
+//! let volume = Volume::open(store).await?;
+//! volume.record("progress").set("step 1".into());
+//! volume.file("image")?.write(0, Some(vec![7; 4096].into()))?;
+//! volume.commit().await?; // the record and the page, durable together
 //! # Ok(())
 //! # }
 //! ```
@@ -127,13 +127,13 @@ use std::{
     },
 };
 
-/// Journal and backend errors returned to the host task.
+/// Volume and backend errors returned to the host task.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Bytes of a page of a [`File`].
 pub const PAGE_SIZE: usize = 4096;
 
-/// One namespace's journal: its paged files and its records, changed in
+/// One namespace's volume: its paged files and its records, changed in
 /// memory and made durable together by [`Self::commit`], one put. A cheap
 /// handle; clones, and the views of [`Self::scoped`], share the pending
 /// changes.
@@ -142,15 +142,15 @@ pub const PAGE_SIZE: usize = 4096;
 /// owner's requests before opening it; a reader ([`Self::open_reader`]) may
 /// open beside the owner.
 #[derive(Clone)]
-pub struct Journal {
+pub struct Volume {
     shared: Arc<Shared>,
-    /// Prefixed to every name: a view of part of the journal.
+    /// Prefixed to every name: a view of part of the volume.
     prefix: Arc<str>,
 }
 
-/// What a journal's handles share.
+/// What a volume's handles share.
 struct Shared {
-    /// The committed state: as opened, then as this journal committed it.
+    /// The committed state: as opened, then as this volume committed it.
     snapshot: Mutex<Arc<Snapshot>>,
     options: StorageOptions,
     /// Records set and files written since the last commit, which the next
@@ -158,12 +158,12 @@ struct Shared {
     records: Mutex<log::Records>,
     files: Mutex<snapshot::Writes>,
     /// The participants that joined, by name: whether each holds changes not
-    /// yet in the journal.
+    /// yet in the volume.
     participants: Mutex<HashMap<String, bool>>,
-    /// What participants left idle at the state this journal opened on, by
+    /// What participants left idle at the state this volume opened on, by
     /// participant, until they take it.
     idle: Mutex<HashMap<String, Idle>>,
-    /// A reader's ([`Journal::open_reader`]): it never commits.
+    /// A reader's ([`Volume::open_reader`]): it never commits.
     reader: AtomicBool,
     /// A commit failed or was cancelled: its outcome is unknown.
     poisoned: AtomicBool,
@@ -177,9 +177,9 @@ impl Shared {
     }
 }
 
-/// A running commit. One that fails ends the journal. One dropped midway
+/// A running commit. One that fails ends the volume. One dropped midway
 /// has an unknown outcome too, and the cache forgets what it knew of the
-/// namespace (as a failed sync makes it), so that no other journal commits
+/// namespace (as a failed sync makes it), so that no other volume commits
 /// on top of a state that may be gone.
 struct Committing<'a> {
     shared: &'a Shared,
@@ -218,10 +218,10 @@ impl Drop for Shared {
     }
 }
 
-/// The error of a journal that a failed commit ended.
-const ENDED: &str = "the journal ended after a failed or cancelled commit; open a new one";
+/// The error of a volume that a failed commit ended.
+const ENDED: &str = "the volume ended after a failed or cancelled commit; open a new one";
 
-impl Journal {
+impl Volume {
     /// Open the namespace with default [`StorageOptions`]: read its commit
     /// record (and the stored values it names), recovering what a crash
     /// left, before anything reads.
@@ -231,7 +231,7 @@ impl Journal {
 
     /// Open with explicit [`StorageOptions`]. Options never change the stored
     /// format: existing page tags determine decoding. With a [`PageCache`],
-    /// what participants of this owner's previous journal left idle waits
+    /// what participants of this owner's previous volume left idle waits
     /// for them ([`Participant::take_idle`]) when nothing changed since.
     pub async fn open_with_options(
         store: Arc<dyn KvStore>,
@@ -241,7 +241,7 @@ impl Journal {
     }
 
     /// Open a reader of a namespace that another owns, alongside it: a
-    /// journal that writes nothing to the store (its changes stay private,
+    /// volume that writes nothing to the store (its changes stay private,
     /// and it refuses to commit) and keeps no cache. It reads the state as of
     /// open, unless the owner checkpoints meanwhile: [`Self::is_current`],
     /// once it has read, says whether it did.
@@ -280,7 +280,7 @@ impl Journal {
         })
     }
 
-    /// The options this journal opened with.
+    /// The options this volume opened with.
     pub fn options(&self) -> &StorageOptions {
         &self.shared.options
     }
@@ -318,39 +318,39 @@ impl Journal {
         Ok(file)
     }
 
-    /// The part of the journal whose names start with `prefix`, named
+    /// The part of the volume whose names start with `prefix`, named
     /// without it: an extension's, say (`scoped("fs/")` makes `manifest`
     /// the record `fs/manifest`).
-    pub fn scoped(&self, prefix: &str) -> Journal {
-        Journal {
+    pub fn scoped(&self, prefix: &str) -> Volume {
+        Volume {
             prefix: format!("{}{prefix}", self.prefix).into(),
             ..self.clone()
         }
     }
 
-    /// Take part in the journal as `name`, one at a time per name (see
+    /// Take part in the volume as `name`, one at a time per name (see
     /// [`Participant`]).
     pub fn join(&self, name: &str) -> Result<Participant> {
         let name = format!("{}{name}", self.prefix);
         let mut joined = self.shared.participants.lock().unwrap();
         if joined.contains_key(&name) {
-            return Err(format!("{name:?} already takes part in this journal").into());
+            return Err(format!("{name:?} already takes part in this volume").into());
         }
         joined.insert(name.clone(), false);
         Ok(Participant {
             name: name.into(),
-            journal: self.clone(),
+            volume: self.clone(),
         })
     }
 
     /// The commit: every record set and file written since the last one, in
     /// one put (and a checkpoint, when the log is long), then one sync.
     /// Nothing changed: nothing is written. It is refused while a
-    /// participant holds changes not yet in the journal, and while another
+    /// participant holds changes not yet in the volume, and while another
     /// commit of it runs. What it cannot store (a record too large, a bad
     /// size) is refused before anything is written, and stays pending. `Ok`
     /// holds what it wrote; any other error, or dropping the future, leaves
-    /// the outcome unknown and ends the journal: open it again.
+    /// the outcome unknown and ends the volume: open it again.
     pub async fn commit(&self) -> Result<CommitReport> {
         let shared = &self.shared;
         if shared.poisoned.load(Ordering::SeqCst) {
@@ -361,11 +361,11 @@ impl Journal {
         }
         if let Some(name) = self.unflushed() {
             return Err(
-                format!("{name:?} has changes not yet in the journal: flush it first").into(),
+                format!("{name:?} has changes not yet in the volume: flush it first").into(),
             );
         }
         if shared.committing.swap(true, Ordering::SeqCst) {
-            return Err("a commit of this journal is running".into());
+            return Err("a commit of this volume is running".into());
         }
         let mut running = Committing {
             shared,
@@ -374,7 +374,7 @@ impl Journal {
         };
         let snapshot = shared.snapshot();
         // What it cannot store is refused before anything is written, and
-        // stays pending: the journal goes on.
+        // stays pending: the volume goes on.
         {
             let (files, records) = (shared.files.lock().unwrap(), shared.records.lock().unwrap());
             if let Err(error) = snapshot.check(&files, &records) {
@@ -391,7 +391,7 @@ impl Journal {
         Ok(report)
     }
 
-    /// A participant holding changes not yet in the journal.
+    /// A participant holding changes not yet in the volume.
     fn unflushed(&self) -> Option<String> {
         let joined = self.shared.participants.lock().unwrap();
         let mut unflushed = joined.iter().filter(|(_, unflushed)| **unflushed);
@@ -417,39 +417,39 @@ impl Journal {
             || !self.shared.records.lock().unwrap().is_empty()
     }
 
-    /// The namespace's version: the commits ever made, as this journal holds
+    /// The namespace's version: the commits ever made, as this volume holds
     /// it (opened on, or committed itself).
     pub fn version(&self) -> u64 {
         self.shared.snapshot().version()
     }
 
-    /// Whether the store still holds the state this journal opened on (see
+    /// Whether the store still holds the state this volume opened on (see
     /// [`Self::open_reader`]): if it does not, what was read may mix that
     /// state with a later checkpoint's pages, so read again in a new one. A
-    /// journal's own commits change the state, so this is for one that has
+    /// volume's own commits change the state, so this is for one that has
     /// not committed.
     pub async fn is_current(&self) -> Result<bool> {
         Ok(self.shared.snapshot().is_current().await?)
     }
 
-    /// Whether the journal can commit: a failed or cancelled commit ends it.
+    /// Whether the volume can commit: a failed or cancelled commit ends it.
     pub fn is_usable(&self) -> bool {
         !self.shared.poisoned.load(Ordering::SeqCst)
     }
 }
 
-/// Something that takes part in a journal under a name ([`Journal::join`]):
+/// Something that takes part in a volume under a name ([`Volume::join`]):
 /// it keeps changes of its own (an SQL engine's pages, say), and moves them
-/// into the journal's files and records before a commit. While it says it
-/// holds changes not yet moved ([`Self::set_unflushed`]), the journal refuses
+/// into the volume's files and records before a commit. While it says it
+/// holds changes not yet moved ([`Self::set_unflushed`]), the volume refuses
 /// to commit. Dropping it leaves the name free, and its unmoved changes out.
 ///
 /// With a [`PageCache`], it may leave state idle for the namespace's next
-/// journal ([`Self::park`]), which that journal's participant of the same
+/// volume ([`Self::park`]), which that volume's participant of the same
 /// name takes back ([`Self::take_idle`]) when nothing changed since.
 pub struct Participant {
     name: Arc<str>,
-    journal: Journal,
+    volume: Volume,
 }
 
 impl Participant {
@@ -457,22 +457,22 @@ impl Participant {
         &self.name
     }
 
-    /// The journal it takes part in.
-    pub fn journal(&self) -> &Journal {
-        &self.journal
+    /// The volume it takes part in.
+    pub fn volume(&self) -> &Volume {
+        &self.volume
     }
 
-    /// Say whether it holds changes not yet in the journal.
+    /// Say whether it holds changes not yet in the volume.
     pub fn set_unflushed(&self, unflushed: bool) {
-        let mut joined = self.journal.shared.participants.lock().unwrap();
+        let mut joined = self.volume.shared.participants.lock().unwrap();
         joined.insert(self.name.to_string(), unflushed);
     }
 
     /// What this participant left idle at the end of the owner's previous
-    /// journal, if nothing changed since and it is a `T`.
+    /// volume, if nothing changed since and it is a `T`.
     pub fn take_idle<T: Any + Send>(&self) -> Option<T> {
         let idle = self
-            .journal
+            .volume
             .shared
             .idle
             .lock()
@@ -481,35 +481,33 @@ impl Participant {
         idle.value.downcast().ok().map(|value| *value)
     }
 
-    /// Whether [`Self::park`] would keep state now: the journal has a
+    /// Whether [`Self::park`] would keep state now: the volume has a
     /// [`PageCache`], is at the owner's last durable commit, and holds no
     /// changes since.
     pub fn can_park(&self) -> bool {
-        let journal = &self.journal;
-        let Some(cache) = &journal.shared.options.cache else {
+        let volume = &self.volume;
+        let Some(cache) = &volume.shared.options.cache else {
             return false;
         };
-        journal.is_usable()
-            && cache.committed() == Some(journal.version())
-            && !journal.has_pending()
+        volume.is_usable() && cache.committed() == Some(volume.version()) && !volume.has_pending()
     }
 
-    /// Leave `value`, which corresponds to the journal's committed state, for
-    /// the namespace's next journal, weighing `weight` bytes against
+    /// Leave `value`, which corresponds to the volume's committed state, for
+    /// the namespace's next volume, weighing `weight` bytes against
     /// [`PageCacheConfig::idle_bytes`]. `Err` gives it back if it cannot be
     /// kept (see [`Self::can_park`]). The cache drops it when anything
     /// changes, or under its budget; one heavier than the whole budget is
-    /// not kept. `value` must hold no handle of this journal (a [`File`], a
-    /// [`Record`], the [`Journal`]), which would keep it open meanwhile and
+    /// not kept. `value` must hold no handle of this volume (a [`File`], a
+    /// [`Record`], the [`Volume`]), which would keep it open meanwhile and
     /// hold back the namespace's checkpoints.
     pub fn park<T: Any + Send>(&self, value: T, weight: usize) -> std::result::Result<(), T> {
         if !self.can_park() {
             return Err(value);
         }
-        let cache = self.journal.shared.options.cache.as_ref().unwrap();
+        let cache = self.volume.shared.options.cache.as_ref().unwrap();
         let idle = Idle {
             value: Box::new(value),
-            version: self.journal.version(),
+            version: self.volume.version(),
             weight,
         };
         cache.park(&self.name, idle);
@@ -519,18 +517,18 @@ impl Participant {
 
 impl Drop for Participant {
     fn drop(&mut self) {
-        (self.journal.shared.participants.lock().unwrap()).remove(&*self.name);
+        (self.volume.shared.participants.lock().unwrap()).remove(&*self.name);
     }
 }
 
 /// A named whole value the commit record holds, replaced whole: the host's
 /// state beside its files (a run's progress, an outbox), committed with them
-/// in the same put. A cheap handle; clones share the journal's pending
+/// in the same put. A cheap handle; clones share the volume's pending
 /// changes.
 ///
 /// A value of up to [`StorageOptions::inline_log_bytes`] is in the record,
 /// which every commit rewrites; a larger one is a stored value of its own,
-/// written when it changes. Either way, opening the journal reads it.
+/// written when it changes. Either way, opening the volume reads it.
 #[derive(Clone)]
 pub struct Record {
     name: Arc<str>,
@@ -538,7 +536,7 @@ pub struct Record {
 }
 
 impl Record {
-    /// The value as the journal holds it: set since the last commit, or
+    /// The value as the volume holds it: set since the last commit, or
     /// committed; empty if never set.
     pub fn get(&self) -> Bytes {
         if let Some(value) = self.shared.records.lock().unwrap().get(&*self.name) {
@@ -552,7 +550,7 @@ impl Record {
             .unwrap_or_default()
     }
 
-    /// Replace the value with the next commit (see [`Journal::commit`]).
+    /// Replace the value with the next commit (see [`Volume::commit`]).
     pub fn set(&self, value: Bytes) {
         (self.shared.records.lock().unwrap()).insert(self.name.to_string(), value);
     }
@@ -563,12 +561,12 @@ impl Record {
 }
 
 /// A paged file: 4 KiB pages, read and written at random, made durable by
-/// the journal's next commit with its other files and its records. An absent
+/// the volume's next commit with its other files and its records. An absent
 /// page, never written or past the end, reads as `None` (zeros). A cheap
-/// handle; clones share the journal's pending changes.
+/// handle; clones share the volume's pending changes.
 ///
 /// The commit record's log holds the changed pages until a checkpoint writes
-/// them in place, and the [`PageCache`] keeps them across journals.
+/// them in place, and the [`PageCache`] keeps them across volumes.
 #[derive(Clone)]
 pub struct File {
     name: Arc<str>,
@@ -593,7 +591,7 @@ impl File {
         self.len() == 0
     }
 
-    /// Page `page` as the journal holds it; `None` for zeros (a hole of a
+    /// Page `page` as the volume holds it; `None` for zeros (a hole of a
     /// file without a base, or past its end).
     pub async fn read(&self, page: u64) -> Result<Option<Page>> {
         if page.saturating_mul(PAGE) >= self.len() {

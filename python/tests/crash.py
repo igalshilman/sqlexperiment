@@ -41,7 +41,7 @@ CLIENTS = 4
 SESSIONS = 3
 PROMPTS = 6
 
-dir = Path(tempfile.mkdtemp(prefix="journal-python-crash-"))
+dir = Path(tempfile.mkdtemp(prefix="volume-python-crash-"))
 print(f"logs in {dir}", file=sys.stderr)
 
 

@@ -1,12 +1,6 @@
 //! Paired raw/compressed SQL traffic (the default codec, zstd) and isolated codec
 //! CPU measurements of every codec.
 //! All payloads are deterministic synthetic data; no network or replication model.
-use journal::{
-    Journal, PageCompression, Result, StorageOptions,
-    kv::KvStore,
-    page_codec,
-    simulation::{MemoryKv, Stats},
-};
 use sql::Sql;
 use std::{
     fmt::Write as _,
@@ -16,11 +10,17 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use volume::{
+    PageCompression, Result, StorageOptions, Volume,
+    kv::KvStore,
+    page_codec,
+    simulation::{MemoryKv, Stats},
+};
 
-/// Flush and commit `db`'s journal, ending the session.
-async fn save(mut db: Sql) -> journal::Result<journal::CommitReport> {
+/// Flush and commit `db`'s volume, ending the session.
+async fn save(mut db: Sql) -> volume::Result<volume::CommitReport> {
     db.flush().await?;
-    db.journal().commit().await
+    db.volume().commit().await
 }
 
 /// The codec compared with raw pages in SQL traffic: the default.
@@ -101,7 +101,7 @@ fn options(page_compression: PageCompression) -> StorageOptions {
 async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let mut db =
-        Sql::open(&Journal::open_with_options(Arc::new(store.clone()), options(codec)).await?)
+        Sql::open(&Volume::open_with_options(Arc::new(store.clone()), options(codec)).await?)
             .await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload BLOB)")
         .await?;
@@ -124,8 +124,7 @@ async fn baseline(case: Case, codec: PageCompression) -> Result<MemoryKv> {
         checkpoint_after: 0,
         ..options(codec)
     };
-    let mut db =
-        Sql::open(&Journal::open_with_options(Arc::new(store.clone()), all).await?).await?;
+    let mut db = Sql::open(&Volume::open_with_options(Arc::new(store.clone()), all).await?).await?;
     db.execute("CREATE TABLE other(x)").await?;
     save(db).await?;
     store.crash();
@@ -190,7 +189,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
     let store = Arc::new(base.fork());
     let start = Instant::now();
     let mut db =
-        Sql::open(&Journal::open_with_options(store.clone(), options(sample.codec)).await?).await?;
+        Sql::open(&Volume::open_with_options(store.clone(), options(sample.codec)).await?).await?;
     let middle = case.rows / 2;
     let read_ids: Vec<_> = match sample.operation {
         "cold_pk" => vec![middle],
@@ -255,7 +254,7 @@ async fn workload(base: &MemoryKv, sample: Sample) -> Result<()> {
             PageCompression::Raw
         };
         let mut db =
-            Sql::open(&Journal::open_with_options(store.clone(), options(other)).await?).await?;
+            Sql::open(&Volume::open_with_options(store.clone(), options(other)).await?).await?;
         assert_eq!(
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"

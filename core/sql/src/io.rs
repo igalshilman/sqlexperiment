@@ -1,7 +1,7 @@
-//! Bridge between engine byte-addressed files and the journal's file `db`.
+//! Bridge between engine byte-addressed files and the volume's file `db`.
 //!
 //! The engine sees two virtual files: [`DB_PATH`] and its private WAL. The database
-//! reads through the journal's file; its dirty pages and the entire WAL live in
+//! reads through the volume's file; its dirty pages and the entire WAL live in
 //! `State` until `KvIo::move_into_file`. Full-page writes avoid a backing read; partial writes merge with the
 //! visible page. Truncation records explicit holes and clears a partial tail so
 //! regrowing a file never exposes bytes from before.
@@ -10,10 +10,10 @@
 //! futures on the host executor. Adjacent reads overlap in bounded batches; writes,
 //! truncation and sync serialize the queue into ordered phases. Within a read batch,
 //! completion order may differ from submission order. A single multi-page file read
-//! fetches its pages sequentially. This layer does not prefetch: the journal does
+//! fetches its pages sequentially. This layer does not prefetch: the volume does
 //! (a small database whole, or the working-set hint, at open; readahead after
 //! consecutive misses), and cross-session reuse comes from the optional
-//! [`journal::PageCache`].
+//! [`volume::PageCache`].
 //!
 //! Read buffers are staged privately until the read succeeds. `Completing` retires
 //! in-flight accounting and aborts incomplete engine callbacks even if a dequeued
@@ -32,11 +32,10 @@
 //! or spinning. Normal engine I/O is driven by the asynchronous pump.
 //!
 //! File sync is only a private-overlay ordering barrier. A complete private
-//! checkpoint moves the database's pages into the journal's file, which the
-//! journal's commit makes durable. The engine WAL never becomes a durable KV object.
+//! checkpoint moves the database's pages into the volume's file, which the
+//! volume's commit makes durable. The engine WAL never becomes a durable KV object.
 use bytes::BytesMut;
 use futures::future::join_all;
-use journal::{File as JournalFile, Page};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
@@ -50,9 +49,10 @@ use turso_core::{
     Buffer, Clock, Completion, CompletionError, File, IO, LimboError, MonotonicInstant, OpenFlags,
     WallClockInstant,
 };
+use volume::{File as VolumeFile, Page};
 
 /// Logical database-page and overlay-block size; encoded KV values may be smaller.
-pub const BLOCK_SIZE: usize = journal::PAGE_SIZE;
+pub const BLOCK_SIZE: usize = volume::PAGE_SIZE;
 /// Engine-visible virtual database name, not a filesystem or KV key.
 pub const DB_PATH: &str = "object.db";
 /// Engine-visible private WAL name; this file is never fetched from KV.
@@ -97,7 +97,7 @@ fn blocks(pos: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize, usiz
 }
 
 /// Mutable session overlay indexed by `(file number, logical block number)`
-/// ([`DB`] or [`WAL`]). A missing entry falls through to the journal's file
+/// ([`DB`] or [`WAL`]). A missing entry falls through to the volume's file
 /// for the database, and reads zeros for the WAL; `Some(None)` is an explicit
 /// zero-filled hole that masks old data after truncation. Sizes track the
 /// private view.
@@ -166,9 +166,9 @@ impl Drop for Completing<'_> {
 /// The queue lock orders engine mutations; it does not implement a
 /// distributed ownership lock.
 pub struct KvIo {
-    /// The journal's file `db`; replaced when a warm engine continues on a
-    /// new journal, and `None` while the engine is parked.
-    file: Mutex<Option<JournalFile>>,
+    /// The volume's file `db`; replaced when a warm engine continues on a
+    /// new volume, and `None` while the engine is parked.
+    file: Mutex<Option<VolumeFile>>,
     /// See [`crate::SqlOptions::max_private_bytes`].
     max_private_bytes: AtomicUsize,
     state: Mutex<State>,
@@ -178,16 +178,16 @@ pub struct KvIo {
     /// A request or synchronous engine read failed: the engine's state after
     /// the error is unknown.
     failed: AtomicBool,
-    /// The journal of [`Self::mount`], which [`Self::publish`] commits.
+    /// The volume of [`Self::mount`], which [`Self::publish`] commits.
     #[cfg(feature = "simulation")]
-    journal: Mutex<Option<journal::Journal>>,
+    volume: Mutex<Option<volume::Volume>>,
     #[cfg(all(test, feature = "simulation"))]
     fault: Mutex<Option<test_faults::Fault>>,
 }
 
 impl KvIo {
-    /// An adapter over `file`, the journal's file `db`.
-    pub fn new(file: JournalFile, max_private_bytes: usize) -> Arc<Self> {
+    /// An adapter over `file`, the volume's file `db`.
+    pub fn new(file: VolumeFile, max_private_bytes: usize) -> Arc<Self> {
         let state = State {
             sizes: [file.len(), 0],
             ..State::default()
@@ -201,49 +201,49 @@ impl KvIo {
             progress: Mutex::default(),
             failed: AtomicBool::default(),
             #[cfg(feature = "simulation")]
-            journal: Mutex::new(None),
+            volume: Mutex::new(None),
             #[cfg(all(test, feature = "simulation"))]
             fault: Mutex::new(None),
         })
     }
 
-    /// Open the namespace's journal, and an adapter over its file `db`.
+    /// Open the namespace's volume, and an adapter over its file `db`.
     #[cfg(feature = "simulation")]
-    pub async fn mount(store: Arc<dyn journal::kv::KvStore>) -> io::Result<Arc<Self>> {
-        Self::mount_with_options(store, journal::StorageOptions::default()).await
+    pub async fn mount(store: Arc<dyn volume::kv::KvStore>) -> io::Result<Arc<Self>> {
+        Self::mount_with_options(store, volume::StorageOptions::default()).await
     }
 
     /// [`Self::mount`] with explicit storage options.
     #[cfg(feature = "simulation")]
     pub async fn mount_with_options(
-        store: Arc<dyn journal::kv::KvStore>,
-        options: journal::StorageOptions,
+        store: Arc<dyn volume::kv::KvStore>,
+        options: volume::StorageOptions,
     ) -> io::Result<Arc<Self>> {
-        let journal = (journal::Journal::open_with_options(store, options).await)
-            .map_err(io::Error::other)?;
-        let file = journal.file(crate::DB_FILE).map_err(io::Error::other)?;
+        let volume =
+            (volume::Volume::open_with_options(store, options).await).map_err(io::Error::other)?;
+        let file = volume.file(crate::DB_FILE).map_err(io::Error::other)?;
         let io = Self::new(file, crate::MAX_PRIVATE_BYTES);
-        *io.journal.lock().unwrap() = Some(journal);
+        *io.volume.lock().unwrap() = Some(volume);
         Ok(io)
     }
 
-    /// Move the private pages into the file and commit the journal of
+    /// Move the private pages into the file and commit the volume of
     /// [`Self::mount`].
     #[cfg(feature = "simulation")]
-    pub async fn publish(&self) -> io::Result<journal::CommitReport> {
+    pub async fn publish(&self) -> io::Result<volume::CommitReport> {
         self.move_into_file().await?;
-        let journal = self.journal.lock().unwrap().clone();
-        let journal = journal.ok_or_else(|| invalid("not mounted"))?;
-        journal.commit().await.map_err(io::Error::other)
+        let volume = self.volume.lock().unwrap().clone();
+        let volume = volume.ok_or_else(|| invalid("not mounted"))?;
+        volume.commit().await.map_err(io::Error::other)
     }
 
-    /// Let go of the journal while the engine is parked: it reads nothing
+    /// Let go of the volume while the engine is parked: it reads nothing
     /// until [`Self::resume`] gives it the next one.
     pub(crate) fn release(&self) {
         *self.file.lock().unwrap() = None;
     }
 
-    fn file(&self) -> io::Result<JournalFile> {
+    fn file(&self) -> io::Result<VolumeFile> {
         let file = self.file.lock().unwrap().clone();
         file.ok_or_else(|| invalid("the engine is parked"))
     }
@@ -258,11 +258,11 @@ impl KvIo {
         progress.inflight == 0 && !progress.stopped
     }
 
-    /// Continue a clean adapter on `file` of a newly opened journal at the
+    /// Continue a clean adapter on `file` of a newly opened volume at the
     /// same committed state, keeping the engine that uses it warm.
     pub(crate) async fn resume(
         &self,
-        file: JournalFile,
+        file: VolumeFile,
         max_private_bytes: usize,
     ) -> io::Result<()> {
         if !self.is_clean() {
@@ -599,9 +599,9 @@ impl KvIo {
         state.sizes[WAL] != 0 || state.dirty.keys().any(|(file, _)| *file == DB)
     }
 
-    /// Move the database's private pages into the journal's file, once no
+    /// Move the database's private pages into the volume's file, once no
     /// SQL transaction remains and the private WAL is truncated; the
-    /// journal's commit makes them durable. The adapter goes on reading
+    /// volume's commit makes them durable. The adapter goes on reading
     /// them through the file.
     pub(crate) async fn move_into_file(&self) -> io::Result<()> {
         if self.pending_count() != 0 {

@@ -1,25 +1,25 @@
 # SQL
 
-SQLite-compatible SQL on a [journal](../journal/README.md), for a Restate object
-without Restate's journal (`journalReplay: false`), whose state the journal's
+SQLite-compatible SQL on a [volume](../volume/README.md), for a Restate object
+without Restate's journal (`journalReplay: false`), whose state the volume's
 namespace is. It runs Turso's Rust engine (`turso_core` 0.8.2) unmodified,
-over the journal's file `db`, and commits with the journal: the rows, and the
-journal's other files and records, durable together in one put.
+over the volume's file `db`, and commits with the volume: the rows, and the
+volume's other files and records, durable together in one put.
 
-SQL takes part in the journal as the participant `sql`. Its statements change a
+SQL takes part in the volume as the participant `sql`. Its statements change a
 private view; `flush` moves what SQL committed into the file `db`; the
-journal's `commit` makes it durable. With a page cache, a session that ends
+volume's `commit` makes it durable. With a page cache, a session that ends
 cleanly leaves its engine warm for the namespace's next one.
 
-An experiment, not a production backend: see the journal's
-[design](../journal/docs/DESIGN.md).
+An experiment, not a production backend: see the volume's
+[design](../volume/docs/DESIGN.md).
 
 ## Use
 
-Implement `journal::kv::KvStore` over your store, then:
+Implement `volume::kv::KvStore` over your store, then:
 
 ```rust,ignore
-use journal::{Journal, PageCache, PageCacheConfig, StorageOptions};
+use volume::{Volume, PageCache, PageCacheConfig, StorageOptions};
 use sql::Sql;
 
 // Once per process: a page cache in memory and on a local disk file.
@@ -30,18 +30,18 @@ let options = StorageOptions {
     cache: Some(cache.namespace("object-42")),
     ..StorageOptions::default()
 };
-let journal = Journal::open_with_options(store, options).await?;
-let mut db = Sql::open(&journal).await?;
+let volume = Volume::open_with_options(store, options).await?;
+let mut db = Sql::open(&volume).await?;
 db.transaction(async |db| {                    // one SQL transaction, or rolled back
     db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?;
     db.execute("INSERT INTO shipments VALUES(7)").await
 }).await?;
 db.flush().await?;                             // into the file `db`, still private
-journal.record("progress").set("shipped 7".into());
-journal.commit().await?; // the rows and the record, durable together
+volume.record("progress").set("shipped 7".into());
+volume.commit().await?; // the rows and the record, durable together
 ```
 
-Nothing is durable before `Journal::commit`, and the journal refuses to commit
+Nothing is durable before `Volume::commit`, and the volume refuses to commit
 while SQL holds changes not flushed. The host chooses when to commit: after
 each SQL transaction, as the Node.js addon and the Python extension do, or once
 per turn, as the durable functions runtime does. Bind values with
@@ -60,7 +60,7 @@ outstanding requests and open a new one; a failed commit's outcome is unknown.
 - [Python extension](../../python/sql/README.md): the same in Python, in
   `python/sql/`
 
-Both expose `binding::Session`: a session that commits the journal after each
+Both expose `binding::Session`: a session that commits the volume after each
 call that leaves no SQL transaction open, with the transaction calls behind
 their `transaction()`.
 
@@ -68,10 +68,10 @@ their `transaction()`.
 
 | Path                  | What                                                                                                               |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `src/`                | The crate: `Sql`, the adapter (`io`) from the engine's files to the journal, and the bindings' session (`binding`) |
-| `tests/`              | SQL, and the journal's storage, crash and cache campaigns under SQL workloads                                      |
+| `src/`                | The crate: `Sql`, the adapter (`io`) from the engine's files to the volume, and the bindings' session (`binding`) |
+| `tests/`              | SQL, and the volume's storage, crash and cache campaigns under SQL workloads                                      |
 | `examples/`           | `lookup`: a small database, opened and queried                                                                     |
-| [`benches/`](benches) | Benchmarks of SQL workloads on the journal, and their results                                                      |
+| [`benches/`](benches) | Benchmarks of SQL workloads on the volume, and their results                                                      |
 
 ## Build and test
 
@@ -84,7 +84,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo run --locked --features simulation --example lookup
 ```
 
-The `simulation` feature turns on the journal's in-memory KV store, fault
+The `simulation` feature turns on the volume's in-memory KV store, fault
 injection and latency simulator, used by most tests and all benchmarks.
 
 The randomized campaign (`tests/integration/campaign.rs`) runs a few seeds by

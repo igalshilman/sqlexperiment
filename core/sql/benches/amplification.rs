@@ -1,15 +1,15 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
-use journal::{
-    Journal, Result, StorageOptions,
-    simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
-};
 use sql::Sql;
 use std::sync::Arc;
+use volume::{
+    Result, StorageOptions, Volume,
+    simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
+};
 
-/// Flush and commit `db`'s journal, ending the session.
-async fn save(mut db: Sql) -> journal::Result<journal::CommitReport> {
+/// Flush and commit `db`'s volume, ending the session.
+async fn save(mut db: Sql) -> volume::Result<volume::CommitReport> {
     db.flush().await?;
-    db.journal().commit().await
+    db.volume().commit().await
 }
 
 #[derive(Clone, Copy)]
@@ -104,7 +104,7 @@ fn sum(s: &Stats) -> Traffic {
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let mut db = Sql::open(
-        &Journal::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?,
+        &Volume::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?,
     )
     .await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload TEXT)")
@@ -114,7 +114,7 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     save(db).await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
     let mut db =
-        Sql::open(&Journal::open_with_options(Arc::new(store.clone()), checkpoint_all()).await?)
+        Sql::open(&Volume::open_with_options(Arc::new(store.clone()), checkpoint_all()).await?)
             .await?;
     db.execute("CREATE TABLE other(x)").await?;
     save(db).await?;
@@ -173,7 +173,7 @@ async fn reads(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_delete: 0,
             db_pages: base.page_count(),
         };
-        let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&Volume::open(store.clone()).await?).await?;
         sample.emit("open", &store, 0, 0);
         for cache in ["cold", "warm"] {
             sample.cache = cache;
@@ -233,7 +233,7 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_delete: 0,
             db_pages: base.page_count(),
         };
-        let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&Volume::open(store.clone()).await?).await?;
         sample.emit("open", &store, 0, 0);
         let id = case.rows / 2;
         let ids: Vec<_> = if op == "ten_scattered" {
@@ -308,7 +308,7 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
         save(db).await?;
         sample.emit("save", &store, 0, 0);
         store.crash();
-        let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&Volume::open(store.clone()).await?).await?;
         let count = db.query("SELECT count(*) FROM t").await?[0][0]
             .as_int()
             .unwrap() as usize;
@@ -367,7 +367,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
         let mut db =
-            Sql::open(&Journal::open_with_options(store.clone(), checkpoint_all()).await?).await?;
+            Sql::open(&Volume::open_with_options(store.clone(), checkpoint_all()).await?).await?;
         db.execute(&format!(
             "UPDATE t SET payload=printf('%0{}d',0) WHERE id={}",
             case.payload,
@@ -400,7 +400,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_delete: 0,
             db_pages: base.page_count(),
         };
-        let mut db = Sql::open(&Journal::open(store.clone()).await?).await?;
+        let mut db = Sql::open(&Volume::open(store.clone()).await?).await?;
         sample.emit("recovery_open", &store.inner, 0, 0);
         let value = db
             .query(&format!("SELECT payload FROM t WHERE id={}", case.rows / 2))

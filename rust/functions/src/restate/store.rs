@@ -8,7 +8,6 @@
 //! `RawState::get`, FUTURE.md at the repository's root).
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use journal::kv::KvStore;
 use restate_sdk::context::RawState;
 use std::{
     collections::HashMap,
@@ -18,6 +17,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use volume::kv::KvStore;
 
 pub(crate) struct StateQueue {
     state: RawState,

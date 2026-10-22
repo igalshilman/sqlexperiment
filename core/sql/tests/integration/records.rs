@@ -2,11 +2,11 @@
 //! commit record (`Sql::seal`).
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
-use journal::{
+use std::sync::Arc;
+use volume::{
     NamespaceCache, Result, StorageOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
-use std::sync::Arc;
 
 fn options(cache: Option<NamespaceCache>) -> Setup {
     Setup(
@@ -39,19 +39,19 @@ async fn turn(db: &mut Db, i: usize) -> Result<()> {
         db.execute("BEGIN").await?;
         db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     }
-    db.journal()
+    db.volume()
         .record("effects")
         .set(Bytes::from(format!("turn {i}")));
-    db.journal().record("turn").set(value(i));
+    db.volume().record("turn").set(value(i));
     if i % 11 == 10 {
-        db.journal().record("state").set(Bytes::new());
+        db.volume().record("state").set(Bytes::new());
     } else if i.is_multiple_of(3) {
-        db.journal().record("state").set(value(i));
+        db.volume().record("state").set(value(i));
     }
     // With Durability::Commit the flush sealed, and this commit has
     // nothing left to write.
     db.flush().await?;
-    db.journal().commit().await.map(drop)
+    db.volume().commit().await.map(drop)
 }
 
 /// The record `state` after turns `0..turns`.
@@ -80,7 +80,7 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
             for i in 0..60 {
                 turn(&mut db, i).await?;
                 assert_eq!(
-                    db.journal().record("turn").get(),
+                    db.volume().record("turn").get(),
                     expected(i + 1),
                     "turn {i}"
                 );
@@ -90,12 +90,12 @@ fn a_turn_commits_its_records_with_its_sql() -> Result<()> {
                     drop(db);
                     let mut other = Db::open(store.clone(), options(None)).await?;
                     assert_eq!(
-                        other.journal().record("turn").get(),
+                        other.volume().record("turn").get(),
                         expected(i + 1),
                         "turn {i}, reopened"
                     );
                     assert_eq!(other.effects(), format!("turn {i}").as_bytes());
-                    assert_eq!(other.journal().record("state").get(), state(i + 1));
+                    assert_eq!(other.volume().record("state").get(), state(i + 1));
                     assert_eq!(rows(&mut other).await?, (i / 2 + 1) as i64);
                     drop(other);
                     db = Db::open(store.clone(), options(cache.clone())).await?;
@@ -133,11 +133,11 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
             if i % 3 == 0 {
                 db.execute("BEGIN").await?;
             }
-            db.journal()
+            db.volume()
                 .record("turn")
                 .set(Bytes::from(vec![i as u8; 64]));
             db.flush().await?;
-            db.journal().commit().await?;
+            db.volume().commit().await?;
         }
         assert_eq!(db.version(), version + 100);
         // Without SQL nothing checkpointed: no page keys beyond the first
@@ -146,7 +146,7 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
         assert_eq!(pages(&store), 0);
         drop(db);
         let db = Db::open(store.clone(), options(None)).await?;
-        assert_eq!(db.journal().record("turn").get(), vec![99u8; 64]);
+        assert_eq!(db.volume().record("turn").get(), vec![99u8; 64]);
         Ok(())
     })
 }
@@ -194,7 +194,7 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
     let mut db = Db::open(store.clone(), options(cache.clone())).await?;
     db.execute("CREATE TABLE t(n INTEGER)").await?;
     db.flush().await?;
-    db.journal().commit().await?;
+    db.volume().commit().await?;
     let _signal = store.arm(Failpoint {
         operation: Operation::Sync,
         key_prefix: String::new(),
@@ -226,11 +226,11 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
         // only to read, as the cache follows one history, and the forks are
         // each another.
         let db = Db::open(store.clone(), options(cache.clone())).await?;
-        let turns = match db.journal().record("turn").get() == expected(acknowledged) {
+        let turns = match db.volume().record("turn").get() == expected(acknowledged) {
             true => acknowledged,
             false => {
                 assert_eq!(
-                    db.journal().record("turn").get(),
+                    db.volume().record("turn").get(),
                     expected(acknowledged + 1),
                     "{case}"
                 );
@@ -246,14 +246,14 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
                 "{case}"
             );
         }
-        assert_eq!(db.journal().record("state").get(), state(turns), "{case}");
+        assert_eq!(db.volume().record("state").get(), state(turns), "{case}");
         assert_eq!(rows(&mut db).await?, turns.div_ceil(2) as i64, "{case}");
         // The namespace takes turns again.
         turn(&mut db, turns).await?;
         drop(db);
         let db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(
-            db.journal().record("turn").get(),
+            db.volume().record("turn").get(),
             expected(turns + 1),
             "{case}"
         );
@@ -262,26 +262,26 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
     Ok(Some(writes + 1))
 }
 
-/// A scoped journal names its records and files under its prefix, and
+/// A scoped volume names its records and files under its prefix, and
 /// commits with the session.
 #[test]
-fn a_scoped_journal_is_part_of_the_session_s() -> Result<()> {
+fn a_scoped_volume_is_part_of_the_session_s() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let mut db = Db::open(store.clone(), options(None)).await?;
-        let fs = db.journal().scoped("fs/");
+        let fs = db.volume().scoped("fs/");
         fs.record("manifest").set(Bytes::from_static(b"m"));
         fs.scoped("blobs/")
             .file("a")?
             .write(0, Some(vec![7; 4096].into()))?;
         db.flush().await?;
-        db.journal().commit().await?;
+        db.volume().commit().await?;
         drop(db);
         let db = Db::open(store, options(None)).await?;
-        let journal = db.journal();
-        assert_eq!(journal.record("fs/manifest").get(), &b"m"[..]);
-        assert_eq!(journal.scoped("fs/").record("manifest").get(), &b"m"[..]);
-        let file = journal.file("fs/blobs/a")?;
+        let volume = db.volume();
+        assert_eq!(volume.record("fs/manifest").get(), &b"m"[..]);
+        assert_eq!(volume.scoped("fs/").record("manifest").get(), &b"m"[..]);
+        let file = volume.file("fs/blobs/a")?;
         assert_eq!(file.len(), 4096);
         assert_eq!(file.read(0).await?.unwrap()[0], 7);
         Ok(())

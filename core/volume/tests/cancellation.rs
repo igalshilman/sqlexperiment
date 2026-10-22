@@ -1,18 +1,18 @@
 //! Futures dropped after every number of polls: a commit cancelled midway
-//! ends its journal and lands wholly or not at all, and the journal reopens
+//! ends its volume and lands wholly or not at all, and the volume reopens
 //! and goes on; one never polled did nothing; a cancelled open leaves the
 //! owner's cache usable.
 #![cfg(feature = "simulation")]
 mod support;
 
 use futures::task::noop_waker_ref;
-use journal::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 use std::{
     pin::pin,
     sync::Arc,
     task::{Context, Poll},
 };
 use support::*;
+use volume::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 
 /// Every commit checkpoints, and large transactions go to stored values.
 fn options(cache: Option<NamespaceCache>) -> StorageOptions {
@@ -45,7 +45,7 @@ async fn prepared() -> Result<(MemoryKv, Model)> {
         for op in &ops {
             session.apply(op)?;
         }
-        session.journal.commit().await?;
+        session.volume.commit().await?;
         model = model.applied(&ops);
     }
     Ok((memory, model))
@@ -71,8 +71,8 @@ fn a_commit_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> 
                 for op in &ops {
                     session.apply(op)?;
                 }
-                let journal = &session.journal;
-                match poll_times(journal.commit(), polls) {
+                let volume = &session.volume;
+                match poll_times(volume.commit(), polls) {
                     Some(outcome) => {
                         outcome?;
                         assert!(polls > 2, "a commit takes several polls");
@@ -80,17 +80,17 @@ fn a_commit_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> 
                     }
                     // Never polled: it did nothing, and the changes wait.
                     None if polls == 0 => {
-                        assert!(journal.is_usable());
+                        assert!(volume.is_usable());
                         assert_eq!(memory.unsynced(), vec![]);
-                        journal.commit().await?;
+                        volume.commit().await?;
                         assert_eq!(new.differs(&session).await?, None);
                         continue;
                     }
                     None => {}
                 }
                 let case = format!("cached {cached}, crash {crash}, dropped after {polls} polls");
-                assert!(!journal.is_usable(), "{case}");
-                let error = journal.commit().await.unwrap_err().to_string();
+                assert!(!volume.is_usable(), "{case}");
+                let error = volume.commit().await.unwrap_err().to_string();
                 assert!(error.contains("ended"), "{case}: {error}");
                 drop(session);
                 if crash {
@@ -103,7 +103,7 @@ fn a_commit_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> 
                 // It goes on, durably.
                 let after = Op::Set("state", "after".into());
                 reopened.apply(&after)?;
-                reopened.journal.commit().await?;
+                reopened.volume.commit().await?;
                 drop(reopened);
                 memory.crash();
                 let reopened = Session::open(store.clone(), options(None)).await?;
@@ -148,7 +148,7 @@ fn an_open_cancelled_at_any_poll_leaves_the_cache_usable() -> Result<()> {
             assert_eq!(model.differs(&session).await?, None, "after {polls} polls");
             let op = Op::random(&mut rng);
             session.apply(&op)?;
-            session.journal.commit().await?;
+            session.volume.commit().await?;
             model.apply(&op);
         }
         Ok(())

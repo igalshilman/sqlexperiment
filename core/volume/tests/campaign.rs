@@ -3,22 +3,18 @@
 //! checkpoints, garbage deletion and the working-set hint all happen, and
 //! random faults, cancellations, crashes and reopens by owners with and
 //! without a cache, every request checked by the protocol monitor. After
-//! each reopen the journal reads as the model: every acknowledged commit,
+//! each reopen the volume reads as the model: every acknowledged commit,
 //! and an unacknowledged one wholly or not at all.
 //!
 //! ```sh
 //! cargo test --features simulation --test campaign                  # a few seeds
-//! JOURNAL_SEEDS=1000 cargo test --release --features simulation --test campaign
-//! JOURNAL_SEED=17 cargo test --features simulation --test campaign  # one, as a failure prints it
+//! VOLUME_SEEDS=1000 cargo test --release --features simulation --test campaign
+//! VOLUME_SEED=17 cargo test --features simulation --test campaign  # one, as a failure prints it
 //! ```
 #![cfg(feature = "simulation")]
 mod support;
 
 use futures::task::noop_waker_ref;
-use journal::{
-    NamespaceCache, PageCache, PageCacheConfig, PageCompression, Result, StorageOptions,
-    kv::KvStore, simulation::*,
-};
 use std::{
     sync::{
         Arc, OnceLock,
@@ -27,22 +23,26 @@ use std::{
     task::{Context, Poll},
 };
 use support::*;
+use volume::{
+    NamespaceCache, PageCache, PageCacheConfig, PageCompression, Result, StorageOptions,
+    kv::KvStore, simulation::*,
+};
 
-/// Seeds `cargo test` runs without `JOURNAL_SEEDS`.
+/// Seeds `cargo test` runs without `VOLUME_SEEDS`.
 const SEEDS: u64 = 12;
 /// Commits per seed.
 const STEPS: usize = 40;
 
 type Store = MonitorKv<FaultKv>;
 
-/// The seeds to run: `JOURNAL_SEED`, or the first `JOURNAL_SEEDS`.
+/// The seeds to run: `VOLUME_SEED`, or the first `VOLUME_SEEDS`.
 fn seeds() -> Vec<u64> {
     let var = |name| {
         std::env::var(name)
             .ok()
             .map(|v: String| v.parse().expect(name))
     };
-    match (var("JOURNAL_SEED"), var("JOURNAL_SEEDS")) {
+    match (var("VOLUME_SEED"), var("VOLUME_SEEDS")) {
         (Some(seed), _) => vec![seed],
         (None, count) => (0..count.unwrap_or(SEEDS)).collect(),
     }
@@ -54,7 +54,7 @@ fn random_faults_never_lose_an_acknowledged_commit_or_split_one() {
     for seed in seeds() {
         let run = std::panic::catch_unwind(|| futures::executor::block_on(run(seed)));
         let rerun = format!(
-            "JOURNAL_SEED={seed} cargo test --features simulation --test campaign -- --nocapture"
+            "VOLUME_SEED={seed} cargo test --features simulation --test campaign -- --nocapture"
         );
         match run {
             Ok(Ok(run)) => totals.add(&run),
@@ -134,7 +134,7 @@ fn new_owner(rng: &mut Rng) -> NamespaceCache {
     }
 }
 
-/// One seed's world: the store, the owners, and what the journal may hold.
+/// One seed's world: the store, the owners, and what the volume may hold.
 struct World {
     rng: Rng,
     store: Arc<Store>,
@@ -164,7 +164,7 @@ impl World {
             ]),
             cache,
             checkpoint_after: rng.below(4) as u32,
-            checkpoint_log_bytes: rng.pick(&[4 << 10, 32 << 10, journal::CHECKPOINT_LOG_BYTES]),
+            checkpoint_log_bytes: rng.pick(&[4 << 10, 32 << 10, volume::CHECKPOINT_LOG_BYTES]),
             inline_log_bytes: rng.pick(&[0, 200, 1024, 8192]),
             prefetch_pages: rng.pick(&[0, 4, 16]),
             hint_pages: rng.pick(&[0, 8, 32]),
@@ -310,15 +310,15 @@ impl World {
         }
         if self.rng.percent(5) {
             trace(|| "discard".into());
-            session.journal.discard();
+            session.volume.discard();
             pending = self.model.clone();
         }
         let outcome = match self.rng.below(10) {
-            0..=5 => Some(session.journal.commit().await),
+            0..=5 => Some(session.volume.commit().await),
             6..=7 => {
                 let failpoint = self.failpoint();
                 let _signal = self.store.arm(failpoint);
-                let outcome = session.journal.commit().await;
+                let outcome = session.volume.commit().await;
                 self.store.disarm();
                 Some(outcome)
             }
@@ -327,10 +327,10 @@ impl World {
         let acknowledged = match outcome {
             // Never polled: nothing happened, and the changes wait.
             None => {
-                if !session.journal.is_usable() {
-                    return Err("a commit never polled ended the journal".into());
+                if !session.volume.is_usable() {
+                    return Err("a commit never polled ended the volume".into());
                 }
-                Some(text(session.journal.commit().await)?)
+                Some(text(session.volume.commit().await)?)
             }
             Some(Ok(report)) => Some(report),
             Some(Err(_)) => None,
@@ -364,9 +364,9 @@ impl World {
             let candidates = self.since_sync.clone();
             return self.reopen(&candidates).await;
         }
-        // The outcome is unknown: the journal ended.
-        if session.journal.is_usable() || session.journal.commit().await.is_ok() {
-            return Err("a failed commit left the journal usable".into());
+        // The outcome is unknown: the volume ended.
+        if session.volume.is_usable() || session.volume.commit().await.is_ok() {
+            return Err("a failed commit left the volume usable".into());
         }
         drop(session);
         if self.rng.percent(50) {
@@ -408,9 +408,9 @@ impl World {
 
     /// Poll a commit a random number of times, then drop it: `None` if it
     /// was never polled.
-    fn cancelled(&mut self, session: &Session) -> Option<Result<journal::CommitReport>> {
+    fn cancelled(&mut self, session: &Session) -> Option<Result<volume::CommitReport>> {
         let polls = self.rng.below(12);
-        let mut commit = Box::pin(session.journal.commit());
+        let mut commit = Box::pin(session.volume.commit());
         let mut cx = Context::from_waker(noop_waker_ref());
         for _ in 0..polls {
             if let Poll::Ready(outcome) = commit.as_mut().poll(&mut cx) {
@@ -431,10 +431,10 @@ impl World {
     }
 }
 
-/// With `JOURNAL_TRACE` set, print what a run does.
+/// With `VOLUME_TRACE` set, print what a run does.
 fn trace(line: impl FnOnce() -> String) {
     static ON: OnceLock<bool> = OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("JOURNAL_TRACE").is_some()) {
+    if *ON.get_or_init(|| std::env::var_os("VOLUME_TRACE").is_some()) {
         eprintln!("{}", line());
     }
 }

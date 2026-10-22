@@ -14,7 +14,7 @@
 //!   the program sees it.
 //! - **State kept by the turn's transaction**: an attached extension is a
 //!   [`Participant`]: it keeps its state in its part of the scope's
-//!   [`Journal`] (records and files named under `<name>/`), and its large
+//!   [`Volume`] (records and files named under `<name>/`), and its large
 //!   state in the scope's blobs, which its records name. The next attempt,
 //!   on any machine, reads them back from [`Extension::attach`].
 //!
@@ -23,7 +23,7 @@
 use crate::{
     GuestError, Operation, Outcome,
     db::Db,
-    transaction::{Blobs, Journal, Participant, ScopeBlobs},
+    transaction::{Blobs, Participant, ScopeBlobs, Volume},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -71,14 +71,14 @@ impl Tables<'_> {
 #[async_trait]
 pub trait Extension: Send + Sync + 'static {
     /// Its part of a run in the scope `blobs` are of: as the scope's last
-    /// seal left its `journal` (empty if none did), or new.
-    async fn attach(&self, blobs: ScopeBlobs, journal: Journal) -> Result<Box<dyn Attached>>;
+    /// seal left its `volume` (empty if none did), or new.
+    async fn attach(&self, blobs: ScopeBlobs, volume: Volume) -> Result<Box<dyn Attached>>;
 }
 
 /// An extension's part of one attempt at a run: a participant in each of
 /// its turns' transactions.
 ///
-/// Its records and files are in the journal it was attached with; an
+/// Its records and files are in the volume it was attached with; an
 /// [`Sql`](sql::Sql) it opens there flushes in its `prepare`, as the
 /// run's own tables do.
 #[async_trait]
@@ -176,12 +176,12 @@ pub(crate) struct Attachments(BTreeMap<String, Box<dyn Attached>>);
 
 impl Attachments {
     /// Each of `extensions`, in the scope `db` is of, with its part of the
-    /// journal.
+    /// volume.
     pub async fn attach(extensions: &Extensions, blobs: &ScopeBlobs, db: &Db) -> Result<Self> {
         let mut attached = BTreeMap::new();
         for (name, extension) in &extensions.offered {
-            let journal = db.journal().scoped(&format!("{name}/"));
-            let part = extension.attach(blobs.clone(), journal).await?;
+            let volume = db.volume().scoped(&format!("{name}/"));
+            let part = extension.attach(blobs.clone(), volume).await?;
             attached.insert(name.clone(), part);
         }
         Ok(Self(attached))

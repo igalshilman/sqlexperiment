@@ -3,13 +3,13 @@
 //! reader beside its owner.
 use crate::fault::{Ended, every_failure, failpoint, probe, under};
 use bytes::Bytes;
-use journal::{
+use sql::{Sql, binding::Session};
+use std::sync::Arc;
+use volume::{
     NamespaceCache, Result, StorageOptions,
     kv::KvStore,
     simulation::{Effect, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
-use sql::{Sql, binding::Session};
-use std::sync::Arc;
 
 /// Pages read from the store as queries need them; the log checkpointed often.
 fn options(cache: Option<NamespaceCache>) -> StorageOptions {
@@ -302,8 +302,8 @@ async fn crash_at_sync(cached: bool, nth: usize) -> Result<Option<usize>> {
 
 /// The result of `sql` on a store, through a plain session.
 async fn expected(store: MemoryKv, sql: &str) -> Result<String> {
-    let journal = journal::Journal::open_with_options(Arc::new(store), options(None)).await?;
-    let mut session = Sql::open(&journal).await?;
+    let volume = volume::Volume::open_with_options(Arc::new(store), options(None)).await?;
+    let mut session = Sql::open(&volume).await?;
     Ok(format!("{:?}", session.query(sql).await?))
 }
 

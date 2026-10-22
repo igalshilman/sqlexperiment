@@ -6,12 +6,11 @@
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
 //! is stored. The object's state keeps writes in issue order, so a crash
-//! loses only a suffix of them (see [`journal::kv`]): a statement that
+//! loses only a suffix of them (see [`volume::kv`]): a statement that
 //! commits queues its writes, then resolves at one `sync`. The session itself,
 //! its commits and the process-wide page cache, is [`sql::binding::Session`].
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use journal::kv::KvStore;
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -20,6 +19,7 @@ use sql::binding::Session;
 use sql::{Numeric, Value};
 use std::io;
 use std::sync::Arc;
+use volume::kv::KvStore;
 
 const GET: u32 = 0;
 const SET: u32 = 1;

@@ -38,10 +38,10 @@ transaction that changed it. Nothing may follow. A missing record means
 version 0, epoch 0 and no files.
 
 The files are records and paged files. The SQL database is the paged file
-`db`; others are the host's (`Journal::file`). A file is never deleted, only
+`db`; others are the host's (`Volume::file`). A file is never deleted, only
 emptied, and its id is never reused.
 
-A paged file with a base (`Journal::file_with_base`) is over a golden image
+A paged file with a base (`Volume::file_with_base`) is over a golden image
 the host holds, named by the base's id: a hole, or a page absent from the
 store, reads as the base's page (zeros past its end); a page equal to its
 base's page is written as a hole; and a page's first image in the log is
@@ -56,13 +56,13 @@ Pages they change are authoritative from the log; any other page of a file is
 read at `page/<file>/<n>`, and is a hole (zeros) if absent. A commit without
 page changes adds none.
 
-The records are the host's (`Journal::record`): named whole values, each
+The records are the host's (`Volume::record`): named whole values, each
 replaced whole by a commit that sets it. One of at most the inline budget
 (1 KiB by default) is inline; a larger one is a stored value of its own,
 written by the commit that sets it. Checkpoints keep them. A record never
 set reads as empty.
 
-A commit (`Journal::commit`) sets records and writes paged files with its
+A commit (`Volume::commit`) sets records and writes paged files with its
 SQL, in the same put. A stored value holds a large transaction's segment, a
 large record, or the record's inline log sealed into one (a seal).
 

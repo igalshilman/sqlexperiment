@@ -12,7 +12,7 @@ description = "Node.js bindings: SQL over a key/value store the host implements 
 crate-type = ["cdylib"]
 
 [dependencies]
-journal = { path = "../../../core/journal" }
+volume = { path = "../../../core/volume" }
 sql = { path = "../../../core/sql" }
 napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
 napi-derive = "3"

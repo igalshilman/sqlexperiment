@@ -3,9 +3,9 @@
 #![cfg(feature = "simulation")]
 mod support;
 
-use journal::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
+use volume::{NamespaceCache, Result, StorageOptions, kv::KvStore, simulation::*};
 
 /// Options that checkpoint after every commit.
 fn options(cache: Option<&NamespaceCache>) -> StorageOptions {
@@ -39,7 +39,7 @@ async fn commit(
     for op in ops {
         session.apply(op)?;
     }
-    session.journal.commit().await?;
+    session.volume.commit().await?;
     *model = model.applied(ops);
     Ok(())
 }
@@ -69,7 +69,7 @@ fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
         let session = Session::open(store.clone(), options(Some(&a))).await?;
         session.apply(&Op::Write("db", 0, Some(page(2))))?;
         let _gate = fault.arm(failing_sync());
-        assert!(session.journal.commit().await.is_err());
+        assert!(session.volume.commit().await.is_err());
         fault.disarm();
         drop(session);
         // A reopens on them, and reads (and caches) the checkpointed page.
@@ -145,9 +145,9 @@ fn a_reader_beside_a_checkpointing_owner_knows_when_it_is_stale() -> Result<()> 
                 }
             }
             for name in RECORDS {
-                assert_eq!(reader.journal.record(name).get(), opened.record(name));
+                assert_eq!(reader.volume.record(name).get(), opened.record(name));
             }
-            let is_current = reader.journal.is_current().await?;
+            let is_current = reader.volume.is_current().await?;
             assert!(
                 !differed || !is_current,
                 "round {round}: read a replaced page"
@@ -160,7 +160,7 @@ fn a_reader_beside_a_checkpointing_owner_knows_when_it_is_stale() -> Result<()> 
             // Its changes stay its own.
             let keys = memory.keys();
             reader.apply(&Op::Set("progress", "reader".into()))?;
-            assert!(reader.journal.commit().await.is_err());
+            assert!(reader.volume.commit().await.is_err());
             assert_eq!(memory.keys(), keys);
         }
         assert!(
@@ -197,18 +197,18 @@ fn an_open_session_holds_back_checkpoints_and_reads_its_state() -> Result<()> {
             for op in &ops {
                 writer.apply(op)?;
             }
-            let report = writer.journal.commit().await?;
+            let report = writer.volume.commit().await?;
             assert_eq!(report.checkpointed_pages, 0, "waits for the open session");
             model = model.applied(&ops);
             assert_eq!(opened.differs(&open).await?, None);
         }
         open.apply(&Op::Set("progress", "late".into()))?;
-        let error = open.journal.commit().await.unwrap_err().to_string();
+        let error = open.volume.commit().await.unwrap_err().to_string();
         assert!(error.contains("another session committed"), "{error}");
         drop(open);
         writer.apply(&Op::Write("db", 0, Some(page(7))))?;
         model.apply(&Op::Write("db", 0, Some(page(7))));
-        assert!(writer.journal.commit().await?.checkpointed_pages > 0);
+        assert!(writer.volume.commit().await?.checkpointed_pages > 0);
         drop(writer);
         let session = Session::open(store, options(Some(&cache))).await?;
         assert_eq!(model.differs(&session).await?, None);
