@@ -8,11 +8,11 @@ use anyhow::Result;
 use common::*;
 use functions::{Language, Run, Scope, View};
 use serde_json::{Value, json};
-use std::sync::Arc;
-use volume::{
+use state::{
     NamespaceCache,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, fresh_namespace},
 };
+use std::sync::Arc;
 
 mod common;
 

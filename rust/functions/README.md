@@ -59,9 +59,9 @@ one byte array. A run is one call of a handler, without journal
 replay, looping over turns on one live VM:
 
 ```
-deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wait on Restate ─┐
-       ▲                                                                           │
-       └───────────────────────────────────────────────────────────────────────────┘
+deliver one result ─▶ run until the JavaScript waits ─▶ flush ─▶ wait on Restate ─┐
+       ▲                                                                          │
+       └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Snapshot only at a wait**, when no frame is on the stack: memory is the
@@ -77,12 +77,13 @@ deliver one result ─▶ run until the JavaScript waits ─▶ commit ─▶ wa
   golden's is a hole, and a page is compressed against golden's the first
   time, then against its previous image. Dead bytes (the stack between
   calls, freed heap memory) are zeroed first, so garbage is not saved.
-- **One commit**: a turn is one put of the scope's
-  [volume](../../core/volume) record: its memory pages, its SQL
-  (`ctx.kv` is a table too) and the run's state with its pending requests.
-  The volume syncs the pages it names before it puts the record, so a
-  crash never leaves a record naming pages that are not stored.
-- **No replay**: a retry restores the VM from the last commit and waits
+- **One flush**: a turn is one flush of the scope's
+  [state](../../core/state), one put of its commit record: its memory pages,
+  its SQL (`ctx.kv` is a table too) and the run's progress with its pending
+  requests, written into one WAL. The state stores the values the record
+  names before it puts the record, so a crash never leaves a record naming
+  values that are not stored.
+- **No replay**: a retry restores the VM from the last flush and waits
   again on its requests under the same idempotency keys, attaching to calls
   already made.
 

@@ -49,7 +49,7 @@ Assumptions and invariants:
 3. Writes are kept in issue order: a sync makes every write before it
    durable, and a crash keeps a prefix of those not yet synced. Reads within
    an attempt see its own writes.
-4. A turn happened once its commit, one put of the scope's database record,
+4. A turn happened once its commit, one put of the scope's commit record,
    is stored, with its pages and its KV writes (§7). Effects are dispatched
    only after the commit that issued them, in issue order, so a crash that
    loses the commit loses them too.
@@ -226,7 +226,7 @@ in order, in one turn. A run takes its `Scope`: the store its database lives
 in, and, for a process that keeps owning it, an owner cache. Every store call
 is awaited outside any Wasm call, so a remote store may suspend in each. An
 error leaves the `Run` unusable: the attempt ends, and the next one starts
-from the store. Tests run over the `volume` crate's `MemoryKv`, and its `FaultKv`
+from the store. Tests run over the `state` crate's `MemoryKv`, and its `FaultKv`
 fails any one write, as a crash may.
 
 ## 3. QuickJS/Wasm snapshot ABI
@@ -519,7 +519,7 @@ payload. Reset the tracker on restore before rebinding pointers/limits, and
 after each commit is stored. A failed commit ends the attempt with its VM.
 
 Since 21 October 2026 the runtime keeps no encoding of its own: a turn writes
-its changed pages into the memory file (§5.1), and the volume compresses each
+its changed pages into the memory file (§5.1), and the state compresses each
 against what it replaces (its previous image, or golden's), whole pages with
 Zstd. The block encoding below, and its measurements, are the history that
 design came from.
@@ -616,8 +616,8 @@ Zeroing free chunks (§5.6) already makes what it allocates and frees free.
 
 ### 5.1. Record identities and layouts
 
-A scope's store holds one volume, a `volume` namespace
-([its format](../../../core/volume/docs/FORMAT.md)): the commit record at
+A scope's store holds one state, a `state` namespace
+([its format](../../../core/state/docs/FORMAT.md)): the commit record at
 `v15/commit`, the values it outgrew at `v15/log/<n>`, and pages in place at
 `v15/page/<file>/<n>`. Its files:
 
@@ -627,7 +627,7 @@ A scope's store holds one volume, a `volume` namespace
 | `memory`          | Record                  | Its memory: JSON, below                                                 |
 | `memory/<golden>` | Paged file over golden  | The pages of the run's memory that differ from its program's golden one |
 | `db`              | Paged file              | SQL: the scope's KV, a table `kv(key TEXT PRIMARY KEY, value TEXT)`     |
-| `<extension>/…`   | Records and paged files | Each extension's part of the volume (`fs/manifest`, say)               |
+| `<extension>/…`   | Records and paged files | Each extension's part of the state (`fs/manifest`, say)                |
 
 Programs and their golden images are not stored: the process supplies them
 (§5.5). The records, in camelCase JSON:
@@ -636,7 +636,7 @@ Programs and their golden images are not stored: the process supplies them
 VmMeta = {stack: i32, runtime: i32, context: i32}
 Run = {
     run: run_id, handler: name, program: name, version: u64, runtime: u64,
-    turns: count, state: State
+    turns: count, state: Progress
 }
 Memory = {
     meta: VmMeta, memoryLen: byte_count,
@@ -646,9 +646,9 @@ Memory = {
 ```
 
 The image is golden (zeros beyond its length) with the pages `pages` lists
-read from `file`. The file is over golden (a `volume` base): a page the run
+read from `file`. The file is over golden (a `state` base): a page the run
 never changed, or changed back, is a hole that reads as golden's, and the
-volume compresses each page against what it replaces (golden's, the first
+state compresses each page against what it replaces (golden's, the first
 time it is logged, and in place), so a page costs about what changed in it.
 `pages` lists the pages that differ from golden, run-length encoded,
 because the store cannot list a file's pages: a restore reads exactly
@@ -659,14 +659,14 @@ restores only on the program version and runtime it started on: a changed
 program needs a new name while the old one's runs finish. There is no heap
 migration.
 
-The returned View holds the run, program, turns, State, memory length, live
+The returned View holds the run, program, turns, Progress, memory length, live
 pages, and what the last turn wrote: changed and examined pages, the bytes
 its seal logged (memory and tables) and the commit record's.
 
 ### 5.2. One file per golden image
 
 The memory file is named after its golden image, and opens only with it
-(the volume refuses another base): its log since the last checkpoint, and its
+(the state refuses another base): its log since the last checkpoint, and its
 pages in place, decode only against that image. A new run in the scope
 writes holes for the previous run's pages in its first seal, in the
 previous run's file (without its golden image: a hole needs none), then its
@@ -696,11 +696,12 @@ capture(G, P, VM):
         P.page(i) = current
     return changed
 
-prepare(changed):                                 // the memory's part of the seal
+prepare(changed, wal):                            // the memory's part of the seal,
+                                                  // written into the turn's WAL
     if the scope's previous run left pages: write each as a hole, in its file
     if the run settled: write every page of P that differs from G as a hole
                         pages = []                // no image is kept
-    else: write P.page(i) for each i in changed   // the volume makes one equal
+    else: write P.page(i) for each i in changed   // the state makes one equal
                                                   // to G's a hole
           pages = the pages of P that differ from G
     set the record "memory"
@@ -863,32 +864,33 @@ Resume can coexist. Once the root settles, the run is final.
 
 ## 7. Storage: one commit per turn
 
-A turn is one commit of the scope's database (`Volume::commit`), one put of
-its record:
+A turn is one flush of the scope's state (`Wal::flush`), one put of its
+commit record. Every participant writes into one WAL:
 
 1. its KV writes, the SQL transaction its first KV request began;
 2. its memory's pages that changed, into the file over golden (§5.3);
-3. the run's state, as the record `run`, with the pending requests; the
+3. the run's progress, as the record `run`, with the pending requests; the
    memory's, as the record `memory`; and what each extension changed in
-   its part of the volume (its records and files under `<name>/`).
+   its part of the state (its records and files under `<name>/`).
 
 Writes land in any order (§1), so nothing may be its own put: a turn's pages
-and a commit that names them could not be ordered. The record carries the
-turn's log segments (SQL and memory pages alike) inline, or names them as a
-stored value it waits for first (a transaction larger than the inline
+and a commit record that names them could not be ordered. The record carries
+the turn's log segments (SQL and memory pages alike) inline, or names them
+as a stored value it waits for first (a transaction larger than the inline
 budget, 1 KiB here). Past the budget, the record's earlier inline parts are
-sealed into one stored value, which the next commit names. A checkpoint
+sealed into one stored value, which the next flush names. A checkpoint
 writes every file's logged pages in place, the memory's with the SQL's. A
 crash before the record is stored loses the whole turn, which the next
-attempt runs again from the previous commit: the requests it issued were
-never dispatched (§1). Nothing is applied after a commit.
+attempt runs again from the previous flush: the requests it issued were
+never dispatched (§1). Nothing is applied after a flush; a WAL that is not
+flushed is dropped, and its writes with it.
 
 **SQL again.** Until 18 October 2026 the scope's records lived in SQL tables
-through an earlier version of the volume; it cost a turn about 2 ms of CPU and wrote
+through an earlier version of the state crate; it cost a turn about 2 ms of CPU and wrote
 every log segment twice, so it gave way to one commit record of its own
 (with `batch/<n>` and `kv/<key>` keys) that relied on ordered writes. With
-Restate's journal off, writes are not ordered, and the volume's one record per
-commit, with the host's records in it, is that commit. Measured on
+Restate's journal off, writes are not ordered, and the state's one record per
+flush, with the host's records in it, is that record. Measured on
 18 October 2026 (`cargo bench --bench checkpoints`, medians), against that
 record of its own:
 
@@ -930,8 +932,8 @@ A crash before T1's record is stored leaves nothing: the next attempt starts
 the run again, and R was never dispatched. After it, count=42 is stored with
 it. After dispatch, the next attempt waits on R again under its stable ID:
 Restate attaches to the call already made. After T2's record, a repeated
-delivery is a no-op and another attempt returns the outcome. Pages a crashed
-commit wrote before its record are garbage the volume deletes.
+delivery is a no-op and another attempt returns the outcome. Log values a
+crashed flush wrote before its record are garbage the state deletes.
 
 ### 8.2. Fan-out
 
@@ -988,7 +990,7 @@ An implementation can be built and accepted in this order:
    pending promises and queued jobs before optimizing capture.
 2. Implement the JSON bridge and the turn over a store in memory. Add stable
    IDs, duplicate handling, and an unusable run after an error.
-3. Add the memory's pages to the volume (a file over golden), and growth.
+3. Add the memory's pages to the state (a file over golden), and growth.
 4. Add write barriers and host marking, retaining a full-scan control and a
    verification oracle: every actually changed page must have been marked.
 5. Add the commit protocol, then crash tests at every write.
@@ -1039,7 +1041,7 @@ before the chain of batches, the run of 20 waits wrote 137 KiB, and ~70
 KiB before compressing pages against their previous contents (§4) and
 zeroing dead bytes; the throughput rows did not move with those (an A/B of
 both binaries on one server). Most of what is left is Restate's: a commit
-record and the volume per turn. The Rust
+record and its sync per turn. The Rust
 SDK's server now sets `TCP_NODELAY`, which saved ~40 ms per round trip. One
 synchronous JavaScript job is capped by time (10 minutes by default), and the
 interpreter runs compute-bound code ~10x slower than V8.

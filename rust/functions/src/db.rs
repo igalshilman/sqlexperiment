@@ -1,5 +1,5 @@
 //! The scope's database, as a turn sees it: one SQL transaction, begun at the
-//! turn's first statement and committed with the turn (its state and pages,
+//! turn's first statement and committed with the turn (its records and pages,
 //! one put). `ctx.kv` is a table in it, and `ctx.db.sql` runs in it.
 //!
 //! The guest reaches it synchronously, through the VM's host call (see
@@ -7,18 +7,21 @@
 //! never ends a turn: if it reads pages from Restate, the guest waits on its
 //! fiber. An SQL error (syntax, a constraint) undoes the statement and throws
 //! in the guest; a storage error fails the attempt, which runs again from the
-//! last commit.
+//! last seal.
 //!
 //! `ctx.db.transaction(fn)` is a savepoint, released when `fn` returns and
 //! rolled back when it throws. `fn` is synchronous, so a transaction never
-//! spans a commit. Statements that end or nest transactions themselves
+//! spans a seal. Statements that end or nest transactions themselves
 //! (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...) are refused: they would commit the
 //! SQL without the turn.
-use crate::{model::MAX_INPUT, store::storage_error, transaction::Participant};
+use crate::{
+    model::MAX_INPUT,
+    store::storage_error,
+    transaction::{Participant, State, Wal},
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Number, Value, json};
 use sql::{Sql, Value as SqlValue};
-use volume::Volume;
 
 /// The scope's KV, a table of its database: values are JSON.
 const KV_TABLE: &str = "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL)";
@@ -47,9 +50,9 @@ impl Db {
         }
     }
 
-    /// The scope's volume: the records and files sealed with its SQL.
-    pub fn volume(&self) -> Volume {
-        self.sql.volume()
+    /// The scope's state: the records and files sealed with its SQL.
+    pub fn state(&self) -> State {
+        self.sql.state()
     }
 
     /// The guest trapped: what its open `ctx.db.transaction` did is undone,
@@ -288,15 +291,15 @@ fn unhex(hex: &str) -> Result<Vec<u8>, String> {
 }
 
 /// The scope's tables, a participant: their part of the seal is the turn's
-/// SQL transaction, which the seal commits.
+/// SQL transaction, which the seal's flush makes durable.
 #[async_trait::async_trait]
 impl Participant for Db {
-    /// The turn's transaction, committed and in the volume's file `db`;
-    /// the next statement begins the next turn's.
-    async fn prepare(&mut self) -> Result<()> {
+    /// The turn's transaction, committed and moved into `wal`, as pages of
+    /// the state's file `db`; the next statement begins the next turn's.
+    async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         ensure!(self.savepoints == 0, "A transaction is still open");
         self.began = false;
-        self.sql.flush().await.map_err(storage_error)
+        self.sql.flush(wal).await.map_err(storage_error)
     }
 }
 

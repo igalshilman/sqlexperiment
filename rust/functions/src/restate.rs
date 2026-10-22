@@ -6,9 +6,9 @@
 //!
 //! `<program>/<key>/<export>` calls `export(input, ctx)` in its handler,
 //! exclusive and without journal replay, and returns its outcome. The
-//! program runs until it waits; the handler commits the changed pages, the
-//! SQL and the call's requests (a turn), in one write of the object's
-//! database, then waits on Restate itself for the first request to complete,
+//! program runs until it waits; the handler flushes the changed pages, the
+//! SQL and the call's requests (a turn) to the object's state, in one put,
+//! then waits on Restate itself for the first request to complete,
 //! and delivers it in the next turn, to the same live VM:
 //!
 //! | `ctx` request              | The handler waits on                                          |
@@ -59,8 +59,8 @@ use std::{
 };
 
 mod store;
+use state::{PageCache, PageCacheConfig};
 use store::StateQueue;
-use volume::{PageCache, PageCacheConfig};
 
 /// Fault injection, for tests.
 #[doc(hidden)]

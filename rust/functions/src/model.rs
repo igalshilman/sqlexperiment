@@ -188,9 +188,12 @@ pub enum Status {
     Failed,
 }
 
+/// The run's progress between turns, as the seal keeps it: its pending
+/// operations (the outbox the host makes once the seal is flushed), the
+/// number of the next, its clock, and where it stands.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct State {
+pub struct Progress {
     pub pending: Vec<Operation>,
     pub next_operation: u64,
     pub now: u64,
@@ -305,9 +308,9 @@ impl Image {
     }
 }
 
-/// The scope's current run, as its last seal keeps it (the part "run"):
-/// what it calls, and where it stands, its pending operations the outbox the
-/// host makes once the seal is written.
+/// The scope's current run, as its last seal keeps it (the record "run"):
+/// what it calls, and its progress, its pending operations the outbox the
+/// host makes once the seal is flushed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RunRecord {
@@ -321,7 +324,8 @@ pub(crate) struct RunRecord {
     pub runtime: u64,
     /// Turns sealed, this one included.
     pub turns: u64,
-    pub state: State,
+    /// Its progress (the JSON field `state`).
+    pub state: Progress,
 }
 
 /// The run's memory, as its last seal keeps it (the record "memory"): the
@@ -363,13 +367,14 @@ impl MemoryRecord {
     }
 }
 
-/// A run as of its last commit, and what that turn wrote.
+/// A run as of its last seal, and what that turn wrote.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct View {
     pub run: String,
     pub program: String,
     pub turns: u64,
-    pub state: State,
+    /// Where the run stands.
+    pub state: Progress,
     pub memory_bytes: usize,
     /// Pages that differ from golden.
     pub live_pages: usize,

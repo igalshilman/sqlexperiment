@@ -17,11 +17,11 @@ use functions::{
 use futures::future::BoxFuture;
 use futures_executor::block_on as block;
 use serde_json::{Value, json};
+use state::simulation::MemoryKv;
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-use volume::simulation::MemoryKv;
 
 /// The scripted model, as the gateway's provider `anthropic`: it answers
 /// with `next`, and keeps the size of the request it was sent.

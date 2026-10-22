@@ -6,8 +6,8 @@ five things:
 - how a turn's time is bounded, instead of fuel;
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
-- one record that commits a turn's SQL, pages and records together:
-  the volume's (v15) commit record, the memory's pages a file beside the SQL's;
+- one flush that makes a turn's SQL, pages and records durable together:
+  the state's (v15) commit record, the memory's pages a file beside the SQL's;
 - host bindings: operations the host makes itself, such as a model call,
   whose input nothing but the guest's heap keeps (§6).
 
@@ -129,7 +129,7 @@ it returns, is a new runtime version: names live in heaps.
 ## 3. `ctx.db.sql`
 
 Each scope (an object key) has a SQLite database: `core/sql` on the scope's
-volume (`core/volume`),
+state (`core/state`),
 running in the host over the object's Restate state. The guest never holds
 pages of it. Only statements go in and only rows come out.
 
@@ -163,15 +163,16 @@ export async function order({ sku, qty }, ctx) {
   undoes that statement, as in SQLite. A storage error fails the attempt,
   which is retried from the last commit, as today.
 - **Readers.** A shared handler (`<program>/<key>/query`) can run read-only
-  SQL against the committed database (the volume's reader), without
+  SQL against the flushed database (the state's reader), without
   disturbing a running run.
 - **`ctx.kv`** is already a table in this database, so one store holds a
   scope's data.
 
 ## 4. One record commits a turn
 
-Built in #142 and #143. A turn is one volume commit: the run's state, the
-VM's page batch and the turn's SQL go into one record, written in one put.
+Built in #142 and #143. A turn is one flush of the scope's state: the run's
+progress, the VM's page batch and the turn's SQL go into one WAL, flushed as
+one record, in one put.
 Before, a turn put `batch/<n>`, then `commit` (naming the batch), then the KV
 writes the commit listed. That was correct, since Restate keeps writes in
 issue order and a crash keeps a prefix, but it was three kinds of keys and
@@ -183,7 +184,7 @@ two commit points once SQL joined.
 v15/commit = SC15
   version, epoch, next_segment, garbage
   directory: files by id and name
-    run:               record: the run's state as JSON   // run, program, pending
+    run:               record: the run's progress as JSON // run, program, pending
                                                          // (the outbox), status, outcome
     memory:            record: the memory's as JSON      // meta, memoryLen, file, pages
     memory/<golden>:   paged file over the golden image  // the pages that differ from it
@@ -193,9 +194,9 @@ v15/commit = SC15
            inline or stored
 ```
 
-- **A turn is one put.** Its SQL pages and its memory's changed pages join
-  `log` as one transaction, and the records it set replace theirs (a record
-  past 1 KiB is a stored value of its own, written first).
+- **A turn is one put.** Its SQL pages and its memory's changed pages, from
+  its WAL, join `log` as one transaction, and the records it set replace
+  theirs (a record past 1 KiB is a stored value of its own, written first).
 - **Sealing covers it.** Past `inline_log_bytes` (1 KiB), the inline
   segments move into one stored value, written before the record that names
   it, in the same round trip.
@@ -205,31 +206,32 @@ v15/commit = SC15
 - **`ctx.kv` is a table** in the database, so its writes commit with the
   turn.
 
-### Commit, recover
+### Flush, recover
 
-- **Commit.** Garbage deletes, a seal if one is due, the record, and a
+- **Flush.** Garbage deletes, a seal if one is due, the record, and a
   checkpoint if one is due: queued in that order, then one sync. Then the
-  outbox: its Waits are made after the commit, and the next commit drops
+  outbox: its Waits are made after the flush, and the next flush drops
   the ones already made.
 - **Recover.** Open reads the record and the stored values it names: each
   file's log replays over its pages in place, and the VM is the golden image
   with the pages the memory record lists, read together. The record's
   pending Waits are made again, under their IDs.
 
-The API is `Volume::open`, whose `record(name)`, `file(name)` and
-`file_with_base(name, base)` are handles each participant writes in
-its prepare (the SQL, `Sql::open(&volume)`,
-flushes), then `Volume::commit`, the one put.
+The API is `State::open`, whose `record(name)`, `file(name)` and
+`file_with_base(name, base)` are handles each participant writes through
+the turn's `Wal` (`state.wal()`) in its prepare (the SQL, `Sql::open(&state)`,
+flushes into it), then `Wal::flush`, the one put.
 
 ## 5. Plan
 
 On branches, a PR each:
 
-1. **sqlite-kv (now `volume`): the host's page chain in the record** (§4), with tests.
+1. **sqlite-kv (now `state`): the host's page chain in the record** (§4), with tests.
    Done in #142.
-2. **The functions runtime on the volume:** a turn commits through
-   `commit_turn`; `batch/<n>`, `commit` and `kv/<key>` are gone, and
-   `ctx.kv` is a table. Done in #143, measured in DESIGN.md §7.
+2. **The functions runtime on the state:** a turn is one commit of the
+   scope's state (`commit_turn` then, `Wal::flush` now); `batch/<n>`,
+   `commit` and `kv/<key>` are gone, and `ctx.kv` is a table. Done in #143,
+   measured in DESIGN.md §7.
 3. **`ctx.db.sql` and `ctx.db.transaction`**, as Calls over `host_call`
    (§2), sharing the turn's session. Done: the Wasm runs async (#150), and
    one host function, `__host`, answers from `src/db.rs`.
