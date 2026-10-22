@@ -1,6 +1,8 @@
 // SQL in virtual objects against a real Restate server: throughput, latency
-// and what the objects store, for a few workloads. A benchmark, not a test:
-// it measures the storage protocol end to end, with the SDK and the server.
+// and what the objects store, for a few workloads and for databases of 1, 10
+// and 100 MB. A benchmark, not a test: it measures the storage protocol end
+// to end, with the SDK and the server. Payloads are random, so they do not
+// compress.
 //
 //   RESTATE_SERVER=/path/to/restate-server node sql/bench.ts [out.json]
 //
@@ -17,7 +19,7 @@ import type { ChildProcess } from 'node:child_process';
 import * as restate from 'restate-fns';
 import { row } from './sql.ts';
 
-const SCHEMA = `CREATE TABLE IF NOT EXISTS rows(id INTEGER PRIMARY KEY, v TEXT);
+const SCHEMA = `CREATE TABLE IF NOT EXISTS rows(id INTEGER PRIMARY KEY, v BLOB);
   CREATE TABLE IF NOT EXISTS counter(id INTEGER PRIMARY KEY, n INTEGER);
   CREATE TABLE IF NOT EXISTS history(at INTEGER PRIMARY KEY, n INTEGER)`;
 
@@ -28,7 +30,7 @@ export const bench = restate.object({
     /** Insert one row of `bytes` bytes, an autocommit statement. */
     insert: async (ctx: restate.ObjectContext, bytes: number) => {
       await ctx.db.execute(SCHEMA);
-      await ctx.db.execute('INSERT INTO rows(v) VALUES(?)', ['x'.repeat(bytes)]);
+      await ctx.db.execute('INSERT INTO rows(v) VALUES(randomblob(?))', [bytes]);
     },
     /** Increment a counter and record it, in one transaction; returns it. */
     count: (ctx: restate.ObjectContext) =>
@@ -43,8 +45,29 @@ export const bench = restate.object({
     bulk: (ctx: restate.ObjectContext, [rows, bytes]: [number, number]) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(SCHEMA);
-        for (let i = 0; i < rows; i++) await db.execute('INSERT INTO rows(v) VALUES(?)', [`${i}`.padEnd(bytes, 'y')]);
+        for (let i = 0; i < rows; i++) await db.execute('INSERT INTO rows(v) VALUES(randomblob(?))', [bytes]);
       }),
+    /** Append `rows` rows of `bytes` random bytes each, in one statement. */
+    load: async (ctx: restate.ObjectContext, [rows, bytes]: [number, number]) => {
+      await ctx.db.execute(SCHEMA);
+      await ctx.db.execute(
+        `WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < ?)
+         INSERT INTO rows(v) SELECT randomblob(?) FROM s`,
+        [rows, bytes],
+      );
+    },
+    /** Rewrite row `id` with new random bytes of the same length. */
+    update: async (ctx: restate.ObjectContext, id: number) => {
+      await ctx.db.execute('UPDATE rows SET v = randomblob(length(v)) WHERE id = ?', [id]);
+    },
+    /** Row `id`'s length, from the exclusive handler: the owner's session. */
+    get: async (ctx: restate.ObjectContext, id: number) =>
+      (await row<[number]>(ctx.db, 'SELECT length(v) FROM rows WHERE id = ?', [id]))[0],
+    /** Row `id`'s length, from a shared handler: a reader's session. */
+    peek: restate.handlers.object.shared(
+      async (ctx: restate.ObjectSharedContext, id: number) =>
+        (await row<[number]>(ctx.db, 'SELECT length(v) FROM rows WHERE id = ?', [id]))[0],
+    ),
     /** The rows' count and total length, from a shared handler. */
     read: restate.handlers.object.shared((ctx: restate.ObjectSharedContext) =>
       row<[number, number]>(ctx.db, 'SELECT count(*), coalesce(sum(length(v)), 0) FROM rows'),
@@ -95,10 +118,11 @@ async function retried<T>(f: () => Promise<T>): Promise<T> {
   }
 }
 
-/** The objects' stored state: its keys and bytes. */
-async function stored() {
+/** The objects' stored state, or one object's: its keys and bytes. */
+async function stored(key?: string) {
   const query =
-    "SELECT count(*) AS keys, sum(length(encode(value, 'hex'))) / 2 AS bytes FROM state WHERE service_name = 'SqlBench'";
+    "SELECT count(*) AS keys, sum(length(encode(value, 'hex'))) / 2 AS bytes FROM state WHERE service_name = 'SqlBench'" +
+    (key ? ` AND service_key = '${key}'` : '');
   const response = await fetch(`${ADMIN}/query`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
@@ -112,7 +136,11 @@ async function stored() {
   return { stateKeys: rows[0]?.keys ?? 0, stateBytes: rows[0]?.bytes ?? 0 };
 }
 
-/** Call `handler` `calls` times, `concurrency` at once, on the key `key(i)`. */
+/**
+ * Call `handler` `calls` times, `concurrency` at once, on the key `key(i)`,
+ * with `input`, or `input(i)` if it is a function. The state it reports is
+ * all the objects', or only `stateOf`'s.
+ */
 async function phase(
   name: string,
   handler: string,
@@ -120,18 +148,19 @@ async function phase(
   calls: number,
   concurrency: number,
   key: (i: number) => string,
+  stateOf?: string,
 ): Promise<Phase> {
   let next = 0;
   let errors = 0;
   const latencies: number[] = [];
-  const body = JSON.stringify(input);
+  const body = (i: number) => JSON.stringify(typeof input === 'function' ? input(i) : input);
   const worker = async () => {
     for (let i = next++; i < calls; i = next++) {
       const started = performance.now();
       const response = await fetch(`${INGRESS}/SqlBench/${key(i)}/${handler}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body,
+        body: body(i),
       });
       await response.text();
       if (response.ok) latencies.push(performance.now() - started);
@@ -154,7 +183,7 @@ async function phase(
     p99: at(0.99),
     errors,
     // A partition just started may refuse the query for a moment.
-    ...(await retried(stored)),
+    ...(await retried(() => stored(stateOf))),
   };
   console.log(JSON.stringify(result));
   return result;
@@ -218,6 +247,28 @@ async function drive(out?: string) {
   await start();
   phases.push(await phase('read, 16 keys, cold process', 'read', null, 16, 16, (i) => `${run}-grow-${i % 16}`));
   phases.push(await phase('count, one key, cold process', 'count', null, 1, 1, () => `${run}-hot`));
+
+  // Databases of 1, 10 and 100 MB, of 1 KiB rows, loaded 1 MB per call.
+  const SIZES = [1, 10, 100];
+  const ROWS_PER_MB = 1000;
+  const sized = (mb: number) => `${run}-${mb}mb`;
+  const anyRow = (mb: number) => () => 1 + Math.floor(Math.random() * mb * ROWS_PER_MB);
+  for (const mb of SIZES) {
+    const [key, row] = [() => sized(mb), anyRow(mb)];
+    phases.push(await phase(`${mb} MB: load, 1 MB per call`, 'load', [ROWS_PER_MB, 1024], mb, 1, key, key()));
+    phases.push(await phase(`${mb} MB: update a row, warm`, 'update', row, 200, 1, key, key()));
+    phases.push(await phase(`${mb} MB: read a row, warm`, 'get', row, 200, 1, key, key()));
+    phases.push(await phase(`${mb} MB: read a row, shared handler`, 'peek', row, 50, 1, key, key()));
+  }
+  // The first calls after a restart of the objects: an empty page cache.
+  for (let round = 1; round <= 3; round++) {
+    await start();
+    for (const mb of SIZES) {
+      const [key, row] = [() => sized(mb), anyRow(mb)];
+      phases.push(await phase(`${mb} MB: read a row, cold process (${round})`, 'get', row, 1, 1, key, key()));
+      phases.push(await phase(`${mb} MB: update a row, after a cold read (${round})`, 'update', row, 1, 1, key, key()));
+    }
+  }
   if (out) writeFileSync(out, JSON.stringify(phases, null, 2));
   process.exit(0);
 }
