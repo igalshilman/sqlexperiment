@@ -21,12 +21,15 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Annotated, Any
 
+import agents
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import InjectedToolCallId, tool
+from openai.types.responses import ResponseOutputItem
+from pydantic import TypeAdapter
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
@@ -416,6 +419,47 @@ class ResponsesServer:
         text = [{"type": "output_text", "text": str(reply.content)}]
         message = {"type": "message", "id": f"msg_{uuid.uuid4().hex}", "role": "assistant", "content": text}
         return calls or [message]
+
+
+class AgentsTeller(agents.Model):
+    """
+    The teller, as an OpenAI Agents SDK model: it reads the input as the
+    Responses API's, as ``ResponsesServer`` does, with the agent's
+    instructions first.
+    """
+
+    def __init__(self, teller: Teller) -> None:
+        self.teller = teller
+        self.reader = ResponsesServer(teller)
+        self.requests = self.reader.requests
+
+    async def get_response(self, system_instructions: str | None, input: Any, *args: Any, **kwargs: Any):
+        items = [{"role": "user", "content": input}] if isinstance(input, str) else list(input)
+        if system_instructions:
+            items.insert(0, {"type": "message", "role": "developer", "content": [{"text": system_instructions}]})
+        output = []
+        for item in self.reader.answer({"input": [_as_item(i) for i in items]}):
+            if item["type"] == "message":
+                text = item["content"][0]["text"]
+                content = [{"type": "output_text", "text": text, "annotations": []}]
+                output.append({**item, "content": content, "status": "completed"})
+            else:
+                output.append({**item, "status": "completed"})
+        usage = agents.Usage(requests=1, input_tokens=1, output_tokens=1, total_tokens=2)
+        return agents.ModelResponse(output=_OUTPUT.validate_python(output), usage=usage, response_id=None)
+
+    def stream_response(self, *args: Any, **kwargs: Any):
+        raise NotImplementedError
+
+
+def _as_item(item: dict[str, Any]) -> dict[str, Any]:
+    """An input item as the Responses API has it: a message's content as parts."""
+    if item.get("type", "message") == "message" and isinstance(item.get("content"), str):
+        return {**item, "type": "message", "content": [{"type": "input_text", "text": item["content"]}]}
+    return {"type": "message", **item} if "role" in item else item
+
+
+_OUTPUT = TypeAdapter(list[ResponseOutputItem])
 
 
 class Bank:
