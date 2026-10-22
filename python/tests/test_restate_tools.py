@@ -29,7 +29,15 @@ SUPPORT = use(("orders_status", {"order": "103"}), ("wait_for_approval", REFUND)
 
 
 @pytest.fixture(
-    params=["support", "pydantic_support", "claude_support", "claude_agent_support", "codex_support", "agents_support"]
+    params=[
+        "support",
+        "pydantic_support",
+        "claude_support",
+        "claude_agent_support",
+        "codex_support",
+        "agents_support",
+        "adk_support",
+    ]
 )
 def agent(request) -> str:
     """The support agent, on each framework."""

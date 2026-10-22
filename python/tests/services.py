@@ -17,13 +17,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests")
 
 import restate_fns as restate  # noqa: E402
 from bank import account  # noqa: E402
-from fakes import AgentsTeller, ClaudeClient, MessagesServer, ResponsesServer, Teller, pydantic_ai_model  # noqa: E402
+from fakes import AdkTeller, AgentsTeller, ClaudeClient, MessagesServer, ResponsesServer, Teller, pydantic_ai_model  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
 from langgraph.graph import START, MessagesState, StateGraph  # noqa: E402
 from notes import add, notes  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from restate_agents import (  # noqa: E402
     Object,
+    adk,
     ask,
     call,
     claude,
@@ -200,6 +201,7 @@ codex_support = codex.agent("codex_support", tools=SUPPORT_TOOLS, config=Respons
 # The OpenAI Agents SDK, on the teller as its model, sending no traces.
 os.environ["OPENAI_AGENTS_DISABLE_TRACING"] = "1"
 agents_support = openai_agents.agent("agents_support", model=AgentsTeller(Teller()), tools=SUPPORT_TOOLS)
+adk_support = adk.agent("adk_support", model=AdkTeller(Teller()), tools=SUPPORT_TOOLS)
 
 # A Claude assistant that compacts and resets its conversation, by handlers of its own.
 notebook_client = ClaudeClient(Teller())
@@ -272,6 +274,7 @@ if __name__ == "__main__":
         claude_agent_support,
         codex_support,
         agents_support,
+        adk_support,
         desk,
         notebook,
         refunds,

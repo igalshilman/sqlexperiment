@@ -23,6 +23,8 @@ from typing import Annotated, Any
 
 import agents
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
+from google.adk.models import BaseLlm, LlmResponse
+from google.genai import types as genai_types
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -460,6 +462,54 @@ def _as_item(item: dict[str, Any]) -> dict[str, Any]:
 
 
 _OUTPUT = TypeAdapter(list[ResponseOutputItem])
+
+
+class AdkTeller(BaseLlm):
+    """
+    The teller, as a Google ADK model: it reads the request's contents as
+    LangChain's messages, with the agent's instruction first; a message
+    steered to the turn (``harness.STEERED``) as a steered message.
+    """
+
+    teller: Any = None
+    requests: list[Any] = []
+
+    def __init__(self, teller: Teller) -> None:
+        super().__init__(model="teller", teller=teller, requests=[])
+
+    async def generate_content_async(self, llm_request: Any, stream: bool = False):
+        from restate_agents.harness import STEERED
+
+        self.requests.append(llm_request)
+        said: list[BaseMessage] = []
+        instruction = llm_request.config.system_instruction if llm_request.config else None
+        if instruction:
+            said.append(SystemMessage(instruction if isinstance(instruction, str) else str(instruction)))
+        for content in llm_request.contents:
+            parts = content.parts or []
+            text = "".join(p.text or "" for p in parts if p.text and not p.thought)
+            calls = [p.function_call for p in parts if p.function_call]
+            results = [p.function_response for p in parts if p.function_response]
+            if content.role == "model":
+                tool_calls = [{"name": c.name, "args": c.args or {}, "id": c.id} for c in calls]
+                said.append(AIMessage(content=text, tool_calls=tool_calls))
+            elif results:
+                for r in results:
+                    output = (r.response or {}).get("result", r.response)
+                    said.append(
+                        ToolMessage(output if isinstance(output, str) else json.dumps(output), tool_call_id=r.id)
+                    )
+            elif text.startswith(STEERED):
+                said.append(HumanMessage(text.removeprefix(STEERED), id="turn:steer:"))
+            elif text:
+                said.append(HumanMessage(text))
+        reply = self.teller._answer(said)
+        parts = [genai_types.Part(text=str(reply.content))] if reply.content else []
+        parts += [
+            genai_types.Part(function_call=genai_types.FunctionCall(id=c["id"], name=c["name"], args=c["args"]))
+            for c in reply.tool_calls
+        ]
+        yield LlmResponse(content=genai_types.Content(role="model", parts=parts))
 
 
 class Bank:
