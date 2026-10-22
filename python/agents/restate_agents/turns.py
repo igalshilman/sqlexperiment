@@ -1,9 +1,10 @@
 """
-A turn: the message an agent's ``chat`` answers. While it answers, the
-object's ``status`` says so; ``stop`` cancels it; and ``steer`` adds
-messages to it, which a framework gives its conversation at its next tool
-call (``steering``). Those it did not take when it ends are answered as
-messages of their own, unless it was cancelled.
+An agent's object (``agent``), as each integration makes it, and its turns.
+A turn is the message its ``chat`` answers. While it answers, the object's
+``status`` says so; ``stop`` cancels it; and ``steer`` adds messages to it,
+which a framework gives its conversation at its next tool call
+(``steering``). Those it did not take when it ends are answered as messages
+of their own, unless it was cancelled.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Any
 
 import restate_fns as restate
 
-from restate_agents.common import CHECK_MODEL, MessageSerde, refused
+from restate_agents.common import CHECK_MODEL, Messages, MessagesRequest, Transcript, refused
 from restate_agents.object import TURN, Object, Turn, context, service
 from restate_agents.signals import Agent, CloseRequest, Steer, signals_of
 from restate_agents.signals import close as close_turn
@@ -83,7 +84,29 @@ def taken(ids: Iterable[str]) -> None:
         turn.taken.update(ids)
 
 
-def chat(obj: Object, answer: Callable[[Any, str], Awaitable[str]]) -> None:
+def agent(
+    name: str,
+    answer: Callable[[restate.ObjectContext, str], Awaitable[str]],
+    transcript: Callable[[restate.ObjectContext], Awaitable[Transcript]],
+    **options: Any,
+) -> Object:
+    """
+    An agent's object: ``chat``, which ``answer`` answers, a turn at a time;
+    and ``messages``, its conversation as ``transcript`` gives it.
+    ``options``: those of ``Object``.
+    """
+    obj = Object(name, **options)
+    _chat(obj, answer)
+
+    async def messages(ctx: restate.ObjectContext, request: MessagesRequest | None = None) -> Messages:
+        """The conversation so far, with the tool calls."""
+        return (await transcript(ctx)).page(request)
+
+    obj.handler("messages", kind="shared")(messages)
+    return obj
+
+
+def _chat(obj: Object, answer: Callable[[restate.ObjectContext, str], Awaitable[str]]) -> None:
     """
     ``answer`` as ``obj``'s ``chat`` handler, which takes its message as plain
     text or as a JSON string (``curl -d 'Hi'``, ``curl --json '"Hi"'``).
@@ -123,4 +146,4 @@ def chat(obj: Object, answer: Callable[[Any, str], Awaitable[str]]) -> None:
         end()
         return answered
 
-    obj.handler("chat", accept="*/*", input_serde=MessageSerde())(chat)
+    obj.chat(chat)

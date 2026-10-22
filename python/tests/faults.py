@@ -12,7 +12,8 @@ import signal
 import sys
 from pathlib import Path
 
-from restate_fns.session import SqlStore, set_store_wrapper
+from restate_fns.session import set_store_wrapper
+from restate_sql import Store
 
 PER_MILLE = float(os.environ.get("ABORT_PER_MILLE", "0"))
 AT = int(os.environ.get("ABORT_AT", "0"))
@@ -31,7 +32,7 @@ def maybe_abort() -> None:
 class Faulty:
     """``store``, aborting around its requests."""
 
-    def __init__(self, store: SqlStore) -> None:
+    def __init__(self, store: Store) -> None:
         self.store = store
 
     def get(self, key):

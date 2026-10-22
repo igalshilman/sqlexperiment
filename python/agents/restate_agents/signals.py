@@ -91,6 +91,8 @@ class Watch(BaseModel):
 
 
 class Subscription(BaseModel):
+    """A ``watch`` waiting: the awakeable to resolve once the revision is past ``afterRevision``."""
+
     afterRevision: int  # noqa: N815
     awakeable: str
 
@@ -103,12 +105,16 @@ class Agent(BaseModel):
 
 
 class SteerRequest(BaseModel):
+    """A message steered to ``agent``'s turn ``turn`` (or, with none, sent as a message of its own)."""
+
     agent: Agent
     turn: str | None
     text: str
 
 
 class CloseRequest(BaseModel):
+    """The end of ``agent``'s turn ``turn``: the steered messages it took, and whether it was cancelled."""
+
     agent: Agent
     turn: str
     taken: list[str]
@@ -136,6 +142,8 @@ async def _send(ctx: ObjectContext, agent: Agent, text: str) -> str:
 
 
 class _Listening(Waiting):
+    """A wait, with the awakeable that resolves it."""
+
     awakeable: str
 
 

@@ -55,14 +55,12 @@ from pydantic import ValidationError
 from restate_fns import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import Messages, MessagesRequest, Transcript, has_table, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_id_of, model_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
 
 __all__ = ["CANCELLED", "DECLINED", "DEFAULT_MODEL", "REQUEST", "agent", "compact", "prompt", "reset"]
-
-DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
 
 # What each request has unless ``request`` says otherwise, as the host's
 # ``claude.messages`` binding sends it: a declined request is retried on
@@ -108,8 +106,7 @@ def agent(
     with ``@agent.handler``.
     """
     if not callable(model):
-        model_id_of(model_of(model, DEFAULT_MODEL), "anthropic")
-    obj = Object(name, **options)
+        model_id_of(model_of(model), "anthropic")
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         async def given(option: Any) -> Any:
@@ -126,11 +123,10 @@ def agent(
             request=await given(request),
         )
 
-    async def messages(ctx: ObjectContext, request: MessagesRequest | None = None) -> Messages:
-        """The conversation so far, with the tool calls."""
+    async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
         if not await has_table(ctx.db, "claude_messages"):
-            return transcript.page(request)
+            return transcript
         for row in await _Conversation(ctx.db, ctx.key()).load():
             content = row.message["content"]
             transcript.say(row.message["role"], _text(content))
@@ -141,11 +137,9 @@ def agent(
                     transcript.result(
                         block["tool_use_id"], _text(block.get("content", "")), block.get("is_error", False)
                     )
-        return transcript.page(request)
+        return transcript
 
-    turns.chat(obj, answer)
-    obj.handler("messages", kind="shared")(messages)
-    return obj
+    return turns.agent(name, answer, transcript, **options)
 
 
 async def prompt(
@@ -170,13 +164,13 @@ async def prompt(
     Each prompt is answered once, however often an attempt crashes: the
     invocation's first prompt has its id, the next ``<id>:2``, and so on.
     """
-    run = _Run(
-        client=client or _client(),
-        model=model_id_of(model_of(model, DEFAULT_MODEL), "anthropic"),
+    run = _Run.of(
+        _Conversation(ctx.db, thread or ctx.key()),
+        model=model,
+        client=client,
+        request=request,
         system=system,
-        tools=list(tools),
-        request={**REQUEST, **(request or {})},
-        conversation=_Conversation(ctx.db, thread or ctx.key()),
+        tools=tools,
     )
     id = turns.prompt_id(ctx)
     while True:
@@ -231,14 +225,7 @@ async def compact(
     asking = (
         "Summarize our conversation so far, in place of it: what was asked and answered, and what to carry on with."
     )
-    run = _Run(
-        client=client or _client(),
-        model=model_id_of(model_of(model, DEFAULT_MODEL), "anthropic"),
-        system=None,
-        tools=[],
-        request={**REQUEST, **(request or {})},
-        conversation=conversation,
-    )
+    run = _Run.of(conversation, model=model, client=client, request=request)
     ask = {"role": "user", "content": f"{asking} {instructions or ''}".strip()}
     reply = await run.reply([*(row.message for row in rows), ask])
     summary = _text([block.model_dump(exclude_none=True) for block in reply.content])
@@ -383,6 +370,27 @@ class _Run:
     request: dict[str, Any]
     conversation: _Conversation
 
+    @classmethod
+    def of(
+        cls,
+        conversation: _Conversation,
+        *,
+        model: str | None,
+        client: AsyncAnthropic | None,
+        request: dict[str, Any] | None,
+        system: str | None = None,
+        tools: Tools = (),
+    ) -> _Run:
+        """A run of ``conversation``, with the options of ``prompt``: over ``REQUEST``, and the shared client."""
+        return cls(
+            client=client or _client(),
+            model=model_id_of(model_of(model), "anthropic"),
+            system=system,
+            tools=list(tools),
+            request={**REQUEST, **(request or {})},
+            conversation=conversation,
+        )
+
     async def answer(self, ctx: Any, prompt: str, messages: list[dict[str, Any]]) -> None:
         """Run ``prompt`` from ``messages`` (the stored ones) until it is answered."""
         while True:
@@ -435,8 +443,7 @@ class _Run:
             return {**result, "content": f"Error: no tool {call['name']}", "is_error": True}
         try:
             if isinstance(tool, Tool):
-                input = tool.input.model_validate(call["input"])
-                output = await tool.run({name: getattr(input, name) for name in type(input).model_fields}, call["id"])
+                output = await tool.invoke(call["input"], call["id"])
             else:
                 output = tool.call(call["input"])
                 output = await output if inspect.isawaitable(output) else output
@@ -450,9 +457,8 @@ class _Run:
 
 
 def _name(tool: Tool | Any) -> str | None:
-    if isinstance(tool, Tool | dict):
-        return tool.name if isinstance(tool, Tool) else tool.get("name")
-    return getattr(tool, "name", None)
+    """The name of ``tool``, of any kind ``Tools`` takes."""
+    return tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", None)
 
 
 def _text(content: str | list[dict[str, Any]]) -> str:

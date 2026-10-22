@@ -36,7 +36,7 @@ from restate.handler import Handler
 from restate_agents.object import context, service
 from restate_agents.signals import Waiting, signals_of
 from restate_agents.signals import wait as wait_for_signal
-from restate_agents.tools import _handler
+from restate_agents.tools import handler_of, main_of
 
 State = Any
 Node = Callable[[State], Awaitable[dict[str, Any]]]
@@ -54,7 +54,7 @@ def call(handler: Callable[..., Any], *, input: Input = None, key: Key = None, u
 
     ``key``: the object's or the workflow's key, or a function of the state giving it.
     """
-    h = _handler(handler)
+    h = handler_of(handler)
     _keyed(h, key)
 
     async def run(state: State) -> dict[str, Any]:
@@ -78,7 +78,7 @@ def send(handler: Callable[..., Any], *, input: Input = None, key: Key = None, d
 
         graph.add_node("follow_up", nodes.send(checkin, input=lambda state: state["order"], delay=timedelta(days=1)))
     """
-    h = _handler(handler)
+    h = handler_of(handler)
     _keyed(h, key)
 
     async def run(state: State) -> dict[str, Any]:
@@ -106,7 +106,7 @@ def workflow(target: restate.Workflow, *, input: Input = None, key: Key = None, 
     Each run of the node runs a workflow of its own, keyed ``<this key>-<task
     id>``, unless ``key`` gives the key.
     """
-    h = next(h for h in target.handlers.values() if h.kind == "workflow")
+    h = main_of(target)
 
     async def run(state: State) -> dict[str, Any]:
         ctx = context()

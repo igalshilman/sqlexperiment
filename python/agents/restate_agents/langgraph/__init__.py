@@ -58,15 +58,13 @@ from pydantic import create_model
 from restate_fns import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import Messages, MessagesRequest, Transcript, has_table, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_id_of, model_of
 from restate_agents.langgraph.checkpointer import SqlCheckpointSaver
 from restate_agents.object import Object, context
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
 
 __all__ = ["CANCELLED", "DEFAULT_MODEL", "SqlCheckpointSaver", "agent", "langchain_tools", "prompt", "tool_node"]
-
-DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
 
 # Marks a prompt's message in the thread (in its additional_kwargs, which models do not read).
 PROMPT = "restate_agents_prompt"
@@ -109,16 +107,15 @@ def agent(
     if isinstance(model, str):
         model_id_of(model, "anthropic")
     chosen = graph if graph is not None else _usual(model, system, tools)
-    obj = Object(name, **options)
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         return await prompt(ctx, chosen if isinstance(chosen, StateGraph) else chosen(ctx), message)
 
-    async def messages(ctx: ObjectContext, request: MessagesRequest | None = None) -> Messages:
-        """The conversation so far, with the tool calls, from the thread's last checkpoint."""
+    async def transcript(ctx: ObjectContext) -> Transcript:
+        """The conversation, from the thread's last checkpoint."""
         transcript = Transcript()
         if not await has_table(ctx.db, "writes"):
-            return transcript.page(request)
+            return transcript
         saved = await SqlCheckpointSaver(ctx.db).aget_tuple({"configurable": {"thread_id": ctx.key()}})
         for m in saved.checkpoint["channel_values"].get("messages", []) if saved else []:
             if isinstance(m, HumanMessage):
@@ -129,11 +126,9 @@ def agent(
                     transcript.call(call["id"] or "", call["name"], call["args"])
             elif isinstance(m, ToolMessage):
                 transcript.result(m.tool_call_id, _text(m), m.status == "error")
-        return transcript.page(request)
+        return transcript
 
-    turns.chat(obj, answer)
-    obj.handler("messages", kind="shared")(messages)
-    return obj
+    return turns.agent(name, answer, transcript, **options)
 
 
 async def prompt(ctx: Any, graph: StateGraph, text: str, *, thread: str | None = None) -> str:
@@ -296,4 +291,4 @@ def _model(model: Model | Callable[[ObjectContext], Model] | None, ctx: ObjectCo
     chosen = model(ctx) if callable(model) and not isinstance(model, BaseChatModel) else model
     if isinstance(chosen, BaseChatModel):
         return chosen
-    return ChatAnthropic(model_name=model_id_of(model_of(chosen, DEFAULT_MODEL), "anthropic"))  # type: ignore[call-arg]
+    return ChatAnthropic(model_name=model_id_of(model_of(chosen), "anthropic"))  # type: ignore[call-arg]

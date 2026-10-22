@@ -33,9 +33,13 @@ async def has_table(db: Any, name: str) -> bool:
     return bool(await db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?", [name]))
 
 
-def model_of(model: str | None, fallback: str) -> str:
-    """The model, as ``provider/model-id``: ``model``, or else MODEL, or else the framework's default."""
-    return model or os.environ.get("MODEL") or fallback
+DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
+"""The model of an agent given none, and no MODEL."""
+
+
+def model_of(model: str | None) -> str:
+    """The model, as ``provider/model-id``: ``model``, or else MODEL, or else ``DEFAULT_MODEL``."""
+    return model or os.environ.get("MODEL") or DEFAULT_MODEL
 
 
 def model_id_of(model: str, provider: str) -> str:
@@ -69,11 +73,15 @@ def refused(error: BaseException) -> bool:
 
 
 class TextPart(TypedDict):
+    """A message's text."""
+
     type: Literal["text"]
     text: str
 
 
 class ToolPart(TypedDict):
+    """A tool call of the assistant's message, with its output once there is one."""
+
     type: Literal["tool"]
     id: str
     name: str

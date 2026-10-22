@@ -53,6 +53,11 @@ class Tool:
         result = self.fn(**input, **{name: get() for name, get in injected.items() if name in params})
         return await result if inspect.isawaitable(result) else result
 
+    async def invoke(self, args: dict[str, Any], call_id: str) -> Any:
+        """``run``, with ``args`` as the model gave them: validated by ``input`` first."""
+        input = self.input.model_validate(args)
+        return await self.run({name: getattr(input, name) for name in type(input).model_fields}, call_id)
+
 
 def tool(fn: Callable[..., Any] | None = None, *, name: str | None = None, description: str | None = None) -> Any:
     """
@@ -109,7 +114,7 @@ def call(
     however often an attempt crashes (its idempotency key is the tool
     call's); a ``restate.TerminalError`` of the handler is the tool's answer.
     """
-    h = _handler(handler)
+    h = handler_of(handler)
     target = _Target(h, key)
 
     async def run(ctx: Any, call_id: str, **input: Any) -> str:
@@ -136,7 +141,7 @@ def send(
 
         send(checkin, name="schedule_checkin", delay=timedelta(days=1))
     """
-    h = _handler(handler)
+    h = handler_of(handler)
     target = _Target(h, key)
 
     async def run(ctx: Any, call_id: str, **input: Any) -> str:
@@ -161,7 +166,7 @@ def workflow(
     workflow of its own, keyed ``<this key>-<call id>``, unless ``key`` gives
     the key.
     """
-    h = next(h for h in target.handlers.values() if h.kind == "workflow")
+    h = main_of(target)
     own = _Target(h, key, model_gives_key=False)
 
     async def run(ctx: Any, call_id: str, **input: Any) -> str:
@@ -263,13 +268,19 @@ def signal(signal: str, *, description: str, input: type[BaseModel] | None = Non
     )
 
 
-def _handler(handler: Callable[..., Any]) -> Handler:
+def handler_of(handler: Callable[..., Any]) -> Handler:
+    """The Restate handler that ``handler``, a function a handler decorator registered, is."""
     try:
         return handler_from_callable(handler)
     except ValueError:
         raise TypeError(
             f"{handler!r} is not a Restate handler: pass a function that a handler decorator made one"
         ) from None
+
+
+def main_of(target: restate.Workflow) -> Handler:
+    """The ``main`` handler of the workflow ``target``: its handler of kind ``workflow``."""
+    return next(h for h in target.handlers.values() if h.kind == "workflow")
 
 
 class _Target:

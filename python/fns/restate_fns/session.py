@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import typing
 import uuid
@@ -27,13 +28,10 @@ from restate.handler import Handler, handler_from_callable
 In = typing.TypeVar("In")
 Out = typing.TypeVar("Out")
 
-SqlValue = None | int | float | str | bytes | bool
-"""An SQL value. A ``bool`` parameter is stored as 0 or 1; BLOBs come back as ``bytes``."""
-
 Rows = list[list[Any]]
 """
-Result rows: lists of ``SqlValue``s, typed ``Any`` (as ``sqlite3``'s), so
-that a row unpacks to what its query selects.
+Result rows: lists of ``restate_sql.SqlValue``s, typed ``Any`` (as
+``sqlite3``'s), so that a row unpacks to what its query selects.
 """
 
 
@@ -212,25 +210,16 @@ class SqlHost(Protocol):
         ...
 
 
-class SqlStore(Protocol):
-    """An ordered store, as the SQL extension takes it."""
-
-    def get(self, key: str) -> Awaitable[bytes | None]: ...
-    def set(self, key: str, value: bytes) -> None: ...
-    def clear(self, key: str) -> None: ...
-    def sync(self) -> Awaitable[Any]: ...
+_wrap_store: Callable[[restate_sql.Store], restate_sql.Store] | None = None
 
 
-_wrap_store: Callable[[SqlStore], SqlStore] | None = None
-
-
-def set_store_wrapper(wrap: Callable[[SqlStore], SqlStore] | None) -> None:
+def set_store_wrapper(wrap: Callable[[restate_sql.Store], restate_sql.Store] | None) -> None:
     """Wrap each object's store, such as for fault injection in tests."""
     global _wrap_store  # pylint: disable=global-statement
     _wrap_store = wrap
 
 
-class ObjectStore:
+class _ObjectStore:
     """
     The object's state as a store: ``set`` and ``clear`` are state writes,
     which return at once; ``sync`` is an empty run, done once the commands
@@ -255,7 +244,7 @@ class ObjectStore:
         return self._host.sql_sync()
 
 
-class ReaderStore:
+class _ReaderStore:
     """
     The object's state as a shared handler's store: it reads, beside the
     exclusive handler that writes, and writes nothing.
@@ -554,7 +543,7 @@ class SqlAttempt:
         host = self._host
         if host.sql_handler_kind not in ("exclusive", "shared"):
             raise TerminalError("ctx.db is for the handlers of objects")
-        store: SqlStore = ReaderStore(host) if self._reader() else ObjectStore(host)
+        store: restate_sql.Store = _ReaderStore(host) if self._reader() else _ObjectStore(host)
         if _wrap_store is not None:
             store = _wrap_store(store)
         try:
@@ -586,8 +575,7 @@ class SqlAttempt:
     async def end(self, failed: bool) -> None:
         """
         The handler ended (``failed``, or not): the outbox is emptied, and the
-        session is saved. One that a storage error
-        ended closes now.
+        session is saved. One that a storage error ended closes now.
         """
         self._ended = True
         if self._session is None:
@@ -608,29 +596,21 @@ class SqlAttempt:
             if not current and not failed:
                 raise RuntimeError("the object's database changed while this shared handler read it: retrying")
             return
-        if failed:
-            # The handler's error stands: what it committed is stored, and an
-            # outbox left full is made again by the next open.
-            try:
-                if db.is_usable():
-                    await self._flush(db)
-                    await db.save()
-                else:
-                    await db.close()
-            except BaseException:  # pylint: disable=broad-exception-caught
-                try:
-                    await db.close()
-                except BaseException:  # pylint: disable=broad-exception-caught
-                    pass
-            return
         try:
             if db.is_usable():
                 await self._flush(db)
                 await db.save()
             else:
                 await db.close()
-        except Exception as error:  # pylint: disable=broad-exception-caught
-            _reraise(error, self.classify)
+        except BaseException as error:  # pylint: disable=broad-exception-caught
+            if not failed:
+                if isinstance(error, Exception):
+                    _reraise(error, self.classify)
+                raise
+            # The handler's error stands: what it committed is stored, and an
+            # outbox left full is made again by the next open.
+            with contextlib.suppress(BaseException):
+                await db.close()
 
 
 def _close_soon(db: Any) -> None:

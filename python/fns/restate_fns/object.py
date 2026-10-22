@@ -108,14 +108,14 @@ class VirtualObject(restate.VirtualObject):
             return register
 
         def register_with_database(fn: Callable[..., Awaitable[Any]]) -> Any:
-            registered = register(with_database(fn))
+            registered = register(_with_database(fn))
             handler_from_callable(registered).explicit_recovery = True
             return registered
 
         return register_with_database
 
 
-def with_database(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+def _with_database(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
     """
     ``fn``, a handler without journal replay, with ``ctx.db`` and
     ``ctx.transaction()``. A context that is not the SDK's, a test's, has
