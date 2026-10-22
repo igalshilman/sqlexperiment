@@ -235,7 +235,7 @@ class MessagesServer:
     The teller, as Anthropic's Messages API over HTTP (streaming), for the
     Claude Code CLI: at ``url``, while ``start``ed. It reads the messages as
     LangChain's: Claude Code's ``restate`` tools by their own names, a message
-    steered to the turn (``claude_agent.STEERED``) as a steered message, and
+    steered to the turn (``harness.STEERED``) as a steered message, and
     a message carried on after a crash as the message it carries on.
     """
 
@@ -318,7 +318,8 @@ class MessagesServer:
             self.server.shutdown()
 
     def answer(self, body: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
-        from restate_agents.claude_agent import CARRY_ON, SERVER, STEERED
+        from restate_agents.claude_agent import SERVER
+        from restate_agents.harness import CARRY_ON, STEERED
 
         prefix = f"mcp__{SERVER}__"
         messages = body.get("messages", [])
