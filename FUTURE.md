@@ -67,3 +67,18 @@ The same holds in Python: `restate-fns`'s selector
 `restate-sdk` 1.1.0. The SDK drives each awaited future with a loop of its
 own, which concurrent waits race on; `python/tests/test_context.py` tells
 (with the hook off, 2 of its 13 tests fail on 1.1.0).
+
+## The OpenAI Agents SDK's latest, beside a trusted LiteLLM
+
+**Waits on:** a stable LiteLLM release that takes `openai` 3, and is
+trusted again: LiteLLM 1.107.0 on PyPI was a credential stealer with a
+backdoor ([SafeDep's report](https://safedep.io/litellm-pypi-compromise-credential-stealer-backdoor/)).
+
+**Now:** `python/agents/pyproject.toml` pins `litellm==1.106.2` (the newest
+stable release, clean per the report; the lock has its hashes) and
+`openai-agents` below 0.21 (0.20), since 0.21 and later need `openai` 3,
+which LiteLLM 1.106.2 does not take.
+
+**Then:** check the new LiteLLM release (its source and its wheels' files:
+no `.pth` or `sitecustomize.py`), pin it exactly, and lift the
+`openai-agents` pin (its `TODO:`).

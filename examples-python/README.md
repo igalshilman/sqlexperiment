@@ -7,6 +7,7 @@ after `make py` at the repository's root. See [Run an example](#run-an-example).
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [`chat.py`](chat.py)                             | **Start here.** A durable chat agent on Claude (the Anthropic SDK), with a tool                                                                                          |
 | [`chat_langgraph.py`](chat_langgraph.py)         | The same agent on LangGraph                                                                                                                                              |
+| [`chat_litellm.py`](chat_litellm.py)             | The same agent on any model (OpenAI's, Gemini, Ollama, ...), through LiteLLM                                                                                             |
 | [`chat_openai_agents.py`](chat_openai_agents.py) | The same agent on the OpenAI Agents SDK                                                                                                                                  |
 | [`chat_adk.py`](chat_adk.py)                     | The same agent on Google ADK                                                                                                                                             |
 | [`coder.py`](coder.py)                           | A coding agent on Claude Code (the Claude Agent SDK): a workspace per key, and a person's review before it is done                                                       |
@@ -66,7 +67,8 @@ curl localhost:8080/assistant/alice/messages                          # the conv
 The agents take `MODEL` (`anthropic/<model-id>`), or else Claude Sonnet,
 with `ANTHROPIC_API_KEY`; `coder_codex.py` and `chat_openai_agents.py`,
 OpenAI's (`MODEL=openai/<model-id>`, or their default), with `OPENAI_API_KEY`;
-`chat_adk.py`, Gemini, with `GOOGLE_API_KEY`; `notes.py` needs no key. Each
+`chat_adk.py`, Gemini, with `GOOGLE_API_KEY`; `chat_litellm.py`, any of LiteLLM's
+models (`MODEL=openai/gpt-5`, with `OPENAI_API_KEY`); `notes.py` needs no key. Each
 example's docstring has its requests.
 
 ## Run on Modal
