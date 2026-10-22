@@ -233,7 +233,7 @@ every result and the reopened state agree.
 Exclusive ownership and settlement of outstanding requests remain host
 requirements. A namespace must use one stable key with `PageCache::namespace`;
 sessions that overlap must share it (without a cache they must not overlap).
-Request fencing, real-backend
+Real-backend
 latency and process crash/power-loss validation remain future work.
 
 See [format](FORMAT.md), [design](DESIGN.md), and
