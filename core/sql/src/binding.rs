@@ -207,8 +207,12 @@ impl Session {
         let result = call(session).await;
         if self.in_body.load(Ordering::Acquire) && !session.in_transaction() {
             self.in_body.store(false, Ordering::Release);
-            // `running` ends the session as it drops.
-            return Err("a statement ended the transaction of transaction(), whose body must not: the session has ended".into());
+            // `running` ends the session as it drops. A storage error that
+            // ended the transaction too is the error to report.
+            return match result {
+                Err(error) if !session.is_usable() => Err(error),
+                _ => Err("a statement ended the transaction of transaction(), whose body must not: the session has ended".into()),
+            };
         }
         let committed = match !self.reader && session.is_usable() && !session.in_transaction() {
             true => commit_journal(session).await,

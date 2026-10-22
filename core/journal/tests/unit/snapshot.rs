@@ -41,7 +41,7 @@ async fn open<S: KvStore + 'static>(
     store: &Arc<S>,
     options: &StorageOptions,
 ) -> io::Result<Snapshot> {
-    Snapshot::open(store.clone(), options.clone()).await
+    Snapshot::open(store.clone(), options.clone(), false).await
 }
 
 /// The expected database: pages and size.
