@@ -28,9 +28,11 @@ REFUND = {"order": "103", "amount": 5}
 SUPPORT = use(("orders_status", {"order": "103"}), ("wait_for_approval", REFUND), ("refund", REFUND))
 
 
-@pytest.fixture(params=["support", "pydantic_support", "claude_support", "litellm_support", "claude_agent_support"])
+@pytest.fixture(
+    params=["support", "pydantic_support", "claude_support", "litellm_support", "claude_agent_support", "codex_support"]
+)
 def agent(request) -> str:
-    """The support agent: on LangGraph, on Pydantic AI, on Claude, on LiteLLM, and on Claude Code."""
+    """The support agent: on LangGraph, on Pydantic AI, on Claude, on LiteLLM, on Claude Code, and on Codex."""
     return request.param
 
 

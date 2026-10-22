@@ -6,8 +6,8 @@ key) keeps the agent's state in its SQL database (`ctx.db`, of
 invocation, however often an attempt crashes. The Python counterpart of
 [`restate-agents`](../../typescript/packages/integrations/README.md), with
 [Claude](#claude) (the Anthropic SDK), [Claude Code](#claude-code) (the
-Claude Agent SDK), [LiteLLM](#litellm) (any model), [LangGraph](#langgraph)
-and [Pydantic AI](#pydantic-ai).
+Claude Agent SDK), [Codex](#codex), [LiteLLM](#litellm) (any model),
+[LangGraph](#langgraph) and [Pydantic AI](#pydantic-ai).
 
 ```python
 from restate_agents import claude, serve, tool
@@ -155,6 +155,36 @@ retried attempt resumes the session from, on any machine. Through crashes:
 Claude Code's own tools run as Claude Code runs them: a crash during an
 edit or a command leaves its effects, and the model sees the interruption
 when the turn carries on.
+
+## Codex
+
+`codex.agent(name, model=, system=, tools=, workspace=, config=)` is the same
+for [Codex](https://github.com/openai/codex), OpenAI's coding agent: its
+loop, its tools (shell, apply_patch, ... in `workspace`, in its sandbox) and
+its compaction; and the tools here, as its dynamic tools. Each prompt runs
+`codex app-server` (the binary of OpenAI's Codex SDK,
+`openai-codex-cli-bin`) in a process of its own, speaking its JSON-RPC
+protocol over stdio; the conversation is a Codex thread
+([`examples-python/coder_codex.py`](../../examples-python/coder_codex.py)).
+
+| Option      | What                                                                                                                                    |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`     | `openai/model-id`; or else `MODEL`, if it is OpenAI's; or else Codex's default. With `OPENAI_API_KEY`                                   |
+| `system`    | Added to Codex's own instructions (its developer instructions)                                                                          |
+| `tools`     | `tool`s and [Restate's tools](#restates-tools)                                                                                          |
+| `workspace` | A directory of the local machine, which Codex's tools may write (sandbox `workspace-write`). Without one, an empty one, and `read-only` |
+| `config`    | Codex's configuration, as `config.toml` has it: `{"model_reasoning_effort": "high"}`, a model provider of your own                      |
+
+`codex.prompt(ctx, text, ...)` and `codex.reset(ctx, handoff)` are those of
+Claude Code. Through crashes, as with Claude Code ([`harness.py`](restate_agents/harness.py)
+has what the two share): the thread's rollout (its JSONL transcript) is in
+the object's database (`codex_rollouts`), stored before each call of the
+tools here and when the turn ends; a retried attempt writes it to a Codex
+home of its own and resumes the thread from it (`thread/resume` with its
+`path`). A message is answered once per invocation; a turn that a crash cut
+off is carried on; a tool call made again with the same input is the
+earlier one. `stop` interrupts the turn (`turn/interrupt`) at its next tool
+call; `steer` adds to it (`turn/steer`) after the next tool call.
 
 ## LiteLLM
 
@@ -525,6 +555,10 @@ async def chat(ctx, message: str) -> str:
   for Claude Code: the CLI the SDK bundles, calling the teller as the
   Messages API ([`tests/fakes.py`](tests/fakes.py), `MessagesServer`), with
   crashes at each state request of a message, steering, stop and reset.
+- [`tests/test_codex.py`](tests/test_codex.py): the same, for Codex:
+  `codex app-server`, calling the teller as the Responses API
+  ([`tests/fakes.py`](tests/fakes.py), `ResponsesServer`, a model provider
+  of Codex's configuration).
 - [`tests/test_litellm.py`](tests/test_litellm.py): the same, for the
   LiteLLM agent (the teller as a LiteLLM provider, `teller/...`), with
   prompts, compacting and resetting of your own.

@@ -2,7 +2,7 @@
 The services of the tests against a Restate server: the notes example, a
 bank, a probe of the context without journal replay, the agent on the
 scripted teller (scripted_agent.py), and a support agent with Restate's
-tools, on LangGraph, on Pydantic AI, on Claude, on LiteLLM and on Claude Code; a desk of your own that
+tools, on LangGraph, on Pydantic AI, on Claude, on LiteLLM, on Claude Code and on Codex; a desk of your own that
 asks the helper; and a graph whose steps are Restate's. Served on PORT, as the examples are.
 """
 
@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests")
 
 import restate_fns as restate  # noqa: E402
 from bank import account  # noqa: E402
-from fakes import ClaudeClient, LiteLLMTeller, MessagesServer, Teller, pydantic_ai_model  # noqa: E402
+from fakes import ClaudeClient, LiteLLMTeller, MessagesServer, ResponsesServer, Teller, pydantic_ai_model  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
 from langgraph.graph import START, MessagesState, StateGraph  # noqa: E402
 from notes import add, notes  # noqa: E402
@@ -28,6 +28,7 @@ from restate_agents import (  # noqa: E402
     call,
     claude,
     claude_agent,
+    codex,
     langgraph,
     litellm,
     pydantic_ai,
@@ -195,6 +196,9 @@ claude_agent_support = claude_agent.agent(
     tools=SUPPORT_TOOLS,
     options={"env": {"ANTHROPIC_BASE_URL": messages_api.url, "ANTHROPIC_API_KEY": "sk-teller"}},
 )
+# Codex calls the teller as the Responses API, a model provider of its configuration.
+os.environ["TELLER_API_KEY"] = "sk-teller"
+codex_support = codex.agent("codex_support", tools=SUPPORT_TOOLS, config=ResponsesServer(Teller()).start().config)
 
 # A Claude assistant that compacts and resets its conversation, by handlers of its own.
 notebook_client = ClaudeClient(Teller())
@@ -266,6 +270,7 @@ if __name__ == "__main__":
         claude_support,
         litellm_support,
         claude_agent_support,
+        codex_support,
         desk,
         notebook,
         refunds,
