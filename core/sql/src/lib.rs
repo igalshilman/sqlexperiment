@@ -517,10 +517,11 @@ impl Sql {
     /// into the file's pages. Nothing is durable yet.
     async fn move_pages(&mut self) -> Result<()> {
         self.checkpoint().await?;
-        if let Err(error) = self.io.move_into_file().await {
-            self.poisoned = true;
-            return Err(error.into());
-        }
+        // Failing or cancelled (it reads the first page again), the move
+        // leaves the file `db` and the engine apart: the session ends.
+        self.poisoned = true;
+        self.io.move_into_file().await?;
+        self.poisoned = false;
         self.measure_changed_schema().await
     }
 
