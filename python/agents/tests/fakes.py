@@ -14,9 +14,11 @@ import asyncio
 import itertools
 import json
 import re
+import threading
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Annotated, Any
 
 import litellm
@@ -226,6 +228,138 @@ class LiteLLMTeller(litellm.CustomLLM):
         }
         finish = "tool_calls" if calls else "stop"
         return litellm.ModelResponse(model=model, choices=[{"index": 0, "message": message, "finish_reason": finish}])
+
+
+class MessagesServer:
+    """
+    The teller, as Anthropic's Messages API over HTTP (streaming), for the
+    Claude Code CLI: at ``url``, while ``start``ed. It reads the messages as
+    LangChain's: Claude Code's ``restate`` tools by their own names, a message
+    steered to the turn (``claude_agent.STEERED``) as a steered message, and
+    a message carried on after a crash as the message it carries on.
+    """
+
+    # The API key it refuses, as an invalid one.
+    WRONG_KEY = "sk-wrong"
+
+    def __init__(self, teller: Teller) -> None:
+        self.teller = teller
+        self.requests: list[dict[str, Any]] = []
+        self.server: ThreadingHTTPServer | None = None
+
+    @property
+    def url(self) -> str:
+        assert self.server is not None
+        return f"http://127.0.0.1:{self.server.server_port}"
+
+    def start(self) -> MessagesServer:
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args: Any) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+                if self.headers.get("x-api-key") == MessagesServer.WRONG_KEY:
+                    error = {"type": "authentication_error", "message": "invalid x-api-key"}
+                    return self.reply({"type": "error", "error": error}, status=401)
+                if "count_tokens" in self.path:
+                    return self.reply({"input_tokens": 1})
+                content, stop = fake.answer(body)
+                message = {
+                    "id": f"msg_{uuid.uuid4().hex}",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": body.get("model"),
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+                if not body.get("stream"):
+                    return self.reply({**message, "content": content, "stop_reason": stop})
+                self.send_response(200)
+                self.send_header("content-type", "text/event-stream")
+                self.end_headers()
+                self.event("message_start", message=message)
+                for i, block in enumerate(content):
+                    if block["type"] == "text":
+                        self.event("content_block_start", index=i, content_block={"type": "text", "text": ""})
+                        self.event("content_block_delta", index=i, delta={"type": "text_delta", "text": block["text"]})
+                    else:
+                        self.event("content_block_start", index=i, content_block={**block, "input": {}})
+                        delta = {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}
+                        self.event("content_block_delta", index=i, delta=delta)
+                    self.event("content_block_stop", index=i)
+                self.event(
+                    "message_delta", delta={"stop_reason": stop, "stop_sequence": None}, usage={"output_tokens": 1}
+                )
+                self.event("message_stop")
+
+            def event(self, type: str, **data: Any) -> None:
+                self.wfile.write(f"event: {type}\ndata: {json.dumps({'type': type, **data})}\n\n".encode())
+                self.wfile.flush()
+
+            def reply(self, value: Any, status: int = 200) -> None:
+                encoded = json.dumps(value).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        return self
+
+    def stop(self) -> None:
+        if self.server is not None:
+            self.server.shutdown()
+
+    def answer(self, body: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+        from restate_agents.claude_agent import CARRY_ON, SERVER, STEERED
+
+        prefix = f"mcp__{SERVER}__"
+        messages = body.get("messages", [])
+        first = messages[0]["content"] if messages else ""
+        if "<session>" in json.dumps(first):
+            return [{"type": "text", "text": "A title"}], "end_turn"  # Claude Code's title of the session
+        self.requests.append(body)
+        system = body.get("system")
+        said: list[BaseMessage] = []
+        if isinstance(system, list):
+            said.append(SystemMessage("\n".join(b.get("text", "") for b in system)))
+        for m in messages:
+            content = [{"type": "text", "text": m["content"]}] if isinstance(m["content"], str) else m["content"]
+            text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+            if m["role"] == "system":
+                for steered in text.split(STEERED)[1:]:
+                    said.append(HumanMessage(steered.strip(), id="turn:steer:"))
+            elif m["role"] == "assistant":
+                calls = [
+                    {"name": b["name"].removeprefix(prefix), "args": b["input"], "id": b["id"]}
+                    for b in content
+                    if b["type"] == "tool_use"
+                ]
+                said.append(AIMessage(content=text, tool_calls=calls))
+            else:
+                for b in content:
+                    if b["type"] == "tool_result":
+                        output = b.get("content")
+                        if isinstance(output, list):
+                            output = "".join(part.get("text", "") for part in output)
+                        said.append(ToolMessage(output or "", tool_call_id=b["tool_use_id"]))
+                texts = [b["text"] for b in content if b["type"] == "text" and not b["text"].startswith("<system")]
+                if texts:
+                    said.append(HumanMessage("".join(texts).removeprefix(CARRY_ON)))
+        reply = self.teller._answer(said)
+        calls = [
+            {"type": "tool_use", "id": c["id"], "name": prefix + c["name"], "input": c["args"]}
+            for c in reply.tool_calls
+        ]
+        text = [{"type": "text", "text": str(reply.content)}] if reply.content else []
+        return [*text, *calls], "tool_use" if calls else "end_turn"
 
 
 class Bank:

@@ -2,11 +2,12 @@
 The services of the tests against a Restate server: the notes example, a
 bank, a probe of the context without journal replay, the agent on the
 scripted teller (scripted_agent.py), and a support agent with Restate's
-tools, on LangGraph, on Pydantic AI, on Claude and on LiteLLM; a desk of your own that
+tools, on LangGraph, on Pydantic AI, on Claude, on LiteLLM and on Claude Code; a desk of your own that
 asks the helper; and a graph whose steps are Restate's. Served on PORT, as the examples are.
 """
 
 import asyncio
+import os
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -16,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests")
 
 import restate_fns as restate  # noqa: E402
 from bank import account  # noqa: E402
-from fakes import ClaudeClient, LiteLLMTeller, Teller, pydantic_ai_model  # noqa: E402
+from fakes import ClaudeClient, LiteLLMTeller, MessagesServer, Teller, pydantic_ai_model  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
 from langgraph.graph import START, MessagesState, StateGraph  # noqa: E402
 from notes import add, notes  # noqa: E402
@@ -26,6 +27,7 @@ from restate_agents import (  # noqa: E402
     ask,
     call,
     claude,
+    claude_agent,
     langgraph,
     litellm,
     pydantic_ai,
@@ -184,6 +186,15 @@ pydantic_support = pydantic_ai.agent("pydantic_support", model=pydantic_ai_model
 claude_support = claude.agent("claude_support", client=ClaudeClient(Teller()), tools=SUPPORT_TOOLS)
 LiteLLMTeller(Teller()).register()
 litellm_support = litellm.agent("litellm_support", model="teller/teller", tools=SUPPORT_TOOLS)
+# Claude Code's CLI calls the teller as the Messages API, with none of a Claude Code session that runs the tests.
+for name in [n for n in os.environ if n.startswith(("CLAUDE", "ANTHROPIC"))]:
+    del os.environ[name]
+messages_api = MessagesServer(Teller()).start()
+claude_agent_support = claude_agent.agent(
+    "claude_agent_support",
+    tools=SUPPORT_TOOLS,
+    options={"env": {"ANTHROPIC_BASE_URL": messages_api.url, "ANTHROPIC_API_KEY": "sk-teller"}},
+)
 
 # A Claude assistant that compacts and resets its conversation, by handlers of its own.
 notebook_client = ClaudeClient(Teller())
@@ -254,6 +265,7 @@ if __name__ == "__main__":
         pydantic_support,
         claude_support,
         litellm_support,
+        claude_agent_support,
         desk,
         notebook,
         refunds,

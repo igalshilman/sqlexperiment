@@ -11,6 +11,7 @@ dependencies = [
   "langchain-core>=1.6",
   "langchain-anthropic>=1.7",
   "pydantic-ai-slim[anthropic]>=2.57",
+  "claude-agent-sdk>=0.2.172",
   "litellm>=1.106",
   "mcp>=1.23", # litellm imports it for any request with tools, without depending on it
 ]
