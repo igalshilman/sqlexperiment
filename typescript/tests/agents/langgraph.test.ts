@@ -85,7 +85,7 @@ describe('the LangGraph agent', () => {
     const c = conversation(prompt, 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
-    expect(await c.read(langgraph.messages())).toEqual({ messages: SAID, more: false });
+    expect(await c.read(langgraph.messages())).toEqual({ messages: SAID, more: false, cursor: expect.any(Number) });
   });
 
   it('gives the model its system prompt', async () => {

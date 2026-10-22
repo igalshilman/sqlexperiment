@@ -3,6 +3,8 @@
 // cancellation, steering, publishing for the clients that follow it), and
 // the `messages` handler with its `Transcript`.
 import * as restate from 'restate-fns';
+import * as log from './log.ts';
+import type { Said } from './log.ts';
 import { agentOf, type Steer, signals, signalsOf } from './signals.ts';
 
 /**
@@ -128,11 +130,14 @@ export interface Steerable {
 const signalsOfAgent = (ctx: restate.ObjectContext) => ctx.objectClient(signals, signalsOf(ctx));
 
 /**
- * The conversation of `ctx` changed (see `watch` in object.ts): its revision
+ * The conversation of `ctx` changed (see `watch` in object.ts): its log takes
+ * the change (while a framework answers: {@link transcribing}), its revision
  * increases, and the clients that follow it read it again. It is a call to
  * Restate, so it also sends what the handler wrote before, for them to read.
  */
 const publish = async (ctx: restate.ObjectContext) => {
+  const read = reading.get(ctx);
+  if (read) await logged(ctx, read);
   await signalsOfAgent(ctx).publish();
 };
 
@@ -268,7 +273,7 @@ function refused(error: unknown) {
 
 /** A message of a conversation, as an agent's `messages` handler returns it. */
 export interface ChatMessage {
-  /** Its position in the conversation, from 0; `before` and `after` take it. */
+  /** Its id, from 0, in the order of the conversation; the same however it changes. `before` takes it. */
   id: number;
   role: 'user' | 'assistant';
   parts: Part[];
@@ -283,21 +288,31 @@ export type Part =
   | { type: 'text'; text: string }
   | { type: 'tool'; id: string; name: string; input: unknown; output?: string; error?: true };
 
-/** Which messages to read: the latest `limit`, or those before or after a message. */
+/**
+ * Which messages to read: the latest `limit`, or those before a message, for
+ * a page of the conversation; or those new or changed since a `cursor`, to
+ * follow it.
+ */
 export interface MessagesRequest {
   /** At most this many messages (default 50). */
   limit?: number;
   /** The messages before this one (its `id`): older ones, such as for scrolling back. */
   before?: number;
-  /** The messages after this one (its `id`): newer ones, such as for polling. */
-  after?: number;
+  /** The messages new or changed since this cursor (a page's `cursor`), by when they changed. */
+  cursor?: number;
 }
 
-/** A page of messages, oldest first. */
+/**
+ * A page of messages: oldest first; or, with a `cursor`, those new or
+ * changed since it, by when they changed. Keep them by `id`: a message comes
+ * again once it changed (its tool call's output came, say).
+ */
 export interface Messages {
   messages: ChatMessage[];
-  /** Whether there are more: older ones, or with `after`, newer ones. */
+  /** Whether there are more: older ones, or with a `cursor`, newer ones. */
   more: boolean;
+  /** The cursor to read on from: what changes after this page. */
+  cursor: number;
 }
 
 /**
@@ -306,7 +321,7 @@ export interface Messages {
  * message, and its result to its call. Messages without parts are left out.
  */
 export class Transcript {
-  #messages: Omit<ChatMessage, 'id'>[] = [];
+  #messages: Said[] = [];
   #calls = new Map<string, Extract<Part, { type: 'tool' }>>();
 
   /** A new message of `role`, with `text` if there is any. */
@@ -330,28 +345,68 @@ export class Transcript {
     if (error || output.startsWith('Error: ')) call.error = true;
   }
 
-  /** The page of `request`. */
-  page({ limit = 50, before, after }: MessagesRequest = {}): Messages {
-    const all = this.#messages.filter((m) => m.parts.length > 0).map((m, id) => ({ id, role: m.role, parts: m.parts }));
-    if (after !== undefined) {
-      const newer = all.slice(after + 1);
-      return { messages: newer.slice(0, limit), more: newer.length > limit };
+  /** Its messages, in order: those with parts. */
+  messages(): Said[] {
+    return this.#messages.filter((m) => m.parts.length > 0);
+  }
+}
+
+/** What a framework's transcript is read into, while it answers (see {@link transcribing}). */
+export type Read = (transcript: Transcript) => Promise<void>;
+
+/** The transcript of the turn of each context, while it answers. */
+const reading = new WeakMap<object, Read>();
+
+/** The log writes of each context, one after another: tool calls in parallel publish at once. */
+const writing = new WeakMap<object, Promise<void>>();
+
+/** The log of the conversation of `ctx` takes its transcript as `read` gives it. */
+function logged(ctx: restate.ObjectContext, read: Read): Promise<void> {
+  const write = async () => {
+    const transcript = new Transcript();
+    await read(transcript);
+    await log.sync(ctx.db, transcript.messages());
+  };
+  const done = (writing.get(ctx) ?? Promise.resolve()).then(write, write);
+  writing.set(ctx, done);
+  return done;
+}
+
+/**
+ * Run `work`, a framework's turn (or a compaction, a reset), with `read`
+ * giving the framework's transcript as it stands, from the framework as
+ * `work` holds it open: each publish meanwhile (a tool call's start and end)
+ * takes it into the conversation's log, and so does `work`'s end, before the
+ * framework closes. `messages` and `sync` read the log.
+ */
+export async function transcribing<T>(ctx: restate.ObjectContext, read: Read, work: () => Promise<T>): Promise<T> {
+  const outer = reading.get(ctx);
+  reading.set(ctx, read);
+  let failed = false;
+  try {
+    return await work();
+  } catch (error) {
+    failed = !(error instanceof restate.TerminalError);
+    throw error;
+  } finally {
+    try {
+      // A failed attempt stores nothing more: its retry runs again.
+      if (!failed) await logged(ctx, read);
+    } finally {
+      if (outer) reading.set(ctx, outer);
+      else reading.delete(ctx);
     }
-    const end = before === undefined ? all.length : Math.max(0, Math.min(before, all.length));
-    const start = Math.max(0, end - limit);
-    return { messages: all.slice(start, end), more: start > 0 };
   }
 }
 
 /**
- * `read` as the handler of an agent's conversation, a page at a time: what
- * was said, in order, with the tool calls. It is shared: it answers while a
- * message is answered, from the database as stored (the tool calls made so
- * far, say), and stores nothing.
+ * The handler of an agent's conversation as clients read it, from its log:
+ * a page of it (`{limit, before}`), or what is new or changed since a cursor
+ * (`{cursor}`). It is shared: it answers while a message is answered, with
+ * what was stored so far, and stores nothing.
  */
-export const messagesHandler = (read: (ctx: restate.ObjectSharedContext, transcript: Transcript) => Promise<void>) =>
-  restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext, request?: MessagesRequest) => {
-    const transcript = new Transcript();
-    await read(ctx, transcript);
-    return transcript.page(request ?? {});
-  });
+export const messagesHandler = () =>
+  restate.handlers.object.shared(
+    async (ctx: restate.ObjectSharedContext, request?: MessagesRequest): Promise<Messages> =>
+      log.page(ctx.db, request ?? {}),
+  );

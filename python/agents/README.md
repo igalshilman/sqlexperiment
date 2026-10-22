@@ -29,7 +29,7 @@ curl localhost:8080/assistant/alice/messages   # the conversation so far
 
 The same agent runs on each: `<framework>.agent(name, model=, system=,
 tools=)`, with the same handlers (`chat`, `messages`, `status`, `stop`,
-`steer`, `pending`, `signal`, `notifications`, `watch`) and Restate's tools.
+`steer`, `pending`, `signal`, `sync`, `notifications`, `watch`) and Restate's tools.
 Where the framework has agents of its own (LangGraph, Pydantic AI, the
 OpenAI Agents SDK, ADK), yours can go in its place, with
 `<framework>.tools([...])` for Restate's tools. `<framework>.prompt(ctx, ...)`
@@ -61,7 +61,7 @@ as plain text, `-d 'Hi'`, or a JSON string, `--json '"Hi"'`) and `messages`
 (the conversation so far, with the tool calls, a page at a time:
 `{"limit": 50, "before": id}`, or what is new since a cursor: `{"cursor": n}`); `status`, `stop` and `steer`
 ([Turns](#turns)); `pending` and `signal` ([Restate's tools](#restates-tools));
-and `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
+and `sync`, `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
 Add handlers of your own with `@assistant.handler`.
 
 | Option    | What                                                                                                                                                         |
@@ -246,7 +246,7 @@ plain text, `-d 'Hi'`, or a JSON string, `--json '"Hi"'`) and `messages` (the
 conversation so far, with the tool calls, a page at a time:
 `{"limit": 50, "before": id}`, or what is new since a cursor: `{"cursor": n}`); `status`, `stop` and `steer`
 ([Turns](#turns)); `pending` and `signal` ([Restate's tools](#restates-tools));
-and `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
+and `sync`, `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
 Add handlers of your own with `@assistant.handler`.
 
 | Option   | What                                                                                                                                                                                                                        |

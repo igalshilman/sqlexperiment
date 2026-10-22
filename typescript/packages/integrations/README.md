@@ -61,7 +61,7 @@ your own (`restate.serve`, `restate.endpoint()`) binds `signals` too.
 The same agent runs on each of them: `agent({ name, ...options })`, with
 the handlers `chat` (a message in, the answer out) and `messages` (the
 conversation so far), `status` (what it is doing), `stop` and `steer` (the
-message it answers), `notifications` and `watch` (to follow it), and `signal`
+message it answers), `sync`, `notifications` and `watch` (to follow it), and `signal`
 and `pending` ([Signals](#signals)).
 
 | Import                                                | Framework                       | Choose it when                                                                                |
@@ -177,22 +177,28 @@ curl localhost:8080/assistant/alice/messages
     },
     { "id": 2, "role": "assistant", "parts": [{ "type": "text", "text": "18°C and sunny." }] }
   ],
-  "more": false
+  "more": false,
+  "cursor": 4
 }
 ```
 
-A message's `id` is its position in the conversation. `limit` caps a page;
-`before` an id gives older messages (scrolling back, while `more` says there
-are older ones still), and `after` an id newer ones (polling for what came
-since):
+The conversation as clients read it is a log in the object's database,
+which each change the agent publishes goes into. A message's `id` never
+changes; `cursor` is where the log is now. `limit` caps a page; `before` an
+id gives older messages (scrolling back, while `more` says there are older
+ones still); and `cursor` gives the messages new or changed since it, by
+when they changed, with the next cursor: a message that grew (a tool call
+with its output) comes again, with its `id`. A compacted or reset
+conversation keeps what was said, and the summary or handoff after it (the
+model's context is what changed):
 
 ```sh
 curl localhost:8080/assistant/alice/messages --json '{"limit": 20, "before": 40}'
-curl localhost:8080/assistant/alice/messages --json '{"after": 59}'
+curl localhost:8080/assistant/alice/messages --json '{"cursor": 4}'
 ```
 
-It answers at once, also while a message is answered: from the framework's
-own storage as stored, with the tool calls made so far.
+It answers at once, also while a message is answered: with the tool calls
+made so far.
 
 **What it is doing.** `status` says which message the agent answers, if
 any (its invocation id, to attach to its answer, and since when), and what
@@ -217,21 +223,22 @@ In a tool part, `error: true` says the output is the tool's error (`Error:
 <message>`), for a UI to show it as one.
 
 **Follow it.** Instead of polling `messages` and `status`, a UI waits for
-the next change: `notifications` is the conversation's revision, which each
-change increases (a message or tool call stored, a wait, a turn's start and
-end), and `watch` answers once the revision is past the one given, or at its
-timeout (50 s by default, at most 60). It waits in Restate, holding no
-process; `follow()` of `restate-agents/client` (below) does the reading and
-the waiting:
+the next change with `sync`: given the `revision` of its last sync, it
+answers once something changed (a message or tool call stored, a wait, a
+turn's start and end), or at its timeout (50 s by default, at most 60), with
+the new revision, the `status`, and the messages since its `cursor`, in one
+request. It waits in Restate, holding no process; sent again with the same
+idempotency key, it joins the same wait. `follow()` of
+`restate-agents/client` (below) is a loop of syncs:
 
 ```sh
-curl localhost:8080/support/alice/notifications                          # {"revision": 7}
-curl localhost:8080/support/alice/watch --json '{"afterRevision": 7}'     # {"revision": 8}, once something changed
+curl localhost:8080/support/alice/sync --json '{}'                              # {"revision": 7, "cursor": 31, "status": ..., "messages": [...], "more": false}
+curl localhost:8080/support/alice/sync --json '{"cursor": 31, "revision": 7}'   # the same, once something changed
 ```
 
-The revision says only that something changed; a client then reads
-`messages` and `status` again. The model's reply comes whole, with its
-message: there is no token streaming.
+`notifications` and `watch({ afterRevision })` are the revision alone, and
+the wait alone. The model's reply comes whole, with its message: there is no
+token streaming.
 
 **From code.** From a Restate handler, through the agent's definition:
 
@@ -462,7 +469,7 @@ API, such as compacting the conversation (see their READMEs).
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and
 `metadata` add to these. Its own handlers cannot be named `signal`,
-`pending`, `status`, `stop`, `steer`, `notifications` or `watch`, which every object has. A shared handler of yours
+`pending`, `status`, `stop`, `steer`, `sync`, `notifications` or `watch`, which every object has. A shared handler of yours
 reads the database too: `ctx.db` is the database as stored, beside a
 message being answered.
 

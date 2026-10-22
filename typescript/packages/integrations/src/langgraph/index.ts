@@ -25,6 +25,7 @@
 // - A message is answered once per invocation: the graph records each answer
 //   in its state, and a retried attempt returns it.
 import * as restate from 'restate-fns';
+import type { SqlSession } from 'restate-fns';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -44,6 +45,8 @@ import {
   nextPromptId,
   toolCallEnded,
   toolCallStarted,
+  type Transcript,
+  transcribing,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -156,10 +159,17 @@ export interface Options {
  * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
  * of an invocation is a prompt of its own. The thread is the object's key.
  */
-export const prompt = async (
+export const prompt = (ctx: restate.ObjectContext, text: string, options: Options = {}): Promise<string> =>
+  transcribing(
+    ctx,
+    (transcript) => transcribe(ctx.db, ctx.key, transcript),
+    () => answerOnce(ctx, text, options),
+  );
+
+const answerOnce = async (
   ctx: restate.ObjectContext,
   text: string,
-  { model, system, tools = [] }: Options = {},
+  { model, system, tools = [] }: Options,
 ): Promise<string> => {
   const llm = typeof model === 'object' ? model : new ChatAnthropic({ model: modelIdOf(modelOf(model), 'anthropic') });
   const app = graph(
@@ -235,18 +245,20 @@ export const chat = (options: Configure<Options> = {}) => {
 };
 
 /** A handler of the thread, a page at a time: what was said, in order, with the tool calls, from its last checkpoint. */
-export const messages = () =>
-  messagesHandler(async (ctx, transcript) => {
-    const saved = await new SqlCheckpointSaver(ctx.db).getTuple({ configurable: { thread_id: ctx.key } });
-    for (const m of (saved?.checkpoint.channel_values.messages ?? []) as BaseMessage[]) {
-      if (HumanMessage.isInstance(m)) transcript.say('user', m.text);
-      if (AIMessage.isInstance(m)) {
-        transcript.say('assistant', m.text);
-        for (const call of m.tool_calls ?? []) transcript.call(call.id ?? '', call.name, call.args);
-      }
-      if (ToolMessage.isInstance(m)) transcript.result(m.tool_call_id, m.text, m.status === 'error');
+export const messages = () => messagesHandler();
+
+/** The thread `key` in `db`, from its last checkpoint, as `messages` gives it. */
+const transcribe = async (db: SqlSession, key: string, transcript: Transcript) => {
+  const saved = await new SqlCheckpointSaver(db).getTuple({ configurable: { thread_id: key } });
+  for (const m of (saved?.checkpoint.channel_values.messages ?? []) as BaseMessage[]) {
+    if (HumanMessage.isInstance(m)) transcript.say('user', m.text);
+    if (AIMessage.isInstance(m)) {
+      transcript.say('assistant', m.text);
+      for (const call of m.tool_calls ?? []) transcript.call(call.id ?? '', call.name, call.args);
     }
-  });
+    if (ToolMessage.isInstance(m)) transcript.result(m.tool_call_id, m.text, m.status === 'error');
+  }
+};
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({

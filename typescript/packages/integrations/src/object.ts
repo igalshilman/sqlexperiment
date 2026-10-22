@@ -1,6 +1,6 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from 'restate-fns';
-import { messageSerde, TURN, type Turn } from './common.ts';
+import { type Messages, type MessagesRequest, messageSerde, TURN, type Turn } from './common.ts';
 import {
   agentOf,
   type Notifications,
@@ -98,21 +98,73 @@ const BUILT_IN = {
    */
   watch: restate.handlers.object.shared(
     { journalReplay: true },
+    async (ctx: restate.JournaledObjectSharedContext, watch: Watch): Promise<Notifications> => waited(ctx, watch),
+  ),
+  /**
+   * The conversation since `cursor` (by default, all of it), what the object
+   * is doing, and the revision, in one request; with `revision`, once there
+   * is a newer one, or at the timeout. A client follows the conversation by
+   * sending each answer's `revision` and `cursor` back, at once while it has
+   * `more`. It reads the object's `messages`.
+   */
+  sync: restate.handlers.object.shared(
+    { journalReplay: true },
     async (
       ctx: restate.JournaledObjectSharedContext,
-      { afterRevision, timeoutSeconds = 50 }: Watch,
-    ): Promise<Notifications> => {
-      const key = signalsOf(ctx);
-      const { id, promise } = ctx.awakeable<Notifications>();
-      ctx.objectSendClient(signals, key).subscribe({ afterRevision, awakeable: id });
-      const timeout = ctx.sleep({ seconds: Math.min(Math.max(timeoutSeconds, 0), 60) }).map(() => null);
-      const changed = await restate.RestatePromise.race([promise, timeout]);
-      if (changed) return changed;
-      ctx.objectSendClient(signals, key).unsubscribe(id);
-      return ctx.objectClient(signals, key).notifications();
+      { cursor = 0, revision, timeoutSeconds = 50, limit = 100 }: SyncRequest = {},
+    ): Promise<Synced> => {
+      if (revision !== undefined) await waited(ctx, { afterRevision: revision, timeoutSeconds });
+      // The revision first: a change after it shows in the next sync.
+      const now = await ctx.objectClient(signals, signalsOf(ctx)).notifications();
+      const status: Status = {
+        answering: await ctx.get<Turn>(TURN),
+        waiting: await ctx.objectClient(signals, signalsOf(ctx)).pending(),
+      };
+      const page = await ctx.genericCall<MessagesRequest, Messages>({
+        service: ctx.request().target.service,
+        method: 'messages',
+        key: ctx.key,
+        parameter: { cursor, limit },
+        inputSerde: restate.serde.json,
+        outputSerde: restate.serde.json,
+      });
+      return { revision: now.revision, status, ...page };
     },
   ),
 };
+
+/** The revision, once it is past `afterRevision`, or at the timeout: see `watch`. */
+async function waited(
+  ctx: restate.JournaledObjectSharedContext,
+  { afterRevision, timeoutSeconds = 50 }: Watch,
+): Promise<Notifications> {
+  const key = signalsOf(ctx);
+  const { id, promise } = ctx.awakeable<Notifications>();
+  ctx.objectSendClient(signals, key).subscribe({ afterRevision, awakeable: id });
+  const timeout = ctx.sleep({ seconds: Math.min(Math.max(timeoutSeconds, 0), 60) }).map(() => null);
+  const changed = await restate.RestatePromise.race([promise, timeout]);
+  if (changed) return changed;
+  ctx.objectSendClient(signals, key).unsubscribe(id);
+  return ctx.objectClient(signals, key).notifications();
+}
+
+/**
+ * What `sync` reads: what is new or changed since `cursor` (default 0, all
+ * of it), at most `limit` messages (default 100); once the revision is past
+ * `revision`, if given, or at `timeoutSeconds` (default 50, at most 60).
+ */
+export interface SyncRequest {
+  cursor?: number;
+  revision?: number;
+  timeoutSeconds?: number;
+  limit?: number;
+}
+
+/** What `sync` answers: the messages since the cursor, as `messages` gives them, the status and the revision. */
+export interface Synced extends Messages {
+  revision: number;
+  status: Status;
+}
 
 /** A handler: `ctx` is the object's context, with `ctx.db`; the input, if any, is annotated. */
 type Handler = (ctx: restate.ObjectContext, input: never) => unknown;
@@ -134,7 +186,7 @@ type Reserved = { [name in keyof typeof BUILT_IN]?: 'a handler every object has:
  * Besides its own handlers, it has `status`, what it is doing (the message
  * it answers, and what its tools wait for), `stop`, which stops that
  * message, `steer`, which adds to it, `pending`, the waits of its tools
- * (`signal()`), `signal({ id, value })`, which resolves one, and
+ * (`signal()`), `signal({ id, value })`, which resolves one, and `sync`,
  * `notifications` and `watch({ afterRevision })`, to follow its
  * conversation (`follow()` of restate-agents/client).
  *

@@ -9,6 +9,7 @@ of their own, unless it was cancelled.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import weakref
 from collections.abc import Awaitable, Callable, Iterable
@@ -79,12 +80,17 @@ async def publish() -> None:
     except RuntimeError:
         return
     if (transcript := _transcripts.get(name)) is not None:
-        await log.sync(ctx.db, (await transcript(ctx)).messages())
+        # One write at a time: a framework's tasks (tool calls in parallel, an SDK's own) publish at once.
+        async with _writing.setdefault(ctx, asyncio.Lock()):
+            await log.sync(ctx.db, (await transcript(ctx)).messages())
     await ctx.object_call(publish_change, key=signals_of(name, ctx.key()), arg=None)
 
 
 # The transcript of each agent, by its object's name: what its log is kept in step with.
 _transcripts: dict[str, Callable[[restate.ObjectContext], Awaitable[Transcript]]] = {}
+
+# The log's writes of each attempt, by its context.
+_writing: weakref.WeakKeyDictionary[Any, asyncio.Lock] = weakref.WeakKeyDictionary()
 
 
 def taken(ids: Iterable[str]) -> None:

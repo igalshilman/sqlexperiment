@@ -21,7 +21,7 @@ import * as restate from '@restatedev/restate-sdk';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { call, signal, signals, workflow, type Messages, type Status, type Waiting } from 'restate-agents';
 import * as clients from '@restatedev/restate-sdk-clients';
-import { agent, follow, type Followed } from 'restate-agents/client';
+import { agent, type ChatMessage, follow, type Followed } from 'restate-agents/client';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
@@ -275,15 +275,18 @@ try {
   ]);
   // `follow` gives the conversation as it changes, without polling: the wait
   // for approval, then the answer, as the turn stores them.
+  // A message comes once, and again once it changes: kept by id, as a UI keeps them.
   const stopFollowing = new AbortController();
   const seen: Followed[] = [];
+  const kept = new Map<number, ChatMessage>();
+  const last = () => [...kept.values()].toSorted((a, b) => a.id - b.id).at(-1);
   const following = (async () => {
     for await (const change of follow(ingress, agent('support'), 'mia', { signal: stopFollowing.signal })) {
       seen.push(change);
+      for (const m of change.messages) kept.set(m.id, m);
       if (change.status.waiting.length > 0)
         await ingress.objectClient(agent('support'), 'mia').signal({ name: 'approval', value: 'approved' });
-      if (change.status.answering === null && change.messages.at(-1)?.parts[0]?.type === 'text' && seen.length > 1)
-        return;
+      if (change.status.answering === null && last()?.parts[0]?.type === 'text' && seen.length > 1) return;
     }
   })();
   await ingress.objectSendClient(agent('support'), 'mia').chat('Refund order 103');
@@ -293,11 +296,7 @@ try {
     seen.some((c) => c.status.answering !== null && c.status.waiting.length === 1),
     JSON.stringify(seen),
   );
-  assert.equal(
-    seen.at(-1)?.messages.at(-1)?.parts[0]?.type === 'text' &&
-      (seen.at(-1)!.messages.at(-1)!.parts[0] as { text: string }).text,
-    'order 103: delivered / approved / refunded 103',
-  );
+  assert.deepEqual(last()?.parts[0], { type: 'text', text: 'order 103: delivered / approved / refunded 103' });
   assert.ok(seen.length < 20, `${seen.length} changes`);
   // A watch with nothing new answers at its timeout, with the same revision.
   const mia = ingress.objectClient(agent('support'), 'mia');

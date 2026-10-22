@@ -26,6 +26,7 @@
 //   invocation id, and a retried attempt returns the answer of the turn that
 //   finished it.
 import * as restate from 'restate-fns';
+import type { SqlSession } from 'restate-fns';
 import { Context } from '@deepseek-ai/cordis';
 import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import { AgentLoop } from '@deepseek-ai/dsh-agent-loop';
@@ -59,6 +60,8 @@ import {
   type Steerable,
   toolCallEnded,
   toolCallStarted,
+  type Transcript,
+  transcribing,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -223,10 +226,17 @@ export interface Options {
  * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
  * of an invocation is a prompt of its own. The session is the object's key.
  */
-export const prompt = async (
+export const prompt = (ctx: restate.ObjectContext, text: string, options: Options = {}): Promise<string> =>
+  transcribing(
+    ctx,
+    (transcript) => transcribe(ctx.db, ctx.key, transcript),
+    () => answerOnce(ctx, text, options),
+  );
+
+const answerOnce = async (
   ctx: restate.ObjectContext,
   text: string,
-  { model: named, system, tools = [] }: Options = {},
+  { model: named, system, tools = [] }: Options,
 ): Promise<string> => {
   const id = nextPromptId(ctx);
   const harness = await boot(ctx.db, system);
@@ -340,18 +350,20 @@ const parsed = (json: string): unknown => {
 };
 
 /** A handler of the session, a page at a time: what was said, in order, with the tool calls, from its log. */
-export const messages = () =>
-  messagesHandler(async (ctx, transcript) => {
-    for (const e of await storedEvents(ctx.db, SessionId(ctx.key))) {
-      // The prompts and the messages steered to them, not the requests to
-      // continue an interrupted turn.
-      if (e.type === 'user/message' && /^(prompt|steer):/.test(e.data.id)) transcript.say('user', textOf(e.data));
-      if (e.type === 'assistant/message') transcript.say('assistant', textOf(e.data.message));
-      if (e.type === 'tool/call') transcript.call(e.data.callId, e.data.name, parsed(e.data.arguments));
-      if (e.type === 'tool/result')
-        transcript.result(e.data.message.toolCallId, textOf(e.data.message), e.data.message.isError);
-    }
-  });
+export const messages = () => messagesHandler();
+
+/** The session `key` in `db`, from its log, as `messages` gives it. */
+const transcribe = async (db: SqlSession, key: string, transcript: Transcript) => {
+  for (const e of await storedEvents(db, SessionId(key))) {
+    // The prompts and the messages steered to them, not the requests to
+    // continue an interrupted turn.
+    if (e.type === 'user/message' && /^(prompt|steer):/.test(e.data.id)) transcript.say('user', textOf(e.data));
+    if (e.type === 'assistant/message') transcript.say('assistant', textOf(e.data.message));
+    if (e.type === 'tool/call') transcript.call(e.data.callId, e.data.name, parsed(e.data.arguments));
+    if (e.type === 'tool/result')
+      transcript.result(e.data.message.toolCallId, textOf(e.data.message), e.data.message.isError);
+  }
+};
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({

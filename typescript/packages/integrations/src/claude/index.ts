@@ -22,6 +22,7 @@
 // - A message is answered once per invocation: its answer is stored with the
 //   model's last reply, and a retried attempt returns it.
 import * as restate from 'restate-fns';
+import type { SqlSession } from 'restate-fns';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import {
@@ -37,6 +38,8 @@ import {
   nextPromptId,
   toolCallEnded,
   toolCallStarted,
+  type Transcript,
+  transcribing,
 } from '../common.ts';
 import { object } from '../object.ts';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
@@ -166,10 +169,17 @@ let shared: Anthropic | undefined;
  * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
  * of an invocation is a prompt of its own.
  */
-export const prompt = async (
+export const prompt = (ctx: restate.ObjectContext, text: string, options: Options = {}): Promise<string> =>
+  transcribing(
+    ctx,
+    (transcript) => transcribe(ctx.db, transcript),
+    () => answerOnce(ctx, text, options),
+  );
+
+const answerOnce = async (
   ctx: restate.ObjectContext,
   text: string,
-  { model: named, system, tools = [], client, maxTokens = 4096 }: Options = {},
+  { model: named, system, tools = [], client, maxTokens = 4096 }: Options,
 ): Promise<string> => {
   const agent = {
     client: client ?? (shared ??= new Anthropic()),
@@ -222,20 +232,22 @@ const storedText = (content: string | readonly { type: string; text?: string }[]
   typeof content === 'string' ? content : (content ?? []).flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
 
 /** A handler of the conversation, a page at a time: what was said, in order, with the tool calls. */
-export const messages = () =>
-  messagesHandler(async (ctx, transcript) => {
-    const conversation = await Conversation.open(ctx.db);
-    for (const m of await conversation.messages()) {
-      if (m.role === 'system') continue;
-      transcript.say(m.role, storedText(m.content));
-      if (typeof m.content === 'string') continue;
-      for (const block of m.content) {
-        if (block.type === 'tool_use') transcript.call(block.id, block.name, block.input);
-        if (block.type === 'tool_result')
-          transcript.result(block.tool_use_id, storedText(block.content), block.is_error === true);
-      }
+export const messages = () => messagesHandler();
+
+/** The conversation in `db`, as `messages` gives it. */
+const transcribe = async (db: SqlSession, transcript: Transcript) => {
+  const conversation = await Conversation.open(db);
+  for (const m of await conversation.messages()) {
+    if (m.role === 'system') continue;
+    transcript.say(m.role, storedText(m.content));
+    if (typeof m.content === 'string') continue;
+    for (const block of m.content) {
+      if (block.type === 'tool_use') transcript.call(block.id, block.name, block.input);
+      if (block.type === 'tool_result')
+        transcript.result(block.tool_use_id, storedText(block.content), block.is_error === true);
     }
-  });
+  }
+};
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
 export const agent = <P extends string>({
