@@ -417,6 +417,19 @@ impl NamespaceCache {
         self.owner().hint = Some(hint);
     }
 
+    /// Take the right to commit on top of `version`, this owner's last
+    /// durable commit: refused if another state committed since, or is
+    /// committing. A commit that lands records its version again
+    /// ([`Self::record`]); one that fails leaves it unknown.
+    pub(crate) fn claim(&self, version: u64) -> bool {
+        let mut owner = self.owner();
+        let claimed = owner.committed == Some(version);
+        if claimed {
+            owner.committed = None;
+        }
+        claimed
+    }
+
     /// The version of this owner's last durable commit, if still known.
     pub(crate) fn committed(&self) -> Option<u64> {
         self.owner().committed

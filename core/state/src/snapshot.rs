@@ -619,16 +619,7 @@ impl Snapshot {
             let after = self.continued(self.commit.clone(), self.commit_bytes.clone());
             return Ok((report, after.registered()));
         }
-        // One writer at a time: another session's commit since this view was
-        // taken would be overwritten.
         let cache = self.options.cache.as_ref();
-        if let Some(cache) = cache
-            && cache.committed() != Some(self.version())
-        {
-            return Err(io::Error::other(
-                "another state flushed since this one opened; reopen",
-            ));
-        }
         let mut commit = self.commit.clone();
         // A file's id, allocated for a new name.
         let allocate = |commit: &mut Commit, name: &str, kind: Kind| match commit.file_id(name) {
@@ -683,6 +674,17 @@ impl Snapshot {
         let mut named = log::Values::new();
         let named_before = commit.stored_values();
         let budget = self.options.inline_log_bytes;
+        // The records' names, refused before anything is written if too many.
+        for name in records.keys() {
+            allocate(&mut commit, name, Kind::Record(Part::Inline(Bytes::new())))?;
+        }
+        // One writer at a time: another state's commit since this one opened,
+        // or one running, would be overwritten.
+        if cache.is_some_and(|cache| !cache.claim(self.version())) {
+            return Err(io::Error::other(
+                "another state flushed since this one opened; reopen",
+            ));
+        }
         // Every write is queued: a failure leaves the commit's outcome unknown.
         let write = |key: &str, value: Option<Bytes>| {
             let queued = match value {
@@ -737,8 +739,7 @@ impl Snapshot {
         }
         let mut after_records = self.records.clone();
         for (name, value) in records {
-            let empty = Kind::Record(Part::Inline(Bytes::new()));
-            let id = allocate(&mut commit, &name, empty)?;
+            let id = commit.file_id(&name).expect("allocated before any write");
             let record = match value.len() > budget {
                 true => Part::Stored(store_value(&mut commit, std::slice::from_ref(&value))?, 0),
                 false => Part::Inline(value.clone()),
