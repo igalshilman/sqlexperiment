@@ -6,7 +6,8 @@ key) keeps the agent's state in its SQL database (`ctx.db`, of
 invocation, however often an attempt crashes. The Python counterpart of
 [`restate-agents`](../../typescript/packages/integrations/README.md), with
 [Claude](#claude) (the Anthropic SDK), [Claude Code](#claude-code) (the
-Claude Agent SDK), [Codex](#codex), [LangGraph](#langgraph),
+Claude Agent SDK), [Codex](#codex), [LiteLLM](#litellm) (any model),
+[LangGraph](#langgraph),
 [Pydantic AI](#pydantic-ai), the [OpenAI Agents SDK](#openai-agents-sdk) and
 [Google ADK](#google-adk).
 
@@ -186,6 +187,35 @@ home of its own and resumes the thread from it (`thread/resume` with its
 off is carried on; a tool call made again with the same input is the
 earlier one. `stop` interrupts the turn (`turn/interrupt`) at its next tool
 call; `steer` adds to it (`turn/steer`) after the next tool call.
+
+## LiteLLM
+
+`litellm.agent(name, model=, system=, tools=)` is the same agent on any model,
+through [LiteLLM](https://docs.litellm.ai): the OpenAI-format messages that
+LiteLLM speaks to every provider, stored in the object's database
+(`litellm_messages`), with the handlers of the Claude agent. As with Claude,
+the loop is the agent's own: each reply of the model is stored before its
+tools run, and their results before the next request.
+
+```python
+from restate_agents import litellm, serve
+
+assistant = litellm.agent("assistant", model="openai/gpt-5", system="Answer briefly.", tools=[get_weather])
+serve(assistant)
+```
+
+| Option    | What                                                                                                                                                                                                             |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`   | Any model LiteLLM knows, as `provider/model-id` (`openai/gpt-5`, `gemini/gemini-2.5-pro`, `bedrock/...`, `ollama/llama3.1`), with its provider's API key; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` |
+| `system`  | The system prompt                                                                                                                                                                                                |
+| `tools`   | `tool`s and [Restate's tools](#restates-tools); and tools the provider runs, as dicts in its format                                                                                                              |
+| `request` | More of each request, as `litellm.acompletion` takes it: `{"temperature": 0.2, "api_base": "http://localhost:11434"}`                                                                                            |
+
+`model`, `system`, `tools` and `request` may be functions of the
+invocation's context, or async ones. A model LiteLLM knows no provider of
+fails when the agent is defined. `litellm.prompt(ctx, text, ...)`,
+`litellm.compact(ctx, instructions)` and `litellm.reset(ctx, handoff)` are
+those of Claude ([`examples-python/chat_litellm.py`](../../examples-python/chat_litellm.py)).
 
 ## LangGraph
 
@@ -612,6 +642,9 @@ async def chat(ctx, message: str) -> str:
   of your own and its typed output, each answered once.
 - [`tests/test_adk.py`](tests/test_adk.py): the same, for Google ADK (the
   teller as an ADK model), with an agent of your own in a thread of its own.
+- [`tests/test_litellm.py`](tests/test_litellm.py): the same, for the
+  LiteLLM agent (the teller as a LiteLLM provider, `teller/...`), with
+  prompts, compacting and resetting of your own.
 - [`tests/test_pydantic_ai.py`](tests/test_pydantic_ai.py): the same, for
   the Pydantic AI agent (the teller as a Pydantic AI model), and agents of
   your own, prompts of your own and a structured output, each answered once.

@@ -1,6 +1,6 @@
 """
 A conversation in the object's database, for the integrations that run the
-model's loop themselves (Claude): the API's own messages, a row
+model's loop themselves (Claude, LiteLLM): the API's own messages, a row
 each, in order, each with the prompt it belongs to, and the answer on the
 message that answers it.
 """

@@ -17,7 +17,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests")
 
 import restate_fns as restate  # noqa: E402
 from bank import account  # noqa: E402
-from fakes import AdkTeller, AgentsTeller, ClaudeClient, MessagesServer, ResponsesServer, Teller, pydantic_ai_model  # noqa: E402
+from fakes import (
+    AdkTeller,
+    AgentsTeller,
+    ClaudeClient,
+    LiteLLMTeller,
+    MessagesServer,
+    ResponsesServer,
+    Teller,
+    pydantic_ai_model,
+)  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
 from langgraph.graph import START, MessagesState, StateGraph  # noqa: E402
 from notes import add, notes  # noqa: E402
@@ -31,6 +40,7 @@ from restate_agents import (  # noqa: E402
     claude_agent,
     codex,
     langgraph,
+    litellm,
     openai_agents,
     pydantic_ai,
     send,
@@ -202,6 +212,8 @@ codex_support = codex.agent("codex_support", tools=SUPPORT_TOOLS, config=Respons
 os.environ["OPENAI_AGENTS_DISABLE_TRACING"] = "1"
 agents_support = openai_agents.agent("agents_support", model=AgentsTeller(Teller()), tools=SUPPORT_TOOLS)
 adk_support = adk.agent("adk_support", model=AdkTeller(Teller()), tools=SUPPORT_TOOLS)
+LiteLLMTeller(Teller()).register()
+litellm_support = litellm.agent("litellm_support", model="teller/teller", tools=SUPPORT_TOOLS)
 
 # A Claude assistant that compacts and resets its conversation, by handlers of its own.
 notebook_client = ClaudeClient(Teller())
@@ -275,6 +287,7 @@ if __name__ == "__main__":
         codex_support,
         agents_support,
         adk_support,
+        litellm_support,
         desk,
         notebook,
         refunds,

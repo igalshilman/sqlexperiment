@@ -37,6 +37,7 @@ SUPPORT = use(("orders_status", {"order": "103"}), ("wait_for_approval", REFUND)
         "codex_support",
         "agents_support",
         "adk_support",
+        "litellm_support",
     ]
 )
 def agent(request) -> str:

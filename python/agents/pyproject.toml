@@ -13,7 +13,12 @@ dependencies = [
   "pydantic-ai-slim[anthropic]>=2.57",
   "claude-agent-sdk>=0.2.172",
   "openai-codex-cli-bin>=0.163",
-  "openai-agents>=0.24",
+  "openai-agents>=0.20,<0.21", # TODO: 0.21 and later need openai 3, which litellm 1.106.2 does not take (FUTURE.md)
+  # Exactly 1.106.2: 1.107.0 on PyPI was a credential stealer
+  # (https://safedep.io/litellm-pypi-compromise-credential-stealer-backdoor/), and
+  # 1.106.2 is the newest stable release the report lists as clean. Update by hand,
+  # after checking the release.
+  "litellm==1.106.2",
   "google-adk>=2.12",
 ]
 

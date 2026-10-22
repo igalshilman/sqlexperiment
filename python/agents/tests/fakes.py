@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Annotated, Any
 
 import agents
+import litellm
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 from google.adk.models import BaseLlm, LlmResponse
 from google.genai import types as genai_types
@@ -184,6 +185,54 @@ class ClaudeClient:
             stop_reason="tool_use" if calls else "end_turn",
             usage=Usage(input_tokens=0, output_tokens=0),
         )
+
+
+class LiteLLMTeller(litellm.CustomLLM):
+    """
+    The teller, as a LiteLLM provider (``teller/<anything>``, once
+    ``register``ed): it reads the OpenAI-format messages as LangChain's.
+    """
+
+    def __init__(self, teller: Teller) -> None:
+        super().__init__()
+        self.teller = teller
+        self.requests: list[dict[str, Any]] = []
+
+    def register(self) -> LiteLLMTeller:
+        litellm.custom_provider_map = [{"provider": "teller", "custom_handler": self}]
+        return self
+
+    async def acompletion(self, model: str, messages: list, model_response: Any, optional_params: dict, **_: Any):
+        self.requests.append({"model": model, "messages": list(messages), **optional_params})
+        said: list[BaseMessage] = []
+        results = False  # whether the messages before are tool results (and messages steered after them)
+        for m in messages:
+            if m["role"] == "system":
+                said.append(SystemMessage(m["content"]))
+            elif m["role"] == "assistant":
+                calls = [
+                    {"name": c["function"]["name"], "args": json.loads(c["function"]["arguments"]), "id": c["id"]}
+                    for c in m.get("tool_calls") or []
+                ]
+                said.append(AIMessage(content=m.get("content") or "", tool_calls=calls))
+            elif m["role"] == "tool":
+                said.append(ToolMessage(m["content"], tool_call_id=m["tool_call_id"]))
+            else:
+                # A message steered to the turn comes after the tool results.
+                said.append(HumanMessage(m["content"], id="turn:steer:" if results else None))
+            results = m["role"] == "tool" or (m["role"] == "user" and results)
+        reply = self.teller._answer(said)
+        calls = [
+            {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": json.dumps(c["args"])}}
+            for c in reply.tool_calls
+        ]
+        message = {
+            "role": "assistant",
+            "content": str(reply.content) or None,
+            **({"tool_calls": calls} if calls else {}),
+        }
+        finish = "tool_calls" if calls else "stop"
+        return litellm.ModelResponse(model=model, choices=[{"index": 0, "message": message, "finish_reason": finish}])
 
 
 class MessagesServer:
