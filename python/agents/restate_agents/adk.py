@@ -15,9 +15,9 @@ appends them::
 
 The usual agent is an ``LlmAgent`` with ``model`` (``google/model-id``, or
 an ADK model), or else MODEL if it is Google's, or else ADK's default, with
-GOOGLE_API_KEY; ``instruction``; and ``tools``. Or bring an agent of your
+GOOGLE_API_KEY; ``system``, its instruction; and ``tools``. Or bring an agent of your
 own (sub-agents, callbacks, an output schema), or an ``App`` (plugins), whose
-tools may include those here through ``adk_tools([...])``.
+tools may include those here through ``tools([...])``.
 
 The handler is not replayed: a retried attempt (a crash, a lost connection)
 runs again from the start, and the session carries on from its stored events:
@@ -66,7 +66,7 @@ from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
 
-__all__ = ["CANCELLED", "adk_tools", "agent", "prompt"]
+__all__ = ["CANCELLED", "agent", "prompt", "tools"]
 
 # The tables of the conversations' messages and answers, and of their sessions' events.
 PROMPTS, EVENTS = "adk_prompts", "adk_events"
@@ -80,7 +80,7 @@ def agent(
     adk_agent: BaseAgent | App | Callable[[ObjectContext], BaseAgent | App] | None = None,
     *,
     model: str | BaseLlm | Callable[[ObjectContext], str | BaseLlm] | None = None,
-    instruction: str | None = None,
+    system: str | None = None,
     tools: Sequence[Tool | Any] = (),
     **options: Any,
 ) -> Object:
@@ -94,24 +94,23 @@ def agent(
       answers; ``pending`` and ``signal``: what its tools wait for.
 
     The usual agent takes ``model``: ``google/model-id``, an ADK model, or a
-    function of the invocation's context giving either; ``instruction``; and
+    function of the invocation's context giving either; ``system``, its
+    instruction; and
     ``tools``: ``tool``s, Restate's tools, and ADK's tools. Or ``adk_agent``:
     an agent of your own, an ``App``, or a function of the context giving one.
 
     ``options``: those of ``restate.VirtualObject``. Add handlers of your own
     with ``@agent.handler``.
     """
-    if adk_agent is not None and (model is not None or instruction is not None or tools):
-        raise TypeError(
-            f"{name}: an agent takes an ADK agent, or the usual agent's model, instruction and tools; not both"
-        )
+    if adk_agent is not None and (model is not None or system is not None or tools):
+        raise TypeError(f"{name}: an agent takes an ADK agent, or the usual agent's model, system and tools; not both")
     if not callable(model):
         _model_of(model)
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         if adk_agent is None:
             chosen = model(ctx) if callable(model) and not isinstance(model, BaseLlm) else model
-            usual = LlmAgent(name=name, instruction=instruction or "", tools=adk_tools(tools))
+            usual = LlmAgent(name=name, instruction=system or "", tools=_tools(tools))
             given = _model_of(chosen)
             return await prompt(ctx, usual.model_copy(update={"model": given}) if given else usual, message)
         chosen = adk_agent if isinstance(adk_agent, BaseAgent | App) else adk_agent(ctx)
@@ -128,14 +127,18 @@ def agent(
     return turns.agent(name, answer, transcript, **options)
 
 
-def adk_tools(given: Sequence[Tool | Any]) -> list[Any]:
+def tools(given: Sequence[Tool | Any]) -> list[Any]:
     """
     ``given`` as ADK's tools, for an agent of your own::
 
-        LlmAgent(name="support", model="gemini-2.5-flash", tools=adk_tools([call(status), signal("approval", ...)]))
+        LlmAgent(name="support", model="gemini-2.5-flash", tools=adk.tools([call(status), signal("approval", ...)]))
 
     ``given``: ``tool``s, Restate's tools, and ADK's tools (functions too), as they are.
     """
+    return _tools(given)
+
+
+def _tools(given: Sequence[Tool | Any]) -> list[Any]:
     return [_AdkTool(t) if isinstance(t, Tool) else t for t in given]
 
 
@@ -154,26 +157,19 @@ async def prompt(ctx: Any, agent: BaseAgent | App, text: str, *, thread: str | N
     invocation's first prompt has its id, the next ``<id>:2``, and so on.
     """
     thread = thread or ctx.key()
+    sessions = _Sessions(ctx, thread)
+
+    async def answer(pending: harness.Prompt, _: str) -> str:
+        return await _run(ctx, agent, sessions, pending, run)
+
+    async def cancelled(pending: harness.Prompt) -> None:
+        await sessions.cancel()
+
+    async def steered() -> list[str]:
+        return _steered(await sessions.events.load())
+
     prompts = harness.Prompts(ctx.db, PROMPTS, thread)
-    id = turns.prompt_id(ctx)
-    while True:
-        rows = await prompts.load()
-        if (asked := next((r for r in rows if r.prompt == id), None)) is not None and asked.answer is not None:
-            turns.taken(_steered(await _Events(ctx.db, thread).load()))
-            return asked.answer
-        # A prompt that a crash cut off (this one's, or an earlier one's) is finished first.
-        pending = next((r for r in rows if r.answer is None), None) or await prompts.add(id, text)
-        sessions = _Sessions(ctx, thread)
-        try:
-            answer = await _run(ctx, agent, sessions, pending, run)
-        except restate.TerminalError as error:
-            if error.status_code == 409:
-                await sessions.cancel()
-                await prompts.answer(pending.prompt, CANCELLED)
-            raise
-        await prompts.answer(pending.prompt, answer)
-        if pending.prompt == id:
-            return answer
+    return await harness.answer_once(ctx, prompts, text, answer, cancelled=cancelled, steered=steered)
 
 
 async def _run(

@@ -15,8 +15,7 @@ mid-turn carries on from the step it was at.
 
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from restate_agents import serve, signal, tool
-from restate_agents.pydantic_ai import agent, prompt, toolset
+from restate_agents import pydantic_ai, serve, signal, tool
 
 
 class Booking(BaseModel):
@@ -49,19 +48,21 @@ def book(call_id: str, hotel: str, nights: int) -> str:
 planner = Agent(
     "anthropic:claude-sonnet-5-5",
     instructions="You are a travel agent: plan trips, and book what the traveller approves. Be brief.",
-    tools=[weather],
-    toolsets=[
-        toolset([signal("approval", description="Ask the traveller to approve a booking.", input=Booking), book])
+    tools=[
+        weather,
+        *pydantic_ai.tools(
+            [signal("approval", description="Ask the traveller to approve a booking.", input=Booking), book]
+        ),
     ],
 )
 
-trips = agent("trips", planner)
+trips = pydantic_ai.agent("trips", planner)
 
 
 @trips.handler
 async def plan(ctx) -> Plan:
     """The trip so far, day by day."""
-    return await prompt(ctx, planner, "Write down the trip we planned, day by day.", output_type=Plan)
+    return await pydantic_ai.prompt(ctx, planner, "Write down the trip we planned, day by day.", output_type=Plan)
 
 
 if __name__ == "__main__":

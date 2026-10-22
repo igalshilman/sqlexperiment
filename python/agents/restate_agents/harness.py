@@ -1,12 +1,11 @@
 """
-What the integrations whose agent is a harness of its own (Claude Code,
-Codex) share. The harness runs the model's loop and keeps its own
-transcript, which each integration stores in the object's database; here,
-around it:
+What the integrations whose framework runs the model's loop and keeps its
+own transcript (Claude Code, Codex, the OpenAI Agents SDK, Google ADK) share,
+around that transcript, which each stores in the object's database:
 
-- each message and its answer (``Prompts``): a message is answered once per
-  invocation, and one that a crash cut off is carried on (``CARRY_ON``)
-  before the next;
+- each message and its answer (``Prompts``, ``answer_once``): a message is
+  answered once per invocation, and one that a crash cut off is finished
+  before the next (for a harness, carried on: ``CARRY_ON``);
 - each tool call of the tools here, with its input and output (``Calls``):
   a call that the model makes again with the same input, in a later attempt
   of the same message, is the earlier call (its id, its output);
@@ -102,17 +101,30 @@ class Prompts:
             raise restate.TerminalError("a message is being answered: change the conversation once it is")
 
 
-async def answer_once(ctx: Any, prompts: Prompts, text: str, run: Callable[[Prompt, str], Awaitable[str]]) -> str:
+async def answer_once(
+    ctx: Any,
+    prompts: Prompts,
+    text: str,
+    run: Callable[[Prompt, str], Awaitable[str]],
+    *,
+    cancelled: Callable[[Prompt], Awaitable[None]] | None = None,
+    steered: Callable[[], Awaitable[list[str]]] | None = None,
+) -> str:
     """
     Answer ``text``, once per invocation, with ``run(prompt, message)``: the
     message is the text, or, for a prompt that a crash cut off (this one's,
     or an earlier one's, which is finished first), ``CARRY_ON`` and its text.
+
+    ``cancelled``: what ends a cancelled prompt's transcript, before its
+    answer is ``CANCELLED``. ``steered``: the ids of the messages steered to
+    the turn that the transcript has, where a framework keeps them in it; by
+    default, those ``steer`` recorded.
     """
     id = turns.prompt_id(ctx)
     while True:
         rows = await prompts.load()
         if (asked := next((r for r in rows if r.prompt == id), None)) is not None:
-            turns.taken(asked.steered)
+            turns.taken(await steered() if steered is not None else asked.steered)
             if asked.answer is not None:
                 return asked.answer
         pending = next((r for r in rows if r.answer is None), None)
@@ -124,6 +136,8 @@ async def answer_once(ctx: Any, prompts: Prompts, text: str, run: Callable[[Prom
             answer = await run(pending, message)
         except restate.TerminalError as error:
             if error.status_code == 409:
+                if cancelled is not None:
+                    await cancelled(pending)
                 await prompts.answer(pending.prompt, CANCELLED)
             raise
         await prompts.answer(pending.prompt, answer)

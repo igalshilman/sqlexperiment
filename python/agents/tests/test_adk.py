@@ -92,7 +92,7 @@ async def test_an_interrupted_run_is_finished_before_the_next_message():
 
 async def test_the_model_gets_the_instruction():
     teller = Teller()
-    obj = adk.agent("teller", model=AdkTeller(teller), instruction="You are a teller.")
+    obj = adk.agent("teller", model=AdkTeller(teller), system="You are a teller.")
     await Object().invoke(obj.handlers["chat"].fn, "hello")
     # With ADK's own line about the agent.
     [system] = teller.systems
