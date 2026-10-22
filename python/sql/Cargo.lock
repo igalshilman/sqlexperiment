@@ -1867,7 +1867,6 @@ dependencies = [
  "pyo3-async-runtimes",
  "sql",
  "tokio",
- "turso_core",
 ]
 
 [[package]]
