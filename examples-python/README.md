@@ -8,6 +8,7 @@ after `make py` at the repository's root. See [Run an example](#run-an-example).
 | [`chat.py`](chat.py)                             | **Start here.** A durable chat agent on Claude (the Anthropic SDK), with a tool                                                                                          |
 | [`chat_langgraph.py`](chat_langgraph.py)         | The same agent on LangGraph                                                                                                                                              |
 | [`chat_openai_agents.py`](chat_openai_agents.py) | The same agent on the OpenAI Agents SDK                                                                                                                                  |
+| [`chat_adk.py`](chat_adk.py)                     | The same agent on Google ADK                                                                                                                                             |
 | [`coder.py`](coder.py)                           | A coding agent on Claude Code (the Claude Agent SDK): a workspace per key, and a person's review before it is done                                                       |
 | [`coder_codex.py`](coder_codex.py)               | The same coding agent on Codex (OpenAI's coding agent)                                                                                                                   |
 | [`memory.py`](memory.py)                         | An assistant that remembers facts about you in its own SQL table, through its tools, with handlers of your own                                                           |
@@ -64,7 +65,8 @@ curl localhost:8080/assistant/alice/messages                          # the conv
 
 The agents take `MODEL` (`anthropic/<model-id>`), or else Claude Sonnet,
 with `ANTHROPIC_API_KEY`; `coder_codex.py` and `chat_openai_agents.py`,
-OpenAI's (`MODEL=openai/<model-id>`, or their default), with `OPENAI_API_KEY`; `notes.py` needs no key. Each
+OpenAI's (`MODEL=openai/<model-id>`, or their default), with `OPENAI_API_KEY`;
+`chat_adk.py`, Gemini, with `GOOGLE_API_KEY`; `notes.py` needs no key. Each
 example's docstring has its requests.
 
 ## Run on Modal

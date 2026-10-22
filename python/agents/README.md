@@ -7,7 +7,8 @@ invocation, however often an attempt crashes. The Python counterpart of
 [`restate-agents`](../../typescript/packages/integrations/README.md), with
 [Claude](#claude) (the Anthropic SDK), [Claude Code](#claude-code) (the
 Claude Agent SDK), [Codex](#codex), [LangGraph](#langgraph),
-[Pydantic AI](#pydantic-ai) and the [OpenAI Agents SDK](#openai-agents-sdk).
+[Pydantic AI](#pydantic-ai), the [OpenAI Agents SDK](#openai-agents-sdk) and
+[Google ADK](#google-adk).
 
 ```python
 from restate_agents import claude, serve, tool
@@ -433,6 +434,44 @@ its answer to the model; any other error fails the attempt (the SDK's
 A message steered to the turn joins it after its next tool call. The run
 takes no `hooks` of yours: give an `Agent` its own (`Agent.hooks`).
 
+## Google ADK
+
+`adk.agent(name, model=, instruction=, tools=)` is the same virtual object
+on Google's [Agent Development Kit](https://google.github.io/adk-docs/)
+([`examples-python/chat_adk.py`](../../examples-python/chat_adk.py)):
+
+```python
+from restate_agents import adk, serve
+
+assistant = adk.agent("assistant", model="google/gemini-2.5-flash", instruction="Answer briefly.", tools=[get_weather])
+serve(assistant)
+```
+
+| Option        | What                                                                                                                                                   |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `model`       | `google/model-id`, an ADK model, or a function of the context giving one; or else `MODEL`, if it is Google's; or else ADK's default (`GOOGLE_API_KEY`) |
+| `instruction` | The instruction                                                                                                                                        |
+| `tools`       | `tool`s, Restate's tools, and ADK's tools (functions, `FunctionTool`s, ...)                                                                            |
+
+Or bring an agent of your own (sub-agents, callbacks, an output schema), or
+an `App` (its plugins), whose tools include Restate's through
+`adk_tools([...])`; and ask it from handlers of your own with
+`adk.prompt(ctx, agent, text, **run)` (`run`: `Runner.run_async`'s options),
+each prompt answered once.
+
+The conversation is an ADK session whose id is the object's key: a session
+service of the object's database (`adk_events`, an event per row; its state
+is that of its events' state changes), which the runner appends each event
+to as it goes, so the model's tool calls are stored before they run. A
+retried attempt runs the stored calls of the tools here again, with their
+ids, without asking the model again, then carries on (`run_async` without a
+new message); for a call of ADK's own tools, ADK asks the model again, as
+its own resumption does. A tool's `restate.TerminalError` is its answer to
+the model; any other error fails the attempt (its error event is not
+stored). A message steered to the turn joins it before the model's next
+request after a tool call (a plugin's `before_model_callback`), as a user
+event of the session.
+
 ## Turns
 
 The message `chat` answers is a turn. While it answers, `status` says so
@@ -571,6 +610,8 @@ async def chat(ctx, message: str) -> str:
 - [`tests/test_openai_agents.py`](tests/test_openai_agents.py): the same,
   for the OpenAI Agents SDK (the teller as an SDK model), with an `Agent`
   of your own and its typed output, each answered once.
+- [`tests/test_adk.py`](tests/test_adk.py): the same, for Google ADK (the
+  teller as an ADK model), with an agent of your own in a thread of its own.
 - [`tests/test_pydantic_ai.py`](tests/test_pydantic_ai.py): the same, for
   the Pydantic AI agent (the teller as a Pydantic AI model), and agents of
   your own, prompts of your own and a structured output, each answered once.
