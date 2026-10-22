@@ -368,9 +368,9 @@ export const signal = (name: string, options: { description: string; input?: z.Z
     description: options.description,
     input: z.object(options.input?.shape ?? {}),
     run: async (input, context) =>
-      once(`signal/${name}`, input, context, async ({ ctx, idempotencyKey: id }) => {
-        return ctx
-          .objectClient(signals, signalsOf(ctx.request().target.service, ctx.key))
-          .wait({ id, name, ...(options.input ? { input } : {}) }, restate.rpc.opts({ idempotencyKey: id }));
-      }),
+      once(`signal/${name}`, input, context, async ({ ctx, idempotencyKey: id }) =>
+        ctx
+          .objectClient(signals, signalsOf(ctx))
+          .wait({ id, name, ...(options.input ? { input } : {}) }, restate.rpc.opts({ idempotencyKey: id })),
+      ),
   });

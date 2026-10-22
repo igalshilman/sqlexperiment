@@ -8,8 +8,14 @@
 // this object, which waits without holding a process.
 import * as restate from '@restatedev/restate-sdk';
 
-/** The key of the signals of the object `service`'s key `key`. */
-export const signalsOf = (service: string, key: string) => `${service}:${key}`;
+/** An agent's context, as far as its signals need it: any handler's of its object. */
+type AgentContext = Pick<restate.ObjectSharedContext, 'key' | 'request'>;
+
+/** The agent of `ctx`: its object's name, and key. */
+export const agentOf = (ctx: AgentContext): Agent => ({ service: ctx.request().target.service, key: ctx.key });
+
+/** The key of the signals of the agent of `ctx`: `<agent>:<key>`. */
+export const signalsOf = (ctx: AgentContext) => `${ctx.request().target.service}:${ctx.key}`;
 
 /** A wait for a signal, as `pending` lists it. */
 export interface Waiting {
@@ -104,6 +110,11 @@ async function publish(ctx: restate.ObjectContext<State>): Promise<Notifications
 const send = (ctx: restate.ObjectContext<State>, { service, key }: Agent, text: string) =>
   ctx.genericSend({ service, method: 'chat', key, parameter: text, inputSerde: restate.serde.json }).invocationId;
 
+/**
+ * The signals of every agent, keyed `<agent>:<key>` ({@link signalsOf}).
+ * `serve` serves it beside the agents; the handlers marked `@internal` are
+ * called by the agents' own handlers, not by clients.
+ */
 export const signals = restate.object({
   name: 'signals',
   handlers: {

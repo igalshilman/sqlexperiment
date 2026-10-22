@@ -1,6 +1,6 @@
-// A LangGraph checkpointer on an SQL database: `SqlCheckpointSaver`, over
-// a database session `db` (in Restate, `ctx.db`), which
-// has `query`, `execute` and `transaction(body)`.
+// A LangGraph checkpointer on an SQL database: `SqlCheckpointSaver`, over a
+// database session `db` (in Restate, `ctx.db`), which has `query`, `execute`
+// and `transaction(body)`.
 //
 // Three tables, with values as LangGraph's serializer writes them:
 // - `checkpoints`: each checkpoint, without its channel values.
@@ -92,6 +92,7 @@ function matches(actual: unknown, expected: unknown): boolean {
   return Object.entries(expected).every(([key, value]) => matches((actual as Record<string, unknown>)[key], value));
 }
 
+/** A LangGraph checkpointer whose threads are in the database session `db`: see the top of this file. */
 export class SqlCheckpointSaver extends BaseCheckpointSaver {
   #db: SqlSession;
   #ready: Promise<void> | undefined;

@@ -62,9 +62,6 @@ export interface ModelRef {
   id: string;
 }
 
-/** The default model, as `provider/model-id`. */
-export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
-
 /** `provider/model-id` as OpenCode names it. */
 const modelRef = (name: string): ModelRef => {
   const [providerID = '', ...id] = name.split('/');
@@ -99,7 +96,7 @@ export interface OpenCodeSession {
 
 /** An agent's options: `chat`, `prompt` and `withOpenCode` take them. */
 export interface Options {
-  /** The model of the session, as `provider/model-id`: MODEL, or else {@link DEFAULT_MODEL}. */
+  /** The model of the session, as `provider/model-id`: MODEL, or else anthropic/claude-sonnet-5-5. */
   model?: string | ModelRef;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
@@ -213,34 +210,46 @@ interface Message {
   error?: { message?: string };
 }
 
+/** The prompts waiting in the session's inbox, until their turn starts, oldest first. */
+const inbox = (host: Host): Promise<{ id: string; payload: { text: string } }[]> =>
+  host.call(host.client.session.inbox.list({ sessionID: SESSION as never }));
+
+/** The session's messages, a page at a time, oldest or newest first. */
+async function* messagePages(host: Host, order: 'asc' | 'desc'): AsyncGenerator<Message[]> {
+  const sessionID = SESSION as never;
+  for (let cursor: string | undefined; ;) {
+    const page: { data: Message[]; cursor: { next?: string | null } } = await host.call(
+      host.client.message.list(cursor === undefined ? { sessionID, order, limit: 50 } : { sessionID, cursor }),
+    );
+    yield page.data;
+    cursor = page.cursor.next ?? undefined;
+    if (cursor === undefined) return;
+  }
+}
+
+/** The session's messages, oldest first. */
+async function sessionMessages(host: Host): Promise<Message[]> {
+  const all: Message[] = [];
+  for await (const page of messagePages(host, 'asc')) all.push(...page);
+  return all;
+}
+
 /**
  * Where prompt `messageId` is: absent, unanswered yet, or answered with the
  * text of the last assistant message before the turn's idle marker.
  */
 async function outcome(host: Host, messageId: string) {
-  // A prompt waits in the inbox until its turn starts.
-  const { session, message } = host.client;
-  const inbox: { id: string }[] = await host.call(session.inbox.list({ sessionID: SESSION as never }));
-  if (inbox.some((item) => item.id === messageId)) return { state: 'running' } as const;
+  if ((await inbox(host)).some((item) => item.id === messageId)) return { state: 'running' } as const;
+  // The messages after the prompt, oldest first.
   const after: Message[] = [];
-  for (let cursor: string | undefined; ;) {
-    const page: { data: Message[]; cursor: { next?: string | null } } = await host.call(
-      message.list(
-        cursor === undefined
-          ? { sessionID: SESSION as never, order: 'desc', limit: 50 }
-          : { sessionID: SESSION as never, cursor },
-      ),
-    );
-    const messages = page.data;
-    const at = messages.findIndex((m) => m.id === messageId);
-    if (at >= 0) {
-      after.unshift(...messages.slice(0, at).toReversed());
-      break;
-    }
-    after.unshift(...messages.toReversed());
-    cursor = page.cursor.next ?? undefined;
-    if (cursor === undefined) return { state: 'absent' } as const;
+  let found = false;
+  for await (const page of messagePages(host, 'desc')) {
+    const at = page.findIndex((m) => m.id === messageId);
+    found = at >= 0;
+    after.unshift(...(found ? page.slice(0, at) : page).toReversed());
+    if (found) break;
   }
+  if (!found) return { state: 'absent' } as const;
   // A turn ends at an idle marker, or where the next prompt, queued while it
   // ran, starts (a message steered to it is not one).
   let last: Message | undefined;
@@ -260,23 +269,13 @@ async function outcome(host: Host, messageId: string) {
 
 /** The id of the session's latest prompt, if any. */
 async function lastPrompt(host: Host): Promise<string | undefined> {
-  const { session, message } = host.client;
-  const inbox: { id: string }[] = await host.call(session.inbox.list({ sessionID: SESSION as never }));
-  const queued = inbox.findLast((item) => !steered(item.id));
+  const queued = (await inbox(host)).findLast((item) => !steered(item.id));
   if (queued) return queued.id;
-  for (let cursor: string | undefined; ;) {
-    const page: { data: Message[]; cursor: { next?: string | null } } = await host.call(
-      message.list(
-        cursor === undefined
-          ? { sessionID: SESSION as never, order: 'desc', limit: 50 }
-          : { sessionID: SESSION as never, cursor },
-      ),
-    );
-    const user = page.data.find((m) => m.type === 'user' && !steered(m.id));
+  for await (const page of messagePages(host, 'desc')) {
+    const user = page.find((m) => m.type === 'user' && !steered(m.id));
     if (user) return user.id;
-    cursor = page.cursor.next ?? undefined;
-    if (cursor === undefined) return undefined;
   }
+  return undefined;
 }
 
 /**
@@ -290,8 +289,7 @@ async function startInbox(host: Host) {
   const sessionID = SESSION as never;
   const active: Record<string, unknown> = await host.call(session.active());
   if (active[SESSION] !== undefined) return;
-  const inbox: { id: string; payload: { text: string } }[] = await host.call(session.inbox.list({ sessionID }));
-  const first = inbox[0];
+  const [first] = await inbox(host);
   if (first === undefined) return;
   await host.call(
     session.prompt({ sessionID, id: first.id as never, text: first.payload.text, delivery: 'queue', resume: true }),
@@ -309,19 +307,16 @@ export const withOpenCode = async <T>(
   { plugins = [], model: named, system, tools = [], workspace }: Options,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
-  const model = typeof named === 'object' ? named : modelRef(modelOf(named, DEFAULT_MODEL));
+  const model = typeof named === 'object' ? named : modelRef(modelOf(named));
   if (workspace) await mkdir(workspace, { recursive: true });
-  const db = ctx.db;
   const fence: Fence = { closed: false };
-  let failed!: (error: unknown) => void;
-  const failure = new Promise<never>((_, reject) => (failed = reject));
+  const { promise: failure, reject: failed } = Promise.withResolvers<never>();
   failure.catch(() => {});
   // A tool's error ends the attempt: nothing more is stored, and the tool
   // call never returns, so OpenCode does not go on without it. A cancelled
-  // invocation interrupts the session's turn instead (below), which OpenCode
-  // records, so the next prompt does not resume it.
+  // invocation, whenever it comes, interrupts the session's turn instead
+  // (below), which OpenCode records, so the next prompt does not resume it.
   let cancelled: restate.CancelledError | undefined;
-  // A cancellation, whenever it comes, interrupts the session's turn (below).
   const turn = cancellationOf(ctx);
   const onCancel = () => void fail(turn!.reason);
   const fail = (error: unknown) => {
@@ -342,13 +337,11 @@ export const withOpenCode = async <T>(
     },
     has: async (id) => {
       const messageId = messageIdOf(id);
-      const inbox: { id: string }[] = await host.call(host.client.session.inbox.list({ sessionID: SESSION as never }));
-      return (
-        inbox.some((item) => item.id === messageId) || (await sessionMessages(host)).some((m) => m.id === messageId)
-      );
+      const given = (m: { id: string }) => m.id === messageId;
+      return (await inbox(host)).some(given) || (await sessionMessages(host)).some(given);
     },
   };
-  const host = await openOpenCode(db, fence, {
+  const host = await openOpenCode(ctx.db, fence, {
     plugins: [
       ...plugins,
       steeringPlugin(ctx, steerable, fail),
@@ -448,23 +441,6 @@ export const chat = (options: Configure<Options> = {}) => {
   if (typeof options === 'object' && typeof options.model !== 'object') checkModelName('opencode', options.model);
   return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
-
-/** The session's messages, oldest first. */
-async function sessionMessages(host: Host): Promise<Message[]> {
-  const all: Message[] = [];
-  for (let cursor: string | undefined; ;) {
-    const page: { data: Message[]; cursor: { next?: string | null } } = await host.call(
-      host.client.message.list(
-        cursor === undefined
-          ? { sessionID: SESSION as never, order: 'asc', limit: 50 }
-          : { sessionID: SESSION as never, cursor },
-      ),
-    );
-    all.push(...page.data);
-    cursor = page.cursor.next ?? undefined;
-    if (cursor === undefined) return all;
-  }
-}
 
 /**
  * A handler of the session, a page at a time: what was said, in order, with

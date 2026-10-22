@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS messages (seq INTEGER PRIMARY KEY, prompt TEXT NOT NU
 CREATE TABLE IF NOT EXISTS answers (prompt TEXT PRIMARY KEY, answer TEXT NOT NULL);
 `;
 
+/** The conversation in the object's database: the tool runner's messages, and each prompt's answer. */
 export class Conversation {
   #db: SqlSession;
   /** Cancelled: a run cut off then stores nothing more. */

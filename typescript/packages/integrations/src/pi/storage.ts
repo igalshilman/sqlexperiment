@@ -1,7 +1,7 @@
 // pi-durable storage on an SQL database: the `SqliteDatabase` facade of
 // @earendil-works/pi-durable/storage/sqlite, over a database session `db`
-// (in Restate, `ctx.db`), which has `query`,
-// `queryColumns`, `execute` and `transaction(body)`.
+// (in Restate, `ctx.db`), which has `query`, `queryColumns`, `execute` and
+// `transaction(body)`.
 //
 // The facade's operations must run one at a time, a transaction excluding
 // every other: the session does that, and a transaction's handle is invalid
@@ -39,7 +39,7 @@ class Executor implements SqliteExecutor {
 }
 
 /** The `SqliteDatabase` facade over the session `db`. */
-export class SqlKvDatabase extends Executor implements SqliteDatabase {
+class SqlKvDatabase extends Executor implements SqliteDatabase {
   readonly #session: SqlSession;
 
   constructor(db: SqlSession) {
