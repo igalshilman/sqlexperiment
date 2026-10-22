@@ -59,7 +59,7 @@ Claude with nothing in between, the API's own messages stored in the
 object's database. It has the handlers `chat` (a message in, the answer out;
 as plain text, `-d 'Hi'`, or a JSON string, `--json '"Hi"'`) and `messages`
 (the conversation so far, with the tool calls, a page at a time:
-`{"limit": 50, "before": id, "after": id}`); `status`, `stop` and `steer`
+`{"limit": 50, "before": id}`, or what is new since a cursor: `{"cursor": n}`); `status`, `stop` and `steer`
 ([Turns](#turns)); `pending` and `signal` ([Restate's tools](#restates-tools));
 and `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
 Add handlers of your own with `@assistant.handler`.
@@ -244,7 +244,7 @@ those of Claude ([`examples-python/release_notes.py`](../../examples-python/rele
 key (its thread), with the handlers `chat` (a message in, the answer out; as
 plain text, `-d 'Hi'`, or a JSON string, `--json '"Hi"'`) and `messages` (the
 conversation so far, with the tool calls, a page at a time:
-`{"limit": 50, "before": id, "after": id}`); `status`, `stop` and `steer`
+`{"limit": 50, "before": id}`, or what is new since a cursor: `{"cursor": n}`); `status`, `stop` and `steer`
 ([Turns](#turns)); `pending` and `signal` ([Restate's tools](#restates-tools));
 and `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
 Add handlers of your own with `@assistant.handler`.
@@ -556,27 +556,42 @@ curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invoca
 
 ## Follow a conversation
 
-A chat page, a backend or a script follows a conversation as it changes,
-without polling: `notifications` is its revision, which each change
-increases (a message or tool call stored, a wait, a turn's start and end),
-and `watch` answers once the revision is past the one given, or at its
-timeout (50 s by default, at most 60). It waits in Restate, holding no
-process. `messages` and `status` answer at once, also while a message is
-answered: the tool calls show up as the agent makes them.
+The conversation as clients read it is a log in the object's database: each
+change the agent stores goes into it. Each message has an `id`, which never
+changes, and the log has a cursor, which each change advances: a message
+that grows (a tool call with its output) comes again, with its `id`, and a
+compacted or reset conversation keeps what was said, the summary or the
+handoff after it (the model's context is what changed). `messages` reads it:
+a page of the latest (`{"limit": 50}`), or older ones (`{"before": 12}`), each
+with the cursor to follow on from; or what is new or changed since a cursor
+(`{"cursor": 31}`), by when it changed, with the next cursor:
 
 ```sh
-curl localhost:8080/support/alice/notifications                          # {"revision": 7}
-curl localhost:8080/support/alice/watch --json '{"afterRevision": 7}'     # {"revision": 8}, once something changed
+curl localhost:8080/support/alice/messages --json '{"limit": 50}'    # {"messages": [...], "more": false, "cursor": 31}
+curl localhost:8080/support/alice/messages --json '{"cursor": 31}'   # what is new or changed since, and the next cursor
+```
+
+`sync` waits for it: with the `revision` of the last sync, it answers once
+something changed (a message, a wait, a turn's start or end), or at its
+timeout (50 s by default, at most 60), with the new revision, what the agent
+is doing (`status`), and the messages since the `cursor`, in one request. It
+waits in Restate, holding no process; sent again with the same idempotency
+key, it joins the same wait. (`notifications` and `watch({"afterRevision"})`
+are the revision alone, and the wait alone.)
+
+```sh
+curl localhost:8080/support/alice/sync --json '{}'                                 # {"revision": 7, "cursor": 31, "status": ..., "messages": [...], "more": false}
+curl localhost:8080/support/alice/sync --json '{"cursor": 31, "revision": 7}'      # the same, once something changed
 ```
 
 `restate_agents.client` does the reading and the waiting, from any Python
 code, with nothing of the agent's: `AgentClient(url, agent, key)` sends
-messages (`chat`, `send`), reads (`messages`, `status`, `pending`), approves,
-steers and stops; and `follow()` gives the conversation as it changes: what
-the agent is doing, and the messages new or changed since the last time (a
-message may come again, changed, such as a tool call with its output: keep
-them by `id`). A network failure does not end it, and a wait it retries
-joins the one already parked in Restate
+messages (`chat`, `send`), reads (`messages`, `status`, `pending`, `sync`),
+approves, steers and stops; and `follow()` gives the conversation as it
+changes: what the agent is doing, and the messages new or changed since the
+last time (keep them by `id`), and the cursor to carry on from later
+(`follow(cursor=...)`). A network failure does not end it, and a sync it
+retries joins the one already waiting in Restate
 ([`examples-python/follow.py`](../../examples-python/follow.py)):
 
 ```python
@@ -674,6 +689,9 @@ async def chat(ctx, message: str) -> str:
 - [`tests/test_pydantic_ai.py`](tests/test_pydantic_ai.py): the same, for
   the Pydantic AI agent (the teller as a Pydantic AI model), and agents of
   your own, prompts of your own and a structured output, each answered once.
+- [`tests/test_log.py`](tests/test_log.py): the conversation as clients
+  read it: ids that never change, a cursor of what is new or changed (a tool
+  call's output), pages back, and a compaction that keeps what was said.
 - [`tests/test_object.py`](tests/test_object.py): a `chat` handler of your
   own, and `ask`, its idempotency keys through a retried attempt.
 - [`tests/test_tools.py`](tests/test_tools.py): Restate's tools on a fake

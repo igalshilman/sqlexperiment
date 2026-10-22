@@ -25,6 +25,7 @@ async def test_it_answers_and_keeps_the_thread():
     chat, messages = agent(bank, teller)
     alice = Object()
     assert await alice.invoke(chat, "hello") == "You said: hello"
+    cursor = (await alice.invoke(messages, None))["cursor"]
     assert await alice.invoke(chat, "move 5 from 1 to 2") == "Done: moved 5 from 1 to 2"
     [(src, dst, amount)] = bank.moves.values()
     assert (src, dst, amount) == (1, 2, 5)
@@ -34,8 +35,10 @@ async def test_it_answers_and_keeps_the_thread():
     assert tool["type"] == "tool" and tool["name"] == "transfer" and tool["output"] == "moved 5 from 1 to 2"
     assert page["messages"][4]["parts"] == [{"type": "text", "text": "Done: moved 5 from 1 to 2"}]
     assert not page["more"]
-    later = await alice.invoke(messages, {"after": 2})
-    assert [m["id"] for m in later["messages"]] == [3, 4]
+    # What is new since the cursor: the message, and the tool call (which came again, with its output), and the answer.
+    later = await alice.invoke(messages, {"cursor": cursor})
+    assert [m["id"] for m in later["messages"]] == [2, 3, 4] and later["cursor"] == page["cursor"]
+    assert (await alice.invoke(messages, {"cursor": later["cursor"]}))["messages"] == []
 
 
 async def test_a_message_is_answered_once_per_invocation():

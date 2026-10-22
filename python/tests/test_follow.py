@@ -11,10 +11,11 @@ import asyncio
 import json
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
-from harness import INGRESS
+from harness import INGRESS, call
 from restate_agents.client import AgentClient, AgentError
 
 REFUND = {"order": "103", "amount": 5}
@@ -94,3 +95,20 @@ async def test_handlers_without_input_take_a_request_as_restates_typescript_clie
             headers={"content-type": "application/json"},
         )
     assert response.status_code == 200, response.text
+
+
+def test_sync_waits_for_a_change_and_answers_with_it():
+    k = uuid.uuid4().hex
+    status, synced = call(f"teller/{k}/sync", {})
+    assert status == 200 and synced["messages"] == [] and synced["cursor"] == 0, synced
+    with ThreadPoolExecutor() as pool:
+        waiting = pool.submit(call, f"teller/{k}/sync", {"cursor": 0, "revision": synced["revision"]})
+        time.sleep(1)
+        assert not waiting.done()  # it waits in Restate, for a change
+        assert call(f"teller/{k}/chat", "hello") == (200, "You said: hello")
+        status, changed = waiting.result(timeout=30)
+    assert status == 200 and changed["revision"] > synced["revision"]
+    # The turn's start can end the wait: the rest comes with the next sync.
+    status, rest = call(f"teller/{k}/sync", {"cursor": changed["cursor"]})
+    said = [m["parts"][0]["text"] for m in changed["messages"] + rest["messages"]]
+    assert said == ["hello", "You said: hello"] and rest["status"]["answering"] is None

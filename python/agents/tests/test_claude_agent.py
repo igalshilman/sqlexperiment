@@ -144,8 +144,9 @@ async def test_reset_starts_a_new_session_with_the_handoff(server):
     await alice.invoke(chat, "hello")
     await alice.invoke(obj.handlers["reset"].fn, "Alice likes short answers")
     assert await alice.invoke(chat, "hi") == "You said: Before this conversation: Alice likes short answers\n\nhi"
+    # The new session's first message has the handoff; the conversation as clients read it keeps what was said.
     page = await alice.invoke(messages, None)
-    assert [m["role"] for m in page["messages"]] == ["user", "assistant"]
+    assert [m["role"] for m in page["messages"]] == ["user", "assistant", "user", "assistant"]
 
 
 def test_a_model_of_another_provider_fails_when_the_agent_is_defined():
