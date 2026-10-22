@@ -10,7 +10,9 @@ keeping its own state there.
 It holds an object's working state (a database, a VM's changed memory, an
 extension's counters), small enough to load and commit quickly. Bulk bytes go
 to the scope's blob store, outside Restate, and a record names each blob by its
-hash.
+hash. Against a Restate server, a warm call costs the same on 1 MB as on 100 MB,
+and text stores at about half its size
+([measurements](../../sql/benches/RESTATE_RESULTS.md)).
 
 ## What Restate stores
 

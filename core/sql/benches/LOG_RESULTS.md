@@ -138,4 +138,4 @@ writes 33 KB.
 Remaining limits: simulated latency only, a uniform RTT for every request, no
 bandwidth model, a single owner and no real backend. The end-to-end benchmark
 against a Restate server is in
-[the SQL benchmark](../../../typescript/tests/sql/bench.ts).
+[RESTATE_RESULTS.md](RESTATE_RESULTS.md).
