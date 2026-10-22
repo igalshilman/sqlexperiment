@@ -168,7 +168,7 @@ impl Participant for Notarized {
     /// in one put.
     async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         if self.count != self.sealed {
-            self.record.set(wal, self.count.to_string().into())?;
+            wal.set(&self.record, self.count.to_string().into())?;
         }
         Ok(())
     }

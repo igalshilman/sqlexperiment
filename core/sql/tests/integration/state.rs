@@ -29,12 +29,8 @@ fn a_flush_makes_every_participant_durable_together() -> Result<()> {
         sql.execute("INSERT INTO t VALUES(1)").await?;
         let mut wal = state.wal();
         sql.flush(&mut wal).await?;
-        state
-            .record("progress")
-            .set(&mut wal, Bytes::from_static(b"one"))?;
-        state
-            .file("pages")?
-            .write(&mut wal, 0, Some(vec![1; 4096].into()))?;
+        wal.set(&state.record("progress"), Bytes::from_static(b"one"))?;
+        wal.write(&state.file("pages")?, 0, Some(vec![1; 4096].into()))?;
         // In the WAL, not flushed: the store holds nothing, and the state
         // reads as before.
         assert!(store.keys().is_empty(), "{:?}", store.keys());
@@ -57,9 +53,7 @@ fn a_flush_makes_every_participant_durable_together() -> Result<()> {
         sql.execute("INSERT INTO t VALUES(2)").await?;
         let mut wal = state.wal();
         sql.flush(&mut wal).await?;
-        state
-            .record("progress")
-            .set(&mut wal, Bytes::from_static(b"two"))?;
+        wal.set(&state.record("progress"), Bytes::from_static(b"two"))?;
         drop(wal);
         drop(sql);
         drop(state);
@@ -97,9 +91,7 @@ fn a_state_needs_no_sql_and_takes_one() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let state = State::open_with_options(store.clone(), options()).await?;
         let mut wal = state.wal();
-        state
-            .record("only")
-            .set(&mut wal, Bytes::from_static(b"records"))?;
+        wal.set(&state.record("only"), Bytes::from_static(b"records"))?;
         wal.flush().await?;
         let sql = Sql::open(&state).await?;
         assert!(Sql::open(&state).await.is_err());

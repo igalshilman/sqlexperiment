@@ -646,10 +646,10 @@ impl KvIo {
             private.flushed.insert(block, page);
         }
         for (block, page) in &private.flushed {
-            file.write(wal, *block, page.clone())
+            wal.write(&file, *block, page.clone())
                 .map_err(io::Error::other)?;
         }
-        file.set_len(wal, private.sizes[DB])
+        wal.set_len(&file, private.sizes[DB])
             .map_err(io::Error::other)
     }
 

@@ -41,14 +41,12 @@ async fn turn(db: &mut Db, i: usize) -> Result<()> {
     }
     let state = db.state();
     let wal = db.wal();
-    state
-        .record("effects")
-        .set(wal, Bytes::from(format!("turn {i}")))?;
-    state.record("turn").set(wal, value(i))?;
+    wal.set(&state.record("effects"), Bytes::from(format!("turn {i}")))?;
+    wal.set(&state.record("turn"), value(i))?;
     if i % 11 == 10 {
-        state.record("progress").set(wal, Bytes::new())?;
+        wal.set(&state.record("progress"), Bytes::new())?;
     } else if i.is_multiple_of(3) {
-        state.record("progress").set(wal, value(i))?;
+        wal.set(&state.record("progress"), value(i))?;
     }
     db.flush().await.map(drop)
 }
@@ -128,9 +126,8 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
             if i % 3 == 0 {
                 db.execute("BEGIN").await?;
             }
-            db.state()
-                .record("turn")
-                .set(db.wal(), Bytes::from(vec![i as u8; 64]))?;
+            let turn = db.state().record("turn");
+            db.wal().set(&turn, Bytes::from(vec![i as u8; 64]))?;
             db.flush().await?;
         }
         assert_eq!(db.version(), version + 100);
@@ -267,11 +264,13 @@ fn a_scoped_state_is_part_of_the_session_s() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let mut db = Db::open(store.clone(), options(None)).await?;
         let fs = db.state().scoped("fs/");
-        fs.record("manifest")
-            .set(db.wal(), Bytes::from_static(b"m"))?;
-        fs.scoped("blobs/")
-            .file("a")?
-            .write(db.wal(), 0, Some(vec![7; 4096].into()))?;
+        db.wal()
+            .set(&fs.record("manifest"), Bytes::from_static(b"m"))?;
+        db.wal().write(
+            &fs.scoped("blobs/").file("a")?,
+            0,
+            Some(vec![7; 4096].into()),
+        )?;
         db.flush().await?;
         drop(db);
         let db = Db::open(store, options(None)).await?;

@@ -165,9 +165,9 @@ impl Session {
     /// Make the change `op` in `wal`, a WAL of this state.
     pub fn apply(&self, wal: &mut Wal, op: &Op) -> Result<()> {
         match op {
-            Op::Set(name, value) => self.state.record(name).set(wal, value.clone()),
-            Op::Write(name, index, image) => self.file(name).write(wal, *index, image.clone()),
-            Op::SetLen(name, len) => self.file(name).set_len(wal, *len),
+            Op::Set(name, value) => wal.set(&self.state.record(name), value.clone()),
+            Op::Write(name, index, image) => wal.write(self.file(name), *index, image.clone()),
+            Op::SetLen(name, len) => wal.set_len(self.file(name), *len),
         }
     }
 

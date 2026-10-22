@@ -94,7 +94,7 @@ impl RunState {
 impl Participant for RunState {
     async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         let bytes = json_bytes(&self.record)?;
-        self.stored.set(wal, bytes.into()).map_err(storage_error)
+        wal.set(&self.stored, bytes.into()).map_err(storage_error)
     }
 
     fn committed(&mut self) {
@@ -173,7 +173,7 @@ impl Participant for Memory {
         let Turn { changed, settled } = self.turn.take().context("No turn to seal")?;
         if let Some((file, pages)) = self.stale.take() {
             for page in pages {
-                file.write(wal, page.into(), None).map_err(storage_error)?;
+                wal.write(&file, page.into(), None).map_err(storage_error)?;
             }
         }
         match (&self.live, settled) {
@@ -181,7 +181,7 @@ impl Participant for Memory {
             // its image.
             (_, true) => {
                 for page in self.record.pages().chain(changed) {
-                    (self.file.write(wal, page.into(), None)).map_err(storage_error)?;
+                    (wal.write(&self.file, page.into(), None)).map_err(storage_error)?;
                 }
                 self.record.pages.clear();
                 self.live = None;
@@ -189,14 +189,14 @@ impl Participant for Memory {
             (Some(live), false) => {
                 for page in changed {
                     let image = bytes::Bytes::copy_from_slice(live.base.page(page));
-                    (self.file.write(wal, page.into(), Some(image))).map_err(storage_error)?;
+                    (wal.write(&self.file, page.into(), Some(image))).map_err(storage_error)?;
                 }
                 self.record.set_pages(live.base.changed());
             }
             (None, false) => anyhow::bail!("No live VM"),
         }
         let bytes = json_bytes(&self.record)?;
-        self.stored.set(wal, bytes.into()).map_err(storage_error)
+        wal.set(&self.stored, bytes.into()).map_err(storage_error)
     }
 
     /// The image no longer matches a seal: the attempt is over.

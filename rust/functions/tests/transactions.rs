@@ -67,7 +67,7 @@ impl Participant for Counting {
         }
         self.count += 1;
         let bytes = serde_json::to_vec(&json!({"count": self.count}))?;
-        (self.record.set(wal, bytes.into())).map_err(anyhow::Error::from_boxed)?;
+        (wal.set(&self.record, bytes.into())).map_err(anyhow::Error::from_boxed)?;
         Ok(())
     }
 

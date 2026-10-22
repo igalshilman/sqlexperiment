@@ -89,9 +89,7 @@ fn a_wal_flush_with_an_immediately_ready_backend() -> Result<()> {
         .await?;
         let mut wal = state.wal();
         db.flush(&mut wal).await?;
-        state
-            .record("note")
-            .set(&mut wal, Bytes::from_static(b"two rows"))?;
+        wal.set(&state.record("note"), Bytes::from_static(b"two rows"))?;
         require_send(wal.flush()).await?;
         drop(db);
         let state = State::open(store).await?;

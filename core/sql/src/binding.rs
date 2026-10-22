@@ -257,7 +257,7 @@ async fn flush(session: &mut Sql, effects: Option<Bytes>) -> Result<()> {
     let mut wal = state.wal();
     session.flush(&mut wal).await?;
     if let Some(effects) = effects {
-        state.record(EFFECTS).set(&mut wal, effects)?;
+        wal.set(&state.record(EFFECTS), effects)?;
     }
     wal.flush().await?;
     Ok(())
