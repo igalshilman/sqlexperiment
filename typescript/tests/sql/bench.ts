@@ -260,9 +260,11 @@ async function drive(out?: string) {
     phases.push(await phase(`${mb} MB: read a row, warm`, 'get', row, 200, 1, key, key()));
     phases.push(await phase(`${mb} MB: read a row, shared handler`, 'peek', row, 50, 1, key, key()));
   }
-  // The first calls after a restart of the objects: an empty page cache.
-  for (let round = 1; round <= 3; round++) {
+  // The first calls after a restart of the objects: an empty page cache. A
+  // call to another key first opens the server's connection to them.
+  for (let round = 1; round <= 5; round++) {
     await start();
+    await phase('warm-up after a restart', 'count', null, 1, 1, () => `${run}-hot`);
     for (const mb of SIZES) {
       const [key, row] = [() => sized(mb), anyRow(mb)];
       phases.push(await phase(`${mb} MB: read a row, cold process (${round})`, 'get', row, 1, 1, key, key()));
