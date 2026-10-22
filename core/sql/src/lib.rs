@@ -71,7 +71,7 @@
 //! sql.execute("INSERT INTO messages VALUES('hello')").await?;
 //! let mut wal = state.wal();
 //! sql.flush(&mut wal).await?;
-//! state.record("seen").set(&mut wal, "1 message".into())?;
+//! wal.set(&state.record("seen"), "1 message".into())?;
 //! wal.flush().await?; // the table and the record, durable together
 //! # Ok(())
 //! # }

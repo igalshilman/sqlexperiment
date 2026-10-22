@@ -35,7 +35,7 @@ db.transaction(async |db| {                    // one SQL transaction, or rolled
 }).await?;
 let mut wal = state.wal();
 db.flush(&mut wal).await?;                     // the rows, into the WAL
-state.record("progress").set(&mut wal, "shipped 7".into())?;
+wal.set(&state.record("progress"), "shipped 7".into())?;
 wal.flush().await?; // the rows and the record, durable together
 ```
 

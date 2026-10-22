@@ -570,29 +570,29 @@ fn records_flush_at_save() -> Result<()> {
         let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
         let large = db.state().record("large");
         assert!(large.get().is_empty());
-        large.set(db.wal(), Bytes::from_static(b"one"))?;
+        db.wal().set(&large, Bytes::from_static(b"one"))?;
         assert!(large.get().is_empty(), "unchanged until the flush");
         drop(db); // discarded, with its WAL
         let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
         assert!(db.state().record("large").get().is_empty());
         db.execute("CREATE TABLE t(n)").await?;
         let (large, small) = (db.state().record("large"), db.state().record("small"));
-        large.set(db.wal(), Bytes::from(vec![7; 5000]))?;
-        small.set(db.wal(), Bytes::from_static(b"s"))?;
+        db.wal().set(&large, Bytes::from(vec![7; 5000]))?;
+        db.wal().set(&small, Bytes::from_static(b"s"))?;
         db.save().await?;
         assert_eq!(stored(&store), 1, "the large record, stored first");
 
         let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
         assert_eq!(db.state().record("large").get(), vec![7; 5000]);
         assert_eq!(db.state().record("small").get(), &b"s"[..]);
-        db.state()
-            .record("large")
-            .set(db.wal(), Bytes::from_static(b"two"))?;
+        let large = db.state().record("large");
+        db.wal().set(&large, Bytes::from_static(b"two"))?;
         db.save().await?;
         // The replaced value is garbage, which the next flush deletes.
         let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
         assert_eq!(db.state().record("large").get(), &b"two"[..]);
-        db.state().record("small").set(db.wal(), Bytes::new())?;
+        let small = db.state().record("small");
+        db.wal().set(&small, Bytes::new())?;
         db.save().await?;
         assert_eq!(stored(&store), 0);
         let db = Db::open(store.clone(), StorageOptions::default()).await?;

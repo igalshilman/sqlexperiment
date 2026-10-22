@@ -69,7 +69,7 @@ impl Store {
         let state = block(State::open(self.kv.clone())).unwrap();
         let mut wal = state.wal();
         let bytes = serde_json::to_vec(value).unwrap();
-        state.record(name).set(&mut wal, bytes.into()).unwrap();
+        wal.set(&state.record(name), bytes.into()).unwrap();
         block(wal.flush()).unwrap();
     }
 

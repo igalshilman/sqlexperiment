@@ -74,7 +74,7 @@ use std::{
 pub(crate) type Changes = BTreeMap<u64, Option<Page>>;
 
 /// What a WAL writes to one paged file: the pages it changed, and its size:
-/// set ([`crate::File::set_len`]), or else only what the pages written need
+/// set ([`crate::Wal::set_len`]), or else only what the pages written need
 /// (the file's length when the WAL first wrote it, grown by its writes),
 /// which a flush keeps a longer file past.
 #[derive(Clone, Debug, Default)]

@@ -82,8 +82,8 @@
 //! # async fn example(store: Arc<dyn KvStore>) -> state::Result<()> {
 //! let state = State::open(store).await?;
 //! let mut wal = state.wal();
-//! state.record("progress").set(&mut wal, "step 1".into())?;
-//! state.file("image")?.write(&mut wal, 0, Some(vec![7; 4096].into()))?;
+//! wal.set(&state.record("progress"), "step 1".into())?;
+//! wal.write(&state.file("image")?, 0, Some(vec![7; 4096].into()))?;
 //! wal.flush().await?; // the record and the page, durable together
 //! # Ok(())
 //! # }
@@ -344,7 +344,7 @@ impl State {
     }
 
     /// A new, empty WAL on this state: the records set and pages written in
-    /// it ([`Record::set`], [`File::write`]) become durable together at
+    /// it ([`Wal::set`], [`Wal::write`]) become durable together at
     /// [`Wal::flush`]; dropping it discards them.
     pub fn wal(&self) -> Wal {
         Wal {
@@ -402,6 +402,87 @@ impl Wal {
         let receipt = Receipt(Arc::new(AtomicU8::new(PENDING)));
         self.receipts.push(receipt.clone());
         receipt
+    }
+
+    /// Replace `record`'s value with this WAL's flush. Refused, before the
+    /// WAL changes, is what no flush could store: a value past
+    /// [`MAX_RECORD_BYTES`], a name past [`MAX_NAME_BYTES`], or the name of
+    /// a paged file.
+    pub fn set(&mut self, record: &Record, value: Bytes) -> Result<()> {
+        self.of(&record.shared)?;
+        if value.len() > MAX_RECORD_BYTES {
+            let (len, max) = (value.len(), MAX_RECORD_BYTES);
+            return Err(format!("record {:?} of {len} bytes exceeds {max}", record.name).into());
+        }
+        check_name(&record.name)?;
+        let paged = record.shared.snapshot().is_paged(&record.name);
+        if self.files.contains_key(&*record.name) || paged == Some(true) {
+            return Err(format!("{:?} is a paged file, not a record", record.name).into());
+        }
+        self.records.insert(record.name.to_string(), value);
+        Ok(())
+    }
+
+    /// Write `image` (4096 bytes) at `file`'s `page`, or a hole with `None`,
+    /// with this WAL's flush, which grows the file to include it if it is
+    /// shorter then. Refused, before the WAL changes, is what no flush could
+    /// store: a page past the largest file, a name past [`MAX_NAME_BYTES`],
+    /// or the name of a record.
+    pub fn write(&mut self, file: &File, page: u64, image: Option<Page>) -> Result<()> {
+        if image.as_ref().is_some_and(|image| image.len() != PAGE_SIZE) {
+            return Err("a page is 4096 bytes".into());
+        }
+        let end = page.saturating_add(1).saturating_mul(PAGE);
+        if end > log::MAX_DATABASE_BYTES {
+            return Err("a page past the largest file".into());
+        }
+        self.change(file, |written| {
+            written.size = written.size.max(end);
+            written.pages.insert(page, image);
+        })
+    }
+
+    /// Make `file` `len` bytes, a multiple of 512, with this WAL's flush,
+    /// whatever its length is then: pages wholly past it become holes, so
+    /// regrowing it reads zeros (or its base's pages). Bytes of a last,
+    /// partial page past `len` stay as written.
+    pub fn set_len(&mut self, file: &File, len: u64) -> Result<()> {
+        if !len.is_multiple_of(512) || len > log::MAX_DATABASE_BYTES {
+            return Err(format!("invalid file length {len}").into());
+        }
+        self.change(file, |written| {
+            // Every page past it a hole: those written in the WAL too, as an
+            // earlier shrink may have cut flushed pages there.
+            let kept = len.div_ceil(PAGE);
+            for (_, image) in written.pages.range_mut(kept..) {
+                *image = None;
+            }
+            for page in kept..written.size.div_ceil(PAGE) {
+                written.pages.insert(page, None);
+            }
+            written.size = len;
+            written.sized = true;
+        })
+    }
+
+    /// Change `file`'s writes with `f`, starting from none at its length as
+    /// last flushed.
+    fn change(&mut self, file: &File, f: impl FnOnce(&mut snapshot::Written)) -> Result<()> {
+        self.of(&file.shared)?;
+        check_name(&file.name)?;
+        let paged = file.shared.snapshot().is_paged(&file.name);
+        if self.records.contains_key(&*file.name) || paged == Some(false) {
+            return Err(format!("{:?} is a record, not a paged file", file.name).into());
+        }
+        let size = file.len();
+        let written =
+            (self.files.entry(file.name.to_string())).or_insert_with(|| snapshot::Written {
+                size,
+                pages: Default::default(),
+                sized: false,
+            });
+        f(written);
+        Ok(())
     }
 
     /// Make every record set and page written durable, in one put (and a
@@ -569,7 +650,7 @@ impl Drop for Participant {
 /// A named whole value the commit record holds, replaced whole: the host's
 /// state beside its files (a run's progress, an outbox), flushed with them
 /// in the same put. Read from the state ([`Self::get`]), set in a WAL
-/// ([`Self::set`]). A cheap handle.
+/// ([`Wal::set`]). A cheap handle.
 ///
 /// A value of up to [`StorageOptions::inline_log_bytes`] is in the record,
 /// which every flush rewrites; a larger one is a stored value of its own,
@@ -593,25 +674,6 @@ impl Record {
             .get(&*self.name)
             .cloned()
             .unwrap_or_default()
-    }
-
-    /// Replace the value with `wal`'s flush. Refused, before the WAL
-    /// changes, is what no flush could store: a value past
-    /// [`MAX_RECORD_BYTES`], a name past [`MAX_NAME_BYTES`], or the name of
-    /// a paged file.
-    pub fn set(&self, wal: &mut Wal, value: Bytes) -> Result<()> {
-        wal.of(&self.shared)?;
-        if value.len() > MAX_RECORD_BYTES {
-            let (len, max) = (value.len(), MAX_RECORD_BYTES);
-            return Err(format!("record {:?} of {len} bytes exceeds {max}", self.name).into());
-        }
-        check_name(&self.name)?;
-        let paged = self.shared.snapshot().is_paged(&self.name);
-        if wal.files.contains_key(&*self.name) || paged == Some(true) {
-            return Err(format!("{:?} is a paged file, not a record", self.name).into());
-        }
-        wal.records.insert(self.name.to_string(), value);
-        Ok(())
     }
 }
 
@@ -650,68 +712,6 @@ impl File {
             return Ok(None);
         }
         Ok(snapshot.read(&self.name, page).await?)
-    }
-
-    /// Write `image` (4096 bytes) at `page`, or a hole with `None`, with
-    /// `wal`'s flush, which grows the file to include it if it is shorter
-    /// then. Refused, before the WAL changes, is what no flush could store:
-    /// a page past the largest file, a name past [`MAX_NAME_BYTES`], or the
-    /// name of a record.
-    pub fn write(&self, wal: &mut Wal, page: u64, image: Option<Page>) -> Result<()> {
-        if image.as_ref().is_some_and(|image| image.len() != PAGE_SIZE) {
-            return Err("a page is 4096 bytes".into());
-        }
-        let end = page.saturating_add(1).saturating_mul(PAGE);
-        if end > log::MAX_DATABASE_BYTES {
-            return Err("a page past the largest file".into());
-        }
-        self.change(wal, |written| {
-            written.size = written.size.max(end);
-            written.pages.insert(page, image);
-        })
-    }
-
-    /// Make the file `len` bytes, a multiple of 512, with `wal`'s flush,
-    /// whatever its length is then: pages wholly past it become holes, so
-    /// regrowing it reads zeros (or its base's pages). Bytes of a last,
-    /// partial page past `len` stay as written.
-    pub fn set_len(&self, wal: &mut Wal, len: u64) -> Result<()> {
-        if !len.is_multiple_of(512) || len > log::MAX_DATABASE_BYTES {
-            return Err(format!("invalid file length {len}").into());
-        }
-        self.change(wal, |written| {
-            // Every page past it a hole: those written in the WAL too, as an
-            // earlier shrink may have cut flushed pages there.
-            let kept = len.div_ceil(PAGE);
-            for (_, image) in written.pages.range_mut(kept..) {
-                *image = None;
-            }
-            for page in kept..written.size.div_ceil(PAGE) {
-                written.pages.insert(page, None);
-            }
-            written.size = len;
-            written.sized = true;
-        })
-    }
-
-    /// Change the file's writes in `wal` with `f`, starting from none at the
-    /// file's length as last flushed.
-    fn change(&self, wal: &mut Wal, f: impl FnOnce(&mut snapshot::Written)) -> Result<()> {
-        wal.of(&self.shared)?;
-        check_name(&self.name)?;
-        let paged = self.shared.snapshot().is_paged(&self.name);
-        if wal.records.contains_key(&*self.name) || paged == Some(false) {
-            return Err(format!("{:?} is a record, not a paged file", self.name).into());
-        }
-        let size = self.len();
-        let written =
-            (wal.files.entry(self.name.to_string())).or_insert_with(|| snapshot::Written {
-                size,
-                pages: Default::default(),
-                sized: false,
-            });
-        f(written);
-        Ok(())
     }
 }
 

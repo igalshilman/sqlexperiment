@@ -286,12 +286,12 @@ impl Participant for Checkpointed {
         }
         if manifest != self.manifest {
             let bytes = serde_json::to_vec(&manifest)?;
-            (self.manifest_record.set(wal, bytes.into())).map_err(storage_error)?;
+            (wal.set(&self.manifest_record, bytes.into())).map_err(storage_error)?;
             self.manifest = manifest;
         }
         if self.running != self.saved_running {
             let running = self.running.clone().unwrap_or_default();
-            (self.running_record.set(wal, running.into())).map_err(storage_error)?;
+            (wal.set(&self.running_record, running.into())).map_err(storage_error)?;
             self.saved_running = self.running.clone();
         }
         Ok(())

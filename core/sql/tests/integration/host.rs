@@ -154,7 +154,7 @@ impl Db {
         // After the SQL flush: a `COMMIT` that fails sets no effects.
         self.sql.flush(&mut self.wal).await?;
         let record = self.sql.state().record("effects");
-        record.set(&mut self.wal, effects)?;
+        self.wal.set(&record, effects)?;
         self.flush().await.map(drop)
     }
 

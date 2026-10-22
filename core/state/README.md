@@ -31,8 +31,8 @@ let options = StorageOptions {
 };
 let state = State::open_with_options(store, options).await?;
 let mut wal = state.wal();
-state.record("progress").set(&mut wal, "step 7".into())?;
-state.file("image")?.write(&mut wal, 0, Some(page))?;
+wal.set(&state.record("progress"), "step 7".into())?;
+wal.write(&state.file("image")?, 0, Some(page))?;
 wal.flush().await?; // the record and the page, durable together
 ```
 

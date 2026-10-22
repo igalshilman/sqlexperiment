@@ -23,13 +23,13 @@ fn shrinking_twice_in_a_wal_leaves_no_page_behind() -> Result<()> {
         let file = state.file("db")?;
         let mut wal = state.wal();
         for n in 0..8 {
-            file.write(&mut wal, n, Some(page(n as u8 + 1)))?;
+            wal.write(&file, n, Some(page(n as u8 + 1)))?;
         }
         wal.flush().await?;
         let mut wal = state.wal();
-        file.set_len(&mut wal, 6 * 4096)?;
-        file.set_len(&mut wal, 2 * 4096)?;
-        file.set_len(&mut wal, 8 * 4096)?;
+        wal.set_len(&file, 6 * 4096)?;
+        wal.set_len(&file, 2 * 4096)?;
+        wal.set_len(&file, 8 * 4096)?;
         assert_eq!(
             byte(&file, 7).await?,
             Some(8),
@@ -77,16 +77,18 @@ fn a_checkpoint_never_exposes_a_page_fetched_under_a_based_log() -> Result<()> {
         for (n, checkpoint_after) in [(1, 0), (2, 8)] {
             let state = State::open_with_options(store.clone(), options(checkpoint_after)).await?;
             let mut wal = state.wal();
-            state
-                .file_with_base("vm", Arc::new(Zeros))?
-                .write(&mut wal, 1, Some(page(n)))?;
+            wal.write(
+                &state.file_with_base("vm", Arc::new(Zeros))?,
+                1,
+                Some(page(n)),
+            )?;
             wal.flush().await?;
         }
         let state = State::open_with_options(store, options(0)).await?;
         let vm = state.file_with_base("vm", Arc::new(Zeros))?;
         assert_eq!(byte(&vm, 1).await?, Some(2));
         let mut wal = state.wal();
-        state.file("db")?.write(&mut wal, 0, Some(page(9)))?;
+        wal.write(&state.file("db")?, 0, Some(page(9)))?;
         assert!(wal.flush().await?.checkpointed_pages > 0);
         assert_eq!(byte(&vm, 1).await?, Some(2), "after the checkpoint");
         Ok(())

@@ -39,9 +39,8 @@ async fn baseline() -> Result<MemoryKv> {
     .await?;
     db.execute("WITH RECURSIVE x(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM x WHERE i < 19) INSERT INTO t SELECT i, i, substr(printf('%07000d', i), 1, 100 + (i % 5) * 1500) FROM x")
         .await?;
-    db.state()
-        .record("effects")
-        .set(db.wal(), Bytes::from("before"))?;
+    let effects = db.state().record("effects");
+    db.wal().set(&effects, Bytes::from("before"))?;
     for k in 0..3 {
         db.execute(&format!("CREATE TABLE a{k}(x)")).await?;
     }
@@ -139,9 +138,8 @@ impl Call {
         match (self, open) {
             (Call::Statement, Open::Sql(db)) => db.execute(UPDATE).await,
             (Call::Turn, Open::Sql(db)) => {
-                db.state()
-                    .record("effects")
-                    .set(db.wal(), Bytes::from("after"))?;
+                let effects = db.state().record("effects");
+                db.wal().set(&effects, Bytes::from("after"))?;
                 db.flush().await.map(drop)
             }
             (Call::SessionWrite, Open::Session(session)) => {

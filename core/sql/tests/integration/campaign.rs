@@ -686,7 +686,7 @@ impl Campaign {
                 let flush = async {
                     let mut wal = state.wal();
                     sql.flush(&mut wal).await?;
-                    state.record("effects").set(&mut wal, effects)?;
+                    wal.set(&state.record("effects"), effects)?;
                     wal.flush().await.map(drop)
                 };
                 let (hit, ended) = self.call(2, "flush the turn", flush).await;

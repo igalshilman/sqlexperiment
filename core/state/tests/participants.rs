@@ -25,7 +25,7 @@ fn a_flush_waits_for_unflushed_participants() -> Result<()> {
         let state = State::open(store.clone()).await?;
         let participant = state.join("cache")?;
         let mut wal = state.wal();
-        state.record("progress").set(&mut wal, "1".into())?;
+        wal.set(&state.record("progress"), "1".into())?;
         participant.set_unflushed(true);
         let error = wal.flush().await.unwrap_err();
         assert!(error.to_string().contains("flush it first"), "{error}");
@@ -33,7 +33,7 @@ fn a_flush_waits_for_unflushed_participants() -> Result<()> {
         participant.set_unflushed(false);
         // The refused flush took its WAL with it: a new one.
         let mut wal = state.wal();
-        state.record("progress").set(&mut wal, "1".into())?;
+        wal.set(&state.record("progress"), "1".into())?;
         wal.flush().await?;
         let reopened = State::open(store).await?;
         assert_eq!(&reopened.record("progress").get()[..], b"1");
@@ -51,7 +51,7 @@ fn idle_state_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
         };
         let state = State::open_with_options(store.clone(), options()).await?;
         let mut wal = state.wal();
-        state.record("n").set(&mut wal, "1".into())?;
+        wal.set(&state.record("n"), "1".into())?;
         wal.flush().await?;
         let engine = state.join("engine")?;
         engine.park(7u32, 1).unwrap();
@@ -63,7 +63,7 @@ fn idle_state_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
         // A WAL changes nothing until it flushes: the state is still at the
         // last durable flush, before and after.
         let mut wal = state.wal();
-        state.record("n").set(&mut wal, "2".into())?;
+        wal.set(&state.record("n"), "2".into())?;
         assert!(engine.can_park());
         wal.flush().await?;
         engine.park(9u32, 1).unwrap();
@@ -73,7 +73,7 @@ fn idle_state_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
         let state = State::open_with_options(store.clone(), options()).await?;
         let other = State::open_with_options(store.clone(), options()).await?;
         let mut wal = other.wal();
-        other.record("n").set(&mut wal, "3".into())?;
+        wal.set(&other.record("n"), "3".into())?;
         wal.flush().await?;
         drop((state, other));
         let state = State::open_with_options(store, options()).await?;
