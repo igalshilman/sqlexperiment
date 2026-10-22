@@ -621,6 +621,12 @@ impl KvIo {
         private.sizes[WAL] != 0 || private.dirty.keys().any(|(file, _)| *file == DB)
     }
 
+    /// Whether pages copied into a WAL wait for the state to flush or drop
+    /// it ([`Self::flush_into`]).
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.private.lock().unwrap().flushed.is_empty()
+    }
+
     /// Copy the database's private pages into the state's file `db`, in
     /// `wal`, once no SQL transaction remains and the engine WAL is
     /// truncated. They stay in the private view, read ahead of the file,

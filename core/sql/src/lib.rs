@@ -424,7 +424,8 @@ impl Sql {
             false => Ok(()),
         };
         let result = match result {
-            Ok(()) if self.io.has_changes() => self.move_pages(wal).await,
+            // Pages a pending WAL holds go in too: it may be dropped.
+            Ok(()) if self.io.has_changes() || self.io.has_pending() => self.move_pages(wal).await,
             Ok(()) => self.measure_changed_schema().await,
             result => result,
         };

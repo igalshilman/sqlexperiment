@@ -3,9 +3,11 @@
 use crate::host::StateSetup;
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
+use sql::Sql;
 use state::simulation::Namespace;
 use state::{
-    Result, StateOptions,
+    Result, State, StateOptions,
+    kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
@@ -284,6 +286,32 @@ fn a_scoped_state_is_part_of_the_session_s() -> Result<()> {
         let file = state.file("fs/blobs/a")?;
         assert_eq!(file.len(), 4096);
         assert_eq!(file.read(0).await?.unwrap()[0], 7);
+        Ok(())
+    })
+}
+
+/// SQL flushed into a WAL that is still pending, then into a second one:
+/// the second carries its pages too, whichever of them the state flushes.
+#[test]
+fn a_second_wal_carries_what_a_pending_one_holds() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = MemoryKv::default();
+        let store: Arc<dyn KvStore> = Arc::new(memory.clone());
+        let state = State::open(store.clone()).await?;
+        let mut sql = Sql::open(&state).await?;
+        sql.execute("CREATE TABLE t(x); INSERT INTO t VALUES(1)")
+            .await?;
+        let mut first = state.wal();
+        sql.flush(&mut first).await?;
+        let mut second = state.wal();
+        sql.flush(&mut second).await?;
+        drop(first);
+        second.flush().await?;
+        drop(sql);
+        let state = State::open(store).await?;
+        let mut sql = Sql::open(&state).await?;
+        let rows = sql.query("SELECT count(*) FROM t").await?;
+        assert_eq!(rows[0][0].as_int(), Some(1));
         Ok(())
     })
 }

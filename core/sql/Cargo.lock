@@ -1734,8 +1734,8 @@ dependencies = [
  "bytes",
  "futures",
  "parking_lot",
- "turso_core",
  "state",
+ "turso_core",
 ]
 
 [[package]]
@@ -1743,6 +1743,18 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "state"
+version = "0.11.0"
+dependencies = [
+ "bytes",
+ "foyer",
+ "futures",
+ "lz4_flex",
+ "tokio",
+ "zstd-safe",
+]
 
 [[package]]
 name = "strum"
@@ -2135,18 +2147,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "state"
-version = "0.11.0"
-dependencies = [
- "bytes",
- "foyer",
- "futures",
- "lz4_flex",
- "tokio",
- "zstd-safe",
-]
 
 [[package]]
 name = "wasi"
