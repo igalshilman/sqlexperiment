@@ -2,7 +2,7 @@
 The services of the tests against a Restate server: the notes example, a
 bank, a probe of the context without journal replay, the agent on the
 scripted teller (scripted_agent.py), and a support agent with Restate's
-tools, on LangGraph, on Pydantic AI and on Claude; a desk of your own that
+tools, on LangGraph, on Pydantic AI, on Claude and on LiteLLM; a desk of your own that
 asks the helper; and a graph whose steps are Restate's. Served on PORT, as the examples are.
 """
 
@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests")
 
 import restate_fns as restate  # noqa: E402
 from bank import account  # noqa: E402
-from fakes import ClaudeClient, Teller, pydantic_ai_model  # noqa: E402
+from fakes import ClaudeClient, LiteLLMTeller, Teller, pydantic_ai_model  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
 from langgraph.graph import START, MessagesState, StateGraph  # noqa: E402
 from notes import add, notes  # noqa: E402
@@ -27,6 +27,7 @@ from restate_agents import (  # noqa: E402
     call,
     claude,
     langgraph,
+    litellm,
     pydantic_ai,
     send,
     serve,
@@ -181,6 +182,8 @@ SUPPORT_TOOLS = [
 support = langgraph.agent("support", model=Teller(), tools=SUPPORT_TOOLS)
 pydantic_support = pydantic_ai.agent("pydantic_support", model=pydantic_ai_model(Teller()), tools=SUPPORT_TOOLS)
 claude_support = claude.agent("claude_support", client=ClaudeClient(Teller()), tools=SUPPORT_TOOLS)
+LiteLLMTeller(Teller()).register()
+litellm_support = litellm.agent("litellm_support", model="teller/teller", tools=SUPPORT_TOOLS)
 
 # A Claude assistant that compacts and resets its conversation, by handlers of its own.
 notebook_client = ClaudeClient(Teller())
@@ -250,6 +253,7 @@ if __name__ == "__main__":
         support,
         pydantic_support,
         claude_support,
+        litellm_support,
         desk,
         notebook,
         refunds,
