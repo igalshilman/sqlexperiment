@@ -5,8 +5,8 @@ key) keeps the agent's state in its SQL database (`ctx.db`, of
 [`restate-fns`](../fns/README.md)), and each message is answered once per
 invocation, however often an attempt crashes. The Python counterpart of
 [`restate-agents`](../../typescript/packages/integrations/README.md), with
-[Claude](#claude) (the Anthropic SDK), [LangGraph](#langgraph) and
-[Pydantic AI](#pydantic-ai).
+[Claude](#claude) (the Anthropic SDK), [LiteLLM](#litellm) (any model),
+[LangGraph](#langgraph) and [Pydantic AI](#pydantic-ai).
 
 ```python
 from restate_agents import claude, serve, tool
@@ -91,6 +91,35 @@ other error fails the attempt. The loop is the SDK tool runner's
 (`client.beta.messages.tool_runner`), of its own: the runner gives a tool
 its input but not its call's id, and cannot start from a stored reply whose
 tools did not run.
+
+## LiteLLM
+
+`litellm.agent(name, model=, system=, tools=)` is the same agent on any model,
+through [LiteLLM](https://docs.litellm.ai): the OpenAI-format messages that
+LiteLLM speaks to every provider, stored in the object's database
+(`litellm_messages`), with the handlers of the Claude agent. As with Claude,
+the loop is the agent's own: each reply of the model is stored before its
+tools run, and their results before the next request.
+
+```python
+from restate_agents import litellm, serve
+
+assistant = litellm.agent("assistant", model="openai/gpt-5", system="Answer briefly.", tools=[get_weather])
+serve(assistant)
+```
+
+| Option    | What                                                                                                                                                                                                             |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`   | Any model LiteLLM knows, as `provider/model-id` (`openai/gpt-5`, `gemini/gemini-2.5-pro`, `bedrock/...`, `ollama/llama3.1`), with its provider's API key; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` |
+| `system`  | The system prompt                                                                                                                                                                                                |
+| `tools`   | `tool`s and [Restate's tools](#restates-tools); and tools the provider runs, as dicts in its format                                                                                                              |
+| `request` | More of each request, as `litellm.acompletion` takes it: `{"temperature": 0.2, "api_base": "http://localhost:11434"}`                                                                                            |
+
+`model`, `system`, `tools` and `request` may be functions of the
+invocation's context, or async ones. A model LiteLLM knows no provider of
+fails when the agent is defined. `litellm.prompt(ctx, text, ...)`,
+`litellm.compact(ctx, instructions)` and `litellm.reset(ctx, handoff)` are
+those of Claude ([`examples-python/chat_litellm.py`](../../examples-python/chat_litellm.py)).
 
 ## LangGraph
 
@@ -428,6 +457,9 @@ async def chat(ctx, message: str) -> str:
 - [`tests/test_claude.py`](tests/test_claude.py): the same, for the Claude
   agent (the teller as an Anthropic client), with options for each
   invocation, the SDK's tools, and prompts of your own, each answered once.
+- [`tests/test_litellm.py`](tests/test_litellm.py): the same, for the
+  LiteLLM agent (the teller as a LiteLLM provider, `teller/...`), with
+  prompts, compacting and resetting of your own.
 - [`tests/test_pydantic_ai.py`](tests/test_pydantic_ai.py): the same, for
   the Pydantic AI agent (the teller as a Pydantic AI model), and agents of
   your own, prompts of your own and a structured output, each answered once.
@@ -438,7 +470,7 @@ async def chat(ctx, message: str) -> str:
 
 Against a real Restate server ([`../tests`](../tests)): `make
 concurrency-test-py` has the agent moving money through Restate calls, and
-Restate's tools on LangGraph and on Pydantic AI
+Restate's tools on each agent
 ([`test_restate_tools.py`](../tests/test_restate_tools.py): a call, a signal
 and a workflow in one turn, signals kept and dropped, a cancelled wait, a
 subagent, a send, status, stop and steer), and
