@@ -15,13 +15,13 @@
 //! 1. **Garbage:** deletes of the stored values the durable record lists as
 //!    garbage (it names them no more).
 //! 2. **Stored values:** a transaction larger than the record's inline budget
-//!    ([`StorageOptions::inline_log_bytes`]), or a large record, goes to
+//!    ([`StateOptions::inline_log_bytes`]), or a large record, goes to
 //!    stored values; past the budget, the record's inline log is sealed into
 //!    one.
 //! 3. **Record:** the commit record: the log so far plus the new transaction, naming
 //!    those values, and listing as garbage the ones it names no more.
-//! 4. **Checkpoint:** once more than [`StorageOptions::checkpoint_after`]
-//!    transactions or [`StorageOptions::checkpoint_log_bytes`] are in the log,
+//! 4. **Checkpoint:** once more than [`StateOptions::checkpoint_after`]
+//!    transactions or [`StateOptions::checkpoint_log_bytes`] are in the log,
 //!    the latest image of every page it changed to `page/<n>` (holes are
 //!    deletes), the working-set hint, and a record with an empty log and the
 //!    next epoch, whose garbage takes the log's stored values.
@@ -98,53 +98,51 @@ impl Written {
 /// What a commit writes to paged files, by name.
 pub(crate) type Writes = BTreeMap<String, Written>;
 
-/// Default [`StorageOptions::prefetch_pages`].
+/// Default [`StateOptions::prefetch_pages`].
 pub const PREFETCH_PAGES: u64 = 16;
-/// Default [`StorageOptions::hint_pages`].
+/// Default [`StateOptions::hint_pages`].
 pub const HINT_PAGES: usize = 32;
 /// Consecutive page reads that start sequential readahead.
 const READAHEAD_AFTER: u32 = 3;
 /// Largest readahead window, in pages.
 const MAX_READAHEAD: u64 = 64;
-/// Default [`StorageOptions::checkpoint_after`].
+/// Default [`StateOptions::checkpoint_after`].
 pub const CHECKPOINT_AFTER: u32 = 32;
-/// Default [`StorageOptions::checkpoint_log_bytes`].
+/// Default [`StateOptions::checkpoint_log_bytes`].
 pub const CHECKPOINT_LOG_BYTES: usize = 64 * 1024;
-/// Default [`StorageOptions::inline_log_bytes`].
+/// Default [`StateOptions::inline_log_bytes`].
 pub const INLINE_LOG_BYTES: usize = 1024;
 
-/// Per-session storage options. They never change the stored format.
+/// How a state flushes and reads: the log's limits, the encoding of new
+/// pages, what a cold open fetches. They never change the stored format.
 #[derive(Clone)]
-pub struct StorageOptions {
+pub struct StateOptions {
     /// Encoding of newly written pages; stored tags decide how pages are read.
     pub page_compression: PageCompression,
-    /// This namespace's handle on the process-wide [`crate::PageCache`].
-    pub cache: Option<NamespaceCache>,
-    /// Transactions kept in the log: a commit that logs more checkpoints the
+    /// Transactions kept in the log: a flush that logs more checkpoints the
     /// whole log. Replay at open reads them all.
     pub checkpoint_after: u32,
-    /// Encoded bytes kept in the log: a commit that logs more checkpoints the
+    /// Encoded bytes kept in the log: a flush that logs more checkpoints the
     /// whole log.
     pub checkpoint_log_bytes: usize,
-    /// Bytes of log the commit record holds inline, which every commit
+    /// Bytes of log the commit record holds inline, which every flush
     /// rewrites. A transaction that takes more goes to stored values, one per
-    /// segment. Once the inline log would pass it, a commit seals the inline
+    /// segment. Once the inline log would pass it, a flush seals the inline
     /// parts into one stored value, which the record names.
     pub inline_log_bytes: usize,
     /// A cold open (no warm cache pages) fetches every page of a database of
     /// at most this many pages, alongside replay.
     pub prefetch_pages: u64,
-    /// Pages a checkpointing commit lists in the working-set hint, which a cold
-    /// open of a larger database fetches alongside replay (at most
+    /// Pages a checkpointing flush lists in the working-set hint, which a
+    /// cold open of a larger database fetches alongside replay (at most
     /// [`crate::MAX_HINT_PAGES`]); 0 neither writes nor reads it.
     pub hint_pages: usize,
 }
 
-impl Default for StorageOptions {
+impl Default for StateOptions {
     fn default() -> Self {
         Self {
             page_compression: PageCompression::default(),
-            cache: None,
             checkpoint_after: CHECKPOINT_AFTER,
             checkpoint_log_bytes: CHECKPOINT_LOG_BYTES,
             inline_log_bytes: INLINE_LOG_BYTES,
@@ -154,10 +152,11 @@ impl Default for StorageOptions {
     }
 }
 
-/// What a commit wrote: its log and record bytes, and the pages its checkpoint, if any, wrote.
+/// What a flush wrote: its log and record bytes, and the pages its
+/// checkpoint, if any, wrote.
 #[derive(Clone, Debug, Default)]
 pub struct FlushReport {
-    /// Pages written in place by this commit's checkpoint; 0 when it did not
+    /// Pages written in place by this flush's checkpoint; 0 when it did not
     /// checkpoint.
     pub checkpointed_pages: usize,
     /// Bytes of its transaction's log segments, every file's: about what its
@@ -167,10 +166,25 @@ pub struct FlushReport {
     pub record_bytes: usize,
 }
 
+/// What a state opened with: its options, and its namespace in the
+/// process's [`crate::PageCache`].
+#[derive(Clone)]
+pub(crate) struct Settings {
+    pub options: StateOptions,
+    pub cache: Option<NamespaceCache>,
+}
+
+impl std::ops::Deref for Settings {
+    type Target = StateOptions;
+    fn deref(&self) -> &StateOptions {
+        &self.options
+    }
+}
+
 /// The committed view a session reads and extends.
 pub(crate) struct Snapshot {
     store: Arc<dyn KvStore>,
-    options: StorageOptions,
+    options: Settings,
     /// The durable commit record, and its exact bytes (`None` when absent).
     commit: Commit,
     commit_bytes: Option<Bytes>,
@@ -235,7 +249,7 @@ impl Snapshot {
     /// nothing, and so syncs nothing either.
     pub async fn open(
         store: Arc<dyn KvStore>,
-        options: StorageOptions,
+        options: Settings,
         reader: bool,
     ) -> io::Result<Self> {
         let cache = options.cache.as_ref();

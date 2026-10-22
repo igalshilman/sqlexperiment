@@ -8,9 +8,8 @@ use anyhow::Result;
 use common::*;
 use functions::{Language, Run, Scope, View};
 use serde_json::{Value, json};
-use state::{
-    NamespaceCache,
-    simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, fresh_namespace},
+use state::simulation::{
+    Effect, Failpoint, FaultKv, MemoryKv, Namespace, Operation, fresh_namespace,
 };
 use std::sync::Arc;
 
@@ -98,10 +97,10 @@ impl Faulty {
         }
     }
 
-    fn scope(&self, cache: &Option<NamespaceCache>) -> Scope {
+    fn scope(&self, cache: &Option<Namespace>) -> Scope {
         let scope = Scope::new(self.faults.clone());
         match cache {
-            Some(cache) => scope.cached(cache.clone()),
+            Some(namespace) => scope.cached(&namespace.cache, &namespace.key),
             None => scope,
         }
     }

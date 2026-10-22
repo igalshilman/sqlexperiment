@@ -54,7 +54,7 @@ checkpoint slice per save and confirmation on weak backends. See
 - `KvStore::durable_when_visible()` (default false) lets strong backends skip
   confirmation.
 - Reads: a cold open prefetches every page of a database of at most
-  `StorageOptions::prefetch_pages` (16) alongside replay; three consecutive page
+  `StateOptions::prefetch_pages` (16) alongside replay; three consecutive page
   reads from the backend start readahead in a window that doubles up to 64; an
   owner probes the log exactly to where it left it. Up to 64 mutations of a
   save group are in flight, so saves with a cache take one round trip.

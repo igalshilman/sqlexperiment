@@ -6,17 +6,17 @@
 mod support;
 
 use futures::FutureExt;
-use state::{Result, StorageOptions, kv::KvStore, simulation::*};
+use state::{Result, StateOptions, kv::KvStore, simulation::*};
 use std::{panic::AssertUnwindSafe, sync::Arc};
 use support::*;
 
-fn options() -> StorageOptions {
-    StorageOptions {
+fn options() -> StateOptions {
+    StateOptions {
         checkpoint_after: 2,
         inline_log_bytes: 200,
         prefetch_pages: 2,
         hint_pages: 8,
-        ..StorageOptions::default()
+        ..StateOptions::default()
     }
 }
 
@@ -72,9 +72,9 @@ enum Read {
 
 /// Open the namespace and read everything, without a cache or with one.
 async fn read(store: Arc<dyn KvStore>, model: &Model, cached: bool) -> Read {
-    let options = StorageOptions {
+    let options = Setup {
+        options: options(),
         cache: cached.then(fresh_namespace),
-        ..options()
     };
     let read = async {
         let session = Session::open(store, options).await?;

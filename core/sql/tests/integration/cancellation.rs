@@ -1,5 +1,6 @@
 //! Cancellation at every point: a call dropped after any number of polls
 //! ends its session, and the store holds the state before it or after it.
+use crate::host::StateSetup;
 use crate::{
     fault::poll_at_most,
     host::{Db, Durability, Setup},
@@ -7,21 +8,24 @@ use crate::{
 };
 use bytes::Bytes;
 use sql::{Sql, binding::Session};
+use state::simulation::Namespace;
 use state::{
-    NamespaceCache, Result, State, StorageOptions,
+    Result, StateOptions,
     kv::KvStore,
     simulation::{MemoryKv, fresh_namespace},
 };
 use std::sync::Arc;
 
 /// Pages read from the store as queries need them; the log checkpointed often.
-fn options(cache: Option<NamespaceCache>) -> StorageOptions {
-    StorageOptions {
+fn options(cache: Option<Namespace>) -> StateSetup {
+    StateSetup {
+        options: StateOptions {
+            checkpoint_after: 2,
+            prefetch_pages: 0,
+            hint_pages: 0,
+            ..StateOptions::default()
+        },
         cache,
-        checkpoint_after: 2,
-        prefetch_pages: 0,
-        hint_pages: 0,
-        ..StorageOptions::default()
     }
 }
 
@@ -56,7 +60,7 @@ async fn baseline() -> Result<MemoryKv> {
 /// The state of a store and its effects, through a plain session; its
 /// database checks out.
 async fn observe(store: MemoryKv) -> Result<(String, Bytes)> {
-    let state = State::open_with_options(Arc::new(store), options(None)).await?;
+    let state = options(None).open(Arc::new(store)).await?;
     let mut sql = Sql::open(&state).await?;
     assert_eq!(integrity(&mut sql).await?, "ok");
     Ok((dump(&mut sql).await?, state.record("effects").get()))
@@ -105,7 +109,7 @@ impl Open {
 }
 
 impl Call {
-    async fn open(self, store: MemoryKv, cache: Option<NamespaceCache>) -> Result<Open> {
+    async fn open(self, store: MemoryKv, cache: Option<Namespace>) -> Result<Open> {
         let store: Arc<dyn KvStore> = Arc::new(store);
         let mut open = match self {
             Call::Statement | Call::Turn => {
@@ -116,7 +120,7 @@ impl Call {
                 let setup = Setup(options(cache), durability);
                 Open::Sql(Db::open(store, setup).await?)
             }
-            _ => Open::Session(Session::open_with_options(store, options(cache), false).await?),
+            _ => Open::Session(Session::new(options(cache).open(store).await?).await?),
         };
         match (self, &mut open) {
             (Call::Turn, Open::Sql(db)) => {
@@ -217,8 +221,7 @@ fn a_call_cancelled_after_any_number_of_polls_ends_its_session() -> Result<()> {
                     // The process goes on: the next session of the owner,
                     // through its cache, sees what the store holds.
                     if cached {
-                        let state =
-                            State::open_with_options(Arc::new(memory), options(cache)).await?;
+                        let state = options(cache).open(Arc::new(memory)).await?;
                         let mut sql = Sql::open(&state).await?;
                         assert_eq!(
                             dump(&mut sql).await?,

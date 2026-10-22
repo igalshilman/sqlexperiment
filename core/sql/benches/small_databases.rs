@@ -1,7 +1,7 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
 use sql::Sql;
 use state::{
-    Result, State, StorageOptions,
+    Result, State,
     simulation::{MemoryKv, Stats},
 };
 use std::{
@@ -25,10 +25,7 @@ struct Case {
 }
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Sql::open(
-        &State::open_with_options(Arc::new(store.clone()), StorageOptions::default()).await?,
-    )
-    .await?;
+    let mut db = Sql::open(&State::open(Arc::new(store.clone())).await?).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER, note INTEGER, payload TEXT)").await?;
     for column in ["a", "b", "c"].into_iter().take(case.indexes) {
         db.execute(&format!("CREATE INDEX by_{column} ON t({column})"))

@@ -129,8 +129,8 @@ pub fn catalog(language: Language, source: &str) -> Arc<Programs> {
         .clone()
 }
 
-pub fn block<F: Future>(future: F) -> F::Output {
-    futures_executor::block_on(future)
+pub fn block<F: IntoFuture>(future: F) -> F::Output {
+    futures_executor::block_on(future.into_future())
 }
 
 /// Run "r" of `source`'s program "v1" in `store`: started, or another attempt.

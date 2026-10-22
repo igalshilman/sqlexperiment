@@ -9,7 +9,10 @@ pub use latency::LatencyKv;
 pub use memory::{MemoryKv, Stats, Traffic, object_kind};
 pub use monitor::MonitorKv;
 
-use crate::{NamespaceCache, PageCache, PageCacheConfig, format::COMMIT, kv::KvStore, log::Commit};
+use crate::{
+    Open, PageCache, PageCacheConfig, State, StateOptions, format::COMMIT, kv::KvStore, log::Commit,
+};
+use std::sync::Arc;
 use std::sync::{
     OnceLock,
     atomic::{AtomicU64, Ordering::Relaxed},
@@ -24,37 +27,11 @@ pub async fn logged_transactions(store: &dyn KvStore) -> std::io::Result<usize> 
     })
 }
 
-/// Cache settings for tests: a new temporary file and 1 MiB disk blocks. Files
-/// left by earlier test processes are removed.
+/// Cache settings for tests: a temporary file, and 1 MiB disk blocks.
 pub fn cache_config(memory: usize, disk: usize) -> PageCacheConfig {
-    static DIRS: AtomicU64 = AtomicU64::new(0);
-    static CLEANED: std::sync::Once = std::sync::Once::new();
-    CLEANED.call_once(remove_stale_cache_files);
-    let file = std::env::temp_dir().join(format!(
-        "state-cache-{}-{}",
-        std::process::id(),
-        DIRS.fetch_add(1, Relaxed)
-    ));
     PageCacheConfig {
         disk_block: 1 << 20,
-        ..PageCacheConfig::new(file, memory, disk)
-    }
-}
-
-fn remove_stale_cache_files() {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("state-cache-")) else {
-            continue;
-        };
-        let pid = rest.split('-').next().unwrap_or_default();
-        let running = std::path::Path::new("/proc").join(pid).exists();
-        if !running && std::path::Path::new("/proc/self").exists() {
-            let _ = std::fs::remove_file(entry.path());
-        }
+        ..PageCacheConfig::new(memory, disk)
     }
 }
 
@@ -72,10 +49,62 @@ pub fn shared_cache() -> &'static PageCache {
     CACHE.get_or_init(|| open_cache(cache_config(64 << 20, 256 << 20)))
 }
 
-/// A namespace of the shared cache that nobody used before: a fresh owner.
-pub fn fresh_namespace() -> NamespaceCache {
+/// A namespace of a page cache: what [`Open::cached`] takes, as one value.
+#[derive(Clone)]
+pub struct Namespace {
+    pub cache: PageCache,
+    pub key: String,
+}
+
+impl Namespace {
+    pub fn new(cache: &PageCache, key: &str) -> Self {
+        Self {
+            cache: cache.clone(),
+            key: key.to_owned(),
+        }
+    }
+}
+
+/// A namespace of [`shared_cache`] that nobody used before: a fresh owner.
+pub fn fresh_namespace() -> Namespace {
     static KEYS: AtomicU64 = AtomicU64::new(0);
-    shared_cache().namespace(&format!("namespace-{}", KEYS.fetch_add(1, Relaxed)))
+    let key = format!("namespace-{}", KEYS.fetch_add(1, Relaxed));
+    Namespace::new(shared_cache(), &key)
+}
+
+/// The handle of a [`fresh_namespace`].
+#[cfg(test)]
+pub(crate) fn fresh_namespace_cache() -> crate::cache::NamespaceCache {
+    let namespace = fresh_namespace();
+    namespace.cache.namespace(&namespace.key)
+}
+
+/// How a test opens a state: its options, and the namespace it keeps warm
+/// in, if any.
+#[derive(Clone, Default)]
+pub struct Setup {
+    pub options: StateOptions,
+    pub cache: Option<Namespace>,
+}
+
+impl Setup {
+    /// Open a state over `store` this way.
+    pub fn open(&self, store: Arc<dyn KvStore>) -> Open {
+        let open = State::open(store).options(self.options.clone());
+        match &self.cache {
+            Some(namespace) => open.cached(&namespace.cache, &namespace.key),
+            None => open,
+        }
+    }
+}
+
+impl From<StateOptions> for Setup {
+    fn from(options: StateOptions) -> Self {
+        Self {
+            options,
+            cache: None,
+        }
+    }
 }
 
 /// Return to the executor once, even when every awaited future is ready.

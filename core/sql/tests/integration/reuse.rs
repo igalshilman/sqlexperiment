@@ -1,6 +1,7 @@
 //! Engine reuse: a session that ends badly (a fault, a cancellation, an open
 //! transaction) never leaves the next session a dirty engine; one that ends
 //! cleanly leaves it, and the next session sees exactly the flushed state.
+use crate::host::StateSetup;
 use crate::{
     fault::{failpoint, poll_at_most, under},
     host::{Db, Durability, Setup},
@@ -8,19 +9,22 @@ use crate::{
 };
 use bytes::Bytes;
 use sql::{Sql, binding::Session};
+use state::simulation::Namespace;
 use state::{
-    NamespaceCache, Result, State, StorageOptions,
+    Result, State, StateOptions,
     kv::KvStore,
     simulation::{Effect, FaultKv, MemoryKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
 
-fn owner(cache: &NamespaceCache) -> Setup {
+fn owner(cache: &Namespace) -> Setup {
     Setup(
-        StorageOptions {
+        StateSetup {
+            options: StateOptions {
+                checkpoint_after: 4,
+                ..StateOptions::default()
+            },
             cache: Some(cache.clone()),
-            checkpoint_after: 4,
-            ..StorageOptions::default()
         },
         Durability::Commit,
     )
@@ -35,7 +39,7 @@ async fn flushed(store: Arc<dyn KvStore>) -> Result<String> {
 
 /// A store with a table of 40 rows, some past a page, and an owner whose
 /// engine is parked in its cache.
-async fn parked() -> Result<(Arc<FaultKv>, NamespaceCache)> {
+async fn parked() -> Result<(Arc<FaultKv>, Namespace)> {
     let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
     let cache = fresh_namespace();
     let mut db = Db::open(store.clone(), owner(&cache)).await?;
@@ -205,7 +209,7 @@ fn a_session_hands_on_only_the_flushed_state() -> Result<()> {
         for case in 0..6 {
             let (store, cache) = parked().await?;
             let options = owner(&cache).0;
-            let open = || Session::open_with_options(store.clone(), options.clone(), false);
+            let open = || async { Session::new(options.clone().open(store.clone()).await?).await };
             let session = open().await?;
             match case {
                 0 => assert!(poll_at_most(session.query(LONG_WRITE, None), 3).is_none()),

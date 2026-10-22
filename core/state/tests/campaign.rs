@@ -16,8 +16,8 @@ mod support;
 
 use futures::task::noop_waker_ref;
 use state::{
-    FlushReport, NamespaceCache, PageCache, PageCacheConfig, PageCompression, Result,
-    StorageOptions, Wal, kv::KvStore, simulation::*,
+    FlushReport, PageCache, PageCacheConfig, PageCompression, Result, StateOptions, Wal,
+    kv::KvStore, simulation::*,
 };
 use std::{
     sync::{
@@ -126,10 +126,13 @@ fn decoded_cache() -> &'static PageCache {
 }
 
 /// A new owner process's cache: its first look at the namespace.
-fn new_owner(rng: &mut Rng) -> NamespaceCache {
+fn new_owner(rng: &mut Rng) -> Namespace {
     static KEYS: AtomicU64 = AtomicU64::new(0);
     match rng.percent(30) {
-        true => decoded_cache().namespace(&format!("campaign-{}", KEYS.fetch_add(1, Relaxed))),
+        true => Namespace::new(
+            decoded_cache(),
+            &format!("campaign-{}", KEYS.fetch_add(1, Relaxed)),
+        ),
         false => fresh_namespace(),
     }
 }
@@ -140,7 +143,7 @@ struct World {
     store: Arc<Store>,
     memory: MemoryKv,
     /// Two owner processes, each with its own cache.
-    caches: [NamespaceCache; 2],
+    caches: [Namespace; 2],
     /// The owner of the namespace: a process, or one without a cache.
     owner: Option<usize>,
     /// The state as of the last acknowledged flush or reopen.
@@ -153,21 +156,23 @@ struct World {
 
 impl World {
     /// Random options: they never change the stored format.
-    fn options(&mut self) -> StorageOptions {
+    fn options(&mut self) -> Setup {
         let cache = self.owner.map(|owner| self.caches[owner].clone());
         let rng = &mut self.rng;
-        StorageOptions {
-            page_compression: rng.pick(&[
-                PageCompression::Raw,
-                PageCompression::Lz4,
-                PageCompression::Zstd,
-            ]),
+        Setup {
+            options: StateOptions {
+                page_compression: rng.pick(&[
+                    PageCompression::Raw,
+                    PageCompression::Lz4,
+                    PageCompression::Zstd,
+                ]),
+                checkpoint_after: rng.below(4) as u32,
+                checkpoint_log_bytes: rng.pick(&[4 << 10, 32 << 10, state::CHECKPOINT_LOG_BYTES]),
+                inline_log_bytes: rng.pick(&[0, 200, 1024, 8192]),
+                prefetch_pages: rng.pick(&[0, 4, 16]),
+                hint_pages: rng.pick(&[0, 8, 32]),
+            },
             cache,
-            checkpoint_after: rng.below(4) as u32,
-            checkpoint_log_bytes: rng.pick(&[4 << 10, 32 << 10, state::CHECKPOINT_LOG_BYTES]),
-            inline_log_bytes: rng.pick(&[0, 200, 1024, 8192]),
-            prefetch_pages: rng.pick(&[0, 4, 16]),
-            hint_pages: rng.pick(&[0, 8, 32]),
         }
     }
 
@@ -227,7 +232,7 @@ impl World {
             }
             let options = self.options();
             trace(|| {
-                let o = &options;
+                let o = &options.options;
                 format!(
                     "open by {:?}{}: checkpoint after {} or {} bytes, inline {}, prefetch {}, hint {}",
                     self.owner,

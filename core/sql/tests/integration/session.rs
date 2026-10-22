@@ -2,28 +2,32 @@
 //! failed call leaves, effects and their transaction under a crash, and a
 //! reader beside its owner.
 use crate::fault::{Ended, every_failure, failpoint, probe, under};
+use crate::host::StateSetup;
 use bytes::Bytes;
 use sql::{Sql, binding::Session};
+use state::simulation::Namespace;
 use state::{
-    NamespaceCache, Result, StorageOptions,
+    Result, StateOptions,
     kv::KvStore,
     simulation::{Effect, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
 
 /// Pages read from the store as queries need them; the log checkpointed often.
-fn options(cache: Option<NamespaceCache>) -> StorageOptions {
-    StorageOptions {
+fn options(cache: Option<Namespace>) -> StateSetup {
+    StateSetup {
+        options: StateOptions {
+            checkpoint_after: 3,
+            prefetch_pages: 0,
+            hint_pages: 0,
+            ..StateOptions::default()
+        },
         cache,
-        checkpoint_after: 3,
-        prefetch_pages: 0,
-        hint_pages: 0,
-        ..StorageOptions::default()
     }
 }
 
-async fn open(store: Arc<dyn KvStore>, cache: Option<NamespaceCache>) -> Result<Session> {
-    Session::open_with_options(store, options(cache), false).await
+async fn open(store: Arc<dyn KvStore>, cache: Option<Namespace>) -> Result<Session> {
+    async { Session::new(options(cache).open(store).await?).await }.await
 }
 
 /// Insert pair `i`: two rows whose `n` cancel out, one with a body past a page.
@@ -302,7 +306,7 @@ async fn crash_at_sync(cached: bool, nth: usize) -> Result<Option<usize>> {
 
 /// The result of `sql` on a store, through a plain session.
 async fn expected(store: MemoryKv, sql: &str) -> Result<String> {
-    let state = state::State::open_with_options(Arc::new(store), options(None)).await?;
+    let state = options(None).open(Arc::new(store)).await?;
     let mut session = Sql::open(&state).await?;
     Ok(format!("{:?}", session.query(sql).await?))
 }
@@ -342,7 +346,7 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
             let snapshot = memory.fork();
             let reader_store = Arc::new(FaultKv::new(memory.clone(), round));
             let reader =
-                Session::open_with_options(reader_store.clone(), options(None), true).await?;
+                Session::new(options(None).open(reader_store.clone()).reader().await?).await?;
             // Now and then its first read fails, which ends it.
             if round % 5 == 0 {
                 let plan = failpoint(

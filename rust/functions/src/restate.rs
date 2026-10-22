@@ -204,7 +204,7 @@ impl ProgramObject {
         // writer meanwhile, so what it read or wrote stays true.
         let store = Arc::new(StateQueue::new(ctx.raw_state()));
         let namespace = format!("{}/{}", self.program, ctx.key());
-        let scope = (Scope::new(store.clone()).cached(self.cache.namespace(&namespace)))
+        let scope = (Scope::new(store.clone()).cached(&self.cache, &namespace))
             .extended(self.extensions.clone());
         let mut lease = self.budget.lease();
         lease.reserve(self.budget.peak(&self.program)).await;
@@ -655,12 +655,7 @@ pub async fn endpoint(programs: &Arc<Programs>) -> anyhow::Result<Endpoint> {
 /// A cache of the scopes' databases for this process: 64 MiB in memory, and
 /// 256 MiB in a file that goes away with the process.
 pub async fn page_cache() -> anyhow::Result<PageCache> {
-    let file = std::env::temp_dir().join(format!("functions-{}.cache", std::process::id()));
-    let cache = PageCache::open(PageCacheConfig::new(&file, 64 << 20, 256 << 20)).await?;
-    // The cache keeps the file open: unlinked now, it goes away with the
-    // process however it ends.
-    let _ = std::fs::remove_file(&file);
-    Ok(cache)
+    Ok(PageCache::open(PageCacheConfig::new(64 << 20, 256 << 20)).await?)
 }
 
 /// Milliseconds since the epoch: a turn's logical time never runs backwards.

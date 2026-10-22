@@ -1,12 +1,14 @@
 //! Races between sessions of one owner that share its cache.
+use crate::host::StateSetup;
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
 use futures::{
     channel::oneshot,
     future::{BoxFuture, FutureExt, Shared},
 };
+use state::simulation::Namespace;
 use state::{
-    NamespaceCache, Result, StorageOptions,
+    Result, StateOptions,
     kv::KvStore,
     simulation::{MemoryKv, fresh_namespace},
 };
@@ -15,12 +17,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-fn opts(cache: &NamespaceCache, durability: Durability) -> Setup {
+fn opts(cache: &Namespace, durability: Durability) -> Setup {
     Setup(
-        StorageOptions {
+        StateSetup {
+            options: StateOptions {
+                hint_pages: 0,
+                ..StateOptions::default()
+            },
             cache: Some(cache.clone()),
-            hint_pages: 0,
-            ..StorageOptions::default()
         },
         durability,
     )
@@ -81,7 +85,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         });
         let plain: Arc<dyn KvStore> = Arc::new(memory.clone());
         // Setup without a cache: a large save checkpoints every page in place.
-        let mut db = Db::open(plain.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(plain.clone(), StateOptions::default()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)")
             .await?;
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<600) INSERT INTO t SELECT x, 'old' || x || '|' || hex(randomblob(700)) FROM n").await?;
@@ -97,7 +101,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
 
         let mut writer = Db::open(
             plain.clone(),
-            opts(&ns, Durability::Commit).with(|o| StorageOptions {
+            opts(&ns, Durability::Commit).with(|o| StateOptions {
                 checkpoint_after: 0,
                 ..o
             }),
@@ -134,7 +138,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         db.execute("UPDATE t SET v = substr(v, 1, 6) || '!' WHERE id = 250")
             .await?;
         drop(db);
-        let mut cold = Db::open(plain, StorageOptions::default()).await?;
+        let mut cold = Db::open(plain, StateOptions::default()).await?;
         let durable = value(&mut cold, 250).await?;
         assert_eq!(
             (seen.as_str(), durable.as_str()),

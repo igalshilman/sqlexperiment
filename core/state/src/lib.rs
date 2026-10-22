@@ -60,19 +60,19 @@
 //! once. Open reads the record, and the stored segments its log names, if
 //! any.
 //!
-//! States of one owner may overlap when they share a [`NamespaceCache`]:
-//! each reads the state it opened at (a checkpoint waits while another state
-//! holds an older version), and a flush is refused if another state flushed
-//! since this one opened. Without a cache they must not overlap.
+//! States of one owner may overlap when they open on the same namespace of a
+//! [`PageCache`] ([`Open::cached`]): each reads the state it opened at (a
+//! checkpoint waits while another state holds an older version), and a flush
+//! is refused if another state flushed since this one opened. Without a
+//! cache they must not overlap.
 //!
-//! [`StorageOptions::cache`] can hold a [`NamespaceCache`]: one namespace's
-//! handle on the process-wide [`PageCache`], which keeps pages in memory and
-//! on a local disk tier under one budget for every namespace. It keeps them
-//! while the record's epoch (its checkpoint count) is the one they belong to,
-//! and remembers the record this owner made durable, so a steady-state open
-//! and flush are each one round trip. A participant may leave idle state
-//! there ([`Participant::park`]); the next state hands it back when nothing
-//! changed. The disk tier's I/O runs on tokio.
+//! The [`PageCache`] is the process's: it keeps pages in memory and on a
+//! local disk tier under one budget for every namespace it opens. It keeps
+//! them while the record's epoch (its checkpoint count) is the one they
+//! belong to, and remembers the record this owner made durable, so a
+//! steady-state open and flush are each one round trip. A participant may
+//! leave idle state there ([`Participant::park`]); the next state hands it
+//! back when nothing changed. The disk tier's I/O runs on tokio.
 //!
 //! # Example
 //!
@@ -107,21 +107,25 @@ pub mod page_codec;
 pub mod simulation;
 mod snapshot;
 
-pub use cache::{NamespaceCache, PageCache, PageCacheConfig};
+pub use cache::{PageCache, PageCacheConfig};
+
+use crate::cache::NamespaceCache;
 pub use hint::MAX_HINT_PAGES;
 pub use log::{Base, MAX_NAME_BYTES, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES};
 pub use page_codec::{Page, PageCompression};
 pub use snapshot::{
-    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, FlushReport, INLINE_LOG_BYTES, StorageOptions,
+    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, FlushReport, INLINE_LOG_BYTES, StateOptions,
 };
 
 use crate::cache::Idle;
 use crate::kv::KvStore;
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Settings, Snapshot};
 use bytes::Bytes;
 use std::{
     any::Any,
     collections::HashMap,
+    future::{Future, IntoFuture},
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -140,8 +144,8 @@ pub const PAGE_SIZE: usize = 4096;
 /// views of [`Self::scoped`], share it.
 ///
 /// Acquire exclusive ownership of the namespace and settle the preceding
-/// owner's requests before opening it; a reader ([`Self::open_reader`]) may
-/// open beside the owner.
+/// owner's requests before opening it; a reader ([`Open::reader`]) may open
+/// beside the owner.
 #[derive(Clone)]
 pub struct State {
     shared: Arc<Shared>,
@@ -153,14 +157,14 @@ pub struct State {
 struct Shared {
     /// The durable state: as opened, then as the WALs flushed it.
     snapshot: Mutex<Arc<Snapshot>>,
-    options: StorageOptions,
+    options: Settings,
     /// The participants that joined, by name: whether each holds changes not
     /// yet in a WAL.
     participants: Mutex<HashMap<String, bool>>,
     /// What participants left idle at the state this one opened on, by
     /// participant, until they take it.
     idle: Mutex<HashMap<String, Idle>>,
-    /// A reader's ([`State::open_reader`]): it never flushes.
+    /// A reader's ([`Open::reader`]): it never flushes.
     reader: AtomicBool,
     /// A flush failed or was cancelled: its outcome is unknown.
     poisoned: AtomicBool,
@@ -226,42 +230,32 @@ impl Drop for Shared {
 const ENDED: &str = "the state ended after a failed or cancelled flush; open a new one";
 
 impl State {
-    /// Open the namespace with default [`StorageOptions`]: read its commit
-    /// record (and the stored values it names), recovering what a crash
-    /// left, before anything reads.
-    pub async fn open(store: Arc<dyn KvStore>) -> Result<Self> {
-        Self::open_with_options(store, StorageOptions::default()).await
-    }
-
-    /// Open with explicit [`StorageOptions`]. Options never change the stored
-    /// format: existing page tags determine decoding. With a [`PageCache`],
-    /// what participants of this owner's previous state left idle waits for
-    /// them ([`Participant::take_idle`]) when nothing changed since.
-    pub async fn open_with_options(
-        store: Arc<dyn KvStore>,
-        options: StorageOptions,
-    ) -> Result<Self> {
-        Self::open_as(store, options, false).await
-    }
-
-    /// Open a reader of a namespace that another owns, alongside it: a state
-    /// that writes nothing to the store (its WALs refuse to flush) and keeps
-    /// no cache. It reads the state as of open, unless the owner checkpoints
-    /// meanwhile: [`Self::is_current`], once it has read, says whether it
-    /// did.
-    pub async fn open_reader(store: Arc<dyn KvStore>, options: StorageOptions) -> Result<Self> {
-        let options = StorageOptions {
+    /// Open the namespace over `store`: read its commit record (and the
+    /// stored values it names), recovering what a crash left, before
+    /// anything reads. Await it as it is, or set how first:
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use state::{PageCache, PageCacheConfig, State, StateOptions, kv::KvStore};
+    /// # async fn example(store: Arc<dyn KvStore>, cache: PageCache) -> state::Result<()> {
+    /// let state = State::open(store.clone()).await?;
+    /// let state = State::open(store.clone()).cached(&cache, "object-42").await?;
+    /// let state = State::open(store)
+    ///     .options(StateOptions { checkpoint_after: 8, ..StateOptions::default() })
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn open(store: Arc<dyn KvStore>) -> Open {
+        Open {
+            store,
+            options: StateOptions::default(),
             cache: None,
-            ..options
-        };
-        Self::open_as(store, options, true).await
+            reader: false,
+        }
     }
 
-    async fn open_as(
-        store: Arc<dyn KvStore>,
-        options: StorageOptions,
-        reader: bool,
-    ) -> Result<Self> {
+    async fn open_as(store: Arc<dyn KvStore>, options: Settings, reader: bool) -> Result<Self> {
         let snapshot = Snapshot::open(store, options.clone(), reader).await?;
         let mut idle = match &options.cache {
             Some(cache) if snapshot.unchanged => cache.take_idle(),
@@ -283,8 +277,8 @@ impl State {
     }
 
     /// The options this state opened with.
-    pub fn options(&self) -> &StorageOptions {
-        &self.shared.options
+    pub fn options(&self) -> &StateOptions {
+        &self.shared.options.options
     }
 
     /// The record named `name`: a whole value the commit record holds, read
@@ -363,7 +357,7 @@ impl State {
     }
 
     /// Whether the store still holds the state this one opened on (see
-    /// [`Self::open_reader`]): if it does not, what was read may mix that
+    /// [`Open::reader`]): if it does not, what was read may mix that
     /// state with a later checkpoint's pages, so read again in a new one. A
     /// state's own flushes change it, so this is for one that has not
     /// flushed.
@@ -371,9 +365,76 @@ impl State {
         Ok(self.shared.snapshot().is_current().await?)
     }
 
+    /// Whether the state opened in a [`PageCache`] ([`Open::cached`]).
+    pub fn is_cached(&self) -> bool {
+        self.shared.options.cache.is_some()
+    }
+
+    /// Whether this is a reader ([`Open::reader`]): its WALs never flush.
+    pub fn is_reader(&self) -> bool {
+        self.shared.reader.load(Ordering::SeqCst)
+    }
+
     /// Whether the state can flush: a failed or cancelled flush ends it.
     pub fn is_usable(&self) -> bool {
         !self.shared.poisoned.load(Ordering::SeqCst)
+    }
+}
+
+/// How to open a [`State`] ([`State::open`]): await it to open.
+#[must_use = "a state opens when awaited"]
+pub struct Open {
+    store: Arc<dyn KvStore>,
+    options: StateOptions,
+    cache: Option<NamespaceCache>,
+    reader: bool,
+}
+
+impl Open {
+    /// Flush and read with `options` rather than the defaults.
+    pub fn options(self, options: StateOptions) -> Self {
+        Self { options, ..self }
+    }
+
+    /// Keep the state warm in the process's `cache`, as `namespace`: the
+    /// key of what the store holds, which no other state of this cache
+    /// uses for another (an object's key, say). With nothing changed since
+    /// this process last flushed it, the next open reads no pages and gets
+    /// back what participants left idle ([`Participant::park`]).
+    pub fn cached(self, cache: &PageCache, namespace: &str) -> Self {
+        Self {
+            cache: Some(cache.namespace(namespace)),
+            ..self
+        }
+    }
+
+    /// Open a reader of a namespace that another owns, alongside it: a
+    /// state that writes nothing to the store (its WALs refuse to flush)
+    /// and keeps no cache. It reads the state as of open, unless the owner
+    /// checkpoints meanwhile: [`State::is_current`], once it has read, says
+    /// whether it did.
+    pub fn reader(self) -> Self {
+        Self {
+            reader: true,
+            cache: None,
+            ..self
+        }
+    }
+}
+
+impl IntoFuture for Open {
+    type Output = Result<State>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Result<State>> + Send>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        let Open {
+            store,
+            options,
+            cache,
+            reader,
+        } = self;
+        let cache = cache.filter(|_| !reader);
+        Box::pin(State::open_as(store, Settings { options, cache }, reader))
     }
 }
 
@@ -652,7 +713,7 @@ impl Drop for Participant {
 /// in the same put. Read from the state ([`Self::get`]), set in a WAL
 /// ([`Wal::set`]). A cheap handle.
 ///
-/// A value of up to [`StorageOptions::inline_log_bytes`] is in the record,
+/// A value of up to [`StateOptions::inline_log_bytes`] is in the record,
 /// which every flush rewrites; a larger one is a stored value of its own,
 /// written when it changes. Either way, opening the state reads it.
 #[derive(Clone)]

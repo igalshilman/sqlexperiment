@@ -200,7 +200,7 @@ saves gets. It stays out of the record, which is on the correctness path.
 
 ## Readers
 
-A reader (`State::open_reader`) reads a namespace that another owns,
+A reader (`State::open(store).reader()`) reads a namespace that another owns,
 alongside it, such as a virtual object's shared handler beside the exclusive
 one. It writes nothing to the store: no cache, its SQL changes stay in the
 session, and its WALs refuse to flush. It opens like anyone, and reads pages
@@ -268,9 +268,9 @@ own), served by `KvIo`:
 
 ## Owner cache
 
-One `PageCache` per process. `PageCache::namespace(key)` returns a
-`NamespaceCache` for one namespace, which a state gets through
-`StorageOptions::cache`.
+One `PageCache` per process. A state opens in it under its namespace's key
+(`State::open(store).cached(&cache, key)`), and keeps that namespace's part of
+it (a `NamespaceCache`, inside the crate).
 
 **Pages.** Checkpointed pages are kept in memory and spill to a local disk
 file ([foyer](https://github.com/foyer-rs/foyer)), one budget for all

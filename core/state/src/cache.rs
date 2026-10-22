@@ -72,8 +72,9 @@ const ENTRY_OVERHEAD: usize = 64;
 /// Sizes and location of a [`PageCache`].
 #[derive(Clone, Debug)]
 pub struct PageCacheConfig {
-    /// File of the disk tier. Its previous contents are discarded.
-    pub file: PathBuf,
+    /// File of the disk tier, its previous contents discarded; `None` for a
+    /// temporary one, which goes away with the process.
+    pub file: Option<PathBuf>,
     /// Bytes of pages kept in memory.
     pub memory: usize,
     /// Bytes of the disk tier.
@@ -92,9 +93,10 @@ pub struct PageCacheConfig {
 }
 
 impl PageCacheConfig {
-    pub fn new(file: impl Into<PathBuf>, memory: usize, disk: usize) -> Self {
+    /// `memory` bytes of pages in memory, and `disk` in a temporary file.
+    pub fn new(memory: usize, disk: usize) -> Self {
         Self {
-            file: file.into(),
+            file: None,
             memory,
             disk,
             disk_block: 4 << 20,
@@ -142,7 +144,12 @@ impl PageCache {
                     .build()?,
             ),
         };
-        let device = FileDeviceBuilder::new(&config.file)
+        static TEMPORARY: AtomicU64 = AtomicU64::new(0);
+        let file = config.file.clone().unwrap_or_else(|| {
+            let n = TEMPORARY.fetch_add(1, Relaxed);
+            std::env::temp_dir().join(format!("state-cache-{}-{n}", std::process::id()))
+        });
+        let device = FileDeviceBuilder::new(&file)
             .with_capacity(config.disk)
             .build()
             .map_err(io::Error::other)?;
@@ -158,6 +165,12 @@ impl PageCache {
             .build()
             .await
             .map_err(io::Error::other)?;
+        // The cache keeps the file open, and nothing else uses a temporary
+        // one: unlinked now, it goes away with the process however it ends
+        // (where unlinking an open file is refused, it stays).
+        if config.file.is_none() {
+            let _ = std::fs::remove_file(&file);
+        }
         Ok(Self {
             shared: Arc::new(Shared {
                 decoded: config.decoded,
@@ -175,7 +188,7 @@ impl PageCache {
 
     /// The handle for one namespace, such as one virtual object. Successive
     /// sessions of the namespace must use the same key.
-    pub fn namespace(&self, key: &str) -> NamespaceCache {
+    pub(crate) fn namespace(&self, key: &str) -> NamespaceCache {
         let mut live = self.shared.live.lock().unwrap();
         let owner = match self.shared.namespaces.get(key) {
             Some(entry) => entry.value().clone(),

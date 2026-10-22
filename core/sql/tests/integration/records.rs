@@ -1,18 +1,22 @@
 //! The host's records: named values a turn flushes with its SQL, in one
 //! commit record.
+use crate::host::StateSetup;
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
+use state::simulation::Namespace;
 use state::{
-    NamespaceCache, Result, StorageOptions,
+    Result, StateOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
 
-fn options(cache: Option<NamespaceCache>) -> Setup {
+fn options(cache: Option<Namespace>) -> Setup {
     Setup(
-        StorageOptions {
+        StateSetup {
+            options: StateOptions {
+                ..StateOptions::default()
+            },
             cache,
-            ..StorageOptions::default()
         },
         Durability::Commit,
     )
@@ -172,7 +176,7 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
     // Checkpoints happen within the run.
     let options = |cache| {
         options(cache)
-            .with(|o| StorageOptions {
+            .with(|o| StateOptions {
                 checkpoint_after: 4,
                 ..o
             })

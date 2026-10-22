@@ -15,6 +15,7 @@
 //! SQL_CAMPAIGN_SEEDS=500 cargo test --release --features simulation --test integration campaign
 //! SQL_CAMPAIGN_SEED=17 SQL_CAMPAIGN_TRACE=1 cargo test --features simulation --test integration campaign -- --nocapture
 //! ```
+use crate::host::StateSetup;
 use crate::{
     fault::{Ended, under},
     reference::{dump, dump_of, integrity, reference_dump, replay, run, text},
@@ -22,7 +23,7 @@ use crate::{
 use bytes::Bytes;
 use sql::{Rows, Sql, binding::Session};
 use state::{
-    Result, State, StorageOptions,
+    Result, State, StateOptions,
     kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
@@ -211,7 +212,7 @@ struct Config {
     /// Through the bindings' session; otherwise `Sql`, a flush per turn.
     session: bool,
     cached: bool,
-    options: StorageOptions,
+    options: StateSetup,
     /// The above, to print.
     summary: String,
 }
@@ -259,14 +260,16 @@ impl Campaign {
     fn new(seed: u64, trace: bool) -> Self {
         let mut rng = Rng::new(seed);
         let cached = seed % 4 >= 2;
-        let options = StorageOptions {
+        let options = StateSetup {
+            options: StateOptions {
+                checkpoint_after: 1 + rng.below(4) as u32,
+                checkpoint_log_bytes: rng.pick(&[4 << 10, 16 << 10, 64 << 10]),
+                inline_log_bytes: rng.pick(&[64, 1024]),
+                prefetch_pages: rng.pick(&[0, 16]),
+                hint_pages: rng.pick(&[0, 32]),
+                ..StateOptions::default()
+            },
             cache: cached.then(fresh_namespace),
-            checkpoint_after: 1 + rng.below(4) as u32,
-            checkpoint_log_bytes: rng.pick(&[4 << 10, 16 << 10, 64 << 10]),
-            inline_log_bytes: rng.pick(&[64, 1024]),
-            prefetch_pages: rng.pick(&[0, 16]),
-            hint_pages: rng.pick(&[0, 32]),
-            ..StorageOptions::default()
         };
         let session = seed.is_multiple_of(2);
         let summary = format!(
@@ -276,11 +279,11 @@ impl Campaign {
             } else {
                 "Sql turns"
             },
-            options.checkpoint_after,
-            options.checkpoint_log_bytes,
-            options.inline_log_bytes,
-            options.prefetch_pages,
-            options.hint_pages,
+            options.options.checkpoint_after,
+            options.options.checkpoint_log_bytes,
+            options.options.inline_log_bytes,
+            options.options.prefetch_pages,
+            options.options.hint_pages,
         );
         let config = Config {
             session,
@@ -356,9 +359,9 @@ impl Campaign {
         let store: Arc<dyn KvStore> = self.store.clone();
         let options = self.config.options.clone();
         Ok(match self.config.session {
-            true => Open::Session(Session::open_with_options(store, options, false).await?),
+            true => Open::Session(Session::new(options.open(store).await?).await?),
             false => {
-                let state = State::open_with_options(store, options).await?;
+                let state = options.open(store).await?;
                 let sql = Sql::open(&state).await?;
                 Open::Turns { state, sql }
             }

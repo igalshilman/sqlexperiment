@@ -6,7 +6,7 @@
 //! Writes may land in any order; a write counts once it is acknowledged.
 use crate::extension::Extensions;
 use anyhow::Result;
-use state::{NamespaceCache, State, StorageOptions, kv::KvStore};
+use state::{PageCache, State, StateOptions, kv::KvStore};
 use std::sync::Arc;
 
 /// A scope's storage: the store its database lives in, and, for a process
@@ -15,7 +15,8 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Scope {
     store: Arc<dyn KvStore>,
-    cache: Option<NamespaceCache>,
+    /// The process's cache, and the scope's namespace in it.
+    cache: Option<(PageCache, String)>,
     pub(crate) extensions: Extensions,
 }
 
@@ -33,10 +34,11 @@ impl Scope {
         Self { extensions, ..self }
     }
 
-    /// The same scope, kept in `cache` between attempts.
-    pub fn cached(self, cache: NamespaceCache) -> Self {
+    /// The same scope, kept warm in `cache` between attempts, as
+    /// `namespace` (see [`state::Open::cached`]).
+    pub fn cached(self, cache: &PageCache, namespace: &str) -> Self {
         Self {
-            cache: Some(cache),
+            cache: Some((cache.clone(), namespace.to_owned())),
             ..self
         }
     }
@@ -44,14 +46,18 @@ impl Scope {
     /// Open the scope's state: its SQL, memory and records durable together
     /// at each turn's flush.
     pub(crate) async fn open(&self) -> Result<State> {
-        let options = StorageOptions {
-            cache: self.cache.clone(),
+        let options = StateOptions {
             // A turn changes a few pages: a small inline log keeps the record
             // each turn rewrites small.
             inline_log_bytes: 1024,
-            ..StorageOptions::default()
+            ..StateOptions::default()
         };
-        (State::open_with_options(self.store.clone(), options).await).map_err(storage_error)
+        let open = State::open(self.store.clone()).options(options);
+        let open = match &self.cache {
+            Some((cache, namespace)) => open.cached(cache, namespace),
+            None => open,
+        };
+        open.await.map_err(storage_error)
     }
 }
 

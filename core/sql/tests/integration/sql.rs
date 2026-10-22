@@ -1,12 +1,12 @@
 use crate::host::Db;
-use state::{Result, StorageOptions, simulation::MemoryKv};
+use state::{Result, StateOptions, simulation::MemoryKv};
 use std::sync::Arc;
 
 #[test]
 fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         db.execute("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         db.execute("INSERT INTO items VALUES (1, 'one'), (2, 'two')")
@@ -18,7 +18,7 @@ fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {
         assert_eq!(store.stats().puts, 1, "a save is one log append");
         store.crash(); // every acknowledged put survives
 
-        let mut reopened = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut reopened = Db::open(store.clone(), StateOptions::default()).await?;
         assert_eq!(reopened.io_stats().private_wal_len, 0);
         let rows = reopened
             .query("SELECT value FROM items ORDER BY id")
@@ -39,24 +39,24 @@ fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {
 fn dropping_overlay_preserves_saved_state_and_sql_rollback_works() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         db.execute("INSERT INTO t VALUES(1, 10)").await?;
         db.checkpoint().await?;
         db.save().await?;
 
-        let mut discarded = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut discarded = Db::open(store.clone(), StateOptions::default()).await?;
         discarded.execute("UPDATE t SET n=99").await?;
         drop(discarded); // committed in SQL, never flushed
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
         db.execute("BEGIN").await?;
         db.execute("UPDATE t SET n=50").await?;
         db.execute("ROLLBACK").await?;
         db.checkpoint().await?;
         db.save().await?;
-        let mut db = Db::open(store, StorageOptions::default()).await?;
+        let mut db = Db::open(store, StateOptions::default()).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
         Ok(())
     })
@@ -68,12 +68,12 @@ fn dropping_overlay_preserves_saved_state_and_sql_rollback_works() -> Result<()>
 fn a_flush_commits_the_open_transaction() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         db.execute("BEGIN").await?;
         db.execute("CREATE TABLE t(n INTEGER)").await?;
         assert!(db.in_transaction());
         db.save().await?;
-        let mut db = Db::open(store, StorageOptions::default()).await?;
+        let mut db = Db::open(store, StateOptions::default()).await?;
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(0)
@@ -86,7 +86,7 @@ fn a_flush_commits_the_open_transaction() -> Result<()> {
 fn cold_indexed_lookup_is_lazy() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, label TEXT, payload TEXT)")
             .await?;
         db.execute("CREATE INDEX t_label ON t(label)").await?;
@@ -96,7 +96,7 @@ fn cold_indexed_lookup_is_lazy() -> Result<()> {
         db.save().await?;
         let total = store.stored_bytes();
         store.reset_stats();
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         let sql = "SELECT id FROM t WHERE label='label-002341'";
         let rows = db.query(sql).await?;
         assert_eq!(rows[0][0].to_string(), "2341");
@@ -123,7 +123,7 @@ fn cold_indexed_lookup_is_lazy() -> Result<()> {
 fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
             .await?;
         db.execute("INSERT INTO t VALUES(1,0)").await?;
@@ -150,7 +150,7 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
         assert!(database_len.div_ceil(4096) >= 2);
         assert!(stats.bytes_written < wal / 10);
         store.crash();
-        let mut db = Db::open(store, StorageOptions::default()).await?;
+        let mut db = Db::open(store, StateOptions::default()).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "100");
         assert_eq!(
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
@@ -171,13 +171,13 @@ fn large_page_sizes_reopen_after_a_save() -> Result<()> {
         for page_size in [8192, 65536] {
             let store: Arc<dyn state::kv::KvStore> =
                 Arc::new(state::simulation::MemoryKv::default());
-            let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+            let mut db = Db::open(store.clone(), StateOptions::default()).await?;
             db.execute(&format!("PRAGMA page_size = {page_size}"))
                 .await?;
             db.execute("CREATE TABLE t(v TEXT)").await?;
             db.execute("INSERT INTO t VALUES ('kept')").await?;
             db.save().await?;
-            let mut db = Db::open(store.clone(), StorageOptions::default()).await?;
+            let mut db = Db::open(store.clone(), StateOptions::default()).await?;
             let rows = db.query("SELECT v FROM t").await?;
             assert_eq!(rows[0][0].to_string(), "kept", "page size {page_size}");
             let rows = db.query("PRAGMA page_size").await?;
@@ -194,7 +194,7 @@ fn parameters_bind_values_not_text() -> Result<()> {
     use sql::Value;
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Db::open(store, StorageOptions::default()).await?;
+        let mut db = Db::open(store, StateOptions::default()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)")
             .await?;
         let hostile = "x'); DROP TABLE t; --";
@@ -232,7 +232,7 @@ fn parameters_bind_values_not_text() -> Result<()> {
 fn query_columns_names_the_last_statement_columns() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Db::open(store, StorageOptions::default()).await?;
+        let mut db = Db::open(store, StateOptions::default()).await?;
         db.execute("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         let (columns, rows) = db

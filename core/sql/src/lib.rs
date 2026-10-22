@@ -300,7 +300,7 @@ impl Sql {
         sql.connection = Some(connect(&sql.io, &database).await?);
         sql.database = Some(database);
         sql.poisoned = false;
-        if !sql.reused && state.options().cache.is_some() {
+        if !sql.reused && state.is_cached() {
             sql.schema_bytes = Some(sql.measure_schema().await?);
         }
         Ok(sql)
@@ -554,7 +554,7 @@ impl Sql {
     /// Weigh the schema again after a statement that may have changed it,
     /// for parking the engine; even one rolled back, which moved no pages.
     async fn measure_changed_schema(&mut self) -> Result<()> {
-        if self.schema_changed && self.participant.state().options().cache.is_some() {
+        if self.schema_changed && self.participant.state().is_cached() {
             // Without a size the engine is just not parked.
             self.schema_bytes = self.measure_schema().await.ok();
             self.schema_changed = false;
@@ -570,7 +570,7 @@ impl Sql {
     }
 
     /// Whether the store still holds the state this session opened on (see
-    /// [`State::open_reader`]): if it does not, what the session read may mix
+    /// [`state::Open::reader`]): if it does not, what the session read may mix
     /// that state with a later checkpoint's pages, so read again in a new
     /// session. A session's own flushes change the state, so this is for a
     /// session that has not flushed.

@@ -29,7 +29,7 @@ default; `PageCompression::Lz4` and `PageCompression::Raw` remain available.
   same bytes under either. The
   private WAL, dirty overlay and cached decoded page remain ordinary logical
   bytes. Commit and checkpoint ordering are unaffected by the policy.
-- `StorageOptions::page_compression` selects new writes only. Raw and compressed
+- `StateOptions::page_compression` selects new writes only. Raw and compressed
   pages coexist; a different policy on reopen does not require rewriting them.
   Switching policy and performing a read-only save causes no mutations.
 - Namespace keys and magic numbers are v14/`SC14`/`SL14`/`SH14`. Start with a

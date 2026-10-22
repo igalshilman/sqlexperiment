@@ -8,9 +8,9 @@
 //! operation and byte counts from `MemoryKv`. Output is CSV.
 use sql::Sql;
 use state::{
-    NamespaceCache, PageCompression, Result, State, StorageOptions,
+    PageCompression, Result, State, StateOptions,
     kv::KvStore,
-    simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
+    simulation::{LatencyKv, MemoryKv, Namespace, Setup, cache_config, open_cache},
 };
 use std::sync::Arc;
 
@@ -98,14 +98,16 @@ fn codec() -> PageCompression {
     }
 }
 
-fn options(policy: Policy, cache: &Option<NamespaceCache>) -> StorageOptions {
-    StorageOptions {
-        page_compression: codec(),
-        checkpoint_after: policy.after,
-        checkpoint_log_bytes: policy.log_bytes,
-        inline_log_bytes: policy.inline_bytes,
+fn options(policy: Policy, cache: &Option<Namespace>) -> Setup {
+    Setup {
+        options: StateOptions {
+            page_compression: codec(),
+            checkpoint_after: policy.after,
+            checkpoint_log_bytes: policy.log_bytes,
+            inline_log_bytes: policy.inline_bytes,
+            ..StateOptions::default()
+        },
         cache: cache.clone(),
-        ..StorageOptions::default()
     }
 }
 
@@ -113,14 +115,12 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
     let mut db = Sql::open(
-        &State::open_with_options(
-            kv.clone(),
-            StorageOptions {
+        &State::open(kv.clone())
+            .options(StateOptions {
                 page_compression: codec(),
-                ..StorageOptions::default()
-            },
-        )
-        .await?,
+                ..StateOptions::default()
+            })
+            .await?,
     )
     .await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, payload TEXT)")
@@ -137,17 +137,15 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     save(db).await?;
     // Steady state: a later save checkpoints the bulk load into page keys.
     let mut db = Sql::open(
-        &State::open_with_options(
-            kv,
-            options(
-                Policy {
-                    after: 0,
-                    log_bytes: 0,
-                    inline_bytes: 0,
-                },
-                &None,
-            ),
+        &options(
+            Policy {
+                after: 0,
+                log_bytes: 0,
+                inline_bytes: 0,
+            },
+            &None,
         )
+        .open(kv)
         .await?,
     )
     .await?;
@@ -165,7 +163,7 @@ struct Phase<'a> {
     case: Case,
     policy: Policy,
     strong: bool,
-    cache: &'a Option<NamespaceCache>,
+    cache: &'a Option<Namespace>,
     run: usize,
     iteration: u64,
     workload: &'a str,
@@ -216,8 +214,7 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
     } = *phase;
     reset(store);
     let kv: Arc<dyn KvStore> = store.clone();
-    let mut db =
-        Sql::open(&State::open_with_options(kv, options(phase.policy, phase.cache)).await?).await?;
+    let mut db = Sql::open(&options(phase.policy, phase.cache).open(kv).await?).await?;
     phase.print("open", store);
     reset(store);
     match phase.workload {
@@ -263,10 +260,10 @@ async fn session(store: &Store, phase: &Phase<'_>) -> Result<()> {
 
 async fn run(case: Case, policy: Policy, strong: bool, cached: bool, run: usize) -> Result<()> {
     let store: Store = Arc::new(LatencyKv::new(baseline(case).await?));
-    let cache = cached.then(|| open_cache(cache_config(256 << 20, 1 << 30)).namespace("bench"));
+    let cache =
+        cached.then(|| Namespace::new(&open_cache(cache_config(256 << 20, 1 << 30)), "bench"));
     // Warm the owner state outside the measurement.
-    let mut db =
-        Sql::open(&State::open_with_options(store.clone(), options(policy, &cache)).await?).await?;
+    let mut db = Sql::open(&options(policy, &cache).open(store.clone()).await?).await?;
     db.execute("UPDATE t SET a = a WHERE id = 1").await?;
     save(db).await?;
     for iteration in 0..ITERATIONS {

@@ -5,18 +5,13 @@ use crate::{
 };
 use sql::Value;
 use state::{
-    Result, StorageOptions,
+    Result, StateOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
 use std::sync::Arc;
 
 fn options(durability: Durability) -> Setup {
-    Setup(
-        StorageOptions {
-            ..StorageOptions::default()
-        },
-        durability,
-    )
+    Setup(StateOptions::default().into(), durability)
 }
 
 async fn rows(db: &mut Db) -> Result<Vec<(i64, i64)>> {
@@ -130,7 +125,7 @@ fn storage_errors_end_the_session() -> Result<()> {
                 .await?;
             }
             drop(db);
-            let options = options(Durability::Commit).with(|o| StorageOptions {
+            let options = options(Durability::Commit).with(|o| StateOptions {
                 prefetch_pages: 0,
                 hint_pages: 0,
                 ..o

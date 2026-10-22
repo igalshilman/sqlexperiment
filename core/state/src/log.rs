@@ -6,7 +6,7 @@
 //! segments. A small transaction's segments are inline in the record, so a
 //! commit is one put. A large one's are put at `log/<n>`, immutable keys, before
 //! the record that names them. So are the inline ones once they outgrow
-//! [`crate::StorageOptions::inline_log_bytes`]: a commit seals them into one
+//! [`crate::StateOptions::inline_log_bytes`]: a commit seals them into one
 //! stored value, and the record keeps only their names. Every commit rewrites
 //! the record, so this keeps commits small while the log grows long between
 //! checkpoints.

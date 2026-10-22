@@ -4,7 +4,7 @@ use futures::{
     future::{Either, select},
 };
 use state::{
-    Result, StorageOptions,
+    Result, StateOptions,
     kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation},
 };
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Db::open(Arc::new(store.clone()), StorageOptions::default()).await?;
+    let mut db = Db::open(Arc::new(store.clone()), StateOptions::default()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -24,10 +24,10 @@ async fn baseline() -> Result<MemoryKv> {
     assert!(db.save().await?.checkpointed_pages > 0);
     Ok(store)
 }
-fn all() -> StorageOptions {
-    StorageOptions {
+fn all() -> StateOptions {
+    StateOptions {
         checkpoint_after: 0,
-        ..StorageOptions::default()
+        ..StateOptions::default()
     }
 }
 fn plan(operation: Operation, prefix: &str, nth: usize, effect: Effect, cancel: bool) -> Failpoint {
@@ -40,7 +40,7 @@ fn plan(operation: Operation, prefix: &str, nth: usize, effect: Effect, cancel: 
     }
 }
 async fn check(store: Arc<dyn KvStore>, changed: bool) -> Result<()> {
-    let mut db = Db::open(store, StorageOptions::default()).await?;
+    let mut db = Db::open(store, StateOptions::default()).await?;
     let rows = db
         .query("SELECT id,n,length(payload),substr(payload,-2) FROM t ORDER BY id")
         .await?;
@@ -83,12 +83,12 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
         ] {
             let probe = Arc::new(FaultKv::new(base.fork(), 7));
             if let Some(sql) = sql {
-                let mut db = Db::open(probe.clone(), StorageOptions::default()).await?;
+                let mut db = Db::open(probe.clone(), StateOptions::default()).await?;
                 let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
                 db.query(sql).await?;
             } else {
                 let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
-                drop(Db::open(probe.clone(), StorageOptions::default()).await?);
+                drop(Db::open(probe.clone(), StateOptions::default()).await?);
             }
             let count = probe
                 .events()
@@ -101,7 +101,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
                     for cancel in [false, true] {
                         let store = Arc::new(FaultKv::new(base.fork(), nth as u64));
                         let mut session = if sql.is_some() {
-                            Some(Db::open(store.clone(), StorageOptions::default()).await?)
+                            Some(Db::open(store.clone(), StateOptions::default()).await?)
                         } else {
                             None
                         };
@@ -111,7 +111,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
                             if let Some(sql) = sql {
                                 session.as_mut().unwrap().query(sql).await.map(|_| ())
                             } else {
-                                Db::open(store.clone(), StorageOptions::default())
+                                Db::open(store.clone(), StateOptions::default())
                                     .await
                                     .map(drop)
                             }
@@ -197,7 +197,7 @@ fn open_read_failures_are_retryable() -> Result<()> {
         let reads = {
             let probe = Arc::new(FaultKv::new(base.fork(), 0));
             let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
-            drop(Db::open(probe.clone(), StorageOptions::default()).await?);
+            drop(Db::open(probe.clone(), StateOptions::default()).await?);
             probe.disarm();
             probe
                 .events()
@@ -211,7 +211,7 @@ fn open_read_failures_are_retryable() -> Result<()> {
                 for cancel in [false, true] {
                     let store = Arc::new(FaultKv::new(base.fork(), 31));
                     let gate = store.arm(plan(Operation::Get, "", nth, effect, cancel));
-                    let future = Db::open(store.clone(), StorageOptions::default()).boxed();
+                    let future = Db::open(store.clone(), StateOptions::default()).boxed();
                     if cancel {
                         match select(future, gate).await {
                             Either::Left(_) => panic!("open read failpoint not reached"),
