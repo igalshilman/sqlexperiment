@@ -237,7 +237,7 @@ impl Journal {
         store: Arc<dyn KvStore>,
         options: StorageOptions,
     ) -> Result<Self> {
-        let snapshot = Snapshot::open_with_options(store, options.clone()).await?;
+        let snapshot = Snapshot::open(store, options.clone()).await?;
         let mut idle = match &options.cache {
             Some(cache) if snapshot.unchanged => cache.take_idle(),
             _ => HashMap::new(),
@@ -401,10 +401,8 @@ impl Journal {
     /// one takes.
     fn take_pending(&self) -> (snapshot::Writes, log::Records) {
         let files = std::mem::take(&mut *self.shared.files.lock().unwrap());
-        (
-            files,
-            std::mem::take(&mut *self.shared.records.lock().unwrap()),
-        )
+        let records = std::mem::take(&mut *self.shared.records.lock().unwrap());
+        (files, records)
     }
 
     /// Whether files or records changed since the last commit.
@@ -621,16 +619,10 @@ impl File {
         if end > log::MAX_DATABASE_BYTES {
             return Err("a page past the largest file".into());
         }
-        let len = self.len();
-        let mut pending = self.shared.files.lock().unwrap();
-        let written = pending
-            .entry(self.name.to_string())
-            .or_insert_with(|| snapshot::Written {
-                size: len,
-                pages: Default::default(),
-            });
-        written.size = written.size.max(end);
-        written.pages.insert(page, image);
+        self.change(|written| {
+            written.size = written.size.max(end);
+            written.pages.insert(page, image);
+        });
         Ok(())
     }
 
@@ -641,23 +633,29 @@ impl File {
         if !len.is_multiple_of(512) || len > log::MAX_DATABASE_BYTES {
             return Err(format!("invalid file length {len}").into());
         }
-        let old = self.len();
-        let mut pending = self.shared.files.lock().unwrap();
-        let written = pending
-            .entry(self.name.to_string())
-            .or_insert_with(|| snapshot::Written {
-                size: old,
-                pages: Default::default(),
-            });
-        let kept = len.div_ceil(PAGE);
-        written.pages.retain(|&page, _| page < kept);
-        for page in kept..old.div_ceil(PAGE) {
-            written.pages.insert(page, None);
-        }
-        written.size = len;
+        self.change(|written| {
+            let kept = len.div_ceil(PAGE);
+            written.pages.retain(|&page, _| page < kept);
+            for page in kept..written.size.div_ceil(PAGE) {
+                written.pages.insert(page, None);
+            }
+            written.size = len;
+        });
         Ok(())
+    }
+
+    /// Change the file's writes since the last commit with `f`, starting
+    /// from none at its current length.
+    fn change(&self, f: impl FnOnce(&mut snapshot::Written)) {
+        let size = self.len();
+        let mut pending = self.shared.files.lock().unwrap();
+        let written = (pending.entry(self.name.to_string())).or_insert_with(|| snapshot::Written {
+            size,
+            pages: Default::default(),
+        });
+        f(written);
     }
 }
 
-/// Bytes of a page.
+/// Bytes of a page, as the `u64` that offsets and sizes are.
 const PAGE: u64 = PAGE_SIZE as u64;

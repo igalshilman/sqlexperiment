@@ -291,7 +291,7 @@ fn replay_reads_stored_values() -> io::Result<()> {
             ..Commit::default()
         };
         let Replayed { log, values, .. } = replay(&store, &commit, Values::new()).await?;
-        assert_eq!(log.transactions.len(), 3);
+        assert_eq!(log.transactions, 3);
         let mut latest = second;
         latest.extend(third);
         assert_eq!(log.images, latest);

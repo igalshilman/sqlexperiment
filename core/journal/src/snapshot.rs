@@ -1,5 +1,5 @@
 //! Committed state: the commit record, the log it holds replayed over the
-//! checkpointed pages, and the save that extends it.
+//! checkpointed pages, and the commit that extends it.
 //!
 //! # Reads
 //!
@@ -7,9 +7,9 @@
 //! `page/<n>` (absent means a zero-filled hole). There is no page map: a cold
 //! read is one get.
 //!
-//! # Save
+//! # Commit
 //!
-//! A save commits its changed pages as one transaction (see [`crate::log`]).
+//! A commit logs its changed pages as one transaction (see [`crate::log`]).
 //! It queues its writes in this order, then one sync makes them durable:
 //!
 //! 1. **Garbage:** deletes of the stored values the durable record lists as
@@ -18,7 +18,7 @@
 //!    ([`StorageOptions::inline_log_bytes`]), or a large record, goes to
 //!    stored values; past the budget, the record's inline log is sealed into
 //!    one.
-//! 3. **Commit:** the record: the log so far plus the new transaction, naming
+//! 3. **Record:** the commit record: the log so far plus the new transaction, naming
 //!    those values, and listing as garbage the ones it names no more.
 //! 4. **Checkpoint:** once more than [`StorageOptions::checkpoint_after`]
 //!    transactions or [`StorageOptions::checkpoint_log_bytes`] are in the log,
@@ -35,6 +35,12 @@
 //! object IDs, no intent and no orphans: pages are overwritten, never
 //! allocated.
 //!
+//! A checkpoint overwrites page keys that another open session of the
+//! namespace reads without the log that covers them. So each snapshot
+//! registers with the owner's cache while a session uses it
+//! ([`NamespaceCache::reader`]), and a commit checkpoints only when no other
+//! session is open; the log grows meanwhile.
+//!
 //! # Open
 //!
 //! Read the commit record, then the stored segments it names, if any, and
@@ -42,6 +48,7 @@
 //! since. A cold open (no cached pages) fetches a small database whole, or the
 //! pages the working-set hint lists, alongside.
 use crate::{
+    PAGE,
     cache::{NamespaceCache, PageKey, Reader},
     format::{COMMIT, HINT, log_key, page_key},
     hint::{self, Usage},
@@ -73,17 +80,10 @@ pub(crate) struct Written {
 /// What a commit writes to paged files, by name.
 pub(crate) type Writes = BTreeMap<String, Written>;
 
-#[cfg(feature = "simulation")]
-/// Writes to the file `db` only.
-pub(crate) fn db_writes(pages: Changes, size: u64) -> Writes {
-    Writes::from([("db".to_owned(), Written { size, pages })])
-}
-
 /// Default [`StorageOptions::prefetch_pages`].
 pub const PREFETCH_PAGES: u64 = 16;
 /// Default [`StorageOptions::hint_pages`].
 pub const HINT_PAGES: usize = 32;
-const PAGE: u64 = crate::PAGE_SIZE as u64;
 /// Consecutive page reads that start sequential readahead.
 const READAHEAD_AFTER: u32 = 3;
 /// Largest readahead window, in pages.
@@ -102,10 +102,10 @@ pub struct StorageOptions {
     pub page_compression: PageCompression,
     /// This namespace's handle on the process-wide [`crate::PageCache`].
     pub cache: Option<NamespaceCache>,
-    /// Transactions kept in the log: a save that logs more checkpoints the
+    /// Transactions kept in the log: a commit that logs more checkpoints the
     /// whole log. Replay at open reads them all.
     pub checkpoint_after: u32,
-    /// Encoded bytes kept in the log: a save that logs more checkpoints the
+    /// Encoded bytes kept in the log: a commit that logs more checkpoints the
     /// whole log.
     pub checkpoint_log_bytes: usize,
     /// Bytes of log the commit record holds inline, which every commit
@@ -116,7 +116,7 @@ pub struct StorageOptions {
     /// A cold open (no warm cache pages) fetches every page of a database of
     /// at most this many pages, alongside replay.
     pub prefetch_pages: u64,
-    /// Pages a checkpointing save lists in the working-set hint, which a cold
+    /// Pages a checkpointing commit lists in the working-set hint, which a cold
     /// open of a larger database fetches alongside replay (at most
     /// [`crate::MAX_HINT_PAGES`]); 0 neither writes nor reads it.
     pub hint_pages: usize,
@@ -139,7 +139,7 @@ impl Default for StorageOptions {
 /// What a commit wrote: its log and record bytes, and the pages its checkpoint, if any, wrote.
 #[derive(Clone, Debug, Default)]
 pub struct CommitReport {
-    /// Pages written in place by this save's checkpoint; 0 when it did not
+    /// Pages written in place by this commit's checkpoint; 0 when it did not
     /// checkpoint.
     pub checkpointed_pages: usize,
     /// Bytes of its transaction's log segments, every file's: about what its
@@ -213,10 +213,8 @@ impl Readahead {
 }
 
 impl Snapshot {
-    pub async fn open_with_options(
-        store: Arc<dyn KvStore>,
-        options: StorageOptions,
-    ) -> io::Result<Self> {
+    /// Open the namespace: see the module documentation.
+    pub async fn open(store: Arc<dyn KvStore>, options: StorageOptions) -> io::Result<Self> {
         let cache = options.cache.as_ref();
         // An owner that knows nothing reads the working-set hint with the record.
         let read_hint = async {
@@ -251,10 +249,7 @@ impl Snapshot {
         }
         let wanted: Vec<u64> = wanted.into_iter().filter(|n| !logged.contains(n)).collect();
         let prefetch = async {
-            let tokens: Vec<_> = wanted.iter().map(|&n| cache.map(|c| c.token(n))).collect();
-            let keys: Vec<_> = wanted.iter().copied().map(page_key).collect();
-            let values = futures::future::try_join_all(keys.iter().map(|k| store.get(k))).await?;
-            let fetched = tokens.into_iter().zip(values);
+            let fetched = get_pages(&*store, cache, &wanted).await?;
             Ok::<_, io::Error>(wanted.iter().copied().zip(fetched).collect::<Vec<_>>())
         };
         let named = commit.stored_values();
@@ -308,26 +303,27 @@ impl Snapshot {
     /// Keep page values fetched at open, except pages the log overrides.
     fn with_fetched(self, pages: Vec<(u64, Fetched)>) -> Self {
         let mut fetched = self.fetched.lock().unwrap();
-        for (index, (token, value)) in pages {
+        for (index, (cache_key, value)) in pages {
             if self.log.images.contains_key(&index) {
                 continue;
             }
             // The cache keeps values; holes, and pages without a cache, stay here.
-            if let (Some(cache), Some(token), Some(value)) = (&self.options.cache, &token, &value) {
+            if let (Some(cache), Some(key), Some(value)) = (&self.options.cache, &cache_key, &value)
+            {
                 match cache.is_decoded() {
                     true => {
                         if let Ok(page) = page_codec::decode_bytes(value) {
-                            cache.insert_read(token.clone(), page);
+                            cache.insert_read(key.clone(), page);
                             continue;
                         }
                     }
                     false => {
-                        cache.insert_read(token.clone(), value.clone());
+                        cache.insert_read(key.clone(), value.clone());
                         continue;
                     }
                 }
             }
-            fetched.insert(index, (token, value));
+            fetched.insert(index, (cache_key, value));
         }
         drop(fetched);
         self
@@ -415,17 +411,17 @@ impl Snapshot {
                 false => page_codec::decode_against(&value, base_page)?,
             }
         } else {
-            let (token, Some(image)) = self.fetch(index).await? else {
+            let (cache_key, Some(image)) = self.fetch(index).await? else {
                 return self.hole(index);
             };
             let page = page_codec::decode_against(&image, base_page)?;
-            if let (Some(cache), Some(token)) = (cache, token) {
+            if let (Some(cache), Some(key)) = (cache, cache_key) {
                 let value = if cache.is_decoded() {
                     page.clone()
                 } else {
                     image
                 };
-                cache.insert_read(token, value);
+                cache.insert_read(key, value);
             }
             page
         };
@@ -455,17 +451,14 @@ impl Snapshot {
         };
         let pages: Vec<_> = std::iter::once(index).chain(ahead).collect();
         let cache = self.options.cache.as_ref();
-        let tokens: Vec<_> = pages.iter().map(|&n| cache.map(|c| c.token(n))).collect();
-        let keys: Vec<_> = pages.iter().copied().map(page_key).collect();
-        let values = futures::future::try_join_all(keys.iter().map(|k| self.store.get(k))).await?;
-        let mut values = tokens.into_iter().zip(values);
+        let mut values = get_pages(&*self.store, cache, &pages).await?.into_iter();
         let value = values.next().expect("the page itself");
         let mut fetched = self.fetched.lock().unwrap();
         fetched.extend(pages[1..].iter().copied().zip(values));
         Ok(value)
     }
 
-    /// The working-set hint a checkpointing save writes, unless it is unchanged
+    /// The working-set hint a checkpointing commit writes, unless it is unchanged
     /// or empty.
     fn hint(&self) -> Option<Vec<u8>> {
         let limit = self.options.hint_pages;
@@ -482,46 +475,25 @@ impl Snapshot {
         (hint::decode(&hint, limit).is_some_and(|pages| !pages.is_empty())).then_some(hint)
     }
 
-    /// Whether the log is long enough to checkpoint.
+    /// Whether the log is long enough to checkpoint, and can be: no file's
+    /// segments wait for their base.
     fn wants_checkpoint(&self) -> bool {
-        !self.log.transactions.is_empty() && self.too_long(0, 0) && !self.log.waits_for_bases()
-    }
-
-    /// Whether the log, with `transactions` more of `bytes`, passes a
-    /// checkpoint threshold.
-    fn too_long(&self, transactions: usize, bytes: usize) -> bool {
         let log = &self.log;
-        log.transactions.len() + transactions > self.options.checkpoint_after as usize
-            || log.bytes + bytes > self.options.checkpoint_log_bytes
-    }
-
-    /// Commit `dirty` pages as one transaction and advance checkpointing.
-    ///
-    /// Requires exclusive ownership until every request settles, even on
-    /// cancellation. After an error, reopen; never reuse this snapshot.
-    #[cfg_attr(not(test), allow(dead_code))]
-    #[cfg(feature = "simulation")]
-    pub async fn publish(&self, dirty: Changes, size: u64) -> io::Result<CommitReport> {
-        let writes = db_writes(dirty, size);
-        Ok(self.commit(writes, Records::new()).await?.0)
+        let too_long = log.transactions > self.options.checkpoint_after as usize
+            || log.bytes > self.options.checkpoint_log_bytes;
+        log.transactions > 0 && too_long && !log.waits_for_bases()
     }
 
     /// Refuse what a commit cannot store, before it writes anything: a
     /// record too large, a name too long, a name both a record and a paged
     /// file, a size not a multiple of 512 or past the largest file.
     pub(crate) fn check(&self, writes: &Writes, records: &Records) -> io::Result<()> {
-        if let Some((name, value)) = records
-            .iter()
-            .find(|(_, v)| v.len() > log::MAX_RECORD_BYTES)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "record {name:?} of {} bytes exceeds {}",
-                    value.len(),
-                    log::MAX_RECORD_BYTES
-                ),
-            ));
+        let paged = |id| matches!(self.commit.directory[&id].kind, Kind::Paged { .. });
+        for (name, value) in records {
+            if value.len() > log::MAX_RECORD_BYTES {
+                let (len, max) = (value.len(), log::MAX_RECORD_BYTES);
+                return refuse(format!("record {name:?} of {len} bytes exceeds {max}"));
+            }
         }
         for name in records.keys().chain(writes.keys()) {
             if name.len() > log::MAX_NAME_BYTES {
@@ -532,7 +504,6 @@ impl Snapshot {
             }
         }
         for (name, written) in writes {
-            let paged = |id| matches!(self.commit.directory[&id].kind, Kind::Paged { .. });
             if records.contains_key(name) || self.commit.file_id(name).is_some_and(|id| !paged(id))
             {
                 return refuse(format!("{name:?} is a record, not a paged file"));
@@ -546,7 +517,6 @@ impl Snapshot {
             }
         }
         for name in records.keys() {
-            let paged = |id| matches!(self.commit.directory[&id].kind, Kind::Paged { .. });
             if self.commit.file_id(name).is_some_and(paged) {
                 return refuse(format!("{name:?} is a paged file, not a record"));
             }
@@ -554,12 +524,17 @@ impl Snapshot {
         Ok(())
     }
 
-    /// [`Self::publish`], also returning the committed view afterwards, which a
-    /// session may continue on. This snapshot is not used again. `writes`
-    /// change paged files (a new name makes a new file), each of `records`
-    /// replaces that record's value, in the same put. Without page changes the log gains no
+    /// Commit `writes` and `records` as one transaction (see the module
+    /// documentation), returning what it wrote and the committed view
+    /// afterwards, which a session may continue on. `writes` change paged
+    /// files (a new name makes a new file), each of `records` replaces that
+    /// record's value, in the same put. Without page changes the log gains no
     /// transaction; without any change nothing is committed. A commit that
     /// leaves the log long also checkpoints it, before the one sync.
+    ///
+    /// Requires exclusive ownership until every request settles, even on
+    /// cancellation. After an error the outcome is unknown: reopen. This
+    /// snapshot is not used again either way.
     pub(crate) async fn commit(
         &self,
         mut writes: Writes,
@@ -720,7 +695,8 @@ impl Snapshot {
         // 4. A long log is checkpointed in the same sync. This view is not
         // used again: it must not hold the checkpoint back.
         drop(self.reader.lock().unwrap().take());
-        let checkpoint = match after.wants_checkpoint() && after.checkpoint_limit() == u64::MAX {
+        let others_open = cache.is_some_and(|cache| cache.other_readers(version));
+        let checkpoint = match after.wants_checkpoint() && !others_open {
             true => Some(after.checkpoint(&write)?),
             false => None,
         };
@@ -806,29 +782,14 @@ impl Snapshot {
     }
 
     /// This view under another commit record, for a session that continues
-    /// after a save. The log, pages fetched ahead and usage carry over.
+    /// after a commit. The log, pages fetched ahead and usage carry over.
     fn continued(&self, commit: Commit, commit_bytes: Option<Bytes>) -> Self {
-        let log = Log {
-            transactions: self
-                .log
-                .transactions
-                .iter()
-                .map(|t| log::Transaction {
-                    pages: t.pages.clone(),
-                    bytes: t.bytes,
-                })
-                .collect(),
-            images: self.log.images.clone(),
-            bytes: self.log.bytes,
-            chain: self.log.chain.clone(),
-            undecoded: self.log.undecoded.clone(),
-        };
         Self {
             store: self.store.clone(),
             options: self.options.clone(),
             commit,
             commit_bytes,
-            log,
+            log: self.log.clone(),
             records: self.records.clone(),
             bases: self.bases.clone(),
             unchanged: false,
@@ -872,15 +833,6 @@ impl Snapshot {
         self
     }
 
-    /// The latest version a checkpoint may write images of: no other open
-    /// session may read a page key that holds an image it has not replayed.
-    fn checkpoint_limit(&self) -> u64 {
-        let cache = self.options.cache.as_ref();
-        cache
-            .and_then(|cache| cache.oldest_reader(self.version()))
-            .unwrap_or(u64::MAX)
-    }
-
     /// Add this owner's acknowledged transaction to the log. Values fetched
     /// ahead for its pages are stale once a checkpoint drops it from the log.
     fn extend(&mut self, images: Images, bytes: usize) {
@@ -890,6 +842,22 @@ impl Snapshot {
         }
         self.log.append(images, bytes);
     }
+}
+
+/// The stored values of `pages`, read together, each with its cache key taken
+/// before the read.
+async fn get_pages(
+    store: &dyn KvStore,
+    cache: Option<&NamespaceCache>,
+    pages: &[u64],
+) -> io::Result<Vec<Fetched>> {
+    let cache_keys: Vec<_> = pages
+        .iter()
+        .map(|&n| cache.map(|cache| cache.key(n)))
+        .collect();
+    let keys: Vec<_> = pages.iter().copied().map(page_key).collect();
+    let values = futures::future::try_join_all(keys.iter().map(|key| store.get(key))).await?;
+    Ok(cache_keys.into_iter().zip(values).collect())
 }
 
 /// A commit refused before it writes anything: what it was asked is invalid.

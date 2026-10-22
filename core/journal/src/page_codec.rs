@@ -1,19 +1,21 @@
-//! Independent immutable-page envelopes; logical pages remain 4096 bytes.
+//! The encoding of a checkpointed page at `page/<file>/<n>`; logical pages
+//! remain 4096 bytes.
 //!
 //! The value starts with a codec tag (u8) and logical size (u16 LE, always 4096),
 //! followed by raw bytes (tag 0), one LZ4 block (tag 1), one zstd frame (tag 2),
 //! or one zstd frame whose dictionary is the page's base (tag 3: a page of a
 //! file with a base, see [`crate::Base`], which decoding needs).
-//! Compression is retained only when its payload is smaller than the raw page. Incompressible pages therefore use
-//! 4099 bytes including the header, even under the LZ4 policy.
+//! Compression is retained only when its payload is smaller than the raw page.
+//! Incompressible pages therefore use 4099 bytes including the header, even
+//! under the LZ4 policy.
 //!
-//! Raw and compressed pages can coexist. Write policy is per session, while stored
-//! tags determine decoding; no dictionary, neighboring page, frame stream or policy
-//! setting is needed to read an object. Dirty pages and the engine WAL are not encoded.
+//! Raw and compressed pages can coexist. Write policy is per session, while
+//! stored tags determine decoding; apart from a file's base, no dictionary,
+//! neighboring page or policy setting is needed to read a page.
 //!
 //! Decode allocates exactly one logical page, never a stored-length-sized buffer.
-//! Bounds, tag, logical size and LZ4 expansion are validated before a decoded page
-//! enters the snapshot cache. A valid-looking bit change can remain undetected:
+//! Bounds, tag, logical size and LZ4 expansion are validated before a decoded
+//! page is used or cached. A valid-looking bit change can remain undetected:
 //! there is no checksum or corruption repair.
 use crate::PAGE_SIZE;
 use std::cell::RefCell;
@@ -30,7 +32,7 @@ const HEADER: usize = 3;
 /// A page held in memory, encoded or decoded, shared without copying.
 pub type Page = bytes::Bytes;
 /// Largest valid encoded value: a three-byte envelope plus one raw logical page.
-pub const MAX_ENCODED_PAGE: usize = HEADER + PAGE_SIZE;
+const MAX_ENCODED_PAGE: usize = HEADER + PAGE_SIZE;
 
 /// Per-session write policy. Both policies can read either encoded form.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,8 +53,8 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-/// Tag (0 = raw, 1 = LZ4 block, 2 = zstd frame), u16 LE logical length, then
-/// payload. Compression is retained only when it is smaller than the raw payload.
+/// Encode a page under `policy`: tag 0 (raw), 1 (LZ4) or 2 (zstd), whichever
+/// of raw and the policy's is smaller.
 pub fn encode(page: &[u8], policy: PageCompression) -> io::Result<Vec<u8>> {
     if page.len() != PAGE_SIZE {
         return Err(invalid("invalid logical page length"));
@@ -68,15 +70,31 @@ pub fn encode(page: &[u8], policy: PageCompression) -> io::Result<Vec<u8>> {
             Some((2, frame))
         }
     };
-    let (tag, payload) = match &compressed {
-        Some((tag, bytes)) if bytes.len() < PAGE_SIZE => (*tag, &bytes[..]),
-        _ => (0, page),
-    };
+    Ok(match &compressed {
+        Some((tag, bytes)) if bytes.len() < PAGE_SIZE => envelope(*tag, bytes),
+        _ => envelope(0, page),
+    })
+}
+
+/// `payload` behind the header: `tag` and the logical size.
+fn envelope(tag: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER + payload.len());
     out.push(tag);
     out.extend_from_slice(&(PAGE_SIZE as u16).to_le_bytes());
     out.extend_from_slice(payload);
-    Ok(out)
+    out
+}
+
+/// The tag and payload of an encoded page, once its length and logical size
+/// are valid.
+fn open_envelope(bytes: &[u8]) -> io::Result<(u8, &[u8])> {
+    if bytes.len() < HEADER || bytes.len() > MAX_ENCODED_PAGE {
+        return Err(invalid("invalid encoded page length"));
+    }
+    if u16::from_le_bytes([bytes[1], bytes[2]]) as usize != PAGE_SIZE {
+        return Err(invalid("invalid decoded page length"));
+    }
+    Ok((bytes[0], &bytes[HEADER..]))
 }
 
 /// Encode a page of a file with a base against `base`, its base's page: as a
@@ -100,11 +118,7 @@ pub(crate) fn encode_against(
     if HEADER + frame.len() >= own.len() {
         return Ok(own);
     }
-    let mut out = Vec::with_capacity(HEADER + frame.len());
-    out.push(3);
-    out.extend_from_slice(&(PAGE_SIZE as u16).to_le_bytes());
-    out.extend_from_slice(&frame);
-    Ok(out)
+    Ok(envelope(3, &frame))
 }
 
 /// [`decode_bytes`], for a page of a file whose base page is `base`: a page
@@ -114,16 +128,11 @@ pub(crate) fn decode_against(bytes: &bytes::Bytes, base: Option<&[u8]>) -> io::R
         return decode_bytes(bytes);
     }
     let base = base.ok_or_else(|| invalid("a page encoded against a base, without it"))?;
-    if bytes.len() < HEADER || bytes.len() > MAX_ENCODED_PAGE {
-        return Err(invalid("invalid encoded page length"));
-    }
-    if u16::from_le_bytes([bytes[1], bytes[2]]) as usize != PAGE_SIZE {
-        return Err(invalid("invalid decoded page length"));
-    }
+    let (_, payload) = open_envelope(bytes)?;
     let mut page = Vec::with_capacity(PAGE_SIZE);
     let mut dctx = DCtx::create();
     dctx.ref_prefix(base)
-        .and_then(|_| dctx.decompress(&mut page, &bytes[HEADER..]))
+        .and_then(|_| dctx.decompress(&mut page, payload))
         .map_err(|_| invalid("invalid zstd page against its base"))?;
     if page.len() != PAGE_SIZE {
         return Err(invalid("invalid zstd decoded length"));
@@ -140,14 +149,8 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<u8>> {
 /// Like [`decode`], but a raw page is returned as a slice of `bytes` without
 /// copying; only compressed pages allocate.
 pub(crate) fn decode_bytes(bytes: &bytes::Bytes) -> io::Result<Page> {
-    if bytes.len() < HEADER || bytes.len() > MAX_ENCODED_PAGE {
-        return Err(invalid("invalid encoded page length"));
-    }
-    if u16::from_le_bytes([bytes[1], bytes[2]]) as usize != PAGE_SIZE {
-        return Err(invalid("invalid decoded page length"));
-    }
-    let payload = &bytes[HEADER..];
-    match bytes[0] {
+    let (tag, payload) = open_envelope(bytes)?;
+    match tag {
         0 if payload.len() == PAGE_SIZE => Ok(bytes.slice(HEADER..)),
         1 if !payload.is_empty() && payload.len() < PAGE_SIZE => {
             let mut page = vec![0; PAGE_SIZE];

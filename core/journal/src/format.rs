@@ -31,7 +31,7 @@ pub(crate) fn page_key(id: u64) -> String {
 }
 
 /// The page id a page key names.
-#[cfg_attr(not(feature = "simulation"), allow(dead_code))]
+#[cfg(feature = "simulation")]
 pub(crate) fn parse_page_key(key: &str) -> Option<u64> {
     let (file, page) = key.strip_prefix(PAGE_PREFIX)?.split_once('/')?;
     let file = u32::from_str_radix(file, 16).ok()?;
