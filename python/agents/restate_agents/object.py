@@ -95,7 +95,9 @@ class Object(restate.VirtualObject):
     A Restate virtual object with a SQL database of its own, ``ctx.db``: one
     per key, stored with the object's state. ``options`` are those of
     ``restate_fns.VirtualObject``, which add to (or replace) the one set here:
-    retries without end, since each attempt resumes from the database.
+    retries without end, since each attempt resumes from the database. Among
+    them ``schema``, optional: tables of your own, beside the agent's (which
+    are its own business), such as ``schema=["CREATE TABLE facts (fact TEXT)"]``.
 
     Besides its own handlers, each has ``status``, what it is doing (the
     message it answers, and what its tools wait for), ``stop``, which stops
