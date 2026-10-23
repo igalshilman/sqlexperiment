@@ -18,10 +18,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
 use sql::binding::Session;
 use sql::{Numeric, Value};
+use state::kv::KvStore;
 use std::io;
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use state::kv::KvStore;
 
 const GET: u32 = 0;
 const SET: u32 = 1;

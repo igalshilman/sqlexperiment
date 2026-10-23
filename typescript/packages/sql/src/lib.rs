@@ -17,9 +17,9 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use sql::binding::Session;
 use sql::{Numeric, Value};
+use state::kv::KvStore;
 use std::io;
 use std::sync::Arc;
-use state::kv::KvStore;
 
 const GET: u32 = 0;
 const SET: u32 = 1;
