@@ -191,7 +191,7 @@ class _Conversation:
     """
 
     SCHEMA = """
-    CREATE TABLE pydantic_ai_messages (
+    CREATE TABLE restate_pydantic_ai_messages (
       thread TEXT NOT NULL,
       n INTEGER NOT NULL,
       message TEXT NOT NULL,
@@ -205,9 +205,9 @@ class _Conversation:
         self._saved: list[str] = []
 
     async def load(self) -> list[ModelMessage]:
-        await table_schema("pydantic_ai_messages", self.SCHEMA).ensure(self.db)
+        await table_schema("restate_pydantic_ai_messages", self.SCHEMA).ensure(self.db)
         rows = await self.db.query(
-            "SELECT message FROM pydantic_ai_messages WHERE thread = ? ORDER BY n", [self.thread]
+            "SELECT message FROM restate_pydantic_ai_messages WHERE thread = ? ORDER BY n", [self.thread]
         )
         self._saved = [row[0] for row in rows]
         return [_MESSAGE.validate_json(m) for m in self._saved]
@@ -219,9 +219,9 @@ class _Conversation:
         if first == len(dumped) == len(self._saved):
             return
         async with self.db.transaction() as tx:
-            await tx.execute("DELETE FROM pydantic_ai_messages WHERE thread = ? AND n >= ?", [self.thread, first])
+            await tx.execute("DELETE FROM restate_pydantic_ai_messages WHERE thread = ? AND n >= ?", [self.thread, first])
             for n in range(first, len(dumped)):
-                await tx.execute("INSERT INTO pydantic_ai_messages VALUES (?, ?, ?)", [self.thread, n, dumped[n]])
+                await tx.execute("INSERT INTO restate_pydantic_ai_messages VALUES (?, ?, ?)", [self.thread, n, dumped[n]])
         self._saved = dumped
         await turns.publish()
 

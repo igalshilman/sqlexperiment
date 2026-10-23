@@ -10,7 +10,7 @@ conversation's own, which lasts from one message to the next::
 
 The first sandbox tool of an attempt opens the conversation's sandbox: it
 makes it, or resumes the one it made before, whose reference is in the
-object's database (``sandboxes``). Its name is the conversation's (the
+object's database (``restate_sandboxes``). Its name is the conversation's (the
 object's service and key), so an attempt that retries after the sandbox
 was made finds it rather than making another. Parallel tool calls share it.
 
@@ -49,7 +49,7 @@ from restate_fns.schema import Schema
 from restate_agents.object import service
 from restate_agents.tools import Tool, tool
 
-TABLE = "sandboxes"
+TABLE = "restate_sandboxes"
 SCHEMA = Schema("restate_agents.sandbox", [f"CREATE TABLE {TABLE} (name TEXT PRIMARY KEY, ref TEXT NOT NULL)"])
 # What a tool gives the model of a file or a command's output, at most.
 CLIPPED = 20_000

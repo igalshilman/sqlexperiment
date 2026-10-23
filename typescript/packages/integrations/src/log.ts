@@ -13,7 +13,7 @@ import type { SqlSession } from 'restate-fns';
 import { Schema } from 'restate-fns/internal';
 import type { ChatMessage, Messages, MessagesRequest } from './common.ts';
 
-const TABLE = 'agent_log';
+const TABLE = 'restate_agent_log';
 
 /** A message as the transcript gives it: its role and parts, without an id. */
 export type Said = Omit<ChatMessage, 'id'>;

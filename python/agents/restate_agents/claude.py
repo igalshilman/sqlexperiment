@@ -79,7 +79,7 @@ DECLINED = "Declined: the model would not answer this."
 Tools = Sequence[Tool | Any]
 
 # The conversations, in the object's database.
-TABLE = "claude_messages"
+TABLE = "restate_claude_messages"
 
 
 def agent(

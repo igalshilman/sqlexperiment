@@ -35,14 +35,14 @@ import type { SqlSession } from 'restate-fns';
 import { Schema } from 'restate-fns/internal';
 
 const SCHEMA = new Schema('restate-agents.deepseek', [
-  'CREATE TABLE dsh_sessions (id TEXT PRIMARY KEY, header TEXT NOT NULL, inherited INTEGER NOT NULL)',
-  'CREATE TABLE dsh_events (session TEXT NOT NULL, seq INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY (session, seq))',
+  'CREATE TABLE restate_deepseek_sessions (id TEXT PRIMARY KEY, header TEXT NOT NULL, inherited INTEGER NOT NULL)',
+  'CREATE TABLE restate_deepseek_events (session TEXT NOT NULL, seq INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY (session, seq))',
 ]);
 
 /** The stored events of session `id`, in order: for reading the log without a harness. */
 export async function storedEvents(db: SqlSession, id: SessionId): Promise<SessionEvent[]> {
   await SCHEMA.ensure(db);
-  const rows = await db.query('SELECT event FROM dsh_events WHERE session = ? ORDER BY seq', [id]);
+  const rows = await db.query('SELECT event FROM restate_deepseek_events WHERE session = ? ORDER BY seq', [id]);
   return rows.map(([event]) => JSON.parse(String(event)) as SessionEvent);
 }
 
@@ -105,7 +105,7 @@ export class SqlSessionPersistence extends SessionPersistence {
     if (created) return { ...created, count: 0 };
     const [row] = await this.serial((db) =>
       db.query(
-        'SELECT header, inherited, (SELECT count(*) FROM dsh_events WHERE session = id) FROM dsh_sessions WHERE id = ?',
+        'SELECT header, inherited, (SELECT count(*) FROM restate_deepseek_events WHERE session = id) FROM restate_deepseek_sessions WHERE id = ?',
         [id],
       ),
     );
@@ -150,7 +150,7 @@ export class SqlSessionPersistence extends SessionPersistence {
 
   async list(): Promise<readonly SessionPersistenceSnapshot[]> {
     const rows = await this.serial((db) =>
-      db.query('SELECT header, inherited, (SELECT count(*) FROM dsh_events WHERE session = id) FROM dsh_sessions'),
+      db.query('SELECT header, inherited, (SELECT count(*) FROM restate_deepseek_events WHERE session = id) FROM restate_deepseek_sessions'),
     );
     return [
       ...[...this.created.values()].map((created) => snapshot({ ...created, count: 0 })),
@@ -210,7 +210,7 @@ class SqlSessionHandle implements SessionHandle {
   async read(offset = 0, length = Infinity): Promise<SessionHandleReadResult> {
     this.#check('read');
     const rows = await this.#store.serial((db) =>
-      db.query('SELECT event FROM dsh_events WHERE session = ? AND seq >= ? ORDER BY seq', [this.id, offset]),
+      db.query('SELECT event FROM restate_deepseek_events WHERE session = ? AND seq >= ? ORDER BY seq', [this.id, offset]),
     );
     let events: SessionEvent[] = [
       ...rows.map(([event]) => JSON.parse(String(event)) as SessionEvent),
@@ -250,14 +250,14 @@ class SqlSessionHandle implements SessionHandle {
     await this.#store.serial((db) =>
       db.transaction(async (tx) => {
         if (created) {
-          await tx.execute('INSERT INTO dsh_sessions (id, header, inherited) VALUES (?, ?, ?)', [
+          await tx.execute('INSERT INTO restate_deepseek_sessions (id, header, inherited) VALUES (?, ?, ?)', [
             this.id,
             JSON.stringify(created.header),
             created.inherited,
           ]);
         }
         for (const event of batch) {
-          await tx.execute('INSERT INTO dsh_events (session, seq, event) VALUES (?, ?, ?)', [
+          await tx.execute('INSERT INTO restate_deepseek_events (session, seq, event) VALUES (?, ?, ?)', [
             this.id,
             event.seq,
             JSON.stringify(event),

@@ -13,8 +13,8 @@ import { Schema } from 'restate-fns/internal';
 type MessageParam = Anthropic.Beta.Messages.BetaMessageParam;
 
 const SCHEMA = new Schema('restate-agents.claude', [
-  'CREATE TABLE claude_messages (seq INTEGER PRIMARY KEY, prompt TEXT NOT NULL, message TEXT NOT NULL)',
-  'CREATE TABLE claude_answers (prompt TEXT PRIMARY KEY, answer TEXT NOT NULL)',
+  'CREATE TABLE restate_claude_messages (seq INTEGER PRIMARY KEY, prompt TEXT NOT NULL, message TEXT NOT NULL)',
+  'CREATE TABLE restate_claude_answers (prompt TEXT PRIMARY KEY, answer TEXT NOT NULL)',
 ]);
 
 /** The conversation in the object's database: the tool runner's messages, and each prompt's answer. */
@@ -35,20 +35,20 @@ export class Conversation {
 
   /** The answer to prompt `id`, or undefined. */
   async answer(id: string): Promise<string | undefined> {
-    const [row] = await this.#db.query('SELECT answer FROM claude_answers WHERE prompt = ?', [id]);
+    const [row] = await this.#db.query('SELECT answer FROM restate_claude_answers WHERE prompt = ?', [id]);
     return row?.[0] as string | undefined;
   }
 
   /** The messages, in order. */
   async messages(): Promise<MessageParam[]> {
-    const rows = await this.#db.query('SELECT message FROM claude_messages ORDER BY seq');
+    const rows = await this.#db.query('SELECT message FROM restate_claude_messages ORDER BY seq');
     return rows.map(([message]) => JSON.parse(String(message)));
   }
 
   /** The prompt being answered: the last message's, unless it is answered. */
   async pending(): Promise<string | undefined> {
     const [row] = await this.#db.query(
-      'SELECT prompt FROM claude_messages WHERE prompt NOT IN (SELECT prompt FROM claude_answers) ORDER BY seq DESC LIMIT 1',
+      'SELECT prompt FROM restate_claude_messages WHERE prompt NOT IN (SELECT prompt FROM restate_claude_answers) ORDER BY seq DESC LIMIT 1',
     );
     return row?.[0] as string | undefined;
   }
@@ -79,10 +79,10 @@ export class Conversation {
   #store(id: string, messages: MessageParam[], answer?: string): Promise<void> {
     return this.#db.transaction(async (tx) => {
       for (const message of messages) {
-        await tx.execute('INSERT INTO claude_messages (prompt, message) VALUES (?, ?)', [id, JSON.stringify(message)]);
+        await tx.execute('INSERT INTO restate_claude_messages (prompt, message) VALUES (?, ?)', [id, JSON.stringify(message)]);
       }
       if (answer !== undefined)
-        await tx.execute('INSERT INTO claude_answers (prompt, answer) VALUES (?, ?)', [id, answer]);
+        await tx.execute('INSERT INTO restate_claude_answers (prompt, answer) VALUES (?, ?)', [id, answer]);
     });
   }
 }

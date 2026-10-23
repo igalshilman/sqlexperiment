@@ -60,7 +60,7 @@ from restate_agents.turns import CANCELLED
 __all__ = ["CANCELLED", "agent", "prompt", "reset"]
 
 # The tables of the conversations, of their tool calls, and of the threads' rollouts.
-PROMPTS, CALLS, ROLLOUTS, THREADS = "codex_prompts", "codex_calls", "codex_rollouts", "codex_threads"
+PROMPTS, CALLS, ROLLOUTS, THREADS = "restate_codex_prompts", "restate_codex_calls", "restate_codex_rollouts", "restate_codex_threads"
 
 
 def agent(

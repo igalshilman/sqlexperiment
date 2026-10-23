@@ -89,7 +89,7 @@ for await (const { status, messages } of follow(restate, agent('support'), 'alic
 
 As the reference keeps a public history apart from the model's context, the
 conversation as clients read it is a log in the object's database
-(`agent_log`, `log.ts`), which each publish takes the framework's
+(`restate_agent_log`, `log.ts`), which each publish takes the framework's
 transcript into (`transcribing` in `common.ts`, through the framework as the
 turn holds it open):
 

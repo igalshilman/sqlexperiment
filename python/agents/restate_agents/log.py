@@ -20,7 +20,7 @@ from restate_fns.schema import Schema
 
 from restate_agents.common import ChatMessage, Messages, MessagesRequest
 
-TABLE = "agent_log"
+TABLE = "restate_agent_log"
 SCHEMA = Schema(
     "restate_agents.log",
     [
