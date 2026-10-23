@@ -46,43 +46,42 @@ const InTransaction = Context.Service<SqlClient.TransactionConnection, SqlClient
   'restate-agents/OpenCodeTransaction',
 );
 
+/**
+ * A connection whose statements go to `target`: the session, which runs one
+ * call at a time and holds them while a transaction runs, or that
+ * transaction's database. Each is refused once `fence` closes.
+ */
+function connection(target: SqlDatabase, fence: Fence): Connection {
+  const exec = (sql: string, params: readonly unknown[]) =>
+    Effect.tryPromise({
+      try: async () => {
+        if (fence.closed) throw new Error('the attempt is over');
+        // Effect binds what the compiler made of OpenCode's values: SQL values.
+        return target.queryColumns(sql, params as SqlValue[]);
+      },
+      catch: (cause) => error('execute', cause),
+    });
+  const run = (sql: string, params: readonly unknown[] = []) =>
+    Effect.map(exec(sql, params), ({ columns, rows }) =>
+      rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]]))),
+    );
+  const runValues = (sql: string, params: readonly unknown[] = []) => Effect.map(exec(sql, params), ({ rows }) => rows);
+  const transformed: Connection['execute'] = (sql, params, transformRows) =>
+    transformRows ? Effect.map(run(sql, params), transformRows) : run(sql, params);
+  return {
+    execute: transformed,
+    executeRaw: (sql, params) => run(sql, params),
+    executeValues: (sql, params) => runValues(sql, params),
+    executeValuesUnprepared: (sql, params) => runValues(sql, params),
+    executeUnprepared: transformed,
+    executeStream: () => {
+      throw new Error('executeStream is not supported');
+    },
+  };
+}
+
 /** An Effect SqlClient over `db`, with its statements refused once `fence` closes. */
 export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.SqlClient> {
-  // Statements through `target`: the session, which runs one call at a time
-  // and holds them while a transaction runs, or that transaction's database.
-  const connectionOf = (target: SqlDatabase): Connection => {
-    const exec = (sql: string, params: readonly unknown[]) =>
-      Effect.tryPromise({
-        try: async () => {
-          if (fence.closed) throw new Error('the attempt is over');
-          // Effect binds what the compiler made of OpenCode's values: SQL values.
-          return target.queryColumns(
-            sql,
-            params.map((value) => value as SqlValue),
-          );
-        },
-        catch: (cause) => error('execute', cause),
-      });
-    const run = (sql: string, params: readonly unknown[] = []) =>
-      Effect.map(exec(sql, params), ({ columns, rows }) =>
-        rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]]))),
-      );
-    const runValues = (sql: string, params: readonly unknown[] = []) =>
-      Effect.map(exec(sql, params), ({ rows }) => rows);
-    return {
-      execute: (sql, params, transformRows) =>
-        transformRows ? Effect.map(run(sql, params), transformRows) : run(sql, params),
-      executeRaw: (sql, params) => run(sql, params),
-      executeValues: (sql, params) => runValues(sql, params),
-      executeValuesUnprepared: (sql, params) => runValues(sql, params),
-      executeUnprepared: (sql, params, transformRows) =>
-        transformRows ? Effect.map(run(sql, params), transformRows) : run(sql, params),
-      executeStream: () => {
-        throw new Error('executeStream is not supported');
-      },
-    };
-  };
-
   // `effect` as one SQL transaction: it commits when `effect` succeeds
   // and rolls back when it fails. Its statements go to the transaction's
   // database.
@@ -103,7 +102,7 @@ export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.S
               if (interrupted) return reject(rollback);
               const inner = Effect.provideContext(
                 effect,
-                Context.add(fiber.context, InTransaction, [connectionOf(tx), 0]),
+                Context.add(fiber.context, InTransaction, [connection(tx, fence), 0]),
               );
               resumed = true;
               resume(
@@ -140,7 +139,7 @@ export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.S
 
   const make = Effect.gen(function* () {
     const client = yield* SqlClient.make({
-      acquirer: Effect.succeed(connectionOf(db)),
+      acquirer: Effect.succeed(connection(db, fence)),
       compiler: Statement.makeCompilerSqlite(),
       spanAttributes: [['db.system.name', 'sqlite']],
       transactionService: InTransaction,
@@ -176,6 +175,16 @@ export interface Host {
 }
 
 /**
+ * How OpenCode resumes the turns a previous attempt left unfinished when it
+ * boots: each, however often it crashed (Restate's retry policy decides how
+ * often an attempt is retried), or, without `resume`, none.
+ */
+const restarts = (resume: boolean) =>
+  resume
+    ? SessionRestart.layer({ maxAttempts: Infinity })
+    : Layer.succeed(SessionRestart.Service, { resumeSuspendedSessions: Effect.void });
+
+/**
  * Boot OpenCode with its database in `db`. Booting resumes the turns a
  * previous attempt left unfinished. Close the host when done.
  */
@@ -186,8 +195,6 @@ export async function openOpenCode(
 ): Promise<Host> {
   // The workerd profile, but for its database, which comes first. (The
   // Promise API's OpenCode.create takes no replacements; the Effect API's does.)
-  // OpenCode stops resuming a turn that crashed ten times, and fails it;
-  // here Restate's retry policy decides how often an attempt is retried.
   const profile = { storage: undefined as never, models: { fetch: false } };
   // In 2.0.27's order: database, process spawner, snapshot, version control,
   // filesystem, filesystem search, pty, plugin discovery. Local keeps the
@@ -205,14 +212,7 @@ export async function openOpenCode(
         overrides: [
           Database.node.replace(Database.configuredClient(sqlClient(db, fence))),
           ...rest,
-          SessionRestart.node.replace(
-            SessionRestart.node.mapLayer(
-              () =>
-                (resume
-                  ? SessionRestart.layer({ maxAttempts: Infinity })
-                  : Layer.succeed(SessionRestart.Service, { resumeSuspendedSessions: Effect.void })) as never,
-            ),
-          ),
+          SessionRestart.node.replace(SessionRestart.node.mapLayer(() => restarts(resume) as never)),
         ],
       },
     ).pipe(Scope.provide(scope)),

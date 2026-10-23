@@ -58,26 +58,15 @@ export class Conversation {
    */
   async cancel(id: string, text: string): Promise<void> {
     this.#closed = true;
-    const last = (await this.messages()).at(-1);
-    const calls =
-      last?.role === 'assistant' && Array.isArray(last.content)
-        ? last.content.filter((b) => b.type === 'tool_use')
-        : [];
-    const results: MessageParam[] =
-      calls.length === 0
-        ? []
-        : [
-            {
-              role: 'user',
-              content: calls.map((call) => ({
-                type: 'tool_result' as const,
-                tool_use_id: call.id,
-                content: text,
-                is_error: true,
-              })),
-            },
-          ];
-    await this.#store(id, [...results, { role: 'assistant', content: text }], text);
+    const calls = toolUses((await this.messages()).at(-1));
+    const results = calls.map((call) => ({
+      type: 'tool_result' as const,
+      tool_use_id: call.id,
+      content: text,
+      is_error: true,
+    }));
+    const closing: MessageParam[] = results.length > 0 ? [{ role: 'user', content: results }] : [];
+    await this.#store(id, [...closing, { role: 'assistant', content: text }], text);
   }
 
   /** Store `messages` of prompt `id`, and its `answer` if given, in one transaction. */
@@ -95,3 +84,9 @@ export class Conversation {
     });
   }
 }
+
+/** The tool calls of `message`, if it is the assistant's. */
+const toolUses = (message: MessageParam | undefined) =>
+  message?.role === 'assistant' && Array.isArray(message.content)
+    ? message.content.filter((b) => b.type === 'tool_use')
+    : [];

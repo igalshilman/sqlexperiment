@@ -169,26 +169,27 @@ class AgentClient:
         """
         revision: int | None = None
         while True:
-            # One sync, retried with the same idempotency key.
-            window = uuid.uuid4().hex
-            while True:
-                try:
-                    synced = await self.sync(
-                        cursor=cursor, revision=revision, timeout_seconds=timeout_seconds, idempotency_key=window
-                    )
-                    break
-                except (httpx.TransportError, AgentError) as error:
-                    # A 4xx (such as an unknown agent) would come again: only Restate's (5xx) or a 429 is retried.
-                    if isinstance(error, AgentError) and error.status < 500 and error.status != 429:
-                        raise
-                    log.warning("follow: retrying after %s", error)
-                    await asyncio.sleep(1)
+            synced = await self._sync_retried(cursor, revision, timeout_seconds)
             # Nothing changed (the wait timed out): wait again.
             if synced["revision"] != revision or synced["messages"]:
                 yield Followed(status=synced["status"], messages=synced["messages"], cursor=synced["cursor"])
             cursor = synced["cursor"]
             # With more to read, at once; else once something changes.
             revision = None if synced["more"] else synced["revision"]
+
+    async def _sync_retried(self, cursor: int, revision: int | None, timeout_seconds: float) -> Synced:
+        """One ``sync``, tried again with the same idempotency key until it answers, unless its error would last."""
+        window = uuid.uuid4().hex
+        while True:
+            try:
+                return await self.sync(
+                    cursor=cursor, revision=revision, timeout_seconds=timeout_seconds, idempotency_key=window
+                )
+            except (httpx.TransportError, AgentError) as error:
+                if not _transient(error):
+                    raise
+                log.warning("follow: retrying after %s", error)
+                await asyncio.sleep(1)
 
     async def _post(
         self, handler: str, body: Any = None, *, idempotency_key: str | None = None, timeout: float | None = 30
@@ -209,3 +210,8 @@ class AgentClient:
                 message = response.text
             raise AgentError(response.status_code, message)
         return response.json() if response.content else None
+
+
+def _transient(error: Exception) -> bool:
+    """Whether a retry may answer: a network failure, Restate's (5xx) or too many requests (429); not a 4xx."""
+    return not isinstance(error, AgentError) or error.status >= 500 or error.status == 429
