@@ -599,16 +599,19 @@ retries joins the one already waiting in Restate
 ([`examples-python/basic/follow.py`](../../examples-python/basic/follow.py)):
 
 ```python
-from restate_agents.client import AgentClient
+from restate_agents.client import AgentClient, as_text
 
 async with AgentClient("http://localhost:8080", "support", "alice") as alice:
     await alice.send("Order 103 arrived broken, can I get my $30 back?")
     async for change in alice.follow():
-        for wait in change.status["waiting"]:
-            await alice.signal("approved", id=wait["id"])
         for message in change.messages:
-            print(message)
+            print(as_text(message))
+        for wait in change.waiting:
+            await alice.signal("approved", id=wait["id"])
 ```
+
+`as_text(message)` is a message to read, its tool calls with their outputs;
+`change.waiting` is what the agent waits for (`change.status["waiting"]`).
 
 The handlers are those of the TypeScript agents, so the chat page of
 [`examples-typescript/ui`](../../examples-typescript/ui/app.ts) serves the
@@ -697,6 +700,8 @@ async def chat(ctx, message: str) -> str:
 - [`tests/test_harness.py`](tests/test_harness.py): the answer-once loop of
   Claude Code, Codex, the OpenAI Agents SDK and ADK: a turn that finishes a
   cut-off message takes the messages steered into it.
+- [`tests/test_client.py`](tests/test_client.py): a message as text, as
+  `as_text` gives it.
 - [`tests/test_log.py`](tests/test_log.py): the conversation as clients
   read it: ids that never change, a cursor of what is new or changed (a tool
   call's output), pages back, and a compaction that keeps what was said.

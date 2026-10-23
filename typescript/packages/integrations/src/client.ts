@@ -78,7 +78,22 @@ export interface Followed {
   messages: ChatMessage[];
   /** Where this leaves off: `follow(..., { cursor })` carries on from here, later or elsewhere. */
   cursor: number;
+  /** What the agent's tools wait for now (`status.waiting`). */
+  waiting: Waiting[];
 }
+
+/**
+ * `message` to read, such as in a terminal: its text after its role, and
+ * each tool call on a line of its own, with its output (`…` until it has one).
+ */
+export const asText = ({ role, parts }: ChatMessage) =>
+  parts
+    .map((part) =>
+      part.type === 'text'
+        ? `${role}: ${part.text}`
+        : `  ${part.name}(${JSON.stringify(part.input)}) -> ${part.output ?? '…'}`,
+    )
+    .join('\n');
 
 /** Where {@link follow} starts, and what stops it. */
 export interface FollowOptions {
@@ -142,7 +157,7 @@ export async function* follow(
     if (!synced) return;
     // Nothing changed (the wait timed out): wait again.
     if (synced.revision !== revision || synced.messages.length > 0) {
-      yield { status: synced.status, messages: synced.messages, cursor: synced.cursor };
+      yield { status: synced.status, messages: synced.messages, cursor: synced.cursor, waiting: synced.status.waiting };
     }
     cursor = synced.cursor;
     // With more to read, at once; else once something changes.
