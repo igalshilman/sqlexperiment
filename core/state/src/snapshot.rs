@@ -208,6 +208,15 @@ pub(crate) struct Snapshot {
     reader: Mutex<Option<Reader>>,
 }
 
+/// A get started by [`Readahead::start`], until it ends or is dropped.
+struct Fetching<'a>(&'a Mutex<Readahead>);
+
+impl Drop for Fetching<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().fetching -= 1;
+    }
+}
+
 /// A stored page value, with the cache key taken before it was read (see
 /// [`NamespaceCache::insert_read`]).
 type Fetched = (Option<PageKey>, Option<Bytes>);
@@ -218,6 +227,8 @@ struct Readahead {
     last: Option<u64>,
     run: u32,
     window: u64,
+    /// Gets in flight (see [`Fetching`]).
+    fetching: usize,
 }
 
 impl Readahead {
@@ -233,10 +244,13 @@ impl Readahead {
         }
     }
 
-    /// Pages to read ahead with a get that missed; doubles while reads stay
-    /// sequential.
-    fn window(&mut self) -> u64 {
-        if self.run < READAHEAD_AFTER {
+    /// Pages to read ahead with a get that missed, starting now; doubles
+    /// while reads stay sequential. None while another get is in flight:
+    /// concurrent reads each ask for their own page, and would fetch ahead
+    /// the pages the others are reading.
+    fn start(&mut self) -> u64 {
+        self.fetching += 1;
+        if self.fetching > 1 || self.run < READAHEAD_AFTER {
             return 0;
         }
         self.window = (self.window * 2).clamp(4, MAX_READAHEAD);
@@ -502,7 +516,8 @@ impl Snapshot {
         if let Some(value) = self.fetched.lock().unwrap().remove(&index) {
             return Ok(value);
         }
-        let ahead = self.readahead.lock().unwrap().window();
+        let ahead = self.readahead.lock().unwrap().start();
+        let _fetching = Fetching(&self.readahead);
         let file = file_of(index);
         let last = page_id(file, self.commit.size(file).div_ceil(PAGE));
         let ahead: Vec<u64> = {
