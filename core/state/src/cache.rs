@@ -306,7 +306,7 @@ impl NamespaceCache {
             owner.epoch = Some(epoch);
         }
         // An absent record is a real state: an empty namespace.
-        owner.commit = Some(bytes.unwrap_or_default());
+        owner.commit = Some(owned(&bytes.unwrap_or_default()));
         if committed.is_some() {
             owner.committed = committed;
         }
@@ -369,9 +369,11 @@ impl NamespaceCache {
     ) {
         let mut owner = self.owner();
         owner.values.retain(|n, _| named.contains(n));
-        owner
-            .values
-            .extend(values.into_iter().filter(|(n, _)| named.contains(n)));
+        let new = (values.into_iter())
+            .filter(|(n, _)| named.contains(n) && !owner.values.contains_key(n))
+            .map(|(n, value)| (n, owned(&value)))
+            .collect::<Vec<_>>();
+        owner.values.extend(new);
     }
 
     /// Register an open session at `version`; see [`Reader`].
@@ -485,7 +487,7 @@ impl NamespaceCache {
         let owner = self.owner();
         let current = owner.versions.get(&key.page).copied().unwrap_or(0);
         if owner.generation == key.generation && current == key.version {
-            self.shared.pages.insert(key, value);
+            self.shared.pages.insert(key, owned(&value));
         }
     }
 
@@ -552,6 +554,14 @@ impl Owner {
         self.versions.clear();
         self.epoch = None;
     }
+}
+
+/// `value` in an allocation of its own. A value read from the store can be
+/// a slice of a larger receive buffer (the Rust SDK's eager state is slices
+/// of the invocation's start message), which the cache would otherwise keep
+/// whole, uncounted, for as long as it keeps the value.
+fn owned(value: &Page) -> Page {
+    Page::copy_from_slice(value)
 }
 
 /// A random starting point for identities, leaving room to count up.

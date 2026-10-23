@@ -71,36 +71,32 @@ fn invalid(what: &str) -> io::Error {
 }
 
 /// The previous images a segment is compressed against: the latest image of
-/// each page in the log before it, by page id.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Chain {
-    pub images: Images,
-}
+/// each page in the log before it, by page id. The log's own images are its
+/// chain.
+pub(crate) type Chain = Images;
 
-impl Chain {
-    /// The dictionary of a segment of `file`'s `pages`: the previous image of
-    /// each one with an image, in order; where the log has none, the page of
-    /// the file's `base`, if any.
-    fn dictionary<'a>(
-        &self,
-        file: u32,
-        pages: impl Iterator<Item = &'a (u64, bool)>,
-        base: Option<&dyn Base>,
-    ) -> Vec<u8> {
-        let mut out = Vec::new();
-        for (index, _) in pages.filter(|(_, image)| *image) {
-            match self.images.get(&page_id(file, *index)) {
-                Some(Some(previous)) => out.extend_from_slice(previous),
-                // A hole of a file with a base is its base's page.
-                Some(None) | None => {
-                    if let Some(page) = base.and_then(|base| base.page(*index)) {
-                        out.extend_from_slice(page);
-                    }
+/// The dictionary of a segment of `file`'s `pages` after `chain`: the
+/// previous image of each one with an image, in order; where the log has
+/// none, the page of the file's `base`, if any.
+fn dictionary<'a>(
+    chain: &Chain,
+    file: u32,
+    pages: impl Iterator<Item = &'a (u64, bool)>,
+    base: Option<&dyn Base>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (index, _) in pages.filter(|(_, image)| *image) {
+        match chain.get(&page_id(file, *index)) {
+            Some(Some(previous)) => out.extend_from_slice(previous),
+            // A hole of a file with a base is its base's page.
+            Some(None) | None => {
+                if let Some(page) = base.and_then(|base| base.page(*index)) {
+                    out.extend_from_slice(page);
                 }
             }
         }
-        out
     }
+    out
 }
 
 /// What a paged file's absent pages hold: a golden image it diverges from (a
@@ -190,7 +186,7 @@ fn encode_segment(
         .copied()
         .collect();
     if !raw.is_empty() {
-        let dictionary = chain.dictionary(file, pages.iter(), base);
+        let dictionary = dictionary(chain, file, pages.iter(), base);
         zstd::compress(&raw, &dictionary, true, |frame| {
             out.reserve_exact(frame.len());
             out.extend_from_slice(frame);
@@ -246,7 +242,7 @@ pub(crate) fn decode_segment(
         images.extend(pages.iter().map(|&(index, _)| (page_id(file, index), None)));
         return Ok(images);
     }
-    let dictionary = chain.dictionary(file, pages.iter(), base);
+    let dictionary = dictionary(chain, file, pages.iter(), base);
     let mut raw = Vec::with_capacity(count * PAGE_SIZE);
     zstd::decompress(&mut raw, &bytes[at..], &dictionary)
         .map_err(|_| invalid("log segment images"))?;
@@ -748,12 +744,11 @@ fn put_part(out: &mut Vec<u8>, part: &Part) {
 pub(crate) struct Log {
     /// Committed transactions in the log.
     pub transactions: usize,
-    /// Latest committed image of every page the log changes.
+    /// Latest committed image of every page the log changes: what the next
+    /// transaction is compressed against.
     pub images: Images,
     /// Encoded bytes of the log's segments.
     pub bytes: usize,
-    /// What the next transaction is compressed against.
-    pub chain: Chain,
     /// The segments of each file with a base not yet given, in log order:
     /// they decode against it, once it is (see [`Self::decode_file`]).
     pub undecoded: BTreeMap<u32, Vec<Bytes>>,
@@ -765,7 +760,6 @@ impl Log {
             transactions: 0,
             images: Images::new(),
             bytes: 0,
-            chain: Chain::default(),
             undecoded: BTreeMap::new(),
         }
     }
@@ -799,13 +793,10 @@ impl Log {
         let mut chain = Chain::default();
         for segment in &segments {
             let images = decode_segment(segment, &chain, file, Some(base))?;
-            chain.images.extend(images);
+            chain.extend(images);
         }
-        for (page, image) in chain.images {
-            if let std::collections::btree_map::Entry::Vacant(entry) = self.images.entry(page) {
-                entry.insert(image.clone());
-                self.chain.images.insert(page, image);
-            }
+        for (page, image) in chain {
+            self.images.entry(page).or_insert(image);
         }
         Ok(())
     }
@@ -813,7 +804,6 @@ impl Log {
     /// Add a committed transaction.
     pub(crate) fn append(&mut self, images: Images, bytes: usize) {
         self.transactions += 1;
-        self.chain.images.extend(images.clone());
         self.images.extend(images);
         self.bytes += bytes;
     }
@@ -885,7 +875,7 @@ pub(crate) async fn replay(
                     continue;
                 }
                 // The parts of a transaction decode against the log before it.
-                images.extend(decode_segment(&segment, &log.chain, change.file, None)?);
+                images.extend(decode_segment(&segment, &log.images, change.file, None)?);
             }
         }
         log.append(images, bytes);

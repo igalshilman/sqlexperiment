@@ -668,7 +668,7 @@ impl Snapshot {
             sizes.insert(id, size);
         }
         let bases = self.bases(&commit);
-        let mut segments = log::encode_transaction(&images, &self.log.chain, &bases)?;
+        let mut segments = log::encode_transaction(&images, &self.log.images, &bases)?;
         let logged_bytes = segments.values().flatten().map(Bytes::len).sum::<usize>();
         // Stored values this record names, for the cache.
         let mut named = log::Values::new();

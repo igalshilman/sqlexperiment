@@ -102,7 +102,7 @@ impl Known {
                     images.extend(decoded.ok()?);
                 }
             }
-            chain.images.extend(images.clone());
+            chain.extend(images.clone());
             transactions.push(images);
         }
         Some(transactions)

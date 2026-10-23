@@ -25,7 +25,7 @@ fn varied(seed: u64, n: usize) -> Page {
 }
 
 fn chain(images: Images) -> Chain {
-    Chain { images }
+    images
 }
 
 /// The segments of a transaction of file 0, whose page ids are its page
@@ -105,7 +105,7 @@ fn segments_compress_against_the_previous_images() -> io::Result<()> {
 
     // Another previous image, or none, fails the frame's checksum.
     let mut other = previous.clone();
-    other.images.insert(1, Some(varied(2, 0)));
+    other.insert(1, Some(varied(2, 0)));
     assert!(decode_segment(&segments[0], &other).is_err());
     assert!(decode_segment(&segments[0], &Chain::default()).is_err());
     Ok(())
@@ -270,11 +270,11 @@ fn replay_reads_stored_values() -> io::Result<()> {
         let second = Images::from([(0, Some(varied(3, 30))), (1, Some(image(4)))]);
         let third = Images::from([(1, Some(varied(4, 9)))]);
         let mut log = Log::new();
-        let inline = encode_transaction(&first, &log.chain)?;
+        let inline = encode_transaction(&first, &log.images)?;
         log.append(first, 0);
-        let sealed = encode_transaction(&second, &log.chain)?;
+        let sealed = encode_transaction(&second, &log.images)?;
         log.append(second.clone(), 0);
-        let last = encode_transaction(&third, &log.chain)?;
+        let last = encode_transaction(&third, &log.images)?;
         // The second transaction sealed with the third, into one value.
         let value = stored_value(&[sealed[0].clone(), last[0].clone()]);
         store.put(&log_key(5), value.clone())?;
