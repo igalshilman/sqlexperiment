@@ -25,4 +25,7 @@ export { call, send, signal, subagent, tool, workflow, type Tool, type ToolCall,
  * them (the `signals` object).
  */
 export const serve = (...services: restate.ServeOptions['services']) =>
-  restate.serve({ services: [...services, signals], port: Number(process.env.PORT ?? 9080) });
+  restate.serve({
+    services: [...services.filter((s) => s !== signals), signals],
+    port: Number(process.env.PORT ?? 9080),
+  });

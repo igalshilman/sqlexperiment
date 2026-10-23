@@ -51,9 +51,13 @@ METADATA = {
     "dev.restate.tooling.journal.hidden.name.prefix": "v15/",
 }
 
-# Each attempt resumes from the database, so a failed one is retried soon, and without end.
+# Each attempt resumes from the database, so a failed one is retried for weeks: soon after a crash, then twice as
+# long each time, up to 10 seconds apart (a provider's rate limit, say, is not asked again twice a second).
 RETRY_POLICY = InvocationRetryPolicy(
-    initial_interval=timedelta(milliseconds=50), max_interval=timedelta(milliseconds=500), max_attempts=100_000
+    initial_interval=timedelta(milliseconds=50),
+    exponentiation_factor=2,
+    max_interval=timedelta(seconds=10),
+    max_attempts=100_000,
 )
 
 

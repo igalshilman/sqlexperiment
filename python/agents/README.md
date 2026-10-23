@@ -91,6 +91,10 @@ async def summarize(ctx, topic: str) -> str:
     return await claude.prompt(ctx, f"Summarize what we said about {topic}")
 ```
 
+Prompts are numbered in the order they are made, so a handler makes them one
+after another: prompts made at once (`asyncio.gather`) may be numbered
+differently in a retried attempt, and take each other's answers.
+
 `claude.compact(ctx, instructions)` summarizes the conversation in place of
 it, to keep the model's context short, and returns the summary; and
 `claude.reset(ctx, handoff)` starts it over, with a note to carry on from,
@@ -614,9 +618,10 @@ and Reject, Steer and Stop.
 ## Handlers of your own
 
 An agent is a virtual object with a SQL database of its own, `ctx.db`, one
-per key: `restate_fns.VirtualObject`, retries up to
-100,000 times, 50 to 500 ms apart (each attempt resumes from the database),
-and the SQL storage hidden from the journal in Restate's UI.
+per key: `restate_fns.VirtualObject`, retries for weeks (50 ms after a
+crash, then twice as long each time, up to 10 s apart), since each attempt
+resumes from the database, and the SQL storage hidden from the journal in
+Restate's UI.
 `@assistant.handler` adds a handler, which takes `ctx`, then its input: one
 parameter, or several, which a JSON object gives by name
 ([`examples-python/memory.py`](../../examples-python/memory.py)). With
