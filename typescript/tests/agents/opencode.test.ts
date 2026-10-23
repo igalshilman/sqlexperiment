@@ -27,6 +27,20 @@ vi.mock('restate-agents/opencode/db', async (original) => {
 vi.stubEnv('MODEL', 'teller/teller');
 
 describe('the OpenCode agent', () => {
+  it('boots beside tables of yours, in a database of its own', async () => {
+    // Tables of yours before OpenCode's first boot, one of them named as OpenCode's.
+    const yours = async (ctx: Parameters<typeof prompt>[0], message: string) => {
+      await ctx.db.execute('CREATE TABLE IF NOT EXISTS session (id TEXT)');
+      return prompt(ctx, message);
+    };
+    const c = conversation(yours, 'tables');
+    expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toMatch(/^Done: /);
+    const names = await c.read(async (ctx) =>
+      (await ctx.db.query("SELECT name FROM sqlite_schema WHERE type = 'table'")).map(([name]) => name),
+    );
+    expect(names.filter((name) => !String(name).startsWith('restate_'))).toEqual(['session']);
+  }, 60_000);
+
   it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
     const now = await cancelledWhileWorking((tools) => opencode.chat({ tools }), opencode.messages());
     const waiting = await afterCancel(opencode.chat({ tools: [cancelledTransfer] }), opencode.messages());

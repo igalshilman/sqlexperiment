@@ -1,5 +1,5 @@
 // OpenCode 2.0 agents in Restate virtual objects: OpenCode for each
-// invocation, with its database in the object's database.
+// invocation, with its database in the object's state.
 //
 //   const coder = opencode.agent({ name: 'coder', workspace: (ctx) => `/work/${ctx.key}` });
 //
@@ -14,9 +14,12 @@
 // which OpenCode's own providers serve, with the provider's API key (such as
 // ANTHROPIC_API_KEY).
 //
-// It runs `work` over `ctx.db`: OpenCode's tables are the object's
-// database (db.ts), and each OpenCode transaction is an SQL
-// transaction in it, stored in order with everything else the handler does.
+// It runs `work` over a database of the key's own, beside `ctx.db`
+// (`databaseOf`): OpenCode's tables are alone there (db.ts), as OpenCode
+// boots only on a database that is empty or its own, and each OpenCode
+// transaction is an SQL transaction in it, stored in order with everything
+// else the handler does. `ctx.db` keeps the conversation's log, and the
+// tables of yours.
 // OpenCode is booted with `plugins` and a plugin of the `tools`, and closed at
 // the end.
 //
@@ -33,6 +36,7 @@
 // to the model: from then on the attempt stores nothing (its fence closes),
 // and the next attempt finds the call interrupted.
 import * as restate from 'restate-fns';
+import { databaseOf } from 'restate-fns/internal';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
@@ -89,6 +93,9 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): OpenCodeTool => ({
 
 /** The session every prompt goes to. */
 const SESSION = 'ses_root';
+
+/** The key's database where OpenCode's tables are, apart from `ctx.db`. */
+const DATABASE = 'restate-agents.opencode';
 
 /** What `work` gets: `prompt(text)`, and the OpenCode `host` for anything else. */
 export interface OpenCodeSession {
@@ -426,7 +433,7 @@ export const withOpenCode = async <T>(
     },
     has: (id) => inSession(host, messageIdOf(id)),
   };
-  const host = await openOpenCode(ctx.db, fence, {
+  const host = await openOpenCode(databaseOf(ctx.db, DATABASE), fence, {
     plugins: [
       ...plugins,
       steeringPlugin(ctx, steerable, fail),
