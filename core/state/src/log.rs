@@ -34,6 +34,7 @@ use crate::{
     format::{COMMIT_MAGIC, LOG_MAGIC, log_key},
     kv::KvStore,
     page_codec::Page,
+    zstd,
 };
 use bytes::Bytes;
 use futures::future::try_join_all;
@@ -41,7 +42,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io,
 };
-use zstd_safe::{CCtx, CParameter, DCtx};
 
 /// Largest segment.
 pub const MAX_SEGMENT_BYTES: usize = 1024 * 1024;
@@ -57,7 +57,6 @@ pub const MAX_NAME_BYTES: usize = 255;
 /// Most files and records a commit record may name.
 pub(crate) const MAX_FILES: u32 = 1 << 16;
 const MAGIC: usize = 4;
-const ZSTD_LEVEL: i32 = 3;
 /// Largest version, epoch or segment number a stored record may name, far
 /// from overflow.
 pub(crate) const MAX_SEQUENCE: u64 = 1 << 62;
@@ -172,7 +171,6 @@ fn encode_segment(
     chain: &Chain,
     base: Option<&dyn Base>,
 ) -> io::Result<Vec<u8>> {
-    let zstd = |e: zstd_safe::ErrorCode| io::Error::other(zstd_safe::get_error_name(e));
     let pages: Vec<(u64, bool)> = entries
         .iter()
         .map(|(index, image)| (*index, image.is_some()))
@@ -193,15 +191,10 @@ fn encode_segment(
         .collect();
     if !raw.is_empty() {
         let dictionary = chain.dictionary(file, pages.iter(), base);
-        let mut frame = Vec::with_capacity(zstd_safe::compress_bound(raw.len()));
-        let mut cctx = CCtx::create();
-        cctx.set_parameter(CParameter::CompressionLevel(ZSTD_LEVEL))
-            .map_err(zstd)?;
-        cctx.set_parameter(CParameter::ChecksumFlag(true))
-            .map_err(zstd)?;
-        cctx.ref_prefix(&dictionary).map_err(zstd)?;
-        cctx.compress2(&mut frame, &raw).map_err(zstd)?;
-        out.extend_from_slice(&frame);
+        zstd::compress(&raw, &dictionary, true, |frame| {
+            out.reserve_exact(frame.len());
+            out.extend_from_slice(frame);
+        })?;
     }
     debug_assert!(out.len() + MAGIC <= MAX_SEGMENT_BYTES);
     Ok(out)
@@ -255,9 +248,7 @@ pub(crate) fn decode_segment(
     }
     let dictionary = chain.dictionary(file, pages.iter(), base);
     let mut raw = Vec::with_capacity(count * PAGE_SIZE);
-    let mut dctx = DCtx::create();
-    dctx.ref_prefix(&dictionary)
-        .and_then(|_| dctx.decompress(&mut raw, &bytes[at..]))
+    zstd::decompress(&mut raw, &bytes[at..], &dictionary)
         .map_err(|_| invalid("log segment images"))?;
     if raw.len() != count * PAGE_SIZE {
         return Err(invalid("log segment images"));

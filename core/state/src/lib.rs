@@ -106,6 +106,7 @@ pub mod page_codec;
 #[cfg(feature = "simulation")]
 pub mod simulation;
 mod snapshot;
+mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
 

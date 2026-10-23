@@ -17,16 +17,8 @@
 //! Bounds, tag, logical size and LZ4 expansion are validated before a decoded
 //! page is used or cached. A valid-looking bit change can remain undetected:
 //! there is no checksum or corruption repair.
-use crate::PAGE_SIZE;
-use std::cell::RefCell;
+use crate::{PAGE_SIZE, zstd};
 use std::io;
-use zstd_safe::{CCtx, DCtx};
-
-thread_local! {
-    // A zstd context costs more to set up than a page to code: one per thread.
-    static ZSTD_C: RefCell<CCtx<'static>> = RefCell::new(CCtx::create());
-    static ZSTD_D: RefCell<DCtx<'static>> = RefCell::new(DCtx::create());
-}
 
 const HEADER: usize = 3;
 /// A page held in memory, encoded or decoded, shared without copying.
@@ -47,33 +39,28 @@ pub enum PageCompression {
     Zstd,
 }
 
-const ZSTD_LEVEL: i32 = 3;
-
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 /// Encode a page under `policy`: tag 0 (raw), 1 (LZ4) or 2 (zstd), whichever
-/// of raw and the policy's is smaller.
+/// of raw and the policy's is smaller. Only the result allocates.
 pub fn encode(page: &[u8], policy: PageCompression) -> io::Result<Vec<u8>> {
     if page.len() != PAGE_SIZE {
         return Err(invalid("invalid logical page length"));
     }
+    let smaller = |tag, payload: &[u8]| (payload.len() < PAGE_SIZE).then(|| envelope(tag, payload));
     let compressed = match policy {
         PageCompression::Raw => None,
-        PageCompression::Lz4 => Some((1, lz4_flex::block::compress(page))),
-        PageCompression::Zstd => {
-            let mut frame = Vec::with_capacity(zstd_safe::compress_bound(PAGE_SIZE));
-            ZSTD_C
-                .with_borrow_mut(|cctx| cctx.compress(&mut frame, page, ZSTD_LEVEL))
-                .map_err(|e| io::Error::other(zstd_safe::get_error_name(e)))?;
-            Some((2, frame))
+        PageCompression::Lz4 => {
+            let mut block = [0; lz4_flex::block::get_maximum_output_size(PAGE_SIZE)];
+            let len = lz4_flex::block::compress_into(page, &mut block)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            smaller(1, &block[..len])
         }
+        PageCompression::Zstd => zstd::compress(page, &[], false, |frame| smaller(2, frame))?,
     };
-    Ok(match &compressed {
-        Some((tag, bytes)) if bytes.len() < PAGE_SIZE => envelope(*tag, bytes),
-        _ => envelope(0, page),
-    })
+    Ok(compressed.unwrap_or_else(|| envelope(0, page)))
 }
 
 /// `payload` behind the header: `tag` and the logical size.
@@ -109,16 +96,10 @@ pub(crate) fn encode_against(
     if policy == PageCompression::Raw || base.len() != PAGE_SIZE {
         return Ok(own);
     }
-    let mut frame = Vec::with_capacity(zstd_safe::compress_bound(PAGE_SIZE));
-    let mut cctx = CCtx::create();
-    cctx.set_parameter(zstd_safe::CParameter::CompressionLevel(ZSTD_LEVEL))
-        .and_then(|_| cctx.ref_prefix(base))
-        .and_then(|_| cctx.compress2(&mut frame, page))
-        .map_err(|e| io::Error::other(zstd_safe::get_error_name(e)))?;
-    if HEADER + frame.len() >= own.len() {
-        return Ok(own);
-    }
-    Ok(envelope(3, &frame))
+    let against = zstd::compress(page, base, false, |frame| {
+        (HEADER + frame.len() < own.len()).then(|| envelope(3, frame))
+    })?;
+    Ok(against.unwrap_or(own))
 }
 
 /// [`decode_bytes`], for a page of a file whose base page is `base`: a page
@@ -130,9 +111,7 @@ pub(crate) fn decode_against(bytes: &bytes::Bytes, base: Option<&[u8]>) -> io::R
     let base = base.ok_or_else(|| invalid("a page encoded against a base, without it"))?;
     let (_, payload) = open_envelope(bytes)?;
     let mut page = Vec::with_capacity(PAGE_SIZE);
-    let mut dctx = DCtx::create();
-    dctx.ref_prefix(base)
-        .and_then(|_| dctx.decompress(&mut page, payload))
+    zstd::decompress(&mut page, payload, base)
         .map_err(|_| invalid("invalid zstd page against its base"))?;
     if page.len() != PAGE_SIZE {
         return Err(invalid("invalid zstd decoded length"));
@@ -163,10 +142,8 @@ pub(crate) fn decode_bytes(bytes: &bytes::Bytes) -> io::Result<Page> {
         }
         2 if !payload.is_empty() && payload.len() < PAGE_SIZE => {
             let mut page = Vec::with_capacity(PAGE_SIZE);
-            let decoded = ZSTD_D
-                .with_borrow_mut(|dctx| dctx.decompress(&mut page, payload))
-                .map_err(|_| invalid("invalid zstd page"))?;
-            if decoded != PAGE_SIZE {
+            zstd::decompress(&mut page, payload, &[]).map_err(|_| invalid("invalid zstd page"))?;
+            if page.len() != PAGE_SIZE {
                 return Err(invalid("invalid zstd decoded length"));
             }
             Ok(page.into())
