@@ -62,7 +62,7 @@ async def test_a_librarys_schema_is_ensured_where_it_is_used_beside_the_objects(
     host = FakeHost({}, f"{name}/alice")
 
     async def use(attempt):
-        await attempt.db.ensure(LIBRARY)
+        await LIBRARY.ensure(attempt.db)
         await attempt.db.execute("INSERT INTO library_items VALUES ('a')")
         return await attempt.db.query("SELECT name, version FROM restate_schema ORDER BY name")
 
@@ -71,7 +71,7 @@ async def test_a_librarys_schema_is_ensured_where_it_is_used_beside_the_objects(
     reader = FakeHost({}, f"{name}/bob", kind="shared")
 
     async def read(attempt):
-        await attempt.db.ensure(LIBRARY)
+        await LIBRARY.ensure(attempt.db)
         return await attempt.db.query("SELECT item FROM library_items")
 
     assert await run(reader, read) == []

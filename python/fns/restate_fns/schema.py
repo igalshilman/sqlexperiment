@@ -17,11 +17,12 @@ step of its own.
 A shared handler applies the steps its key's database lacks in its own
 session, which stores nothing, then reads: a key never written reads as
 empty tables. A library keeps its tables in a schema of its own name,
-which ``ctx.db.ensure(schema)`` applies where it uses them, in any object.
+which ``schema.ensure(ctx.db)`` applies where it uses them, in any object.
 """
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -42,6 +43,20 @@ class Schema:
     def __init__(self, name: str, steps: Sequence[Step]) -> None:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "steps", tuple(steps))
+
+    async def ensure(self, db: Any) -> None:
+        """
+        Apply the steps ``db`` lacks: a library's tables, where it uses them,
+        in any object. On a handler's ``ctx.db``, once per attempt, and a
+        shared handler's are its own, vanishing with its session.
+        """
+        session = sessions[db]() if db in sessions else None
+        await (session([self]) if session is not None else apply(db, [self]))
+
+
+# The handlers' sessions (``ctx.db``), each with how its attempt applies schemas: a weak method, so
+# that the attempt, which holds its session, is not kept alive by it.
+sessions: weakref.WeakKeyDictionary[Any, weakref.WeakMethod] = weakref.WeakKeyDictionary()
 
 
 # The schema of each object, by its name.
