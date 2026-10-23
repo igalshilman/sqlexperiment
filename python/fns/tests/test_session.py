@@ -38,10 +38,13 @@ class FakeHost:
     ``store`` stores the ones a crash keeps.
     """
 
-    def __init__(self, state: dict[str, bytes], name: str, kind: str | None = "exclusive") -> None:
+    def __init__(
+        self, state: dict[str, bytes], name: str, kind: str | None = "exclusive", invocation: str = "inv"
+    ) -> None:
         self.state = state
         self.name = name
         self.kind = kind
+        self.invocation = invocation
         # ("set", key, value), ("clear", key, None), ("sync", "", None) or
         # ("send", idempotency key, (target, parameter, delay)).
         self.log: list[tuple[str, str, Any]] = []
@@ -54,6 +57,10 @@ class FakeHost:
     @property
     def sql_namespace(self) -> str:
         return self.name
+
+    @property
+    def sql_invocation_id(self) -> str:
+        return self.invocation
 
     def sql_get(self, key: str):
         future = asyncio.get_running_loop().create_future()
@@ -145,10 +152,10 @@ async def run(host: FakeHost, body) -> Any:
     attempt = SqlAttempt(host)
     try:
         result = await body(attempt)
-    except BaseException:
-        await attempt.end(failed=True)
+    except BaseException as error:
+        await attempt.end(error)
         raise
-    await attempt.end(failed=False)
+    await attempt.end(None)
     return result
 
 
@@ -259,7 +266,7 @@ async def test_the_sends_of_a_commit_are_made_once_wherever_the_attempt_crashed(
     async with attempt.transaction() as t:
         await t.db.execute("INSERT INTO t VALUES(7)")
         t.tx.object_send(ship, "a", "apple")
-    await attempt.end(failed=False)
+    await attempt.end(None)
     assert len(crashed.sends()) == 1
 
     for n in range(len(crashed.log) + 1):
@@ -321,13 +328,13 @@ async def test_a_shared_handler_that_read_beside_a_commit_is_retried():
     await run(again, lambda a: a.db.execute("INSERT INTO t VALUES (1)"))
     state.update(again.store())
     with pytest.raises(RuntimeError, match="changed while this shared handler read it"):
-        await attempt.end(failed=False)
+        await attempt.end(None)
 
 
 async def test_the_session_is_closed_once_the_handler_ends():
     host = FakeHost({}, fresh())
     attempt = SqlAttempt(host)
     await attempt.db.query("SELECT 1")
-    await attempt.end(failed=False)
+    await attempt.end(None)
     with pytest.raises(RuntimeError, match="the handler has ended"):
         await attempt.db.query("SELECT 1")

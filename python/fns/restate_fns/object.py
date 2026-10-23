@@ -1,5 +1,6 @@
 """
-A virtual object whose handlers have SQL: ``ctx.db`` and ``ctx.transaction()``.
+A virtual object whose handlers have SQL: ``ctx.db``, ``ctx.transaction()``
+and ``ctx.step()``.
 
 Its handlers run with the SDK's explicit recovery instead of journal replay:
 each attempt gets an SQL session (session.py), and the selector (selector.py)
@@ -25,6 +26,8 @@ from restate_fns import schema as schemas
 from restate_fns import selector
 from restate_fns.schema import Step
 from restate_fns.session import SqlAttempt, SqlSession, SqlTransaction, sql_options
+
+T = typing.TypeVar("T")
 
 
 class ObjectContext(restate.ObjectContext):
@@ -57,6 +60,34 @@ class ObjectContext(restate.ObjectContext):
         It commits when the body ends, and rolls back when the body raises. A
         send made with ``t.tx`` is made once the transaction commits, and only
         then: exactly once, even if the attempt crashes after the commit.
+        """
+
+    @abc.abstractmethod
+    async def step(self, name: str, body: Callable[..., Awaitable[T]]) -> T:
+        """
+        Run ``body`` once for this invocation, as its step ``name``::
+
+            answer = await ctx.step("ask", lambda: model.ask(question))
+
+            async def charge(t: SqlTransaction) -> dict:
+                receipt = await payments.charge(order)
+                await t.db.execute("UPDATE orders SET paid = ? WHERE id = ?", [receipt["id"], order["id"]])
+                return receipt
+
+            receipt = await ctx.step("charge", charge)
+
+        A step is a transaction: ``body`` gets a ``SqlTransaction`` (if it
+        takes an argument), and its result (JSON) commits with its SQL and its
+        sends. A retried attempt that reaches the step gets the stored result,
+        and does not run ``body`` again; one that failed before the commit
+        runs it again. Use it for what should not be repeated, such as a
+        request to a model.
+
+        The transaction begins at the body's first statement, so steps that
+        run no SQL until the end run concurrently. A name is one step of the
+        invocation: one that runs several times (a loop) adds what tells them
+        apart. The steps are kept until the invocation ends: its result, or a
+        terminal error.
         """
 
 
@@ -126,8 +157,8 @@ class VirtualObject(restate.VirtualObject):
 
 def _with_database(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
     """
-    ``fn``, a handler without journal replay, with ``ctx.db`` and
-    ``ctx.transaction()``. A context that is not the SDK's, a test's, has
+    ``fn``, a handler without journal replay, with ``ctx.db``,
+    ``ctx.transaction()`` and ``ctx.step()``. A context that is not the SDK's, a test's, has
     them already.
     """
 
@@ -138,13 +169,14 @@ def _with_database(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable
         attempt = SqlAttempt(_ContextHost(ctx))
         ctx.db = attempt.db  # type: ignore[attr-defined]
         ctx.transaction = attempt.transaction  # type: ignore[attr-defined]
+        ctx.step = attempt.step  # type: ignore[attr-defined]
         ctx.awakeable = _no_awakeable  # type: ignore[method-assign]
         try:
             result = await fn(ctx, *args)
-        except BaseException:
-            await attempt.end(failed=True)
+        except BaseException as error:
+            await attempt.end(error)
             raise
-        await attempt.end(failed=False)
+        await attempt.end(None)
         return result
 
     return handler
@@ -178,6 +210,10 @@ class _ContextHost:
     @property
     def sql_namespace(self) -> str:
         return f"{self.context.handler.service_tag.name}/{self.context.key()}"
+
+    @property
+    def sql_invocation_id(self) -> str:
+        return self.context.request().id
 
     def sql_get(self, key: str) -> Awaitable[bytes | None]:
         # Each entry is named after its key, so that tooling can hide a

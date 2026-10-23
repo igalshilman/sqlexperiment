@@ -64,6 +64,19 @@ with the same storage, page cache and pending sends:
   `generic_send`): they are made once it commits, exactly once, even if the
   attempt crashes between the commit and the sends. It commits when the body
   ends and rolls back when it raises.
+- `await ctx.step(name, body)` runs `body` once for the invocation, such as a
+  request to a model: `await ctx.step("ask", lambda: model.ask(question))`. A
+  step is a transaction: `body` gets a `SqlTransaction` if it takes an
+  argument, and its result (JSON) commits with its SQL and sends. A retried
+  attempt that reaches the step gets the stored result without running
+  `body`; one that failed before the commit runs it again. The transaction
+  begins at the body's first statement, so steps that only make requests run
+  concurrently (`asyncio.gather`). A name is one step of the invocation (a
+  step in a loop adds what tells its runs apart, `f"ask {turn}"`); the steps
+  live in the table `restate_steps`, by the invocation's id, until the
+  invocation ends with its result or a terminal error, whose end drops the
+  table (an invocation killed without ending leaves its rows to the end of
+  the next one that uses the database). Exclusive handlers only.
 - An SQL error raises a `TerminalError` (its `__cause__` the SQL error), since
   a retry would repeat it; a storage error, which ends the session, is retried.
 - The attempt's session opens on first use and is saved when the handler
@@ -99,9 +112,10 @@ On a retried attempt, each operation the handler reaches happens again:
 | Operation                         | On a retried attempt                                                                                                                                    |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ctx.db`, `ctx.transaction()`     | Run again, against the state as stored: a handler makes itself idempotent with an id it is given, recorded with its writes                              |
+| `ctx.step()`                      | Returns the result a previous attempt committed, without running its body; runs it if none did                                                          |
 | Calls and sends                   | New ones, unless they have an idempotency key that is the same on every attempt, such as `f"{ctx.request().id}:reserve"`: then they reach the first one |
 | `ctx.get`, `ctx.set`, `ctx.clear` | Read the state as stored; writes are ordered, and a lost one takes the later commands with it                                                           |
-| `ctx.run`, `ctx.run_typed`        | Run their action again: the result is not kept from one attempt to the next. (The store uses an empty run, to sync.)                                    |
+| `ctx.run`, `ctx.run_typed`        | Run their action again: the result is not kept from one attempt to the next (use `ctx.step` for that). (The store uses an empty run, to sync.)          |
 | `ctx.sleep`                       | Starts over: a sleep longer than the inactivity timeout never ends, as each resumption starts it again                                                  |
 | Awakeables                        | Refused, a `TerminalError`: use `ctx.signal`                                                                                                            |
 

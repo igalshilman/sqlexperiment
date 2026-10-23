@@ -47,6 +47,12 @@ def test_a_retried_attempt_runs_again_and_sees_the_commits_before_it():
     assert call(f"probe/{key()}/flaky") == (200, 3)
 
 
+def test_a_step_runs_once_and_the_invocations_end_drops_the_steps():
+    k = key()
+    assert call(f"probe/{k}/stepped") == (200, {"first": 1, "rows": 1, "tries": 2})
+    assert call(f"probe/{k}/has_steps") == (200, False)
+
+
 def test_a_suspended_handler_runs_again_and_attaches_to_its_call():
     started = time.monotonic()
     status, body = call(f"probe/{key()}/waits")

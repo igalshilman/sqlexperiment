@@ -1,8 +1,9 @@
 """
 An attempt's SQL session: ``ctx.db``, a database kept in the object's state,
-through the SQL extension, with no journal replay; and
-``ctx.transaction()``, one transaction of it with the sends it commits with.
-An attempt has one session, opened on first use and saved when the handler
+through the SQL extension, with no journal replay; ``ctx.transaction()``, one
+transaction of it with the sends it commits with; and ``ctx.step(name,
+body)``, one whose result the invocation keeps across its attempts. An
+attempt has one session, opened on first use and saved when the handler
 ends. It needs of the handler's context what ``SqlHost`` lists (object.py
 gives it, over the SDK's context).
 """
@@ -12,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
+import inspect
 import json
 import typing
 import uuid
@@ -174,6 +177,11 @@ class SqlHost(Protocol):
     @property
     def sql_namespace(self) -> str:
         """The object's database's name: ``service/key``."""
+        ...
+
+    @property
+    def sql_invocation_id(self) -> str:
+        """The invocation's id (the request's): the same on every attempt."""
         ...
 
     def sql_get(self, key: str) -> Awaitable[bytes | None]:
@@ -352,6 +360,35 @@ class _Sends:
         return self._record(service, handler, arg, key, send_delay, idempotency_key, headers)
 
 
+# The steps of the invocation in flight: each step's result, by the
+# invocation's id and the step's name, committed with the step's transaction.
+# The object runs one exclusive invocation at a time, so once one ends, every
+# row belongs to an invocation that ended: the end of an invocation that ran
+# steps, or of the next one that uses the database after a killed invocation
+# left rows, drops the table. It exists only while an invocation that ran
+# steps is in flight.
+
+_STEPS = "restate_steps"
+
+
+def _encode_step(value: Any) -> str | None:
+    """A step's result as stored: JSON, or NULL for None."""
+    return None if value is None else json.dumps(value)
+
+
+def _decode_step(value: Any) -> Any:
+    return None if value is None else json.loads(value)
+
+
+_in_body: contextvars.ContextVar[SqlAttempt | None] = contextvars.ContextVar("restate_fns_step", default=None)
+"""
+The attempt whose step body runs: a call to its session from inside the body
+would wait for the step's transaction, which waits for the body.
+"""
+
+_NESTED = "inside a transaction, use the transaction handle its body gets"
+
+
 def _reraise(error: BaseException, classify: Callable[[BaseException], BaseException]) -> typing.NoReturn:
     """Raise what ``error`` fails with, as ``classify`` says."""
     classified = classify(error)
@@ -390,7 +427,7 @@ class _Session:
         self._attempt = attempt
 
     async def _view(self) -> _View:
-        return _View(await self._attempt.open(), self._attempt.classify)
+        return _View(await self._attempt.use(), self._attempt.classify)
 
     async def query(self, sql: str, params: Sequence[Any] | None = None) -> Rows:
         return await (await self._view()).query(sql, params)
@@ -406,7 +443,7 @@ class _Session:
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[SqlDatabase]:
-        db = await self._attempt.open()
+        db = await self._attempt.use()
         async with self._attempt.transaction_of(db) as (tx, _):
             yield tx
 
@@ -429,6 +466,10 @@ class SqlAttempt:
         self._made: set[str] = set()
         # The schemas this attempt's database has all the steps of.
         self._ensured: set[str] = set()
+        # The names of the invocation's steps this attempt runs or ran: a name is one step.
+        self._steps: set[str] = set()
+        # Whether the table of steps exists, once known.
+        self._steps_table: bool | None = None
         self.db: SqlSession = _Session(self)
         """``ctx.db``."""
         schemas.sessions[self.db] = weakref.WeakMethod(self.ensure)
@@ -499,7 +540,7 @@ class SqlAttempt:
         ``ctx.transaction()``: one transaction of the session, whose sends are
         made once it commits, and kept in the outbox until they are stored.
         """
-        db = await self.open()
+        db = await self.use()
         sends = _Sends()
         outgoing: dict[str, Any] | None = None
         try:
@@ -517,6 +558,117 @@ class SqlAttempt:
             sends.open = False
         if outgoing is not None:
             self._make(outgoing)
+
+    async def step(self, name: str, body: Callable[..., Awaitable[Out]]) -> Out:
+        """
+        ``ctx.step(name, body)``: ``body`` as a transaction whose result
+        commits with it, as the invocation's step ``name``. A later attempt of
+        the invocation gets the result, without running ``body`` again.
+        """
+        if self._reader():
+            raise TerminalError("ctx.step is for exclusive handlers")
+        if name in self._steps:
+            raise TerminalError(f"ctx.step: the invocation has a step {name!r} already")
+        self._steps.add(name)
+        try:
+            db = await self.use()
+            invocation = self._host.sql_invocation_id
+            if await self._has_steps(db):
+                done = await _View(db, self.classify).query(
+                    f"SELECT value FROM {_STEPS} WHERE invocation = ? AND name = ?", [invocation, name]
+                )
+                if done:
+                    return _decode_step(done[0][0])
+            return await self._commit_step(db, invocation, name, body)
+        except BaseException:
+            # Not committed: the name is free for another try.
+            self._steps.discard(name)
+            raise
+
+    async def _commit_step(self, db: Any, invocation: str, name: str, body: Callable[..., Awaitable[Out]]) -> Out:
+        """
+        ``body``, its result and its sends committed in one transaction, which
+        begins at the body's first statement (or once it returns, if it runs
+        none): until then the session is free, and other calls go first.
+        """
+        loop = asyncio.get_running_loop()
+        sends = _Sends()
+        outcome: asyncio.Future[Any] = loop.create_future()
+        begun: asyncio.Future[SqlDatabase] = loop.create_future()
+        committed: asyncio.Task[tuple[Any, dict[str, Any] | None]] | None = None
+
+        async def transaction() -> tuple[Any, dict[str, Any] | None]:
+            async with self.transaction_of(db) as (sql, tx):
+                begun.set_result(sql)
+                value = await outcome
+                if not self._steps_table:
+                    await sql.execute(
+                        f"CREATE TABLE IF NOT EXISTS {_STEPS} (invocation TEXT NOT NULL, name TEXT NOT NULL,"
+                        " value TEXT, PRIMARY KEY (invocation, name))"
+                    )
+                await sql.execute(f"INSERT INTO {_STEPS} VALUES (?, ?, ?)", [invocation, name, _encode_step(value)])
+                # The outbox as committed, but the sends stored since, and this step's.
+                outbox = await self._unstored(db)
+                outgoing = {"id": uuid.uuid4().hex, "sends": sends.recorded} if sends.recorded else None
+                if outgoing is not None:
+                    outbox.append(outgoing)
+                tx.commit_effects(_encode_outbox(outbox))
+            return value, outgoing
+
+        def failed(task: asyncio.Task[Any]) -> None:
+            if not begun.done():
+                begun.set_exception(task.exception() or asyncio.CancelledError())
+
+        async def begin() -> SqlDatabase:
+            nonlocal committed
+            if committed is None:
+                committed = asyncio.ensure_future(transaction(), loop=loop)
+                committed.add_done_callback(failed)
+            return await asyncio.shield(begun)
+
+        async def statement(method: str, sql: str, params: Sequence[Any] | None) -> Any:
+            return await getattr(await begin(), method)(sql, params)
+
+        class _Lazy:
+            async def query(self, sql: str, params: Sequence[Any] | None = None) -> Rows:
+                return await statement("query", sql, params)
+
+            async def query_columns(self, sql: str, params: Sequence[Any] | None = None) -> tuple[list[str], Rows]:
+                return await statement("query_columns", sql, params)
+
+            async def execute(self, sql: str, params: Sequence[Any] | None = None) -> None:
+                await statement("execute", sql, params)
+
+        token = _in_body.set(self)
+        try:
+            t = SqlTransaction(db=_Lazy(), tx=sends)
+            value = await (body(t) if inspect.signature(body).parameters else body())
+            outcome.set_result(value)
+        except BaseException as error:
+            sends.open = False
+            if committed is None:
+                # A body that ran no SQL has no transaction to roll back.
+                raise
+            outcome.set_exception(error)
+        finally:
+            _in_body.reset(token)
+            sends.open = False
+        await begin()
+        assert committed is not None
+        value, outgoing = await committed
+        self._steps_table = True
+        if outgoing is not None:
+            self._make(outgoing)
+        return value
+
+    async def _has_steps(self, db: Any) -> bool:
+        """Whether the table of steps exists."""
+        if self._steps_table is None:
+            rows = await _View(db, self.classify).query(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?", [_STEPS]
+            )
+            self._steps_table = bool(rows)
+        return self._steps_table
 
     def _make(self, outgoing: dict[str, Any]) -> None:
         """
@@ -543,16 +695,28 @@ class SqlAttempt:
         """
         return [outgoing for outgoing in _decode_outbox(await db.effects()) if outgoing["id"] not in self._made]
 
-    async def _flush(self, db: Any) -> None:
+    async def _flush(self, db: Any, keep_steps: bool) -> None:
         """
         Empty the outbox, so that a later open does not make its sends again:
-        a commit after them, which stores them first.
+        a commit after them, which stores them first. Unless ``keep_steps``,
+        the same commit drops the table of steps: the invocation ends.
         """
-        if not await db.effects():
+        sending = bool(await db.effects())
+        dropping = not keep_steps and await self._has_steps(db)
+        if not sending and not dropping:
             return
         outbox = _encode_outbox(await self._unstored(db))
         async with db.transaction() as tx:
+            if dropping:
+                await tx.execute(f"DROP TABLE {_STEPS}")
             tx.commit_effects(outbox)
+        self._steps_table = False
+
+    async def use(self) -> Any:
+        """The session, for a call that is not from inside a step's body."""
+        if _in_body.get() is self:
+            raise TerminalError(_NESTED)
+        return await self.open()
 
     async def open(self) -> Any:
         """The session, opened on the first call."""
@@ -607,11 +771,15 @@ class SqlAttempt:
             raise
         return db
 
-    async def end(self, failed: bool) -> None:
+    async def end(self, error: BaseException | None) -> None:
         """
-        The handler ended (``failed``, or not): the outbox is emptied, and the
-        session is saved. One that a storage error ended closes now.
+        The handler ended, with ``error`` or not: the outbox is emptied, and
+        the session is saved. One that a storage error ended closes now.
+        Restate retries an error that is not terminal: the invocation goes on,
+        and keeps its steps.
         """
+        failed = error is not None
+        keep_steps = failed and not isinstance(error, TerminalError)
         self._ended = True
         if self._session is None:
             return
@@ -633,14 +801,14 @@ class SqlAttempt:
             return
         try:
             if db.is_usable():
-                await self._flush(db)
+                await self._flush(db, keep_steps)
                 await db.save()
             else:
                 await db.close()
-        except BaseException as error:  # pylint: disable=broad-exception-caught
+        except BaseException as saving:  # pylint: disable=broad-exception-caught
             if not failed:
-                if isinstance(error, Exception):
-                    _reraise(error, self.classify)
+                if isinstance(saving, Exception):
+                    _reraise(saving, self.classify)
                 raise
             # The handler's error stands: what it committed is stored, and an
             # outbox left full is made again by the next open.

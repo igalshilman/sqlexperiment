@@ -50,7 +50,7 @@ from restate_agents import (  # noqa: E402
     workflow,
 )
 from restate_agents.langgraph import nodes  # noqa: E402
-from restate_fns import Context, ObjectContext, WorkflowContext  # noqa: E402
+from restate_fns import Context, ObjectContext, SqlTransaction, WorkflowContext  # noqa: E402
 from scripted_agent import teller  # noqa: E402
 
 echo = restate.Service("echo")
@@ -81,6 +81,32 @@ async def flaky(ctx: ObjectContext) -> int:
     if attempts < 3:
         raise RuntimeError(f"attempt {attempts}: once more")
     return attempts
+
+
+@probe.handler()
+async def stepped(ctx: ObjectContext) -> dict:
+    """A step commits once: the retried attempt gets its result, and its SQL is there once."""
+
+    async def first(t: SqlTransaction) -> int:
+        await t.db.execute("CREATE TABLE IF NOT EXISTS stepped (id INTEGER PRIMARY KEY)")
+        await t.db.execute("INSERT INTO stepped DEFAULT VALUES")
+        [[rows]] = await t.db.query("SELECT count(*) FROM stepped")
+        return rows
+
+    attempt = await ctx.step("first", first)
+    [[rows]] = await ctx.db.query("SELECT count(*) FROM stepped")
+    await ctx.db.execute("CREATE TABLE IF NOT EXISTS tries (id INTEGER PRIMARY KEY)")
+    await ctx.db.execute("INSERT INTO tries DEFAULT VALUES")
+    [[tries]] = await ctx.db.query("SELECT count(*) FROM tries")
+    if tries < 2:
+        raise RuntimeError("once more")
+    return {"first": attempt, "rows": rows, "tries": tries}
+
+
+@probe.handler()
+async def has_steps(ctx: ObjectContext) -> bool:
+    """Whether the table of steps exists."""
+    return bool(await ctx.db.query("SELECT 1 FROM sqlite_schema WHERE name = 'restate_steps'"))
 
 
 @probe.handler()
