@@ -109,6 +109,21 @@ fn blocks(pos: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize, usiz
     })
 }
 
+/// A piece of a block a read returns: the block, the piece's offset in it,
+/// its offset in the engine's buffer, and its length.
+type Piece = (Page, usize, usize, usize);
+
+/// Copy `pieces` into the engine's `output`, zeros past them: the bytes read.
+fn fill(output: &mut [u8], pieces: &[Piece]) -> usize {
+    let mut count = 0;
+    for (block, start, done, len) in pieces {
+        output[*done..done + len].copy_from_slice(&block[*start..start + len]);
+        count = done + len;
+    }
+    output[count..].fill(0);
+    count
+}
+
 /// The session's private view: the engine's changes, indexed by `(file
 /// number, logical block number)` ([`DB`] or [`WAL`]). A missing entry falls
 /// through to the state's file for the database, and reads zeros for the
@@ -138,10 +153,12 @@ enum Operation {
         file: usize,
         pos: u64,
     },
+    /// The engine's buffers, held as it holds them until the write
+    /// completes, as an asynchronous kernel write would.
     Write {
         file: usize,
         pos: u64,
-        bytes: Vec<u8>,
+        buffers: Vec<Arc<Buffer>>,
     },
     Truncate {
         file: usize,
@@ -404,32 +421,36 @@ impl KvIo {
 
     /// Synchronous engine helpers may only consume data already in this view.
     /// A cache miss never starts or polls a backend request from `IO::step`.
-    fn read_resident(&self, file: usize, pos: u64, output: &mut [u8]) -> Option<usize> {
-        let count = self.readable(file, pos, output);
-        for (index, start, done, len) in blocks(pos, count) {
-            let block = self.resident_block(file, index)?;
-            output[done..done + len].copy_from_slice(&block[start..start + len]);
-        }
-        Some(count)
+    fn read_resident(&self, file: usize, pos: u64, len: usize) -> Option<Vec<Piece>> {
+        let count = self.readable(file, pos, len);
+        (blocks(pos, count))
+            .map(|(index, start, done, len)| {
+                Some((self.resident_block(file, index)?, start, done, len))
+            })
+            .collect()
     }
 
-    async fn read(&self, file: usize, pos: u64, output: &mut [u8]) -> io::Result<usize> {
-        let count = self.readable(file, pos, output);
+    /// The pieces of blocks a read of `len` bytes at `pos` returns, fetched
+    /// before the engine's buffer is written: a failed or cancelled read
+    /// leaves it untouched.
+    async fn read(&self, file: usize, pos: u64, len: usize) -> io::Result<Vec<Piece>> {
+        let count = self.readable(file, pos, len);
+        let mut pieces = Vec::with_capacity(count.div_ceil(BLOCK_SIZE) + 1);
         for (index, start, done, len) in blocks(pos, count) {
-            let block = self.block(file, index).await?;
-            output[done..done + len].copy_from_slice(&block[start..start + len]);
+            pieces.push((self.block(file, index).await?, start, done, len));
         }
-        Ok(count)
+        Ok(pieces)
     }
 
-    /// Zero `output` and return how many of its bytes lie inside the file.
-    fn readable(&self, file: usize, pos: u64, output: &mut [u8]) -> usize {
-        output.fill(0);
+    /// How many of `len` bytes at `pos` lie inside the file.
+    fn readable(&self, file: usize, pos: u64, len: usize) -> usize {
         let size = self.private.lock().unwrap().sizes[file];
-        size.saturating_sub(pos).min(output.len() as u64) as usize
+        size.saturating_sub(pos).min(len as u64) as usize
     }
 
-    async fn write(&self, file: usize, pos: u64, bytes: &[u8]) -> io::Result<usize> {
+    /// Write the engine's `buffers`, one after another, at `pos`.
+    async fn write(&self, file: usize, pos: u64, buffers: &[Arc<Buffer>]) -> io::Result<usize> {
+        let total: usize = buffers.iter().map(|buffer| buffer.len()).sum();
         // Count the blocks this write may add: one write can be a large batch.
         // Only the WAL's writes count: a checkpoint copies committed WAL
         // pages into the database's, which must not fail a flush.
@@ -438,15 +459,33 @@ impl KvIo {
             let private = self.private.lock().unwrap();
             (private.dirty.len() + private.flushed.len()) * BLOCK_SIZE
         };
-        if file == WAL && held + bytes.len() + 2 * BLOCK_SIZE > limit {
+        if file == WAL && held + total + 2 * BLOCK_SIZE > limit {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
                 "private changes exceed SqlOptions::max_private_bytes",
             ));
         }
         let end = pos
-            .checked_add(bytes.len() as u64)
+            .checked_add(total as u64)
             .ok_or_else(|| invalid("offset overflow"))?;
+        let mut at = pos;
+        for buffer in buffers {
+            self.write_blocks(file, at, buffer.as_slice()).await?;
+            at += buffer.len() as u64;
+        }
+        if total != 0 {
+            let mut private = self.private.lock().unwrap();
+            private.sizes[file] = private.sizes[file].max(end);
+            #[cfg(feature = "simulation")]
+            {
+                private.written[file] += total as u64;
+            }
+        }
+        Ok(total)
+    }
+
+    /// Write `bytes` at `pos` into the blocks they cover.
+    async fn write_blocks(&self, file: usize, pos: u64, bytes: &[u8]) -> io::Result<()> {
         for (index, start, done, len) in blocks(pos, bytes.len()) {
             let piece = &bytes[done..done + len];
             if len == BLOCK_SIZE {
@@ -476,15 +515,7 @@ impl KvIo {
                 .dirty
                 .insert((file, index), Some(page.freeze()));
         }
-        if !bytes.is_empty() {
-            let mut private = self.private.lock().unwrap();
-            private.sizes[file] = private.sizes[file].max(end);
-            #[cfg(feature = "simulation")]
-            {
-                private.written[file] += bytes.len() as u64;
-            }
-        }
-        Ok(bytes.len())
+        Ok(())
     }
 
     async fn truncate_file(&self, file: usize, len: u64) -> io::Result<()> {
@@ -583,17 +614,11 @@ impl KvIo {
             self.fault_point(fault_operation, false).await?;
             let result = match op {
                 Operation::Read { file, pos } => {
-                    // Keep the engine's buffer untouched across await and cancellation.
-                    let mut bytes = vec![0; completion.as_read().buf().len()];
-                    self.read(file, pos, &mut bytes).await.inspect(|_| {
-                        completion
-                            .as_read()
-                            .buf()
-                            .as_mut_slice()
-                            .copy_from_slice(&bytes)
-                    })
+                    let buffer = completion.as_read().buf();
+                    let pieces = self.read(file, pos, buffer.len()).await;
+                    pieces.map(|pieces| fill(buffer.as_mut_slice(), &pieces))
                 }
-                Operation::Write { file, pos, bytes } => self.write(file, pos, &bytes).await,
+                Operation::Write { file, pos, buffers } => self.write(file, pos, &buffers).await,
                 Operation::Truncate { file, len } => self.truncate_file(file, len).await.map(|_| 0),
                 Operation::Sync => Ok(0),
             };
@@ -731,17 +756,13 @@ impl IO for KvIo {
             }
             match op {
                 Operation::Read { file, pos } => {
-                    let mut bytes = vec![0; completion.as_read().buf().len()];
-                    let Some(n) = self.read_resident(file, pos, &mut bytes) else {
+                    let buffer = completion.as_read().buf();
+                    let Some(pieces) = self.read_resident(file, pos, buffer.len()) else {
                         return Err(self.engine_error(
                             "engine attempted synchronous I/O for a nonresident page",
                         ));
                     };
-                    completion
-                        .as_read()
-                        .buf()
-                        .as_mut_slice()
-                        .copy_from_slice(&bytes);
+                    let n = fill(buffer.as_mut_slice(), &pieces);
                     completion.complete(
                         i32::try_from(n).map_err(|_| self.engine_error("I/O too large"))?,
                     );
@@ -822,7 +843,7 @@ impl File for KvFile {
             Operation::Write {
                 file: self.file,
                 pos,
-                bytes: buffer.as_slice().to_vec(),
+                buffers: vec![buffer],
             },
             c,
         )
@@ -835,15 +856,11 @@ impl File for KvFile {
     ) -> turso_core::Result<Completion> {
         // One queued operation/completion: do not use the upstream default's
         // child-completion aggregation, which complicates error propagation.
-        let bytes = buffers
-            .iter()
-            .flat_map(|b| b.as_slice().iter().copied())
-            .collect();
         self.io.enqueue(
             Operation::Write {
                 file: self.file,
                 pos,
-                bytes,
+                buffers,
             },
             c,
         )
@@ -863,6 +880,12 @@ impl File for KvFile {
             c,
         )
     }
+}
+
+/// `bytes` as one engine buffer, for tests that write as the engine does.
+#[cfg(all(test, feature = "simulation"))]
+fn buffers(bytes: &[u8]) -> Vec<Arc<Buffer>> {
+    vec![Arc::new(Buffer::new(bytes.to_vec()))]
 }
 
 #[cfg(all(test, feature = "simulation"))]

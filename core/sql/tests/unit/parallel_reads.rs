@@ -60,13 +60,15 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
             };
             for _ in 0..2 {
                 let initial = KvIo::mount_with_options(base.clone(), all.clone()).await?;
-                initial.write(0, 0, &vec![7; 2 * BLOCK_SIZE]).await?;
+                initial
+                    .write(0, 0, &buffers(&vec![7; 2 * BLOCK_SIZE]))
+                    .await?;
                 initial.publish().await?;
             }
             // A third save checkpoints the second and empties the replayed log.
             let initial = KvIo::mount_with_options(base.clone(), all.clone()).await?;
             initial
-                .write(0, 2 * BLOCK_SIZE as u64, &vec![1; BLOCK_SIZE])
+                .write(0, 2 * BLOCK_SIZE as u64, &buffers(&vec![1; BLOCK_SIZE]))
                 .await?;
             initial.truncate_file(0, 2 * BLOCK_SIZE as u64).await?;
             initial.publish().await?;
