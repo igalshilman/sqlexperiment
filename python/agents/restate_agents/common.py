@@ -31,11 +31,12 @@ class MessageSerde(Serde[str]):
 @functools.cache
 def table_schema(table: str, create: str) -> Schema:
     """
-    The schema of an integration's table ``table``: one step, ``create``,
+    The schema of an integration's table ``table`` (``restate_<integration>_...``,
+    apart from the tables of yours), named after it: one step, ``create``,
     which ``ensure`` applies where the table is used (in any object; in a
     shared handler, in its own session, so an empty table reads as empty).
     """
-    return Schema(f"restate_agents.{table}", [create])
+    return Schema(table, [create])
 
 
 DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"

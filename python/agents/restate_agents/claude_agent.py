@@ -70,7 +70,7 @@ __all__ = ["CANCELLED", "DEFAULT_MODEL", "agent", "prompt", "reset"]
 SERVER = "restate"
 
 # The tables of the conversations, of their tool calls, and of Claude Code's sessions.
-PROMPTS, CALLS = "claude_agent_prompts", "claude_agent_calls"
+PROMPTS, CALLS = "restate_claude_agent_prompts", "restate_claude_agent_calls"
 
 # Claude Code's own tools that an agent with a workspace may use without asking.
 WORKSPACE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
@@ -185,7 +185,7 @@ async def reset(ctx: Any, handoff: str | None = None, *, thread: str | None = No
 class _Threads:
     """Each conversation's Claude Code session, and the handoff its next message begins with, if any."""
 
-    TABLE = "claude_agent_threads"
+    TABLE = "restate_claude_agent_threads"
 
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -228,7 +228,7 @@ class _Store:
     project (Claude Code's working directory) does not key them.
     """
 
-    TABLE = "claude_agent_entries"
+    TABLE = "restate_claude_agent_entries"
 
     def __init__(self, db: Any, failed: Callable[[BaseException], None] = lambda error: None) -> None:
         self.db = db

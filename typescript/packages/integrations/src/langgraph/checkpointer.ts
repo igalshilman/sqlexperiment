@@ -3,15 +3,15 @@
 // and `transaction(body)`.
 //
 // Three tables, with values as LangGraph's serializer writes them:
-// - `langgraph_checkpoints`: each checkpoint, without its channel values.
-// - `langgraph_channel_values`: each channel's value at each version, stored when a
+// - `restate_langgraph_checkpoints`: each checkpoint, without its channel values.
+// - `restate_langgraph_channel_values`: each channel's value at each version, stored when a
 //   step changes it. A checkpoint's values are those at its channel versions,
 //   so a step stores only what it changed, not the whole state again (an
 //   agent's message list, say). Versions are unique, as in LangGraph's own
 //   savers (a count and a random part): a thread forked from an earlier
 //   checkpoint takes the same counts again, and its values must not replace
 //   those of the branch it forked from.
-// - `langgraph_writes`: the pending writes of each checkpoint's tasks.
+// - `restate_langgraph_writes`: the pending writes of each checkpoint's tasks.
 //
 // Each `put` and `putWrites` is one SQL transaction, so a step is stored whole,
 // in order with everything else the handler does. Operations run one at a
@@ -37,7 +37,7 @@ import type { SqlSession, SqlValue } from 'restate-fns';
 import { Schema } from 'restate-fns/internal';
 
 const SCHEMA = new Schema('restate-agents.langgraph', [
-  `CREATE TABLE langgraph_checkpoints (
+  `CREATE TABLE restate_langgraph_checkpoints (
     thread_id TEXT NOT NULL,
     checkpoint_ns TEXT NOT NULL,
     checkpoint_id TEXT NOT NULL,
@@ -47,7 +47,7 @@ const SCHEMA = new Schema('restate-agents.langgraph', [
     metadata BLOB NOT NULL,
     PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
   )`,
-  `CREATE TABLE langgraph_channel_values (
+  `CREATE TABLE restate_langgraph_channel_values (
     thread_id TEXT NOT NULL,
     checkpoint_ns TEXT NOT NULL,
     channel TEXT NOT NULL,
@@ -56,7 +56,7 @@ const SCHEMA = new Schema('restate-agents.langgraph', [
     value BLOB,
     PRIMARY KEY (thread_id, checkpoint_ns, channel, version)
   )`,
-  `CREATE TABLE langgraph_writes (
+  `CREATE TABLE restate_langgraph_writes (
     thread_id TEXT NOT NULL,
     checkpoint_ns TEXT NOT NULL,
     checkpoint_id TEXT NOT NULL,
@@ -138,7 +138,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     const values: Record<string, unknown> = {};
     if (versions.length === 0) return values;
     const rows = await this.#db.query(
-      `SELECT channel, type, value FROM langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND (${versions
+      `SELECT channel, type, value FROM restate_langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND (${versions
         .map(() => '(channel = ? AND version = ?)')
         .join(' OR ')})`,
       [threadId, ns, ...versions.flatMap(([channel, version]) => [channel, String(version)])],
@@ -164,7 +164,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     // writes of its parent.
     if (checkpoint.v < 4 && parentId !== null) await this.#migratePendingSends(checkpoint, threadId, ns, parentId);
     const writes = await this.#db.query(
-      'SELECT task_id, channel, type, value FROM langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? ORDER BY rowid',
+      'SELECT task_id, channel, type, value FROM restate_langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? ORDER BY rowid',
       [threadId, ns, checkpointId],
     );
     const config = (id: string) => ({ configurable: { thread_id: threadId, checkpoint_ns: ns, checkpoint_id: id } });
@@ -187,7 +187,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
 
   async #migratePendingSends(checkpoint: Checkpoint, threadId: string, ns: string, parentId: string) {
     const sends = await this.#db.query(
-      'SELECT type, value FROM langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? AND channel = ? ORDER BY rowid',
+      'SELECT type, value FROM restate_langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? AND channel = ? ORDER BY rowid',
       [threadId, ns, parentId, TASKS],
     );
     checkpoint.channel_values[TASKS] = await Promise.all(
@@ -203,11 +203,11 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
       const { thread_id, checkpoint_ns = '', checkpoint_id } = config.configurable ?? {};
       const rows = checkpoint_id
         ? await this.#db.query(
-            `SELECT ${COLUMNS} FROM langgraph_checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
+            `SELECT ${COLUMNS} FROM restate_langgraph_checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
             [thread_id, checkpoint_ns, checkpoint_id],
           )
         : await this.#db.query(
-            `SELECT ${COLUMNS} FROM langgraph_checkpoints WHERE thread_id = ? AND checkpoint_ns = ? ORDER BY checkpoint_id DESC LIMIT 1`,
+            `SELECT ${COLUMNS} FROM restate_langgraph_checkpoints WHERE thread_id = ? AND checkpoint_ns = ? ORDER BY checkpoint_id DESC LIMIT 1`,
             [thread_id, checkpoint_ns],
           );
       return rows.length === 0 ? undefined : this.#tuple(rows[0] as CheckpointRow);
@@ -233,7 +233,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
         params.push(value);
       }
       const rows = await this.#db.query(
-        `SELECT ${COLUMNS} FROM langgraph_checkpoints ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY checkpoint_id DESC`,
+        `SELECT ${COLUMNS} FROM restate_langgraph_checkpoints ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY checkpoint_id DESC`,
         params,
       );
       const wanted = Object.fromEntries(Object.entries(filter ?? {}).filter(([, value]) => value !== undefined));
@@ -271,19 +271,14 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
       await this.#db.transaction(async (tx) => {
         for (const row of changed) {
           await tx.execute(
-            'INSERT OR REPLACE INTO langgraph_channel_values (thread_id, checkpoint_ns, channel, version, type, value) VALUES (?, ?, ?, ?, ?, ?)',
+            'INSERT OR REPLACE INTO restate_langgraph_channel_values (thread_id, checkpoint_ns, channel, version, type, value) VALUES (?, ?, ?, ?, ?, ?)',
             [thread_id, checkpoint_ns, ...row],
           );
         }
-        await tx.execute(`INSERT OR REPLACE INTO langgraph_checkpoints (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)`, [
-          thread_id,
-          checkpoint_ns,
-          checkpoint.id,
-          parentId ?? null,
-          type,
-          stored,
-          metadataValue,
-        ]);
+        await tx.execute(
+          `INSERT OR REPLACE INTO restate_langgraph_checkpoints (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [thread_id, checkpoint_ns, checkpoint.id, parentId ?? null, type, stored, metadataValue],
+        );
       });
       return { configurable: { thread_id, checkpoint_ns, checkpoint_id: checkpoint.id } };
     });
@@ -314,7 +309,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
       await this.#db.transaction(async (tx) => {
         for (const row of rows) {
           await tx.execute(
-            `${verb} INTO langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `${verb} INTO restate_langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             row,
           );
         }
@@ -325,7 +320,11 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
   deleteThread(threadId: string): Promise<void> {
     return this.#serial(() =>
       this.#db.transaction(async (tx) => {
-        for (const table of ['langgraph_checkpoints', 'langgraph_channel_values', 'langgraph_writes']) {
+        for (const table of [
+          'restate_langgraph_checkpoints',
+          'restate_langgraph_channel_values',
+          'restate_langgraph_writes',
+        ]) {
           await tx.execute(`DELETE FROM ${table} WHERE thread_id = ?`, [threadId]);
         }
       }),

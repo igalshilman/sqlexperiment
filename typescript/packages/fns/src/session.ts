@@ -141,6 +141,16 @@ const refusedWrite = () => {
 };
 
 /**
+ * The keys of the database `name`, beside the object's own: each of the
+ * format's keys (`v15/commit`, `v15/page/...`) as `v15/<name>/commit`, under
+ * the format's prefix still, which tooling hides.
+ */
+const beside = (name: string) => (key: string) => {
+  const at = key.indexOf('/');
+  return `${key.slice(0, at)}/${name}/${key.slice(at + 1)}`;
+};
+
+/**
  * The object's state as an ordered store: `get` is a state get, `set` and
  * `clear` are state writes, which return at once and which the runtime
  * stores in order; `sync` is an empty `ctx.run`, acknowledged after the
@@ -148,16 +158,18 @@ const refusedWrite = () => {
  * rejects, so the session that made it ends instead of holding its lock for
  * the life of the process.
  */
-function objectStore(ctx: SqlHost, end: AttemptEnd): SqlStore {
+function objectStore(ctx: SqlHost, end: AttemptEnd, database: string | undefined): SqlStore {
+  const keyOf = database === undefined ? (key: string) => key : beside(database);
   // TODO: read with protocol v8's ephemeral get, left out of the journal, once
   // a Restate release ships v8 and the SDK lets a library make one (FUTURE.md
   // at the repository's root). Restate 1.8 negotiates v7 at most: a journaled get.
-  const get = async (key: string) => (await end.race(ctx.get(key, serde.binary, named(key)))) ?? undefined;
+  const get = async (key: string) =>
+    (await end.race(ctx.get(keyOf(key), serde.binary, named(keyOf(key))))) ?? undefined;
   if (ctx.shared) return { get, set: refusedWrite, clear: refusedWrite, sync: async () => {} };
   return {
     get,
-    set: (key, value) => ctx.set(key, value, serde.binary, named(key)),
-    clear: (key) => ctx.clear(key, named(key)),
+    set: (key, value) => ctx.set(keyOf(key), value, serde.binary, named(keyOf(key))),
+    clear: (key) => ctx.clear(keyOf(key), named(keyOf(key))),
     sync: async () => {
       await end.race(ctx.run('sync', () => {}));
     },
@@ -308,13 +320,32 @@ function settle<T>(outcome: Outcome<T>): T {
   return outcome.value;
 }
 
+// The attempts, by their `ctx.db`: for `databaseOf`.
+const attempts = new WeakMap<object, SqlAttempt>();
+
+/**
+ * The database `name` of the key, apart from the object's own (`ctx.db`, of
+ * the attempt whose session `db` is): for a library whose tables must be
+ * alone in their database, such as OpenCode's. It opens on its first use,
+ * and ends with the attempt, as `ctx.db` does.
+ */
+export function databaseOf(db: SqlSession, name: string): SqlSession {
+  const attempt = attempts.get(db);
+  if (attempt === undefined) throw new Error("databaseOf takes a handler's ctx.db");
+  return attempt.database(name);
+}
+
 /**
  * An attempt's SQL session: opened on its first use (`ctx.db` or
  * `ctx.transaction`), shared by everything the handler does, and saved when
- * the handler ends ({@link end}).
+ * the handler ends ({@link end}). With `name`, of the key's database `name`
+ * ({@link databaseOf}), which has neither the object's schema nor an outbox.
  */
 export class SqlAttempt {
   readonly #ctx: SqlHost;
+  readonly #name: string | undefined;
+  // The key's other databases this attempt opened, by name.
+  readonly #databases = new Map<string, SqlAttempt>();
   readonly #errors = new SqlErrors(() => this.#db?.isUsable() ?? false);
   #session: Promise<Database> | undefined;
   // The session, once open.
@@ -332,8 +363,9 @@ export class SqlAttempt {
   /** `ctx.db`. */
   readonly db: SqlSession;
 
-  constructor(ctx: SqlHost) {
+  constructor(ctx: SqlHost, name?: string) {
     this.#ctx = ctx;
+    this.#name = name;
     this.db = {
       query: (sql, params) => this.#use().then((db) => this.#errors.track(db.query(sql, params))),
       queryColumns: (sql, params) => this.#use().then((db) => this.#errors.track(db.queryColumns(sql, params))),
@@ -341,6 +373,15 @@ export class SqlAttempt {
       transaction: (inner) => this.#use().then((db) => this.#errors.transaction(db, inner)),
     };
     sessions.set(this.db, (schemas) => this.#open().then((db) => this.#apply(db, schemas)));
+    attempts.set(this.db, this);
+  }
+
+  /** The key's database `name`, in this attempt: see {@link databaseOf}. */
+  database(name: string): SqlSession {
+    if (this.#ended) throw new Error('the handler has ended: its SQL session is closed');
+    let database = this.#databases.get(name);
+    if (database === undefined) this.#databases.set(name, (database = new SqlAttempt(this.#ctx, name)));
+    return database.db;
   }
 
   /** Apply the steps of `schemas` that the database lacks, each schema once per attempt. */
@@ -523,9 +564,10 @@ export class SqlAttempt {
 
   async #start(): Promise<Database> {
     const ctx = this.#ctx;
-    const namespace = `${ctx.request().target.service}/${ctx.key}`;
+    const key = `${ctx.request().target.service}/${ctx.key}`;
+    const namespace = this.#name === undefined ? key : `${key}/${this.#name}`;
     const end = new AttemptEnd(ctx.invocationEndPromise.promise);
-    const object = objectStore(ctx, end);
+    const object = objectStore(ctx, end, this.#name);
     const db = await open(namespace, wrapStore ? wrapStore(object) : object, { reader: ctx.shared });
     // A handler still waiting for something else when the attempt ends (a
     // model request, say) keeps the session no longer: it closes once no
@@ -534,10 +576,12 @@ export class SqlAttempt {
     this.#db = db;
     // The object's schema: in a shared handler's session too, whose writes are never stored, so a
     // key never written reads as empty tables.
-    const own = ofObject(ctx.request().target.service);
+    const own = this.#name === undefined ? ofObject(ctx.request().target.service) : undefined;
     try {
       // What a crash may have left unmade.
-      if (!ctx.shared) decodeOutbox(await db.effects()).forEach((outgoing) => this.#make(outgoing));
+      if (!ctx.shared && this.#name === undefined) {
+        decodeOutbox(await db.effects()).forEach((outgoing) => this.#make(outgoing));
+      }
       if (own) await this.#apply(db, [own]);
     } catch (error) {
       await db.close();
@@ -552,6 +596,15 @@ export class SqlAttempt {
    * a storage error ended closes now, rather than when it is collected.
    */
   async end<T>(outcome: Outcome<T>): Promise<T> {
+    // The key's other databases end first, as the handler left them.
+    const databases = await Promise.allSettled([...this.#databases.values()].map((d) => d.end({ value: undefined })));
+    const value = await this.#end(outcome);
+    const failed = databases.find((d) => d.status === 'rejected');
+    if (failed) throw failed.reason;
+    return value;
+  }
+
+  async #end<T>(outcome: Outcome<T>): Promise<T> {
     this.#ended = true;
     const session = this.#session;
     if (session === undefined) return settle(outcome);

@@ -5,14 +5,14 @@ over a database session ``db`` (in Restate, ``ctx.db``), which has ``query``,
 
 Three tables, with values as LangGraph's serializer writes them:
 
-- ``langgraph_checkpoints``: each checkpoint, without its channel values.
-- ``langgraph_channel_values``: each channel's value at each version, stored when a
+- ``restate_langgraph_checkpoints``: each checkpoint, without its channel values.
+- ``restate_langgraph_channel_values``: each channel's value at each version, stored when a
   step changes it. A checkpoint's values are those at its channel versions,
   so a step stores only what it changed, not the whole state again (an
   agent's message list, say). Versions are unique (a count and a random
   part): a thread forked from an earlier checkpoint takes the same counts
   again, and its values must not replace those of the branch it forked from.
-- ``langgraph_writes``: the pending writes of each checkpoint's tasks.
+- ``restate_langgraph_writes``: the pending writes of each checkpoint's tasks.
 
 Each ``aput`` and ``aput_writes`` is one SQL transaction, so a step is stored
 whole, in order with everything else the handler does. Operations run one at
@@ -43,7 +43,7 @@ from restate_fns import SqlDatabase, SqlSession
 from restate_fns.schema import Schema
 
 DDL = """
-CREATE TABLE langgraph_checkpoints (
+CREATE TABLE restate_langgraph_checkpoints (
   thread_id TEXT NOT NULL,
   checkpoint_ns TEXT NOT NULL,
   checkpoint_id TEXT NOT NULL,
@@ -53,7 +53,7 @@ CREATE TABLE langgraph_checkpoints (
   metadata BLOB NOT NULL,
   PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
 );
-CREATE TABLE langgraph_channel_values (
+CREATE TABLE restate_langgraph_channel_values (
   thread_id TEXT NOT NULL,
   checkpoint_ns TEXT NOT NULL,
   channel TEXT NOT NULL,
@@ -62,7 +62,7 @@ CREATE TABLE langgraph_channel_values (
   value BLOB,
   PRIMARY KEY (thread_id, checkpoint_ns, channel, version)
 );
-CREATE TABLE langgraph_writes (
+CREATE TABLE restate_langgraph_writes (
   thread_id TEXT NOT NULL,
   checkpoint_ns TEXT NOT NULL,
   checkpoint_id TEXT NOT NULL,
@@ -118,7 +118,8 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         if not versions:
             return {}
         rows = await self.db.query(
-            "SELECT channel, type, value FROM langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND ("
+            "SELECT channel, type, value FROM restate_langgraph_channel_values "
+            "WHERE thread_id = ? AND checkpoint_ns = ? AND ("
             + " OR ".join("(channel = ? AND version = ?)" for _ in versions)
             + ")",
             [thread_id, ns, *(item for channel, version in versions for item in (channel, str(version)))],
@@ -130,8 +131,8 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         checkpoint: Checkpoint = self.serde.loads_typed((type, stored))
         checkpoint = {**checkpoint, "channel_values": await self._channel_values(thread_id, ns, checkpoint)}
         writes = await self.db.query(
-            "SELECT task_id, channel, type, value FROM langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? "
-            "AND checkpoint_id = ? ORDER BY task_path, task_id, idx",
+            "SELECT task_id, channel, type, value FROM restate_langgraph_writes "
+            "WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? ORDER BY task_path, task_id, idx",
             [thread_id, ns, checkpoint_id],
         )
 
@@ -157,13 +158,13 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
             ns = configurable.get("checkpoint_ns", "")
             if checkpoint_id := get_checkpoint_id(config):
                 rows = await self.db.query(
-                    f"SELECT {COLUMNS} FROM langgraph_checkpoints "
+                    f"SELECT {COLUMNS} FROM restate_langgraph_checkpoints "
                     "WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?",
                     [thread_id, ns, checkpoint_id],
                 )
             else:
                 rows = await self.db.query(
-                    f"SELECT {COLUMNS} FROM langgraph_checkpoints WHERE thread_id = ? AND checkpoint_ns = ? "
+                    f"SELECT {COLUMNS} FROM restate_langgraph_checkpoints WHERE thread_id = ? AND checkpoint_ns = ? "
                     "ORDER BY checkpoint_id DESC LIMIT 1",
                     [thread_id, ns],
                 )
@@ -189,8 +190,8 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
             where = [condition for condition, value in conditions if value is not None]
             params = [value for _, value in conditions if value is not None]
             rows = await self.db.query(
-                f"SELECT {COLUMNS} FROM langgraph_checkpoints {'WHERE ' + ' AND '.join(where) if where else ''} "
-                "ORDER BY checkpoint_id DESC",
+                f"SELECT {COLUMNS} FROM restate_langgraph_checkpoints "
+                f"{'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY checkpoint_id DESC",
                 params,
             )
             found: list[CheckpointTuple] = []
@@ -234,12 +235,12 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
             async with self.db.transaction() as tx:
                 for row in changed:
                     await tx.execute(
-                        "INSERT OR REPLACE INTO langgraph_channel_values "
+                        "INSERT OR REPLACE INTO restate_langgraph_channel_values "
                         "(thread_id, checkpoint_ns, channel, version, type, value) VALUES (?, ?, ?, ?, ?, ?)",
                         [thread_id, ns, *row],
                     )
                 await tx.execute(
-                    f"INSERT OR REPLACE INTO langgraph_checkpoints ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    f"INSERT OR REPLACE INTO restate_langgraph_checkpoints ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     [thread_id, ns, checkpoint["id"], parent_id, type, serialized, metadata_value],
                 )
             return {"configurable": {"thread_id": thread_id, "checkpoint_ns": ns, "checkpoint_id": checkpoint["id"]}}
@@ -269,8 +270,8 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
             async with self.db.transaction() as tx:
                 for row in rows:
                     await tx.execute(
-                        f"{verb} INTO langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, task_path, "
-                        "idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        f"{verb} INTO restate_langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, "
+                        "task_path, idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         row,
                     )
 
@@ -282,5 +283,5 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
 
 
 async def _delete(db: SqlDatabase, thread_id: str) -> None:
-    for table in ("langgraph_checkpoints", "langgraph_channel_values", "langgraph_writes"):
+    for table in ("restate_langgraph_checkpoints", "restate_langgraph_channel_values", "restate_langgraph_writes"):
         await db.execute(f"DELETE FROM {table} WHERE thread_id = ?", [thread_id])

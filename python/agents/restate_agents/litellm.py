@@ -65,7 +65,7 @@ __all__ = ["CANCELLED", "DEFAULT_MODEL", "agent", "compact", "prompt", "reset"]
 Tools = Sequence[Tool | dict[str, Any]]
 
 # The conversations, in the object's database.
-TABLE = "litellm_messages"
+TABLE = "restate_litellm_messages"
 
 
 def agent(

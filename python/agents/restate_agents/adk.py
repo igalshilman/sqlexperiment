@@ -69,7 +69,7 @@ from restate_agents.turns import CANCELLED
 __all__ = ["CANCELLED", "agent", "prompt", "tools"]
 
 # The tables of the conversations' messages and answers, and of their sessions' events.
-PROMPTS, EVENTS = "adk_prompts", "adk_events"
+PROMPTS, EVENTS = "restate_adk_prompts", "restate_adk_events"
 
 # The user of every session: a conversation is the object's key.
 USER = "restate"

@@ -64,7 +64,11 @@ from restate_agents.turns import CANCELLED
 __all__ = ["CANCELLED", "agent", "prompt", "tools"]
 
 # The tables of the conversations' messages and answers, of their items, and of the agent each is with.
-PROMPTS, ITEMS, CURRENT = "openai_agents_prompts", "openai_agents_items", "openai_agents_current"
+PROMPTS, ITEMS, CURRENT = (
+    "restate_openai_agents_prompts",
+    "restate_openai_agents_items",
+    "restate_openai_agents_current",
+)
 
 
 def agent(

@@ -3,6 +3,7 @@
 // `make test-ts T=pi`.
 import { describe, expect, it, vi } from 'vitest';
 import { conversation, crashedAnywhere, SAID } from '../testing.ts';
+import type * as restate from 'restate-fns';
 import * as pi from 'restate-agents/pi';
 import { prompt } from './pi.ts';
 
@@ -11,6 +12,12 @@ vi.mock('@earendil-works/pi-ai/providers/anthropic', async () => {
   const { fakeProvider, teller } = await import('../fakes/pi.ts');
   return { anthropicProvider: () => fakeProvider('anthropic', 'claude-sonnet-5-5', teller) };
 });
+
+/** The bank agent, after making a table of yours named as one of pi-durable's. */
+const besideYours = async (ctx: restate.ObjectContext, message: string) => {
+  await ctx.db.execute('CREATE TABLE IF NOT EXISTS tasks (task TEXT)');
+  return prompt(ctx, message);
+};
 
 describe('the bank agent on pi', () => {
   it('answers a message once after a crash at any of its state requests', async () => {
@@ -27,6 +34,15 @@ describe('the bank agent on pi', () => {
     // The teller audits with a tool `audit`, which this agent lacks.
     const c = conversation(pi.chat(), 'unknown');
     expect(await c.attempt('inv1', 'audit the books')).toMatch(/^Done: .*audit/s);
+  });
+
+  it('keeps its tables apart from yours: each is restate_pi_<name>', async () => {
+    const c = conversation(besideYours, 'tables');
+    expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toMatch(/^Done: /);
+    const names = await c.read(async (ctx) =>
+      (await ctx.db.query("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")).map(([name]) => name),
+    );
+    expect(names.filter((name) => !String(name).startsWith('restate_'))).toEqual(['tasks']);
   });
 
   it('gives the conversation: what was said, in order, with the tool calls', async () => {

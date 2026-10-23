@@ -3,7 +3,10 @@
 [OpenCode](https://opencode.ai) 2.0 can run embedded: `@opencode/sdk` hosts
 the whole OpenCode server in your process, with no HTTP listener. Here it
 runs in the agent's virtual object, and OpenCode's database (sessions,
-messages, the inbox, durable events) is the object's SQL database
+messages, the inbox, durable events) is an SQL database of the key's own,
+in the object's state beside `ctx.db` (`databaseOf` of restate-fns): OpenCode
+boots only on a database that is empty or its own, so its tables are alone
+there, and `ctx.db` keeps the conversation's log and the tables of yours
 ([SQL in Restate virtual objects](../../../sql/README.md)). The integration
 pins OpenCode 2.0.27 exactly, with the Effect release it is built on (4.0.1);
 OpenCode needs Node 24.
@@ -42,7 +45,7 @@ client.
 ## Through crashes
 
 [`db.ts`](db.ts) (`restate-agents/opencode/db`) boots OpenCode's embedded
-host on the object's database: an Effect `SqlClient` through
+host on its database: an Effect `SqlClient` through
 `Database.configuredClient`, OpenCode's seam for an injected client, each
 OpenCode transaction an SQL transaction. The handler is not replayed: a
 retried attempt boots OpenCode again, on the stored database, and OpenCode

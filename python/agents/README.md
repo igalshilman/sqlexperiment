@@ -109,7 +109,7 @@ async def compact(ctx, instructions: str) -> str:
 ```
 
 Through crashes: the conversation is the API's messages in the
-`claude_messages` table, a row each, in order. Each reply of the model is
+`restate_claude_messages` table, a row each, in order. Each reply of the model is
 stored before its tools run, and their results before the next request; so
 a crash during the tools runs them again with the same tool call ids,
 without asking the model again. A message's answer is stored with the
@@ -157,16 +157,16 @@ handoff)` starts a new session, whose first message carries the handoff.
 
 Each prompt runs the CLI that the SDK bundles, in a process of its own (about
 half a second to start), with a configuration directory of its own. Its
-transcript is in the object's database (`claude_agent_entries`): the SDK's
+transcript is in the object's database (`restate_claude_agent_entries`): the SDK's
 `SessionStore`, which the CLI mirrors to as it writes (`eager`), and which a
 retried attempt resumes the session from, on any machine. Through crashes:
 
 - **A message is answered once per invocation**: its answer is stored with
-  it (`claude_agent_prompts`), and a retried attempt returns it.
+  it (`restate_claude_agent_prompts`), and a retried attempt returns it.
 - **A turn that a crash cut off is carried on**: the retried attempt resumes
   the session and asks Claude Code to finish the message (the transcript
   may end before the crash: the message is in the request again). Each tool
-  call is stored with its input and output (`claude_agent_calls`): a call
+  call is stored with its input and output (`restate_claude_agent_calls`): a call
   that the model makes again with the same input, in a later attempt of the
   same message, is the earlier call: its id (so Restate's tools, which pass
   it on as their idempotency key, make it once) and, if it finished, its
@@ -205,7 +205,7 @@ protocol over stdio; the conversation is a Codex thread
 `codex.prompt(ctx, text, ...)` and `codex.reset(ctx, handoff)` are those of
 Claude Code. Through crashes, as with Claude Code ([`harness.py`](restate_agents/harness.py)
 has what the two share): the thread's rollout (its JSONL transcript) is in
-the object's database (`codex_rollouts`), stored before each call of the
+the object's database (`restate_codex_rollouts`), stored before each call of the
 tools here and when the turn ends; a retried attempt writes it to a Codex
 home of its own and resumes the thread from it (`thread/resume` with its
 `path`). A message is answered once per invocation; a turn that a crash cut
@@ -218,7 +218,7 @@ call; `steer` adds to it (`turn/steer`) after the next tool call.
 `litellm.agent(name, model=, system=, tools=)` is the same agent on any model,
 through [LiteLLM](https://docs.litellm.ai): the OpenAI-format messages that
 LiteLLM speaks to every provider, stored in the object's database
-(`litellm_messages`), with the handlers of the Claude agent. As with Claude,
+(`restate_litellm_messages`), with the handlers of the Claude agent. As with Claude,
 the loop is the agent's own: each reply of the model is stored before its
 tools run, and their results before the next request.
 
@@ -386,7 +386,7 @@ async def plan(ctx) -> Plan:
 ```
 
 Through crashes, as with LangGraph: the conversation (a row per message, in
-`pydantic_ai_messages`) is stored before each model request and with each
+`restate_pydantic_ai_messages`) is stored before each model request and with each
 response, so a retried attempt carries on from there: the tool calls a model
 made run again with the same ids, without asking the model again; the
 message it answers is in it, marked with the invocation's id, and a retried
@@ -421,17 +421,17 @@ from handlers of your own with `openai_agents.prompt(ctx, agent, text,
 `run_config`), each prompt answered once, its typed output too.
 
 A handoff holds: the conversation's next message goes to the agent it was
-handed off to (kept in `openai_agents_current`).
+handed off to (kept in `restate_openai_agents_current`).
 
 Through crashes, as with Pydantic AI: the conversation (an item per row, in
-`openai_agents_items`) is stored before each model request (the run's
+`restate_openai_agents_items`) is stored before each model request (the run's
 `call_model_input_filter`) and with each response (its `on_llm_end` hook),
 so the model's tool calls are stored before any tool runs. A retried attempt
 runs the stored calls again, with their ids (the tool's `on_invoke_tool`),
 without asking the model again, then carries on; a stored reply whose calls
 cannot be run again (a handoff, a hosted tool's) is dropped, and the agent
 that made it is asked again. Each prompt's answer is
-stored with it (`openai_agents_prompts`). A tool's `restate.TerminalError` is
+stored with it (`restate_openai_agents_prompts`). A tool's `restate.TerminalError` is
 its answer to the model; any other error fails the attempt (the SDK's
 `@function_tool`s answer their errors to the model, as they do anywhere).
 A message steered to the turn joins it after its next tool call. The run
@@ -463,7 +463,7 @@ an `App` (its plugins), whose tools include Restate's through
 each prompt answered once.
 
 The conversation is an ADK session whose id is the object's key: a session
-service of the object's database (`adk_events`, an event per row; its state
+service of the object's database (`restate_adk_events`, an event per row; its state
 is that of its events' state changes), which the runner appends each event
 to as it goes, so the model's tool calls are stored before they run. A
 retried attempt runs the stored calls of the tools here again, with their
@@ -553,7 +553,7 @@ analyst = claude.agent("analyst", system="...", tools=box.tools())
 
 The first sandbox tool of an attempt opens the conversation's sandbox: it
 makes it, or resumes the one it made before, whose reference is in the
-object's database (`sandboxes`). Its name is the conversation's, so an
+object's database (`restate_sandboxes`). Its name is the conversation's, so an
 attempt that retries after it was made finds it rather than making another;
 parallel tool calls share it. A command that a crash cut off runs again
 (the integrations run an unfinished tool call again), so a command that must

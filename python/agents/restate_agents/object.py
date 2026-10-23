@@ -97,7 +97,9 @@ class Object(restate.VirtualObject):
     ``restate_fns.VirtualObject``, which add to (or replace) the one set here:
     retries without end, since each attempt resumes from the database. Among
     them ``schema``, optional: tables of your own, beside the agent's (which
-    are its own business), such as ``schema=["CREATE TABLE facts (fact TEXT)"]``.
+    are its own business), such as ``schema=["CREATE TABLE facts (fact TEXT)"]``:
+    any name is yours but those starting with ``restate_``, the agent's
+    (``restate_claude_messages``, ``restate_agent_log``...).
 
     Besides its own handlers, each has ``status``, what it is doing (the
     message it answers, and what its tools wait for), ``stop``, which stops
