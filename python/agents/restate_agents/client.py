@@ -99,12 +99,12 @@ class AgentClient:
 
     async def chat(self, message: str, *, idempotency_key: str | None = None) -> str:
         """The agent's answer to ``message``. With an idempotency key, sending it again is the same message."""
-        return await self._post("chat", message, idempotency_key=idempotency_key, timeout=None)
+        return await self.call("chat", message, idempotency_key=idempotency_key, timeout=None)
 
     async def send(self, message: str, *, idempotency_key: str | None = None, delay: timedelta | None = None) -> str:
         """Send ``message`` without waiting for the answer (after ``delay``, if given): its invocation's id."""
         query = f"?delay={int(delay.total_seconds() * 1000)}ms" if delay else ""
-        sent = await self._post(f"chat/send{query}", message, idempotency_key=idempotency_key)
+        sent = await self.call(f"chat/send{query}", message, idempotency_key=idempotency_key)
         return sent["invocationId"]
 
     async def answer(self, invocation_id: str) -> str:
@@ -122,7 +122,7 @@ class AgentClient:
             request["before"] = before
         if cursor is not None:
             request["cursor"] = cursor
-        return await self._post("messages", request)
+        return await self.call("messages", request)
 
     async def sync(
         self,
@@ -141,39 +141,39 @@ class AgentClient:
         request: dict[str, Any] = {"cursor": cursor, "timeoutSeconds": timeout_seconds, "limit": limit}
         if revision is not None:
             request["revision"] = revision
-        return await self._post("sync", request, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
+        return await self.call("sync", request, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
 
     async def status(self) -> dict[str, Any]:
         """What the agent is doing: the message it answers, if any, and what its tools wait for."""
-        return await self._post("status")
+        return await self.call("status")
 
     async def stop(self) -> str | None:
         """Stop the message the agent answers: the invocation stopped, or None if it answered none."""
-        return (await self._post("stop"))["stopped"]
+        return (await self.call("stop"))["stopped"]
 
     async def steer(self, message: str) -> dict[str, Any]:
         """Add ``message`` to the message the agent answers, at its next tool call (or send it as one of its own)."""
-        return await self._post("steer", message)
+        return await self.call("steer", message)
 
     async def pending(self) -> list[dict[str, Any]]:
         """What the agent's tools wait for, oldest first."""
-        return await self._post("pending")
+        return await self.call("pending")
 
     async def signal(
         self, value: Any, *, id: str | None = None, name: str | None = None, keep: bool = False
     ) -> str | None:
         """Resolve the wait ``id``, or the oldest for the signal ``name``, with ``value``: the wait it resolved."""
         signal = {"id": id, "name": name, "value": value, "keep": keep}
-        return (await self._post("signal", signal))["resolved"]
+        return (await self.call("signal", signal))["resolved"]
 
     async def notifications(self) -> int:
         """The revision of the conversation, which each change increases."""
-        return (await self._post("notifications"))["revision"]
+        return (await self.call("notifications"))["revision"]
 
     async def watch(self, revision: int, *, timeout_seconds: float = 50, idempotency_key: str | None = None) -> int:
         """The revision, once there is one newer than ``revision``, or at the timeout."""
         watch = {"revision": revision, "timeoutSeconds": timeout_seconds}
-        changed = await self._post("watch", watch, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
+        changed = await self.call("watch", watch, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
         return changed["revision"]
 
     async def follow(self, *, cursor: int = 0, timeout_seconds: float = 50) -> AsyncIterator[Followed]:
@@ -211,9 +211,13 @@ class AgentClient:
                 log.warning("follow: retrying after %s", error)
                 await asyncio.sleep(1)
 
-    async def _post(
+    async def call(
         self, handler: str, body: Any = None, *, idempotency_key: str | None = None, timeout: float | None = 30
     ) -> Any:
+        """
+        The answer of the agent's handler ``handler``, such as one of your own
+        (``@agent.handler``), to ``body`` as JSON: ``await alice.call("facts")``.
+        """
         headers = {"idempotency-key": idempotency_key} if idempotency_key else {}
         return await self._request("POST", f"{self.url}/{handler}", body, headers, timeout)
 
