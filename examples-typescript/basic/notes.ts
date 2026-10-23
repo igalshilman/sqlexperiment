@@ -10,21 +10,20 @@
  */
 import * as restate from 'restate-fns';
 
-const SCHEMA = 'CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)';
-
 const notes = restate.object({
   name: 'notes',
+  // The schema of each key's database: its steps, applied once per key (a step added later runs then).
+  schema: ['CREATE TABLE notes (text TEXT NOT NULL)'],
   handlers: {
     add: async (ctx: restate.ObjectContext, note: string) => {
-      await ctx.db.execute(SCHEMA);
       await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
     },
 
-    list: async (ctx: restate.ObjectContext) => {
-      await ctx.db.execute(SCHEMA);
+    /** Shared: it reads while `add` writes; a key with no notes yet has none. */
+    list: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
       const rows = await ctx.db.query('SELECT text FROM notes ORDER BY rowid');
       return rows.map(([text]) => text);
-    },
+    }),
   },
 });
 

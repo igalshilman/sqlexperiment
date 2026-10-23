@@ -25,13 +25,12 @@ waits for, and confirm it (as the traveller would, from a link on their phone):
 
 from agents import Agent
 from flights import Change, flights, options, rebooking
-from restate_agents import call, has_table, openai_agents, serve, signal, tool, workflow
+from restate_agents import call, openai_agents, serve, signal, tool, workflow
 
 
 @tool
 async def record_booking(ctx, call_id, flight: str, ticket: str) -> str:
     """Record the traveller's new booking, once it is rebooked."""
-    await ctx.db.execute("CREATE TABLE IF NOT EXISTS bookings (id TEXT PRIMARY KEY, flight TEXT, ticket TEXT)")
     # Keyed by the tool call's id: a retried call records it once.
     await ctx.db.execute("INSERT OR IGNORE INTO bookings VALUES (?, ?, ?)", [call_id, flight, ticket])
     return f"Recorded {flight}, ticket {ticket}"
@@ -59,14 +58,15 @@ triage = Agent(
     handoffs=[changes],
 )
 
-airline = openai_agents.agent("airline", triage)
+# The traveller's bookings: the schema of each traveller's database, beside the conversation.
+airline = openai_agents.agent(
+    "airline", triage, schema=["CREATE TABLE bookings (id TEXT PRIMARY KEY, flight TEXT, ticket TEXT)"]
+)
 
 
 @airline.handler(kind="shared")
 async def bookings(ctx) -> list[dict[str, str]]:
     """The traveller's bookings, from their own table."""
-    if not await has_table(ctx.db, "bookings"):
-        return []  # no booking yet: a shared handler creates no table
     return [{"flight": f, "ticket": t} for f, t in await ctx.db.query("SELECT flight, ticket FROM bookings")]
 
 

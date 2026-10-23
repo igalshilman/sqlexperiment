@@ -11,18 +11,18 @@ stored in Restate with the object's state. No database to run.
 import restate_fns as restate
 from restate_agents import serve
 
-notes = restate.VirtualObject("notes")
+# The schema of each key's database: its steps, applied once per key (a step added later runs then).
+notes = restate.VirtualObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
 
 @notes.handler()
 async def add(ctx: restate.ObjectContext, note: str):
-    await ctx.db.execute("CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)")
     await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [note])
 
 
-@notes.handler("list")
-async def list_notes(ctx: restate.ObjectContext) -> list[str]:
-    await ctx.db.execute("CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)")
+@notes.handler("list", kind="shared")
+async def list_notes(ctx: restate.ObjectSharedContext) -> list[str]:
+    """Shared: it reads while ``add`` writes; a key with no notes yet has none."""
     return [text for (text,) in await ctx.db.query("SELECT text FROM notes ORDER BY rowid")]
 
 

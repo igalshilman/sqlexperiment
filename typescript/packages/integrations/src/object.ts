@@ -209,6 +209,8 @@ type With<H> = typeof BUILT_IN & (H extends { messages: unknown } ? typeof FOLLO
 export const object = <P extends string, H extends Record<string, Handler>>(definition: {
   name: P;
   handlers: H & Reserved;
+  /** The steps that make each key's database (see restate-fns's `object`), beside the agent's own tables. */
+  schema?: readonly restate.Step[];
   description?: string;
   metadata?: Record<string, string>;
   options?: restate.ObjectOptions;
