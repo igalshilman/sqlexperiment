@@ -6,15 +6,17 @@ fn cached_snapshot_page_never_masks_overlay_wal_or_truncation() -> crate::Result
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let initial = KvIo::mount(store.clone()).await?;
-        initial.write(0, 0, &vec![7; 2 * BLOCK_SIZE]).await?;
+        initial
+            .write(0, 0, &buffers(&vec![7; 2 * BLOCK_SIZE]))
+            .await?;
         initial.publish().await?;
         let io = KvIo::mount(store.clone()).await?;
         io.prepare_engine().await?;
         assert_eq!(*io.block(0, 0).await?, vec![7; BLOCK_SIZE]);
-        io.write(0, 10, &[9, 8]).await?;
+        io.write(0, 10, &buffers(&[9, 8])).await?;
         assert_eq!(&io.block(0, 0).await?[10..12], &[9, 8]);
         assert_eq!(*io.block(1, 0).await?, vec![0; BLOCK_SIZE]);
-        io.write(1, 0, &[3]).await?;
+        io.write(1, 0, &buffers(&[3])).await?;
         assert_eq!(io.block(1, 0).await?[0], 3);
         assert_eq!(io.block(0, 0).await?[0], 7);
         assert_eq!(*io.block(0, 1).await?, vec![7; BLOCK_SIZE]);
@@ -73,7 +75,9 @@ fn synchronous_engine_waits_use_only_resident_data_or_fail() -> crate::Result<()
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let initial = KvIo::mount(store.clone()).await?;
-        initial.write(0, 0, &vec![7; 2 * BLOCK_SIZE]).await?;
+        initial
+            .write(0, 0, &buffers(&vec![7; 2 * BLOCK_SIZE]))
+            .await?;
         initial.publish().await?;
         let io = KvIo::mount(store.clone()).await?;
         io.prepare_engine().await?;
