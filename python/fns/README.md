@@ -11,12 +11,11 @@ over the published Restate Python SDK (1.1.0, pinned: see
 ```python
 import restate_fns as restate
 
-notes = restate.VirtualObject("notes")
+notes = restate.VirtualObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
 
 @notes.handler()
 async def add(ctx: restate.ObjectContext, note: str) -> None:
-    await ctx.db.execute("CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)")
     await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [note])
 
 
@@ -44,12 +43,21 @@ with the same storage, page cache and pending sends:
   (`restate._preview.explicit_recovery`); one with
   `journal_replay=True` is the SDK's own, with no `ctx.db` (its context is
   `restate.JournaledObjectContext`), such as one that waits on an awakeable.
+- `VirtualObject(name, schema=[...])` is the steps that make each key's
+  database, in order: statements, or async functions of the transaction (to
+  move data). They are applied once per key, in one transaction, when a
+  handler of the key first opens its database; the table `restate_schema`
+  keeps how far each database got, so a step added later (a column, an
+  index) runs on each key's database once, as that key is next opened. A
+  step never changes once it ran: a change is a step of its own.
 - `ctx.db` is the object's database (namespace `service/key`). Each
   statement is its own transaction, and `async with ctx.db.transaction() as
   db` groups several. Calls run one at a time, in the order they start.
 - In a shared handler, `ctx.db` reads the database as stored, beside the
   exclusive handler that writes it (a chat page reads the conversation while
-  an agent answers), and writes nothing: a write statement raises. If a
+  an agent answers), and writes nothing: a write statement raises. The
+  schema steps its key lacks are applied in its own session, which stores
+  nothing: a key never written reads as empty tables. If a
   commit came while it read, the attempt fails, and Restate retries it.
 - `async with ctx.transaction() as t` is one transaction, `t.db`, with its
   sends, `t.tx` (`service_send`, `object_send`, `workflow_send`,

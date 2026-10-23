@@ -15,6 +15,7 @@ import contextlib
 import json
 import typing
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -24,6 +25,9 @@ import restate_sql
 from restate.context import HandlerType, SendHandle
 from restate.exceptions import TerminalError
 from restate.handler import Handler, handler_from_callable
+
+from restate_fns import schema as schemas
+from restate_fns.schema import Schema
 
 In = typing.TypeVar("In")
 Out = typing.TypeVar("Out")
@@ -423,8 +427,33 @@ class SqlAttempt:
         self._cancel: Callable[[], None] = lambda: None
         # The ids of the outbox's transactions this attempt made the sends of.
         self._made: set[str] = set()
+        # The schemas this attempt's database has all the steps of.
+        self._ensured: set[str] = set()
         self.db: SqlSession = _Session(self)
         """``ctx.db``."""
+        schemas.sessions[self.db] = weakref.WeakMethod(self.ensure)
+
+    async def ensure(self, schema: Sequence[Schema]) -> None:
+        """Apply the steps of ``schema`` that the database lacks, each schema once per attempt."""
+        lacking = [s for s in schema if s.name not in self._ensured]
+        if not lacking:
+            return
+        db = await self.open()
+        if self._reader():
+            # A shared handler's writes stay its own: they make the tables it reads, then it reads only.
+            await db.execute("PRAGMA query_only = 0")
+        try:
+            await self._apply(db, lacking)
+        finally:
+            if self._reader():
+                await db.execute("PRAGMA query_only = 1")
+
+    async def _apply(self, db: Any, schema: Sequence[Schema]) -> None:
+        try:
+            await schemas.apply(db, schema)
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            _reraise(error, self.classify)
+        self._ensured.update(s.name for s in schema)
 
     def classify(self, error: BaseException) -> BaseException:
         """
@@ -555,9 +584,13 @@ class SqlAttempt:
         # (a model request, say) keeps the session no longer: it closes once
         # no statement runs, and the handler's later calls fail.
         self._cancel = host.sql_on_attempt_end(lambda: _close_soon(db))
+        own = schemas.of_object(host.sql_namespace.split("/", 1)[0])
         if self._reader():
-            # Its writes would stay its own, and vanish: a write statement fails instead.
+            # Its writes would stay its own, and vanish: a write statement fails instead, once the
+            # object's schema is applied (its own too: a key never written reads as empty tables).
             try:
+                if own is not None:
+                    await self._apply(db, [own])
                 await db.execute("PRAGMA query_only = 1")
             except BaseException:
                 await db.close()
@@ -567,6 +600,8 @@ class SqlAttempt:
             # What a crash may have left unmade.
             for outgoing in _decode_outbox(await db.effects()):
                 self._make(outgoing)
+            if own is not None:
+                await self._apply(db, [own])
         except BaseException:
             await db.close()
             raise
