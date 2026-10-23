@@ -40,9 +40,9 @@ Run the endpoint, from [`examples/`](..) (after `make js` at the repository
 root), register it, and play the demo against it:
 
 ```sh
-MODEL=openai/gpt-6-luna node gateway/main.ts
+MODEL=openai/gpt-6-luna node advanced/gateway/main.ts
 npx @restatedev/restate deployments register http://localhost:9080
-gateway/demo.sh
+advanced/gateway/demo.sh
 ```
 
 [`demo.sh`](demo.sh) plays four acts through Restate's ingress and admin API:
@@ -62,9 +62,9 @@ gateway/demo.sh
 On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`.
 
-Or as two deployments: `node gateway/main.ts tools` (the tools and the
+Or as two deployments: `node advanced/gateway/main.ts tools` (the tools and the
 Gateway: stateless, so anywhere, such as your laptop) and
-`node gateway/main.ts agents` (the Assistant, keyed per user, the Case,
+`node advanced/gateway/main.ts agents` (the Assistant, keyed per user, the Case,
 keyed per order: in a sandbox). Register both with the same Restate server.
 
 With `WORKSPACE` set, each agent object gets a directory of its own,
@@ -78,5 +78,5 @@ The image's model is `openai/gpt-6-luna`: give it `OPENAI_API_KEY`.
 In Docker: [`Dockerfile`](Dockerfile), published as
 `ghcr.io/igalshilman/tool-gateway`, serves the endpoint on 9080.
 
-[`tests/gateway.test.ts`](../../typescript/tests/gateway.test.ts) tests its parts
+[`tests/gateway.test.ts`](../../../typescript/tests/gateway.test.ts) tests its parts
 without a Restate server (`make test-ts T=gateway`).

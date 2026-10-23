@@ -4,7 +4,7 @@
  * them through `ctx.db`, and a handler of your own serves them, for a profile
  * page say.
  *
- *   ANTHROPIC_API_KEY=… node memory.ts
+ *   ANTHROPIC_API_KEY=… node basic/memory.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'I am vegetarian, and I live in Lisbon.'

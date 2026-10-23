@@ -4,7 +4,7 @@
  * The workflow calls the agents like any Restate handler, and waits for the
  * review without holding a process.
  *
- *   ANTHROPIC_API_KEY=… node triage.ts
+ *   ANTHROPIC_API_KEY=… node intermediate/triage.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/triage/t1/run/send --json '"I was charged twice for order 103."'

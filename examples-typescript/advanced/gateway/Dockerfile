@@ -1,13 +1,13 @@
 # The tool gateway's endpoint. Build it from the repository's root:
 #
-#   docker build -f examples-typescript/gateway/Dockerfile -t tool-gateway .
+#   docker build -f examples-typescript/advanced/gateway/Dockerfile -t tool-gateway .
 #
 # It serves the endpoint (Orders, Payments, Gateway, Assistant, Case) on 9080:
 #
 #   docker run -p 9080:9080 -e OPENAI_API_KEY tool-gateway
 #
-# or a part: `node gateway/main.ts agents` (the Assistant and Case), or
-# `node gateway/main.ts tools` (the tools and the Gateway).
+# or a part: `node advanced/gateway/main.ts agents` (the Assistant and Case), or
+# `node advanced/gateway/main.ts tools` (the tools and the Gateway).
 
 # The SQL addon, for Linux.
 FROM rust:1-bookworm AS addon
@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 git ca-
   && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app /app
 WORKDIR /app/examples-typescript
-COPY examples-typescript/gateway/*.ts gateway/
+COPY examples-typescript/advanced/gateway/*.ts advanced/gateway/
 ENV PORT=9080
 # The agents' model, for the Assistant and Case: give OPENAI_API_KEY.
 ENV MODEL=openai/gpt-6-luna
@@ -46,4 +46,4 @@ ENV MODEL=openai/gpt-6-luna
 ENV WORKSPACE=/data/workspace
 RUN mkdir -p /data/workspace
 EXPOSE 9080
-CMD ["node", "gateway/main.ts"]
+CMD ["node", "advanced/gateway/main.ts"]

@@ -6,7 +6,7 @@
  * keep its context short; and `reset` starts the conversation over, with a
  * note to carry on (both on pi's Harness directly, `withPi`).
  *
- *   ANTHROPIC_API_KEY=… node harness.ts
+ *   ANTHROPIC_API_KEY=… node intermediate/harness.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/configure --json '{"persona": "You answer as a pirate."}'

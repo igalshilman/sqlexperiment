@@ -3,7 +3,7 @@
  * day from now, a one-way call Restate keeps until then. Nothing runs in the
  * meantime, and a restart changes nothing.
  *
- *   ANTHROPIC_API_KEY=… node followup.ts
+ *   ANTHROPIC_API_KEY=… node intermediate/followup.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/concierge/alice/chat -d 'My order 103 is late. Can you keep an eye on it?'

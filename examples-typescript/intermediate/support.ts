@@ -4,7 +4,7 @@
  * a workflow. Every step is durable: a crash, or a manager who takes a day,
  * changes nothing.
  *
- *   ANTHROPIC_API_KEY=… node support.ts
+ *   ANTHROPIC_API_KEY=… node intermediate/support.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/support/alice/chat -d 'Order 103 arrived broken, can I get my $30 back?'

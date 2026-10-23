@@ -2,7 +2,7 @@
  * SQL in a virtual object: every key has a SQLite database of its own,
  * stored in Restate with the object's state. No database to run.
  *
- *   node notes.ts
+ *   node basic/notes.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/notes/alice/add --json '"Buy milk"'

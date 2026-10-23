@@ -5,7 +5,7 @@
  * Each key is a conversation of its own. If the process dies mid-reply,
  * Restate retries the call and the harness resumes the session.
  *
- *   DEEPSEEK_API_KEY=… node deepseek.ts
+ *   DEEPSEEK_API_KEY=… node basic/deepseek.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'

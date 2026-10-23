@@ -5,7 +5,7 @@
  * Each key is a thread of its own. If the process dies mid-reply, Restate
  * retries the call and the graph carries on from its last step.
  *
- *   ANTHROPIC_API_KEY=… node langgraph.ts
+ *   ANTHROPIC_API_KEY=… node basic/langgraph.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'

@@ -10,7 +10,7 @@
  * - `creative` (LangGraph): a ChatAnthropic of its own settings, here a high
  *   temperature. Any LangChain chat model that calls tools works the same.
  *
- *   ANTHROPIC_API_KEY=… node models.ts
+ *   ANTHROPIC_API_KEY=… node basic/models.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/precise/alice/chat -d 'Name a color.'

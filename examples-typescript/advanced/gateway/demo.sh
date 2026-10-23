@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The tool gateway's demo, in four acts, against a Restate server that has
-# the gateway's endpoint (`node gateway/main.ts`) registered. Everything
+# the gateway's endpoint (`node advanced/gateway/main.ts`) registered. Everything
 # goes through Restate: its ingress, and its admin API for the limits.
 #
-#   INGRESS=http://localhost:8080 ADMIN=http://localhost:9070 gateway/demo.sh
+#   INGRESS=http://localhost:8080 ADMIN=http://localhost:9070 advanced/gateway/demo.sh
 #
 # The agent's model is the endpoint's MODEL, such as openai/gpt-6-luna.
 # Press enter between acts.

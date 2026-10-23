@@ -1,5 +1,5 @@
 // Restate's own tools (restate-agents' call, signal and workflow) against a
-// real Restate server: the support agent of examples-typescript/support.ts on a scripted
+// real Restate server: the support agent of examples-typescript/intermediate/support.ts on a scripted
 // model, which looks the order up, waits for approval, then refunds.
 //
 // Checks: the agent waits for the signal (`pending` lists the wait, with
@@ -81,7 +81,7 @@ const support = pi.agent({
   ],
 });
 
-// A workflow that calls the agent like any handler, as examples-typescript/triage.ts does.
+// A workflow that calls the agent like any handler, as examples-typescript/intermediate/triage.ts does.
 const triage = restate.workflow({
   name: 'triage',
   handlers: {
