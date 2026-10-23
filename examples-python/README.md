@@ -19,22 +19,23 @@ put them together.
 
 ### Intermediate
 
-| File                                                | What                                                                                                                                                         |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`support.py`](intermediate/support.py)             | A support agent whose tools are Restate itself: a service, a manager's approval (a signal), a workflow                                                       |
-| [`airline.py`](intermediate/airline.py)             | Customer service on the OpenAI Agents SDK: a triage agent hands off to a changes agent, whose tools are a service, the traveller's confirmation, a rebooking |
-| [`oncall.py`](intermediate/oncall.py)               | An incident responder on Google ADK: health checks, a timeline in SQL, a person paged and waited for, the review scheduled a day later                       |
-| [`trips.py`](intermediate/trips.py)                 | A travel agent on Pydantic AI: an Agent of your own, an approval before booking, and its plan as typed output                                                |
-| [`release_notes.py`](intermediate/release_notes.py) | Two models through LiteLLM, in a handler of your own: a cheap one drafts, a strong one reviews, until approved; then a workflow publishes                    |
-| [`router.py`](intermediate/router.py)               | A front desk of your own: a handler asks a model which team handles a message, then asks that team's agent (`ask`)                                           |
-| [`team.py`](intermediate/team.py)                   | A team on three frameworks: an editor (Claude) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI)                             |
-| [`triage.py`](intermediate/triage.py)               | A LangGraph graph of your own: a router hands each message to the billing or the tech team, each with its tools                                              |
-| [`writer.py`](intermediate/writer.py)               | A LangGraph graph of your own: a writer drafts and a model edits, a person approves (a signal), a workflow publishes                                         |
-| [`followup.py`](intermediate/followup.py)           | An agent that schedules a check-in for a day later: `send` with a delay                                                                                      |
-| [`harness.py`](intermediate/harness.py)             | An agent each user configures: its model and persona from the object's database, and `compact` and `reset` handlers                                          |
-| [`coder.py`](intermediate/coder.py)                 | A coding agent on Claude Code (the Claude Agent SDK): a workspace per key, and a person's review before it is done                                           |
-| [`coder_codex.py`](intermediate/coder_codex.py)     | The same coding agent on Codex (OpenAI's coding agent)                                                                                                       |
-| [`on_modal.py`](intermediate/on_modal.py)           | The support agent on [Modal](https://modal.com), as a Modal Server                                                                                           |
+| File                                                | What                                                                                                                                                            |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`support.py`](intermediate/support.py)             | A support agent whose tools are Restate itself: a service, a manager's approval (a signal), a workflow                                                          |
+| [`airline.py`](intermediate/airline.py)             | Customer service on the OpenAI Agents SDK: a triage agent hands off to a changes agent, whose tools are a service, the traveller's confirmation, a rebooking    |
+| [`oncall.py`](intermediate/oncall.py)               | An incident responder on Google ADK: health checks, a timeline in SQL, a person paged and waited for, the review scheduled a day later                          |
+| [`trips.py`](intermediate/trips.py)                 | A travel agent on Pydantic AI: an Agent of your own, an approval before booking, and its plan as typed output                                                   |
+| [`release_notes.py`](intermediate/release_notes.py) | Two models through LiteLLM, in a handler of your own: a cheap one drafts, a strong one reviews, until approved; then a workflow publishes                       |
+| [`router.py`](intermediate/router.py)               | A front desk of your own: a handler asks a model which team handles a message, then asks that team's agent (`ask`)                                              |
+| [`team.py`](intermediate/team.py)                   | A team on three frameworks: an editor (Claude) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI)                                |
+| [`triage.py`](intermediate/triage.py)               | A LangGraph graph of your own: a router hands each message to the billing or the tech team, each with its tools                                                 |
+| [`writer.py`](intermediate/writer.py)               | A LangGraph graph of your own: a writer drafts and a model edits, a person approves (a signal), a workflow publishes                                            |
+| [`analyst.py`](intermediate/analyst.py)             | A data analyst whose code runs in a sandbox (a Modal Sandbox per conversation): the agent's loop here, its tools write and run Python there, and the files last |
+| [`followup.py`](intermediate/followup.py)           | An agent that schedules a check-in for a day later: `send` with a delay                                                                                         |
+| [`harness.py`](intermediate/harness.py)             | An agent each user configures: its model and persona from the object's database, and `compact` and `reset` handlers                                             |
+| [`coder.py`](intermediate/coder.py)                 | A coding agent on Claude Code (the Claude Agent SDK): a workspace per key, and a person's review before it is done                                              |
+| [`coder_codex.py`](intermediate/coder_codex.py)     | The same coding agent on Codex (OpenAI's coding agent)                                                                                                          |
+| [`on_modal.py`](intermediate/on_modal.py)           | The support agent on [Modal](https://modal.com), as a Modal Server                                                                                              |
 
 Where an example's agent works with Restate's own services and workflows
 (journaled handlers), they are in a module beside it, so the example reads

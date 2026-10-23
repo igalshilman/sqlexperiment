@@ -531,6 +531,37 @@ agent has two more handlers, for its signals: `pending`, the waits, and
 the next wait if none waits). The waits are in a journaled virtual object,
 `signals`, which `serve` (and `app`) serve with your services.
 
+## Sandboxes
+
+`restate_agents.sandbox` gives an agent tools that run in a sandbox, while
+its loop runs where it does: `list_files`, `read_file`, `write_file` and
+`run_command`, in a workspace of the conversation's own, whose files last
+from one message to the next
+([`examples-python/intermediate/analyst.py`](../../examples-python/intermediate/analyst.py)):
+
+```python
+from restate_agents import claude, sandbox
+
+box = sandbox.modal(image="python:3.13-slim")
+analyst = claude.agent("analyst", system="...", tools=box.tools())
+```
+
+| Provider                                     | Where                                                                                                                                                                                                                    |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sandbox.modal(image=, app=, idle_timeout=)` | A [Modal Sandbox](https://modal.com/docs/guide/sandbox) per conversation, its files in a Volume of its own; its compute stops once idle, and starts again on the next tool call (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`) |
+| `sandbox.local(root)`                        | A directory of this machine, commands in it with a bare environment (no API keys): for development, it isolates nothing                                                                                                  |
+
+The first sandbox tool of an attempt opens the conversation's sandbox: it
+makes it, or resumes the one it made before, whose reference is in the
+object's database (`sandboxes`). Its name is the conversation's, so an
+attempt that retries after it was made finds it rather than making another;
+parallel tool calls share it. A command that a crash cut off runs again
+(the integrations run an unfinished tool call again), so a command that must
+not run twice makes itself safe to. `box.destroy(ctx)`, in a handler of your
+own, removes the sandbox and its files. Another provider implements
+`open(name, ref)` and `destroy(ref)` (`sandbox.Provider`), and
+`sandbox.Sandbox(provider)` gives its tools.
+
 ## Turns
 
 The message `chat` answers is a turn. While it answers, `status` says so
@@ -702,6 +733,10 @@ async def chat(ctx, message: str) -> str:
   cut-off message takes the messages steered into it.
 - [`tests/test_client.py`](tests/test_client.py): a message as text, as
   `as_text` gives it.
+- [`tests/test_sandbox.py`](tests/test_sandbox.py): the sandbox's tools on
+  the local provider: files from one message to the next, commands without
+  the process's environment, a timeout, paths kept in the workspace, one
+  opening for parallel calls, and an agent that writes and runs code.
 - [`tests/test_log.py`](tests/test_log.py): the conversation as clients
   read it: ids that never change, a cursor of what is new or changed (a tool
   call's output), pages back, and a compaction that keeps what was said.
