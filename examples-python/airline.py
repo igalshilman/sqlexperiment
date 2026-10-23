@@ -29,7 +29,7 @@ from datetime import timedelta
 import restate_fns as restate
 from agents import Agent
 from pydantic import BaseModel
-from restate_agents import call, openai_agents, serve, signal, tool, workflow
+from restate_agents import call, has_table, openai_agents, serve, signal, tool, workflow
 
 # A plain Restate service: the flights, a stand-in for the airline's systems.
 flights = restate.Service("flights")
@@ -104,7 +104,7 @@ airline = openai_agents.agent("airline", triage)
 @airline.handler(kind="shared")
 async def bookings(ctx) -> list[dict[str, str]]:
     """The traveller's bookings, from their own table."""
-    if not await ctx.db.query("SELECT 1 FROM sqlite_schema WHERE name = 'bookings'"):
+    if not await has_table(ctx.db, "bookings"):
         return []  # no booking yet: a shared handler creates no table
     return [{"flight": f, "ticket": t} for f, t in await ctx.db.query("SELECT flight, ticket FROM bookings")]
 

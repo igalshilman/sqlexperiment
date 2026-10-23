@@ -9,7 +9,7 @@ the object's database (checkpointer.py)::
         '''The current weather in a city.'''
         return f"Sunny and 21°C in {city}"
 
-    assistant = langgraph.agent("assistant", tools=[get_weather])
+    assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
     serve(assistant)
 
 The usual graph is the tool-calling loop: a model node, a tools node, and
@@ -114,7 +114,7 @@ def agent(
     async def transcript(ctx: ObjectContext) -> Transcript:
         """The conversation, from the thread's last checkpoint."""
         transcript = Transcript()
-        if not await has_table(ctx.db, "writes"):
+        if not await has_table(ctx.db, "langgraph_writes"):
             return transcript
         saved = await SqlCheckpointSaver(ctx.db).aget_tuple({"configurable": {"thread_id": ctx.key()}})
         for m in saved.checkpoint["channel_values"].get("messages", []) if saved else []:

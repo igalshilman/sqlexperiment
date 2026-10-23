@@ -10,7 +10,7 @@ appends them::
         '''The current weather in a city.'''
         return f"Sunny and 21°C in {city}"
 
-    assistant = adk.agent("assistant", instruction="Answer briefly.", tools=[get_weather])
+    assistant = adk.agent("assistant", system="Answer briefly.", tools=[get_weather])
     serve(assistant)
 
 The usual agent is an ``LlmAgent`` with ``model`` (``google/model-id``, or

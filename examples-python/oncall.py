@@ -27,7 +27,7 @@ from datetime import timedelta
 
 import restate_fns as restate
 from pydantic import BaseModel
-from restate_agents import adk, call, send, serve, signal, tool
+from restate_agents import adk, call, has_table, send, serve, signal, tool
 
 # A plain Restate service: the services' health, a stand-in for your monitoring.
 monitoring = restate.Service("monitoring")
@@ -96,7 +96,7 @@ responder = adk.agent(
 @responder.handler(kind="shared")
 async def timeline(ctx) -> list[str]:
     """The incident's timeline, oldest first."""
-    if not await ctx.db.query("SELECT 1 FROM sqlite_schema WHERE name = 'timeline'"):
+    if not await has_table(ctx.db, "timeline"):
         return []
     return [f"{at} {entry}" for at, entry in await ctx.db.query("SELECT at, entry FROM timeline ORDER BY rowid")]
 

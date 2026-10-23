@@ -26,7 +26,7 @@ from typing import Any
 
 import httpx
 
-from restate_agents.common import ChatMessage, Messages
+from restate_agents.common import ChatMessage, Messages, Synced
 
 __all__ = ["AgentClient", "AgentError", "Followed"]
 
@@ -112,7 +112,7 @@ class AgentClient:
         timeout_seconds: float = 50,
         limit: int = 100,
         idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> Synced:
         """
         The messages new or changed since ``cursor`` (at most ``limit``), what
         the agent is doing, and the revision, in one request; with

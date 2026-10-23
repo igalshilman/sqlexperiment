@@ -18,9 +18,10 @@ API's own JSON, as the host's ``claude.messages`` binding of the durable
 functions sends it: with ``fallbacks: "default"`` unless ``request`` says
 otherwise, and more of it from ``request``.
 
-It is the SDK tool runner's loop (``client.beta.messages.tool_runner``), of
-its own: the runner gives a tool its input but not its call's id, and cannot
-start from a stored reply whose tools did not run.
+The loop is the agent's own, not the SDK's tool runner
+(``client.beta.messages.tool_runner``): the runner gives a tool its input
+but not its call's id, and cannot start from a stored reply whose tools did
+not run.
 
 The handler is not replayed: a retried attempt (a crash, a lost connection)
 runs again from the start, with the stored messages:

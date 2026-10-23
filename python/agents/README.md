@@ -111,8 +111,8 @@ a crash during the tools runs them again with the same tool call ids,
 without asking the model again. A message's answer is stored with the
 model's last reply, and a retried attempt returns it. A tool's
 `restate.TerminalError` is its answer to the model (its message); any
-other error fails the attempt. The loop is the SDK tool runner's
-(`client.beta.messages.tool_runner`), of its own: the runner gives a tool
+other error fails the attempt. The loop is the agent's own, not the SDK's
+tool runner (`client.beta.messages.tool_runner`): the runner gives a tool
 its input but not its call's id, and cannot start from a stored reply whose
 tools did not run.
 
@@ -138,13 +138,13 @@ coder = claude_agent.agent(
 serve(coder)
 ```
 
-| Option      | What                                                                                                                                                                  |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`     | `anthropic/model-id`; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)                                                                    |
-| `system`    | Added to Claude Code's own system prompt                                                                                                                              |
-| `tools`     | `tool`s and [Restate's tools](#restates-tools)                                                                                                                        |
-| `workspace` | A directory of the local machine to work in, with Claude Code's own tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`); use a sandbox. Without one, only `tools` |
-| `options`   | More of `ClaudeAgentOptions`: `{"max_turns": 50}`, `{"setting_sources": ["project"]}`, `{"env": {...}}` for the CLI's environment                                     |
+| Option           | What                                                                                                                                                                  |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`          | `anthropic/model-id`; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)                                                                    |
+| `system`         | Added to Claude Code's own system prompt                                                                                                                              |
+| `tools`          | `tool`s and [Restate's tools](#restates-tools)                                                                                                                        |
+| `workspace`      | A directory of the local machine to work in, with Claude Code's own tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`); use a sandbox. Without one, only `tools` |
+| `claude_options` | More of `ClaudeAgentOptions`: `{"max_turns": 50}`, `{"setting_sources": ["project"]}`, `{"env": {...}}` for the CLI's environment                                     |
 
 Each may be a function of the invocation's context, or an async one (a
 workspace for each key, say). `claude_agent.prompt(ctx, text, ...)` answers
@@ -168,9 +168,9 @@ retried attempt resumes the session from, on any machine. Through crashes:
   it on as their idempotency key, make it once) and, if it finished, its
   output, without running the tool again.
 - **A tool's error fails the attempt**, and Restate retries it; a
-  `restate.TerminalError` is the tool's answer to the model. So is an error
-  result of Claude Code (an API error), unless it is a limit of the options
-  (`max_turns`, `max_budget_usd`), which is terminal.
+  `restate.TerminalError` is the tool's answer to the model. An error
+  result of Claude Code (an API error) fails the attempt too, unless it is
+  a limit of the options (`max_turns`, `max_budget_usd`), which is terminal.
 - **`stop`** reaches the turn at its next tool call of the tools here; it
   ends there, answered "Cancelled". **`steer`** reaches the model after the
   next tool call, with its result (a `PostToolUse` hook's context).
@@ -253,7 +253,7 @@ Add handlers of your own with `@assistant.handler`.
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `model`  | `anthropic/model-id` (`ChatAnthropic`); or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`); or any LangChain chat model that calls tools; or a function of the invocation's context giving either |
 | `system` | The system prompt                                                                                                                                                                                                           |
-| `tools`  | LangChain tools, or functions of the invocation's context giving them                                                                                                                                                       |
+| `tools`  | `tool`s, [Restate's tools](#restates-tools) and LangChain tools, or functions of the invocation's context giving them                                                                                                       |
 
 The graph is the usual tool-calling loop: a model node, a tools node, and
 back to the model until it answers. Its checkpoints are in the object's
@@ -325,62 +325,6 @@ graph.add_node("follow_up", nodes.send(checkin, input=lambda state: state["order
 
 A handler's `restate.TerminalError` fails the turn: no model reads it. A
 stopped turn ends at a node that waits, as at a tool that does.
-
-### Tools
-
-`@tool` makes a tool of a function: the model gives its parameters, which
-their types and the docstring describe. Three parameters are not the model's:
-`ctx`, the handler's context (`ctx.db`, calls, sends), `call_id`, the tool
-call's id, and `idempotency_key`, the call's in this invocation
-(`<invocation id>:<call id>`). A crash runs an unfinished tool call again
-with the same id, so a tool that must not run twice passes it on, as an
-idempotency key or a row's key:
-
-```python
-@tool
-async def send_money(ctx, idempotency_key, to: str, amount: int) -> str:
-    """Send money from the customer's account to another account."""
-    await ctx.object_call(transfer, key=ctx.key(), arg={"to": to, "amount": amount}, idempotency_key=idempotency_key)
-    return f"Sent {amount} to {to}"
-```
-
-LangChain's own tools work too.
-
-### Restate's tools
-
-Tools that call, send to, start and wait for what Restate runs, each once
-per tool call, however often an attempt crashes (its idempotency key is the
-tool call's), as in [`examples-python/support.py`](../../examples-python/support.py):
-
-```python
-from restate_agents import call, langgraph, send, signal, subagent, workflow
-
-support = langgraph.agent(
-    "support",
-    tools=[
-        call(status),  # a handler of a service, an object or a workflow
-        signal("approval", description="Wait for a manager to approve a refund.", input=Refund),
-        workflow(refund),  # a restate.Workflow, run to its end
-        subagent(researcher, description="a researcher, who answers with facts"),
-        send(checkin, delay=timedelta(days=1)),
-    ],
-)
-```
-
-| Tool                                                   | What                                                                                                                                                                                                                                                                                                      |
-| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `call(handler, description=, name=, key=)`             | Calls `handler` and answers with what it returns. The model gives its input (its parameter, or its pydantic model's fields) and, for an object or a workflow, the key, unless `key` (a string, or a function of the context) does. `name`: `<service>_<handler>`; `description`: the handler's docstring. |
-| `send(handler, description=, name=, key=, delay=)`     | Sends to `handler`, after `delay` if given, and does not wait.                                                                                                                                                                                                                                            |
-| `workflow(wf, description=, name=, key=)`              | Runs the workflow `wf`, keyed `<this key>-<call id>` unless `key` keys it, and answers with its result.                                                                                                                                                                                                   |
-| `subagent(agent, description=, name=, handler="chat")` | Hands a named task to `agent`, keyed `<this key>.<task name>`: tasks of different names run at once, the same name continues the same task.                                                                                                                                                               |
-| `signal(signal, description=, input=, name=)`          | Waits for the signal `signal` to the agent, without holding a process, and answers with its value. With `input` (a pydantic model), the model says what it waits for.                                                                                                                                     |
-
-A handler's `restate.TerminalError` is the tool's answer to the model. Each
-agent has two more handlers, for its signals: `pending`, the waits, and
-`signal`, which resolves one by its id, or the oldest for a name
-(`{"name": "approval", "value": "approved"}`; with `"keep": true`, kept for
-the next wait if none waits). The waits are in a journaled virtual object,
-`signals`, which `serve` (and `app`) serve with your services.
 
 ### Through crashes
 
@@ -527,6 +471,62 @@ stored). A message steered to the turn joins it before the model's next
 request after a tool call (a plugin's `before_model_callback`), as a user
 event of the session.
 
+## Tools
+
+`@tool` makes a tool of a function: the model gives its parameters, which
+their types and the docstring describe. Three parameters are not the model's:
+`ctx`, the handler's context (`ctx.db`, calls, sends), `call_id`, the tool
+call's id, and `idempotency_key`, the call's in this invocation
+(`<invocation id>:<call id>`). A crash runs an unfinished tool call again
+with the same id, so a tool that must not run twice passes it on, as an
+idempotency key or a row's key:
+
+```python
+@tool
+async def send_money(ctx, idempotency_key, to: str, amount: int) -> str:
+    """Send money from the customer's account to another account."""
+    await ctx.object_call(transfer, key=ctx.key(), arg={"to": to, "amount": amount}, idempotency_key=idempotency_key)
+    return f"Sent {amount} to {to}"
+```
+
+Most frameworks take their own tools too: see each one's `tools`.
+
+## Restate's tools
+
+Tools that call, send to, start and wait for what Restate runs, each once
+per tool call, however often an attempt crashes (its idempotency key is the
+tool call's), as in [`examples-python/support.py`](../../examples-python/support.py):
+
+```python
+from restate_agents import call, langgraph, send, signal, subagent, workflow
+
+support = langgraph.agent(
+    "support",
+    tools=[
+        call(status),  # a handler of a service, an object or a workflow
+        signal("approval", description="Wait for a manager to approve a refund.", input=Refund),
+        workflow(refund),  # a restate.Workflow, run to its end
+        subagent(researcher, description="a researcher, who answers with facts"),
+        send(checkin, delay=timedelta(days=1)),
+    ],
+)
+```
+
+| Tool                                                   | What                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `call(handler, description=, name=, key=)`             | Calls `handler` and answers with what it returns. The model gives its input (its parameter, or its pydantic model's fields) and, for an object or a workflow, the key, unless `key` (a string, or a function of the context) does. `name`: `<service>_<handler>`; `description`: the handler's docstring. |
+| `send(handler, description=, name=, key=, delay=)`     | Sends to `handler`, after `delay` if given, and does not wait.                                                                                                                                                                                                                                            |
+| `workflow(wf, description=, name=, key=)`              | Runs the workflow `wf`, keyed `<this key>-<call id>` unless `key` keys it, and answers with its result.                                                                                                                                                                                                   |
+| `subagent(agent, description=, name=, handler="chat")` | Hands a named task to `agent`, keyed `<this key>.<task name>`: tasks of different names run at once, the same name continues the same task.                                                                                                                                                               |
+| `signal(signal, description=, input=, name=)`          | Waits for the signal `signal` to the agent, without holding a process, and answers with its value. With `input` (a pydantic model), the model says what it waits for.                                                                                                                                     |
+
+A handler's `restate.TerminalError` is the tool's answer to the model. Each
+agent has two more handlers, for its signals: `pending`, the waits, and
+`signal`, which resolves one by its id, or the oldest for a name
+(`{"name": "approval", "value": "approved"}`; with `"keep": true`, kept for
+the next wait if none waits). The waits are in a journaled virtual object,
+`signals`, which `serve` (and `app`) serve with your services.
+
 ## Turns
 
 The message `chat` answers is a turn. While it answers, `status` says so
@@ -545,9 +545,9 @@ curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invoca
   message starts afresh. It reaches the turn at its next Restate operation
   (a tool's call or wait, a storage request); during a model request, once
   the request is answered.
-- **`steer`** adds a message to the turn: the agent takes it after its next
-  tool call (Claude's tools; LangGraph's `tool_node`; in Pydantic AI, before
-  the next model request), and the model reads it with the tools' results.
+- **`steer`** adds a message to the turn: the model reads it with the
+  results of its next tool call (in Pydantic AI and ADK, before its next
+  request; in Codex, as Codex steers a turn).
   A turn that ends before (no tool call came) answers it as a message of its
   own; with no turn, `steer` is a message of its own (`"steered": false`, and
   its invocation, to attach to). A stopped turn answers none of them. The

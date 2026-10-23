@@ -83,8 +83,8 @@ def agent(
     system: str | Callable[[ObjectContext], str] | None = None,
     tools: Sequence[Tool] | Callable[[ObjectContext], Sequence[Tool]] = (),
     workspace: str | Path | Callable[[ObjectContext], str | Path] | None = None,
-    options: dict[str, Any] | Callable[[ObjectContext], dict[str, Any]] | None = None,
-    **object_options: Any,
+    claude_options: dict[str, Any] | Callable[[ObjectContext], dict[str, Any]] | None = None,
+    **options: Any,
 ) -> Object:
     """
     An agent: a virtual object ``name``, one per key (its conversation), with the handlers
@@ -98,11 +98,11 @@ def agent(
     ``system`` is added to Claude Code's own system prompt. ``tools``: ``tool``s
     and Restate's tools. ``workspace``: a directory of the local machine to
     work in, with Claude Code's own tools (read, write, edit, bash, ...; use
-    a sandbox); without one, the agent has only ``tools``. ``options``: more
+    a sandbox); without one, the agent has only ``tools``. ``claude_options``: more
     of ``ClaudeAgentOptions``, such as ``{"max_turns": 20}`` or
     ``{"setting_sources": ["project"]}``. Each may be a function of the
     invocation's context, or an async one (a workspace for each key, say).
-    ``object_options``: those of ``restate.VirtualObject``. Add handlers of
+    ``options``: those of ``restate.VirtualObject``. Add handlers of
     your own with ``@agent.handler``.
     """
     if not callable(model):
@@ -116,7 +116,7 @@ def agent(
             system=await configured(system, ctx),
             tools=await configured(tools, ctx),
             workspace=await configured(workspace, ctx),
-            options=await configured(options, ctx),
+            claude_options=await configured(claude_options, ctx),
         )
 
     async def transcript(ctx: ObjectContext) -> Transcript:
@@ -128,7 +128,7 @@ def agent(
             _transcribe(transcript, entry)
         return transcript
 
-    return turns.agent(name, answer, transcript, **object_options)
+    return turns.agent(name, answer, transcript, **options)
 
 
 async def prompt(
@@ -139,7 +139,7 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[Tool] = (),
     workspace: str | Path | None = None,
-    options: dict[str, Any] | None = None,
+    claude_options: dict[str, Any] | None = None,
     thread: str | None = None,
 ) -> str:
     """
@@ -161,7 +161,7 @@ async def prompt(
         system=system,
         tools=list(tools),
         workspace=workspace,
-        options=options or {},
+        options=claude_options or {},
     )
     return await harness.answer_once(ctx, harness.Prompts(ctx.db, PROMPTS, thread), text, run.answer)
 

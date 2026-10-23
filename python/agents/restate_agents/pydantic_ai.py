@@ -2,15 +2,14 @@
 Pydantic AI agents in Restate virtual objects: each conversation is in the
 object's database, stored a step at a time::
 
-    from restate_agents import serve, tool
-    from restate_agents.pydantic_ai import agent
+    from restate_agents import pydantic_ai, serve, tool
 
     @tool
     def get_weather(city: str) -> str:
         '''The current weather in a city.'''
         return f"Sunny and 21°C in {city}"
 
-    assistant = agent("assistant", tools=[get_weather])
+    assistant = pydantic_ai.agent("assistant", system="Answer briefly.", tools=[get_weather])
     serve(assistant)
 
 The usual agent is a Pydantic AI ``Agent`` with ``model`` (``provider/model-id``,

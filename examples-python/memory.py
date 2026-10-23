@@ -10,7 +10,7 @@ handler of your own serves them, for a profile page say.
     curl localhost:8080/assistant/alice/facts
 """
 
-from restate_agents import langgraph, serve, tool
+from restate_agents import has_table, langgraph, serve, tool
 
 
 async def facts_table(db):
@@ -40,10 +40,12 @@ assistant = langgraph.agent(
 )
 
 
-@assistant.handler
+@assistant.handler(kind="shared")
 async def facts(ctx) -> list[str]:
-    db = await facts_table(ctx.db)
-    return [fact for (fact,) in await db.query("SELECT fact FROM facts ORDER BY rowid")]
+    """What the assistant remembers about the user: shared, so it answers while a message is answered."""
+    if not await has_table(ctx.db, "facts"):
+        return []
+    return [fact for (fact,) in await ctx.db.query("SELECT fact FROM facts ORDER BY rowid")]
 
 
 if __name__ == "__main__":

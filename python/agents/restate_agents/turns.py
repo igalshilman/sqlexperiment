@@ -16,12 +16,12 @@ from collections.abc import Awaitable, Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, TypedDict
+from typing import Any
 
 import restate_fns as restate
 
 from restate_agents import log
-from restate_agents.common import Messages, MessagesRequest, Transcript
+from restate_agents.common import Messages, MessagesRequest, Synced, SyncRequest, Transcript
 from restate_agents.object import TURN, Object, Turn, context, refusal, service
 from restate_agents.signals import Agent, CloseRequest, Steer, signals_of
 from restate_agents.signals import close as close_turn
@@ -145,26 +145,6 @@ def agent(
     obj.handler("messages", kind="shared")(messages)
     obj.handler("sync", kind="shared")(sync)
     return obj
-
-
-class SyncRequest(TypedDict, total=False):
-    """
-    What ``sync`` reads: what is new or changed since ``cursor`` (default 0,
-    all of it), at most ``limit`` messages (default 100); once the revision is
-    past ``revision``, if given, or at ``timeoutSeconds``.
-    """
-
-    cursor: int
-    revision: int
-    timeoutSeconds: float
-    limit: int
-
-
-class Synced(Messages):
-    """What ``sync`` answers: the messages since the cursor, as ``messages`` gives them, the status and the revision."""
-
-    revision: int
-    status: dict[str, Any]
 
 
 def _chat(obj: Object, answer: Callable[[restate.ObjectContext, str], Awaitable[str]]) -> None:

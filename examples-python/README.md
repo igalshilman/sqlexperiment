@@ -51,8 +51,8 @@ workflows and other agents, and wait for signals:
 support = claude.agent("support", tools=[call(status), signal("approval", description=...), workflow(refund)])
 ```
 
-`notes.py` uses [`restate-fns`](../python/fns/README.md) alone:
-`restate_fns.VirtualObject`.
+`notes.py` is SQL alone, with no agent: a
+[`restate-fns`](../python/fns/README.md) `restate_fns.VirtualObject`.
 
 ## Run an example
 
@@ -65,11 +65,12 @@ curl localhost:8080/assistant/alice/messages                          # the conv
 ```
 
 The agents take `MODEL` (`anthropic/<model-id>`), or else Claude Sonnet,
-with `ANTHROPIC_API_KEY`; `coder_codex.py` and `airline.py`, OpenAI's
-(their default), with `OPENAI_API_KEY`; `oncall.py`, Gemini, with
-`GOOGLE_API_KEY`; `release_notes.py`, any two of LiteLLM's models (`DRAFTER`,
-`REVIEWER`), by default Claude's; `notes.py` needs no key. Each
-example's docstring has its requests.
+with `ANTHROPIC_API_KEY`; `triage.py`, `writer.py` and `trips.py` bring a
+graph or an agent of their own, which names its model. `coder_codex.py` and
+`airline.py` take OpenAI's (their default), with `OPENAI_API_KEY`;
+`oncall.py`, Gemini, with `GOOGLE_API_KEY`; `release_notes.py`, any two of
+LiteLLM's models (`DRAFTER`, `REVIEWER`), by default Claude's; `notes.py`
+needs no key. Each example's docstring has its requests.
 
 ## Run on Modal
 

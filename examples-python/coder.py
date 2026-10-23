@@ -36,7 +36,7 @@ coder = claude_agent.agent(
     system="Once the change works, ask for a review, and do what the reviewer says.",
     tools=[review],
     workspace=workspace,
-    options={"max_turns": 50},
+    claude_options={"max_turns": 50},
 )
 
 if __name__ == "__main__":

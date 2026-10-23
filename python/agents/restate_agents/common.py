@@ -180,3 +180,23 @@ class Transcript:
     def messages(self) -> list[dict[str, Any]]:
         """Its messages, in order (each ``{role, parts}``): those with parts."""
         return [{"role": m["role"], "parts": m["parts"]} for m in self._messages if m["parts"]]
+
+
+class SyncRequest(TypedDict, total=False):
+    """
+    What ``sync`` reads: what is new or changed since ``cursor`` (default 0,
+    all of it), at most ``limit`` messages (default 100); once the revision is
+    past ``revision``, if given, or at ``timeoutSeconds``.
+    """
+
+    cursor: int
+    revision: int
+    timeoutSeconds: float
+    limit: int
+
+
+class Synced(Messages):
+    """What ``sync`` answers: the messages since the cursor, as ``messages`` gives them, the status and the revision."""
+
+    revision: int
+    status: dict[str, Any]

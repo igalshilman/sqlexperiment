@@ -3,15 +3,14 @@ OpenAI Agents SDK agents in Restate virtual objects: each conversation is in
 the object's database, stored before each model request and with each
 response::
 
-    from restate_agents import serve, tool
-    from restate_agents.openai_agents import agent
+    from restate_agents import openai_agents, serve, tool
 
     @tool
     def get_weather(city: str) -> str:
         '''The current weather in a city.'''
         return f"Sunny and 21°C in {city}"
 
-    assistant = agent("assistant", instructions="Answer briefly.", tools=[get_weather])
+    assistant = openai_agents.agent("assistant", system="Answer briefly.", tools=[get_weather])
     serve(assistant)
 
 The usual agent is an ``Agent`` with ``model`` (``openai/model-id``, or a
