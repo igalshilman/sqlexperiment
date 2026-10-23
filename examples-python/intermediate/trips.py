@@ -5,7 +5,7 @@ booking; and a handler of your own that asks it for the plan, typed. The
 conversation is stored in the object's database at each step: a crash
 mid-turn carries on from the step it was at.
 
-    ANTHROPIC_API_KEY=... uv run trips.py
+    ANTHROPIC_API_KEY=... uv run intermediate/trips.py
     restate deployments register http://localhost:9080
     curl localhost:8080/trips/alice/chat -d 'Three days in Lisbon in May, and book me a hotel'
     curl localhost:8080/trips/alice/pending      # the booking it waits to be approved

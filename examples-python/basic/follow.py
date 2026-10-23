@@ -4,8 +4,8 @@ the tool calls as the agent makes them, and what it waits for. Optionally,
 send it a message first. It needs nothing of the agent's code, only
 Restate's address (``restate_agents.client``).
 
-    uv run support.py   # an agent to follow, in another terminal
-    uv run follow.py support alice 'Order 103 arrived broken, can I get my $30 back?'
+    uv run intermediate/support.py   # an agent to follow, in another terminal
+    uv run basic/follow.py support alice 'Order 103 arrived broken, can I get my $30 back?'
     curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'
 
 RESTATE is Restate's ingress, http://localhost:8080 by default. A chat page

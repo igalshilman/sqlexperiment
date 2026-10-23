@@ -5,7 +5,7 @@ reads for each message; ``compact`` has the model summarize the conversation
 so far, to keep its context short; and ``reset`` starts it over, with a note
 to carry on.
 
-    ANTHROPIC_API_KEY=... uv run harness.py
+    ANTHROPIC_API_KEY=... uv run intermediate/harness.py
     restate deployments register http://localhost:9080
     curl localhost:8080/assistant/alice/configure --json '{"persona": "You answer as a pirate."}'
     curl localhost:8080/assistant/alice/chat -d 'What time is it?'

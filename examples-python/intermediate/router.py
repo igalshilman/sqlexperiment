@@ -6,7 +6,7 @@ The desk asks a model which team it is (``claude.prompt``, answered once),
 then sends the message to that team's agent (``ask``, sent once). Each team
 keeps its own conversation with each user (``billing/alice``, ``tech/alice``).
 
-    ANTHROPIC_API_KEY=... uv run router.py
+    ANTHROPIC_API_KEY=... uv run intermediate/router.py
     restate deployments register http://localhost:9080
     curl localhost:8080/desk/alice/chat -d 'I was charged twice for order 103'
     curl localhost:8080/desk/alice/chat -d 'The app crashes when I open my orders'

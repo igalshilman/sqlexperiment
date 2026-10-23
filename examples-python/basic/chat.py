@@ -4,7 +4,7 @@ conversation of its own, kept in the object's SQL database; if the process
 dies mid-reply, Restate retries and the agent carries on from the last
 message it stored, without asking the model again.
 
-    ANTHROPIC_API_KEY=... uv run chat.py
+    ANTHROPIC_API_KEY=... uv run basic/chat.py
     restate deployments register http://localhost:9080
     curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
     curl localhost:8080/assistant/alice/chat -d 'What is my name?'

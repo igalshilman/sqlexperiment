@@ -3,7 +3,7 @@ An assistant with a memory: the facts it learns about you go into a table
 of its own SQL database, next to its conversation, through its tools; and a
 handler of your own serves them, for a profile page say.
 
-    ANTHROPIC_API_KEY=... uv run memory.py
+    ANTHROPIC_API_KEY=... uv run basic/memory.py
     restate deployments register http://localhost:9080
     curl localhost:8080/assistant/alice/chat -d 'I am vegetarian, and I live in Lisbon.'
     curl localhost:8080/assistant/alice/chat -d 'Suggest a restaurant for tonight.'

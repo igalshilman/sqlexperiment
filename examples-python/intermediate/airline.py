@@ -10,7 +10,7 @@ A handoff holds: the traveller's next message goes to the changes agent. A
 crash anywhere (mid-handoff, mid-wait, mid-rebooking) changes nothing:
 Restate retries, and the conversation carries on from its last stored step.
 
-    OPENAI_API_KEY=... uv run airline.py
+    OPENAI_API_KEY=... uv run intermediate/airline.py
     restate deployments register http://localhost:9080
     curl localhost:8080/airline/alice/chat/send -d 'My flight RA 102 to Lisbon is delayed, can I take an earlier one?'
 

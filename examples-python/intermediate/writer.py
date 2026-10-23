@@ -6,7 +6,7 @@ signal), or sends notes back to the writer; and the publishing workflow
 publishes it. Each step is stored in the object's database: a crash
 mid-review carries on from the last draft, and the post is published once.
 
-    ANTHROPIC_API_KEY=... uv run writer.py
+    ANTHROPIC_API_KEY=... uv run intermediate/writer.py
     restate deployments register http://localhost:9080
     curl localhost:8080/writer/post/chat -d 'A tweet announcing durable AI agents on Restate'
     curl localhost:8080/writer/post/pending    # the draft that waits for your approval

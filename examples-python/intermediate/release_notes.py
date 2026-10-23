@@ -6,7 +6,7 @@ each model's answer is stored as it comes: a crash in the third round
 carries on from there, without asking either model again. The approved
 notes go to a publishing workflow, which runs once.
 
-    ANTHROPIC_API_KEY=... uv run release_notes.py
+    ANTHROPIC_API_KEY=... uv run intermediate/release_notes.py
     restate deployments register http://localhost:9080
     curl localhost:8080/releases/v2.4/write --json '["Add Apple Pay", "Fix rounding in the cart"]'
 

@@ -4,7 +4,7 @@ plain service, waits for a manager's approval (a signal), and refunds with
 a workflow. Every step is durable: a crash, or a manager who takes a day,
 changes nothing.
 
-    ANTHROPIC_API_KEY=... uv run support.py
+    ANTHROPIC_API_KEY=... uv run intermediate/support.py
     restate deployments register http://localhost:9080
     curl localhost:8080/support/alice/chat -d 'Order 103 arrived broken, can I get my $30 back?'
 

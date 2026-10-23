@@ -5,7 +5,7 @@ instructions and tools. The graph's state (the conversation, and the team
 that answers it) is stored in the object's database at each step: a crash
 mid-turn carries on from the step it was at.
 
-    ANTHROPIC_API_KEY=... uv run triage.py
+    ANTHROPIC_API_KEY=... uv run intermediate/triage.py
     restate deployments register http://localhost:9080
     curl localhost:8080/desk/alice/chat -d 'I was charged twice for order 103, $30 each time'
     curl localhost:8080/desk/alice/chat -d 'And the app crashes when I log in'

@@ -35,16 +35,16 @@ OpenAI Agents SDK, ADK), yours can go in its place, with
 `<framework>.tools([...])` for Restate's tools. `<framework>.prompt(ctx, ...)`
 answers a prompt in a handler of your own, once.
 
-| Import                                | Framework                          | Choose it when                                                                | Its example                                                  |
-| ------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| [`claude`](#claude)                   | The Anthropic SDK                  | You want Claude with nothing in between: the lightest, the API's own messages | [`chat.py`](../../examples-python/chat.py)                   |
-| [`litellm`](#litellm)                 | LiteLLM                            | You want the same, on any model: OpenAI's, Gemini, Bedrock, a local one       | [`release_notes.py`](../../examples-python/release_notes.py) |
-| [`langgraph`](#langgraph)             | LangGraph                          | You use LangChain, or want a graph of your own, its steps Restate's           | [`writer.py`](../../examples-python/writer.py)               |
-| [`pydantic_ai`](#pydantic-ai)         | Pydantic AI                        | You want typed outputs, and an `Agent` of your own                            | [`trips.py`](../../examples-python/trips.py)                 |
-| [`openai_agents`](#openai-agents-sdk) | The OpenAI Agents SDK              | You want handoffs between agents, guardrails, OpenAI's models                 | [`airline.py`](../../examples-python/airline.py)             |
-| [`adk`](#google-adk)                  | Google's Agent Development Kit     | You want Gemini, ADK's sub-agents and callbacks                               | [`oncall.py`](../../examples-python/oncall.py)               |
-| [`claude_agent`](#claude-code)        | Claude Code (the Claude Agent SDK) | You want a coding agent: Claude Code's own tools in a workspace               | [`coder.py`](../../examples-python/coder.py)                 |
-| [`codex`](#codex)                     | Codex (`codex app-server`)         | You want OpenAI's coding agent: its tools in a workspace, in its sandbox      | [`coder_codex.py`](../../examples-python/coder_codex.py)     |
+| Import                                | Framework                          | Choose it when                                                                | Its example                                                               |
+| ------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| [`claude`](#claude)                   | The Anthropic SDK                  | You want Claude with nothing in between: the lightest, the API's own messages | [`chat.py`](../../examples-python/basic/chat.py)                          |
+| [`litellm`](#litellm)                 | LiteLLM                            | You want the same, on any model: OpenAI's, Gemini, Bedrock, a local one       | [`release_notes.py`](../../examples-python/intermediate/release_notes.py) |
+| [`langgraph`](#langgraph)             | LangGraph                          | You use LangChain, or want a graph of your own, its steps Restate's           | [`writer.py`](../../examples-python/intermediate/writer.py)               |
+| [`pydantic_ai`](#pydantic-ai)         | Pydantic AI                        | You want typed outputs, and an `Agent` of your own                            | [`trips.py`](../../examples-python/intermediate/trips.py)                 |
+| [`openai_agents`](#openai-agents-sdk) | The OpenAI Agents SDK              | You want handoffs between agents, guardrails, OpenAI's models                 | [`airline.py`](../../examples-python/intermediate/airline.py)             |
+| [`adk`](#google-adk)                  | Google's Agent Development Kit     | You want Gemini, ADK's sub-agents and callbacks                               | [`oncall.py`](../../examples-python/intermediate/oncall.py)               |
+| [`claude_agent`](#claude-code)        | Claude Code (the Claude Agent SDK) | You want a coding agent: Claude Code's own tools in a workspace               | [`coder.py`](../../examples-python/intermediate/coder.py)                 |
+| [`codex`](#codex)                     | Codex (`codex app-server`)         | You want OpenAI's coding agent: its tools in a workspace, in its sandbox      | [`coder_codex.py`](../../examples-python/intermediate/coder_codex.py)     |
 
 `system` is the whole system prompt for Claude, LiteLLM, LangGraph, Pydantic
 AI, the OpenAI Agents SDK and ADK, and is added to the framework's own for
@@ -100,7 +100,7 @@ it, to keep the model's context short, and returns the summary; and
 `claude.reset(ctx, handoff)` starts it over, with a note to carry on from,
 if given. Each takes effect once per invocation, and refuses while a message
 is still being answered
-([`examples-python/harness.py`](../../examples-python/harness.py)):
+([`examples-python/intermediate/harness.py`](../../examples-python/intermediate/harness.py)):
 
 ```python
 @assistant.handler(message=True)
@@ -129,7 +129,7 @@ its loop, its tools (read, edit, bash, grep, ... in `workspace`), its
 compaction and its skills; and the tools here, served to it in this process
 (an SDK MCP server). It has the handlers of the Claude agent; Claude Code's
 session is the conversation
-([`examples-python/coder.py`](../../examples-python/coder.py)):
+([`examples-python/intermediate/coder.py`](../../examples-python/intermediate/coder.py)):
 
 ```python
 from restate_agents import claude_agent, serve, signal
@@ -192,7 +192,7 @@ its compaction; and the tools here, as its dynamic tools. Each prompt runs
 `codex app-server` (the binary of OpenAI's Codex SDK,
 `openai-codex-cli-bin`) in a process of its own, speaking its JSON-RPC
 protocol over stdio; the conversation is a Codex thread
-([`examples-python/coder_codex.py`](../../examples-python/coder_codex.py)).
+([`examples-python/intermediate/coder_codex.py`](../../examples-python/intermediate/coder_codex.py)).
 
 | Option      | What                                                                                                                                    |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------- |
@@ -240,7 +240,7 @@ serve(assistant)
 invocation's context, or async ones. A model LiteLLM knows no provider of
 fails when the agent is defined. `litellm.prompt(ctx, text, ...)`,
 `litellm.compact(ctx, instructions)` and `litellm.reset(ctx, handoff)` are
-those of Claude ([`examples-python/release_notes.py`](../../examples-python/release_notes.py): two models, one drafting and one reviewing).
+those of Claude ([`examples-python/intermediate/release_notes.py`](../../examples-python/intermediate/release_notes.py): two models, one drafting and one reviewing).
 
 ## LangGraph
 
@@ -278,8 +278,8 @@ context from `restate_agents.context()`, and run their tools with
 tools and LangChain's, which then takes the messages steered to the turn
 (and a node's model binds them with
 `model.bind_tools(langgraph.tools(tools))`)
-([`examples-python/triage.py`](../../examples-python/triage.py),
-[`examples-python/writer.py`](../../examples-python/writer.py)):
+([`examples-python/intermediate/triage.py`](../../examples-python/intermediate/triage.py),
+[`examples-python/intermediate/writer.py`](../../examples-python/intermediate/writer.py)):
 
 ```python
 graph = StateGraph(MessagesState)
@@ -306,7 +306,7 @@ graph can take Restate's steps itself, as nodes
 `workflow(target)` and `signal(name)`, each made once per run of its node,
 however often an attempt crashes (its idempotency key is the invocation's
 id and LangGraph's task id, which a step that a crash cut off keeps)
-([`examples-python/writer.py`](../../examples-python/writer.py): a person approves
+([`examples-python/intermediate/writer.py`](../../examples-python/intermediate/writer.py): a person approves
 each post, and a workflow publishes it):
 
 ```python
@@ -370,7 +370,7 @@ Or bring an `Agent` of your own, whose tools include Restate's through
 `pydantic_ai.tools([...])`; and ask it from handlers of your own with `pydantic_ai.prompt(ctx,
 agent, text, **run)` (`run`: `Agent.run`'s options, such as `output_type` or
 `deps`), each prompt answered once
-([`examples-python/trips.py`](../../examples-python/trips.py)):
+([`examples-python/intermediate/trips.py`](../../examples-python/intermediate/trips.py)):
 
 ```python
 from pydantic_ai import Agent
@@ -399,7 +399,7 @@ answer to the model; any other error fails the attempt.
 `openai_agents.agent(name, model=, system=, tools=)` is the same virtual
 object (`chat`, `messages`, `status`, `stop`, `steer`, `pending`, `signal`)
 on the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)
-([`examples-python/airline.py`](../../examples-python/airline.py): a handoff, and Restate's tools):
+([`examples-python/intermediate/airline.py`](../../examples-python/intermediate/airline.py): a handoff, and Restate's tools):
 
 ```python
 from restate_agents import openai_agents, serve
@@ -441,7 +441,7 @@ takes no `hooks` of yours: give an `Agent` its own (`Agent.hooks`).
 
 `adk.agent(name, model=, system=, tools=)` is the same virtual object
 on Google's [Agent Development Kit](https://google.github.io/adk-docs/)
-([`examples-python/oncall.py`](../../examples-python/oncall.py): an incident responder on Restate's tools):
+([`examples-python/intermediate/oncall.py`](../../examples-python/intermediate/oncall.py): an incident responder on Restate's tools):
 
 ```python
 from restate_agents import adk, serve
@@ -499,7 +499,7 @@ Most frameworks take their own tools too: see each one's `tools`.
 
 Tools that call, send to, start and wait for what Restate runs, each once
 per tool call, however often an attempt crashes (its idempotency key is the
-tool call's), as in [`examples-python/support.py`](../../examples-python/support.py):
+tool call's), as in [`examples-python/intermediate/support.py`](../../examples-python/intermediate/support.py):
 
 ```python
 from restate_agents import call, langgraph, send, signal, subagent, workflow
@@ -596,7 +596,7 @@ changes: what the agent is doing, and the messages new or changed since the
 last time (keep them by `id`), and the cursor to carry on from later
 (`follow(cursor=...)`). A network failure does not end it, and a sync it
 retries joins the one already waiting in Restate
-([`examples-python/follow.py`](../../examples-python/follow.py)):
+([`examples-python/basic/follow.py`](../../examples-python/basic/follow.py)):
 
 ```python
 from restate_agents.client import AgentClient
@@ -624,7 +624,7 @@ resumes from the database, and the SQL storage hidden from the journal in
 Restate's UI.
 `@assistant.handler` adds a handler, which takes `ctx`, then its input: one
 parameter, or several, which a JSON object gives by name
-([`examples-python/memory.py`](../../examples-python/memory.py)). With
+([`examples-python/basic/memory.py`](../../examples-python/basic/memory.py)). With
 `@assistant.handler(message=True)`, its input is a message, as `chat`'s is:
 plain text or a JSON string (`curl -d 'Keep it short'`), or nothing. A
 shared handler (`@assistant.handler(kind="shared")`) runs beside the message
@@ -633,7 +633,7 @@ without input also takes an empty request, or one with a JSON body, as
 TypeScript's do, so any Restate client calls it. `serve(*services)`
 serves them on `PORT`, or 9080; with `background=True`, on a thread of its
 own, returning at once, as in a Modal Server
-([`examples-python/on_modal.py`](../../examples-python/on_modal.py)).
+([`examples-python/intermediate/on_modal.py`](../../examples-python/intermediate/on_modal.py)).
 
 An object of your own, without an agent of its own, is an `Object`: the same
 virtual object, with `ctx.db`, its handlers yours. `@obj.chat` makes its
@@ -644,7 +644,7 @@ once per invocation, however often an attempt runs, as its call has an
 idempotency key (the invocation's id, the agent's name and how many messages
 the attempt sent before, unless given one). Here, a front desk asks a model
 which team handles a message, then hands it to that team
-([`examples-python/router.py`](../../examples-python/router.py)):
+([`examples-python/intermediate/router.py`](../../examples-python/intermediate/router.py)):
 
 ```python
 from restate_agents import Object, ask, claude

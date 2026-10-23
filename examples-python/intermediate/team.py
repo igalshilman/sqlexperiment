@@ -7,7 +7,7 @@ Each member is an agent of its own, keyed by the editor's key and the task
 (``researcher/alice.lisbon``), with its own conversation: the editor can come
 back to a task, and a crash anywhere resumes where it stopped.
 
-    ANTHROPIC_API_KEY=... uv run team.py
+    ANTHROPIC_API_KEY=... uv run intermediate/team.py
     restate deployments register http://localhost:9080
     curl localhost:8080/editor/alice/chat -d 'Write a short guide to Lisbon for a first visit.'
     curl localhost:8080/writer/alice.guide/messages   # what the editor asked the writer (the task's name may differ)

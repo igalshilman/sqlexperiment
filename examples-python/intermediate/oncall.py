@@ -6,7 +6,7 @@ waits for them to acknowledge (a signal, without holding a process), and
 schedules the post-incident review for the next day (a delayed send, which
 Restate keeps until then). A handler of your own serves the timeline.
 
-    GOOGLE_API_KEY=... uv run oncall.py
+    GOOGLE_API_KEY=... uv run intermediate/oncall.py
     restate deployments register http://localhost:9080
     curl localhost:8080/oncall/inc-42/chat/send -d 'Checkout errors went up to 30% five minutes ago'
 

@@ -2,12 +2,12 @@
 // client: send a message, see what the agent is doing while it works,
 // approve or reject what it waits for, steer it, or stop it.
 //
-//   ANTHROPIC_API_KEY=… node support.ts                                 # the agent, on port 9080
+//   ANTHROPIC_API_KEY=… node intermediate/support.ts                                 # the agent, on port 9080
 //   npx @restatedev/restate-server                                       # Restate, in another terminal
 //   npx @restatedev/restate deployments register http://localhost:9080
 //   npx vite ui                                                          # this page: http://localhost:5173
 //
-// The Python support agent (../../examples-python/support.py) has the same
+// The Python support agent (../../examples-python/intermediate/support.py) has the same
 // handlers: `uv run support.py` there serves this page as it is.
 //
 // Each user (`?user=alice`) is a conversation of its own: the agent's key.

@@ -6,7 +6,7 @@ mode, which is all Modal's web endpoints speak).
 
     make wheels                                                  # at the repository's root: dist/
     uvx modal secret create anthropic ANTHROPIC_API_KEY=...
-    uvx modal deploy on_modal.py
+    uvx modal deploy intermediate/on_modal.py
     restate deployments register https://<workspace>--restate-support-support.us-east.modal.direct \\
         --extra-header "Modal-Key: wk-..." --extra-header "Modal-Secret: ws-..."
 
@@ -24,7 +24,7 @@ image = (
     modal.Image.debian_slim(python_version="3.13")
     # The SQL extension, restate-fns and restate-agents: built here, not on PyPI
     # (pip installs the Restate SDK they need from it).
-    .add_local_dir(HERE.parent / "dist", "/wheels", copy=True)
+    .add_local_dir(HERE.parents[1] / "dist", "/wheels", copy=True)
     .run_commands("pip install /wheels/*.whl")
     .add_local_python_source("support")
 )

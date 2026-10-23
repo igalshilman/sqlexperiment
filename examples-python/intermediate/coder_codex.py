@@ -6,7 +6,7 @@ Its thread is kept in the object's SQL database: if the process dies
 mid-task, Restate retries and Codex carries on from its stored rollout, on
 whichever machine runs the retry.
 
-    OPENAI_API_KEY=... uv run coder_codex.py
+    OPENAI_API_KEY=... uv run intermediate/coder_codex.py
     restate deployments register http://localhost:9080
     curl localhost:8080/coder/fizzbuzz/chat/send -d 'Write fizzbuzz.py, with a test, and run it'
     curl localhost:8080/coder/fizzbuzz/status                           # what it waits for
