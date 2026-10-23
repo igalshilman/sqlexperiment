@@ -32,11 +32,11 @@ pub struct Traffic {
 
 /// Class of a key, used to split traffic counters: `page`, `log`, `commit`, `hint` or `other`.
 pub fn object_kind(key: &str) -> &'static str {
-    if key.starts_with(PAGE_PREFIX) {
+    if key.starts_with(PAGE_PREFIX) || key.starts_with("cow/blob/") {
         "page"
     } else if key.starts_with(LOG_PREFIX) {
         "log"
-    } else if key == COMMIT {
+    } else if key == COMMIT || key == "cow/root" {
         "commit"
     } else if key == HINT {
         "hint"

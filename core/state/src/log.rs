@@ -121,7 +121,7 @@ pub trait Base: Send + Sync {
 /// The bases of files, by id.
 pub(crate) type Bases = BTreeMap<u32, std::sync::Arc<dyn Base>>;
 
-fn put_varint(out: &mut Vec<u8>, mut n: u64) {
+pub(crate) fn put_varint(out: &mut Vec<u8>, mut n: u64) {
     while n >= 0x80 {
         out.push(n as u8 | 0x80);
         n >>= 7;
@@ -129,7 +129,7 @@ fn put_varint(out: &mut Vec<u8>, mut n: u64) {
     out.push(n as u8);
 }
 
-fn get_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
+pub(crate) fn get_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
     let mut n = 0u64;
     for shift in (0..64).step_by(7) {
         let byte = *bytes.get(*at)?;

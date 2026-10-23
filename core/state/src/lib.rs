@@ -97,7 +97,10 @@
 //! decoding checks structure and bounds, not checksums. Use a fresh,
 //! dedicated namespace; no migration or format discovery is implemented.
 //! Simulation and benchmark support require the opt-in `simulation` feature.
+#![cfg_attr(feature = "cow", allow(dead_code))]
 mod cache;
+#[cfg(feature = "cow")]
+mod cow;
 mod format;
 mod hint;
 pub mod kv;
@@ -119,8 +122,12 @@ pub use snapshot::{
 };
 
 use crate::cache::Idle;
+#[cfg(feature = "cow")]
+use crate::cow::Snapshot;
 use crate::kv::KvStore;
-use crate::snapshot::{Settings, Snapshot};
+use crate::snapshot::Settings;
+#[cfg(not(feature = "cow"))]
+use crate::snapshot::Snapshot;
 use bytes::Bytes;
 use std::{
     any::Any,

@@ -8,6 +8,8 @@ description = "Transactional state over an asynchronous key/value store: records
 [features]
 default = []
 simulation = []
+# Experiment: copy-on-write pages in place of the log (src/cow.rs).
+cow = []
 
 [lib]
 bench = false
