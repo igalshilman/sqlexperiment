@@ -100,8 +100,6 @@ async fn server() -> Server {
         .arg(dir.path())
         .env("RESTATE_BIND_IP", "127.0.0.1")
         .env("RESTATE_LISTEN_MODE", "tcp")
-        // Protocol v8 where the server has it (FUTURE.md): unjournaled reads.
-        .env("RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8", "true")
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
