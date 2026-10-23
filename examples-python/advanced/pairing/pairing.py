@@ -25,7 +25,7 @@ import os
 from pydantic import BaseModel, Field
 from restate_agents import claude, serve, signal, subagent, workflow
 from shipping import shipping
-from tools import TASKS, box, done, edit_file, plan, tasks_of
+from tools import PLAN, box, done, edit_file, plan, tasks_of
 
 reviewer = claude.agent(
     "reviewer",
@@ -66,7 +66,7 @@ Answer briefly: what you did, and what is next.""",
         approval,
         workflow(shipping, description="Ship an approved change: its checks run, then its pull request opens."),
     ],
-    schema=TASKS,
+    schema=PLAN,
 )
 
 
