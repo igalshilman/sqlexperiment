@@ -211,8 +211,13 @@ type With<H> = typeof BUILT_IN & (H extends { messages: unknown } ? typeof FOLLO
  *
  * `schema`, optional: tables of your own, beside the agent's (which are its
  * own business), made in each key's database as restate-fns's `object` makes
- * them. `options` and `metadata` add to (or replace) the ones set here, such
- * as `options: { journalRetention: { hours: 1 } }` to look at journals in the
+ * them. Name them apart from the agent's: pi's are pi-durable's, unprefixed
+ * (`tasks`, `entries`, `conversations`, `documents`, `submissions`...); the
+ * other integrations' have their prefix (`claude_`, `langgraph_`, `dsh_`), and
+ * `agent_log` is the log of each.
+ *
+ * `options` and `metadata` add to (or replace) the ones set here, such as
+ * `options: { journalRetention: { hours: 1 } }` to look at journals in the
  * UI, or `options: { retryPolicy: ... }`.
  */
 export const object = <P extends string, H extends Record<string, Handler>>(

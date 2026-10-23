@@ -8,7 +8,7 @@ coding harness: each model step and each tool call is stored.
 
 ```
 you ──▶ pair.py (a terminal) ──▶ pair/<project> (Claude) ──▶ sandbox: files, git, tests
-          ▲   steer, approve        │  plan (its tasks table)
+          ▲   steer, approve        │  plan (a table of its own)
           └── follow ◀──────────────┤  reviewer/<project>.<task> (another model): what to fix
                                     └▶ approval (you) ──▶ shipping/<…> (a workflow): CI, then a pull request
 ```
@@ -30,7 +30,7 @@ What it shows:
   next tool call (`steer`), as "use pytest" would reach a person you pair
   with.
 - **Tables of your own**: the plan is a table beside the agent's own
-  (`schema=TASKS`), which its tools write and a shared handler reads while
+  (`schema=PLAN`), which its tools write and a shared handler reads while
   it works (`curl localhost:8080/pair/fizzbuzz/tasks`).
 - **A second opinion**: the reviewer is an agent of its own, on another
   model, with a conversation per task (`subagent`), so a second review of

@@ -15,7 +15,7 @@ from restate_agents import sandbox, tool
 box = sandbox.modal(image="python:3.13") if os.environ.get("MODAL_TOKEN_ID") else sandbox.local()
 
 # The plan's table, the project's own, beside the agent's: the pair's schema.
-TASKS = ["CREATE TABLE tasks (n INTEGER PRIMARY KEY, task TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0)"]
+PLAN = ["CREATE TABLE plan (n INTEGER PRIMARY KEY, task TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0)"]
 
 
 @tool
@@ -33,20 +33,20 @@ async def edit_file(ctx, path: str, old: str, new: str) -> str:
 async def plan(ctx, tasks: list[str]) -> list[dict]:
     """Set the plan of the work you were asked for: its tasks, in order, in place of the plan before."""
     async with ctx.db.transaction() as tx:
-        await tx.execute("DELETE FROM tasks")
+        await tx.execute("DELETE FROM plan")
         for task in tasks:
-            await tx.execute("INSERT INTO tasks (task) VALUES (?)", [task])
+            await tx.execute("INSERT INTO plan (task) VALUES (?)", [task])
     return await tasks_of(ctx.db)
 
 
 @tool
 async def done(ctx, n: int) -> list[dict]:
     """Mark the plan's task ``n`` (from 1) done."""
-    await ctx.db.execute("UPDATE tasks SET done = 1 WHERE n = ?", [n])
+    await ctx.db.execute("UPDATE plan SET done = 1 WHERE n = ?", [n])
     return await tasks_of(ctx.db)
 
 
 async def tasks_of(db) -> list[dict]:
     """The plan: each task's number, text, and whether it is done."""
-    rows = await db.query("SELECT n, task, done FROM tasks ORDER BY n")
+    rows = await db.query("SELECT n, task, done FROM plan ORDER BY n")
     return [{"n": n, "task": task, "done": bool(finished)} for n, task, finished in rows]
