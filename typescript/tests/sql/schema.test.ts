@@ -2,6 +2,7 @@
 // steps, applied once per key by the handlers that open its database.
 import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-fns';
+import { Schema } from 'restate-fns/internal';
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from '../testing.ts';
 
@@ -47,7 +48,7 @@ describe("an object's schema", () => {
 });
 
 describe("a library's schema", () => {
-  const LIBRARY = new restate.Schema('library', ['CREATE TABLE library_items (item TEXT)']);
+  const LIBRARY = new Schema('library', ['CREATE TABLE library_items (item TEXT)']);
 
   it('is ensured where it is used, beside the object’s own', async () => {
     const service = objectWith(NOTES);

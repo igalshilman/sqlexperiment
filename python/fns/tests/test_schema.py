@@ -4,8 +4,8 @@ import itertools
 
 import pytest
 from restate.exceptions import TerminalError
-from restate_fns import Schema
 from restate_fns import schema as schemas
+from restate_fns.schema import Schema
 from test_session import FakeHost, run
 
 pytestmark = [pytest.mark.anyio]

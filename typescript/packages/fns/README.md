@@ -76,9 +76,7 @@ keeps how far each database got, so a step added later (a column, an index)
 runs on each key's database once, as that key is next opened. A step never
 changes once it ran: a change is a step of its own. A shared handler applies
 the steps its key lacks in its own session, which stores nothing: a key never
-written reads as empty tables. A library keeps its tables in a schema of its
-own, `new restate.Schema('my-library', steps)`, and calls
-`await SCHEMA.ensure(ctx.db)` where it uses them (once per attempt).
+written reads as empty tables.
 
 **Sends that commit with the SQL.** A send made with `tx`, the transaction's
 send clients, is made once the transaction commits, and only then:

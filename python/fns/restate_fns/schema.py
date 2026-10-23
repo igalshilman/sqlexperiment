@@ -16,8 +16,9 @@ step of its own.
 
 A shared handler applies the steps its key's database lacks in its own
 session, which stores nothing, then reads: a key never written reads as
-empty tables. A library keeps its tables in a schema of its own name,
-which ``schema.ensure(ctx.db)`` applies where it uses them, in any object.
+empty tables. This repository's libraries (restate_agents) keep their tables
+in a schema of their own name, which ``schema.ensure(ctx.db)`` applies where
+they use them, in any object: internal, not in ``restate_fns``'s exports.
 """
 
 from __future__ import annotations

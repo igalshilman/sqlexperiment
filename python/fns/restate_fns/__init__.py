@@ -25,7 +25,6 @@ from restate_fns.object import (
     ObjectSharedContext,
     VirtualObject,
 )
-from restate_fns.schema import Schema
 from restate_fns.session import (
     SqlDatabase,
     SqlOptions,
@@ -43,7 +42,6 @@ __all__ = [
     "VirtualObject",
     "JournaledObjectContext",
     "JournaledObjectSharedContext",
-    "Schema",
     "SqlDatabase",
     "SqlOptions",
     "SqlSession",

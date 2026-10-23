@@ -49,9 +49,7 @@ with the same storage, page cache and pending sends:
   handler of the key first opens its database; the table `restate_schema`
   keeps how far each database got, so a step added later (a column, an
   index) runs on each key's database once, as that key is next opened. A
-  step never changes once it ran: a change is a step of its own. A library
-  keeps its tables in a `restate.Schema("my-library", steps)` of its own, and
-  calls `await SCHEMA.ensure(ctx.db)` where it uses them (once per attempt).
+  step never changes once it ran: a change is a step of its own.
 - `ctx.db` is the object's database (namespace `service/key`). Each
   statement is its own transaction, and `async with ctx.db.transaction() as
   db` groups several. Calls run one at a time, in the order they start.
