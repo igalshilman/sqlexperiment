@@ -25,7 +25,7 @@ from typing import Any
 import restate_fns as restate
 
 from restate_agents import turns
-from restate_agents.common import has_table
+from restate_agents.common import table_schema
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
 
@@ -59,17 +59,19 @@ class Prompts:
         self.thread = thread
 
     async def load(self) -> list[Prompt]:
-        if not await has_table(self.db, self.table):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.table} (
-                  thread TEXT NOT NULL,
-                  prompt TEXT NOT NULL,
-                  text TEXT NOT NULL,
-                  answer TEXT,
-                  steered TEXT NOT NULL DEFAULT '[]',
-                  PRIMARY KEY (thread, prompt)
-                )
-            """)
+        await table_schema(
+            self.table,
+            f"""
+            CREATE TABLE {self.table} (
+              thread TEXT NOT NULL,
+              prompt TEXT NOT NULL,
+              text TEXT NOT NULL,
+              answer TEXT,
+              steered TEXT NOT NULL DEFAULT '[]',
+              PRIMARY KEY (thread, prompt)
+            )
+            """,
+        ).ensure(self.db)
         rows = await self.db.query(
             f"SELECT prompt, text, answer, steered FROM {self.table} WHERE thread = ? ORDER BY rowid", [self.thread]
         )
@@ -162,17 +164,19 @@ class Calls:
         self.attempt = uuid.uuid4().hex
 
     async def _table(self) -> None:
-        if not await has_table(self.db, self.table):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.table} (
-                  id TEXT PRIMARY KEY,
-                  prompt TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  input TEXT NOT NULL,
-                  output TEXT,
-                  attempt TEXT NOT NULL
-                )
-            """)
+        await table_schema(
+            self.table,
+            f"""
+            CREATE TABLE {self.table} (
+              id TEXT PRIMARY KEY,
+              prompt TEXT NOT NULL,
+              name TEXT NOT NULL,
+              input TEXT NOT NULL,
+              output TEXT,
+              attempt TEXT NOT NULL
+            )
+            """,
+        ).ensure(self.db)
 
     async def start(self, id: str, name: str, input: dict[str, Any]) -> tuple[str, str | None]:
         """The id of call ``id`` (an earlier attempt's, if it made it), and its output if it finished."""

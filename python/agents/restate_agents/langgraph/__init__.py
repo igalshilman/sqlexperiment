@@ -58,7 +58,7 @@ from pydantic import create_model
 from restate_fns import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, configured, has_table, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, configured, model_id_of, model_of
 from restate_agents.langgraph.checkpointer import SqlCheckpointSaver
 from restate_agents.object import Object, context
 from restate_agents.tools import Tool
@@ -114,8 +114,6 @@ def agent(
     async def transcript(ctx: ObjectContext) -> Transcript:
         """The conversation, from the thread's last checkpoint."""
         transcript = Transcript()
-        if not await has_table(ctx.db, "langgraph_writes"):
-            return transcript
         saved = await SqlCheckpointSaver(ctx.db).aget_tuple({"configurable": {"thread_id": ctx.key()}})
         for m in saved.checkpoint["channel_values"].get("messages", []) if saved else []:
             if isinstance(m, HumanMessage):

@@ -59,7 +59,7 @@ from claude_agent_sdk import (
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, configured, has_table, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, configured, model_id_of, model_of, table_schema
 from restate_agents.object import Object, service
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
@@ -121,8 +121,6 @@ def agent(
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
-        if not await has_table(ctx.db, _Store.TABLE):
-            return transcript
         session = await _Threads(ctx.db).session(ctx.key())
         for entry in await _Store(ctx.db).load({"project_key": "", "session_id": session}) or []:
             _transcribe(transcript, entry)
@@ -193,17 +191,19 @@ class _Threads:
         self.db = db
 
     async def _table(self) -> None:
-        if not await has_table(self.db, self.TABLE):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE} (thread TEXT PRIMARY KEY, session TEXT NOT NULL, handoff TEXT)
-            """)
+        await table_schema(
+            self.TABLE,
+            f"""
+            CREATE TABLE {self.TABLE} (thread TEXT PRIMARY KEY, session TEXT NOT NULL, handoff TEXT)
+            """,
+        ).ensure(self.db)
 
     async def get(self, thread: str) -> tuple[str, str | None]:
         """The session of ``thread`` (its first, unless it was reset), and its handoff."""
-        if await has_table(self.db, self.TABLE):
-            rows = await self.db.query(f"SELECT session, handoff FROM {self.TABLE} WHERE thread = ?", [thread])
-            if rows:
-                return rows[0][0], rows[0][1]
+        await self._table()
+        rows = await self.db.query(f"SELECT session, handoff FROM {self.TABLE} WHERE thread = ?", [thread])
+        if rows:
+            return rows[0][0], rows[0][1]
         return _session_of(f"{service()}/{thread}"), None
 
     async def session(self, thread: str) -> str:
@@ -235,18 +235,20 @@ class _Store:
         self.failed = failed
 
     async def _table(self) -> None:
-        if not await has_table(self.db, self.TABLE):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE} (
-                  session TEXT NOT NULL,
-                  subpath TEXT NOT NULL,
-                  n INTEGER NOT NULL,
-                  uuid TEXT,
-                  entry TEXT NOT NULL,
-                  PRIMARY KEY (session, subpath, n),
-                  UNIQUE (session, subpath, uuid)
-                )
-            """)
+        await table_schema(
+            self.TABLE,
+            f"""
+            CREATE TABLE {self.TABLE} (
+              session TEXT NOT NULL,
+              subpath TEXT NOT NULL,
+              n INTEGER NOT NULL,
+              uuid TEXT,
+              entry TEXT NOT NULL,
+              PRIMARY KEY (session, subpath, n),
+              UNIQUE (session, subpath, uuid)
+            )
+            """,
+        ).ensure(self.db)
 
     async def append(self, key: dict[str, Any], entries: list[dict[str, Any]]) -> None:
         # The SDK logs an append's error and goes on: the attempt must fail instead.

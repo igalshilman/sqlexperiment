@@ -39,12 +39,10 @@ from langgraph.checkpoint.base import (
     get_checkpoint_metadata,
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
-from restate_fns import SqlDatabase, SqlSession
+from restate_fns import Schema, SqlDatabase, SqlSession
 
-from restate_agents.common import has_table
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS langgraph_checkpoints (
+DDL = """
+CREATE TABLE langgraph_checkpoints (
   thread_id TEXT NOT NULL,
   checkpoint_ns TEXT NOT NULL,
   checkpoint_id TEXT NOT NULL,
@@ -54,7 +52,7 @@ CREATE TABLE IF NOT EXISTS langgraph_checkpoints (
   metadata BLOB NOT NULL,
   PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
 );
-CREATE TABLE IF NOT EXISTS langgraph_channel_values (
+CREATE TABLE langgraph_channel_values (
   thread_id TEXT NOT NULL,
   checkpoint_ns TEXT NOT NULL,
   channel TEXT NOT NULL,
@@ -63,7 +61,7 @@ CREATE TABLE IF NOT EXISTS langgraph_channel_values (
   value BLOB,
   PRIMARY KEY (thread_id, checkpoint_ns, channel, version)
 );
-CREATE TABLE IF NOT EXISTS langgraph_writes (
+CREATE TABLE langgraph_writes (
   thread_id TEXT NOT NULL,
   checkpoint_ns TEXT NOT NULL,
   checkpoint_id TEXT NOT NULL,
@@ -76,6 +74,8 @@ CREATE TABLE IF NOT EXISTS langgraph_writes (
   PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
 );
 """
+# The checkpointer's tables, a schema of their own, applied where it is used.
+SCHEMA = Schema("restate_agents.langgraph", [DDL])
 
 COLUMNS = "thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata"
 
@@ -108,9 +108,7 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
 
     async def _setup(self) -> None:
         if not self._ready:
-            # Created only if missing: a shared handler's ctx.db reads, and creates nothing.
-            if not await has_table(self.db, "langgraph_writes"):
-                await self.db.execute(SCHEMA)
+            await SCHEMA.ensure(self.db)
             self._ready = True
 
     async def _channel_values(self, thread_id: str, ns: str, checkpoint: Checkpoint) -> dict[str, Any]:

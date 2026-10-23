@@ -63,7 +63,7 @@ from pydantic_ai.models import Model, ModelRequestContext
 from restate_fns import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, configured, has_table, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, configured, model_of, table_schema
 from restate_agents.object import Object, context
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
@@ -120,8 +120,6 @@ def agent(
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
-        if not await has_table(ctx.db, "pydantic_ai_messages"):
-            return transcript
         for m in await _Conversation(ctx.db, ctx.key()).load():
             for part in m.parts:
                 if isinstance(part, UserPromptPart):
@@ -193,7 +191,7 @@ class _Conversation:
     """
 
     SCHEMA = """
-    CREATE TABLE IF NOT EXISTS pydantic_ai_messages (
+    CREATE TABLE pydantic_ai_messages (
       thread TEXT NOT NULL,
       n INTEGER NOT NULL,
       message TEXT NOT NULL,
@@ -207,8 +205,7 @@ class _Conversation:
         self._saved: list[str] = []
 
     async def load(self) -> list[ModelMessage]:
-        if not await has_table(self.db, "pydantic_ai_messages"):
-            await self.db.execute(self.SCHEMA)
+        await table_schema("pydantic_ai_messages", self.SCHEMA).ensure(self.db)
         rows = await self.db.query(
             "SELECT message FROM pydantic_ai_messages WHERE thread = ? ORDER BY n", [self.thread]
         )
