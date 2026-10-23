@@ -24,7 +24,6 @@ from restate_agents import claude, serve, tool
 
 async def settings_of(ctx) -> dict:
     """What the user set up: ``model`` and ``persona``, each if set."""
-    await ctx.db.execute("CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT)")
     rows = await ctx.db.query("SELECT json FROM settings")
     return json.loads(rows[0][0]) if rows else {}
 
@@ -43,7 +42,13 @@ def clock() -> str:
     return datetime.now(UTC).isoformat()
 
 
-assistant = claude.agent("assistant", model=model, system=persona, tools=[clock])
+assistant = claude.agent(
+    "assistant",
+    model=model,
+    system=persona,
+    tools=[clock],
+    schema=["CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT)"],
+)
 
 
 @assistant.handler

@@ -172,6 +172,13 @@ export interface Synced extends Messages {
   status: Status;
 }
 
+/** An object's (or agent's) name, its description, and the tables of your own in its database, if any (see `object`). */
+export interface Definition<P extends string> {
+  name: P;
+  description?: string;
+  schema?: readonly restate.Step[];
+}
+
 /** A handler: `ctx` is the object's context, with `ctx.db`; the input, if any, is annotated. */
 type Handler = (ctx: restate.ObjectContext, input: never) => unknown;
 
@@ -202,17 +209,24 @@ type With<H> = typeof BUILT_IN & (H extends { messages: unknown } ? typeof FOLLO
  * An agent, an object with a `messages` handler (such as `claude.messages()`),
  * has `sync` too, which `follow()` of restate-agents/client reads.
  *
+ * `schema`, optional: tables of your own, beside the agent's (which are its
+ * own business), made in each key's database as restate-fns's `object` makes
+ * them. Name them apart from the agent's: pi's are pi-durable's, unprefixed
+ * (`tasks`, `entries`, `conversations`, `documents`, `submissions`...); the
+ * other integrations' have their prefix (`claude_`, `langgraph_`, `dsh_`), and
+ * `agent_log` is the log of each.
+ *
  * `options` and `metadata` add to (or replace) the ones set here, such as
  * `options: { journalRetention: { hours: 1 } }` to look at journals in the
  * UI, or `options: { retryPolicy: ... }`.
  */
-export const object = <P extends string, H extends Record<string, Handler>>(definition: {
-  name: P;
-  handlers: H & Reserved;
-  description?: string;
-  metadata?: Record<string, string>;
-  options?: restate.ObjectOptions;
-}): restate.VirtualObjectDefinition<P, With<H>> => {
+export const object = <P extends string, H extends Record<string, Handler>>(
+  definition: Definition<P> & {
+    handlers: H & Reserved;
+    metadata?: Record<string, string>;
+    options?: restate.ObjectOptions;
+  },
+): restate.VirtualObjectDefinition<P, With<H>> => {
   for (const name of [...Object.keys(BUILT_IN), ...Object.keys(FOLLOWED)]) {
     if (name in definition.handlers)
       throw new Error(`${definition.name}: every object has a \`${name}\` handler already`);

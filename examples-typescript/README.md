@@ -37,9 +37,10 @@ tools, a person in the loop, teams, workflows, coding agents); and
 
 ### Advanced
 
-| Folder                                   | What                                                                                                                                    |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| [`gateway/`](advanced/gateway/README.md) | A tool gateway for agents: one per tenant, holding dangerous calls for approval, with limits per tenant and user, and an agent per case |
+| Folder                                   | What                                                                                                                                                                                                                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`gateway/`](advanced/gateway/README.md) | A tool gateway for agents: one per tenant, holding dangerous calls for approval, with limits per tenant and user, and an agent per case                                                                                                                 |
+| [`pairing/`](advanced/pairing/README.md) | A pair programmer you talk with from a terminal, about a project: its loop in Restate, pi's coding tools in the project's directory; you steer it as it works; a reviewer on another model reads its diff; it ships through a workflow once you approve |
 
 Each agent is a virtual object, one per key, whose conversation is in the
 object's SQL database: a message is answered once per invocation, and a

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import os
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict
 
 from restate.serde import Serde
+from restate_fns.schema import Schema
 
 
 class MessageSerde(Serde[str]):
@@ -26,12 +28,14 @@ class MessageSerde(Serde[str]):
         return json.dumps(obj).encode()
 
 
-async def has_table(db: Any, name: str) -> bool:
+@functools.cache
+def table_schema(table: str, create: str) -> Schema:
     """
-    Whether ``db`` has the table ``name``. A shared handler's ``ctx.db`` only
-    reads: it creates no table, and one that is not there yet is empty.
+    The schema of an integration's table ``table``: one step, ``create``,
+    which ``ensure`` applies where the table is used (in any object; in a
+    shared handler, in its own session, so an empty table reads as empty).
     """
-    return bool(await db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?", [name]))
+    return Schema(f"restate_agents.{table}", [create])
 
 
 DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"

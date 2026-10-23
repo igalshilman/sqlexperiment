@@ -415,37 +415,38 @@ own: here, an assistant whose tools keep facts in its own table
 ([`examples-typescript/basic/memory.ts`](../../../examples-typescript/basic/memory.ts)):
 
 ```ts
-import type * as restate from 'restate-fns';
+import { handlers } from 'restate-fns';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
-
-const facts = async (ctx: restate.ObjectContext) => {
-  await ctx.db.execute('CREATE TABLE IF NOT EXISTS facts (fact TEXT PRIMARY KEY)');
-  return ctx.db;
-};
 
 const remember = tool({
   name: 'remember',
   description: 'Remember a fact about the user.',
   input: z.object({ fact: z.string() }),
   run: async ({ fact }, { ctx }) => {
-    await (await facts(ctx)).execute('INSERT OR IGNORE INTO facts VALUES (?)', [fact]);
+    await ctx.db.execute('INSERT OR IGNORE INTO facts VALUES (?)', [fact]);
     return 'remembered';
   },
 });
 
 const assistant = object({
   name: 'assistant',
+  schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'], // tables of your own, beside the agent's (optional)
   handlers: {
     chat: pi.chat({ tools: [remember] }),
     messages: pi.messages(),
-    facts: async (ctx) => (await facts(ctx)).query('SELECT fact FROM facts'),
+    facts: handlers.object.shared((ctx) => ctx.db.query('SELECT fact FROM facts')),
   },
 });
 
 await serve(assistant);
 ```
+
+Your tables share the database with the agent's, so name them apart: pi's
+are pi-durable's, unprefixed (`tasks`, `entries`, `conversations`,
+`documents`, `submissions`...); the other integrations' have their prefix
+(`claude_`, `langgraph_`, `dsh_`), and `agent_log` is the log of each.
 
 **Options for each invocation.** `chat` takes options, or a function of the
 invocation's context that gives them: each user's model and persona from

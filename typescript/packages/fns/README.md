@@ -15,11 +15,8 @@ import * as restate from 'restate-fns';
 
 const ledger = restate.object({
   name: 'Ledger',
+  schema: ['CREATE TABLE accounts(id INTEGER PRIMARY KEY, balance INTEGER)'], // applied once per key
   handlers: {
-    init: (ctx: restate.ObjectContext) =>
-      ctx.transaction(async ({ db }) => {
-        await db.execute('CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, balance INTEGER)');
-      }),
     deposit: (ctx: restate.ObjectContext, { id, amount }: { id: number; amount: number }) =>
       ctx.transaction(async ({ db }) => {
         await db.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, id]);
@@ -69,7 +66,17 @@ An SQL error rejects as a `TerminalError` (its `cause` the SQL error), from
 `ctx.db` and `ctx.transaction` alike, since a retry would repeat it; a storage
 error, which ends the session, is retried. The handler's own errors are as in any handler: a `TerminalError` is
 terminal, and any other error, such as a failed request to a model or another
-service, is retried. Creating tables is up to the handlers, such as `init`.
+service, is retried.
+
+**The schema.** `schema` in `restate.object` is the steps that make each
+key's database, in order: statements, or async functions of the transaction
+(to move data). They are applied once per key, in one transaction, when a
+handler of the key first opens its database; the table `restate_schema`
+keeps how far each database got, so a step added later (a column, an index)
+runs on each key's database once, as that key is next opened. A step never
+changes once it ran: a change is a step of its own. A shared handler applies
+the steps its key lacks in its own session, which stores nothing: a key never
+written reads as empty tables.
 
 **Sends that commit with the SQL.** A send made with `tx`, the transaction's
 send clients, is made once the transaction commits, and only then:

@@ -56,7 +56,7 @@ from pydantic_core import to_json
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import Transcript, configured, has_table, model_id_of
+from restate_agents.common import Transcript, configured, model_id_of, table_schema
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
@@ -108,8 +108,6 @@ def agent(
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
-        if not await has_table(ctx.db, ITEMS):
-            return transcript
         for _, item in await _Items(ctx.db, ctx.key()).load():
             _transcribe(transcript, item)
         return transcript
@@ -179,16 +177,18 @@ class _Items:
         self._saved: list[str] = []
 
     async def load(self) -> list[tuple[str | None, dict[str, Any]]]:
-        if not await has_table(self.db, ITEMS):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {ITEMS} (
-                  thread TEXT NOT NULL,
-                  n INTEGER NOT NULL,
-                  tag TEXT,
-                  item TEXT NOT NULL,
-                  PRIMARY KEY (thread, n)
-                )
-            """)
+        await table_schema(
+            ITEMS,
+            f"""
+            CREATE TABLE {ITEMS} (
+              thread TEXT NOT NULL,
+              n INTEGER NOT NULL,
+              tag TEXT,
+              item TEXT NOT NULL,
+              PRIMARY KEY (thread, n)
+            )
+            """,
+        ).ensure(self.db)
         rows = await self.db.query(f"SELECT tag, item FROM {ITEMS} WHERE thread = ? ORDER BY n", [self.thread])
         self._saved = [item for _, item in rows]
         return [(tag, json.loads(item)) for tag, item in rows]
@@ -347,10 +347,9 @@ class _Current:
         self.name: str | None = None
 
     async def get(self) -> str | None:
-        if not await has_table(self.db, CURRENT):
-            await self.db.execute(
-                f"CREATE TABLE IF NOT EXISTS {CURRENT} (thread TEXT PRIMARY KEY, agent TEXT NOT NULL)"
-            )
+        await table_schema(CURRENT, f"CREATE TABLE {CURRENT} (thread TEXT PRIMARY KEY, agent TEXT NOT NULL)").ensure(
+            self.db
+        )
         rows = await self.db.query(f"SELECT agent FROM {CURRENT} WHERE thread = ?", [self.thread])
         self.name = rows[0][0] if rows else None
         return self.name

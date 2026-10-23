@@ -56,7 +56,7 @@ from pydantic import ValidationError
 from restate_fns import ObjectContext
 
 from restate_agents import conversation, turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, configured, has_table, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, configured, model_id_of, model_of
 from restate_agents.conversation import Conversation, answer_of, idle, pending_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
@@ -126,8 +126,6 @@ def agent(
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
-        if not await has_table(ctx.db, TABLE):
-            return transcript
         for row in await Conversation(ctx.db, TABLE, ctx.key()).load():
             content = row.message["content"]
             transcript.say(row.message["role"], _text(content))
@@ -356,7 +354,20 @@ class _Run:
             if error.status_code == 409:
                 raise
             return {**result, "content": error.message, "is_error": True}
-        return {**result, "content": output if isinstance(output, list) else text_of(output)}
+        return {**result, "content": output if _blocks(output) else text_of(output)}
+
+
+# The content blocks a tool's result may be, as the API takes them; any other result is text.
+_BLOCKS = {"text", "image", "document", "search_result"}
+
+
+def _blocks(output: Any) -> bool:
+    """Whether ``output`` is content blocks (an image, say), not a value of the tool's, such as a list of rows."""
+    return (
+        isinstance(output, list)
+        and bool(output)
+        and all(isinstance(b, dict) and b.get("type") in _BLOCKS for b in output)
+    )
 
 
 def _name(tool: Tool | Any) -> str | None:

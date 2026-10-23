@@ -10,6 +10,7 @@
 // the messages after them are new ones. So a client reads from a cursor, and
 // gets each message that is new or changed since, once.
 import type { SqlSession } from 'restate-fns';
+import { Schema } from 'restate-fns/internal';
 import type { ChatMessage, Messages, MessagesRequest } from './common.ts';
 
 const TABLE = 'agent_log';
@@ -17,22 +18,21 @@ const TABLE = 'agent_log';
 /** A message as the transcript gives it: its role and parts, without an id. */
 export type Said = Omit<ChatMessage, 'id'>;
 
-const SCHEMA = `CREATE TABLE IF NOT EXISTS ${TABLE} (
-  id INTEGER PRIMARY KEY,
-  seq INTEGER NOT NULL UNIQUE,
-  position INTEGER UNIQUE,
-  message TEXT NOT NULL
-)`;
-
-const hasLog = async (db: SqlSession) =>
-  (await db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?", [TABLE])).length > 0;
+const SCHEMA = new Schema('restate-agents.log', [
+  `CREATE TABLE ${TABLE} (
+    id INTEGER PRIMARY KEY,
+    seq INTEGER NOT NULL UNIQUE,
+    position INTEGER UNIQUE,
+    message TEXT NOT NULL
+  )`,
+]);
 
 /**
  * Store the transcript's `messages`, in order, in the log: those that
  * changed since the last time, in one transaction.
  */
 export async function sync(db: SqlSession, messages: Said[]) {
-  if (!(await hasLog(db))) await db.execute(SCHEMA);
+  await SCHEMA.ensure(db);
   const head = (await db.query(`SELECT id, message FROM ${TABLE} WHERE position IS NOT NULL ORDER BY position`)).map(
     ([id, message]) => ({ id: Number(id), message: JSON.parse(String(message)) as Said }),
   );
@@ -75,7 +75,7 @@ export async function sync(db: SqlSession, messages: Said[]) {
  * cursor to follow the conversation from.
  */
 export async function page(db: SqlSession, { limit = 50, before, cursor }: MessagesRequest = {}): Promise<Messages> {
-  if (!(await hasLog(db))) return { messages: [], more: false, cursor: cursor ?? 0 };
+  await SCHEMA.ensure(db);
   if (cursor !== undefined) {
     const rows = await db.query(`SELECT id, message, seq FROM ${TABLE} WHERE seq > ? ORDER BY seq LIMIT ?`, [
       cursor,

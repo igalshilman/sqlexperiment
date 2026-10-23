@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests")
 
 from bank import transfer  # noqa: E402
 from fakes import ClaudeClient, Teller  # noqa: E402
-from memory import facts_table, remember  # noqa: E402
+from memory import FACTS, remember  # noqa: E402
 from restate_agents import claude, langgraph, serve, tool  # noqa: E402
 
 
@@ -29,15 +29,14 @@ async def bank_transfer(ctx, call_id, src: int, dst: int, amount: int) -> str:
 
 TOOLS = [bank_transfer, remember]
 if os.environ.get("AGENT", "langgraph") == "claude":
-    teller = claude.agent("teller", client=ClaudeClient(Teller()), tools=TOOLS)
+    teller = claude.agent("teller", client=ClaudeClient(Teller()), tools=TOOLS, schema=FACTS)
 else:
-    teller = langgraph.agent("teller", model=Teller(), tools=TOOLS)
+    teller = langgraph.agent("teller", model=Teller(), tools=TOOLS, schema=FACTS)
 
 
 @teller.handler
 async def facts(ctx) -> list[str]:
-    db = await facts_table(ctx.db)
-    return [fact for (fact,) in await db.query("SELECT fact FROM facts ORDER BY rowid")]
+    return [fact for (fact,) in await ctx.db.query("SELECT fact FROM facts ORDER BY rowid")]
 
 
 if __name__ == "__main__":

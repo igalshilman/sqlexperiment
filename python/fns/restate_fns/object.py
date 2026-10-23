@@ -11,7 +11,7 @@ from __future__ import annotations
 import abc
 import functools
 import typing
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -21,7 +21,9 @@ from restate.handler import handler_from_callable
 from restate.serde import BytesSerde
 from restate.server_context import ServerInvocationContext
 
+from restate_fns import schema as schemas
 from restate_fns import selector
+from restate_fns.schema import Step
 from restate_fns.session import SqlAttempt, SqlSession, SqlTransaction, sql_options
 
 
@@ -89,13 +91,20 @@ class VirtualObject(restate.VirtualObject):
         async def add(ctx: restate.ObjectContext, note: str) -> None:
             await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [note])
 
+    ``schema``: the steps that make each key's database, in order, applied
+    once per key where its first handler opens it (see schema.py)::
+
+        notes = restate.VirtualObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
+
     It takes the options of ``restate.VirtualObject``, which add to (or replace)
     ``sql_options``. A handler with ``journal_replay=True`` is the SDK's own,
     with no ``ctx.db``, such as one that waits on an awakeable.
     """
 
-    def __init__(self, name: str, **options: Any) -> None:
+    def __init__(self, name: str, *, schema: Sequence[Step] = (), **options: Any) -> None:
         super().__init__(name, **{**sql_options, **options})
+        if schema:
+            schemas.register(name, schema)
 
     def handler(self, *args: Any, journal_replay: bool = False, **options: Any) -> Callable[[Any], Any]:
         """

@@ -61,7 +61,7 @@ from pydantic import ValidationError
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import Transcript, configured, has_table, model_id_of
+from restate_agents.common import Transcript, configured, model_id_of, table_schema
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
@@ -116,8 +116,6 @@ def agent(
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
-        if not await has_table(ctx.db, EVENTS):
-            return transcript
         for _, event in await _Events(ctx.db, ctx.key()).load():
             _transcribe(transcript, event)
         return transcript
@@ -290,16 +288,18 @@ class _Events:
         self.length = 0
 
     async def load(self) -> list[tuple[str | None, Event]]:
-        if not await has_table(self.db, EVENTS):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {EVENTS} (
-                  thread TEXT NOT NULL,
-                  n INTEGER NOT NULL,
-                  tag TEXT,
-                  event TEXT NOT NULL,
-                  PRIMARY KEY (thread, n)
-                )
-            """)
+        await table_schema(
+            EVENTS,
+            f"""
+            CREATE TABLE {EVENTS} (
+              thread TEXT NOT NULL,
+              n INTEGER NOT NULL,
+              tag TEXT,
+              event TEXT NOT NULL,
+              PRIMARY KEY (thread, n)
+            )
+            """,
+        ).ensure(self.db)
         rows = await self.db.query(f"SELECT tag, event FROM {EVENTS} WHERE thread = ? ORDER BY n", [self.thread])
         self.length = len(rows)
         return [(tag, Event.model_validate_json(event)) for tag, event in rows]
