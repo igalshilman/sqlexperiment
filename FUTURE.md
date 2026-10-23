@@ -29,13 +29,14 @@ The TypeScript and Python reads are in `restate-fns` (`typescript/packages/fns`,
 TypeScript and Rust SDKs' discovery already advertises v8; a v7 server picks
 v7.
 
-**To benchmark with v8 now:** the image
+**For local benchmarks only:** the image
 `ghcr.io/restatedev/restate:service-protocol-v8-stats` (restate-server
-1.8.2-dev) has v8, enabled with `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true`,
-which the durable functions' test server sets:
+1.8.2-dev) has v8, behind `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true`. The
+Makefile and the tests stay on 1.8.0 and v7; to run the durable functions
+against the image (its test server passes the variable on):
 
 ```sh
-make test-functions RESTATE_FROM=image RESTATE_IMAGE=ghcr.io/restatedev/restate:service-protocol-v8-stats
+RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true make test-functions RESTATE_FROM=image RESTATE_IMAGE=ghcr.io/restatedev/restate:service-protocol-v8-stats
 ```
 
 `state_reads_are_unjournaled_on_protocol_v8` (`rust/functions/tests/restate.rs`)
@@ -61,8 +62,8 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
 1. set `RESTATE_VERSION` to it in the Makefile, and export
    `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true` there (unless the release
    enables v8 by default);
-2. set the variable in the READMEs' commands that start Restate (the
-   durable functions' test server already does);
+2. set the variable on the server `rust/functions/tests/restate.rs`
+   starts, and in the READMEs' commands that start Restate;
 3. switch the TypeScript and Python reads above to the ephemeral ones, drop
    the Rust v7 fallback, and regenerate the Rust patch
    (`patches/regenerate.sh`).
