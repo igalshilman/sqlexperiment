@@ -123,10 +123,10 @@ async def answer_once(
     id = turns.prompt_id(ctx)
     while True:
         rows = await prompts.load()
-        if (asked := next((r for r in rows if r.prompt == id), None)) is not None:
-            turns.taken(await steered() if steered is not None else asked.steered)
-            if asked.answer is not None:
-                return asked.answer
+        # The messages steered to this turn that a conversation has: this prompt's, or a cut-off one's it finished.
+        turns.taken(await steered() if steered is not None else [s for r in rows for s in r.steered])
+        if (asked := next((r for r in rows if r.prompt == id), None)) is not None and asked.answer is not None:
+            return asked.answer
         pending = next((r for r in rows if r.answer is None), None)
         if pending is None:
             pending, message = await prompts.add(id, text), text

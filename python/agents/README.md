@@ -689,6 +689,9 @@ async def chat(ctx, message: str) -> str:
 - [`tests/test_pydantic_ai.py`](tests/test_pydantic_ai.py): the same, for
   the Pydantic AI agent (the teller as a Pydantic AI model), and agents of
   your own, prompts of your own and a structured output, each answered once.
+- [`tests/test_harness.py`](tests/test_harness.py): the answer-once loop of
+  Claude Code, Codex, the OpenAI Agents SDK and ADK: a turn that finishes a
+  cut-off message takes the messages steered into it.
 - [`tests/test_log.py`](tests/test_log.py): the conversation as clients
   read it: ids that never change, a cursor of what is new or changed (a tool
   call's output), pages back, and a compaction that keeps what was said.
