@@ -48,10 +48,11 @@ as the agent: [`shop.py`](intermediate/shop.py) for `support.py`,
 
 ### Advanced
 
-| Folder                                           | What                                                                                                                                                                                                                                                              |
-| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`research/`](advanced/research/README.md)       | Deep research, a workflow per run: a planner (Pydantic AI, typed) waits for you to approve its plan or change it; researchers (Claude, on Wikipedia) work the topics at once; a writer drafts and a critic sends the report back until it is good                 |
-| [`remediation/`](advanced/remediation/README.md) | A supervisor of security fixes, a workflow per finding: an executor proposes a fix in a deadline, a judge audits it, a rejected fix goes up the ladder to a careful executor; a risky fix waits for a person's sign-off; every decision is kept as an audit trail |
+| Folder                                           | What                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`research/`](advanced/research/README.md)       | Deep research, a workflow per run: a planner (Pydantic AI, typed) waits for you to approve its plan or change it; researchers (Claude, on Wikipedia) work the topics at once; a writer drafts and a critic sends the report back until it is good                           |
+| [`pairing/`](advanced/pairing/README.md)         | A pair programmer you talk with from a terminal, about a project, for as long as it lasts: its loop in Restate, its tools in a sandbox of the project's; you steer it as it works; a reviewer on another model reads its diff; it ships through a workflow once you approve |
+| [`remediation/`](advanced/remediation/README.md) | A supervisor of security fixes, a workflow per finding: an executor proposes a fix in a deadline, a judge audits it, a rejected fix goes up the ladder to a careful executor; a risky fix waits for a person's sign-off; every decision is kept as an audit trail           |
 
 They are built from [`restate_agents`](../python/agents/README.md): an agent
 is a virtual object per conversation, and its tools are plain functions.
