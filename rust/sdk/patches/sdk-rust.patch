@@ -22,10 +22,10 @@ index 5dcf242..0000000
 -profile = "minimal"
 -components = ["rustfmt", "clippy"]
 diff --git a/src/context/mod.rs b/src/context/mod.rs
-index dd43c1c..ce726cd 100644
+index dd43c1c..5986780 100644
 --- a/src/context/mod.rs
 +++ b/src/context/mod.rs
-@@ -199,6 +199,50 @@ impl ObjectContext<'_> {
+@@ -199,6 +199,54 @@ impl ObjectContext<'_> {
      pub fn idempotency_key(&self) -> Option<&str> {
          self.idempotency_key.as_deref()
      }
@@ -46,15 +46,19 @@ index dd43c1c..ce726cd 100644
 +pub struct RawState(ContextInternal);
 +
 +impl RawState {
-+    /// The value of `key`, if set.
++    /// The value of `key`, if set: read without a journal entry where the
++    /// server speaks protocol v8 (its ephemeral get), as nothing reads the
++    /// journal back; a journaled get on v7.
 +    pub fn get<'a>(
 +        &'a self,
 +        key: &'a str,
 +    ) -> impl Future<Output = Result<Option<bytes::Bytes>, TerminalError>> + Send + 'a {
-+        // TODO: read with protocol v8's ephemeral get (`get_ephemeral`), left
-+        // out of the journal, once a Restate release ships v8 (FUTURE.md at the
-+        // repository's root). Restate 1.8 negotiates v7 at most: a journaled get.
-+        self.0.get(key)
++        // TODO: drop the journaled get once a Restate release ships v8
++        // (FUTURE.md at the repository's root): 1.8 negotiates v7 at most.
++        match self.0.has_ephemeral_get() {
++            true => futures::future::Either::Left(self.0.get_ephemeral(key)),
++            false => futures::future::Either::Right(self.0.get(key)),
++        }
 +    }
 +
 +    /// Set `key` to `value`.
@@ -223,7 +227,7 @@ index 1995d07..32a54f9 100644
 +    }
 +}
 diff --git a/src/endpoint/context.rs b/src/endpoint/context.rs
-index dbe2730..f39b826 100644
+index dbe2730..ed8ecc7 100644
 --- a/src/endpoint/context.rs
 +++ b/src/endpoint/context.rs
 @@ -4,6 +4,7 @@ use crate::context::{
@@ -234,7 +238,7 @@ index dbe2730..f39b826 100644
  use crate::endpoint::futures::intercept_error::InterceptErrorFuture;
  use crate::endpoint::futures::select_poll::VmSelectAsyncResultPollFuture;
  use crate::endpoint::futures::trap::TrapFuture;
-@@ -15,9 +16,9 @@ use futures::future::{BoxFuture, Either, Shared};
+@@ -15,9 +16,10 @@ use futures::future::{BoxFuture, Either, Shared};
  use futures::{FutureExt, TryFutureExt};
  use pin_project_lite::pin_project;
  use restate_sdk_shared_core::{
@@ -244,10 +248,11 @@ index dbe2730..f39b826 100644
 +    AttachInvocationTarget, AwaitResponse, AwakeableHandle, CoreVM, EphemeralCompletionId,
 +    Error as CoreError, Header, NonEmptyValue, NotificationHandle, OnMaxAttempts, PayloadOptions,
 +    RetryPolicy, RunExitResult, RunHandle, Target, TerminalFailure, UnresolvedFuture, VM, Value,
++    Version,
  };
  use std::borrow::Cow;
  use std::collections::HashMap;
-@@ -38,6 +39,14 @@ pub struct ContextInternalInner {
+@@ -38,6 +40,14 @@ pub struct ContextInternalInner {
      /// We remember here the state of the span replaying field state, because setting it might be expensive (it's guarded behind locks and other stuff).
      /// For details, see [ContextInternalInner::maybe_flip_span_replaying_field]
      pub(super) span_replaying_field_state: bool,
@@ -262,7 +267,7 @@ index dbe2730..f39b826 100644
  }
  
  impl ContextInternalInner {
-@@ -53,9 +62,37 @@ impl ContextInternalInner {
+@@ -53,9 +63,37 @@ impl ContextInternalInner {
              write,
              handler_state,
              span_replaying_field_state: false,
@@ -300,7 +305,7 @@ index dbe2730..f39b826 100644
      pub(super) fn fail(&mut self, e: Error) {
          self.maybe_flip_span_replaying_field();
          self.vm.notify_error(
-@@ -274,7 +311,12 @@ impl ContextInternal {
+@@ -274,7 +312,12 @@ impl ContextInternal {
              inner_lock,
              inner_lock
                  .vm
@@ -314,10 +319,15 @@ index dbe2730..f39b826 100644
          );
          inner_lock.maybe_flip_span_replaying_field();
  
-@@ -297,9 +339,34 @@ impl ContextInternal {
+@@ -297,9 +340,39 @@ impl ContextInternal {
          Either::Left(InterceptErrorFuture::new(self.clone(), poll_future))
      }
  
++    /// Whether the negotiated protocol has ephemeral state gets (V8).
++    pub fn has_ephemeral_get(&self) -> bool {
++        must_lock!(self.inner).vm.get_response_head().version >= Version::V8
++    }
++
 +    /// The value of `key` as stored, read without a journal entry
 +    /// (protocol V8's ephemeral get): for a handler that replays nothing.
 +    pub fn get_ephemeral(
@@ -350,7 +360,7 @@ index dbe2730..f39b826 100644
          inner_lock.maybe_flip_span_replaying_field();
  
          let poll_future = get_async_result(Arc::clone(&self.inner), handle).map(|res| match res {
-@@ -320,9 +387,12 @@ impl ContextInternal {
+@@ -320,9 +393,12 @@ impl ContextInternal {
          let mut inner_lock = must_lock!(self.inner);
          match t.serialize() {
              Ok(b) => {
@@ -366,7 +376,7 @@ index dbe2730..f39b826 100644
                  inner_lock.maybe_flip_span_replaying_field();
              }
              Err(e) => {
-@@ -333,13 +403,15 @@ impl ContextInternal {
+@@ -333,13 +409,15 @@ impl ContextInternal {
  
      pub fn clear(&self, key: &str) {
          let mut inner_lock = must_lock!(self.inner);
