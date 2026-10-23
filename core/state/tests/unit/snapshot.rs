@@ -689,6 +689,21 @@ fn sequential_reads_fetch_ahead() -> io::Result<()> {
     })
 }
 
+/// Concurrent reads ask for their own pages: none fetches ahead what
+/// another is reading, even when the pages are sequential.
+#[test]
+fn concurrent_reads_fetch_each_page_once() -> io::Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(LatencyKv::new(checkpointed(300).await?));
+        let snapshot = open(&store, &options(4, None)).await?;
+        store.inner.reset_stats();
+        let pages = futures::future::try_join_all((0..300).map(|i| snapshot.block(i))).await?;
+        assert!((pages.into_iter().map(number)).eq((0..300).map(Some)));
+        assert_eq!(store.inner.stats().gets, 300);
+        Ok(())
+    })
+}
+
 /// With a cache, open reads the record alone, and every save is one round
 /// trip, the ones that checkpoint too (with a log the record holds inline).
 #[test]
