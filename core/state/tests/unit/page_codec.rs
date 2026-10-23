@@ -128,3 +128,34 @@ fn mutated_encodings_of_every_tag_never_panic() -> io::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn a_base_is_raw_content_even_when_it_looks_like_a_dictionary() -> io::Result<()> {
+    // zstd's dictionary magic, then text: a trained dictionary to zstd's
+    // dictionary calls, content here.
+    let mut base = vec![0x37, 0xa4, 0x30, 0xec];
+    base.extend((0..PAGE_SIZE - 4).map(|i| b"page of text "[i % 13]));
+    let mut page = base.clone();
+    page[2000..2010].copy_from_slice(b"0123456789");
+    let encoded = bytes::Bytes::from(encode_against(&page, &base, PageCompression::Zstd)?);
+    assert_eq!(encoded[0], 3);
+    assert_eq!(decode_against(&encoded, Some(&base))?, page);
+    Ok(())
+}
+
+#[test]
+fn a_failed_decode_leaves_the_thread_s_context_usable() -> io::Result<()> {
+    let base = vec![7; PAGE_SIZE];
+    let mut page = base.clone();
+    page[0] = 8;
+    let against = bytes::Bytes::from(encode_against(&page, &base, PageCompression::Zstd)?);
+    let mut broken = against.to_vec();
+    broken.truncate(broken.len() - 2);
+    assert!(decode_against(&broken.into(), Some(&base)).is_err());
+    // The next frames decode without the earlier prefix.
+    let own = bytes::Bytes::from(encode(&page, PageCompression::Zstd)?);
+    assert_eq!(own[0], 2);
+    assert_eq!(decode_bytes(&own)?, page);
+    assert_eq!(decode_against(&against, Some(&base))?, page);
+    Ok(())
+}
