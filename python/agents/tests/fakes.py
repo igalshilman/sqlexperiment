@@ -670,12 +670,12 @@ class Object:
         token = _restate_context_var.set(ctx)  # type: ignore[arg-type]
         try:
             result = await handler(ctx, *args)
-            await ctx.attempt.end(failed=False)
+            await ctx.attempt.end(None)
         except Exception as error:
             if self.crashed:
                 self.crashed = False
                 raise Crash() from error
-            await ctx.attempt.end(failed=True)
+            await ctx.attempt.end(error)
             raise
         finally:
             _restate_context_var.reset(token)
@@ -760,6 +760,10 @@ class Context:
     @property
     def sql_namespace(self) -> str:
         return self.obj.name
+
+    @property
+    def sql_invocation_id(self) -> str:
+        return self.invocation
 
     def sql_get(self, key: str):
         future = asyncio.get_running_loop().create_future()
