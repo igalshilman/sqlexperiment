@@ -57,7 +57,7 @@ from pydantic_core import to_json
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import Transcript, has_table, model_id_of
+from restate_agents.common import Transcript, configured, has_table, model_id_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
@@ -103,11 +103,9 @@ def agent(
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         if usual is not None:
-            chosen = model(ctx) if callable(model) and not isinstance(model, Model) else model
-            given = _model_of(chosen)
+            given = _model_of(await configured(model, ctx, Model))
             return await prompt(ctx, usual, message, **({"run_config": RunConfig(model=given)} if given else {}))
-        chosen = openai_agent if isinstance(openai_agent, Agent) else openai_agent(ctx)
-        return text_of(await prompt(ctx, chosen, message))
+        return text_of(await prompt(ctx, await configured(openai_agent, ctx, Agent), message))
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()

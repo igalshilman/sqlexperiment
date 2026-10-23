@@ -39,7 +39,6 @@ end:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import shutil
@@ -53,7 +52,7 @@ from codex_cli_bin import bundled_codex_path
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import Transcript, has_table, model_id_of
+from restate_agents.common import Transcript, configured, has_table, model_id_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
@@ -98,18 +97,14 @@ def agent(
         _model_of(model)
 
     async def answer(ctx: ObjectContext, message: str) -> str:
-        async def given(option: Any) -> Any:
-            value = option(ctx) if callable(option) else option
-            return await value if inspect.isawaitable(value) else value
-
         return await prompt(
             ctx,
             message,
-            model=await given(model),
-            system=await given(system),
-            tools=await given(tools),
-            workspace=await given(workspace),
-            config=await given(config),
+            model=await configured(model, ctx),
+            system=await configured(system, ctx),
+            tools=await configured(tools, ctx),
+            workspace=await configured(workspace, ctx),
+            config=await configured(config, ctx),
         )
 
     async def transcript(ctx: ObjectContext) -> Transcript:

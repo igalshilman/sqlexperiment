@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from dataclasses import dataclass, field
@@ -37,6 +38,23 @@ DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
 """The model of an agent given none, and no MODEL."""
 
 
+async def configured(option: Any, ctx: Any, value: type | tuple[type, ...] = ()) -> Any:
+    """
+    ``option`` for the invocation of ``ctx``: the option itself, or what a
+    function of the context gives (awaited, if it is a coroutine), the same
+    for every message or each user's. ``value``: the types that are an option
+    themselves, though callable (a framework's model, say).
+    """
+    if not callable(option) or isinstance(option, value):
+        return option
+    given = option(ctx)
+    return await given if inspect.isawaitable(given) else given
+
+
+class ModelError(ValueError):
+    """An agent's model that it cannot take: not ``provider/model-id``, or another provider's."""
+
+
 def model_of(model: str | None) -> str:
     """The model, as ``provider/model-id``: ``model``, or else MODEL, or else ``DEFAULT_MODEL``."""
     return model or os.environ.get("MODEL") or DEFAULT_MODEL
@@ -47,7 +65,7 @@ def model_id_of(model: str, provider: str) -> str:
     named, id = model.split("/", 1) if "/" in model else (provider, model)
     if named != provider or not id:
         source = " (from MODEL)" if os.environ.get("MODEL") == model else ""
-        raise ValueError(f'the model "{model}"{source} is not {provider}\'s: this agent takes {provider}/<model-id>')
+        raise ModelError(f'the model "{model}"{source} is not {provider}\'s: this agent takes {provider}/<model-id>')
     return id
 
 
@@ -64,6 +82,8 @@ def refused(error: BaseException) -> bool:
     Other errors (a tool's, an overloaded provider's) fail the attempt, and
     Restate retries it.
     """
+    if isinstance(error, ModelError):
+        return True
     if any(kind.__name__ in _FOR_GOOD for kind in type(error).__mro__):
         return True
     if type(error).__name__ == "ModelHTTPError":  # Pydantic AI's, of any provider

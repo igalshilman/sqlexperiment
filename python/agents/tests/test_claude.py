@@ -175,6 +175,29 @@ async def test_a_missing_api_key_is_a_terminal_error(monkeypatch):
         await Object().run(obj.handlers["chat"].fn, "hello")
 
 
+async def test_a_handler_of_your_own_that_prompts_ends_on_a_refusal(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    obj = claude.agent("assistant")
+
+    @obj.handler
+    async def summarize(ctx, text: str) -> str:
+        return await claude.prompt(ctx, f"Summarize: {text}", thread="summaries")
+
+    with pytest.raises(restate.TerminalError, match="check the agent's model") as refused:
+        await Object().run(obj.handlers["summarize"].fn, "hello")
+    assert refused.value.status_code == 424
+
+
+async def test_a_model_of_another_provider_from_a_function_ends_the_message():
+    async def model(ctx) -> str:
+        return "openai/gpt-6-luna"
+
+    obj = claude.agent("assistant", client=ClaudeClient(Teller()), model=model)
+    with pytest.raises(restate.TerminalError, match="is not anthropic's"):
+        await Object().run(obj.handlers["chat"].fn, "hello")
+
+
 async def test_a_tool_gets_the_context_and_its_call_id():
     seen = []
 

@@ -21,8 +21,8 @@ from typing import Any, TypedDict
 import restate_fns as restate
 
 from restate_agents import log
-from restate_agents.common import CHECK_MODEL, Messages, MessagesRequest, Transcript, refused
-from restate_agents.object import TURN, Object, Turn, context, service
+from restate_agents.common import Messages, MessagesRequest, Transcript
+from restate_agents.object import TURN, Object, Turn, context, refusal, service
 from restate_agents.signals import Agent, CloseRequest, Steer, signals_of
 from restate_agents.signals import close as close_turn
 from restate_agents.signals import publish as publish_change
@@ -200,10 +200,10 @@ def _chat(obj: Object, answer: Callable[[restate.ObjectContext, str], Awaitable[
             raise
         except Exception as error:
             # Any other error fails the attempt, and Restate retries the turn.
-            if not refused(error):
+            if (terminal := refusal(error)) is None:
                 raise
             end()
-            raise restate.TerminalError(f"the model's provider refused the request: {CHECK_MODEL}. {error}") from error
+            raise terminal from error
         end()
         return answered
 

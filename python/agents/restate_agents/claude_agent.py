@@ -36,7 +36,6 @@ stored transcript (the SDK's ``SessionStore``, mirrored as the CLI writes):
 
 from __future__ import annotations
 
-import inspect
 import json
 import shutil
 import tempfile
@@ -60,7 +59,7 @@ from claude_agent_sdk import (
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, configured, has_table, model_id_of, model_of
 from restate_agents.object import Object, service
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
@@ -110,18 +109,14 @@ def agent(
         model_id_of(model_of(model), "anthropic")
 
     async def answer(ctx: ObjectContext, message: str) -> str:
-        async def given(option: Any) -> Any:
-            value = option(ctx) if callable(option) else option
-            return await value if inspect.isawaitable(value) else value
-
         return await prompt(
             ctx,
             message,
-            model=await given(model),
-            system=await given(system),
-            tools=await given(tools),
-            workspace=await given(workspace),
-            options=await given(options),
+            model=await configured(model, ctx),
+            system=await configured(system, ctx),
+            tools=await configured(tools, ctx),
+            workspace=await configured(workspace, ctx),
+            options=await configured(options, ctx),
         )
 
     async def transcript(ctx: ObjectContext) -> Transcript:
