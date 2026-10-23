@@ -101,3 +101,23 @@ fn dropping_the_cache_frees_idle_state() -> crate::Result<()> {
         Ok(())
     })
 }
+
+#[test]
+fn values_read_as_slices_of_a_larger_buffer_are_kept_alone() {
+    futures::executor::block_on(async {
+        let cache = fresh_namespace_cache();
+        // A receive buffer holding much more than the one value.
+        let buffer = Page::from(vec![9; 1 << 20]);
+        let inside = |value: &Page| buffer.as_ptr_range().contains(&value.as_ptr());
+        let slice = buffer.slice(4096..8192);
+        cache.insert_read(cache.key(1), slice.clone());
+        let cached = cache.get(1).await.expect("cached");
+        assert_eq!(cached, slice);
+        assert!(!inside(&cached));
+        cache.record(Some(slice.clone()), 0, None);
+        assert!(!inside(cache.owner().commit.as_ref().unwrap()));
+        let named = std::collections::BTreeSet::from([3]);
+        cache.keep_values(&named, crate::log::Values::from([(3, slice)]));
+        assert!(!inside(&cache.values(&named)[&3]));
+    })
+}
