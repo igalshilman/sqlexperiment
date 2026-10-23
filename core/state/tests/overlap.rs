@@ -1,4 +1,5 @@
 //! Two states of one owner, flushing at once.
+#![cfg(feature = "simulation")]
 use bytes::Bytes;
 use futures::{FutureExt, future::BoxFuture};
 use state::{Result, State, kv::KvStore, simulation::*};
