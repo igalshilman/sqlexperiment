@@ -163,8 +163,9 @@ class AgentClient:
         for as long as you read it.
 
         Each change is one ``sync``, which waits in Restate for the next. A
-        network failure does not end it: it tries again, and a sync it retries
-        keeps its idempotency key, so it joins the one already waiting.
+        network failure (or Restate's, restarting) does not end it: it tries
+        again, and a sync it retries keeps its idempotency key, so it joins
+        the one already waiting.
         """
         revision: int | None = None
         while True:
@@ -176,7 +177,10 @@ class AgentClient:
                         cursor=cursor, revision=revision, timeout_seconds=timeout_seconds, idempotency_key=window
                     )
                     break
-                except httpx.TransportError as error:
+                except (httpx.TransportError, AgentError) as error:
+                    # A 4xx (such as an unknown agent) would come again: only Restate's (5xx) or a 429 is retried.
+                    if isinstance(error, AgentError) and error.status < 500 and error.status != 429:
+                        raise
                     log.warning("follow: retrying after %s", error)
                     await asyncio.sleep(1)
             # Nothing changed (the wait timed out): wait again.

@@ -90,9 +90,15 @@ export interface FollowOptions {
   timeoutSeconds?: number;
 }
 
-/** After `error`, wait a second to try again: false, to stop instead, once `signal` aborted. */
+/**
+ * After `error`, wait a second to try again: false, to stop instead, once
+ * `signal` aborted. An error that a retry would get again (a 4xx, such as an
+ * unknown agent) ends following: only a network failure, Restate's (5xx) or
+ * too many requests (429) is retried.
+ */
 async function retrying(error: unknown, signal: AbortSignal | undefined): Promise<boolean> {
   if (signal?.aborted) return false;
+  if (error instanceof clients.HttpCallError && error.status < 500 && error.status !== 429) throw error;
   console.warn('follow: retrying', error);
   await new Promise((resolve) => setTimeout(resolve, 1000));
   return true;
@@ -105,8 +111,9 @@ async function retrying(error: unknown, signal: AbortSignal | undefined): Promis
  * `signal` aborts.
  *
  * Each change is one `sync`, which waits in Restate for the next. A network
- * failure does not end it: it tries again, and a sync it retries keeps its
- * idempotency key, so it joins the one already waiting.
+ * failure (or Restate's, restarting) does not end it: it tries again, and a
+ * sync it retries keeps its idempotency key, so it joins the one already
+ * waiting.
  */
 export async function* follow(
   ingress: clients.Ingress,

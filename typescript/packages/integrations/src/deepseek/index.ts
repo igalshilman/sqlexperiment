@@ -86,7 +86,7 @@ const textTool = <const S extends ParameterSchemaSpec>(options: {
   });
 
 /** The default model. */
-const DEFAULT_MODEL = 'deepseek/deepseek-flash';
+const DEEPSEEK_MODEL = 'deepseek/deepseek-flash';
 
 /** The harness, its session in `db`: the services an agent loop needs, the persistence and its checkpoints. */
 async function boot(db: restate.SqlSession, system?: string): Promise<Context> {
@@ -255,7 +255,7 @@ const answerOnce = async (
   try {
     const sessionId = SessionId(ctx.key);
     const options = {
-      agentOptions: { provider: 'deepseek-official', model: modelIdOf(modelOf(named, DEFAULT_MODEL), 'deepseek') },
+      agentOptions: { provider: 'deepseek-official', model: modelIdOf(modelOf(named, DEEPSEEK_MODEL), 'deepseek') },
       setup: (agentCtx: Context) =>
         tools.forEach((t) => {
           const definition = isTool(t) ? native(t, ctx) : t;
@@ -336,7 +336,7 @@ const answerOnce = async (
  * a JSON string (`curl --json '"Hi"'`).
  */
 export const chat = (options: Configure<Options> = {}) => {
-  if (typeof options === 'object' && options.model !== undefined) modelIdOf(options.model, 'deepseek');
+  if (typeof options === 'object') modelIdOf(modelOf(options.model, DEEPSEEK_MODEL), 'deepseek');
   return chatHandler(async (ctx, text) => prompt(ctx, text, await configured(options, ctx)));
 };
 
@@ -349,7 +349,11 @@ const parsed = (json: string): unknown => {
   }
 };
 
-/** A handler of the session, a page at a time: what was said, in order, with the tool calls, from its log. */
+/**
+ * A handler of the conversation as clients read it: a page at a time, or
+ * what is new or changed since a cursor, from the log each change writes
+ * (log.ts). It answers while a message is answered.
+ */
 export const messages = () => messagesHandler();
 
 /** The session `key` in `db`, from its log, as `messages` gives it. */

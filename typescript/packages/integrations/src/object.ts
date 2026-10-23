@@ -1,6 +1,6 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from 'restate-fns';
-import { type Messages, type MessagesRequest, messageSerde, TURN, type Turn } from './common.ts';
+import { type Messages, type MessagesRequest, messageSerde, refusal, TURN, type Turn } from './common.ts';
 import {
   agentOf,
   type Notifications,
@@ -217,10 +217,15 @@ export const object = <P extends string, H extends Record<string, Handler>>(defi
     if (name in definition.handlers)
       throw new Error(`${definition.name}: every object has a \`${name}\` handler already`);
   }
+  const yours = Object.entries(definition.handlers as Record<string, Handler>).map(([name, handler]) => [
+    name,
+    // A plain function: a model provider's refusal (a missing API key) ends its invocation.
+    Object.getOwnPropertySymbols(handler).length === 0 ? answering(handler) : handler,
+  ]);
   const handlers: object = {
     ...BUILT_IN,
     ...('messages' in definition.handlers ? FOLLOWED : {}),
-    ...definition.handlers,
+    ...Object.fromEntries(yours),
   };
   return restate.object({
     ...definition,
@@ -228,3 +233,14 @@ export const object = <P extends string, H extends Record<string, Handler>>(defi
     options: { ...OPTIONS, ...definition.options },
   });
 };
+
+/** `handler`, but a model provider's refusal it fails with ends its invocation, as `chat`'s does. */
+const answering =
+  (handler: Handler): Handler =>
+  async (ctx, input) => {
+    try {
+      return await handler(ctx, input);
+    } catch (error) {
+      throw refusal(error) ?? error;
+    }
+  };

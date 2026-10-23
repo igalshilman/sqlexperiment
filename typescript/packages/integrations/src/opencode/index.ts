@@ -117,7 +117,7 @@ export interface Options {
 
 /** An OpenCode plugin that adds `system` to the session's system prompt. */
 const systemPlugin = (system: string): Plugin.Plugin => ({
-  id: 'examples.system',
+  id: 'restate-agents.system',
   async setup(ctx) {
     const hook = await ctx.session.hook('context', (request) => {
       request.system.push({ type: 'text', text: system });
@@ -129,7 +129,7 @@ const systemPlugin = (system: string): Plugin.Plugin => ({
 /** An OpenCode plugin whose tools are `tools`, and only those. */
 function toolsPlugin(tools: OpenCodeTool[], fail: (error: unknown) => Promise<never>, builtins = false): Plugin.Plugin {
   return {
-    id: 'examples.tools',
+    id: 'restate-agents.tools',
     async setup(ctx) {
       const transform = await ctx.tool.transform((editor) => {
         // Without a workspace, no filesystem, shell or web: the agent acts
@@ -168,7 +168,7 @@ const steeringPlugin = (
   steerable: Steerable,
   fail: (error: unknown) => Promise<never>,
 ): Plugin.Plugin => ({
-  id: 'examples.steering',
+  id: 'restate-agents.steering',
   async setup(plugin) {
     const before = await plugin.tool.hook('execute.before', async () => {
       await toolCallStarted(ctx).catch(fail);
@@ -450,10 +450,9 @@ export const chat = (options: Configure<Options> = {}) => {
 };
 
 /**
- * A handler of the session, a page at a time: what was said, in order, with
- * the tool calls. It answers while a message is answered, with the messages
- * stored so far: OpenCode boots on the database as stored, without resuming
- * the turn.
+ * A handler of the conversation as clients read it: a page at a time, or
+ * what is new or changed since a cursor, from the log each change writes
+ * (log.ts). It answers while a message is answered.
  */
 export const messages = () => messagesHandler();
 

@@ -54,7 +54,8 @@ npx @restatedev/restate deployments register http://host.docker.internal:9080
 
 `MODEL` picks another model, such as `MODEL=openai/gpt-6-luna` with
 `OPENAI_API_KEY`, for the agents on pi and OpenCode; Claude and LangGraph
-take Anthropic's models, and DeepSeek its own (see
+take Anthropic's models, and DeepSeek its own, and refuse another
+provider's `MODEL` when they start (see
 [the models](../typescript/packages/integrations/README.md#models)). To call an agent
 from code, or to send a message again safely, see
 [Calling an agent](../typescript/packages/integrations/README.md#calling-an-agent).

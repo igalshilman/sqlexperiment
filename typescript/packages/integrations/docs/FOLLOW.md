@@ -13,13 +13,13 @@ the one source of truth.
 Token streaming (the reply's text while the model writes it) is not part of
 it: see [Tokens](#tokens).
 
-## Where we are
+## Where we started
 
-A UI polls `status` and `messages` (see
-[`examples-typescript/ui`](../../../../examples-typescript/ui/app.ts)), once a second, whether or
-not anything changed.
+A UI polled `status` and `messages` once a second, whether or not anything
+changed (it now follows: see
+[`examples-typescript/ui`](../../../../examples-typescript/ui/app.ts)).
 
-And a reader sees a running turn's progress late. Measured against
+And a reader saw a running turn's progress late. Measured against
 restate-server, with a handler that writes a row every 100 ms and a shared
 handler that reads it:
 

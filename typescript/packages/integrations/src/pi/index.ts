@@ -275,9 +275,9 @@ export const chat = (options: Configure<Options> = {}) => {
 };
 
 /**
- * A handler of the conversation, a page at a time: what was said, in order,
- * with the tool calls, from pi-durable's entries. It answers while a message
- * is answered, with the entries committed so far.
+ * A handler of the conversation as clients read it: a page at a time, or
+ * what is new or changed since a cursor, from the log each change writes
+ * (log.ts). It answers while a message is answered.
  */
 export const messages = () => messagesHandler();
 

@@ -240,11 +240,15 @@ async function cancel(app: ReturnType<ReturnType<typeof graph>['compile']>, conf
  * (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
 export const chat = (options: Configure<Options> = {}) => {
-  if (typeof options === 'object' && typeof options.model === 'string') modelIdOf(options.model, 'anthropic');
+  if (typeof options === 'object' && typeof options.model !== 'object') modelIdOf(modelOf(options.model), 'anthropic');
   return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
 
-/** A handler of the thread, a page at a time: what was said, in order, with the tool calls, from its last checkpoint. */
+/**
+ * A handler of the conversation as clients read it: a page at a time, or
+ * what is new or changed since a cursor, from the log each change writes
+ * (log.ts). It answers while a message is answered.
+ */
 export const messages = () => messagesHandler();
 
 /** The thread `key` in `db`, from its last checkpoint, as `messages` gives it. */
