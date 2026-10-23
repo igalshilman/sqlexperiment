@@ -45,6 +45,7 @@ runs again from the start, with the stored messages:
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -224,7 +225,8 @@ async def compact(
     idle(rows)
     run = _Run.of(thread_of, model=model, client=client, request=request)
     ask = {"role": "user", "content": f"{conversation.SUMMARIZE} {instructions or ''}".strip()}
-    reply = await run.reply([*(row.message for row in rows), ask])
+    # As text: a request with tool calls and results must define the tools, which this one has none of.
+    reply = await run.reply([*(_as_text(row.message) for row in rows), ask])
     summary = _text([block.model_dump(exclude_none=True) for block in reply.content])
     await thread_of.replace(id, f"{conversation.SUMMARIZED}{summary}", answer=summary)
     return summary
@@ -360,6 +362,22 @@ class _Run:
 def _name(tool: Tool | Any) -> str | None:
     """The name of ``tool``, of any kind ``Tools`` takes."""
     return tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", None)
+
+
+def _as_text(message: dict[str, Any]) -> dict[str, Any]:
+    """``message`` with its tool calls and results as text: ``[called move_money {"amount": 5}]``."""
+    if isinstance(message["content"], str):
+        return message
+    said = []
+    for block in message["content"]:
+        match block.get("type"):
+            case "text":
+                said.append(block["text"])
+            case "tool_use":
+                said.append(f"[called {block['name']} {json.dumps(block['input'])}]")
+            case "tool_result":
+                said.append(f"[result: {_text(block.get('content') or '')}]")
+    return {"role": message["role"], "content": "\n".join(said) or "[no text]"}
 
 
 def _text(content: str | list[dict[str, Any]]) -> str:

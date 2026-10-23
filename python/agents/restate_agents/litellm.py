@@ -189,7 +189,8 @@ async def compact(
     idle(rows)
     run = _Run(model_of(model), None, [], request or {}, thread_of)
     ask = {"role": "user", "content": f"{conversation.SUMMARIZE} {instructions or ''}".strip()}
-    summary = _text((await run.reply([*(row.message for row in rows), ask])).get("content"))
+    # As text: a request with tool calls and results must define the tools (Anthropic's), which this one has none of.
+    summary = _text((await run.reply([*(_as_text(row.message) for row in rows), ask])).get("content"))
     await thread_of.replace(id, f"{conversation.SUMMARIZED}{summary}", answer=summary)
     return summary
 
@@ -303,6 +304,16 @@ def _arguments(call: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     except ValueError as error:
         return {}, f"the arguments are not JSON: {error}"
     return (input, None) if isinstance(input, dict) else ({}, "the arguments are not a JSON object")
+
+
+def _as_text(message: dict[str, Any]) -> dict[str, Any]:
+    """``message`` with its tool calls and results as text: ``[called move_money {"amount": 5}]``."""
+    if message["role"] == "tool":
+        return {"role": "user", "content": f"[result: {_text(message.get('content'))}]"}
+    if not message.get("tool_calls"):
+        return message
+    calls = [f"[called {c['function']['name']} {c['function']['arguments']}]" for c in message["tool_calls"]]
+    return {"role": message["role"], "content": "\n".join([_text(message.get("content")), *calls]).strip()}
 
 
 def _text(content: str | list[dict[str, Any]] | None) -> str:

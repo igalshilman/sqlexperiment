@@ -336,6 +336,23 @@ def assistant(client: ClaudeClient):
     return obj
 
 
+async def test_compact_reads_the_tool_calls_as_text():
+    client = ClaudeClient(Teller())
+    obj = claude.agent("teller", client=client, tools=[Bank().restate_tool()])
+
+    @obj.handler(message=True)
+    async def compact(ctx, instructions: str) -> str:
+        return await claude.compact(ctx, instructions, client=client)
+
+    alice = Object()
+    await alice.invoke(obj.handlers["chat"].fn, "move 5 from 1 to 2")
+    await alice.invoke(obj.handlers["compact"].fn, "Keep the transfers")
+    # The API takes no tool calls in a request without tools: the summary reads them as text.
+    said = [m["content"] for m in client.requests[-1]["messages"]]
+    assert all(isinstance(text, str) for text in said)
+    assert any("[result: moved 5 from 1 to 2]" in text for text in said)
+
+
 async def test_compact_summarizes_the_conversation_in_place_of_it():
     client = ClaudeClient(Teller())
     obj = assistant(client)
