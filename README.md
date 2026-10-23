@@ -23,21 +23,20 @@ that in its objects ([`examples-typescript/basic/notes.ts`](examples-typescript/
 ```ts
 import * as restate from 'restate-fns';
 
-const SCHEMA = 'CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)';
-
 const notes = restate.object({
   name: 'notes',
+  // The schema of each key's database: its steps, applied once per key (a step added later runs then).
+  schema: ['CREATE TABLE notes (text TEXT NOT NULL)'],
   handlers: {
     add: async (ctx: restate.ObjectContext, note: string) => {
-      await ctx.db.execute(SCHEMA);
       await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
     },
 
-    list: async (ctx: restate.ObjectContext) => {
-      await ctx.db.execute(SCHEMA);
+    /** Shared: it reads while `add` writes; a key with no notes yet has none. */
+    list: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
       const rows = await ctx.db.query('SELECT text FROM notes ORDER BY rowid');
       return rows.map(([text]) => text);
-    },
+    }),
   },
 });
 
@@ -103,18 +102,16 @@ conversation, and a handler of yours serves that table, for a profile page
 say ([`examples-typescript/basic/memory.ts`](examples-typescript/basic/memory.ts)):
 
 ```ts
+import { handlers } from 'restate-fns';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
-
-const SCHEMA = 'CREATE TABLE IF NOT EXISTS facts (fact TEXT PRIMARY KEY)';
 
 const remember = tool({
   name: 'remember',
   description: 'Remember a fact about the user, for this conversation and later ones.',
   input: z.object({ fact: z.string() }),
   run: async ({ fact }, { ctx }) => {
-    await ctx.db.execute(SCHEMA);
     await ctx.db.execute('INSERT OR IGNORE INTO facts (fact) VALUES (?)', [fact]);
     return `Remembered: ${fact}`;
   },
@@ -125,7 +122,6 @@ const recall = tool({
   description: 'Everything remembered about the user.',
   input: z.object({}),
   run: async (_input, { ctx }) => {
-    await ctx.db.execute(SCHEMA);
     const rows = await ctx.db.query('SELECT fact FROM facts ORDER BY rowid');
     return rows.map(([fact]) => fact);
   },
@@ -133,6 +129,8 @@ const recall = tool({
 
 const assistant = object({
   name: 'assistant',
+  // The facts' table: the schema of each conversation's database, beside the conversation.
+  schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'],
   handlers: {
     chat: pi.chat({
       system: 'You are a helpful assistant. Remember what you learn about the user, and recall it when it helps.',
@@ -140,12 +138,11 @@ const assistant = object({
     }),
     messages: pi.messages(),
 
-    /** What the assistant knows about the user. */
-    facts: async (ctx) => {
-      await ctx.db.execute(SCHEMA);
+    /** What the assistant knows about the user: shared, so it answers while a message is answered. */
+    facts: handlers.object.shared(async (ctx) => {
       const rows = await ctx.db.query('SELECT fact FROM facts ORDER BY rowid');
       return rows.map(([fact]) => fact);
-    },
+    }),
   },
 });
 
