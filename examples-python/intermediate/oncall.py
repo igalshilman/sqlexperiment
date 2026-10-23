@@ -27,7 +27,7 @@ from datetime import timedelta
 
 from ops import health, monitoring, reviews, schedule
 from pydantic import BaseModel
-from restate_agents import adk, call, has_table, send, serve, signal, tool
+from restate_agents import adk, call, send, serve, signal, tool
 
 
 class Page(BaseModel):
@@ -40,7 +40,6 @@ class Page(BaseModel):
 @tool
 async def note(ctx, call_id, entry: str) -> str:
     """Add an entry to the incident's timeline: what was found, decided or done."""
-    await ctx.db.execute("CREATE TABLE IF NOT EXISTS timeline (id TEXT PRIMARY KEY, at TEXT, entry TEXT)")
     # Keyed by the tool call's id: a retried call notes it once.
     await ctx.db.execute("INSERT OR IGNORE INTO timeline VALUES (?, datetime('now'), ?)", [call_id, entry])
     return "noted"
@@ -65,14 +64,14 @@ responder = adk.agent(
             delay=timedelta(seconds=int(os.environ.get("REVIEW_SECONDS", 24 * 60 * 60))),
         ),
     ],
+    # The incident's timeline: the schema of each incident's database, beside the conversation.
+    schema=["CREATE TABLE timeline (id TEXT PRIMARY KEY, at TEXT, entry TEXT)"],
 )
 
 
 @responder.handler(kind="shared")
 async def timeline(ctx) -> list[str]:
     """The incident's timeline, oldest first."""
-    if not await has_table(ctx.db, "timeline"):
-        return []
     return [f"{at} {entry}" for at, entry in await ctx.db.query("SELECT at, entry FROM timeline ORDER BY rowid")]
 
 

@@ -29,10 +29,7 @@ interface Settings {
   persona?: string;
 }
 
-const SCHEMA = 'CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT NOT NULL)';
-
 async function settingsOf(ctx: restate.ObjectContext): Promise<Settings> {
-  await ctx.db.execute(SCHEMA);
   const [row] = await ctx.db.query('SELECT json FROM settings');
   return row ? (JSON.parse(String(row[0])) as Settings) : {};
 }
@@ -52,6 +49,7 @@ const options = async (ctx: restate.ObjectContext): Promise<pi.Options> => {
 
 const assistant = object({
   name: 'assistant',
+  schema: ['CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT NOT NULL)'],
   handlers: {
     chat: pi.chat(options),
     messages: pi.messages(),

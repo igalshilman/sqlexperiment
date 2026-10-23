@@ -44,12 +44,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import restate_fns as restate
+from restate_fns.schema import Schema
 
-from restate_agents.common import has_table
 from restate_agents.object import service
 from restate_agents.tools import Tool, tool
 
 TABLE = "sandboxes"
+SCHEMA = Schema("restate_agents.sandbox", [f"CREATE TABLE {TABLE} (name TEXT PRIMARY KEY, ref TEXT NOT NULL)"])
 # What a tool gives the model of a file or a command's output, at most.
 CLIPPED = 20_000
 
@@ -143,14 +144,13 @@ def _name(ctx: Any) -> str:
 
 
 async def _stored(db: Any, name: str) -> dict[str, Any] | None:
-    if not await has_table(db, TABLE):
-        return None
+    await SCHEMA.ensure(db)
     rows = await db.query(f"SELECT ref FROM {TABLE} WHERE name = ?", [name])
     return json.loads(rows[0][0]) if rows else None
 
 
 async def _store(db: Any, name: str, ref: dict[str, Any]) -> None:
-    await db.execute(f"CREATE TABLE IF NOT EXISTS {TABLE} (name TEXT PRIMARY KEY, ref TEXT NOT NULL)")
+    await SCHEMA.ensure(db)
     await db.execute(f"INSERT OR REPLACE INTO {TABLE} VALUES (?, ?)", [name, json.dumps(ref)])
 
 

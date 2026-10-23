@@ -41,7 +41,7 @@ import {
   type Transcript,
   transcribing,
 } from '../common.ts';
-import { object } from '../object.ts';
+import { type Definition, object } from '../object.ts';
 import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { Conversation } from './conversation.ts';
@@ -254,9 +254,5 @@ const transcribe = async (db: SqlSession, transcript: Transcript) => {
 };
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
-export const agent = <P extends string>({
-  name,
-  description,
-  ...options
-}: Options & { name: P; description?: string }) =>
-  object({ name, description, handlers: { chat: chat(options), messages: messages() } });
+export const agent = <P extends string>({ name, description, schema, ...options }: Options & Definition<P>) =>
+  object({ name, description, schema, handlers: { chat: chat(options), messages: messages() } });

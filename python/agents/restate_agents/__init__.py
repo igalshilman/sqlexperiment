@@ -15,7 +15,6 @@ often an attempt crashes.
     serve(assistant)
 """
 
-from restate_agents.common import has_table
 from restate_agents.object import Object, app, ask, context, serve
 from restate_agents.tools import Tool, call, send, signal, subagent, tool, workflow
 
@@ -26,7 +25,6 @@ __all__ = [
     "ask",
     "call",
     "context",
-    "has_table",
     "send",
     "serve",
     "signal",
