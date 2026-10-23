@@ -45,6 +45,7 @@ import {
   configured,
   messagesHandler,
   modelOf,
+  providerOf,
   nextPromptId,
   settleSteering,
   type Steerable,
@@ -66,8 +67,8 @@ export interface ModelRef {
 
 /** `provider/model-id` as OpenCode names it. */
 const modelRef = (name: string): ModelRef => {
-  const [providerID = '', ...id] = name.split('/');
-  return { providerID, id: id.join('/') };
+  const [providerID, id] = providerOf(name);
+  return { providerID, id };
 };
 
 /** An OpenCode tool of your own: `execute` gets the input and the tool call's id. */

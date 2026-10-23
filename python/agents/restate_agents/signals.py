@@ -84,16 +84,16 @@ class Notifications(BaseModel):
 
 
 class Watch(BaseModel):
-    """What ``watch`` waits for: a revision past ``afterRevision``, for at most ``timeoutSeconds`` (at most 60)."""
+    """What ``watch`` waits for: a revision newer than ``revision``, for at most ``timeoutSeconds`` (at most 60)."""
 
-    afterRevision: int = 0  # noqa: N815 (as the TypeScript agents name it)
+    revision: int = 0
     timeoutSeconds: float = 50  # noqa: N815
 
 
 class Subscription(BaseModel):
-    """A ``watch`` waiting: the awakeable to resolve once the revision is past ``afterRevision``."""
+    """A ``watch`` waiting: the awakeable to resolve once there is a revision newer than ``revision``."""
 
-    afterRevision: int  # noqa: N815
+    revision: int
     awakeable: str
 
 
@@ -271,9 +271,9 @@ async def notifications(ctx: ObjectSharedContext) -> Notifications:
 
 @signals.handler(ingress_private=True)
 async def subscribe(ctx: ObjectContext, subscription: Subscription) -> None:
-    """Answer ``subscription.awakeable`` once the revision is past ``afterRevision``: at once, if it is."""
+    """Answer ``subscription.awakeable`` once there is a revision newer than ``revision``: at once, if there is."""
     revision = await ctx.get("revision") or 0
-    if revision > subscription.afterRevision:
+    if revision > subscription.revision:
         ctx.resolve_awakeable(subscription.awakeable, Notifications(revision=revision).model_dump())
         return
     ctx.set("watching", [*(await ctx.get("watching") or []), subscription.model_dump()])

@@ -58,6 +58,7 @@ import {
   configured,
   messagesHandler,
   modelOf,
+  providerOf,
   nextPromptId,
   settleSteering,
   type Steerable,
@@ -139,7 +140,7 @@ export const withPi = async <T>(
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const model = modelOf(named);
-  const [provider = '', modelId = ''] = model.split('/');
+  const [provider, modelId] = providerOf(model);
   models ??= await modelsOf(provider);
   // A tool's error fails the attempt, which Restate retries (pi-durable would
   // hand it to the model): the work is cancelled, so the tool call stores no

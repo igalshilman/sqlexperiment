@@ -56,7 +56,7 @@ export interface Agent {
   signal(ctx: unknown, signal: Signal): Promise<Resolved>;
   /** The revision of its conversation, which each change increases. */
   notifications(ctx: unknown): Promise<Notifications>;
-  /** The revision, once it is past `afterRevision`, or at the timeout. */
+  /** The revision, once there is one newer than `revision`, or at the timeout. */
   watch(ctx: unknown, watch: Watch): Promise<Notifications>;
 }
 

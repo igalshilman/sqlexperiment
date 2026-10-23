@@ -151,7 +151,7 @@ class Object(restate.VirtualObject):
 
         async def watch(ctx: restate.JournaledObjectSharedContext, watch: Watch) -> Notifications:
             """
-            The revision, once it is past ``afterRevision``, or at the timeout
+            The revision, once there is one newer than ``revision``, or at the timeout
             (``timeoutSeconds``, 50 by default, at most 60), whichever comes
             first: a client then reads what changed. It waits in Restate,
             holding no process; a client that sends it again with the same
@@ -159,9 +159,7 @@ class Object(restate.VirtualObject):
             """
             key = signals_of(name, ctx.key())
             awakeable, changed = ctx.awakeable()
-            ctx.object_send(
-                subscribe, key=key, arg=Subscription(afterRevision=watch.afterRevision, awakeable=awakeable)
-            )
+            ctx.object_send(subscribe, key=key, arg=Subscription(revision=watch.revision, awakeable=awakeable))
             timeout = ctx.sleep(timedelta(seconds=min(max(watch.timeoutSeconds, 0), 60)))
             match await restate.select(changed=changed, timeout=timeout):
                 case ["changed", revision]:

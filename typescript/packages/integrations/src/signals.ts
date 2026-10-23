@@ -67,9 +67,9 @@ export interface Notifications {
   revision: number;
 }
 
-/** What `watch` waits for: a revision past `afterRevision`, for at most `timeoutSeconds` (default 50, at most 60). */
+/** What `watch` waits for: a revision newer than `revision`, for at most `timeoutSeconds` (default 50, at most 60). */
 export interface Watch {
-  afterRevision: number;
+  revision: number;
   timeoutSeconds?: number;
 }
 
@@ -94,7 +94,7 @@ interface State {
   steering: { turn: string; messages: Steer[] };
   closed: string[];
   revision: number;
-  watching: { afterRevision: number; awakeable: string }[];
+  watching: { revision: number; awakeable: string }[];
 }
 
 /** Increase the revision, and answer each `watch` waiting for it: the new revision. */
@@ -110,10 +110,14 @@ async function publish(ctx: restate.ObjectContext<State>): Promise<Notifications
 const send = (ctx: restate.ObjectContext<State>, { service, key }: Agent, text: string) =>
   ctx.genericSend({ service, method: 'chat', key, parameter: text, inputSerde: restate.serde.json }).invocationId;
 
+/** A handler that the agents' own handlers call, which clients cannot (through Restate's ingress). */
+const internal = <I, O>(fn: (ctx: restate.ObjectContext<State>, input: I) => Promise<O>) =>
+  restate.handlers.object.exclusive({ ingressPrivate: true }, fn);
+
 /**
  * The signals of every agent, keyed `<agent>:<key>` ({@link signalsOf}).
  * `serve` serves it beside the agents; the handlers marked `@internal` are
- * called by the agents' own handlers, not by clients.
+ * called by the agents' own handlers, and Restate's ingress refuses them.
  */
 export const signals = restate.object({
   name: 'signals',
@@ -159,7 +163,7 @@ export const signals = restate.object({
     ),
 
     /** @internal A wait: resolved now with a signal kept for it, or else when one comes. */
-    listen: async (ctx: restate.ObjectContext<State>, wait: Waiting & { awakeable: string }) => {
+    listen: internal(async (ctx: restate.ObjectContext<State>, wait: Waiting & { awakeable: string }) => {
       const kept = (await ctx.get('kept')) ?? {};
       const [value, ...rest] = kept[wait.name] ?? [];
       if (kept[wait.name]?.length) {
@@ -169,74 +173,81 @@ export const signals = restate.object({
       }
       ctx.set('waiting', [...((await ctx.get('waiting')) ?? []), wait]);
       await publish(ctx);
-    },
+    }),
 
     /**
      * @internal Steer `turn` (the message `agent` answers, if any) with
      * `text`: queued for it to take at its next step, or, if it is over, sent
      * as a message of its own.
      */
-    steer: async (
-      ctx: restate.ObjectContext<State>,
-      { agent, turn, text }: { agent: Agent; turn: string | null; text: string },
-    ) => {
-      if (turn === null || ((await ctx.get('closed')) ?? []).includes(turn)) {
-        return { invocationId: await send(ctx, agent, text), steered: false } satisfies Steered;
-      }
-      const steering = await ctx.get('steering');
-      const messages = steering?.turn === turn ? steering.messages : [];
-      ctx.set('steering', { turn, messages: [...messages, { id: `${turn}:steer:${messages.length + 1}`, text }] });
-      await publish(ctx);
-      return { invocationId: turn, steered: true } satisfies Steered;
-    },
+    steer: internal(
+      async (
+        ctx: restate.ObjectContext<State>,
+        { agent, turn, text }: { agent: Agent; turn: string | null; text: string },
+      ) => {
+        if (turn === null || ((await ctx.get('closed')) ?? []).includes(turn)) {
+          return { invocationId: await send(ctx, agent, text), steered: false } satisfies Steered;
+        }
+        const steering = await ctx.get('steering');
+        const messages = steering?.turn === turn ? steering.messages : [];
+        ctx.set('steering', { turn, messages: [...messages, { id: `${turn}:steer:${messages.length + 1}`, text }] });
+        await publish(ctx);
+        return { invocationId: turn, steered: true } satisfies Steered;
+      },
+    ),
 
     /** @internal The messages steered to `turn`, in order. */
-    steering: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext<State>, turn: string) => {
-      const steering = await ctx.get('steering');
-      return steering?.turn === turn ? steering.messages : [];
-    }),
+    steering: restate.handlers.object.shared(
+      { ingressPrivate: true },
+      async (ctx: restate.ObjectSharedContext<State>, turn: string) => {
+        const steering = await ctx.get('steering');
+        return steering?.turn === turn ? steering.messages : [];
+      },
+    ),
 
     /**
      * @internal `turn` is over: each message steered to it that it did not
      * take (not in `taken`) is sent as a message of its own, unless the turn
      * was cancelled; later ones are, too.
      */
-    close: async (
-      ctx: restate.ObjectContext<State>,
-      { agent, turn, taken, cancelled }: { agent: Agent; turn: string; taken: string[]; cancelled: boolean },
-    ) => {
-      const closed = (await ctx.get('closed')) ?? [];
-      if (closed.includes(turn)) return;
-      ctx.set('closed', [...closed, turn].slice(-CLOSED));
-      const steering = await ctx.get('steering');
-      if (steering?.turn !== turn) return;
-      ctx.clear('steering');
-      if (cancelled) return;
-      for (const { id, text } of steering.messages) if (!taken.includes(id)) await send(ctx, agent, text);
-    },
+    close: internal(
+      async (
+        ctx: restate.ObjectContext<State>,
+        { agent, turn, taken, cancelled }: { agent: Agent; turn: string; taken: string[]; cancelled: boolean },
+      ) => {
+        const closed = (await ctx.get('closed')) ?? [];
+        if (closed.includes(turn)) return;
+        ctx.set('closed', [...closed, turn].slice(-CLOSED));
+        const steering = await ctx.get('steering');
+        if (steering?.turn !== turn) return;
+        ctx.clear('steering');
+        if (cancelled) return;
+        for (const { id, text } of steering.messages) if (!taken.includes(id)) await send(ctx, agent, text);
+      },
+    ),
 
     /** @internal Forget wait `id`, whose agent no longer waits. */
-    forget: async (ctx: restate.ObjectContext<State>, id: string) => {
+    forget: internal(async (ctx: restate.ObjectContext<State>, id: string) => {
       const waiting = (await ctx.get('waiting')) ?? [];
       ctx.set(
         'waiting',
         waiting.filter((w) => w.id !== id),
       );
       await publish(ctx);
-    },
+    }),
 
     /** @internal The conversation changed: increase its revision, and answer the `watch`es. */
-    publish,
+    publish: restate.handlers.object.exclusive({ ingressPrivate: true }, publish),
 
     /**
      * @internal The turn `turn` made progress (a tool call ended): publish
      * it, and answer the messages steered to the turn.
      */
-    progress: async (ctx: restate.ObjectContext<State>, turn: string) => {
+    progress: internal(async (ctx: restate.ObjectContext<State>, turn: string) => {
       await publish(ctx);
       const steering = await ctx.get('steering');
       return steering?.turn === turn ? steering.messages : [];
-    },
+    }),
 
     /** The conversation's revision. */
     notifications: restate.handlers.object.shared(
@@ -245,23 +256,23 @@ export const signals = restate.object({
       }),
     ),
 
-    /** @internal Answer `awakeable` once the revision is past `afterRevision`: at once, if it is. */
-    subscribe: async (ctx: restate.ObjectContext<State>, watch: { afterRevision: number; awakeable: string }) => {
+    /** @internal Answer `awakeable` once there is a revision newer than `revision`: at once, if there is. */
+    subscribe: internal(async (ctx: restate.ObjectContext<State>, watch: { revision: number; awakeable: string }) => {
       const revision = (await ctx.get('revision')) ?? 0;
-      if (revision > watch.afterRevision) {
+      if (revision > watch.revision) {
         ctx.resolveAwakeable(watch.awakeable, { revision });
         return;
       }
       ctx.set('watching', [...((await ctx.get('watching')) ?? []), watch]);
-    },
+    }),
 
     /** @internal Forget the `watch` of `awakeable`, which no longer waits. */
-    unsubscribe: async (ctx: restate.ObjectContext<State>, awakeable: string) => {
+    unsubscribe: internal(async (ctx: restate.ObjectContext<State>, awakeable: string) => {
       const watching = (await ctx.get('watching')) ?? [];
       ctx.set(
         'watching',
         watching.filter((w) => w.awakeable !== awakeable),
       );
-    },
+    }),
   },
 });

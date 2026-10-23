@@ -110,14 +110,15 @@ class AgentClient:
         cursor: int = 0,
         revision: int | None = None,
         timeout_seconds: float = 50,
+        limit: int = 100,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """
-        The messages new or changed since ``cursor``, what the agent is doing,
-        and the revision, in one request; with ``revision``, once there is a
-        newer one, or at the timeout.
+        The messages new or changed since ``cursor`` (at most ``limit``), what
+        the agent is doing, and the revision, in one request; with
+        ``revision``, once there is a newer one, or at the timeout.
         """
-        request: dict[str, Any] = {"cursor": cursor, "timeoutSeconds": timeout_seconds}
+        request: dict[str, Any] = {"cursor": cursor, "timeoutSeconds": timeout_seconds, "limit": limit}
         if revision is not None:
             request["revision"] = revision
         return await self._post("sync", request, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
@@ -149,11 +150,9 @@ class AgentClient:
         """The revision of the conversation, which each change increases."""
         return (await self._post("notifications"))["revision"]
 
-    async def watch(
-        self, after_revision: int, *, timeout_seconds: float = 50, idempotency_key: str | None = None
-    ) -> int:
-        """The revision, once it is past ``after_revision``, or at the timeout."""
-        watch = {"afterRevision": after_revision, "timeoutSeconds": timeout_seconds}
+    async def watch(self, revision: int, *, timeout_seconds: float = 50, idempotency_key: str | None = None) -> int:
+        """The revision, once there is one newer than ``revision``, or at the timeout."""
+        watch = {"revision": revision, "timeoutSeconds": timeout_seconds}
         changed = await self._post("watch", watch, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
         return changed["revision"]
 

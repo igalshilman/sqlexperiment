@@ -236,7 +236,7 @@ curl localhost:8080/support/alice/sync --json '{}'                              
 curl localhost:8080/support/alice/sync --json '{"cursor": 31, "revision": 7}'   # the same, once something changed
 ```
 
-`notifications` and `watch({ afterRevision })` are the revision alone, and
+`notifications` and `watch({ revision })` are the revision alone, and
 the wait alone. The model's reply comes whole, with its message: there is no
 token streaming.
 

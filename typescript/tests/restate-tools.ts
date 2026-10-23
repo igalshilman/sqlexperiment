@@ -302,7 +302,7 @@ try {
   const mia = ingress.objectClient(agent('support'), 'mia');
   const now = await mia.notifications();
   const started = Date.now();
-  assert.deepEqual(await mia.watch({ afterRevision: now.revision, timeoutSeconds: 1 }), now);
+  assert.deepEqual(await mia.watch({ revision: now.revision, timeoutSeconds: 1 }), now);
   assert.ok(Date.now() - started >= 900, `${Date.now() - started} ms`);
 
   // With no message answered, it is a message of its own.

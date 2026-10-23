@@ -11,8 +11,8 @@
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/configure --json '{"persona": "You answer as a pirate."}'
  *   curl localhost:8080/assistant/alice/chat -d 'What time is it?'
- *   curl localhost:8080/assistant/alice/compact -d 'Keep the times you were asked'
- *   curl localhost:8080/assistant/alice/reset -d 'Alice likes short answers'
+ *   curl localhost:8080/assistant/alice/compact --json '"Keep the times you were asked"'
+ *   curl localhost:8080/assistant/alice/reset --json '"Alice likes short answers"'
  *   curl localhost:8080/assistant/alice/messages
  *
  * A model of another provider takes its API key, such as

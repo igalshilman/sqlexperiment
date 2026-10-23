@@ -134,11 +134,12 @@ def agent(
             return json.loads(answer)
 
         if (revision := request.get("revision")) is not None:
-            await own("watch", {"afterRevision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)})
-        # The revision first: a change after it shows in the next sync.
+            await own("watch", {"revision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)})
+        # The revision first: a change after it shows in the next sync. Then
+        # the object's own handlers, which read its state as it is now.
         notifications = await own("notifications")
         status = await own("status")
-        page = await log.page(ctx.db, {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)})
+        page = await own("messages", {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)})
         return Synced(revision=notifications["revision"], status=status, **page)
 
     obj.handler("messages", kind="shared")(messages)

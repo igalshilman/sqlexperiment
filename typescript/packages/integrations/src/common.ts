@@ -43,6 +43,12 @@ export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
  */
 export const modelOf = (model: string | undefined, fallback = DEFAULT_MODEL) => model || process.env.MODEL || fallback;
 
+/** `provider/model-id` as its provider and model id, split at the first `/` (`openrouter/meta-llama/llama-4`). */
+export const providerOf = (model: string): [provider: string, id: string] => {
+  const slash = model.indexOf('/');
+  return slash < 0 ? ['', model] : [model.slice(0, slash), model.slice(slash + 1)];
+};
+
 /**
  * The error code of a message the model's provider refused (a missing or
  * wrong API key, an unknown model): 424, Failed Dependency, as its HTTP
@@ -65,7 +71,7 @@ export const checkModelName = (framework: string, model: string | undefined) => 
  * `provider/model-id`, or the id alone.
  */
 export const modelIdOf = (model: string, provider: string) => {
-  const [named, id] = model.includes('/') ? model.split('/', 2) : [provider, model];
+  const [named, id] = model.includes('/') ? providerOf(model) : [provider, model];
   if (named !== provider || !id) {
     const from = process.env.MODEL === model ? ' (from MODEL)' : '';
     throw new Error(`the model "${model}"${from} is not ${provider}'s: this agent takes ${provider}/<model-id>`);

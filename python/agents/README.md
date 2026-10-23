@@ -576,7 +576,7 @@ something changed (a message, a wait, a turn's start or end), or at its
 timeout (50 s by default, at most 60), with the new revision, what the agent
 is doing (`status`), and the messages since the `cursor`, in one request. It
 waits in Restate, holding no process; sent again with the same idempotency
-key, it joins the same wait. (`notifications` and `watch({"afterRevision"})`
+key, it joins the same wait. (`notifications` and `watch({"revision"})`
 are the revision alone, and the wait alone.)
 
 ```sh

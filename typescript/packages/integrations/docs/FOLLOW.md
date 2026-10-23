@@ -40,8 +40,8 @@ conversation this way (its `docs/protocol.md`, "History and notifications"):
 
 - Each agent has a **revision**, which every change of what a client reads
   increases (`publish`): its history, approvals, profile, schedules.
-- `watch({ afterRevision, timeoutSeconds })` answers once the revision is
-  past `afterRevision`, or at the timeout: it waits on an awakeable, which
+- `watch({ revision, timeoutSeconds })` answers once there is a revision
+  newer than `revision`, or at the timeout: it waits on an awakeable, which
   `publish` resolves, in a window of at most a minute. A client that retries
   a window keeps its idempotency key, so it joins the wait already parked in
   Restate.
@@ -61,7 +61,7 @@ The same, on what we have:
    `publish` increases it and resolves each subscriber behind it.
 2. **`watch` and `notifications`, handlers every object has** (beside
    `status`, `stop`, `steer`): `notifications()` is `{ revision }`, and
-   `watch({ afterRevision, timeoutSeconds })` answers `{ revision }` once it
+   `watch({ revision, timeoutSeconds })` answers `{ revision }` once it
    is newer, or at the timeout (at most 60 s).
 3. **The turn publishes where its conversation changes:** when it starts and
    ends, before and after each tool call (the framework's wrappers, where it
