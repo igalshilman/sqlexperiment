@@ -3,12 +3,11 @@ The Restate Python SDK, with SQL in virtual objects::
 
     import restate_fns as restate
 
-    notes = restate.VirtualObject("notes")
+    notes = restate.VirtualObject("notes", schema=["CREATE TABLE notes (text TEXT NOT NULL)"])
 
 
     @notes.handler()
     async def add(ctx: restate.ObjectContext, note: str) -> None:
-        await ctx.db.execute("CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)")
         await ctx.db.execute("INSERT INTO notes (text) VALUES (?)", [note])
 
 It exports what ``restate`` does, with ``VirtualObject``, ``ObjectContext``
