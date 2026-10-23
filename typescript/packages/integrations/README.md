@@ -443,6 +443,11 @@ const assistant = object({
 await serve(assistant);
 ```
 
+Your tables share the database with the agent's, so name them apart: pi's
+are pi-durable's, unprefixed (`tasks`, `entries`, `conversations`,
+`documents`, `submissions`...); the other integrations' have their prefix
+(`claude_`, `langgraph_`, `dsh_`), and `agent_log` is the log of each.
+
 **Options for each invocation.** `chat` takes options, or a function of the
 invocation's context that gives them: each user's model and persona from
 the object's database, say ([`examples-typescript/intermediate/harness.ts`](../../../examples-typescript/intermediate/harness.ts)):
