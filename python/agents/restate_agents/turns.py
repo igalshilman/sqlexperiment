@@ -16,13 +16,13 @@ from collections.abc import Awaitable, Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, TypedDict
+from typing import Any
 
 import restate_fns as restate
 
 from restate_agents import log
-from restate_agents.common import CHECK_MODEL, Messages, MessagesRequest, Transcript, refused
-from restate_agents.object import TURN, Object, Turn, context, service
+from restate_agents.common import Messages, MessagesRequest, Synced, SyncRequest, Transcript
+from restate_agents.object import TURN, Object, Turn, context, refusal, service
 from restate_agents.signals import Agent, CloseRequest, Steer, signals_of
 from restate_agents.signals import close as close_turn
 from restate_agents.signals import publish as publish_change
@@ -134,36 +134,17 @@ def agent(
             return json.loads(answer)
 
         if (revision := request.get("revision")) is not None:
-            await own("watch", {"afterRevision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)})
-        # The revision first: a change after it shows in the next sync.
+            await own("watch", {"revision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)})
+        # The revision first: a change after it shows in the next sync. Then
+        # the object's own handlers, which read its state as it is now.
         notifications = await own("notifications")
         status = await own("status")
-        page = await log.page(ctx.db, {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)})
+        page = await own("messages", {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)})
         return Synced(revision=notifications["revision"], status=status, **page)
 
     obj.handler("messages", kind="shared")(messages)
     obj.handler("sync", kind="shared")(sync)
     return obj
-
-
-class SyncRequest(TypedDict, total=False):
-    """
-    What ``sync`` reads: what is new or changed since ``cursor`` (default 0,
-    all of it), at most ``limit`` messages (default 100); once the revision is
-    past ``revision``, if given, or at ``timeoutSeconds``.
-    """
-
-    cursor: int
-    revision: int
-    timeoutSeconds: float
-    limit: int
-
-
-class Synced(Messages):
-    """What ``sync`` answers: the messages since the cursor, as ``messages`` gives them, the status and the revision."""
-
-    revision: int
-    status: dict[str, Any]
 
 
 def _chat(obj: Object, answer: Callable[[restate.ObjectContext, str], Awaitable[str]]) -> None:
@@ -199,10 +180,10 @@ def _chat(obj: Object, answer: Callable[[restate.ObjectContext, str], Awaitable[
             raise
         except Exception as error:
             # Any other error fails the attempt, and Restate retries the turn.
-            if not refused(error):
+            if (terminal := refusal(error)) is None:
                 raise
             end()
-            raise restate.TerminalError(f"the model's provider refused the request: {CHECK_MODEL}. {error}") from error
+            raise terminal from error
         end()
         return answered
 

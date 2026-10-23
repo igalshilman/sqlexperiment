@@ -10,7 +10,7 @@ import inspect
 import os
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from datetime import timedelta
 from typing import Any
@@ -23,7 +23,7 @@ from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL
 from restate.serde import Serde
 from restate_fns import InvocationRetryPolicy
 
-from restate_agents.common import MessageSerde
+from restate_agents.common import CHECK_MODEL, MessageSerde, ModelError, refused
 from restate_agents.signals import (
     Agent,
     Notifications,
@@ -51,9 +51,13 @@ METADATA = {
     "dev.restate.tooling.journal.hidden.name.prefix": "v15/",
 }
 
-# Each attempt resumes from the database, so a failed one is retried soon, and without end.
+# Each attempt resumes from the database, so a failed one is retried for weeks: soon after a crash, then twice as
+# long each time, up to 10 seconds apart (a provider's rate limit, say, is not asked again twice a second).
 RETRY_POLICY = InvocationRetryPolicy(
-    initial_interval=timedelta(milliseconds=50), max_interval=timedelta(milliseconds=500), max_attempts=100_000
+    initial_interval=timedelta(milliseconds=50),
+    exponentiation_factor=2,
+    max_interval=timedelta(seconds=10),
+    max_attempts=100_000,
 )
 
 
@@ -151,7 +155,7 @@ class Object(restate.VirtualObject):
 
         async def watch(ctx: restate.JournaledObjectSharedContext, watch: Watch) -> Notifications:
             """
-            The revision, once it is past ``afterRevision``, or at the timeout
+            The revision, once there is one newer than ``revision``, or at the timeout
             (``timeoutSeconds``, 50 by default, at most 60), whichever comes
             first: a client then reads what changed. It waits in Restate,
             holding no process; a client that sends it again with the same
@@ -159,9 +163,7 @@ class Object(restate.VirtualObject):
             """
             key = signals_of(name, ctx.key())
             awakeable, changed = ctx.awakeable()
-            ctx.object_send(
-                subscribe, key=key, arg=Subscription(afterRevision=watch.afterRevision, awakeable=awakeable)
-            )
+            ctx.object_send(subscribe, key=key, arg=Subscription(revision=watch.revision, awakeable=awakeable))
             timeout = ctx.sleep(timedelta(seconds=min(max(watch.timeoutSeconds, 0), 60)))
             match await restate.select(changed=changed, timeout=timeout):
                 case ["changed", revision]:
@@ -230,14 +232,14 @@ class Object(restate.VirtualObject):
 
             async def handler(context: Any, *input: Any) -> Any:
                 _service.set(self.name)
-                return await fn(context, *input)
+                return await _answered(fn(context, *input))
 
             handler.__signature__ = signature  # type: ignore[attr-defined]
         elif not params:
             # No input, but a body is taken (and left unread), as TypeScript's handlers take one: any client calls it.
             async def handler(context: Any, _: None = None) -> Any:  # type: ignore[misc]
                 _service.set(self.name)
-                return await fn(context)
+                return await _answered(fn(context))
 
             handler.__signature__ = signature.replace(  # type: ignore[attr-defined]
                 parameters=[
@@ -257,7 +259,7 @@ class Object(restate.VirtualObject):
 
             async def handler(context: Any, input: Any) -> Any:  # type: ignore[misc]
                 _service.set(self.name)
-                return await fn(context, **{name: getattr(input, name) for name in fields})
+                return await _answered(fn(context, **{name: getattr(input, name) for name in fields}))
 
             handler.__signature__ = signature.replace(  # type: ignore[attr-defined]
                 parameters=[ctx, inspect.Parameter("input", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=model)]
@@ -353,3 +355,26 @@ def serve(*services: restate.Service | restate.VirtualObject | restate.Workflow,
 def app(*services: restate.Service | restate.VirtualObject | restate.Workflow, **options: Any) -> Any:
     """The ASGI app of ``services``, and of the agents' ``signals``; ``options`` are ``restate.app``'s."""
     return restate.app([*services, *([] if signals in services else [signals])], **options)
+
+
+def refusal(error: BaseException) -> restate.TerminalError | None:
+    """
+    ``error`` as a terminal error (424, Failed Dependency), if a retry does
+    not change it: a model the agent cannot take, or its provider's refusal
+    (``refused``).
+    """
+    if isinstance(error, restate.TerminalError) or not refused(error):
+        return None
+    if isinstance(error, ModelError):
+        return restate.TerminalError(str(error), status_code=424)
+    return restate.TerminalError(f"the model's provider refused the request: {CHECK_MODEL}. {error}", status_code=424)
+
+
+async def _answered(answer: Awaitable[Any]) -> Any:
+    """A handler's answer: a model provider's refusal (a missing API key, an unknown model) ends its invocation."""
+    try:
+        return await answer
+    except Exception as error:
+        if (terminal := refusal(error)) is not None:
+            raise terminal from error
+        raise

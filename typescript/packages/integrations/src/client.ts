@@ -56,7 +56,7 @@ export interface Agent {
   signal(ctx: unknown, signal: Signal): Promise<Resolved>;
   /** The revision of its conversation, which each change increases. */
   notifications(ctx: unknown): Promise<Notifications>;
-  /** The revision, once it is past `afterRevision`, or at the timeout. */
+  /** The revision, once there is one newer than `revision`, or at the timeout. */
   watch(ctx: unknown, watch: Watch): Promise<Notifications>;
 }
 
@@ -90,12 +90,32 @@ export interface FollowOptions {
   timeoutSeconds?: number;
 }
 
-/** After `error`, wait a second to try again: false, to stop instead, once `signal` aborted. */
-async function retrying(error: unknown, signal: AbortSignal | undefined): Promise<boolean> {
-  if (signal?.aborted) return false;
-  console.warn('follow: retrying', error);
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  return true;
+/** Whether a retry may answer: a network failure, Restate's (5xx) or too many requests (429); not a 4xx. */
+const transient = (error: unknown) =>
+  !(error instanceof clients.HttpCallError) || error.status >= 500 || error.status === 429;
+
+/**
+ * One `sync` of `followed`, tried again a second later with the same
+ * idempotency key until it answers, unless its error would last; undefined
+ * once `signal` aborts.
+ */
+async function syncRetried(
+  followed: clients.IngressClient<Agent>,
+  request: SyncRequest,
+  signal: AbortSignal | undefined,
+): Promise<Synced | undefined> {
+  const opts = clients.rpc.opts<SyncRequest, Synced>({ signal, idempotencyKey: crypto.randomUUID() });
+  for (;;) {
+    if (signal?.aborted) return undefined;
+    try {
+      return await followed.sync(request, opts);
+    } catch (error) {
+      if (signal?.aborted) return undefined;
+      if (!transient(error)) throw error;
+      console.warn('follow: retrying', error);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
 }
 
 /**
@@ -105,8 +125,9 @@ async function retrying(error: unknown, signal: AbortSignal | undefined): Promis
  * `signal` aborts.
  *
  * Each change is one `sync`, which waits in Restate for the next. A network
- * failure does not end it: it tries again, and a sync it retries keeps its
- * idempotency key, so it joins the one already waiting.
+ * failure (or Restate's, restarting) does not end it: it tries again, and a
+ * sync it retries keeps its idempotency key, so it joins the one already
+ * waiting.
  */
 export async function* follow(
   ingress: clients.Ingress,
@@ -117,18 +138,8 @@ export async function* follow(
   const followed = ingress.objectClient(definition, key);
   let revision: number | undefined;
   for (;;) {
-    // One sync, retried with the same idempotency key.
-    const opts = clients.rpc.opts<SyncRequest, Synced>({ signal, idempotencyKey: crypto.randomUUID() });
-    let synced: Synced;
-    for (;;) {
-      if (signal?.aborted) return;
-      try {
-        synced = await followed.sync({ cursor, revision, timeoutSeconds }, opts);
-        break;
-      } catch (error) {
-        if (!(await retrying(error, signal))) return;
-      }
-    }
+    const synced = await syncRetried(followed, { cursor, revision, timeoutSeconds }, signal);
+    if (!synced) return;
     // Nothing changed (the wait timed out): wait again.
     if (synced.revision !== revision || synced.messages.length > 0) {
       yield { status: synced.status, messages: synced.messages, cursor: synced.cursor };

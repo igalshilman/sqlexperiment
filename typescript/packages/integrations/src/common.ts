@@ -43,6 +43,12 @@ export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
  */
 export const modelOf = (model: string | undefined, fallback = DEFAULT_MODEL) => model || process.env.MODEL || fallback;
 
+/** `provider/model-id` as its provider and model id, split at the first `/` (`openrouter/meta-llama/llama-4`). */
+export const providerOf = (model: string): [provider: string, id: string] => {
+  const slash = model.indexOf('/');
+  return slash < 0 ? ['', model] : [model.slice(0, slash), model.slice(slash + 1)];
+};
+
 /**
  * The error code of a message the model's provider refused (a missing or
  * wrong API key, an unknown model): 424, Failed Dependency, as its HTTP
@@ -53,10 +59,20 @@ export const REFUSED = 424;
 /** What to check when a model's provider refuses a request. */
 export const CHECK_MODEL = "check the agent's model (its `model` option, or MODEL) and its provider's API key";
 
+/** An agent's model that it cannot take: not `provider/model-id`, or another provider's. */
+export class ModelError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModelError';
+  }
+}
+
 /** `model`, the explicit `model` option of `framework`'s agent, if it is not `provider/model-id`. */
 export const checkModelName = (framework: string, model: string | undefined) => {
   if (model !== undefined && !/^[^/\s]+\/\S+$/.test(model)) {
-    throw new Error(`${framework}: the model "${model}" is not provider/model-id, such as anthropic/claude-sonnet-5-5`);
+    throw new ModelError(
+      `${framework}: the model "${model}" is not provider/model-id, such as anthropic/claude-sonnet-5-5`,
+    );
   }
 };
 
@@ -65,10 +81,10 @@ export const checkModelName = (framework: string, model: string | undefined) => 
  * `provider/model-id`, or the id alone.
  */
 export const modelIdOf = (model: string, provider: string) => {
-  const [named, id] = model.includes('/') ? model.split('/', 2) : [provider, model];
+  const [named, id] = model.includes('/') ? providerOf(model) : [provider, model];
   if (named !== provider || !id) {
     const from = process.env.MODEL === model ? ' (from MODEL)' : '';
-    throw new Error(`the model "${model}"${from} is not ${provider}'s: this agent takes ${provider}/<model-id>`);
+    throw new ModelError(`the model "${model}"${from} is not ${provider}'s: this agent takes ${provider}/<model-id>`);
   }
   return id;
 };
@@ -236,11 +252,10 @@ export const chatHandler = (answer: (ctx: restate.ObjectContext, message: string
           throw error;
         }
         // Any other error fails the attempt, and Restate retries the turn.
-        if (!refused(error)) throw error;
+        const terminal = refusal(error);
+        if (!terminal) throw error;
         await end();
-        throw new restate.TerminalError(`the model's provider refused the request: ${CHECK_MODEL}. ${String(error)}`, {
-          errorCode: REFUSED,
-        });
+        throw terminal;
       }
       await end();
       return answered;
@@ -266,9 +281,23 @@ const FOR_GOOD = new Set(['AuthenticationError', 'PermissionDeniedError', 'NotFo
  * (a tool's, an overloaded provider's) fail the attempt, and Restate retries.
  */
 function refused(error: unknown) {
+  if (error instanceof ModelError) return true;
   if (error instanceof ToolError) return false;
   if (error instanceof Error && FOR_GOOD.has(error.constructor.name)) return true;
   return /API key not found|no API key|Could not resolve authentication method|"code":"AUTH"/i.test(String(error));
+}
+
+/**
+ * `error` as a terminal error ({@link REFUSED}), if a retry does not change
+ * it: a model the agent cannot take, or its provider's refusal.
+ */
+export function refusal(error: unknown): restate.TerminalError | undefined {
+  if (error instanceof restate.TerminalError || !refused(error)) return undefined;
+  const message =
+    error instanceof ModelError
+      ? error.message
+      : `the model's provider refused the request: ${CHECK_MODEL}. ${String(error)}`;
+  return new restate.TerminalError(message, { errorCode: REFUSED });
 }
 
 /** A message of a conversation, as an agent's `messages` handler returns it. */

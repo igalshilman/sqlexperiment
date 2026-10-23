@@ -1,5 +1,5 @@
 // Restate's own tools (restate-agents' call, signal and workflow) against a
-// real Restate server: the support agent of examples-typescript/support.ts on a scripted
+// real Restate server: the support agent of examples-typescript/intermediate/support.ts on a scripted
 // model, which looks the order up, waits for approval, then refunds.
 //
 // Checks: the agent waits for the signal (`pending` lists the wait, with
@@ -81,7 +81,7 @@ const support = pi.agent({
   ],
 });
 
-// A workflow that calls the agent like any handler, as examples-typescript/triage.ts does.
+// A workflow that calls the agent like any handler, as examples-typescript/intermediate/triage.ts does.
 const triage = restate.workflow({
   name: 'triage',
   handlers: {
@@ -302,7 +302,7 @@ try {
   const mia = ingress.objectClient(agent('support'), 'mia');
   const now = await mia.notifications();
   const started = Date.now();
-  assert.deepEqual(await mia.watch({ afterRevision: now.revision, timeoutSeconds: 1 }), now);
+  assert.deepEqual(await mia.watch({ revision: now.revision, timeoutSeconds: 1 }), now);
   assert.ok(Date.now() - started >= 900, `${Date.now() - started} ms`);
 
   // With no message answered, it is a message of its own.

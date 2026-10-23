@@ -3,15 +3,14 @@ OpenAI Agents SDK agents in Restate virtual objects: each conversation is in
 the object's database, stored before each model request and with each
 response::
 
-    from restate_agents import serve, tool
-    from restate_agents.openai_agents import agent
+    from restate_agents import openai_agents, serve, tool
 
     @tool
     def get_weather(city: str) -> str:
         '''The current weather in a city.'''
         return f"Sunny and 21°C in {city}"
 
-    assistant = agent("assistant", instructions="Answer briefly.", tools=[get_weather])
+    assistant = openai_agents.agent("assistant", system="Answer briefly.", tools=[get_weather])
     serve(assistant)
 
 The usual agent is an ``Agent`` with ``model`` (``openai/model-id``, or a
@@ -57,7 +56,7 @@ from pydantic_core import to_json
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import Transcript, has_table, model_id_of
+from restate_agents.common import Transcript, configured, has_table, model_id_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
@@ -103,11 +102,9 @@ def agent(
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         if usual is not None:
-            chosen = model(ctx) if callable(model) and not isinstance(model, Model) else model
-            given = _model_of(chosen)
+            given = _model_of(await configured(model, ctx, Model))
             return await prompt(ctx, usual, message, **({"run_config": RunConfig(model=given)} if given else {}))
-        chosen = openai_agent if isinstance(openai_agent, Agent) else openai_agent(ctx)
-        return text_of(await prompt(ctx, chosen, message))
+        return text_of(await prompt(ctx, await configured(openai_agent, ctx, Agent), message))
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
@@ -214,79 +211,131 @@ class _Items:
 
 async def _run(ctx: Any, agent: Agent[Any], pending: harness.Prompt, items: _Items, run: dict[str, Any]) -> Any:
     """Run ``agent`` on from the stored items to the answer of the prompt ``pending``."""
-    stored = await items.load()
-    tags = {n: tag for n, (tag, _) in enumerate(stored) if tag}
-    history = [item for _, item in stored]
-    turns.taken(_steered(stored))
-    asked = f"prompt:{pending.prompt}"
-    if asked not in tags.values():
-        tags[len(history)] = asked
-        history.append({"role": "user", "content": pending.text})
-        await items.save(history, tags)
-    elif history[-1].get("type") == "message" and history[-1].get("role") == "assistant":
-        # The model answered, and a crash came before the answer was stored.
-        return _output(agent, _text(history[-1]))
-    context = run.get("context")
-    # The agent the conversation is with: the root, or the one a handoff gave it to.
-    current = _Current(items.db, items.thread)
+    run = dict(run)
+    config = run.pop("run_config", None) or RunConfig()
+    conversation = _Conversation(ctx, items, _Current(items.db, items.thread), config.call_model_input_filter)
+    if (answer := await conversation.ask(pending)) is not None:
+        return _output(agent, answer)
     everyone = _agents(agent)
-    agent = everyone.get(await current.get() or agent.name, agent)
-    if unanswered := _unanswered(history):
-        found = {t.name: t for t in await agent.get_all_tools(RunContextWrapper(context))}
-        if all(isinstance(found.get(c["name"]), FunctionTool) for c in unanswered):
-            # The model's calls, stored before a crash cut their tools off: run them again, with their ids.
-            for call in unanswered:
-                tool = found[call["name"]]
-                given = ToolContext(
-                    context, tool_name=call["name"], tool_call_id=call["call_id"], tool_arguments=call["arguments"]
-                )
-                output = await _unwrap(tool.on_invoke_tool(given, call["arguments"]))
-                history.append({"type": "function_call_output", "call_id": call["call_id"], "output": text_of(output)})
-        else:
-            # A reply that cannot be carried on (a handoff, a hosted tool's call): its agent is asked again.
-            cut = tags.get(history.index(unanswered[0]))
-            if cut is not None:
-                agent = everyone.get(cut.split(":", 2)[2], agent)
-            kept = [n for n in range(len(history)) if cut is None or tags.get(n) != cut]
-            history = [history[n] for n in kept]
-            tags = {i: tags[n] for i, n in enumerate(kept) if n in tags}
-        await items.save(history, tags)
-    seen: list[dict[str, Any]] = list(history)
+    # The agent the conversation is with: the root, or the one a handoff gave it to.
+    agent = everyone.get(await conversation.current.get() or agent.name, agent)
+    agent = await conversation.recover(agent, everyone, run.get("context"))
+    config = dataclasses.replace(config, call_model_input_filter=conversation.model_input)
+    hooks = _Hooks(conversation)
+    result = await _unwrap(Runner.run(agent, conversation.history, hooks=hooks, run_config=config, **run))
+    return result.final_output
 
-    async def before(data: CallModelData[Any]) -> ModelInputData:
-        nonlocal seen
+
+class _Conversation:
+    """
+    A run's conversation: its items, as stored and as the model sees them,
+    each tagged with the prompt, response or steered message it is part of.
+    """
+
+    def __init__(self, ctx: Any, items: _Items, current: _Current, user_filter: Any) -> None:
+        self.ctx = ctx
+        self.items = items
+        self.current = current
+        # The run_config's own model input filter, which runs first.
+        self.user_filter = user_filter
+        self.history: list[dict[str, Any]] = []
+        self.tags: dict[int, str] = {}
+        # The items as the model has seen them so far, with its replies.
+        self.seen: list[dict[str, Any]] = []
+
+    async def ask(self, pending: harness.Prompt) -> str | None:
+        """
+        Add the prompt ``pending`` to the conversation, unless it is there:
+        then its answer, if the model gave one before a crash stored it.
+        """
+        stored = await self.items.load()
+        self.tags = {n: tag for n, (tag, _) in enumerate(stored) if tag}
+        self.history = [item for _, item in stored]
+        turns.taken(_steered(stored))
+        asked = f"prompt:{pending.prompt}"
+        if asked not in self.tags.values():
+            self.tags[len(self.history)] = asked
+            self.history.append({"role": "user", "content": pending.text})
+            await self.items.save(self.history, self.tags)
+            return None
+        last = self.history[-1]
+        return _text(last) if last.get("type") == "message" and last.get("role") == "assistant" else None
+
+    async def recover(self, agent: Agent[Any], everyone: dict[str, Agent[Any]], context: Any) -> Agent[Any]:
+        """
+        Carry on from a reply whose tool calls a crash cut off: run its calls
+        again, with their ids; or, for a reply that cannot be carried on (a
+        handoff, a hosted tool's call), drop it, and ask its agent again. The
+        agent to run on.
+        """
+        if unanswered := _unanswered(self.history):
+            found = {t.name: t for t in await agent.get_all_tools(RunContextWrapper(context))}
+            if all(isinstance(found.get(c["name"]), FunctionTool) for c in unanswered):
+                await self._run_again(unanswered, found, context)
+            else:
+                agent = self._drop_reply(unanswered[0], agent, everyone)
+            await self.items.save(self.history, self.tags)
+        self.seen = list(self.history)
+        return agent
+
+    async def _run_again(self, calls: list[dict[str, Any]], found: dict[str, Any], context: Any) -> None:
+        """Run the function tools' ``calls`` again, with their ids, and add their outputs."""
+        for call in calls:
+            tool = found[call["name"]]
+            given = ToolContext(
+                context, tool_name=call["name"], tool_call_id=call["call_id"], tool_arguments=call["arguments"]
+            )
+            output = await _unwrap(tool.on_invoke_tool(given, call["arguments"]))
+            self.history.append({"type": "function_call_output", "call_id": call["call_id"], "output": text_of(output)})
+
+    def _drop_reply(self, call: dict[str, Any], agent: Agent[Any], everyone: dict[str, Agent[Any]]) -> Agent[Any]:
+        """Drop the reply of ``call``: the agent that gave it, to ask again."""
+        cut = self.tags.get(self.history.index(call))
+        if cut is None:
+            return agent
+        kept = [n for n in range(len(self.history)) if self.tags.get(n) != cut]
+        self.tags = {i: self.tags[n] for i, n in enumerate(kept) if n in self.tags}
+        self.history = [self.history[n] for n in kept]
+        return everyone.get(cut.split(":", 2)[2], agent)
+
+    async def model_input(self, data: CallModelData[Any]) -> ModelInputData:
+        """
+        The input of the model's next request (a ``call_model_input_filter``),
+        stored first: after the tools' results, with the messages steered to the turn.
+        """
         given = data.model_data
-        if user_filter is not None:  # the run_config's own filter, first
-            given = user_filter(data)
+        if self.user_filter is not None:
+            given = self.user_filter(data)
             given = await given if inspect.isawaitable(given) else given
         input = list(given.input)
         if input and input[-1].get("type") == "function_call_output":
-            for steered in await turns.steering(ctx):
-                tags[len(input)] = f"steer:{steered.id}"
+            for steered in await turns.steering(self.ctx):
+                self.tags[len(input)] = f"steer:{steered.id}"
                 input.append({"role": "user", "content": harness.STEERED + steered.text})
-        await items.save(input, tags)
-        turns.taken(_steered([(tags.get(n), i) for n, i in enumerate(input)]))
-        seen = input
+        await self.items.save(input, self.tags)
+        turns.taken(_steered([(self.tags.get(n), i) for n, i in enumerate(input)]))
+        self.seen = input
         return ModelInputData(input=input, instructions=given.instructions)
 
-    class Hooks(RunHooks[Any]):
-        async def on_agent_start(self, context: Any, agent: Any) -> None:
-            await current.set(agent.name)
+    async def replied(self, agent: str, reply: list[dict[str, Any]]) -> None:
+        """Store the model's ``reply``, of ``agent``, tagged as one response."""
+        tag = f"response:{uuid.uuid4().hex}:{agent}"
+        self.tags.update({n: tag for n in range(len(self.seen), len(self.seen) + len(reply))})
+        self.seen = [*self.seen, *reply]
+        await self.items.save(self.seen, self.tags)
 
-        async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
-            nonlocal seen
-            reply = list(response.to_input_items())
-            tag = f"response:{uuid.uuid4().hex}:{agent.name}"
-            tags.update({n: tag for n in range(len(seen), len(seen) + len(reply))})
-            seen = [*seen, *reply]
-            await items.save(seen, tags)
 
-    run = dict(run)
-    config = run.pop("run_config", None) or RunConfig()
-    user_filter = config.call_model_input_filter
-    config = dataclasses.replace(config, call_model_input_filter=before)
-    result = await _unwrap(Runner.run(agent, history, hooks=Hooks(), run_config=config, **run))
-    return result.final_output
+class _Hooks(RunHooks[Any]):
+    """A run's hooks: the agent the conversation is with, and each reply of the model, stored as they come."""
+
+    def __init__(self, conversation: _Conversation) -> None:
+        self.conversation = conversation
+
+    async def on_agent_start(self, context: Any, agent: Any) -> None:
+        await self.conversation.current.set(agent.name)
+
+    async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
+        await self.conversation.replied(agent.name, list(response.to_input_items()))
 
 
 class _Current:

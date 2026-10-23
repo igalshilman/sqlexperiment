@@ -1,0 +1,6 @@
+{
+  "service": "checkout",
+  "title": "requests leaks proxy credentials",
+  "severity": "critical",
+  "detail": "checkout depends on requests 2.25.1, which sends Proxy-Authorization to the redirect target (CVE-2023-32681)"
+}

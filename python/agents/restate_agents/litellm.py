@@ -40,7 +40,6 @@ runs again from the start, with the stored messages:
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 from collections.abc import Callable, Sequence
@@ -53,7 +52,7 @@ from pydantic import ValidationError
 from restate_fns import ObjectContext
 
 from restate_agents import conversation, turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_of
+from restate_agents.common import DEFAULT_MODEL, ModelError, Transcript, configured, has_table, model_of
 from restate_agents.conversation import Conversation, answer_of, idle, pending_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
@@ -98,17 +97,13 @@ def agent(
         _provider_of(model_of(model))
 
     async def answer(ctx: ObjectContext, message: str) -> str:
-        async def given(option: Any) -> Any:
-            value = option(ctx) if callable(option) else option
-            return await value if inspect.isawaitable(value) else value
-
         return await prompt(
             ctx,
             message,
-            model=await given(model),
-            system=await given(system),
-            tools=await given(tools),
-            request=await given(request),
+            model=await configured(model, ctx),
+            system=await configured(system, ctx),
+            tools=await configured(tools, ctx),
+            request=await configured(request, ctx),
         )
 
     async def transcript(ctx: ObjectContext) -> Transcript:
@@ -194,7 +189,8 @@ async def compact(
     idle(rows)
     run = _Run(model_of(model), None, [], request or {}, thread_of)
     ask = {"role": "user", "content": f"{conversation.SUMMARIZE} {instructions or ''}".strip()}
-    summary = _text((await run.reply([*(row.message for row in rows), ask])).get("content"))
+    # As text: a request with tool calls and results must define the tools (Anthropic's), which this one has none of.
+    summary = _text((await run.reply([*(_as_text(row.message) for row in rows), ask])).get("content"))
     await thread_of.replace(id, f"{conversation.SUMMARIZED}{summary}", answer=summary)
     return summary
 
@@ -296,7 +292,7 @@ def _provider_of(model: str) -> str:
         return litellm.get_llm_provider(model)[1]
     except litellm.BadRequestError:
         source = " (from MODEL)" if os.environ.get("MODEL") == model else ""
-        raise ValueError(
+        raise ModelError(
             f'LiteLLM knows no provider of the model "{model}"{source}: it takes provider/model-id'
         ) from None
 
@@ -308,6 +304,16 @@ def _arguments(call: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     except ValueError as error:
         return {}, f"the arguments are not JSON: {error}"
     return (input, None) if isinstance(input, dict) else ({}, "the arguments are not a JSON object")
+
+
+def _as_text(message: dict[str, Any]) -> dict[str, Any]:
+    """``message`` with its tool calls and results as text: ``[called move_money {"amount": 5}]``."""
+    if message["role"] == "tool":
+        return {"role": "user", "content": f"[result: {_text(message.get('content'))}]"}
+    if not message.get("tool_calls"):
+        return message
+    calls = [f"[called {c['function']['name']} {c['function']['arguments']}]" for c in message["tool_calls"]]
+    return {"role": message["role"], "content": "\n".join([_text(message.get("content")), *calls]).strip()}
 
 
 def _text(content: str | list[dict[str, Any]] | None) -> str:

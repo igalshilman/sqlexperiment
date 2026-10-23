@@ -13,13 +13,13 @@ the one source of truth.
 Token streaming (the reply's text while the model writes it) is not part of
 it: see [Tokens](#tokens).
 
-## Where we are
+## Where we started
 
-A UI polls `status` and `messages` (see
-[`examples-typescript/ui`](../../../../examples-typescript/ui/app.ts)), once a second, whether or
-not anything changed.
+A UI polled `status` and `messages` once a second, whether or not anything
+changed (it now follows: see
+[`examples-typescript/ui`](../../../../examples-typescript/ui/app.ts)).
 
-And a reader sees a running turn's progress late. Measured against
+And a reader saw a running turn's progress late. Measured against
 restate-server, with a handler that writes a row every 100 ms and a shared
 handler that reads it:
 
@@ -40,8 +40,8 @@ conversation this way (its `docs/protocol.md`, "History and notifications"):
 
 - Each agent has a **revision**, which every change of what a client reads
   increases (`publish`): its history, approvals, profile, schedules.
-- `watch({ afterRevision, timeoutSeconds })` answers once the revision is
-  past `afterRevision`, or at the timeout: it waits on an awakeable, which
+- `watch({ revision, timeoutSeconds })` answers once there is a revision
+  newer than `revision`, or at the timeout: it waits on an awakeable, which
   `publish` resolves, in a window of at most a minute. A client that retries
   a window keeps its idempotency key, so it joins the wait already parked in
   Restate.
@@ -61,7 +61,7 @@ The same, on what we have:
    `publish` increases it and resolves each subscriber behind it.
 2. **`watch` and `notifications`, handlers every object has** (beside
    `status`, `stop`, `steer`): `notifications()` is `{ revision }`, and
-   `watch({ afterRevision, timeoutSeconds })` answers `{ revision }` once it
+   `watch({ revision, timeoutSeconds })` answers `{ revision }` once it
    is newer, or at the timeout (at most 60 s).
 3. **The turn publishes where its conversation changes:** when it starts and
    ends, before and after each tool call (the framework's wrappers, where it

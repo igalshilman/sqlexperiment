@@ -19,7 +19,7 @@ once, and each tool call is made once.
 ## Start here
 
 A chat agent with a tool, the whole of
-[`examples-typescript/chat.ts`](../../../examples-typescript/chat.ts):
+[`examples-typescript/basic/chat.ts`](../../../examples-typescript/basic/chat.ts):
 
 ```ts
 import { serve, tool } from 'restate-agents';
@@ -236,7 +236,7 @@ curl localhost:8080/support/alice/sync --json '{}'                              
 curl localhost:8080/support/alice/sync --json '{"cursor": 31, "revision": 7}'   # the same, once something changed
 ```
 
-`notifications` and `watch({ afterRevision })` are the revision alone, and
+`notifications` and `watch({ revision })` are the revision alone, and
 the wait alone. The model's reply comes whole, with its message: there is no
 token streaming.
 
@@ -381,7 +381,7 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 A wait ends with its agent's invocation: a cancelled one leaves `pending`.
 The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 `serve` serves beside the agents. See
-[`examples-typescript/support.ts`](../../../examples-typescript/support.ts).
+[`examples-typescript/intermediate/support.ts`](../../../examples-typescript/intermediate/support.ts).
 
 ## Models
 
@@ -408,7 +408,7 @@ the caller waits.
 `agent()` is an object with `chat` and `messages`. For more, make the
 object yourself, with `object()`, and the framework's handlers beside your
 own: here, an assistant whose tools keep facts in its own table
-([`examples-typescript/memory.ts`](../../../examples-typescript/memory.ts)):
+([`examples-typescript/basic/memory.ts`](../../../examples-typescript/basic/memory.ts)):
 
 ```ts
 import type * as restate from 'restate-fns';
@@ -445,7 +445,7 @@ await serve(assistant);
 
 **Options for each invocation.** `chat` takes options, or a function of the
 invocation's context that gives them: each user's model and persona from
-the object's database, say ([`examples-typescript/harness.ts`](../../../examples-typescript/harness.ts)):
+the object's database, say ([`examples-typescript/intermediate/harness.ts`](../../../examples-typescript/intermediate/harness.ts)):
 
 ```ts
 chat: pi.chat(async (ctx) => ({ model: (await settingsOf(ctx)).model, tools: [clock] })),

@@ -2,28 +2,46 @@
 
 Each one is a file you run with [uv](https://docs.astral.sh/uv/), from here,
 after `make py` at the repository's root. See [Run an example](#run-an-example).
+They come in three levels: **basic**, an agent and what it keeps;
+**intermediate**, one of Restate's patterns at a time (its tools, a person in
+the loop, handoffs, teams, workflows); and **advanced**, applications that
+put them together.
 
-| File                                     | What                                                                                                                                                                                                                   |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`chat.py`](chat.py)                     | **Start here.** A durable chat agent on Claude (the Anthropic SDK), with a tool                                                                                                                                        |
-| [`chat_langgraph.py`](chat_langgraph.py) | The same agent on LangGraph                                                                                                                                                                                            |
-| [`coder.py`](coder.py)                   | A coding agent on Claude Code (the Claude Agent SDK): a workspace per key, and a person's review before it is done                                                                                                     |
-| [`coder_codex.py`](coder_codex.py)       | The same coding agent on Codex (OpenAI's coding agent)                                                                                                                                                                 |
-| [`memory.py`](memory.py)                 | An assistant that remembers facts about you in its own SQL table, through its tools, with handlers of your own                                                                                                         |
-| [`support.py`](support.py)               | A support agent whose tools are Restate itself: a service, a manager's approval (a signal), a workflow                                                                                                                 |
-| [`airline.py`](airline.py)               | Customer service on the OpenAI Agents SDK: a triage agent hands off to a changes agent, whose tools are a Restate service, the traveller's confirmation (a signal), a rebooking workflow and the traveller's SQL table |
-| [`oncall.py`](oncall.py)                 | An incident responder on Google ADK: it checks services' health, keeps the timeline in SQL, pages a person and waits for their ack (a signal), and schedules the review a day later (a delayed send)                   |
-| [`release_notes.py`](release_notes.py)   | Two models through LiteLLM, in a handler of your own: a cheap one drafts, a strong one reviews, until approved, each answer stored once; then a workflow publishes                                                     |
-| [`follow.py`](follow.py)                 | A conversation followed from a terminal as the agent works (`restate_agents.client`); a chat page for it is [`examples-typescript/ui`](../examples-typescript/ui/app.ts)                                               |
-| [`followup.py`](followup.py)             | An agent that schedules a check-in for a day later: `send` with a delay                                                                                                                                                |
-| [`harness.py`](harness.py)               | An agent each user configures: its model and persona from the object's database, and `compact` and `reset` handlers                                                                                                    |
-| [`team.py`](team.py)                     | A team on three frameworks: an editor (Claude) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI)                                                                                       |
-| [`router.py`](router.py)                 | A front desk of your own: a handler asks a model which team handles a message (`claude.prompt`), then asks that team's agent (`ask`)                                                                                   |
-| [`trips.py`](trips.py)                   | A travel agent on Pydantic AI: an Agent of your own, an approval before booking, and its plan as typed output                                                                                                          |
-| [`triage.py`](triage.py)                 | A LangGraph graph of your own: a router hands each message to the billing or the tech team, each with its tools                                                                                                        |
-| [`writer.py`](writer.py)                 | A LangGraph graph of your own: a writer drafts and a model edits, a person approves (a signal), a workflow publishes                                                                                                   |
-| [`notes.py`](notes.py)                   | SQL in a virtual object, with `ctx.db`                                                                                                                                                                                 |
-| [`on_modal.py`](on_modal.py)             | The support agent on [Modal](https://modal.com), as a Modal Server                                                                                                                                                     |
+### Basic
+
+| File                                   | What                                                                                                                                                                     |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`chat.py`](basic/chat.py)             | **Start here.** A durable chat agent on Claude (the Anthropic SDK), with a tool                                                                                          |
+| [`frameworks.py`](basic/frameworks.py) | The same agent on each framework: Claude, LiteLLM, LangGraph, Pydantic AI, the OpenAI Agents SDK, ADK                                                                    |
+| [`memory.py`](basic/memory.py)         | An assistant that remembers facts about you in its own SQL table, through its tools, with a handler of your own                                                          |
+| [`notes.py`](basic/notes.py)           | SQL in a virtual object, with `ctx.db`, and no agent                                                                                                                     |
+| [`follow.py`](basic/follow.py)         | A conversation followed from a terminal as the agent works (`restate_agents.client`); a chat page for it is [`examples-typescript/ui`](../examples-typescript/ui/app.ts) |
+
+### Intermediate
+
+| File                                                | What                                                                                                                                                         |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`support.py`](intermediate/support.py)             | A support agent whose tools are Restate itself: a service, a manager's approval (a signal), a workflow                                                       |
+| [`airline.py`](intermediate/airline.py)             | Customer service on the OpenAI Agents SDK: a triage agent hands off to a changes agent, whose tools are a service, the traveller's confirmation, a rebooking |
+| [`oncall.py`](intermediate/oncall.py)               | An incident responder on Google ADK: health checks, a timeline in SQL, a person paged and waited for, the review scheduled a day later                       |
+| [`trips.py`](intermediate/trips.py)                 | A travel agent on Pydantic AI: an Agent of your own, an approval before booking, and its plan as typed output                                                |
+| [`release_notes.py`](intermediate/release_notes.py) | Two models through LiteLLM, in a handler of your own: a cheap one drafts, a strong one reviews, until approved; then a workflow publishes                    |
+| [`router.py`](intermediate/router.py)               | A front desk of your own: a handler asks a model which team handles a message, then asks that team's agent (`ask`)                                           |
+| [`team.py`](intermediate/team.py)                   | A team on three frameworks: an editor (Claude) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI)                             |
+| [`triage.py`](intermediate/triage.py)               | A LangGraph graph of your own: a router hands each message to the billing or the tech team, each with its tools                                              |
+| [`writer.py`](intermediate/writer.py)               | A LangGraph graph of your own: a writer drafts and a model edits, a person approves (a signal), a workflow publishes                                         |
+| [`followup.py`](intermediate/followup.py)           | An agent that schedules a check-in for a day later: `send` with a delay                                                                                      |
+| [`harness.py`](intermediate/harness.py)             | An agent each user configures: its model and persona from the object's database, and `compact` and `reset` handlers                                          |
+| [`coder.py`](intermediate/coder.py)                 | A coding agent on Claude Code (the Claude Agent SDK): a workspace per key, and a person's review before it is done                                           |
+| [`coder_codex.py`](intermediate/coder_codex.py)     | The same coding agent on Codex (OpenAI's coding agent)                                                                                                       |
+| [`on_modal.py`](intermediate/on_modal.py)           | The support agent on [Modal](https://modal.com), as a Modal Server                                                                                           |
+
+### Advanced
+
+| Folder                                           | What                                                                                                                                                                                                                                                              |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`research/`](advanced/research/README.md)       | Deep research, a workflow per run: a planner (Pydantic AI, typed) waits for you to approve its plan or change it; researchers (Claude, on Wikipedia) work the topics at once; a writer drafts and a critic sends the report back until it is good                 |
+| [`remediation/`](advanced/remediation/README.md) | A supervisor of security fixes, a workflow per finding: an executor proposes a fix in a deadline, a judge audits it, a rejected fix goes up the ladder to a careful executor; a risky fix waits for a person's sign-off; every decision is kept as an audit trail |
 
 They are built from [`restate_agents`](../python/agents/README.md): an agent
 is a virtual object per conversation, and its tools are plain functions.
@@ -51,13 +69,13 @@ workflows and other agents, and wait for signals:
 support = claude.agent("support", tools=[call(status), signal("approval", description=...), workflow(refund)])
 ```
 
-`notes.py` uses [`restate-fns`](../python/fns/README.md) alone:
-`restate_fns.VirtualObject`.
+`notes.py` is SQL alone, with no agent: a
+[`restate-fns`](../python/fns/README.md) `restate_fns.VirtualObject`.
 
 ## Run an example
 
 ```sh
-ANTHROPIC_API_KEY=… uv run chat.py                                   # the agent, on port 9080
+ANTHROPIC_API_KEY=… uv run basic/chat.py                             # the agent, on port 9080
 npx @restatedev/restate-server                                        # Restate, in another terminal
 npx @restatedev/restate deployments register http://localhost:9080   # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
@@ -65,15 +83,16 @@ curl localhost:8080/assistant/alice/messages                          # the conv
 ```
 
 The agents take `MODEL` (`anthropic/<model-id>`), or else Claude Sonnet,
-with `ANTHROPIC_API_KEY`; `coder_codex.py` and `airline.py`, OpenAI's
-(their default), with `OPENAI_API_KEY`; `oncall.py`, Gemini, with
-`GOOGLE_API_KEY`; `release_notes.py`, any two of LiteLLM's models (`DRAFTER`,
-`REVIEWER`), by default Claude's; `notes.py` needs no key. Each
-example's docstring has its requests.
+with `ANTHROPIC_API_KEY` (and so do the advanced ones); `triage.py`, `writer.py` and `trips.py` bring a
+graph or an agent of their own, which names its model. `coder_codex.py` and
+`airline.py` take OpenAI's (their default), with `OPENAI_API_KEY`;
+`oncall.py`, Gemini, with `GOOGLE_API_KEY`; `release_notes.py`, any two of
+LiteLLM's models (`DRAFTER`, `REVIEWER`), by default Claude's; `notes.py`
+needs no key. Each example's docstring has its requests.
 
 ## Run on Modal
 
-[`on_modal.py`](on_modal.py) deploys `support.py` to Modal, as a Modal Server
+[`on_modal.py`](intermediate/on_modal.py) deploys `support.py` to Modal, as a Modal Server
 (`@app.server(h2_enabled=True)`), which serves the agent in its own process
 (`serve(..., background=True)`): Restate calls it over HTTP/2, end to end.
 The agents need that: an attempt that waits runs its handler again from the
@@ -85,7 +104,7 @@ Restate SDK is, and pip installs it with them).
 ```sh
 make wheels                                          # at the repository's root: dist/
 uvx modal secret create anthropic ANTHROPIC_API_KEY=…
-uvx modal deploy on_modal.py
+uvx modal deploy intermediate/on_modal.py
 restate deployments register https://<workspace>--restate-support-support.us-east.modal.direct \
     --extra-header "Modal-Key: wk-…" --extra-header "Modal-Secret: ws-…"   # a Modal proxy token
 ```

@@ -189,6 +189,23 @@ async def test_a_cancelled_turn_ends_and_the_next_message_starts_afresh():
     ]
 
 
+async def test_compact_reads_the_tool_calls_as_text():
+    model = LiteLLMTeller(Teller()).register()
+    obj = litellm.agent("teller", model=MODEL, tools=[Bank().restate_tool()])
+
+    @obj.handler(message=True)
+    async def compact(ctx, instructions: str) -> str:
+        return await litellm.compact(ctx, instructions, model=MODEL)
+
+    alice = Object()
+    await alice.invoke(obj.handlers["chat"].fn, "move 5 from 1 to 2")
+    await alice.invoke(obj.handlers["compact"].fn, "Keep the transfers")
+    # A provider may take no tool calls in a request without tools: the summary reads them as text.
+    said = model.requests[-1]["messages"]
+    assert not any(m["role"] == "tool" or m.get("tool_calls") for m in said)
+    assert any("[result: moved 5 from 1 to 2]" in m["content"] for m in said)
+
+
 async def test_prompts_compact_and_reset_of_handlers_of_your_own():
     teller = Teller()
     model = LiteLLMTeller(teller).register()

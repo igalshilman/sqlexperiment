@@ -45,6 +45,7 @@ import {
   configured,
   messagesHandler,
   modelOf,
+  providerOf,
   nextPromptId,
   settleSteering,
   type Steerable,
@@ -66,8 +67,8 @@ export interface ModelRef {
 
 /** `provider/model-id` as OpenCode names it. */
 const modelRef = (name: string): ModelRef => {
-  const [providerID = '', ...id] = name.split('/');
-  return { providerID, id: id.join('/') };
+  const [providerID, id] = providerOf(name);
+  return { providerID, id };
 };
 
 /** An OpenCode tool of your own: `execute` gets the input and the tool call's id. */
@@ -116,7 +117,7 @@ export interface Options {
 
 /** An OpenCode plugin that adds `system` to the session's system prompt. */
 const systemPlugin = (system: string): Plugin.Plugin => ({
-  id: 'examples.system',
+  id: 'restate-agents.system',
   async setup(ctx) {
     const hook = await ctx.session.hook('context', (request) => {
       request.system.push({ type: 'text', text: system });
@@ -128,7 +129,7 @@ const systemPlugin = (system: string): Plugin.Plugin => ({
 /** An OpenCode plugin whose tools are `tools`, and only those. */
 function toolsPlugin(tools: OpenCodeTool[], fail: (error: unknown) => Promise<never>, builtins = false): Plugin.Plugin {
   return {
-    id: 'examples.tools',
+    id: 'restate-agents.tools',
     async setup(ctx) {
       const transform = await ctx.tool.transform((editor) => {
         // Without a workspace, no filesystem, shell or web: the agent acts
@@ -167,7 +168,7 @@ const steeringPlugin = (
   steerable: Steerable,
   fail: (error: unknown) => Promise<never>,
 ): Plugin.Plugin => ({
-  id: 'examples.steering',
+  id: 'restate-agents.steering',
   async setup(plugin) {
     const before = await plugin.tool.hook('execute.before', async () => {
       await toolCallStarted(ctx).catch(fail);
@@ -236,37 +237,50 @@ async function sessionMessages(host: Host): Promise<Message[]> {
   return all;
 }
 
-/**
- * Where prompt `messageId` is: absent, unanswered yet, or answered with the
- * text of the last assistant message before the turn's idle marker.
- */
-async function outcome(host: Host, messageId: string) {
-  if ((await inbox(host)).some((item) => item.id === messageId)) return { state: 'running' } as const;
-  // The messages after the prompt, oldest first.
+/** Where a prompt is: not in the session, its turn running, or ended with an answer or a failure. */
+type Outcome =
+  | { state: 'absent' | 'running' }
+  | { state: 'answered'; text: string }
+  | { state: 'failed'; reason: string };
+
+/** Where prompt `messageId` is (see {@link Outcome}). */
+async function outcome(host: Host, messageId: string): Promise<Outcome> {
+  if ((await inbox(host)).some((item) => item.id === messageId)) return { state: 'running' };
+  const after = await messagesAfter(host, messageId);
+  return after ? turnOutcome(after) : { state: 'absent' };
+}
+
+/** The messages after prompt `messageId`, oldest first; undefined if the session does not have it. */
+async function messagesAfter(host: Host, messageId: string): Promise<Message[] | undefined> {
   const after: Message[] = [];
-  let found = false;
   for await (const page of messagePages(host, 'desc')) {
     const at = page.findIndex((m) => m.id === messageId);
-    found = at >= 0;
-    after.unshift(...(found ? page.slice(0, at) : page).toReversed());
-    if (found) break;
+    after.unshift(...(at < 0 ? page : page.slice(0, at)).toReversed());
+    if (at >= 0) return after;
   }
-  if (!found) return { state: 'absent' } as const;
-  // A turn ends at an idle marker, or where the next prompt, queued while it
-  // ran, starts (a message steered to it is not one).
+  return undefined;
+}
+
+/**
+ * How the turn of the messages `after` a prompt ended: at an idle marker, or
+ * where the next prompt, queued while it ran, starts (a message steered to it
+ * is not one). Running, if neither came yet.
+ */
+function turnOutcome(after: Message[]): Outcome {
   let last: Message | undefined;
   for (const m of after) {
-    if (m.type === 'idle' || (m.type === 'user' && last !== undefined && !steered(m.id))) {
-      const text = textOf(last?.content);
-      const error = last?.error?.message;
-      const ended = m.type === 'idle' ? m.outcome : 'succeeded';
-      return ended === 'succeeded' && error === undefined
-        ? ({ state: 'answered', text } as const)
-        : ({ state: 'failed', reason: error ?? ended ?? 'failed' } as const);
-    }
+    if (m.type === 'idle') return ended(last, m.outcome);
+    if (m.type === 'user' && last !== undefined && !steered(m.id)) return ended(last, 'succeeded');
     if (m.type === 'assistant') last = m;
   }
-  return { state: 'running' } as const;
+  return { state: 'running' };
+}
+
+/** The outcome of a turn that ended `how`, with `last`, its last assistant message: its text, or its error. */
+function ended(last: Message | undefined, how: string | undefined): Outcome {
+  const error = last?.error?.message;
+  if (how === 'succeeded' && error === undefined) return { state: 'answered', text: textOf(last?.content) };
+  return { state: 'failed', reason: error ?? how ?? 'failed' };
 }
 
 /** The id of the session's latest prompt, if any. */
@@ -280,6 +294,18 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
   return undefined;
 }
 
+/** Whether a turn of the session runs. */
+const active = async (host: Host) => {
+  const turns: Record<string, unknown> = await host.call(host.client.session.active());
+  return turns[SESSION] !== undefined;
+};
+
+/** Whether the session has message `messageId`: in its inbox, or in its transcript. */
+const inSession = async (host: Host, messageId: string) => {
+  const given = (m: { id: string }) => m.id === messageId;
+  return (await inbox(host)).some(given) || (await sessionMessages(host)).some(given);
+};
+
 /**
  * Start the session's queued prompts, if no turn runs them. OpenCode resumes
  * the turns it claimed when it boots, but a crash between a prompt's queueing
@@ -287,15 +313,78 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
  * again, by its id, it starts.
  */
 async function startInbox(host: Host) {
-  const { session } = host.client;
-  const sessionID = SESSION as never;
-  const active: Record<string, unknown> = await host.call(session.active());
-  if (active[SESSION] !== undefined) return;
+  if (await active(host)) return;
   const [first] = await inbox(host);
   if (first === undefined) return;
   await host.call(
-    session.prompt({ sessionID, id: first.id as never, text: first.payload.text, delivery: 'queue', resume: true }),
+    host.client.session.prompt({
+      sessionID: SESSION as never,
+      id: first.id as never,
+      text: first.payload.text,
+      delivery: 'queue',
+      resume: true,
+    }),
   );
+}
+
+/** The session, made with `model` (working in `workspace`, if given) unless it is there already. */
+async function openSession(host: Host, model: ModelRef, workspace: string | undefined) {
+  const { session } = host.client;
+  const sessionID = SESSION as never;
+  const exists = await host.call(session.get({ sessionID })).then(
+    () => true,
+    () => false,
+  );
+  if (exists) return;
+  const location = workspace ? { location: { directory: workspace as never } } : {};
+  await host.call(session.create({ id: sessionID, model: model as never, agent: 'build' as never, ...location }));
+}
+
+/**
+ * Queue prompt `messageId`, unless the session has it. A prompt that a crash
+ * interrupted finishes first: queued now, the new prompt would join its
+ * resumed turn.
+ */
+async function submit(host: Host, messageId: string, text: string) {
+  if ((await outcome(host, messageId)).state !== 'absent') return;
+  const last = await lastPrompt(host);
+  if (last !== undefined) await settled(host, last);
+  await host.call(
+    host.client.session.prompt({
+      sessionID: SESSION as never,
+      id: messageId as never,
+      text,
+      delivery: 'queue',
+      resume: true,
+    }),
+  );
+}
+
+/** The outcome of prompt `messageId`, once its turn has ended. */
+async function settled(host: Host, messageId: string): Promise<Outcome> {
+  for (;;) {
+    const now = await outcome(host, messageId);
+    if (now.state !== 'running') return now;
+    await startInbox(host);
+    await host.call(host.client.session.wait({ sessionID: SESSION as never }));
+    // A turn resumed at boot may not have started yet.
+    if (!(await active(host))) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/**
+ * `failure`, once it comes. A cancellation first interrupts the session's
+ * turn, which OpenCode records, so the next prompt does not resume it.
+ */
+async function interruptOn(host: Host, failure: Promise<never>): Promise<never> {
+  try {
+    return await failure;
+  } catch (error) {
+    if (error instanceof restate.CancelledError) {
+      await host.call(host.client.session.interrupt({ sessionID: SESSION as never }));
+    }
+    throw error;
+  }
 }
 
 /**
@@ -317,31 +406,25 @@ export const withOpenCode = async <T>(
   // A tool's error ends the attempt: nothing more is stored, and the tool
   // call never returns, so OpenCode does not go on without it. A cancelled
   // invocation, whenever it comes, interrupts the session's turn instead
-  // (below), which OpenCode records, so the next prompt does not resume it.
+  // (interruptOn).
   let cancelled: restate.CancelledError | undefined;
-  const turn = cancellationOf(ctx);
-  const onCancel = () => void fail(turn!.reason);
   const fail = (error: unknown) => {
     if (error instanceof restate.CancelledError) cancelled = error;
     else fence.closed = true;
     failed(error);
     return new Promise<never>(() => {});
   };
+  const turn = cancellationOf(ctx);
+  const onCancel = () => void fail(turn!.reason);
   turn?.addEventListener('abort', onCancel, { once: true });
   // Messages steered to the turn: OpenCode's steering input (by its message
   // id, once), which the session takes at its next step.
   const steerable: Steerable = {
     steer: async ({ id, text }) => {
-      const { session } = host.client;
-      await host.call(
-        session.prompt({ sessionID: SESSION as never, id: messageIdOf(id) as never, text, delivery: 'steer' }),
-      );
+      const steer = { sessionID: SESSION as never, id: messageIdOf(id) as never, text, delivery: 'steer' as const };
+      await host.call(host.client.session.prompt(steer));
     },
-    has: async (id) => {
-      const messageId = messageIdOf(id);
-      const given = (m: { id: string }) => m.id === messageId;
-      return (await inbox(host)).some(given) || (await sessionMessages(host)).some(given);
-    },
+    has: (id) => inSession(host, messageIdOf(id)),
   };
   const host = await openOpenCode(ctx.db, fence, {
     plugins: [
@@ -357,73 +440,27 @@ export const withOpenCode = async <T>(
     config: { default_agent: 'build' },
     local: workspace !== undefined,
   });
+
+  const prompt = async (text: string, id = nextPromptId(ctx)) => {
+    const messageId = messageIdOf(id);
+    await openSession(host, model, workspace);
+    await submit(host, messageId, text);
+    const now = await settled(host, messageId);
+    if (now.state === 'answered') {
+      await settleSteering(ctx, steerable);
+      return now.text;
+    }
+    if (now.state !== 'failed') throw new Error(`prompt ${id} is not in the session`);
+    // A prompt the cancellation's interrupt ended fails with the cancellation.
+    if (cancelled) throw cancelled;
+    const of = `the model ${model.providerID}/${model.id}: ${CHECK_MODEL}`;
+    throw new restate.TerminalError(`prompt ${id} unanswered: ${now.reason} (${of})`);
+  };
+
   try {
     // The log reads the session through this host, while it is open.
     const read = (transcript: Transcript) => transcribe(host, transcript);
-    return await transcribing(ctx, read, () =>
-      Promise.race([
-        failure.catch(async (error: unknown) => {
-          if (error instanceof restate.CancelledError) {
-            await host.call(host.client.session.interrupt({ sessionID: SESSION as never }));
-          }
-          throw error;
-        }),
-        work({
-          host,
-          async prompt(text, id = nextPromptId(ctx)) {
-            const messageId = messageIdOf(id);
-            const { session } = host.client;
-            const sessionID = SESSION as never;
-            try {
-              await host.call(session.get({ sessionID }));
-            } catch {
-              await host.call(
-                session.create({
-                  id: sessionID,
-                  model: model as never,
-                  agent: 'build' as never,
-                  ...(workspace ? { location: { directory: workspace as never } } : {}),
-                }),
-              );
-            }
-            // The outcome of prompt `of`, once its turn has ended.
-            const settled = async (of: string) => {
-              for (;;) {
-                const now = await outcome(host, of);
-                if (now.state !== 'running') return now;
-                await startInbox(host);
-                await host.call(session.wait({ sessionID }));
-                // A turn resumed at boot may not have started yet.
-                const active: Record<string, unknown> = await host.call(session.active());
-                if (active[SESSION] === undefined) await new Promise((r) => setTimeout(r, 20));
-              }
-            };
-            if ((await outcome(host, messageId)).state === 'absent') {
-              // A prompt a crash interrupted finishes first: queued now, the
-              // new prompt would join its resumed turn.
-              const last = await lastPrompt(host);
-              if (last !== undefined) await settled(last);
-              await host.call(
-                session.prompt({ sessionID, id: messageId as never, text, delivery: 'queue', resume: true }),
-              );
-            }
-            const now = await settled(messageId);
-            if (now.state === 'answered') {
-              await settleSteering(ctx, steerable);
-              return now.text;
-            }
-            if (now.state === 'failed') {
-              // A prompt the cancellation's interrupt ended fails with the cancellation.
-              if (cancelled) throw cancelled;
-              throw new restate.TerminalError(
-                `prompt ${id} unanswered: ${now.reason} (the model ${model.providerID}/${model.id}: ${CHECK_MODEL})`,
-              );
-            }
-            throw new Error(`prompt ${id} is not in the session`);
-          },
-        }),
-      ]),
-    );
+    return await transcribing(ctx, read, () => Promise.race([interruptOn(host, failure), work({ host, prompt })]));
   } finally {
     turn?.removeEventListener('abort', onCancel);
     await host.close();
@@ -449,10 +486,9 @@ export const chat = (options: Configure<Options> = {}) => {
 };
 
 /**
- * A handler of the session, a page at a time: what was said, in order, with
- * the tool calls. It answers while a message is answered, with the messages
- * stored so far: OpenCode boots on the database as stored, without resuming
- * the turn.
+ * A handler of the conversation as clients read it: a page at a time, or
+ * what is new or changed since a cursor, from the log each change writes
+ * (log.ts). It answers while a message is answered.
  */
 export const messages = () => messagesHandler();
 

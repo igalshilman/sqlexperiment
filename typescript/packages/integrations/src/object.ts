@@ -1,6 +1,6 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from 'restate-fns';
-import { type Messages, type MessagesRequest, messageSerde, TURN, type Turn } from './common.ts';
+import { type Messages, type MessagesRequest, messageSerde, refusal, TURN, type Turn } from './common.ts';
 import {
   agentOf,
   type Notifications,
@@ -42,7 +42,7 @@ export interface Stopped {
  * `pending`, the waits, `status`, what the object is doing, `stop`, which
  * stops the message it answers, `steer`, which adds to it, and
  * `notifications` and `watch`, the revision of its conversation, and a wait
- * for a newer one. They are shared, so they run while the object's handler
+ * for a newer one (an agent's has `sync` too: `FOLLOWED`). They are shared, so they run while the object's handler
  * works, and replay their journal: they use no `ctx.db`.
  */
 const BUILT_IN = {
@@ -91,7 +91,7 @@ const BUILT_IN = {
       ctx.objectClient(signals, signalsOf(ctx)).notifications(),
   ),
   /**
-   * The revision, once it is past `afterRevision`, or at the timeout (50 s by
+   * The revision, once there is one newer than `revision`, or at the timeout (50 s by
    * default, at most 60 s), whichever comes first: a client then reads what
    * changed. It waits in Restate, holding no process; a client that retries
    * it with the same idempotency key joins the same wait.
@@ -100,47 +100,53 @@ const BUILT_IN = {
     { journalReplay: true },
     async (ctx: restate.JournaledObjectSharedContext, watch: Watch): Promise<Notifications> => waited(ctx, watch),
   ),
-  /**
-   * The conversation since `cursor` (by default, all of it), what the object
-   * is doing, and the revision, in one request; with `revision`, once there
-   * is a newer one, or at the timeout. A client follows the conversation by
-   * sending each answer's `revision` and `cursor` back, at once while it has
-   * `more`. It reads the object's `messages`.
-   */
+};
+
+/**
+ * The handler that agents (an object with `messages`) have beside those of
+ * every object: `sync`, the conversation since `cursor` (by default, all of
+ * it), what the agent is doing, and the revision, in one request; with
+ * `revision`, once there is a newer one, or at the timeout. A client follows
+ * the conversation by sending each answer's `revision` and `cursor` back, at
+ * once while it has `more`.
+ */
+const FOLLOWED = {
   sync: restate.handlers.object.shared(
     { journalReplay: true },
     async (
       ctx: restate.JournaledObjectSharedContext,
       { cursor = 0, revision, timeoutSeconds = 50, limit = 100 }: SyncRequest = {},
     ): Promise<Synced> => {
-      if (revision !== undefined) await waited(ctx, { afterRevision: revision, timeoutSeconds });
-      // The revision first: a change after it shows in the next sync.
+      if (revision !== undefined) await waited(ctx, { revision, timeoutSeconds });
+      // The revision first: a change after it shows in the next sync. Then
+      // the object's own handlers, which read its state as it is now.
       const now = await ctx.objectClient(signals, signalsOf(ctx)).notifications();
-      const status: Status = {
-        answering: await ctx.get<Turn>(TURN),
-        waiting: await ctx.objectClient(signals, signalsOf(ctx)).pending(),
-      };
-      const page = await ctx.genericCall<MessagesRequest, Messages>({
-        service: ctx.request().target.service,
-        method: 'messages',
-        key: ctx.key,
-        parameter: { cursor, limit },
-        inputSerde: restate.serde.json,
-        outputSerde: restate.serde.json,
-      });
+      const status = await own<Status>(ctx, 'status');
+      const page = await own<Messages>(ctx, 'messages', { cursor, limit } satisfies MessagesRequest);
       return { revision: now.revision, status, ...page };
     },
   ),
 };
 
-/** The revision, once it is past `afterRevision`, or at the timeout: see `watch`. */
+/** A call of a handler of the object of `ctx`, the same key. */
+const own = <O>(ctx: restate.JournaledObjectSharedContext, method: string, parameter?: unknown) =>
+  ctx.genericCall<unknown, O>({
+    service: ctx.request().target.service,
+    method,
+    key: ctx.key,
+    parameter,
+    inputSerde: restate.serde.json,
+    outputSerde: restate.serde.json,
+  });
+
+/** The revision, once there is one newer than `revision`, or at the timeout: see `watch`. */
 async function waited(
   ctx: restate.JournaledObjectSharedContext,
-  { afterRevision, timeoutSeconds = 50 }: Watch,
+  { revision, timeoutSeconds = 50 }: Watch,
 ): Promise<Notifications> {
   const key = signalsOf(ctx);
   const { id, promise } = ctx.awakeable<Notifications>();
-  ctx.objectSendClient(signals, key).subscribe({ afterRevision, awakeable: id });
+  ctx.objectSendClient(signals, key).subscribe({ revision, awakeable: id });
   const timeout = ctx.sleep({ seconds: Math.min(Math.max(timeoutSeconds, 0), 60) }).map(() => null);
   const changed = await restate.RestatePromise.race([promise, timeout]);
   if (changed) return changed;
@@ -169,8 +175,13 @@ export interface Synced extends Messages {
 /** A handler: `ctx` is the object's context, with `ctx.db`; the input, if any, is annotated. */
 type Handler = (ctx: restate.ObjectContext, input: never) => unknown;
 
-/** The names of the handlers every object has, which its own handlers cannot take. */
-type Reserved = { [name in keyof typeof BUILT_IN]?: 'a handler every object has: name yours otherwise' };
+/** The names of the handlers every object (or agent) has, which its own handlers cannot take. */
+type Reserved = {
+  [name in keyof typeof BUILT_IN | keyof typeof FOLLOWED]?: 'a handler every object has: name yours otherwise';
+};
+
+/** The handlers an object with `handlers` has: those of every object, an agent's `sync`, and its own. */
+type With<H> = typeof BUILT_IN & (H extends { messages: unknown } ? typeof FOLLOWED : unknown) & H;
 
 /**
  * A Restate virtual object with a SQL database of its own, `ctx.db`: one per
@@ -186,9 +197,10 @@ type Reserved = { [name in keyof typeof BUILT_IN]?: 'a handler every object has:
  * Besides its own handlers, it has `status`, what it is doing (the message
  * it answers, and what its tools wait for), `stop`, which stops that
  * message, `steer`, which adds to it, `pending`, the waits of its tools
- * (`signal()`), `signal({ id, value })`, which resolves one, and `sync`,
- * `notifications` and `watch({ afterRevision })`, to follow its
- * conversation (`follow()` of restate-agents/client).
+ * (`signal()`), `signal({ id, value })`, which resolves one, and
+ * `notifications` and `watch({ revision })`, to follow its conversation.
+ * An agent, an object with a `messages` handler (such as `claude.messages()`),
+ * has `sync` too, which `follow()` of restate-agents/client reads.
  *
  * `options` and `metadata` add to (or replace) the ones set here, such as
  * `options: { journalRetention: { hours: 1 } }` to look at journals in the
@@ -200,14 +212,35 @@ export const object = <P extends string, H extends Record<string, Handler>>(defi
   description?: string;
   metadata?: Record<string, string>;
   options?: restate.ObjectOptions;
-}): restate.VirtualObjectDefinition<P, typeof BUILT_IN & H> => {
-  for (const name of Object.keys(BUILT_IN)) {
+}): restate.VirtualObjectDefinition<P, With<H>> => {
+  for (const name of [...Object.keys(BUILT_IN), ...Object.keys(FOLLOWED)]) {
     if (name in definition.handlers)
       throw new Error(`${definition.name}: every object has a \`${name}\` handler already`);
   }
+  const yours = Object.entries(definition.handlers as Record<string, Handler>).map(([name, handler]) => [
+    name,
+    // A plain function: a model provider's refusal (a missing API key) ends its invocation.
+    Object.getOwnPropertySymbols(handler).length === 0 ? answering(handler) : handler,
+  ]);
+  const handlers: object = {
+    ...BUILT_IN,
+    ...('messages' in definition.handlers ? FOLLOWED : {}),
+    ...Object.fromEntries(yours),
+  };
   return restate.object({
     ...definition,
-    handlers: { ...BUILT_IN, ...definition.handlers },
+    handlers: handlers as With<H>,
     options: { ...OPTIONS, ...definition.options },
   });
 };
+
+/** `handler`, but a model provider's refusal it fails with ends its invocation, as `chat`'s does. */
+const answering =
+  (handler: Handler): Handler =>
+  async (ctx, input) => {
+    try {
+      return await handler(ctx, input);
+    } catch (error) {
+      throw refusal(error) ?? error;
+    }
+  };

@@ -175,6 +175,29 @@ async def test_a_missing_api_key_is_a_terminal_error(monkeypatch):
         await Object().run(obj.handlers["chat"].fn, "hello")
 
 
+async def test_a_handler_of_your_own_that_prompts_ends_on_a_refusal(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    obj = claude.agent("assistant")
+
+    @obj.handler
+    async def summarize(ctx, text: str) -> str:
+        return await claude.prompt(ctx, f"Summarize: {text}", thread="summaries")
+
+    with pytest.raises(restate.TerminalError, match="check the agent's model") as refused:
+        await Object().run(obj.handlers["summarize"].fn, "hello")
+    assert refused.value.status_code == 424
+
+
+async def test_a_model_of_another_provider_from_a_function_ends_the_message():
+    async def model(ctx) -> str:
+        return "openai/gpt-6-luna"
+
+    obj = claude.agent("assistant", client=ClaudeClient(Teller()), model=model)
+    with pytest.raises(restate.TerminalError, match="is not anthropic's"):
+        await Object().run(obj.handlers["chat"].fn, "hello")
+
+
 async def test_a_tool_gets_the_context_and_its_call_id():
     seen = []
 
@@ -311,6 +334,23 @@ def assistant(client: ClaudeClient):
         await claude.reset(ctx, handoff)
 
     return obj
+
+
+async def test_compact_reads_the_tool_calls_as_text():
+    client = ClaudeClient(Teller())
+    obj = claude.agent("teller", client=client, tools=[Bank().restate_tool()])
+
+    @obj.handler(message=True)
+    async def compact(ctx, instructions: str) -> str:
+        return await claude.compact(ctx, instructions, client=client)
+
+    alice = Object()
+    await alice.invoke(obj.handlers["chat"].fn, "move 5 from 1 to 2")
+    await alice.invoke(obj.handlers["compact"].fn, "Keep the transfers")
+    # The API takes no tool calls in a request without tools: the summary reads them as text.
+    said = [m["content"] for m in client.requests[-1]["messages"]]
+    assert all(isinstance(text, str) for text in said)
+    assert any("[result: moved 5 from 1 to 2]" in text for text in said)
 
 
 async def test_compact_summarizes_the_conversation_in_place_of_it():

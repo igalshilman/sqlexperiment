@@ -86,7 +86,7 @@ const textTool = <const S extends ParameterSchemaSpec>(options: {
   });
 
 /** The default model. */
-const DEFAULT_MODEL = 'deepseek/deepseek-flash';
+const DEEPSEEK_MODEL = 'deepseek/deepseek-flash';
 
 /** The harness, its session in `db`: the services an agent loop needs, the persistence and its checkpoints. */
 async function boot(db: restate.SqlSession, system?: string): Promise<Context> {
@@ -233,6 +233,9 @@ export const prompt = (ctx: restate.ObjectContext, text: string, options: Option
     () => answerOnce(ctx, text, options),
   );
 
+/** An agent of the harness, on a session. */
+type Agent = Awaited<ReturnType<Context['agents']['create']>>['agent'];
+
 const answerOnce = async (
   ctx: restate.ObjectContext,
   text: string,
@@ -244,84 +247,31 @@ const answerOnce = async (
   // stores nothing more, so the retry finds the tool's call without a result.
   const { promise: failed, reject: fail } = Promise.withResolvers<never>();
   failed.catch(() => {});
-  // A cancelled invocation cancels the agent's turn, which the log keeps.
-  let cancelTurn: (() => Promise<void>) | undefined;
   const turn = cancellationOf(ctx);
   const onCancel = () => fail(turn!.reason);
   turn?.addEventListener('abort', onCancel, { once: true });
-  // Messages steered to the turn: the agent's steering, which its next step
-  // takes (after the tool calls), and the log keeps, by id.
-  let steerable!: Steerable;
+  let agent: Agent | undefined;
   try {
     const sessionId = SessionId(ctx.key);
+    const steerable = () => steeringOf(agent!);
     const options = {
-      agentOptions: { provider: 'deepseek-official', model: modelIdOf(modelOf(named, DEFAULT_MODEL), 'deepseek') },
-      setup: (agentCtx: Context) =>
-        tools.forEach((t) => {
-          const definition = isTool(t) ? native(t, ctx) : t;
-          agentCtx.tools.register({
-            ...definition,
-            execute: async (args, exec) => {
-              try {
-                await toolCallStarted(ctx);
-                const result = await definition.execute(args, exec);
-                await toolCallEnded(ctx, steerable);
-                return result;
-              } catch (error) {
-                fail(error);
-                throw error;
-              }
-            },
-          });
-        }),
+      agentOptions: { provider: 'deepseek-official', model: modelIdOf(modelOf(named, DEEPSEEK_MODEL), 'deepseek') },
+      setup: (agentCtx: Context) => {
+        for (const t of tools) agentCtx.tools.register(tracked(isTool(t) ? native(t, ctx) : t, ctx, steerable, fail));
+      },
     };
     // Resuming closes a turn a crash left open.
-    const { agent } = (await harness.sessionPersistence.stat(sessionId))
+    const started = (await harness.sessionPersistence.stat(sessionId))
       ? await harness.agents.resume({ resumeSessionId: sessionId, ...options })
       : await harness.agents.create({ sessionId, ...options });
-    steerable = {
-      steer: async (steered) => agent.steer(message(steerId(steered.id), steered.text)),
-      has: async (steered) =>
-        agent.session.snapshotEvents().some((e) => e.type === 'user/message' && e.data.id === steerId(steered)),
-    };
-    // The log as this attempt found it: a turn that failed before is
-    // continued like an interrupted one.
-    const found = agent.session.snapshotEvents().length;
-    cancelTurn = async () => {
-      agent.cancel({ kind: 'user' });
-      await agent.whenIdle();
-      await harness.sessions.flush(agent.session);
-    };
-    for (;;) {
-      const events = agent.session.snapshotEvents();
-      const answer = answerOf(events, promptId(id));
-      if (answer !== undefined) {
-        await settleSteering(ctx, steerable);
-        return answer;
-      }
-      // A turn of this attempt that failed (the model's request, or a
-      // checkpoint) fails the attempt. Its end may be stored already, so
-      // only this attempt's turns count: the retry asks the model again.
-      const end = events.slice(found).findLast((e): e is SessionEvent<'turn/end'> => e.type === 'turn/end')
-        ?.data.reason;
-      if (end?.kind === 'error') throw new Error(`the agent's turn failed: ${JSON.stringify(end.error)}`);
-      // Finish an unfinished prompt first (this one's, after a crash), then
-      // start this one.
-      const last = lastPrompt(events);
-      if (last !== undefined && answerOf(events, last) === undefined) {
-        agent.followup(message(`continue:${events.length}`, CONTINUE));
-      } else {
-        agent.followup(message(promptId(id), text));
-      }
-      await Promise.race([agent.whenIdle(), failed]);
-      await harness.sessions.flush(agent.session);
-    }
+    agent = started.agent;
+    const answer = await answered(harness, agent, id, text, failed);
+    await settleSteering(ctx, steerable());
+    return answer;
   } catch (e) {
-    if (e instanceof restate.CancelledError && cancelTurn) {
-      await cancelTurn();
-      throw e;
-    }
-    (harness.sessionPersistence as SqlSessionPersistence).abandon();
+    // A cancelled invocation cancels the agent's turn, which the log keeps.
+    if (e instanceof restate.CancelledError && agent) await cancelTurn(harness, agent);
+    else (harness.sessionPersistence as SqlSessionPersistence).abandon();
     throw e;
   } finally {
     turn?.removeEventListener('abort', onCancel);
@@ -330,13 +280,85 @@ const answerOnce = async (
 };
 
 /**
+ * The answer of prompt `id`, `text`, asked once: a prompt left unfinished
+ * (this one's, after a crash) is finished first, then this one starts.
+ */
+async function answered(harness: Context, agent: Agent, id: string, text: string, failed: Promise<never>) {
+  // The log as this attempt found it: a turn that failed before is continued like an interrupted one.
+  const found = agent.session.snapshotEvents().length;
+  for (;;) {
+    const events = agent.session.snapshotEvents();
+    const answer = answerOf(events, promptId(id));
+    if (answer !== undefined) return answer;
+    throwIfTurnFailed(events.slice(found));
+    const last = lastPrompt(events);
+    const unfinished = last !== undefined && answerOf(events, last) === undefined;
+    agent.followup(unfinished ? message(`continue:${events.length}`, CONTINUE) : message(promptId(id), text));
+    await Promise.race([agent.whenIdle(), failed]);
+    await harness.sessions.flush(agent.session);
+  }
+}
+
+/**
+ * Fail the attempt if a turn of `events` (this attempt's) failed: its model
+ * request, or a checkpoint. Its end may be stored already, so only this
+ * attempt's turns count: the retry asks the model again.
+ */
+function throwIfTurnFailed(events: readonly SessionEvent[]) {
+  const end = events.findLast((e): e is SessionEvent<'turn/end'> => e.type === 'turn/end')?.data.reason;
+  if (end?.kind === 'error') throw new Error(`the agent's turn failed: ${JSON.stringify(end.error)}`);
+}
+
+/** Cancel `agent`'s turn, and store it cancelled. */
+async function cancelTurn(harness: Context, agent: Agent) {
+  agent.cancel({ kind: 'user' });
+  await agent.whenIdle();
+  await harness.sessions.flush(agent.session);
+}
+
+/**
+ * Messages steered to the turn: the agent's steering, which its next step
+ * takes (after the tool calls), and the log keeps, by id.
+ */
+const steeringOf = (agent: Agent): Steerable => ({
+  steer: async (steered) => agent.steer(message(steerId(steered.id), steered.text)),
+  has: async (steered) =>
+    agent.session.snapshotEvents().some((e) => e.type === 'user/message' && e.data.id === steerId(steered)),
+});
+
+/**
+ * `definition`, its calls published as they start and end (for the clients
+ * that follow the conversation, and the steering), and its error failing the
+ * attempt.
+ */
+const tracked = (
+  definition: ToolDefinition,
+  ctx: restate.ObjectContext,
+  steerable: () => Steerable,
+  fail: (error: unknown) => void,
+): ToolDefinition => ({
+  ...definition,
+  execute: async (args, exec) => {
+    try {
+      await toolCallStarted(ctx);
+      const result = await definition.execute(args, exec);
+      await toolCallEnded(ctx, steerable());
+      return result;
+    } catch (error) {
+      fail(error);
+      throw error;
+    }
+  },
+});
+
+/**
  * A chat handler: each message an invocation, the session in the object's
  * database, with `options`, or the options a function of the invocation's
  * context gives. It takes the message as plain text (`curl -d 'Hi'`) or as
  * a JSON string (`curl --json '"Hi"'`).
  */
 export const chat = (options: Configure<Options> = {}) => {
-  if (typeof options === 'object' && options.model !== undefined) modelIdOf(options.model, 'deepseek');
+  if (typeof options === 'object') modelIdOf(modelOf(options.model, DEEPSEEK_MODEL), 'deepseek');
   return chatHandler(async (ctx, text) => prompt(ctx, text, await configured(options, ctx)));
 };
 
@@ -349,7 +371,11 @@ const parsed = (json: string): unknown => {
   }
 };
 
-/** A handler of the session, a page at a time: what was said, in order, with the tool calls, from its log. */
+/**
+ * A handler of the conversation as clients read it: a page at a time, or
+ * what is new or changed since a cursor, from the log each change writes
+ * (log.ts). It answers while a message is answered.
+ */
 export const messages = () => messagesHandler();
 
 /** The session `key` in `db`, from its log, as `messages` gives it. */

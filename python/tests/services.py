@@ -12,7 +12,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples-python"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples-python" / "basic"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "tests"))
 
 import restate_fns as restate  # noqa: E402
@@ -203,7 +203,7 @@ messages_api = MessagesServer(Teller()).start()
 claude_agent_support = claude_agent.agent(
     "claude_agent_support",
     tools=SUPPORT_TOOLS,
-    options={"env": {"ANTHROPIC_BASE_URL": messages_api.url, "ANTHROPIC_API_KEY": "sk-teller"}},
+    claude_options={"env": {"ANTHROPIC_BASE_URL": messages_api.url, "ANTHROPIC_API_KEY": "sk-teller"}},
 )
 # Codex calls the teller as the Responses API, a model provider of its configuration.
 os.environ["TELLER_API_KEY"] = "sk-teller"

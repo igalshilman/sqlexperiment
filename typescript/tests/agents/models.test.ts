@@ -3,7 +3,7 @@
 // caller waits. LangGraph's agent takes a chat model of its own, here one that
 // fails as a provider would.
 import * as restate from '@restatedev/restate-sdk';
-import { chatHandler, REFUSED, tool } from 'restate-agents';
+import { chatHandler, object, REFUSED, tool } from 'restate-agents';
 import * as deepseek from 'restate-agents/deepseek';
 import * as langgraph from 'restate-agents/langgraph';
 import * as opencode from 'restate-agents/opencode';
@@ -11,7 +11,7 @@ import * as pi from 'restate-agents/pi';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { Teller } from '../fakes/langgraph.ts';
-import { conversation } from '../testing.ts';
+import { conversation, type PromptHandler } from '../testing.ts';
 
 /** The Anthropic SDK's error of a wrong API key. */
 class AuthenticationError extends Error {
@@ -51,6 +51,23 @@ describe('a wrong model', () => {
     await expect(answer(new Failing(new Error('Anthropic API key not found')))).rejects.toBeInstanceOf(
       restate.TerminalError,
     );
+  });
+
+  it('that the provider refuses fails a handler of your own that prompts too', async () => {
+    const agent = object({
+      name: 'assistant',
+      handlers: {
+        summarize: async (ctx, text: string) =>
+          langgraph.prompt(ctx, `Summarize: ${text}`, {
+            model: new Failing(new AuthenticationError('invalid x-api-key')),
+          }),
+      },
+    });
+    // The handler as the object serves it.
+    const { summarize } = (agent as unknown as { object: Record<string, PromptHandler> }).object;
+    const refused = conversation(summarize!, 'k').attempt('inv1', 'Hi');
+    await expect(refused).rejects.toBeInstanceOf(restate.TerminalError);
+    await expect(refused).rejects.toMatchObject({ code: REFUSED });
   });
 
   it('is told apart from errors that a retry may fix', async () => {

@@ -10,7 +10,7 @@ appends them::
         '''The current weather in a city.'''
         return f"Sunny and 21°C in {city}"
 
-    assistant = adk.agent("assistant", instruction="Answer briefly.", tools=[get_weather])
+    assistant = adk.agent("assistant", system="Answer briefly.", tools=[get_weather])
     serve(assistant)
 
 The usual agent is an ``LlmAgent`` with ``model`` (``google/model-id``, or
@@ -61,7 +61,7 @@ from pydantic import ValidationError
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import Transcript, has_table, model_id_of
+from restate_agents.common import Transcript, configured, has_table, model_id_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
@@ -109,12 +109,10 @@ def agent(
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         if adk_agent is None:
-            chosen = model(ctx) if callable(model) and not isinstance(model, BaseLlm) else model
             usual = LlmAgent(name=name, instruction=system or "", tools=_tools(tools))
-            given = _model_of(chosen)
+            given = _model_of(await configured(model, ctx, BaseLlm))
             return await prompt(ctx, usual.model_copy(update={"model": given}) if given else usual, message)
-        chosen = adk_agent if isinstance(adk_agent, BaseAgent | App) else adk_agent(ctx)
-        return await prompt(ctx, chosen, message)
+        return await prompt(ctx, await configured(adk_agent, ctx, (BaseAgent, App)), message)
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()

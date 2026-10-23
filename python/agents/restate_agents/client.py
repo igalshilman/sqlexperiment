@@ -26,7 +26,7 @@ from typing import Any
 
 import httpx
 
-from restate_agents.common import ChatMessage, Messages
+from restate_agents.common import ChatMessage, Messages, Synced
 
 __all__ = ["AgentClient", "AgentError", "Followed"]
 
@@ -110,14 +110,15 @@ class AgentClient:
         cursor: int = 0,
         revision: int | None = None,
         timeout_seconds: float = 50,
+        limit: int = 100,
         idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> Synced:
         """
-        The messages new or changed since ``cursor``, what the agent is doing,
-        and the revision, in one request; with ``revision``, once there is a
-        newer one, or at the timeout.
+        The messages new or changed since ``cursor`` (at most ``limit``), what
+        the agent is doing, and the revision, in one request; with
+        ``revision``, once there is a newer one, or at the timeout.
         """
-        request: dict[str, Any] = {"cursor": cursor, "timeoutSeconds": timeout_seconds}
+        request: dict[str, Any] = {"cursor": cursor, "timeoutSeconds": timeout_seconds, "limit": limit}
         if revision is not None:
             request["revision"] = revision
         return await self._post("sync", request, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
@@ -149,11 +150,9 @@ class AgentClient:
         """The revision of the conversation, which each change increases."""
         return (await self._post("notifications"))["revision"]
 
-    async def watch(
-        self, after_revision: int, *, timeout_seconds: float = 50, idempotency_key: str | None = None
-    ) -> int:
-        """The revision, once it is past ``after_revision``, or at the timeout."""
-        watch = {"afterRevision": after_revision, "timeoutSeconds": timeout_seconds}
+    async def watch(self, revision: int, *, timeout_seconds: float = 50, idempotency_key: str | None = None) -> int:
+        """The revision, once there is one newer than ``revision``, or at the timeout."""
+        watch = {"revision": revision, "timeoutSeconds": timeout_seconds}
         changed = await self._post("watch", watch, idempotency_key=idempotency_key, timeout=timeout_seconds + 30)
         return changed["revision"]
 
@@ -164,28 +163,33 @@ class AgentClient:
         for as long as you read it.
 
         Each change is one ``sync``, which waits in Restate for the next. A
-        network failure does not end it: it tries again, and a sync it retries
-        keeps its idempotency key, so it joins the one already waiting.
+        network failure (or Restate's, restarting) does not end it: it tries
+        again, and a sync it retries keeps its idempotency key, so it joins
+        the one already waiting.
         """
         revision: int | None = None
         while True:
-            # One sync, retried with the same idempotency key.
-            window = uuid.uuid4().hex
-            while True:
-                try:
-                    synced = await self.sync(
-                        cursor=cursor, revision=revision, timeout_seconds=timeout_seconds, idempotency_key=window
-                    )
-                    break
-                except httpx.TransportError as error:
-                    log.warning("follow: retrying after %s", error)
-                    await asyncio.sleep(1)
+            synced = await self._sync_retried(cursor, revision, timeout_seconds)
             # Nothing changed (the wait timed out): wait again.
             if synced["revision"] != revision or synced["messages"]:
                 yield Followed(status=synced["status"], messages=synced["messages"], cursor=synced["cursor"])
             cursor = synced["cursor"]
             # With more to read, at once; else once something changes.
             revision = None if synced["more"] else synced["revision"]
+
+    async def _sync_retried(self, cursor: int, revision: int | None, timeout_seconds: float) -> Synced:
+        """One ``sync``, tried again with the same idempotency key until it answers, unless its error would last."""
+        window = uuid.uuid4().hex
+        while True:
+            try:
+                return await self.sync(
+                    cursor=cursor, revision=revision, timeout_seconds=timeout_seconds, idempotency_key=window
+                )
+            except (httpx.TransportError, AgentError) as error:
+                if not _transient(error):
+                    raise
+                log.warning("follow: retrying after %s", error)
+                await asyncio.sleep(1)
 
     async def _post(
         self, handler: str, body: Any = None, *, idempotency_key: str | None = None, timeout: float | None = 30
@@ -206,3 +210,8 @@ class AgentClient:
                 message = response.text
             raise AgentError(response.status_code, message)
         return response.json() if response.content else None
+
+
+def _transient(error: Exception) -> bool:
+    """Whether a retry may answer: a network failure, Restate's (5xx) or too many requests (429); not a 4xx."""
+    return not isinstance(error, AgentError) or error.status >= 500 or error.status == 429

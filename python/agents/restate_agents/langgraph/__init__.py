@@ -9,7 +9,7 @@ the object's database (checkpointer.py)::
         '''The current weather in a city.'''
         return f"Sunny and 21°C in {city}"
 
-    assistant = langgraph.agent("assistant", tools=[get_weather])
+    assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
     serve(assistant)
 
 The usual graph is the tool-calling loop: a model node, a tools node, and
@@ -58,7 +58,7 @@ from pydantic import create_model
 from restate_fns import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, configured, has_table, model_id_of, model_of
 from restate_agents.langgraph.checkpointer import SqlCheckpointSaver
 from restate_agents.object import Object, context
 from restate_agents.tools import Tool
@@ -104,17 +104,17 @@ def agent(
     """
     if graph is not None and (model is not None or system is not None or tools):
         raise TypeError(f"{name}: an agent takes a graph, or the usual graph's model, system and tools; not both")
-    if isinstance(model, str):
-        model_id_of(model, "anthropic")
+    if model is None or isinstance(model, str):
+        model_id_of(model_of(model), "anthropic")
     chosen = graph if graph is not None else _usual(model, system, tools)
 
     async def answer(ctx: ObjectContext, message: str) -> str:
-        return await prompt(ctx, chosen if isinstance(chosen, StateGraph) else chosen(ctx), message)
+        return await prompt(ctx, await configured(chosen, ctx, StateGraph), message)
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         """The conversation, from the thread's last checkpoint."""
         transcript = Transcript()
-        if not await has_table(ctx.db, "writes"):
+        if not await has_table(ctx.db, "langgraph_writes"):
             return transcript
         saved = await SqlCheckpointSaver(ctx.db).aget_tuple({"configurable": {"thread_id": ctx.key()}})
         for m in saved.checkpoint["channel_values"].get("messages", []) if saved else []:
@@ -205,7 +205,7 @@ def _usual(model: Model | Callable[[ObjectContext], Model] | None, system: str |
 
     async def call_model(state: MessagesState) -> dict[str, Any]:
         ctx = context()
-        chosen = _model(model, ctx)
+        chosen = await _model(model, ctx)
         with_tools = chosen.bind_tools(_langchain_tools(tools, ctx)) if tools else chosen
         messages = state["messages"]
         return {"messages": [await with_tools.ainvoke([SystemMessage(system), *messages] if system else messages)]}
@@ -287,8 +287,8 @@ def _langchain(t: Tool) -> BaseTool:
     return StructuredTool.from_function(coroutine=run, name=t.name, description=t.description, args_schema=schema)
 
 
-def _model(model: Model | Callable[[ObjectContext], Model] | None, ctx: ObjectContext) -> BaseChatModel:
-    chosen = model(ctx) if callable(model) and not isinstance(model, BaseChatModel) else model
+async def _model(model: Model | Callable[[ObjectContext], Model] | None, ctx: ObjectContext) -> BaseChatModel:
+    chosen = await configured(model, ctx, BaseChatModel)
     if isinstance(chosen, BaseChatModel):
         return chosen
     return ChatAnthropic(model_name=model_id_of(model_of(chosen), "anthropic"))  # type: ignore[call-arg]

@@ -40,7 +40,7 @@ def world() -> tuple[Bank, Object]:
 
 
 def agent(bank: Bank, server: MessagesServer, **options):
-    obj = claude_agent.agent("teller", tools=[bank.restate_tool()], options=api(server), **options)
+    obj = claude_agent.agent("teller", tools=[bank.restate_tool()], claude_options=api(server), **options)
     return obj.handlers["chat"].fn, obj.handlers["messages"].fn
 
 
@@ -85,7 +85,7 @@ async def test_a_terminal_error_of_a_tool_is_its_answer_to_the_model(server):
         """Refuse."""
         raise restate.TerminalError(f"no: {reason}")
 
-    obj = claude_agent.agent("teller", tools=[refuse], options=api(server))
+    obj = claude_agent.agent("teller", tools=[refuse], claude_options=api(server))
     assert await Object().invoke(obj.handlers["chat"].fn, "refuse politely") == "Done: no: politely"
 
 
@@ -95,13 +95,13 @@ async def test_any_other_error_of_a_tool_fails_the_attempt(server):
         """Fail."""
         raise ConnectionError("unavailable")
 
-    obj = claude_agent.agent("teller", tools=[flaky], options=api(server))
+    obj = claude_agent.agent("teller", tools=[flaky], claude_options=api(server))
     with pytest.raises(ConnectionError):
         await Object().run(obj.handlers["chat"].fn, "refuse politely")
 
 
 async def test_the_system_prompt_is_added_to_claude_codes(server):
-    obj = claude_agent.agent("teller", system="You are a teller.", options=api(server))
+    obj = claude_agent.agent("teller", system="You are a teller.", claude_options=api(server))
     await Object().invoke(obj.handlers["chat"].fn, "hello")
     [system] = [s for s in server.teller.systems if "You are a teller." in s]
     assert len(system) > len("You are a teller.")
@@ -122,7 +122,7 @@ async def test_a_cancelled_turn_ends_and_the_next_message_starts_afresh(server):
         """Wait for an approval."""
         raise restate.TerminalError("cancelled", 409)  # as Restate's cancellation reaches a wait
 
-    obj = claude_agent.agent("support", tools=[wait_for_approval], options=api(server))
+    obj = claude_agent.agent("support", tools=[wait_for_approval], claude_options=api(server))
     chat = obj.handlers["chat"].fn
     alice = Object()
     with pytest.raises(restate.TerminalError, match="cancelled"):
@@ -133,7 +133,7 @@ async def test_a_cancelled_turn_ends_and_the_next_message_starts_afresh(server):
 
 
 async def test_reset_starts_a_new_session_with_the_handoff(server):
-    obj = claude_agent.agent("teller", options=api(server))
+    obj = claude_agent.agent("teller", claude_options=api(server))
 
     @obj.handler(message=True)
     async def reset(ctx, handoff: str) -> None:
@@ -179,6 +179,6 @@ async def test_a_wrong_api_key_is_a_terminal_error(server):
         "ANTHROPIC_API_KEY": MessagesServer.WRONG_KEY,
         "CLAUDE_CODE_MAX_RETRIES": "0",
     }
-    obj = claude_agent.agent("assistant", options={"env": env})
+    obj = claude_agent.agent("assistant", claude_options={"env": env})
     with pytest.raises(restate.TerminalError, match="check the agent's model"):
         await Object().run(obj.handlers["chat"].fn, "hello")

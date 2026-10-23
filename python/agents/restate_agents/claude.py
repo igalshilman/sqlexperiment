@@ -18,9 +18,10 @@ API's own JSON, as the host's ``claude.messages`` binding of the durable
 functions sends it: with ``fallbacks: "default"`` unless ``request`` says
 otherwise, and more of it from ``request``.
 
-It is the SDK tool runner's loop (``client.beta.messages.tool_runner``), of
-its own: the runner gives a tool its input but not its call's id, and cannot
-start from a stored reply whose tools did not run.
+The loop is the agent's own, not the SDK's tool runner
+(``client.beta.messages.tool_runner``): the runner gives a tool its input
+but not its call's id, and cannot start from a stored reply whose tools did
+not run.
 
 The handler is not replayed: a retried attempt (a crash, a lost connection)
 runs again from the start, with the stored messages:
@@ -44,6 +45,7 @@ runs again from the start, with the stored messages:
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -54,7 +56,7 @@ from pydantic import ValidationError
 from restate_fns import ObjectContext
 
 from restate_agents import conversation, turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, configured, has_table, model_id_of, model_of
 from restate_agents.conversation import Conversation, answer_of, idle, pending_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
@@ -112,18 +114,14 @@ def agent(
         model_id_of(model_of(model), "anthropic")
 
     async def answer(ctx: ObjectContext, message: str) -> str:
-        async def given(option: Any) -> Any:
-            value = option(ctx) if callable(option) else option
-            return await value if inspect.isawaitable(value) else value
-
         return await prompt(
             ctx,
             message,
-            model=await given(model),
-            system=await given(system),
-            tools=await given(tools),
+            model=await configured(model, ctx),
+            system=await configured(system, ctx),
+            tools=await configured(tools, ctx),
             client=client,
-            request=await given(request),
+            request=await configured(request, ctx),
         )
 
     async def transcript(ctx: ObjectContext) -> Transcript:
@@ -227,7 +225,8 @@ async def compact(
     idle(rows)
     run = _Run.of(thread_of, model=model, client=client, request=request)
     ask = {"role": "user", "content": f"{conversation.SUMMARIZE} {instructions or ''}".strip()}
-    reply = await run.reply([*(row.message for row in rows), ask])
+    # As text: a request with tool calls and results must define the tools, which this one has none of.
+    reply = await run.reply([*(_as_text(row.message) for row in rows), ask])
     summary = _text([block.model_dump(exclude_none=True) for block in reply.content])
     await thread_of.replace(id, f"{conversation.SUMMARIZED}{summary}", answer=summary)
     return summary
@@ -363,6 +362,22 @@ class _Run:
 def _name(tool: Tool | Any) -> str | None:
     """The name of ``tool``, of any kind ``Tools`` takes."""
     return tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", None)
+
+
+def _as_text(message: dict[str, Any]) -> dict[str, Any]:
+    """``message`` with its tool calls and results as text: ``[called move_money {"amount": 5}]``."""
+    if isinstance(message["content"], str):
+        return message
+    said = []
+    for block in message["content"]:
+        match block.get("type"):
+            case "text":
+                said.append(block["text"])
+            case "tool_use":
+                said.append(f"[called {block['name']} {json.dumps(block['input'])}]")
+            case "tool_result":
+                said.append(f"[result: {_text(block.get('content') or '')}]")
+    return {"role": message["role"], "content": "\n".join(said) or "[no text]"}
 
 
 def _text(content: str | list[dict[str, Any]]) -> str:

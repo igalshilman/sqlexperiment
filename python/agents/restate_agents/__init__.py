@@ -11,11 +11,26 @@ often an attempt crashes.
         '''The current weather in a city.'''
         return f"Sunny and 21°C in {city}"
 
-    assistant = langgraph.agent("assistant", tools=[get_weather])
+    assistant = langgraph.agent("assistant", system="Answer briefly.", tools=[get_weather])
     serve(assistant)
 """
 
+from restate_agents.common import has_table
 from restate_agents.object import Object, app, ask, context, serve
 from restate_agents.tools import Tool, call, send, signal, subagent, tool, workflow
 
-__all__ = ["Object", "Tool", "app", "ask", "call", "context", "send", "serve", "signal", "subagent", "tool", "workflow"]
+__all__ = [
+    "Object",
+    "Tool",
+    "app",
+    "ask",
+    "call",
+    "context",
+    "has_table",
+    "send",
+    "serve",
+    "signal",
+    "subagent",
+    "tool",
+    "workflow",
+]

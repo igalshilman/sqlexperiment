@@ -36,14 +36,13 @@ stored transcript (the SDK's ``SessionStore``, mirrored as the CLI writes):
 
 from __future__ import annotations
 
-import inspect
 import json
 import shutil
 import tempfile
 import uuid
 from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +59,7 @@ from claude_agent_sdk import (
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, configured, has_table, model_id_of, model_of
 from restate_agents.object import Object, service
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
@@ -84,8 +83,8 @@ def agent(
     system: str | Callable[[ObjectContext], str] | None = None,
     tools: Sequence[Tool] | Callable[[ObjectContext], Sequence[Tool]] = (),
     workspace: str | Path | Callable[[ObjectContext], str | Path] | None = None,
-    options: dict[str, Any] | Callable[[ObjectContext], dict[str, Any]] | None = None,
-    **object_options: Any,
+    claude_options: dict[str, Any] | Callable[[ObjectContext], dict[str, Any]] | None = None,
+    **options: Any,
 ) -> Object:
     """
     An agent: a virtual object ``name``, one per key (its conversation), with the handlers
@@ -99,29 +98,25 @@ def agent(
     ``system`` is added to Claude Code's own system prompt. ``tools``: ``tool``s
     and Restate's tools. ``workspace``: a directory of the local machine to
     work in, with Claude Code's own tools (read, write, edit, bash, ...; use
-    a sandbox); without one, the agent has only ``tools``. ``options``: more
+    a sandbox); without one, the agent has only ``tools``. ``claude_options``: more
     of ``ClaudeAgentOptions``, such as ``{"max_turns": 20}`` or
     ``{"setting_sources": ["project"]}``. Each may be a function of the
     invocation's context, or an async one (a workspace for each key, say).
-    ``object_options``: those of ``restate.VirtualObject``. Add handlers of
+    ``options``: those of ``restate.VirtualObject``. Add handlers of
     your own with ``@agent.handler``.
     """
     if not callable(model):
         model_id_of(model_of(model), "anthropic")
 
     async def answer(ctx: ObjectContext, message: str) -> str:
-        async def given(option: Any) -> Any:
-            value = option(ctx) if callable(option) else option
-            return await value if inspect.isawaitable(value) else value
-
         return await prompt(
             ctx,
             message,
-            model=await given(model),
-            system=await given(system),
-            tools=await given(tools),
-            workspace=await given(workspace),
-            options=await given(options),
+            model=await configured(model, ctx),
+            system=await configured(system, ctx),
+            tools=await configured(tools, ctx),
+            workspace=await configured(workspace, ctx),
+            claude_options=await configured(claude_options, ctx),
         )
 
     async def transcript(ctx: ObjectContext) -> Transcript:
@@ -133,7 +128,7 @@ def agent(
             _transcribe(transcript, entry)
         return transcript
 
-    return turns.agent(name, answer, transcript, **object_options)
+    return turns.agent(name, answer, transcript, **options)
 
 
 async def prompt(
@@ -144,7 +139,7 @@ async def prompt(
     system: str | None = None,
     tools: Sequence[Tool] = (),
     workspace: str | Path | None = None,
-    options: dict[str, Any] | None = None,
+    claude_options: dict[str, Any] | None = None,
     thread: str | None = None,
 ) -> str:
     """
@@ -166,7 +161,7 @@ async def prompt(
         system=system,
         tools=list(tools),
         workspace=workspace,
-        options=options or {},
+        options=claude_options or {},
     )
     return await harness.answer_once(ctx, harness.Prompts(ctx.db, PROMPTS, thread), text, run.answer)
 
@@ -316,56 +311,47 @@ class _Run:
         resume = await store.load({"project_key": "", "session_id": session}) is not None
         if handoff and not resume:
             message = f"Before this conversation: {handoff}\n\n{message}"
-        ids: dict[tuple[str, str], deque[str]] = defaultdict(deque)
-        calls = harness.Calls(self.ctx.db, CALLS, pending.prompt)
-        prompts = harness.Prompts(self.ctx.db, PROMPTS, self.thread)
-
-        async def before(input: dict[str, Any], tool_use_id: str | None, _: Any) -> dict[str, Any]:
-            if tool_use_id:
-                ids[(input["tool_name"], harness.canonical(input["tool_input"]))].append(tool_use_id)
-            return {}
-
-        async def after(input: dict[str, Any], tool_use_id: str | None, _: Any) -> dict[str, Any]:
-            try:
-                steered = await harness.steer(self.ctx, prompts, pending)
-            except BaseException as error:
-                self.fail(error)
-                return {}
-            if not steered:
-                return {}
-            context = "\n\n".join(steered)
-            return {"hookSpecificOutput": {"hookEventName": input["hook_event_name"], "additionalContext": context}}
-
-        def served(tool: Tool) -> SdkMcpTool[Any]:
-            async def handler(args: dict[str, Any]) -> dict[str, Any]:
-                if self.failure is not None:
-                    return _result("Error: the turn is ending", error=True)
-                waiting = ids[(f"mcp__{SERVER}__{tool.name}", harness.canonical(args))]
-                id = waiting.popleft() if waiting else uuid.uuid4().hex
-                output, error = await calls.run(tool, id, args, self.fail)
-                return _result(output, error)
-
-            return SdkMcpTool(tool.name, tool.description, tool.input.model_json_schema(), handler)
-
+        hooks = _Hooks(
+            self,
+            pending,
+            harness.Calls(self.ctx.db, CALLS, pending.prompt),
+            harness.Prompts(self.ctx.db, PROMPTS, self.thread),
+        )
         # Claude Code's configuration, with its local copy of the transcript: the run's own, as the stored one counts.
         config = tempfile.mkdtemp(prefix="restate-agents-claude-")
-        options = ClaudeAgentOptions(
+        try:
+            answer = await self._ask(message, self._options(hooks, store, session, resume, config))
+        finally:
+            shutil.rmtree(config, ignore_errors=True)
+        if handoff:
+            await threads.start(self.thread, session, None)  # the new session has its handoff now
+        return answer
+
+    def _options(self, hooks: _Hooks, store: _Store, session: str, resume: bool, config: str) -> ClaudeAgentOptions:
+        """Claude Code's options: the session to resume (or start), the tools here, the hooks, and the run's options."""
+        local = self.workspace is not None
+        system = {"type": "preset", "preset": "claude_code", **({"append": self.system} if self.system else {})}
+        tools = [f"mcp__{SERVER}__{t.name}" for t in self.tools]
+        return ClaudeAgentOptions(
             model=self.model,
-            cwd=str(self.workspace) if self.workspace is not None else harness.nowhere(),
-            system_prompt={"type": "preset", "preset": "claude_code", "append": self.system}
-            if self.system
-            else {"type": "preset", "preset": "claude_code"},
-            mcp_servers={SERVER: create_sdk_mcp_server(SERVER, tools=[served(t) for t in self.tools])},
-            allowed_tools=[f"mcp__{SERVER}__{t.name}" for t in self.tools]
-            + (WORKSPACE_TOOLS if self.workspace is not None else []),
-            hooks={"PreToolUse": [HookMatcher(hooks=[before])], "PostToolUse": [HookMatcher(hooks=[after])]},
+            cwd=str(self.workspace) if local else harness.nowhere(),
+            system_prompt=system,
+            mcp_servers={SERVER: create_sdk_mcp_server(SERVER, tools=[hooks.served(t) for t in self.tools])},
+            allowed_tools=tools + (WORKSPACE_TOOLS if local else []),
+            hooks={
+                "PreToolUse": [HookMatcher(hooks=[hooks.before])],
+                "PostToolUse": [HookMatcher(hooks=[hooks.after])],
+            },
             env={"CLAUDE_CONFIG_DIR": config, **self.options.get("env", {})},
             session_store=store,
             session_store_flush="eager",
             **({"resume": session} if resume else {"session_id": session}),
-            **({} if self.workspace is not None else {"tools": []}),
+            **({} if local else {"tools": []}),
             **{k: v for k, v in self.options.items() if k != "env"},
         )
+
+    async def _ask(self, message: str, options: ClaudeAgentOptions) -> str:
+        """Claude Code's answer to ``message``: its result, or else the text of its last reply."""
         answer: str | None = None
         texts: list[str] = []
         messages = query(prompt=message, options=options)
@@ -376,25 +362,70 @@ class _Run:
                 if isinstance(reply, AssistantMessage):
                     texts = [block.text for block in reply.content if hasattr(block, "text")] or texts
                 elif isinstance(reply, ResultMessage):
-                    if reply.is_error:
-                        failed = f"Claude Code failed: {reply.result or reply.subtype}"
-                        # A limit of the options (max_turns, max_budget_usd), which a retry would reach again.
-                        raise (
-                            restate.TerminalError(failed)
-                            if reply.subtype.startswith("error_max")
-                            else RuntimeError(failed)
-                        )
-                    answer = reply.result if reply.result is not None else "".join(texts)
+                    answer = _result_of(reply, texts)
         finally:
             await messages.aclose()
-            shutil.rmtree(config, ignore_errors=True)
         if self.failure is not None:
             raise self.failure
         if answer is None:
             raise RuntimeError("Claude Code ended without an answer")
-        if handoff:
-            await threads.start(self.thread, session, None)  # the new session has its handoff now
         return answer
+
+
+@dataclass
+class _Hooks:
+    """
+    A prompt's hooks and tools: each call of a tool here takes the id Claude
+    Code gave it (its ``PreToolUse`` hook), and the messages steered to the
+    turn reach the model after each tool call (its ``PostToolUse`` hook).
+    """
+
+    run: _Run
+    pending: harness.Prompt
+    calls: harness.Calls
+    prompts: harness.Prompts
+    # The ids Claude Code gave the calls about to run, by tool and input.
+    ids: dict[tuple[str, str], deque[str]] = field(default_factory=lambda: defaultdict(deque))
+
+    async def before(self, input: dict[str, Any], tool_use_id: str | None, _: Any) -> dict[str, Any]:
+        if tool_use_id:
+            self.ids[(input["tool_name"], harness.canonical(input["tool_input"]))].append(tool_use_id)
+        return {}
+
+    async def after(self, input: dict[str, Any], tool_use_id: str | None, _: Any) -> dict[str, Any]:
+        try:
+            steered = await harness.steer(self.run.ctx, self.prompts, self.pending)
+        except BaseException as error:
+            self.run.fail(error)
+            return {}
+        if not steered:
+            return {}
+        context = "\n\n".join(steered)
+        return {"hookSpecificOutput": {"hookEventName": input["hook_event_name"], "additionalContext": context}}
+
+    def served(self, tool: Tool) -> SdkMcpTool[Any]:
+        """``tool``, as the SDK's MCP server serves it to Claude Code."""
+
+        async def handler(args: dict[str, Any]) -> dict[str, Any]:
+            if self.run.failure is not None:
+                return _result("Error: the turn is ending", error=True)
+            waiting = self.ids[(f"mcp__{SERVER}__{tool.name}", harness.canonical(args))]
+            id = waiting.popleft() if waiting else uuid.uuid4().hex
+            output, error = await self.calls.run(tool, id, args, self.run.fail)
+            return _result(output, error)
+
+        return SdkMcpTool(tool.name, tool.description, tool.input.model_json_schema(), handler)
+
+
+def _result_of(reply: ResultMessage, texts: list[str]) -> str:
+    """The answer of Claude Code's result: its own, or else ``texts``; an error result fails the attempt."""
+    if not reply.is_error:
+        return reply.result if reply.result is not None else "".join(texts)
+    failed = f"Claude Code failed: {reply.result or reply.subtype}"
+    # A limit of the options (max_turns, max_budget_usd), which a retry would reach again.
+    if reply.subtype.startswith("error_max"):
+        raise restate.TerminalError(failed)
+    raise RuntimeError(failed)
 
 
 def _result(text: str, error: bool = False) -> dict[str, Any]:

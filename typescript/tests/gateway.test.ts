@@ -2,9 +2,9 @@
 // prompt and the workspaces. Against a server: demo.sh.
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { EXAMPLES, PROMPT_SCHEMA, workspaceOf } from '../../examples-typescript/gateway/agent.ts';
-import { identity } from '../../examples-typescript/gateway/gateway.ts';
-import { PREBUILT } from '../../examples-typescript/gateway/tools.ts';
+import { EXAMPLES, PROMPT_SCHEMA, workspaceOf } from '../../examples-typescript/advanced/gateway/agent.ts';
+import { identity } from '../../examples-typescript/advanced/gateway/gateway.ts';
+import { PREBUILT } from '../../examples-typescript/advanced/gateway/tools.ts';
 
 describe('the gateway', () => {
   it('has prebuilt tools, with the JSON schema of their zod input', () => {

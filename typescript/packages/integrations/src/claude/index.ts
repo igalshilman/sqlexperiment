@@ -231,7 +231,11 @@ export const chat = (options: Configure<Options> = {}) => {
 const storedText = (content: string | readonly { type: string; text?: string }[] | undefined) =>
   typeof content === 'string' ? content : (content ?? []).flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
 
-/** A handler of the conversation, a page at a time: what was said, in order, with the tool calls. */
+/**
+ * A handler of the conversation as clients read it: a page at a time, or
+ * what is new or changed since a cursor, from the log each change writes
+ * (log.ts). It answers while a message is answered.
+ */
 export const messages = () => messagesHandler();
 
 /** The conversation in `db`, as `messages` gives it. */

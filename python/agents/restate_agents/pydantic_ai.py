@@ -2,15 +2,14 @@
 Pydantic AI agents in Restate virtual objects: each conversation is in the
 object's database, stored a step at a time::
 
-    from restate_agents import serve, tool
-    from restate_agents.pydantic_ai import agent
+    from restate_agents import pydantic_ai, serve, tool
 
     @tool
     def get_weather(city: str) -> str:
         '''The current weather in a city.'''
         return f"Sunny and 21°C in {city}"
 
-    assistant = agent("assistant", tools=[get_weather])
+    assistant = pydantic_ai.agent("assistant", system="Answer briefly.", tools=[get_weather])
     serve(assistant)
 
 The usual agent is a Pydantic AI ``Agent`` with ``model`` (``provider/model-id``,
@@ -64,7 +63,7 @@ from pydantic_ai.models import Model, ModelRequestContext
 from restate_fns import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, has_table, model_of
+from restate_agents.common import DEFAULT_MODEL, Transcript, configured, has_table, model_of
 from restate_agents.object import Object, context
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
@@ -116,9 +115,8 @@ def agent(
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         if usual is not None:
-            return await prompt(ctx, usual, message, model=_model(model, ctx))
-        chosen = pydantic_agent if isinstance(pydantic_agent, Agent) else pydantic_agent(ctx)
-        return await prompt(ctx, chosen, message)
+            return await prompt(ctx, usual, message, model=await _model(model, ctx))
+        return await prompt(ctx, await configured(pydantic_agent, ctx, Agent), message)
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
@@ -332,9 +330,9 @@ def _usual(system: str | None, given: Tools) -> Agent[None, str]:
     return Agent(instructions=system, tools=_tools(given))
 
 
-def _model(model: str | Model | Callable[[ObjectContext], str | Model] | None, ctx: ObjectContext) -> str | Model:
+async def _model(model: str | Model | Callable[[ObjectContext], str | Model] | None, ctx: ObjectContext) -> str | Model:
     """The model, as Pydantic AI names it: ``provider:model-id``."""
-    chosen = model(ctx) if callable(model) and not isinstance(model, Model) else model
+    chosen = await configured(model, ctx, Model)
     if isinstance(chosen, Model):
         return chosen
     named = model_of(chosen)

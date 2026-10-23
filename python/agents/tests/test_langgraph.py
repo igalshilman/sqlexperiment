@@ -136,9 +136,12 @@ async def test_a_terminal_error_of_a_tool_is_its_answer_to_the_model():
         await Object().run(obj.handlers["chat"].fn, "refuse politely")
 
 
-def test_a_model_that_is_not_anthropics_is_refused_early():
+def test_a_model_that_is_not_anthropics_is_refused_early(monkeypatch):
     with pytest.raises(ValueError, match="not anthropic's"):
         langgraph.agent("teller", model="openai/gpt-6-luna")
+    monkeypatch.setenv("MODEL", "openai/gpt-6-luna")
+    with pytest.raises(ValueError, match=r"\(from MODEL\) is not anthropic's"):
+        langgraph.agent("teller")
 
 
 async def test_a_missing_api_key_is_a_terminal_error(monkeypatch):

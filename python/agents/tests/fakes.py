@@ -155,6 +155,11 @@ class ClaudeClient:
 
     async def create(self, *, messages: list[dict[str, Any]], system: str | None = None, **params: Any) -> Message:
         self.requests.append({"messages": list(messages), "system": system, **params})
+        blocks = [b for m in messages if not isinstance(m["content"], str) for b in m["content"]]
+        if not params.get("tools") and any(b["type"] in ("tool_use", "tool_result") for b in blocks):
+            raise ValueError(
+                "Requests which include `tool_use` or `tool_result` blocks must define tools."
+            )  # as the API
         said: list[BaseMessage] = [SystemMessage(system)] if system else []
         for m in messages:
             content = [{"type": "text", "text": m["content"]}] if isinstance(m["content"], str) else m["content"]
@@ -204,6 +209,8 @@ class LiteLLMTeller(litellm.CustomLLM):
 
     async def acompletion(self, model: str, messages: list, model_response: Any, optional_params: dict, **_: Any):
         self.requests.append({"model": model, "messages": list(messages), **optional_params})
+        if not optional_params.get("tools") and any(m["role"] == "tool" or m.get("tool_calls") for m in messages):
+            raise ValueError("Requests with tool calls must define tools.")  # as Anthropic's API, through LiteLLM
         said: list[BaseMessage] = []
         results = False  # whether the messages before are tool results (and messages steered after them)
         for m in messages:

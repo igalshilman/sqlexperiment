@@ -2,29 +2,44 @@
 
 Each one is a file you run with Node (24 or later), from here, after `make
 js` at the repository's root. See [Run an example](#run-an-example). Start
-with [`chat.ts`](chat.ts), and [`restate-agents`](../typescript/packages/integrations/README.md),
-the integrations they use.
+with [`chat.ts`](basic/chat.ts), and [`restate-agents`](../typescript/packages/integrations/README.md),
+the integrations they use. They come in three levels: **basic**, an agent
+and what it keeps; **intermediate**, one of Restate's patterns at a time (its
+tools, a person in the loop, teams, workflows, coding agents); and
+**advanced**, applications that put them together.
 
-| File                            | What                                                                                                                                          |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`chat.ts`](chat.ts)            | **Start here.** A durable chat agent on pi, with a tool: `pi.agent({ name: 'assistant', tools: [weather] })`                                  |
-| [`opencode.ts`](opencode.ts)    | The same agent on OpenCode 2.0                                                                                                                |
-| [`langgraph.ts`](langgraph.ts)  | The same agent on LangGraph                                                                                                                   |
-| [`claude.ts`](claude.ts)        | The same agent on Claude (the Anthropic SDK's tool runner)                                                                                    |
-| [`deepseek.ts`](deepseek.ts)    | The same agent on the DeepSeek Harness (`DEEPSEEK_API_KEY`)                                                                                   |
-| [`coding.ts`](coding.ts)        | A coordinator (pi) that hands coding tasks to coders of its own (OpenCode)                                                                    |
-| [`review.ts`](review.ts)        | A coder (OpenCode) made your own: a plugin that keeps its edits in `src/`, and a handler that writes code, then reviews it (`withOpenCode`)   |
-| [`support.ts`](support.ts)      | A support agent whose tools are Restate itself: a service call, a signal (a manager's approval) and a workflow                                |
-| [`memory.ts`](memory.ts)        | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a handler of your own beside the agent's |
-| [`harness.ts`](harness.ts)      | An agent each user configures: its model and persona from the object's database (`pi.chat(options)`), and `compact` and `reset` handlers      |
-| [`models.ts`](models.ts)        | Models you set up yourself: Claude through an Anthropic client of your own (a gateway, no retries of its own), LangGraph on a `ChatAnthropic` |
-| [`team.ts`](team.ts)            | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                       |
-| [`router.ts`](router.ts)        | A front desk of your own: a handler asks a model which team handles a message (`pi.prompt`), then calls that team's agent                     |
-| [`followup.ts`](followup.ts)    | An agent that schedules a check-in for a day later: `send` with a delay                                                                       |
-| [`triage.ts`](triage.ts)        | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review                                               |
-| [`ui/`](ui/app.ts)              | A chat page for `support.ts` on Restate's own client: the conversation as the agent works, Approve and Reject, Steer, Stop (`npx vite ui`)    |
-| [`notes.ts`](notes.ts)          | SQL in a virtual object, with `ctx.db`                                                                                                        |
-| [`gateway/`](gateway/README.md) | A tool gateway for agents: approvals, and limits per tenant and user                                                                          |
+### Basic
+
+| File                                 | What                                                                                                                                          |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`chat.ts`](basic/chat.ts)           | **Start here.** A durable chat agent on pi, with a tool: `pi.agent({ name: 'assistant', tools: [weather] })`                                  |
+| [`opencode.ts`](basic/opencode.ts)   | The same agent on OpenCode 2.0                                                                                                                |
+| [`langgraph.ts`](basic/langgraph.ts) | The same agent on LangGraph                                                                                                                   |
+| [`claude.ts`](basic/claude.ts)       | The same agent on Claude (the Anthropic SDK's tool runner)                                                                                    |
+| [`deepseek.ts`](basic/deepseek.ts)   | The same agent on the DeepSeek Harness (`DEEPSEEK_API_KEY`)                                                                                   |
+| [`models.ts`](basic/models.ts)       | Models you set up yourself: Claude through an Anthropic client of your own (a gateway, no retries of its own), LangGraph on a `ChatAnthropic` |
+| [`memory.ts`](basic/memory.ts)       | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a handler of your own beside the agent's |
+| [`notes.ts`](basic/notes.ts)         | SQL in a virtual object, with `ctx.db`, and no agent                                                                                          |
+
+### Intermediate
+
+| File                                      | What                                                                                                                                        |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`support.ts`](intermediate/support.ts)   | A support agent whose tools are Restate itself: a service call, a signal (a manager's approval) and a workflow                              |
+| [`triage.ts`](intermediate/triage.ts)     | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review                                             |
+| [`router.ts`](intermediate/router.ts)     | A front desk of your own: a handler asks a model which team handles a message (`pi.prompt`), then calls that team's agent                   |
+| [`team.ts`](intermediate/team.ts)         | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                     |
+| [`followup.ts`](intermediate/followup.ts) | An agent that schedules a check-in for a day later: `send` with a delay                                                                     |
+| [`harness.ts`](intermediate/harness.ts)   | An agent each user configures: its model and persona from the object's database (`pi.chat(options)`), and `compact` and `reset` handlers    |
+| [`coding.ts`](intermediate/coding.ts)     | A coordinator (pi) that hands coding tasks to coders of its own (OpenCode)                                                                  |
+| [`review.ts`](intermediate/review.ts)     | A coder (OpenCode) made your own: a plugin that keeps its edits in `src/`, and a handler that writes code, then reviews it (`withOpenCode`) |
+| [`ui/`](ui/app.ts)                        | A chat page for `support.ts` on Restate's own client: the conversation as the agent works, Approve and Reject, Steer, Stop (`npx vite ui`)  |
+
+### Advanced
+
+| Folder                                   | What                                                                                                                                    |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| [`gateway/`](advanced/gateway/README.md) | A tool gateway for agents: one per tenant, holding dangerous calls for approval, with limits per tenant and user, and an agent per case |
 
 Each agent is a virtual object, one per key, whose conversation is in the
 object's SQL database: a message is answered once per invocation, and a
@@ -34,7 +49,7 @@ crash resumes the reply. The integrations are in
 ## Run an example
 
 ```sh
-ANTHROPIC_API_KEY=… node chat.ts                                             # the agent, on port 9080
+ANTHROPIC_API_KEY=… node basic/chat.ts                                       # the agent, on port 9080
 npx @restatedev/restate-server  # Restate, in another terminal
 npx @restatedev/restate deployments register http://localhost:9080           # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
@@ -54,7 +69,8 @@ npx @restatedev/restate deployments register http://host.docker.internal:9080
 
 `MODEL` picks another model, such as `MODEL=openai/gpt-6-luna` with
 `OPENAI_API_KEY`, for the agents on pi and OpenCode; Claude and LangGraph
-take Anthropic's models, and DeepSeek its own (see
+take Anthropic's models, and DeepSeek its own, and refuse another
+provider's `MODEL` when they start (see
 [the models](../typescript/packages/integrations/README.md#models)). To call an agent
 from code, or to send a message again safely, see
 [Calling an agent](../typescript/packages/integrations/README.md#calling-an-agent).

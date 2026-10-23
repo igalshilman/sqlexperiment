@@ -18,7 +18,7 @@ Three layers, each on the one before:
 
 Each key of a virtual object has a SQLite database of its own, kept in the
 object's state: no database to run. `restate-fns` is the Restate SDK with
-that in its objects ([`examples-typescript/notes.ts`](examples-typescript/notes.ts)):
+that in its objects ([`examples-typescript/basic/notes.ts`](examples-typescript/basic/notes.ts)):
 
 ```ts
 import * as restate from 'restate-fns';
@@ -52,7 +52,7 @@ curl localhost:8080/notes/alice/list
 A statement is durable when it returns. `ctx.transaction` groups
 statements, and the sends made in it, into one commit. See
 [`restate-fns`](typescript/packages/fns/README.md), and
-[`examples-python/notes.py`](examples-python/notes.py) for the same in Python
+[`examples-python/basic/notes.py`](examples-python/basic/notes.py) for the same in Python
 ([`restate_fns`](python/fns/README.md)).
 
 ## AI agents
@@ -61,7 +61,7 @@ An agent is an object with SQL: its conversation is in its own database, so
 a crash, or a manager who takes a day, changes nothing. This one's tools are
 Restate itself: it looks an order up with a service, waits for a manager's
 approval, and refunds with a workflow
-([`examples-typescript/support.ts`](examples-typescript/support.ts)):
+([`examples-typescript/intermediate/support.ts`](examples-typescript/intermediate/support.ts)):
 
 ```ts
 const support = pi.agent({
@@ -100,7 +100,7 @@ Claude, LangGraph or Pydantic AI ([`restate_agents`](python/agents/README.md),
 A tool is a function with the object's `ctx`. This assistant keeps what it
 learns about you in a table of its own SQL database, next to its
 conversation, and a handler of yours serves that table, for a profile page
-say ([`examples-typescript/memory.ts`](examples-typescript/memory.ts)):
+say ([`examples-typescript/basic/memory.ts`](examples-typescript/basic/memory.ts)):
 
 ```ts
 import { object, serve, tool } from 'restate-agents';

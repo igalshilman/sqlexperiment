@@ -39,13 +39,12 @@ end:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import shutil
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +52,7 @@ from codex_cli_bin import bundled_codex_path
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import Transcript, has_table, model_id_of
+from restate_agents.common import Transcript, configured, has_table, model_id_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
@@ -98,18 +97,14 @@ def agent(
         _model_of(model)
 
     async def answer(ctx: ObjectContext, message: str) -> str:
-        async def given(option: Any) -> Any:
-            value = option(ctx) if callable(option) else option
-            return await value if inspect.isawaitable(value) else value
-
         return await prompt(
             ctx,
             message,
-            model=await given(model),
-            system=await given(system),
-            tools=await given(tools),
-            workspace=await given(workspace),
-            config=await given(config),
+            model=await configured(model, ctx),
+            system=await configured(system, ctx),
+            tools=await configured(tools, ctx),
+            workspace=await configured(workspace, ctx),
+            config=await configured(config, ctx),
         )
 
     async def transcript(ctx: ObjectContext) -> Transcript:
@@ -334,72 +329,52 @@ class _Run:
         path, handoff = await rollout.place()
         if handoff and not lines:
             message = f"Before this conversation: {handoff}\n\n{message}"
-        calls = harness.Calls(self.ctx.db, CALLS, pending.prompt)
-        prompts = harness.Prompts(self.ctx.db, PROMPTS, self.thread)
         home = tempfile.mkdtemp(prefix="restate-agents-codex-")
-        file: Path | None = None
-
-        async def serve(method: str, params: dict[str, Any]) -> Any:
-            if method != "item/tool/call":
-                return {"decision": "decline"} if method.endswith("requestApproval") else {}
-            tool = next((t for t in self.tools if t.name == params["tool"]), None)
-            if tool is None or self.failure is not None:
-                text = f"Error: no tool {params['tool']}" if tool is None else "Error: the turn is ending"
-                return {"contentItems": [{"type": "inputText", "text": text}], "success": False}
-            turn = {"threadId": params["threadId"], "turnId": params["turnId"]}
-            output, error, steered = "Error: the turn is ending", True, []
-            try:
-                if file is not None:
-                    await rollout.sync(file)  # the model's call, before the tool runs
-                output, error = await calls.run(tool, params["callId"], params.get("arguments") or {}, self.fail)
-                steered = await harness.steer(self.ctx, prompts, pending)
-            except BaseException as failure:
-                self.fail(failure)
-            # Requests of their own, which Codex answers once it has the tool's result.
-            if self.failure is not None:
-                asyncio.ensure_future(server.request("turn/interrupt", turn))
-            elif steered:
-                steering = {"threadId": turn["threadId"], "expectedTurnId": turn["turnId"]}
-                input = [{"type": "text", "text": text} for text in steered]
-                asyncio.ensure_future(server.request("turn/steer", {**steering, "input": input}))
-            return {"contentItems": [{"type": "inputText", "text": output}], "success": not error}
-
-        server = _AppServer(home, serve)
+        prompts = harness.Prompts(self.ctx.db, PROMPTS, self.thread)
+        tools = _Tools(self, pending, harness.Calls(self.ctx.db, CALLS, pending.prompt), prompts, rollout)
+        server = tools.server = _AppServer(home, tools.serve)
         try:
             await server.start()
             if key := os.environ.get("OPENAI_API_KEY"):
                 await server.request("account/login/start", {"type": "apiKey", "apiKey": key})
-            settings = {
-                "cwd": str(self.workspace) if self.workspace is not None else harness.nowhere(),
-                "approvalPolicy": "never",
-                "sandbox": "workspace-write" if self.workspace is not None else "read-only",
-                "config": self.config or None,
-                "model": self.model,
-                "developerInstructions": self.system,
-            }
-            if path is not None and lines:
-                file = Path(home) / path
-                file.parent.mkdir(parents=True, exist_ok=True)
-                file.write_text("".join(line + "\n" for line in lines))
-                id = json.loads(lines[0])["payload"]["id"]
-                started = await server.request("thread/resume", {"threadId": id, "path": str(file), **settings})
-            else:
-                started = await server.request(
-                    "thread/start", {**settings, "dynamicTools": [_spec(t) for t in self.tools]}
-                )
-                file = Path(started["thread"]["path"])
-                await rollout.started(str(file.relative_to(home)))
-            id = started["thread"]["id"]
+            id, tools.file = await self._thread(server, rollout, home, path, lines)
             turn = await server.request("turn/start", {"threadId": id, "input": [{"type": "text", "text": message}]})
             answer = await self._until_completed(server, turn["turn"]["id"])
             await server.close()  # Codex has written the whole rollout once it exits
-            await rollout.sync(file)
+            await rollout.sync(tools.file)
         finally:
             await server.close()
             shutil.rmtree(home, ignore_errors=True)
         if self.failure is not None:
             raise self.failure
         return answer
+
+    async def _thread(
+        self, server: _AppServer, rollout: _Rollout, home: str, path: str | None, lines: list[str]
+    ) -> tuple[str, Path]:
+        """
+        The conversation's Codex thread, and its rollout file in ``home``:
+        resumed from the stored rollout, or else started, with its place stored.
+        """
+        settings = {
+            "cwd": str(self.workspace) if self.workspace is not None else harness.nowhere(),
+            "approvalPolicy": "never",
+            "sandbox": "workspace-write" if self.workspace is not None else "read-only",
+            "config": self.config or None,
+            "model": self.model,
+            "developerInstructions": self.system,
+        }
+        if path is not None and lines:
+            file = Path(home) / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("".join(line + "\n" for line in lines))
+            thread = json.loads(lines[0])["payload"]["id"]
+            resumed = await server.request("thread/resume", {"threadId": thread, "path": str(file), **settings})
+            return resumed["thread"]["id"], file
+        started = await server.request("thread/start", {**settings, "dynamicTools": [_spec(t) for t in self.tools]})
+        file = Path(started["thread"]["path"])
+        await rollout.started(str(file.relative_to(home)))
+        return started["thread"]["id"], file
 
     def fail(self, error: BaseException) -> None:
         self.failure = self.failure or error
@@ -419,6 +394,66 @@ class _Run:
                 if done.get("status") == "failed" and self.failure is None:
                     raise RuntimeError(f"Codex failed: {(done.get('error') or {}).get('message', 'the turn failed')}")
                 return texts[-1] if texts else ""
+
+
+@dataclass
+class _Tools:
+    """
+    The tools here, as a prompt's Codex calls them (dynamic tools): each call
+    is stored once, with the rollout before it, and the messages steered to
+    the turn follow its result.
+    """
+
+    run: _Run
+    pending: harness.Prompt
+    calls: harness.Calls
+    prompts: harness.Prompts
+    rollout: _Rollout
+    # Codex, which calls them; and its rollout file, once the thread started.
+    server: _AppServer = field(init=False)
+    file: Path | None = None
+
+    async def serve(self, method: str, params: dict[str, Any]) -> Any:
+        """Answer Codex's request ``method``: a tool call; an approval is declined (the tools here need none)."""
+        if method != "item/tool/call":
+            return {"decision": "decline"} if method.endswith("requestApproval") else {}
+        tool = next((t for t in self.run.tools if t.name == params["tool"]), None)
+        if tool is None:
+            return _content(f"Error: no tool {params['tool']}", success=False)
+        if self.run.failure is not None:
+            return _content("Error: the turn is ending", success=False)
+        output, error, steered = await self._call(tool, params)
+        self._follow_up(params, steered)
+        return _content(output, success=not error)
+
+    async def _call(self, tool: Tool, params: dict[str, Any]) -> tuple[str, bool, list[str]]:
+        """The call's output, whether it is an error, and the messages steered to the turn; a failure fails the run."""
+        try:
+            if self.file is not None:
+                await self.rollout.sync(self.file)  # the model's call, before the tool runs
+            output, error = await self.calls.run(tool, params["callId"], params.get("arguments") or {}, self.run.fail)
+            return output, error, await harness.steer(self.run.ctx, self.prompts, self.pending)
+        except BaseException as failure:
+            self.run.fail(failure)
+            return "Error: the turn is ending", True, []
+
+    def _follow_up(self, params: dict[str, Any], steered: list[str]) -> None:
+        """
+        A failed run's turn is interrupted, or the steered messages join it:
+        requests of their own, which Codex answers once it has the tool's result.
+        """
+        thread, turn = params["threadId"], params["turnId"]
+        if self.run.failure is not None:
+            asyncio.ensure_future(self.server.request("turn/interrupt", {"threadId": thread, "turnId": turn}))
+        elif steered:
+            input = [{"type": "text", "text": text} for text in steered]
+            steer = {"threadId": thread, "expectedTurnId": turn, "input": input}
+            asyncio.ensure_future(self.server.request("turn/steer", steer))
+
+
+def _content(text: str, *, success: bool) -> dict[str, Any]:
+    """A dynamic tool's result."""
+    return {"contentItems": [{"type": "inputText", "text": text}], "success": success}
 
 
 def _spec(tool: Tool) -> dict[str, Any]:

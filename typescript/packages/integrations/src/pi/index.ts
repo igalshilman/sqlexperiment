@@ -58,6 +58,7 @@ import {
   configured,
   messagesHandler,
   modelOf,
+  providerOf,
   nextPromptId,
   settleSteering,
   type Steerable,
@@ -128,6 +129,45 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): ToolRegistration =>
   });
 
 /**
+ * The tools of an agent, `system` added to its system prompt, and, with a
+ * `workspace`, pi's coding tools working there, with the environment they
+ * run in.
+ */
+async function extensions(tools: ToolRegistration[], system: string | undefined, workspace: string | undefined) {
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: 'tools', tools }));
+  if (system) registry.install(defineExtension({ name: 'system', sections: [section('system', () => system)] }));
+  if (!workspace) return { registry, env: undefined };
+  await mkdir(workspace, { recursive: true });
+  registry.install(CodingTools);
+  // Tell the model where the coding tools work.
+  registry.install(defineExtension({ name: 'workspace', sections: [section('cwd', () => workspace)] }));
+  return { registry, env: () => new NodeExecutionEnv({ cwd: workspace }) };
+}
+
+/**
+ * The root conversation of `harness`, on `model`. It keeps the model it was
+ * created with: on another one now (`model` or MODEL changed), it moves to
+ * this one.
+ */
+async function rootOn(harness: Harness, context: Context, model: string): Promise<Conversation> {
+  const [provider, modelId] = providerOf(model);
+  const root = await harness.root(context, { agent: { model: { provider, modelId } } });
+  const { model: current } = await root.agent(context);
+  if (current?.provider !== provider || current.modelId !== modelId) {
+    await root.configure({ model: { provider, modelId } }, context);
+  }
+  return root;
+}
+
+/** The error of prompt `id`, which ended unanswered for `reason`: the model's, if it is the model's. */
+function unanswered(id: string, why: string | null | undefined, model: string) {
+  const reason = why ?? 'unknown';
+  const check = reason === 'model_error' || reason === 'no_model' ? ` (the model ${model}: ${CHECK_MODEL})` : '';
+  return new restate.TerminalError(`prompt ${id} unanswered: ${reason}${check}`);
+}
+
+/**
  * Run `work(pi)` with a Harness over the object's database: `model` is the
  * model to use as `provider/model-id`, and `tools` the agent's tools. `pi`
  * has `prompt(text)`, and the `harness` and chord `context` for anything
@@ -139,8 +179,7 @@ export const withPi = async <T>(
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const model = modelOf(named);
-  const [provider = '', modelId = ''] = model.split('/');
-  models ??= await modelsOf(provider);
+  models ??= await modelsOf(providerOf(model)[0]);
   // A tool's error fails the attempt, which Restate retries (pi-durable would
   // hand it to the model): the work is cancelled, so the tool call stores no
   // result, and the retry runs it again with the same call id.
@@ -148,7 +187,7 @@ export const withPi = async <T>(
   const { promise: failure, reject: failed } = Promise.withResolvers<never>();
   failure.catch(() => {});
   // A cancelled invocation, whenever it comes, aborts the conversation's
-  // work instead (below): pi-durable ends the turn, and the tool call with it.
+  // work instead (abortOn): pi-durable ends the turn, and the tool call with it.
   let cancelled: restate.CancelledError | undefined;
   const turn = cancellationOf(ctx);
   const onCancel = () => {
@@ -157,7 +196,7 @@ export const withPi = async <T>(
   };
   turn?.addEventListener('abort', onCancel, { once: true });
   // The root conversation, once the Harness is open (below).
-  let conversation!: () => Promise<Conversation>;
+  const conversation = () => rootOn(harness, context, model);
   // Messages steered to the turn: given as pi-durable's steering input (by
   // its id, once), which the run takes once the round's tools are done.
   const steerable: Steerable = {
@@ -169,85 +208,67 @@ export const withPi = async <T>(
       return (await root.commit((tx) => tx.submissionByRequest(root.id, id), context)) !== undefined;
     },
   };
-  const failing = (t: ToolRegistration): ToolRegistration => ({
+  // A tool call's error: the attempt fails, and the call never returns.
+  const stopped = (error: unknown, task: Context): Promise<never> => {
+    // The turn was cancelled, and the abort ended the call: pi-durable records it.
+    if (cancelled) throw error;
+    failed(error);
+    if (error instanceof restate.CancelledError) {
+      cancelled = error;
+      return awaitWithContext(new Promise<never>(() => {}), task);
+    }
+    cancel(error);
+    return awaitWithContext(new Promise<never>(() => {}), context);
+  };
+  const tracked = (t: ToolRegistration): ToolRegistration => ({
     ...t,
-    execute: (args, api, task) =>
-      toolCallStarted(ctx)
-        .then(() => t.execute(args, api, task))
-        .then(async (result) => {
-          await toolCallEnded(ctx, steerable);
-          return result;
-        })
-        .catch((error: unknown) => {
-          // The turn was cancelled, and the abort ended the call: pi-durable records it.
-          if (cancelled) throw error;
-          failed(error);
-          if (error instanceof restate.CancelledError) {
-            cancelled = error;
-            return awaitWithContext(new Promise<never>(() => {}), task);
-          }
-          cancel(error);
-          return awaitWithContext(new Promise<never>(() => {}), context);
-        }),
-  });
-  const registry = createRegistry();
-  registry.install(
-    defineExtension({ name: 'tools', tools: tools.map((t) => failing(isTool(t) ? native(t, ctx) : t)) }),
-  );
-  if (system) registry.install(defineExtension({ name: 'system', sections: [section('system', () => system)] }));
-  let env: (() => NodeExecutionEnv) | undefined;
-  if (workspace) {
-    await mkdir(workspace, { recursive: true });
-    env = () => new NodeExecutionEnv({ cwd: workspace });
-    registry.install(CodingTools);
-    // Tell the model where the coding tools work.
-    registry.install(defineExtension({ name: 'workspace', sections: [section('cwd', () => workspace)] }));
-  }
-  const harness = await Harness.open(await openSqlKvStorage(ctx.db), { models, registry, env }, context);
-  try {
-    // The root conversation keeps the model it was created with: on another
-    // one now (`model` or MODEL changed), it moves to this one.
-    conversation = async () => {
-      const root = await harness.root(context, { agent: { model: { provider, modelId } } });
-      const { model: current } = await root.agent(context);
-      if (current?.provider !== provider || current.modelId !== modelId) {
-        await root.configure({ model: { provider, modelId } }, context);
+    execute: async (args, api, task) => {
+      try {
+        await toolCallStarted(ctx);
+        const result = await t.execute(args, api, task);
+        await toolCallEnded(ctx, steerable);
+        return result;
+      } catch (error) {
+        return stopped(error, task);
       }
-      return root;
-    };
+    },
+  });
+  const { registry, env } = await extensions(
+    tools.map((t) => tracked(isTool(t) ? native(t, ctx) : t)),
+    system,
+    workspace,
+  );
+  const harness = await Harness.open(await openSqlKvStorage(ctx.db), { models, registry, env }, context);
+
+  const prompt = async (text: string, id = nextPromptId(ctx)) => {
+    const root = await conversation();
+    const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
+    const settled = await submission.wait(context);
+    // A prompt the cancellation's abort ended fails with the cancellation.
+    if (settled.status !== 'done' || settled.answer === undefined)
+      throw cancelled ?? unanswered(id, settled.reason, model);
+    const { answer } = settled;
+    const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
+    const reply = entry?.model?.at(-1);
+    if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
+    await settleSteering(ctx, steerable);
+    return textOf(reply.content);
+  };
+  // `failure`, once it comes; a cancellation first aborts the conversation's work.
+  const abortOn = async (): Promise<never> => {
+    try {
+      return await failure;
+    } catch (error) {
+      if (error instanceof restate.CancelledError) await (await conversation()).abort(context);
+      throw error;
+    }
+  };
+
+  try {
     // The log reads the root conversation through this Harness, while it is open.
     const read = async (transcript: Transcript) => transcribe(await harness.root(context), context, transcript);
     return await transcribing(ctx, read, () =>
-      Promise.race([
-        failure.catch(async (error: unknown) => {
-          if (error instanceof restate.CancelledError) await (await conversation()).abort(context);
-          throw error;
-        }),
-        work({
-          harness,
-          context,
-          conversation,
-          async prompt(text, id = nextPromptId(ctx)) {
-            const root = await conversation();
-            const submission = await root.submit({ type: 'input', content: text, requestId: id }, context);
-            const settled = await submission.wait(context);
-            if (settled.status !== 'done' || settled.answer === undefined) {
-              // A prompt the cancellation's abort ended fails with the cancellation.
-              if (cancelled) throw cancelled;
-              const reason = settled.reason ?? 'unknown';
-              const check =
-                reason === 'model_error' || reason === 'no_model' ? ` (the model ${model}: ${CHECK_MODEL})` : '';
-              throw new restate.TerminalError(`prompt ${id} unanswered: ${reason}${check}`);
-            }
-            const { answer } = settled;
-            const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
-            const reply = entry?.model?.at(-1);
-            if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
-            await settleSteering(ctx, steerable);
-            return textOf(reply.content);
-          },
-        }),
-      ]),
+      Promise.race([abortOn(), work({ harness, context, conversation, prompt })]),
     );
   } finally {
     turn?.removeEventListener('abort', onCancel);
@@ -274,9 +295,9 @@ export const chat = (options: Configure<Options> = {}) => {
 };
 
 /**
- * A handler of the conversation, a page at a time: what was said, in order,
- * with the tool calls, from pi-durable's entries. It answers while a message
- * is answered, with the entries committed so far.
+ * A handler of the conversation as clients read it: a page at a time, or
+ * what is new or changed since a cursor, from the log each change writes
+ * (log.ts). It answers while a message is answered.
  */
 export const messages = () => messagesHandler();
 

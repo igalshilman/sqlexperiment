@@ -46,8 +46,9 @@ export interface Tool<I = Record<string, unknown>> {
 /** Whether `value` is a {@link Tool}, rather than a framework's own. */
 export const isTool = (value: unknown): value is Tool => typeof value === 'object' && value !== null && TOOL in value;
 
-/** A result as text: a string as it is, anything else as JSON. */
-const text = (value: unknown) => (typeof value === 'string' ? value : (JSON.stringify(value) ?? 'done'));
+/** A result as text: a string as it is, nothing as "done", anything else as JSON. */
+const text = (value: unknown) =>
+  typeof value === 'string' ? value : value === null || value === undefined ? 'done' : JSON.stringify(value);
 
 /**
  * A tool, for any framework's agent:
