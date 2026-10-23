@@ -1,6 +1,6 @@
 """
 An on-call responder on Google ADK, its steps Restate's: for each incident
-(a key) it checks the services' health with a Restate service, keeps the
+(a key) it checks the services' health with a Restate service (ops.py), keeps the
 incident's timeline in its own SQL table, pages the engineer on call and
 waits for them to acknowledge (a signal, without holding a process), and
 schedules the post-incident review for the next day (a delayed send, which
@@ -25,34 +25,9 @@ of ``reviews/schedule``; REVIEW_SECONDS=30 makes it come sooner.
 import os
 from datetime import timedelta
 
-import restate_fns as restate
+from ops import health, monitoring, reviews, schedule
 from pydantic import BaseModel
 from restate_agents import adk, call, has_table, send, serve, signal, tool
-
-# A plain Restate service: the services' health, a stand-in for your monitoring.
-monitoring = restate.Service("monitoring")
-
-
-@monitoring.handler()
-async def health(ctx: restate.Context, service: str) -> str:
-    """The health of a service (checkout, payments, inventory): its error rate and its last deploy."""
-    if service == "payments":
-        return "payments: 31% errors since 14:02; deployed 2.4.1 at 14:00"
-    return f"{service}: healthy, 0.1% errors"
-
-
-class Review(BaseModel):
-    incident: str
-    summary: str
-
-
-reviews = restate.Service("reviews")
-
-
-@reviews.handler()
-async def schedule(ctx: restate.Context, review: Review) -> None:
-    """Schedule the post-incident review of an incident."""
-    print(f"Review of {review.incident}: {review.summary}")  # a stand-in for a calendar invite
 
 
 class Page(BaseModel):

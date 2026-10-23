@@ -3,7 +3,7 @@ A writer and two editors, on a LangGraph graph of your own: the writer
 drafts, the model editor reviews, and the writer revises until it approves
 (three drafts at most); then a person approves the draft (a Restate
 signal), or sends notes back to the writer; and the publishing workflow
-publishes it. Each step is stored in the object's database: a crash
+(publishing.py) publishes it. Each step is stored in the object's database: a crash
 mid-review carries on from the last draft, and the post is published once.
 
     ANTHROPIC_API_KEY=... uv run intermediate/writer.py
@@ -15,10 +15,10 @@ mid-review carries on from the last draft, and the post is published once.
     curl localhost:8080/writer/post/messages   # each draft, and where it was published
 """
 
-import restate_fns as restate
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
+from publishing import publishing
 from pydantic import BaseModel
 from restate_agents import langgraph, serve
 from restate_agents.langgraph import nodes
@@ -37,15 +37,6 @@ class Draft(MessagesState):
 class Review(BaseModel):
     approved: bool
     notes: str = ""
-
-
-publishing = restate.Workflow("publishing")
-
-
-@publishing.main()
-async def publish(ctx: restate.WorkflowContext, post: str) -> str:
-    """Publish a post, once per workflow (a stand-in for the blog's API): its URL."""
-    return f"https://blog.example.com/posts/{ctx.key()}"
 
 
 async def write(state: Draft) -> dict:

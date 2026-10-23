@@ -4,7 +4,7 @@ a strong one reviews, and the draft goes back and forth until the reviewer
 approves it (at most three rounds). The loop is a handler of your own, and
 each model's answer is stored as it comes: a crash in the third round
 carries on from there, without asking either model again. The approved
-notes go to a publishing workflow, which runs once.
+notes go to the publishing workflow (publishing.py), which runs once.
 
     ANTHROPIC_API_KEY=... uv run intermediate/release_notes.py
     restate deployments register http://localhost:9080
@@ -17,22 +17,11 @@ Claude Haiku drafts and Claude Sonnet reviews.
 
 import os
 
-import restate_fns as restate
+from publishing import publish, publishing
 from restate_agents import Object, litellm, serve
 
 DRAFTER = os.environ.get("DRAFTER", "anthropic/claude-haiku-5-5")
 REVIEWER = os.environ.get("REVIEWER", "anthropic/claude-sonnet-5-5")
-
-# A workflow: the notes are published once, however often the release asks.
-publishing = restate.Workflow("publishing")
-
-
-@publishing.main()
-async def publish(ctx: restate.WorkflowContext, notes: str) -> str:
-    """Publish a release's notes."""
-    await ctx.run_typed("post the notes", lambda: print(notes))  # a stand-in for your blog or changelog
-    return f"https://example.com/releases/{ctx.key()}"
-
 
 releases = Object("releases")
 

@@ -3,7 +3,7 @@ An airline's customer service on the OpenAI Agents SDK, its steps Restate's:
 a triage agent hands each traveller off to the flight changes agent, which
 looks flights up with a Restate service, asks the traveller to confirm the
 change fee (a signal, which may take hours), and rebooks with a workflow
-that charges the fee once. The new booking goes into the traveller's own SQL
+that charges the fee once (both in flights.py). The new booking goes into the traveller's own SQL
 table, which a handler of your own serves.
 
 A handoff holds: the traveller's next message goes to the changes agent. A
@@ -23,48 +23,9 @@ waits for, and confirm it (as the traveller would, from a link on their phone):
     curl localhost:8080/airline/alice/bookings        # the new booking, from the traveller's table
 """
 
-import hashlib
-from datetime import timedelta
-
-import restate_fns as restate
 from agents import Agent
-from pydantic import BaseModel
+from flights import Change, flights, options, rebooking
 from restate_agents import call, has_table, openai_agents, serve, signal, tool, workflow
-
-# A plain Restate service: the flights, a stand-in for the airline's systems.
-flights = restate.Service("flights")
-
-
-@flights.handler()
-async def options(ctx: restate.Context, flight: str) -> str:
-    """The status of a flight, and the flights it can be changed to, with their fees."""
-    return (
-        f"{flight} is delayed by 3 hours. Same route, same day: "
-        "RA 100 at 07:10 (fee $40, 2 seats left), RA 104 at 18:30 (no fee, 9 seats left)."
-    )
-
-
-class Change(BaseModel):
-    """A change of flight: the booking's flight, the new one, and its fee."""
-
-    flight: str
-    to: str
-    fee: float
-
-
-# A workflow: a rebooking runs to its end once, its steps journaled.
-rebooking = restate.Workflow("rebooking")
-
-
-@rebooking.main()
-async def rebook(ctx: restate.WorkflowContext, change: Change) -> str:
-    """Rebook a traveller onto another flight and charge its fee. Only once the traveller confirmed the fee."""
-    await ctx.run_typed("hold the seat", lambda: f"seat held on {change.to}")
-    if change.fee:
-        await ctx.run_typed("charge the fee", lambda: f"charged ${change.fee}")  # a stand-in for the payments API
-    await ctx.sleep(timedelta(seconds=2))  # the ticket is reissued
-    ticket = hashlib.sha1(ctx.key().encode()).hexdigest()[:6].upper()  # the same in each attempt
-    return f"Rebooked onto {change.to}, ticket {ticket}."
 
 
 @tool

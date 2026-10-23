@@ -36,6 +36,15 @@ put them together.
 | [`coder_codex.py`](intermediate/coder_codex.py)     | The same coding agent on Codex (OpenAI's coding agent)                                                                                                       |
 | [`on_modal.py`](intermediate/on_modal.py)           | The support agent on [Modal](https://modal.com), as a Modal Server                                                                                           |
 
+Where an example's agent works with Restate's own services and workflows
+(journaled handlers), they are in a module beside it, so the example reads
+as the agent: [`shop.py`](intermediate/shop.py) for `support.py`,
+[`flights.py`](intermediate/flights.py) for `airline.py`,
+[`ops.py`](intermediate/ops.py) for `oncall.py`,
+[`checkins.py`](intermediate/checkins.py) for `followup.py`, and
+[`publishing.py`](intermediate/publishing.py) for `writer.py` and
+`release_notes.py`.
+
 ### Advanced
 
 | Folder                                           | What                                                                                                                                                                                                                                                              |
