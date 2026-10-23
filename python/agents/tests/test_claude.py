@@ -223,6 +223,16 @@ async def test_the_sdks_tools_work_as_they_are():
     assert await Object().invoke(obj.handlers["chat"].fn, "move 5 from 1 to 2") == "Done: moved 5"
 
 
+async def test_a_tool_that_returns_a_list_answers_with_it_as_json():
+    @tool
+    async def transfer(src: int, dst: int, amount: int) -> list[dict]:
+        """Move money."""
+        return [{"from": src, "amount": amount}]
+
+    obj = claude.agent("teller", client=ClaudeClient(Teller()), tools=[transfer])
+    assert await Object().invoke(obj.handlers["chat"].fn, "move 5 from 1 to 2") == 'Done: [{"from":1,"amount":5}]'
+
+
 async def test_a_steered_message_joins_the_turn_at_its_next_tool_call():
     bank, teller, alice = world()
     chat, messages = agent(bank, teller)

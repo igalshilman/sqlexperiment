@@ -354,7 +354,20 @@ class _Run:
             if error.status_code == 409:
                 raise
             return {**result, "content": error.message, "is_error": True}
-        return {**result, "content": output if isinstance(output, list) else text_of(output)}
+        return {**result, "content": output if _blocks(output) else text_of(output)}
+
+
+# The content blocks a tool's result may be, as the API takes them; any other result is text.
+_BLOCKS = {"text", "image", "document", "search_result"}
+
+
+def _blocks(output: Any) -> bool:
+    """Whether ``output`` is content blocks (an image, say), not a value of the tool's, such as a list of rows."""
+    return (
+        isinstance(output, list)
+        and bool(output)
+        and all(isinstance(b, dict) and b.get("type") in _BLOCKS for b in output)
+    )
 
 
 def _name(tool: Tool | Any) -> str | None:
