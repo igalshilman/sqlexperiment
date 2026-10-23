@@ -44,12 +44,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import restate_fns as restate
+from restate_fns.schema import Schema
 
 from restate_agents.object import service
 from restate_agents.tools import Tool, tool
 
 TABLE = "sandboxes"
-SCHEMA = restate.Schema("restate_agents.sandbox", [f"CREATE TABLE {TABLE} (name TEXT PRIMARY KEY, ref TEXT NOT NULL)"])
+SCHEMA = Schema("restate_agents.sandbox", [f"CREATE TABLE {TABLE} (name TEXT PRIMARY KEY, ref TEXT NOT NULL)"])
 # What a tool gives the model of a file or a command's output, at most.
 CLIPPED = 20_000
 

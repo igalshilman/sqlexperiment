@@ -9,7 +9,8 @@
 // transcript replaced (compacted, reset) leaves its messages in the log, and
 // the messages after them are new ones. So a client reads from a cursor, and
 // gets each message that is new or changed since, once.
-import { Schema, type SqlSession } from 'restate-fns';
+import type { SqlSession } from 'restate-fns';
+import { Schema } from 'restate-fns/internal';
 import type { ChatMessage, Messages, MessagesRequest } from './common.ts';
 
 const TABLE = 'agent_log';

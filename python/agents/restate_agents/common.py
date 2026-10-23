@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict
 
 from restate.serde import Serde
-from restate_fns import Schema
+from restate_fns.schema import Schema
 
 
 class MessageSerde(Serde[str]):

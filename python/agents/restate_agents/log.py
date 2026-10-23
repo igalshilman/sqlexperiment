@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from restate_fns import Schema
+from restate_fns.schema import Schema
 
 from restate_agents.common import ChatMessage, Messages, MessagesRequest
 

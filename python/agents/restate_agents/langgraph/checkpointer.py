@@ -39,7 +39,8 @@ from langgraph.checkpoint.base import (
     get_checkpoint_metadata,
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
-from restate_fns import Schema, SqlDatabase, SqlSession
+from restate_fns import SqlDatabase, SqlSession
+from restate_fns.schema import Schema
 
 DDL = """
 CREATE TABLE langgraph_checkpoints (
