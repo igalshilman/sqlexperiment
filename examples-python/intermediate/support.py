@@ -1,7 +1,7 @@
 """
 A support agent whose tools are Restate itself: it looks orders up with a
 plain service, waits for a manager's approval (a signal), and refunds with
-a workflow. Every step is durable: a crash, or a manager who takes a day,
+a workflow (both in shop.py). Every step is durable: a crash, or a manager who takes a day,
 changes nothing.
 
     ANTHROPIC_API_KEY=... uv run intermediate/support.py
@@ -23,37 +23,8 @@ tool call), see what it does, or stop it:
     curl localhost:8080/support/alice/stop
 """
 
-from datetime import timedelta
-
-import restate_fns as restate
-from pydantic import BaseModel
 from restate_agents import call, langgraph, serve, signal, workflow
-
-# A plain Restate service.
-orders = restate.Service("orders")
-
-
-@orders.handler()
-async def status(ctx: restate.Context, order: str) -> str:
-    """The status of an order."""
-    return f"Order {order} was delivered yesterday."
-
-
-class Refund(BaseModel):
-    order: str
-    amount: float
-
-
-# A workflow: a refund runs to the end, once, however long it takes.
-refund = restate.Workflow("refund")
-
-
-@refund.main()
-async def run(ctx: restate.WorkflowContext, refund: Refund) -> str:
-    """Refund an order. Only once a manager approved it."""
-    await ctx.sleep(timedelta(seconds=5))  # a stand-in for the payment provider
-    return f"Refunded ${refund.amount} for order {refund.order}."
-
+from shop import Refund, orders, refund, status
 
 support = langgraph.agent(
     "support",

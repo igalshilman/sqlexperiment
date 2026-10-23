@@ -14,24 +14,8 @@ invocation of ``checkins/checkin``; FOLLOW_UP_SECONDS=10 makes it come sooner.
 import os
 from datetime import timedelta
 
-import restate_fns as restate
-from pydantic import BaseModel
+from checkins import checkin, checkins
 from restate_agents import claude, send, serve
-
-
-class Checkin(BaseModel):
-    customer: str
-    note: str
-
-
-checkins = restate.Service("checkins")
-
-
-@checkins.handler()
-async def checkin(ctx: restate.Context, checkin: Checkin) -> None:
-    """Check in with a customer about a note."""
-    print(f"Checking in with {checkin.customer}: {checkin.note}")  # a stand-in for an email or a message
-
 
 concierge = claude.agent(
     "concierge",

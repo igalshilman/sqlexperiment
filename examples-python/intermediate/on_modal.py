@@ -26,7 +26,7 @@ image = (
     # (pip installs the Restate SDK they need from it).
     .add_local_dir(HERE.parents[1] / "dist", "/wheels", copy=True)
     .run_commands("pip install /wheels/*.whl")
-    .add_local_python_source("support")
+    .add_local_python_source("support", "shop")
 )
 
 app = modal.App("restate-support", image=image)
@@ -44,6 +44,7 @@ class Support:
     @modal.enter()
     def start(self):
         from restate_agents import serve
-        from support import orders, refund, support
+        from shop import orders, refund
+        from support import support
 
         serve(orders, refund, support, background=True)  # on port 9080, in this process
