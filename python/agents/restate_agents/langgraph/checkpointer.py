@@ -118,7 +118,8 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         if not versions:
             return {}
         rows = await self.db.query(
-            "SELECT channel, type, value FROM restate_langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND ("
+            "SELECT channel, type, value FROM restate_langgraph_channel_values "
+            "WHERE thread_id = ? AND checkpoint_ns = ? AND ("
             + " OR ".join("(channel = ? AND version = ?)" for _ in versions)
             + ")",
             [thread_id, ns, *(item for channel, version in versions for item in (channel, str(version)))],
@@ -130,8 +131,8 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
         checkpoint: Checkpoint = self.serde.loads_typed((type, stored))
         checkpoint = {**checkpoint, "channel_values": await self._channel_values(thread_id, ns, checkpoint)}
         writes = await self.db.query(
-            "SELECT task_id, channel, type, value FROM restate_langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? "
-            "AND checkpoint_id = ? ORDER BY task_path, task_id, idx",
+            "SELECT task_id, channel, type, value FROM restate_langgraph_writes "
+            "WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? ORDER BY task_path, task_id, idx",
             [thread_id, ns, checkpoint_id],
         )
 
@@ -189,8 +190,8 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
             where = [condition for condition, value in conditions if value is not None]
             params = [value for _, value in conditions if value is not None]
             rows = await self.db.query(
-                f"SELECT {COLUMNS} FROM restate_langgraph_checkpoints {'WHERE ' + ' AND '.join(where) if where else ''} "
-                "ORDER BY checkpoint_id DESC",
+                f"SELECT {COLUMNS} FROM restate_langgraph_checkpoints "
+                f"{'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY checkpoint_id DESC",
                 params,
             )
             found: list[CheckpointTuple] = []
@@ -269,8 +270,8 @@ class SqlCheckpointSaver(BaseCheckpointSaver[str]):
             async with self.db.transaction() as tx:
                 for row in rows:
                     await tx.execute(
-                        f"{verb} INTO restate_langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, task_path, "
-                        "idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        f"{verb} INTO restate_langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, "
+                        "task_path, idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         row,
                     )
 

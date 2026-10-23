@@ -150,7 +150,9 @@ export class SqlSessionPersistence extends SessionPersistence {
 
   async list(): Promise<readonly SessionPersistenceSnapshot[]> {
     const rows = await this.serial((db) =>
-      db.query('SELECT header, inherited, (SELECT count(*) FROM restate_deepseek_events WHERE session = id) FROM restate_deepseek_sessions'),
+      db.query(
+        'SELECT header, inherited, (SELECT count(*) FROM restate_deepseek_events WHERE session = id) FROM restate_deepseek_sessions',
+      ),
     );
     return [
       ...[...this.created.values()].map((created) => snapshot({ ...created, count: 0 })),
@@ -210,7 +212,10 @@ class SqlSessionHandle implements SessionHandle {
   async read(offset = 0, length = Infinity): Promise<SessionHandleReadResult> {
     this.#check('read');
     const rows = await this.#store.serial((db) =>
-      db.query('SELECT event FROM restate_deepseek_events WHERE session = ? AND seq >= ? ORDER BY seq', [this.id, offset]),
+      db.query('SELECT event FROM restate_deepseek_events WHERE session = ? AND seq >= ? ORDER BY seq', [
+        this.id,
+        offset,
+      ]),
     );
     let events: SessionEvent[] = [
       ...rows.map(([event]) => JSON.parse(String(event)) as SessionEvent),

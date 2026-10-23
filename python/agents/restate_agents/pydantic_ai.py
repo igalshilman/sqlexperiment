@@ -219,9 +219,13 @@ class _Conversation:
         if first == len(dumped) == len(self._saved):
             return
         async with self.db.transaction() as tx:
-            await tx.execute("DELETE FROM restate_pydantic_ai_messages WHERE thread = ? AND n >= ?", [self.thread, first])
+            await tx.execute(
+                "DELETE FROM restate_pydantic_ai_messages WHERE thread = ? AND n >= ?", [self.thread, first]
+            )
             for n in range(first, len(dumped)):
-                await tx.execute("INSERT INTO restate_pydantic_ai_messages VALUES (?, ?, ?)", [self.thread, n, dumped[n]])
+                await tx.execute(
+                    "INSERT INTO restate_pydantic_ai_messages VALUES (?, ?, ?)", [self.thread, n, dumped[n]]
+                )
         self._saved = dumped
         await turns.publish()
 

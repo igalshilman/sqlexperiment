@@ -275,15 +275,10 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
             [thread_id, checkpoint_ns, ...row],
           );
         }
-        await tx.execute(`INSERT OR REPLACE INTO restate_langgraph_checkpoints (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)`, [
-          thread_id,
-          checkpoint_ns,
-          checkpoint.id,
-          parentId ?? null,
-          type,
-          stored,
-          metadataValue,
-        ]);
+        await tx.execute(
+          `INSERT OR REPLACE INTO restate_langgraph_checkpoints (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [thread_id, checkpoint_ns, checkpoint.id, parentId ?? null, type, stored, metadataValue],
+        );
       });
       return { configurable: { thread_id, checkpoint_ns, checkpoint_id: checkpoint.id } };
     });
@@ -325,7 +320,11 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
   deleteThread(threadId: string): Promise<void> {
     return this.#serial(() =>
       this.#db.transaction(async (tx) => {
-        for (const table of ['restate_langgraph_checkpoints', 'restate_langgraph_channel_values', 'restate_langgraph_writes']) {
+        for (const table of [
+          'restate_langgraph_checkpoints',
+          'restate_langgraph_channel_values',
+          'restate_langgraph_writes',
+        ]) {
           await tx.execute(`DELETE FROM ${table} WHERE thread_id = ?`, [threadId]);
         }
       }),

@@ -79,7 +79,10 @@ export class Conversation {
   #store(id: string, messages: MessageParam[], answer?: string): Promise<void> {
     return this.#db.transaction(async (tx) => {
       for (const message of messages) {
-        await tx.execute('INSERT INTO restate_claude_messages (prompt, message) VALUES (?, ?)', [id, JSON.stringify(message)]);
+        await tx.execute('INSERT INTO restate_claude_messages (prompt, message) VALUES (?, ?)', [
+          id,
+          JSON.stringify(message),
+        ]);
       }
       if (answer !== undefined)
         await tx.execute('INSERT INTO restate_claude_answers (prompt, answer) VALUES (?, ?)', [id, answer]);
