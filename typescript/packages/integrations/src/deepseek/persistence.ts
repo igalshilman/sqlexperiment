@@ -31,16 +31,16 @@ import {
   type SessionPersistenceCreateOptions,
   type SessionPersistenceSnapshot,
 } from '@deepseek-ai/dsh-session-persistence';
-import type { SqlSession } from 'restate-fns';
+import { Schema, type SqlSession } from 'restate-fns';
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS dsh_sessions (id TEXT PRIMARY KEY, header TEXT NOT NULL, inherited INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS dsh_events (session TEXT NOT NULL, seq INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY (session, seq));
-`;
+const SCHEMA = new Schema('restate-agents.deepseek', [
+  'CREATE TABLE dsh_sessions (id TEXT PRIMARY KEY, header TEXT NOT NULL, inherited INTEGER NOT NULL)',
+  'CREATE TABLE dsh_events (session TEXT NOT NULL, seq INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY (session, seq))',
+]);
 
 /** The stored events of session `id`, in order: for reading the log without a harness. */
 export async function storedEvents(db: SqlSession, id: SessionId): Promise<SessionEvent[]> {
-  await db.execute(SCHEMA);
+  await SCHEMA.ensure(db);
   const rows = await db.query('SELECT event FROM dsh_events WHERE session = ? ORDER BY seq', [id]);
   return rows.map(([event]) => JSON.parse(String(event)) as SessionEvent);
 }
@@ -93,7 +93,7 @@ export class SqlSessionPersistence extends SessionPersistence {
   /** Run `operation` on the database after the ones before it: it serves one statement at a time. */
   serial<T>(operation: (db: SqlSession) => Promise<T>): Promise<T> {
     if (this.abandoned) return Promise.reject(new Error('sql session persistence: abandoned'));
-    this.schema ??= this.db.execute(SCHEMA);
+    this.schema ??= SCHEMA.ensure(this.db);
     const result = this.queue.then(() => this.schema).then(() => operation(this.db));
     this.queue = result.catch(() => {});
     return result;
