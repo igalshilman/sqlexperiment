@@ -85,6 +85,8 @@ export interface AttemptOptions {
   onRequest?: () => void;
   /** A shared handler's attempt: its `ctx.db` reads beside the owner's, and writes nothing. */
   shared?: boolean;
+  /** The object's name (by default, one of its own), such as one with a schema. */
+  service?: string;
 }
 
 /**
@@ -101,6 +103,7 @@ export function sqlAttempt({
   send = () => {},
   onRequest = () => {},
   shared = false,
+  service = `test-${randomUUID()}`,
 }: AttemptOptions) {
   const check = () => {
     onRequest();
@@ -108,7 +111,7 @@ export function sqlAttempt({
   };
   const end = Promise.withResolvers<void>();
   end.promise.catch(() => {});
-  const target = { service: `test-${randomUUID()}` };
+  const target = { service };
   const ctx = {
     shared,
     key,
