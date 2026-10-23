@@ -7,25 +7,45 @@ it waits on, and where the code marks it (`TODO:` comments).
 
 **Waits on:** a Restate release with service protocol v8.
 
-**Now:** the SQL stores of the TypeScript, Python and Rust SDKs read the
-object's state with regular, journaled gets. Restate 1.8.0, the release the
-Makefile downloads, negotiates protocol v7 at most.
+**Now:** the Rust SDK's `RawState::get`, the durable functions' store, reads
+with v8's ephemeral get wherever v8 is negotiated, and with a journaled get
+on v7. The SQL stores of the TypeScript and Python SDKs read the object's
+state with regular, journaled gets. Restate 1.8.0, the release the Makefile
+downloads, negotiates protocol v7 at most.
 
-**Then:** read with v8's ephemeral get, which leaves the read out of the
-journal. A handler without journal replay never reads its journal back, so
-each read's entry is pure overhead: a database read of N pages adds N
-entries. The TypeScript and Python SDKs have it in their internals, unused:
+**Then:** read with v8's ephemeral get everywhere, which leaves the read out
+of the journal. A handler without journal replay never reads its journal
+back, so each read's entry is pure overhead: a database read of N pages adds
+N entries. The TypeScript and Python SDKs have it in their internals, unused:
 
 | SDK        | Read now (TODO)                                          | Ephemeral read, in place                                                                                                                      |
 | ---------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | TypeScript | `objectStore` in `restate-fns`'s `session.ts`: `ctx.get` | The SDK's `ephemeralStateGet` is private (only `getProject` uses it): the SDK needs to expose it, and the selector drives it by completion id |
 | Python     | `sql_get` in `restate-fns`'s `object.py`                 | Not exposed: the SDK (1.1.0) has no ephemeral get, though its shared core 8.1.0 does; the SDK needs one, and the selector would drive it      |
-| Rust       | `RawState::get` in `context/mod.rs`                      | `ContextInternal::get_ephemeral`, `EphemeralGetFuture`                                                                                        |
+| Rust       | Done on v8; the v7 fallback in `RawState::get` (TODO)    | `ContextInternal::get_ephemeral`, `EphemeralGetFuture`, chosen by `has_ephemeral_get`                                                         |
 
 The TypeScript and Python reads are in `restate-fns` (`typescript/packages/fns`,
 `python/fns`), the Rust one in its SDK's patch (`rust/sdk/patches`). The
 TypeScript and Rust SDKs' discovery already advertises v8; a v7 server picks
 v7.
+
+**To benchmark with v8 now:** the image
+`ghcr.io/restatedev/restate:service-protocol-v8-stats` (restate-server
+1.8.2-dev) has v8, enabled with `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true`,
+which the durable functions' test server sets:
+
+```sh
+make test-functions RESTATE_FROM=image RESTATE_IMAGE=ghcr.io/restatedev/restate:service-protocol-v8-stats
+```
+
+`state_reads_are_unjournaled_on_protocol_v8` (`rust/functions/tests/restate.rs`)
+checks the journal: no state gets on v8, journaled ones on v7.
+
+Measured on 23 October 2026 (4 vCPUs, the same functions binary): a turn
+that restores a run of 1,648 changed pages took ~200 ms from its signal to
+its answer on 1.8.0 (v7), and ~105 ms on this image (v8), against ~55 ms
+with the VM live. A turn of `inventory/restock` journals 4 entries fewer
+(7 against 11), for a throughput within noise (~320/s at 32 at once).
 
 **Found out (19 October 2026):** v8 is only on Restate's
 `service-protocol-v8` branch. There, `protocol_v8` is one of the
@@ -39,11 +59,13 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
 **To switch:** once a release has v8,
 
 1. set `RESTATE_VERSION` to it in the Makefile, and export
-   `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true` there;
-2. set the variable on the server `rust/functions/tests/restate.rs`
-   starts, and in the READMEs' commands that start Restate;
-3. switch the three reads above to the ephemeral ones, and regenerate the
-   Rust patch (`patches/regenerate.sh`).
+   `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true` there (unless the release
+   enables v8 by default);
+2. set the variable in the READMEs' commands that start Restate (the
+   durable functions' test server already does);
+3. switch the TypeScript and Python reads above to the ephemeral ones, drop
+   the Rust v7 fallback, and regenerate the Rust patch
+   (`patches/regenerate.sh`).
 
 ## Concurrent awaits in the TypeScript and Python SDKs
 

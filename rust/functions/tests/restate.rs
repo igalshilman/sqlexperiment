@@ -100,6 +100,8 @@ async fn server() -> Server {
         .arg(dir.path())
         .env("RESTATE_BIND_IP", "127.0.0.1")
         .env("RESTATE_LISTEN_MODE", "tcp")
+        // Protocol v8 where the server has it (FUTURE.md): unjournaled reads.
+        .env("RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8", "true")
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
@@ -390,6 +392,56 @@ async fn a_run_waits_for_a_signal_from_outside() {
         assert!(resolved["resolved"].is_string(), "{resolved}");
     }
     assert_eq!(attach(&both).await, (200, json!(["first", "second"])));
+}
+
+/// The rows of the admin API's SQL `query`.
+async fn query(query: &str) -> Vec<Value> {
+    let response = reqwest::Client::new()
+        .post(format!("{ADMIN}/query"))
+        .header("accept", "application/json")
+        .json(&json!({ "query": query }))
+        .send()
+        .await
+        .unwrap();
+    let rows: Value = response.json().await.unwrap();
+    rows["rows"].as_array().unwrap().clone()
+}
+
+/// A run's state reads leave no journal entry where the server speaks
+/// protocol v8 (its ephemeral get), and are journaled gets on v7.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-functions"]
+async fn state_reads_are_unjournaled_on_protocol_v8() {
+    let _server = server().await;
+    serve().await;
+    let refund = send("approvals/carol/refund", json!("104")).await;
+    let [wait] = &waits("approvals/carol", |w| !w.is_empty()).await[..] else {
+        unreachable!()
+    };
+    let invocation = format!(
+        "SELECT pinned_service_protocol_version AS version FROM sys_invocation WHERE id = '{refund}'"
+    );
+    let version = query(&invocation).await[0]["version"].as_u64().unwrap();
+    let journal = format!("SELECT entry_type FROM sys_journal WHERE id = '{refund}'");
+    let entries: Vec<String> = (query(&journal).await.iter())
+        .map(|row| row["entry_type"].as_str().unwrap().to_owned())
+        .collect();
+    // The first turn opened the scope's state: reads of its keys.
+    let gets = entries
+        .iter()
+        .filter(|e| e.contains("Get") && e.contains("State"));
+    match version {
+        8.. => assert_eq!(gets.count(), 0, "{entries:?}"),
+        _ => assert!(gets.count() > 0, "{entries:?}"),
+    }
+    let approve = json!({"id": wait["id"], "value": "approved"});
+    call("approvals/carol/signal", approve).await;
+    let note = json!({"name": "note", "value": "none", "keep": true});
+    call("approvals/carol/signal", note).await;
+    assert_eq!(
+        attach(&refund).await,
+        (200, json!({"verdict": "approved", "note": "none"}))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
