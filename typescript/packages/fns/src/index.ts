@@ -6,9 +6,9 @@
 //
 //   const notes = restate.object({
 //     name: 'notes',
+//     schema: ['CREATE TABLE notes (text TEXT NOT NULL)'],
 //     handlers: {
 //       add: async (ctx: restate.ObjectContext, note: string) => {
-//         await ctx.db.execute('CREATE TABLE IF NOT EXISTS notes (text TEXT NOT NULL)');
 //         await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
 //       },
 //       list: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) =>
@@ -19,12 +19,14 @@
 //
 // See README.md.
 import * as restate from '@restatedev/restate-sdk';
+import { register, type Step } from './schema.ts';
 import { hookSelector } from './selector.ts';
 import { SqlAttempt, type SqlHost, type SqlSession, type SqlTransaction, withSql } from './session.ts';
 
 // The SDK, but what this module declares in its place.
 export * from '@restatedev/restate-sdk';
 export type { SqlDatabase, SqlSession, SqlTransaction, SqlTransactionSends, SqlParam, SqlValue } from './session.ts';
+export { Schema, type Step } from './schema.ts';
 
 /** The SDK's context of an object's handler that replays its journal (`journalReplay: true`): no `ctx.db`. */
 export type JournaledObjectContext = restate.ObjectContext;
@@ -220,6 +222,10 @@ const isHandler = (value: object) =>
  * `handlers.object.exclusive` one with options, and either one with
  * `journalReplay: true` one that replays its journal, without `ctx.db`.
  *
+ * `schema`: the steps that make each key's database, in order, applied once
+ * per key where its first handler opens it (see schema.ts):
+ * `schema: ['CREATE TABLE notes (text TEXT NOT NULL)']`.
+ *
  * `options` and `metadata` add to (or replace) {@link sqlOptions} and
  * {@link sqlMetadata}, such as `options: { journalRetention: { hours: 1 } }`
  * to look at journals in the UI.
@@ -227,10 +233,13 @@ const isHandler = (value: object) =>
 export function object<P extends string, H extends Record<string, unknown>>(definition: {
   name: P;
   handlers: H;
+  schema?: readonly Step[];
   description?: string;
   metadata?: Record<string, string>;
   options?: restate.ObjectOptions;
 }): restate.VirtualObjectDefinition<P, H> {
+  const { schema, ...rest } = definition;
+  if (schema) register(definition.name, schema);
   // The handlers as the SDK takes them.
   const sdkHandlers: Record<string, (ctx: restate.ObjectContext, input?: unknown) => Promise<unknown>> = {};
   for (const [name, fn] of Object.entries(definition.handlers)) {
@@ -238,7 +247,7 @@ export function object<P extends string, H extends Record<string, unknown>>(defi
     sdkHandlers[name] = (isHandler(fn) ? fn : exclusive(fn as Fn<ObjectContext>)) as never;
   }
   return restate.object({
-    ...definition,
+    ...rest,
     handlers: sdkHandlers,
     metadata: { ...sqlMetadata, ...definition.metadata },
     options: { ...sqlOptions, ...definition.options },

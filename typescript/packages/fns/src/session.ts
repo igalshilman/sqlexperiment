@@ -8,6 +8,7 @@ import type * as restate from '@restatedev/restate-sdk';
 import { serde, TerminalError } from '@restatedev/restate-sdk';
 import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
 import { open, type Database, type SqlParam, type SqlValue, type Store, type TransactionHandle } from 'restate-sql';
+import { apply, ofObject, type Schema, sessions } from './schema.ts';
 import { sendClients } from './sends.ts';
 
 export type { SqlParam, SqlValue };
@@ -293,6 +294,8 @@ export class SqlAttempt {
   #db: Database | undefined;
   // The ids of the outbox's transactions this attempt made the sends of.
   readonly #made = new Set<string>();
+  // The schemas this attempt's database has all the steps of.
+  readonly #ensured = new Set<string>();
   #ended = false;
   #cancel: () => void = () => {};
   /** `ctx.db`. */
@@ -306,6 +309,15 @@ export class SqlAttempt {
       execute: (sql, params) => this.#open().then((db) => this.#errors.track(db.execute(sql, params))),
       transaction: (inner) => this.#open().then((db) => this.#errors.transaction(db, inner)),
     };
+    sessions.set(this.db, (schemas) => this.#open().then((db) => this.#apply(db, schemas)));
+  }
+
+  /** Apply the steps of `schemas` that the database lacks, each schema once per attempt. */
+  async #apply(db: Database, schemas: readonly Schema[]) {
+    const lacking = schemas.filter((s) => !this.#ensured.has(s.name));
+    if (lacking.length === 0) return;
+    await this.#errors.track(apply(db, lacking));
+    for (const s of lacking) this.#ensured.add(s.name);
   }
 
   /**
@@ -394,10 +406,13 @@ export class SqlAttempt {
     // statement runs, and the handler's later calls fail.
     this.#cancel = end.onEnd(() => void db.close().catch(() => {}));
     this.#db = db;
-    if (ctx.shared) return db;
+    // The object's schema: in a shared handler's session too, whose writes are never stored, so a
+    // key never written reads as empty tables.
+    const own = ofObject(ctx.request().target.service);
     try {
       // What a crash may have left unmade.
-      decodeOutbox(await db.effects()).forEach((outgoing) => this.#make(outgoing));
+      if (!ctx.shared) decodeOutbox(await db.effects()).forEach((outgoing) => this.#make(outgoing));
+      if (own) await this.#apply(db, [own]);
     } catch (error) {
       await db.close();
       throw error;
