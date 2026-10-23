@@ -45,6 +45,17 @@ describe("an object's schema", () => {
     expect(await reader.end(() => reader.db.query('SELECT text FROM notes'))).toEqual([]);
     expect(map.size).toBe(0);
   });
+
+  it('is applied by a writer after a shared handler read a key never written', async () => {
+    const service = objectWith(NOTES);
+    const map = new Map<string, Uint8Array>();
+    const reader = sqlAttempt({ map, service, shared: true, id: 'reader' });
+    await reader.end(() => reader.db.query('SELECT text FROM notes'));
+    const writer = sqlAttempt({ map, service, id: 'writer' });
+    await writer.end(() => writer.db.execute("INSERT INTO notes VALUES ('milk')"));
+    const later = sqlAttempt({ map, service, id: 'later' });
+    expect(await later.end(() => later.db.query('SELECT text FROM notes'))).toEqual([['milk']]);
+  });
 });
 
 describe("a library's schema", () => {
