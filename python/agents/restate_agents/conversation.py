@@ -15,7 +15,7 @@ from typing import Any
 import restate_fns as restate
 
 from restate_agents import turns
-from restate_agents.common import has_table
+from restate_agents.common import table_schema
 
 # The model's acknowledgment of a summary or a handoff, which the conversation then carries on from.
 CARRY_ON = "Understood: I will carry on from there."
@@ -41,18 +41,20 @@ class Conversation:
         self.length = 0
 
     async def load(self) -> list[Row]:
-        if not await has_table(self.db, self.table):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.table} (
-                  thread TEXT NOT NULL,
-                  n INTEGER NOT NULL,
-                  prompt TEXT NOT NULL,
-                  message TEXT NOT NULL,
-                  answer TEXT,
-                  steered TEXT,
-                  PRIMARY KEY (thread, n)
-                )
-            """)
+        await table_schema(
+            self.table,
+            f"""
+            CREATE TABLE {self.table} (
+              thread TEXT NOT NULL,
+              n INTEGER NOT NULL,
+              prompt TEXT NOT NULL,
+              message TEXT NOT NULL,
+              answer TEXT,
+              steered TEXT,
+              PRIMARY KEY (thread, n)
+            )
+            """,
+        ).ensure(self.db)
         rows = await self.db.query(
             f"SELECT prompt, message, answer, steered FROM {self.table} WHERE thread = ? ORDER BY n", [self.thread]
         )

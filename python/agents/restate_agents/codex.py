@@ -52,7 +52,7 @@ from codex_cli_bin import bundled_codex_path
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import Transcript, configured, has_table, model_id_of
+from restate_agents.common import Transcript, configured, model_id_of, table_schema
 from restate_agents.object import Object
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
@@ -109,8 +109,6 @@ def agent(
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
-        if not await has_table(ctx.db, ROLLOUTS):
-            return transcript
         for line in await _Rollout(ctx.db, ctx.key()).load():
             _transcribe(transcript, line)
         return transcript
@@ -178,18 +176,20 @@ class _Rollout:
         self.length = 0
 
     async def _tables(self) -> None:
-        if not await has_table(self.db, ROLLOUTS):
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {ROLLOUTS} (
-                  thread TEXT NOT NULL,
-                  n INTEGER NOT NULL,
-                  line TEXT NOT NULL,
-                  PRIMARY KEY (thread, n)
-                )
-            """)
-            await self.db.execute(f"""
-                CREATE TABLE IF NOT EXISTS {THREADS} (thread TEXT PRIMARY KEY, path TEXT, handoff TEXT)
-            """)
+        await table_schema(
+            ROLLOUTS,
+            f"""
+            CREATE TABLE {ROLLOUTS} (
+              thread TEXT NOT NULL,
+              n INTEGER NOT NULL,
+              line TEXT NOT NULL,
+              PRIMARY KEY (thread, n)
+            )
+            """,
+        ).ensure(self.db)
+        await table_schema(
+            THREADS, f"CREATE TABLE {THREADS} (thread TEXT PRIMARY KEY, path TEXT, handoff TEXT)"
+        ).ensure(self.db)
 
     async def load(self) -> list[str]:
         """The rollout's lines, as stored."""

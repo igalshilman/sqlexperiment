@@ -16,9 +16,22 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from restate_agents.common import ChatMessage, Messages, MessagesRequest, has_table
+from restate_fns import Schema
+
+from restate_agents.common import ChatMessage, Messages, MessagesRequest
 
 TABLE = "agent_log"
+SCHEMA = Schema(
+    "restate_agents.log",
+    [
+        f"""CREATE TABLE {TABLE} (
+          id INTEGER PRIMARY KEY,
+          seq INTEGER NOT NULL UNIQUE,
+          position INTEGER UNIQUE,
+          message TEXT NOT NULL
+        )"""
+    ],
+)
 
 
 async def sync(db: Any, messages: list[dict[str, Any]]) -> None:
@@ -26,15 +39,7 @@ async def sync(db: Any, messages: list[dict[str, Any]]) -> None:
     Store the transcript's ``messages`` (each ``{role, parts}``, in order) in
     the log: those that changed since the last time, in one transaction.
     """
-    if not await has_table(db, TABLE):
-        await db.execute(f"""
-            CREATE TABLE IF NOT EXISTS {TABLE} (
-              id INTEGER PRIMARY KEY,
-              seq INTEGER NOT NULL UNIQUE,
-              position INTEGER UNIQUE,
-              message TEXT NOT NULL
-            )
-        """)
+    await SCHEMA.ensure(db)
     head = [
         (id, json.loads(message))
         for id, message in await db.query(
@@ -76,8 +81,7 @@ async def page(db: Any, request: MessagesRequest | None = None) -> Messages:
     """
     request = request or {}
     limit = request.get("limit", 50)
-    if not await has_table(db, TABLE):
-        return Messages(messages=[], more=False, cursor=request.get("cursor", 0))
+    await SCHEMA.ensure(db)
     if "cursor" in request:
         rows = await db.query(
             f"SELECT id, seq, message FROM {TABLE} WHERE seq > ? ORDER BY seq LIMIT ?", [request["cursor"], limit + 1]

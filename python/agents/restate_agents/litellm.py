@@ -52,7 +52,7 @@ from pydantic import ValidationError
 from restate_fns import ObjectContext
 
 from restate_agents import conversation, turns
-from restate_agents.common import DEFAULT_MODEL, ModelError, Transcript, configured, has_table, model_of
+from restate_agents.common import DEFAULT_MODEL, ModelError, Transcript, configured, model_of
 from restate_agents.conversation import Conversation, answer_of, idle, pending_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
@@ -108,8 +108,6 @@ def agent(
 
     async def transcript(ctx: ObjectContext) -> Transcript:
         transcript = Transcript()
-        if not await has_table(ctx.db, TABLE):
-            return transcript
         for row in await Conversation(ctx.db, TABLE, ctx.key()).load():
             message = row.message
             if message["role"] == "tool":
