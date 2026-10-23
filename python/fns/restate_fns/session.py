@@ -15,6 +15,7 @@ import contextlib
 import json
 import typing
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -94,14 +95,6 @@ class SqlSession(SqlDatabase, Protocol):
         and a call from inside the body is refused, as it would wait for the
         body. So the body uses the ``db`` it gets, which is invalid once the
         body has ended.
-        """
-        ...
-
-    async def ensure(self, *schema: Schema) -> None:
-        """
-        Apply the steps of ``schema`` that the database lacks (see schema.py):
-        a library's tables, where it uses them, in any object. A shared
-        handler's are its own, and vanish with its session.
         """
         ...
 
@@ -411,9 +404,6 @@ class _Session:
     def transaction(self) -> typing.AsyncContextManager[SqlDatabase]:
         return self._transaction()
 
-    async def ensure(self, *schema: Schema) -> None:
-        await self._attempt.ensure(schema)
-
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[SqlDatabase]:
         db = await self._attempt.open()
@@ -441,6 +431,7 @@ class SqlAttempt:
         self._ensured: set[str] = set()
         self.db: SqlSession = _Session(self)
         """``ctx.db``."""
+        schemas.sessions[self.db] = weakref.WeakMethod(self.ensure)
 
     async def ensure(self, schema: Sequence[Schema]) -> None:
         """Apply the steps of ``schema`` that the database lacks, each schema once per attempt."""
