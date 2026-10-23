@@ -39,6 +39,7 @@ use crate::{
 use bytes::Bytes;
 use futures::future::try_join_all;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     io,
 };
@@ -75,16 +76,24 @@ fn invalid(what: &str) -> io::Error {
 /// chain.
 pub(crate) type Chain = Images;
 
-/// The dictionary of a segment of `file`'s `pages` after `chain`: the
-/// previous image of each one with an image, in order; where the log has
-/// none, the page of the file's `base`, if any.
+thread_local! {
+    /// A segment's dictionary, and its images while it is encoded: up to
+    /// [`MAX_SEGMENT_PAGES`] pages each, kept for the thread's next segment
+    /// (a fresh megabyte is new memory, faulted in and zeroed).
+    static SCRATCH: RefCell<(Vec<u8>, Vec<u8>)> = const { RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// The dictionary of a segment of `file`'s `pages` after `chain`, into
+/// `out`: the previous image of each one with an image, in order; where the
+/// log has none, the page of the file's `base`, if any.
 fn dictionary<'a>(
+    out: &mut Vec<u8>,
     chain: &Chain,
     file: u32,
     pages: impl Iterator<Item = &'a (u64, bool)>,
     base: Option<&dyn Base>,
-) -> Vec<u8> {
-    let mut out = Vec::new();
+) {
+    out.clear();
     for (index, _) in pages.filter(|(_, image)| *image) {
         match chain.get(&page_id(file, *index)) {
             Some(Some(previous)) => out.extend_from_slice(previous),
@@ -96,7 +105,6 @@ fn dictionary<'a>(
             }
         }
     }
-    out
 }
 
 /// What a paged file's absent pages hold: a golden image it diverges from (a
@@ -179,17 +187,17 @@ fn encode_segment(
         put_varint(&mut out, gap << 1 | u64::from(image));
         previous = Some(index);
     }
-    let raw: Vec<u8> = entries
-        .iter()
-        .filter_map(|(_, image)| image.as_deref())
-        .flatten()
-        .copied()
-        .collect();
-    if !raw.is_empty() {
-        let dictionary = dictionary(chain, file, pages.iter(), base);
-        zstd::compress(&raw, &dictionary, true, |frame| {
-            out.reserve_exact(frame.len());
-            out.extend_from_slice(frame);
+    if pages.iter().any(|(_, image)| *image) {
+        SCRATCH.with_borrow_mut(|(dictionary, raw)| {
+            raw.clear();
+            for image in entries.iter().filter_map(|(_, image)| image.as_deref()) {
+                raw.extend_from_slice(image);
+            }
+            self::dictionary(dictionary, chain, file, pages.iter(), base);
+            zstd::compress(raw, dictionary, true, |frame| {
+                out.reserve_exact(frame.len());
+                out.extend_from_slice(frame);
+            })
         })?;
     }
     debug_assert!(out.len() + MAGIC <= MAX_SEGMENT_BYTES);
@@ -242,9 +250,12 @@ pub(crate) fn decode_segment(
         images.extend(pages.iter().map(|&(index, _)| (page_id(file, index), None)));
         return Ok(images);
     }
-    let dictionary = dictionary(chain, file, pages.iter(), base);
     let mut raw = Vec::with_capacity(count * PAGE_SIZE);
-    zstd::decompress(&mut raw, &bytes[at..], &dictionary)
+    SCRATCH
+        .with_borrow_mut(|(dictionary, _)| {
+            self::dictionary(dictionary, chain, file, pages.iter(), base);
+            zstd::decompress(&mut raw, &bytes[at..], dictionary)
+        })
         .map_err(|_| invalid("log segment images"))?;
     if raw.len() != count * PAGE_SIZE {
         return Err(invalid("log segment images"));
