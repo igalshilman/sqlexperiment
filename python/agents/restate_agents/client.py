@@ -17,6 +17,7 @@ Restate's URL, and the agent's name and key::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -28,7 +29,7 @@ import httpx
 
 from restate_agents.common import ChatMessage, Messages, Synced
 
-__all__ = ["AgentClient", "AgentError", "Followed"]
+__all__ = ["AgentClient", "AgentError", "Followed", "as_text"]
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,25 @@ class Followed:
     """
     cursor: int
     """Where this leaves off: ``follow(cursor=...)`` carries on from here, later or elsewhere."""
+
+    @property
+    def waiting(self) -> list[dict[str, Any]]:
+        """What the agent's tools wait for now (``pending``): each wait's ``id``, ``name`` and ``input``."""
+        return self.status["waiting"]
+
+
+def as_text(message: ChatMessage) -> str:
+    """
+    ``message`` to read, such as in a terminal: its text after its role, and
+    each tool call on a line of its own, with its output (``…`` until it has one).
+    """
+    lines = []
+    for part in message["parts"]:
+        if part["type"] == "text":
+            lines.append(f"{message['role']}: {part['text']}")
+        else:
+            lines.append(f"  {part['name']}({json.dumps(part['input'])}) -> {part.get('output', '…')}")
+    return "\n".join(lines)
 
 
 class AgentClient:

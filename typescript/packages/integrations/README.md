@@ -288,6 +288,10 @@ for await (const change of follow(restate, agent('assistant'), 'alice', { signal
 }
 ```
 
+Each change has `waiting` too, what the agent waits for, and `asText(message)`
+is a message to read, as a terminal shows it: its text, and its tool calls
+with their outputs.
+
 `restate-agents/client` also has the types of what the handlers answer
 (`Messages`, `Status`, `Waiting`...); `agent<H>(name)` types an object of
 your own with its handlers `H`.
