@@ -114,6 +114,42 @@ not the transaction commits, while holding it open. Make calls before the
 transaction, with an idempotency key of their own, and record their outcome
 in it, as the shop's `Orders` does; its `expire` is a send of `tx`.
 
+**Steps: what the invocation keeps across its attempts.** A retried attempt
+runs the handler again from the start, so a request to a model, say, would be
+made again. `ctx.step(name, body)` runs `body` once for the invocation:
+
+```ts
+const answer = await ctx.step('ask', () => model.ask(question));
+```
+
+A step is a transaction like `ctx.transaction`'s: `body` gets `{ db, tx }`,
+and its result (as JSON) commits with its SQL and its sends, in one write. A
+later attempt of the invocation that reaches the step gets the stored result,
+without running `body`; one that crashed before the commit runs it again. So a
+step's SQL and its result are stored together or not at all:
+
+```ts
+await ctx.step('charge', async ({ db }) => {
+  const receipt = await payments.charge(order);
+  await db.execute('UPDATE orders SET paid = ? WHERE id = ?', [receipt.id, order.id]);
+  return receipt;
+});
+```
+
+The transaction begins at the body's first statement, not before it runs: steps
+that only make requests run concurrently (`Promise.all`), and commit one after
+the other. A name is one step of the invocation, so a step in a loop adds what
+tells its runs apart (`` `ask ${turn}` ``); a name used twice in one attempt is
+a terminal error.
+
+The steps live in the table `restate_steps` of the object's database, by the
+invocation's id (`ctx.request().id`, the same on every attempt) and name. They
+are kept until the invocation ends, with its result or a terminal error, and
+its end drops the table: the object runs one exclusive invocation at a time,
+so every row then belongs to one that ended (an invocation killed without
+ending leaves its rows to the end of the next one that uses the database). A
+step is for exclusive handlers: a shared one stores nothing.
+
 The store is the object's state: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear` (each named after its key), and `sync` is an empty
 `ctx.run`.
@@ -179,10 +215,11 @@ operation it reaches happens again. What each one does then:
 | Operation                                                                | On a retried attempt                                                                                                                                                                                                          |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ctx.db`, `ctx.transaction`                                              | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
+| `ctx.step`                                                               | Returns the result a previous attempt committed, without running its body; runs it if none did.                                                                                                                               |
 | Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result.                                                   |
 | Sends, delayed sends                                                     | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer.                                                                                                                      |
 | `ctx.get`, `ctx.set`, `ctx.clear`                                        | Read the state as stored; a write is stored once an empty `ctx.run` after it resolves, and a crash before that may lose it.                                                                                                   |
-| `ctx.run`                                                                | Runs its action again: its result is not kept from one attempt to the next. (The store uses an empty run, to sync.)                                                                                                           |
+| `ctx.run`                                                                | Runs its action again: its result is not kept from one attempt to the next (use `ctx.step` for that). (The store uses an empty run, to sync.)                                                                                 |
 | `ctx.sleep`                                                              | Starts over.                                                                                                                                                                                                                  |
 | `attach`, `cancel`                                                       | Idempotent already.                                                                                                                                                                                                           |
 | Awakeables                                                               | Refused, a terminal error (their signal ids would collide): wait in a handler with `journalReplay: true`.                                                                                                                     |

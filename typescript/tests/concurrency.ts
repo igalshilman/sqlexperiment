@@ -248,6 +248,24 @@ const database = restate.object({
 
     sqlError: async (ctx: Ctx) => ctx.db.execute('SELECT * FROM missing'),
 
+    // A step commits once: the retried attempt gets its result, and its SQL
+    // is there once.
+    steps: async (ctx: Ctx) => {
+      const n = () => attempts.get(ctx.request().id)!;
+      attempt(ctx);
+      const first = await ctx.step('first', async ({ db }) => {
+        await db.execute('CREATE TABLE IF NOT EXISTS stepped (attempt INTEGER)');
+        await db.execute('INSERT INTO stepped VALUES (?)', [n()]);
+        return n();
+      });
+      if (n() === 1) throw new Error('retry me');
+      const [rows] = await row<[number]>(ctx.db, 'SELECT count(*) FROM stepped');
+      return { first, rows, attempts: n() };
+    },
+    // Whether the table of steps exists.
+    stepsTable: async (ctx: Ctx) =>
+      (await ctx.db.query("SELECT 1 FROM sqlite_master WHERE name = 'restate_steps'")).length > 0,
+
     // A transaction's sends reach their target once it commits.
     sends: async (ctx: Ctx, n: number) =>
       ctx.transaction(async ({ db, tx }) => {
@@ -470,6 +488,11 @@ await check("a transaction's sends reach their target", async () => {
     await sleep(100);
   } while (Date.now() < deadline);
   assert.deepEqual(marks, [0, 1, 2]);
+});
+
+await check("a step runs once: a retried attempt gets its result; the invocation's end drops the steps", async () => {
+  assert.deepEqual((await call('Db/st/steps')).value, { first: 1, rows: 1, attempts: 2 });
+  assert.equal((await call('Db/st/stepsTable')).value, false);
 });
 
 await check('an SQL error that the handler fails with is terminal', async () => {

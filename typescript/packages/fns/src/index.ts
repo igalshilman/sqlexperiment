@@ -69,6 +69,20 @@ export interface ObjectContext extends Omit<restate.ObjectContext, 'awakeable'> 
    * part of it: make calls before it, and record their outcome in it.
    */
   transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T>;
+
+  /**
+   * Run `body` once for this invocation, as its step `name`: a
+   * {@link transaction} whose result (JSON) commits with its SQL and sends. A
+   * retried attempt that reaches the step gets the stored result, and does not
+   * run `body` again; one that fails before the commit runs it again. Use it
+   * for what should not be repeated, such as a request to a model.
+   *
+   * The transaction begins at the body's first statement, so steps that run no
+   * SQL until the end run concurrently. A name is one step of the invocation:
+   * one that runs several times (a loop) adds what tells them apart. The steps
+   * are kept until the invocation ends: its result, or a terminal error.
+   */
+  step<T>(name: string, body: (t: SqlTransaction) => Promise<T>): Promise<T>;
 }
 
 /**
@@ -133,10 +147,12 @@ const refusedAwakeable = () => {
 /** `ctx`, with `db` and `transaction` of `attempt`: its other members are the context's own. */
 function sqlContext<C extends object>(ctx: C, attempt: SqlAttempt): C {
   const transaction = <T>(body: (t: SqlTransaction) => Promise<T>) => attempt.transaction(body);
+  const step = <T>(name: string, body: (t: SqlTransaction) => Promise<T>) => attempt.step(name, body);
   return new Proxy(ctx, {
     get(target, prop) {
       if (prop === 'db') return attempt.db;
       if (prop === 'transaction') return transaction;
+      if (prop === 'step') return step;
       if (prop === 'awakeable') return refusedAwakeable;
       const value: unknown = Reflect.get(target, prop, target);
       return typeof value === 'function' ? value.bind(target) : value;
