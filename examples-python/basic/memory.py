@@ -12,7 +12,7 @@ handler of your own serves them, for a profile page say.
 
 from restate_agents import langgraph, serve, tool
 
-# The facts' table: the schema of each conversation's database, beside the conversation.
+# A table of your own, beside the agent's: the facts, in each user's database.
 FACTS = ["CREATE TABLE facts (fact TEXT PRIMARY KEY)"]
 
 

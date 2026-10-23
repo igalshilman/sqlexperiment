@@ -432,7 +432,7 @@ const remember = tool({
 
 const assistant = object({
   name: 'assistant',
-  schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'], // each key's database: applied once per key
+  schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'], // tables of your own, beside the agent's (optional)
   handlers: {
     chat: pi.chat({ tools: [remember] }),
     messages: pi.messages(),
