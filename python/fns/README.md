@@ -49,7 +49,9 @@ with the same storage, page cache and pending sends:
   handler of the key first opens its database; the table `restate_schema`
   keeps how far each database got, so a step added later (a column, an
   index) runs on each key's database once, as that key is next opened. A
-  step never changes once it ran: a change is a step of its own.
+  step never changes once it ran: a change is a step of its own. Tables
+  whose names start with `restate_` are Restate's (`restate_schema`, and
+  those of the agents of restate_agents): name yours otherwise.
 - `ctx.db` is the object's database (namespace `service/key`). Each
   statement is its own transaction, and `async with ctx.db.transaction() as
   db` groups several. Calls run one at a time, in the order they start.

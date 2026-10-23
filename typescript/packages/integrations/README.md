@@ -443,10 +443,11 @@ const assistant = object({
 await serve(assistant);
 ```
 
-Your tables share the database with the agent's, so name them apart: pi's
-are pi-durable's, unprefixed (`tasks`, `entries`, `conversations`,
-`documents`, `submissions`...); the other integrations' have their prefix
-(`claude_`, `langgraph_`, `dsh_`), and `agent_log` is the log of each.
+Your tables share the database with the agent's, whose names all start with
+`restate_` (`restate_pi_tasks`, `restate_claude_messages`,
+`restate_agent_log`...): any other name is yours. OpenCode's tables are in a
+database of their own, beside it, as OpenCode boots only on a database that
+is empty or its own.
 
 **Options for each invocation.** `chat` takes options, or a function of the
 invocation's context that gives them: each user's model and persona from
