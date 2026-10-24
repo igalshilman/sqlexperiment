@@ -1,15 +1,16 @@
-//! Transactional state over an asynchronous key/value store: paged files and
-//! records, changed through a write-ahead log in memory, which a flush makes
-//! durable at once.
+//! Transactional state over an asynchronous key/value store: paged files,
+//! records and logs, changed through a mutation in memory, which a flush
+//! makes durable at once.
 //!
 //! A [`State`] is one namespace in a KV store: the state of a Restate object
 //! without Restate's journal, which keeps writes in issue order and makes
 //! them durable at a sync (see [`kv`]). It needs no multi-key transaction,
 //! compare-and-swap or listing operation. Its [`File`]s are 4 KiB pages read
-//! and written at random, and its [`Record`]s whole values. The state is
-//! read; it changes only through a [`Mutation`] ([`State::mutation`]): the records set
-//! and pages written there become durable together at [`Mutation::flush`], and a
-//! mutation dropped discards them.
+//! and written at random, its [`Record`]s whole values, and its [`Log`]s
+//! entries appended and truncated from the start. The state is
+//! read; it changes only through a [`Mutation`] ([`State::mutation`]): the
+//! records set, pages written and entries appended there become durable
+//! together at [`Mutation::flush`], and a mutation dropped discards them.
 //!
 //! What writes a mutation is a [`Participant`]: it keeps changes of its own, moves
 //! them into the mutation before the flush, and may leave state idle for the
@@ -28,9 +29,9 @@
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
-//! | A mutation | Records set and pages written in it, in memory | No: dropping it discards them |
-//! | Root | `v16/root`: the directory, small records, and the blobs of each file's chunks | Yes, after an acknowledged flush |
-//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, or a large record; written once | Yes, until no root a reader may hold names it |
+//! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
+//! | Root | `v16/root`: the directory, small records and log entries, and the top of each file's chunk map | Yes, after an acknowledged flush |
+//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, a map node, or a large record or log entry; written once | Yes, until no root a reader may hold names it |
 //!
 //! # Ownership and concurrency
 //!
@@ -71,7 +72,8 @@
 //! # Limits
 //!
 //! A file holds at most [`MAX_FILE_BYTES`], a record's value
-//! [`MAX_RECORD_BYTES`], a name [`MAX_NAME_BYTES`]. The backend is assumed
+//! [`MAX_RECORD_BYTES`] (a log entry too), a log [`MAX_LOG_ENTRIES`], a name
+//! [`MAX_NAME_BYTES`]. The backend is assumed
 //! to return what was stored; decoding checks structure and bounds, and
 //! blobs' zstd frames carry a checksum. Use a fresh, dedicated namespace; no
 //! migration or format discovery is implemented. Simulation and benchmark
@@ -85,7 +87,10 @@ mod store;
 mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
-pub use store::{FlushReport, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES, ROOT_KEY};
+use store::Is;
+pub use store::{
+    FlushReport, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES, ROOT_KEY,
+};
 
 use crate::cache::{Idle, NamespaceCache};
 use crate::kv::KvStore;
@@ -328,6 +333,15 @@ impl State {
         }
     }
 
+    /// The log named `name`: entries appended in a mutation and truncated
+    /// from its start (see [`Log`]).
+    pub fn log(&self, name: &str) -> Log {
+        Log {
+            name: format!("{}{name}", self.prefix).into(),
+            shared: self.shared.clone(),
+        }
+    }
+
     /// The paged file named `name`: 4 KiB pages, read here and written in a
     /// mutation (see [`File`]).
     pub fn file(&self, name: &str) -> Result<File> {
@@ -383,6 +397,7 @@ impl State {
             shared: self.shared.clone(),
             records: Default::default(),
             files: Default::default(),
+            logs: Default::default(),
             receipts: Vec::new(),
             taken: false,
         }
@@ -466,15 +481,16 @@ impl IntoFuture for Open {
     }
 }
 
-/// The writes ahead of a [`State`]: the records set and pages written since
-/// [`State::mutation`] made it, in memory, which [`Self::flush`] makes durable
-/// together, atomically. There is no other way to change the state. A mutation
+/// A change to a [`State`]: the records set, pages written and log entries
+/// appended and truncated since [`State::mutation`] made it, in memory, which
+/// [`Self::flush`] makes durable together, atomically. There is no other way to change the state. A mutation
 /// dropped discards its writes; a participant that moved changes into it
 /// learns which happened from its [`Receipt`].
 pub struct Mutation {
     shared: Arc<Shared>,
     records: store::Records,
     files: store::Writes,
+    logs: store::Appends,
     receipts: Vec<Receipt>,
     /// [`Self::flush`] took its writes: dropping discards nothing.
     taken: bool,
@@ -483,7 +499,7 @@ pub struct Mutation {
 impl Mutation {
     /// Whether nothing was set or written.
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty() && self.files.is_empty()
+        self.records.is_empty() && self.files.is_empty() && self.logs.is_empty()
     }
 
     /// A receipt for what becomes of this mutation (see [`Receipt`]).
@@ -503,11 +519,7 @@ impl Mutation {
             let (len, max) = (value.len(), MAX_RECORD_BYTES);
             return Err(format!("record {:?} of {len} bytes exceeds {max}", record.name).into());
         }
-        check_name(&record.name)?;
-        let paged = record.shared.snapshot().is_paged(&record.name);
-        if self.files.contains_key(&*record.name) || paged == Some(true) {
-            return Err(format!("{:?} is a paged file, not a record", record.name).into());
-        }
+        self.claim(&record.name, Is::Record)?;
         self.records.insert(record.name.to_string(), value);
         Ok(())
     }
@@ -558,11 +570,7 @@ impl Mutation {
     /// last flushed.
     fn change(&mut self, file: &File, f: impl FnOnce(&mut store::Written)) -> Result<()> {
         self.of(&file.shared)?;
-        check_name(&file.name)?;
-        let paged = file.shared.snapshot().is_paged(&file.name);
-        if self.records.contains_key(&*file.name) || paged == Some(false) {
-            return Err(format!("{:?} is a record, not a paged file", file.name).into());
-        }
+        self.claim(&file.name, Is::Paged)?;
         let size = file.len();
         let written = (self.files.entry(file.name.to_string())).or_insert_with(|| store::Written {
             size,
@@ -573,11 +581,63 @@ impl Mutation {
         Ok(())
     }
 
-    /// Make every record set and page written durable: the blobs of the
-    /// chunks and records it changes, then the root that names them, then
-    /// one sync, in one round trip. Nothing changed: nothing is written. It
-    /// is refused while a participant holds changes not yet in a mutation, while
-    /// another flush of the state runs, and for writes the state cannot
+    /// Append `entry` to `log` with this mutation's flush: its index, one
+    /// past the last entry the log holds or this mutation appended. Refused,
+    /// before the mutation changes, is what no flush could store: an entry
+    /// past [`MAX_RECORD_BYTES`], a log past [`MAX_LOG_ENTRIES`], a name
+    /// past [`MAX_NAME_BYTES`], or the name of a record or a paged file.
+    pub fn append(&mut self, log: &Log, entry: Bytes) -> Result<u64> {
+        self.of(&log.shared)?;
+        if entry.len() > MAX_RECORD_BYTES {
+            let (len, max) = (entry.len(), MAX_RECORD_BYTES);
+            return Err(format!("{:?}: an entry of {len} bytes exceeds {max}", log.name).into());
+        }
+        self.claim(&log.name, Is::Log)?;
+        let held = log.held();
+        let appended = self.logs.entry(log.name.to_string()).or_default();
+        let next = held.next() + appended.values.len() as u64;
+        if next + 1 - appended.before.max(held.first) > MAX_LOG_ENTRIES {
+            let max = MAX_LOG_ENTRIES;
+            return Err(format!("{:?} would hold more than {max} entries", log.name).into());
+        }
+        appended.values.push(entry);
+        Ok(next)
+    }
+
+    /// Drop `log`'s entries before index `before` with this mutation's
+    /// flush, those it appends included: after it, the log starts at
+    /// `before`, or where it started if that is later. Refused is an
+    /// index past the log's end, this mutation's appends included.
+    pub fn truncate(&mut self, log: &Log, before: u64) -> Result<()> {
+        self.of(&log.shared)?;
+        self.claim(&log.name, Is::Log)?;
+        let held = log.held();
+        let appended = self.logs.entry(log.name.to_string()).or_default();
+        if before > held.next() + appended.values.len() as u64 {
+            return Err(format!("{:?}: truncating past its end", log.name).into());
+        }
+        appended.before = appended.before.max(before);
+        Ok(())
+    }
+
+    /// Refuse `name` as `wanted` if it is another kind, in the state or in
+    /// this mutation, or a name no flush could store.
+    fn claim(&self, name: &str, wanted: Is) -> Result<()> {
+        check_name(name)?;
+        let mine = (self.records.contains_key(name).then_some(Is::Record))
+            .or(self.files.contains_key(name).then_some(Is::Paged))
+            .or(self.logs.contains_key(name).then_some(Is::Log));
+        match mine.or(self.shared.snapshot().is(name)) {
+            Some(held) if held != wanted => Err(held.refuse(name, wanted).into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Make every record set, page written and entry appended durable: the
+    /// blobs of the chunks, records and entries it changes, then the root
+    /// that names them, then one sync, in one round trip. Nothing changed:
+    /// nothing is written. It is refused while a participant holds changes
+    /// not yet in a mutation, while another flush of the state runs, and for writes the state cannot
     /// store; a refused flush writes nothing, and the state goes on. `Ok`
     /// holds what it wrote; any other error (one refused because another
     /// state flushed since included), or dropping the future, ends the
@@ -598,7 +658,9 @@ impl Mutation {
         let snapshot = shared.snapshot();
         // What the writes checked as they were made still holds, unless
         // another mutation flushed since: refused before anything is written.
-        snapshot.check(&self.files, &self.records).await?;
+        snapshot
+            .check(&self.files, &self.records, &self.logs)
+            .await?;
         if shared.flushing.swap(true, Ordering::SeqCst) {
             return Err("a flush of this state is running".into());
         }
@@ -609,8 +671,9 @@ impl Mutation {
         };
         let files = std::mem::take(&mut self.files);
         let records = std::mem::take(&mut self.records);
+        let logs = std::mem::take(&mut self.logs);
         self.taken = true;
-        let result = snapshot.commit(files, records).await;
+        let result = snapshot.commit(files, records, logs).await;
         running.returned = true;
         let (report, after) = result?;
         *shared.snapshot.lock().unwrap() = Arc::new(after);
@@ -766,6 +829,48 @@ impl Record {
             .get(&*self.name)
             .cloned()
             .unwrap_or_default()
+    }
+}
+
+/// A named log: entries appended in a mutation ([`Mutation::append`]), each
+/// at the next index, and dropped from its start ([`Mutation::truncate`]),
+/// read from the state ([`Self::entries`]). A cheap handle.
+///
+/// Like a record's value, an entry of up to
+/// [`StateOptions::inline_record_bytes`] is in the root, and a larger one a
+/// blob of its own, written once; opening the state reads every entry. A
+/// flush costs about what it appends: what a log is for is changes too small
+/// to rewrite their whole, folded into a record or a file now and then, and
+/// truncated.
+#[derive(Clone)]
+pub struct Log {
+    name: Arc<str>,
+    shared: Arc<Shared>,
+}
+
+impl Log {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The index of the first entry the log holds, as last flushed: of the
+    /// next entry if it holds none.
+    pub fn first(&self) -> u64 {
+        self.held().first
+    }
+
+    /// The index the next entry appended takes, as last flushed.
+    pub fn next(&self) -> u64 {
+        self.held().next()
+    }
+
+    /// The entries the log holds, as last flushed, from [`Self::first`].
+    pub fn entries(&self) -> Vec<Bytes> {
+        self.held().values
+    }
+
+    fn held(&self) -> store::Entries {
+        self.shared.snapshot().log(&self.name)
     }
 }
 

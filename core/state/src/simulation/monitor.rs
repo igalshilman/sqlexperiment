@@ -21,7 +21,7 @@
 //! 5. **Leak nothing**: a blob the root named and the next one does not is
 //!    its garbage, and stays garbage until deleted.
 //! 6. **Decodable**: every root decodes, and every map node, chunk and
-//!    record blob it names decodes: a chunk's base against its file's golden
+//!    record and log entry blob it names decodes: a chunk's base against its file's golden
 //!    pages, its delta against its base.
 //!
 //! What a root names it learns by walking each file's map through the node
@@ -217,6 +217,12 @@ impl Known {
                     named.insert(*n);
                 }
                 Kind::Record(Value::Inline(_)) => {}
+                Kind::Log { entries, .. } => {
+                    named.extend(entries.iter().filter_map(|entry| match entry {
+                        Value::Blob(n) => Some(*n),
+                        Value::Inline(_) => None,
+                    }));
+                }
                 Kind::Paged { size, map, .. } => {
                     for visit in self.walk(map, root.shape(*size)).0 {
                         match visit {
@@ -232,7 +238,7 @@ impl Known {
         named
     }
 
-    /// Decode every chunk and record blob `root` names (those a failed write
+    /// Decode every chunk, record and log entry blob `root` names (those a failed write
     /// left unknown aside).
     fn decode(&self, root: &Root) -> io::Result<()> {
         let size = (root.chunk_pages * PAGE) as usize;
@@ -247,6 +253,17 @@ impl Known {
                     continue;
                 }
                 Kind::Record(Value::Inline(_)) => continue,
+                Kind::Log { entries, .. } => {
+                    for n in entries.iter().filter_map(|entry| match entry {
+                        Value::Blob(n) => Some(*n),
+                        Value::Inline(_) => None,
+                    }) {
+                        if let Some(frame) = blob(n) {
+                            zstd::decompress_sized(frame, &[], MAX_RECORD_BYTES)?;
+                        }
+                    }
+                    continue;
+                }
             };
             let (met, errors) = self.walk(map, root.shape(bytes));
             if let Some(error) = errors.into_iter().next() {

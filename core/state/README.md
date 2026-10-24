@@ -2,10 +2,11 @@
 
 Transactional state over an asynchronous key/value store, for namespaces with
 one owner at a time: the state of a Restate object without Restate's journal
-(`journalReplay: false`). It keeps named **records** (small whole values) and
-paged **files** (4 KiB pages, read and written at random). The state is read;
-it changes only through a **mutation**, an owned value that collects the records set
-and pages written, and a **flush** makes everything in the mutation durable at
+(`journalReplay: false`). It keeps named **records** (small whole values),
+paged **files** (4 KiB pages, read and written at random) and **logs**
+(entries appended, and truncated from the start). The state is read; it
+changes only through a **mutation**, an owned value that collects the records
+set, pages written and entries appended, and a **flush** makes everything in the mutation durable at
 once, in one round trip. It needs only `get`, `put` and `delete` from the backend.
 
 What writes a mutation is a **participant**: it keeps changes of its own, moves
@@ -59,12 +60,13 @@ but one key, the root, which names everything else: copy-on-write.
 A namespace holds:
 
 - **The root** (`v16/root`): the version, the directory of files (paged
-  files, such as the SQL database's, and records), the small records, and
+  files, such as the SQL database's, records and logs), the small records
+  and log entries, and
   the top of each paged file's chunk map.
 - **Blobs** (`v16/blob/<n>`): one zstd frame each, written once and never
   changed: a chunk's _base_ (its 4 pages), maybe a _delta_ (its pages now,
   compressed against the base, so it costs about what changed), a node of a
-  chunk map, or a large record.
+  chunk map, or a large record or log entry.
 
 **Chunk maps.** A paged file's chunks are named by a copy-on-write radix
 tree of 64-entry nodes, its top node in the root. A file of up to 1 MiB is

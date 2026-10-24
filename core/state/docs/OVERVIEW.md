@@ -23,7 +23,7 @@ and the root plays that role.
 | Key            | What it holds                                                                                                                             |
 | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `v16/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.              |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record |
+| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record or log entry |
 
 Transactions change two kinds of state:
 
@@ -36,6 +36,9 @@ Transactions change two kinds of state:
   stored.
 - **Records** are named values, such as `run`, `memory` or an extension's
   `notary/count`: inside the root up to 1 KiB, a blob of their own past it.
+- **Logs** are named sequences of entries, each stored as a record's value:
+  a mutation appends entries and truncates the log from its start, so a
+  flush writes what it appends, not what came before.
 
 The contract it needs from Restate is small ([`kv.rs`](../src/kv.rs)): writes
 return at once and are kept in issue order, `sync()` waits until they are
@@ -46,15 +49,16 @@ state at a time, which a Restate virtual object guarantees.
 ## How a flush works
 
 Nothing is durable until `mutation.flush()`: every record set and page written in
-the mutation becomes durable at once, and dropping the mutation discards them. The state
+the mutation (and every entry appended) becomes durable at once, and dropping the mutation discards them. The state
 itself shows only what was flushed. A flush queues its writes in this order,
 then syncs once:
 
 1. **Garbage:** deletes of blobs that no root names for the last 16 flushes.
 2. **Blobs:** each changed chunk's pages, compressed against the chunk's base
    (a delta), or, once the delta grows, a new base; a new node on each path
-   of a chunk map to a changed chunk, below its top; and large records.
-3. **The root:** naming them, with the small records. If this put is stored,
+   of a chunk map to a changed chunk, below its top; and large records and
+   log entries.
+3. **The root:** naming them, with the small records and log entries. If this put is stored,
    the transaction happened.
 
 The order makes a crash at any point safe. Restate keeps a prefix of the
