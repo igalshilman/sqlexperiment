@@ -375,30 +375,23 @@ impl Root {
             }
         }
         let mut out = ROOT_MAGIC.to_vec();
-        put_varint(&mut out, body.len() as u64);
-        zstd::compress(&body, &[], true, |frame| out.extend_from_slice(frame))
+        zstd::compress(&body, &[], |frame| out.extend_from_slice(frame))
             .expect("compressing in memory");
         Bytes::from(out)
     }
 
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
-        let rest = (bytes.strip_prefix(ROOT_MAGIC)).ok_or_else(|| invalid("root"))?;
-        let mut at = 0;
-        let len = get_varint(rest, &mut at).ok_or_else(|| invalid("root"))? as usize;
-        if len > MAX_ROOT_BYTES {
-            return Err(invalid("root"));
-        }
-        let mut body = Vec::with_capacity(len);
-        zstd::decompress(&mut body, &rest[at..], &[])?;
-        if body.len() != len {
-            return Err(invalid("root"));
-        }
+        let frame = (bytes.strip_prefix(ROOT_MAGIC)).ok_or_else(|| invalid("root"))?;
+        let body = zstd::decompress_sized(frame, &[], MAX_ROOT_BYTES)?;
         let (id, rest) = body.split_first_chunk().ok_or_else(|| invalid("root"))?;
         let id = u64::from_le_bytes(*id);
         let mut r = Reading { bytes: rest, at: 0 };
         let version = r.bounded(MAX_SEQUENCE)?;
         let next_blob = r.bounded(MAX_SEQUENCE)?;
-        let chunk_pages = r.bounded(MAX_FILE_BYTES / PAGE)?.max(1);
+        let chunk_pages = r.bounded(MAX_FILE_BYTES / PAGE)?;
+        if chunk_pages == 0 {
+            return Err(invalid("root"));
+        }
         let mut root = Root {
             id,
             version,
@@ -579,7 +572,10 @@ impl Snapshot {
         }
         let root = match &root_bytes {
             Some(bytes) => Root::decode(bytes)?,
-            None => Root::new(options.chunk_pages.clamp(1, MAX_FILE_BYTES / PAGE)),
+            None if (1..=MAX_FILE_BYTES / PAGE).contains(&options.chunk_pages) => {
+                Root::new(options.chunk_pages)
+            }
+            None => return refuse(format!("chunk_pages {} is invalid", options.chunk_pages)),
         };
         let mut snapshot = Self {
             store,
@@ -862,7 +858,15 @@ impl Snapshot {
             }
         };
         let value = fetch.await;
-        self.fetching.lock().unwrap().remove(&n);
+        // Gone once no read awaits it, unless a newer fetch took its place.
+        let mut fetching = self.fetching.lock().unwrap();
+        if fetching
+            .get(&n)
+            .is_some_and(|fetch| fetch.upgrade().is_none())
+        {
+            fetching.remove(&n);
+        }
+        drop(fetching);
         value.map_err(|error| io::Error::new(error.kind(), error.to_string()))
     }
 
@@ -1072,8 +1076,7 @@ impl Snapshot {
                 // beside it; else a new base.
                 let delta = match &base_image {
                     Some(base) => {
-                        let delta =
-                            zstd::compress(&pages, &base.pages, true, Bytes::copy_from_slice)?;
+                        let delta = zstd::compress(&pages, &base.pages, Bytes::copy_from_slice)?;
                         let small =
                             delta.len() as f64 <= self.options.rebase_ratio * base.stored as f64;
                         small.then_some(delta)
@@ -1097,7 +1100,7 @@ impl Snapshot {
                     }
                     None => {
                         let prefix = if based { &hole[..] } else { &[] };
-                        let frame = zstd::compress(&pages, prefix, true, Bytes::copy_from_slice)?;
+                        let frame = zstd::compress(&pages, prefix, Bytes::copy_from_slice)?;
                         rebased += usize::from(stored.base.is_some());
                         dead.extend(stored.base);
                         let image = Image {
@@ -1140,7 +1143,7 @@ impl Snapshot {
                     root.next_blob += 1;
                     fresh.push((
                         n,
-                        zstd::compress(&value, &[], true, Bytes::copy_from_slice)?,
+                        zstd::compress(&value, &[], Bytes::copy_from_slice)?,
                         None,
                     ));
                     Value::Blob(n)
@@ -1243,3 +1246,7 @@ impl Snapshot {
         Ok(with)
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/store.rs"]
+mod tests;

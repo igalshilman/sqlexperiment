@@ -15,7 +15,8 @@ unless stated otherwise.
 
 ## Root
 
-`SR16`, the body's length (at most 64 MiB), then one zstd frame of the body:
+`SR16`, then one zstd frame of the body, which carries its size (at most
+64 MiB) and a checksum:
 
 | Field       | Encoding                                                                                                                                                |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |

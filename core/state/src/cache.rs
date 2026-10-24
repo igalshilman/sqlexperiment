@@ -184,9 +184,11 @@ impl PageCache {
         live.retain(|_, owner| owner.strong_count() > 0);
         live.insert(key.to_owned(), Arc::downgrade(&owner));
         drop(live);
+        let id = owner.lock().unwrap().id;
         NamespaceCache {
             shared: self.shared.clone(),
             idle: Arc::downgrade(&self.idle),
+            id,
             owner,
         }
     }
@@ -202,6 +204,8 @@ impl PageCache {
 pub struct NamespaceCache {
     shared: Arc<Shared>,
     idle: Weak<Mutex<Parked>>,
+    /// The owner's identity, which keys its blobs and idle state.
+    id: u64,
     owner: Arc<Mutex<Owner>>,
 }
 
@@ -307,7 +311,7 @@ impl NamespaceCache {
     fn forget_locked(&self, owner: &mut Owner) -> HashMap<String, Idle> {
         owner.root = None;
         owner.committed = None;
-        self.take_idle_of(owner.id)
+        self.take_idle()
     }
 
     /// Take the right to flush on top of `version`, this owner's last
@@ -333,29 +337,27 @@ impl NamespaceCache {
     /// Keep a participant's idle state for the next session; it is dropped
     /// on any reset.
     pub(crate) fn park(&self, name: &str, idle: Idle) {
-        let id = self.owner().id;
         if let Some(parked) = self.idle.upgrade() {
             // Dropped once the lock is released.
-            let evicted = parked.lock().unwrap().park((id, name.to_owned()), idle);
+            let evicted = parked
+                .lock()
+                .unwrap()
+                .park((self.id, name.to_owned()), idle);
             drop(evicted);
         }
     }
 
     /// Every participant's idle state, by participant.
     pub(crate) fn take_idle(&self) -> HashMap<String, Idle> {
-        self.take_idle_of(self.owner().id)
-    }
-
-    fn take_idle_of(&self, id: u64) -> HashMap<String, Idle> {
         let Some(parked) = self.idle.upgrade() else {
             return HashMap::new();
         };
-        parked.lock().unwrap().take_all(id)
+        parked.lock().unwrap().take_all(self.id)
     }
 
     fn key(&self, database: u64, blob: u64) -> BlobKey {
         BlobKey {
-            namespace: self.owner().id,
+            namespace: self.id,
             database,
             blob,
         }
