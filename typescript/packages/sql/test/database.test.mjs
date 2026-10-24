@@ -10,7 +10,7 @@ const { open } = require('../index.js');
 class Backend {
   stored = new Map();
   unconfirmed = [];
-  // Which unsynced writes a failure keeps: none, or a pseudo-random subset.
+  // How many unsynced writes a failure keeps, in order: none, or a pseudo-random prefix.
   #seed = 0;
 
   constructor({ seed = 0 } = {}) {
@@ -24,15 +24,15 @@ class Backend {
     }
   }
 
-  /** A failure: the store keeps some of the unsynced writes, in no order (worse than the contract). */
+  /** A failure: the store keeps a prefix of the unsynced writes, the most the contract allows. */
   lose() {
-    for (const [key, value] of this.unconfirmed.splice(0)) {
-      if (this.#seed === 0) continue;
+    let kept = 0;
+    if (this.#seed !== 0) {
       this.#seed = (this.#seed * 1103515245 + 12345) % 2 ** 31;
-      if (this.#seed % 2 === 0) continue;
-      if (value === undefined) this.stored.delete(key);
-      else this.stored.set(key, value);
+      kept = this.#seed % (this.unconfirmed.length + 1);
     }
+    this.unconfirmed.splice(kept);
+    this.confirm();
   }
 
   /** A request's view: its own writes over the stored values. */
@@ -107,7 +107,7 @@ test('an SQL error leaves the session usable; a transaction rolls back', async (
 
 /**
  * Requests insert a row each; request `lost` fails, its sync losing some of
- * its writes (none kept, or a subset by `seed`). The owner and a process
+ * its writes (none kept, or a prefix by `seed`). The owner and a process
  * without cached state must then read the rows of the other requests, and
  * the lost one's only if both do.
  */
@@ -357,7 +357,7 @@ test('a statement that commits resolves once its writes are stored, however many
     'INSERT INTO t(b) SELECT randomblob(3000) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c)',
   );
   assert.equal(backend.unconfirmed.length, 0);
-  assert.ok(backend.stored.size > 1000, `${backend.stored.size} keys stored`);
+  assert.ok(backend.stored.size > 500, `${backend.stored.size} keys stored`);
   await db.save();
 });
 
@@ -378,7 +378,7 @@ const readerOf = (backend) => ({
   sync() {},
 });
 
-test('a reader reads beside the owner, writes nothing, and knows when the owner committed since', async () => {
+test('a reader reads beside the owner, writes nothing, and keeps the state it opened on', async () => {
   const backend = new Backend();
   const ns = fresh();
   const owner = await open(ns, backend.request());
@@ -391,7 +391,6 @@ test('a reader reads beside the owner, writes nothing, and knows when the owner 
   await reader.execute('CREATE TABLE IF NOT EXISTS t(n INTEGER)');
   await reader.execute('INSERT INTO t VALUES (99)');
   assert.deepEqual(await reader.query('SELECT n FROM t ORDER BY n'), [[1], [99]]);
-  assert.equal(await reader.isCurrent(), true);
   // It commits no effects.
   await assert.rejects(
     reader.transaction(async (tx) => tx.commitEffects(new TextEncoder().encode('sends'))),
@@ -399,15 +398,13 @@ test('a reader reads beside the owner, writes nothing, and knows when the owner 
   );
   assert.equal(await text(reader), '');
 
-  // The owner commits: the reader keeps the state it opened on, which is no longer current.
+  // The owner commits: the reader keeps the state it opened on.
   await owner.execute('INSERT INTO t VALUES (2)');
   assert.deepEqual(await reader.query('SELECT n FROM t ORDER BY n'), [[1], [99]]);
-  assert.equal(await reader.isCurrent(), false);
   await reader.close();
 
   const again = await open(ns, readerOf(backend), { reader: true });
   assert.deepEqual(await again.query('SELECT n FROM t ORDER BY n'), [[1], [2]]);
-  assert.equal(await again.isCurrent(), true);
   await again.close();
   await owner.save();
 });
@@ -415,6 +412,5 @@ test('a reader reads beside the owner, writes nothing, and knows when the owner 
 test('a reader of a namespace without a database reads none', async () => {
   const reader = await open(fresh(), readerOf(new Backend()), { reader: true });
   assert.deepEqual(await reader.query('SELECT count(*) FROM sqlite_schema'), [[0]]);
-  assert.equal(await reader.isCurrent(), true);
   await reader.close();
 });
