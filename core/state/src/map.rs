@@ -44,6 +44,13 @@ impl Shape {
         height
     }
 
+    /// Nodes below the top, at most (fewer where subtrees are holes).
+    pub fn nodes(self) -> u64 {
+        (0..self.height() - 1)
+            .map(|k| self.count.div_ceil(self.span(k + 1)))
+            .sum()
+    }
+
     /// Chunks under one entry of a node at level `k`.
     fn span(self, k: u32) -> u64 {
         self.fanout.saturating_pow(k)
@@ -237,7 +244,7 @@ impl Map {
     pub fn get(&self, shape: Shape, chunk: u64, nodes: &Nodes) -> Chunk {
         let mut node = self.node.clone();
         for k in (0..self.height).rev() {
-            let child = match &*node {
+            let (child, blob) = match &*node {
                 Node::Leaf(chunks) => return chunks[(chunk % shape.fanout) as usize],
                 Node::Inner(children) => {
                     let child = chunk / shape.span(k);
@@ -247,7 +254,6 @@ impl Map {
                     }
                 }
             };
-            let (child, blob) = child;
             node = nodes.node(Need {
                 blob,
                 leaf: k == 1,

@@ -162,8 +162,8 @@ fn a_refused_flush_leaves_the_state_usable() -> Result<()> {
 }
 
 /// A flush without a cache gets the stored chunks it changes together: one
-/// round trip for the map's leaves that name them (100 chunks, two levels),
-/// one for the chunks, however many, then one for the flush.
+/// round trip for the chunks, however many, then one for the flush. The open
+/// before it got the root, then the map's leaves (100 chunks, two levels).
 #[test]
 fn a_cold_flush_gets_the_chunks_it_changes_together() -> Result<()> {
     futures::executor::block_on(async {
@@ -177,6 +177,7 @@ fn a_cold_flush_gets_the_chunks_it_changes_together() -> Result<()> {
         wal.flush().await?;
         let store = Arc::new(LatencyKv::new(memory));
         let state = State::open(store.clone()).await?;
+        assert_eq!(store.round_trips(), 2);
         let file = state.file("db")?;
         store.reset();
         let mut wal = state.wal();
@@ -184,7 +185,7 @@ fn a_cold_flush_gets_the_chunks_it_changes_together() -> Result<()> {
             wal.write(&file, n, Some(page(2)))?;
         }
         wal.flush().await?;
-        assert_eq!(store.round_trips(), 3);
+        assert_eq!(store.round_trips(), 2);
         assert_eq!(byte(&file, 37).await?, Some(2));
         Ok(())
     })

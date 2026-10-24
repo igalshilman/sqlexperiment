@@ -76,6 +76,10 @@ const MAX_ROOT_BYTES: usize = 64 << 20;
 const KEPT_IMAGES: usize = 1024;
 /// Map nodes a state keeps decoded before it drops them all.
 const KEPT_NODES: usize = 1024;
+/// Most map nodes an open fetches, a level a round trip, so that a cold
+/// read pays for the map at most once: 512 MiB of file at the default
+/// fanout and chunk size.
+const PREFETCH_MAP_NODES: u64 = 512;
 /// Consecutive chunk misses that start sequential readahead.
 const READAHEAD_AFTER: u32 = 2;
 /// Most chunks read ahead at once.
@@ -679,35 +683,41 @@ impl Snapshot {
             fetching: Arc::default(),
             readahead: Mutex::default(),
         };
-        // The large records' blobs, and every chunk of a small file, together.
-        let mut wanted = BTreeSet::new();
-        let mut small = Vec::new();
-        for (&id, entry) in &snapshot.root.directory {
-            match &entry.kind {
-                Kind::Record(Value::Blob(n)) => {
-                    wanted.insert(*n);
-                }
-                Kind::Paged {
-                    size, base: None, ..
-                } if size.div_ceil(PAGE) <= options.prefetch_pages => {
-                    let numbers: Vec<u64> = (0..snapshot.root.shape(*size).count).collect();
-                    let chunks = snapshot.chunks(id, &numbers).await?;
-                    for (chunk, stored) in numbers.into_iter().zip(chunks) {
-                        if stored.current().is_some() {
-                            wanted.extend(stored.blobs());
-                            small.push((id, chunk, stored));
+        // The large records' blobs and every chunk of a small file, together,
+        // beside the maps of all but the largest files.
+        let (small, fetched) = {
+            let snapshot = &snapshot;
+            let small = async {
+                let mut wanted = BTreeSet::new();
+                let mut small = Vec::new();
+                for (&id, entry) in &snapshot.root.directory {
+                    match &entry.kind {
+                        Kind::Record(Value::Blob(n)) => {
+                            wanted.insert(*n);
                         }
+                        Kind::Paged {
+                            size, base: None, ..
+                        } if size.div_ceil(PAGE) <= options.prefetch_pages => {
+                            let numbers: Vec<u64> =
+                                (0..snapshot.root.shape(*size).count).collect();
+                            let chunks = snapshot.chunks(id, &numbers).await?;
+                            for (chunk, stored) in numbers.into_iter().zip(chunks) {
+                                if stored.current().is_some() {
+                                    wanted.extend(stored.blobs());
+                                    small.push((id, chunk, stored));
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
-            }
-        }
-        let wanted: Vec<u64> = wanted.into_iter().collect();
-        let fetched: HashMap<u64, Bytes> = wanted
-            .iter()
-            .copied()
-            .zip(snapshot.blobs(&wanted).await?)
-            .collect();
+                let wanted: Vec<u64> = wanted.into_iter().collect();
+                let blobs = snapshot.blobs(&wanted).await?;
+                let fetched: HashMap<u64, Bytes> = wanted.into_iter().zip(blobs).collect();
+                Ok::<_, io::Error>((small, fetched))
+            };
+            futures::try_join!(small, snapshot.prefetch_maps())?.0
+        };
         for (id, chunk, stored) in small {
             snapshot.decode(id, chunk, stored, &fetched)?;
         }
@@ -803,6 +813,21 @@ impl Snapshot {
                 self.keep_nodes([(need.blob, node)]);
             }
         }
+    }
+
+    /// The map nodes of every file of at most [`PREFETCH_MAP_NODES`], a
+    /// level of all of them a round trip.
+    async fn prefetch_maps(&self) -> io::Result<()> {
+        let maps: Vec<(&Map, Shape)> = (self.root.directory.keys())
+            .filter_map(|&id| self.map(id))
+            .filter(|(_, shape)| (1..=PREFETCH_MAP_NODES).contains(&shape.nodes()))
+            .collect();
+        self.with_nodes(|nodes| {
+            for &(map, shape) in &maps {
+                map.walk(shape, nodes, &mut |_| {});
+            }
+        })
+        .await
     }
 
     /// Chunks `chunks` of the file `id`, each below its count, as stored.
