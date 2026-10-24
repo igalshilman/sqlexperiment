@@ -300,6 +300,12 @@ impl Sql {
         sql.connection = Some(connect(&sql.io, &database).await?);
         sql.database = Some(database);
         sql.poisoned = false;
+        // A statement that would grow the database past the state's file cap
+        // fails with SQLITE_FULL, and the session goes on.
+        let page_size = sql.connection.as_ref().unwrap().get_page_size().get();
+        let max_pages = state::MAX_FILE_BYTES / u64::from(page_size);
+        sql.internal(&format!("PRAGMA max_page_count = {max_pages}"))
+            .await?;
         if !sql.reused && state.is_cached() {
             sql.schema_bytes = Some(sql.measure_schema().await?);
         }
