@@ -1,53 +1,35 @@
-//! Process-wide owner state: checkpointed pages in a memory and disk cache
-//! ([foyer]), shared by every namespace this process owns, plus per-namespace
+//! Process-wide owner state: blobs in a memory and disk cache ([foyer]),
+//! shared by every namespace this process opens, plus per-namespace
 //! knowledge of what this owner made durable.
 //!
 //! A [`PageCache`] is created once per process. Each namespace gets its own
-//! [`NamespaceCache`] handle by key, so one namespace never reads another's pages.
+//! [`NamespaceCache`] handle by key, so one namespace never reads another's
+//! blobs.
 //!
-//! # Pages
+//! # Blobs
 //!
-//! Pages are overwritten in place, so cached values can go stale. Page keys
-//! change only in checkpoints, and a checkpoint that lands moves the commit
-//! record to a new *epoch*. The namespace keeps the epoch its cached pages
-//! belong to: until it changes, a page key changed only by a checkpoint whose
-//! record did not land, which wrote images the log still holds, and the log's
-//! images override the cache. This owner updates the cache as it checkpoints;
-//! an open that finds another epoch drops every page.
-//!
-//! The namespace also remembers the exact commit record it last read or wrote.
-//! If open reads the same bytes, nothing changed since: the log, the version
-//! this owner committed and what participants left idle all still hold.
-//!
-//! # Keys are never reused
-//!
-//! The disk tier writes entries in the background, and a delete does not stop a
-//! write already queued. So a page is never changed or invalidated under its
-//! key. A key is (generation, page, version): replacing or invalidating a page
-//! bumps its version, and dropping all of a namespace's pages starts a new
-//! generation. Stale entries are unreachable and age out. Generations come from a
-//! process-wide counter, and the disk tier starts empty in every process, so keys
-//! never collide across namespaces or runs.
+//! A blob never changes once a durable root names it (see [`crate::store`]),
+//! so it is cached under its number, for as long as the cache keeps it:
+//! there is nothing to invalidate. A blob is cached only once a durable root
+//! names it (after this owner's flush synced, or when a state read it as
+//! named by the root it opened), so a crashed flush's blobs, which the next
+//! flush overwrites, are never cached. Keys are the namespace's identity and
+//! the number; an identity comes from a process-wide counter, and the disk
+//! tier starts empty in every process.
 //!
 //! # Durability knowledge
 //!
-//! Besides pages, the namespace remembers its last durable commit (so a
-//! session can tell another committed since it opened) and what participants
-//! left idle at that commit (SQL's engine, say), for the next session.
-//!
-//! A commit whose outcome is unknown leaves writes this owner can read but a
-//! crash can still lose. Were the next open to trust them, the cache could
-//! keep pages and stored values of a history that never became durable, under
-//! an epoch that another history reaches later with other pages. So that open
-//! syncs first ([`NamespaceCache::unsettled`]): what it reads is durable.
+//! The namespace remembers the root it last read or wrote, its last durable
+//! flush (so a state can tell another flushed since it opened), and what
+//! participants left idle at that flush (SQL's engine, say), for the next
+//! state. A flush whose outcome is unknown leaves writes this owner can read
+//! but a crash can still lose, so the next open syncs first
+//! ([`NamespaceCache::unsettled`]): what it reads, and caches, is durable.
 //!
 //! Namespace states are kept for a bounded number of namespaces, and idle
 //! state within a byte budget, least recently used first; forgetting either
 //! only makes a namespace cold.
-use crate::{
-    hint::Usage,
-    page_codec::{self, Page},
-};
+use bytes::Bytes;
 use foyer::{
     BlockEngineConfig, Cache, CacheBuilder, Code, DeviceBuilder, FileDeviceBuilder, HybridCache,
     HybridCacheBuilder, RecoverMode, Spawner,
@@ -63,10 +45,7 @@ use std::{
     },
 };
 
-/// Pages a namespace may have replaced or invalidated before it starts a new
-/// generation, which bounds its version map.
-const MAX_VERSIONED_PAGES: usize = 1 << 16;
-/// Bookkeeping bytes charged per cached page.
+/// Bookkeeping bytes charged per cached blob.
 const ENTRY_OVERHEAD: usize = 64;
 
 /// Sizes and location of a [`PageCache`].
@@ -75,15 +54,12 @@ pub struct PageCacheConfig {
     /// File of the disk tier, its previous contents discarded; `None` for a
     /// temporary one, which goes away with the process.
     pub file: Option<PathBuf>,
-    /// Bytes of pages kept in memory.
+    /// Bytes of blobs kept in memory.
     pub memory: usize,
     /// Bytes of the disk tier.
     pub disk: usize,
     /// Bytes per disk block, the unit the disk tier writes and reclaims.
     pub disk_block: usize,
-    /// Cache decoded 4096-byte pages rather than stored encodings: hits need no
-    /// decoding, but fewer pages fit.
-    pub decoded: bool,
     /// Namespaces whose durability knowledge is kept.
     pub namespaces: usize,
     /// Bytes of what participants leave idle for the next session of their
@@ -93,21 +69,20 @@ pub struct PageCacheConfig {
 }
 
 impl PageCacheConfig {
-    /// `memory` bytes of pages in memory, and `disk` in a temporary file.
+    /// `memory` bytes of blobs in memory, and `disk` in a temporary file.
     pub fn new(memory: usize, disk: usize) -> Self {
         Self {
             file: None,
             memory,
             disk,
             disk_block: 4 << 20,
-            decoded: false,
             namespaces: 1 << 16,
             idle_bytes: 64 << 20,
         }
     }
 }
 
-/// Process-wide page cache; clones share it.
+/// Process-wide blob cache; clones share it.
 ///
 /// Idle state lives here and may refer back to its namespace's handle, so
 /// handles only reach it weakly: dropping the last `PageCache` drops it.
@@ -118,13 +93,12 @@ pub struct PageCache {
 }
 
 struct Shared {
-    decoded: bool,
-    pages: HybridCache<PageKey, Page>,
+    blobs: HybridCache<BlobKey, Bytes>,
     namespaces: Cache<String, Arc<Mutex<Owner>>>,
     /// Every namespace state a handle still holds, so that one namespace never
     /// has two states while a session uses it, even after LRU eviction.
     live: Mutex<HashMap<String, Weak<Mutex<Owner>>>>,
-    /// Source of namespace state identities and page generations.
+    /// Source of namespace state identities.
     ids: AtomicU64,
     /// Keeps the disk tier's own runtime alive when the host has none.
     _runtime: Option<Spawner>,
@@ -153,10 +127,10 @@ impl PageCache {
             .with_capacity(config.disk)
             .build()
             .map_err(io::Error::other)?;
-        let pages = HybridCacheBuilder::new()
-            .with_name("state-pages")
+        let blobs = HybridCacheBuilder::new()
+            .with_name("state-blobs")
             .memory(config.memory)
-            .with_weighter(|_, page: &Page| page.len() + ENTRY_OVERHEAD)
+            .with_weighter(|_, blob: &Bytes| blob.len() + ENTRY_OVERHEAD)
             .storage()
             .with_engine_config(BlockEngineConfig::new(device).with_block_size(config.disk_block))
             // Namespace state is not persisted, so earlier entries are unusable.
@@ -173,8 +147,7 @@ impl PageCache {
         }
         Ok(Self {
             shared: Arc::new(Shared {
-                decoded: config.decoded,
-                pages,
+                blobs,
                 namespaces: CacheBuilder::new(config.namespaces).build(),
                 live: Mutex::default(),
                 // Distinct per instance, so two caches sharing a disk file by
@@ -211,9 +184,9 @@ impl PageCache {
         }
     }
 
-    /// Bytes of pages held in memory.
+    /// Bytes of blobs held in memory.
     pub fn memory_bytes(&self) -> usize {
-        self.shared.pages.memory().usage()
+        self.shared.blobs.memory().usage()
     }
 }
 
@@ -227,31 +200,14 @@ pub struct NamespaceCache {
 
 /// Per-namespace state.
 struct Owner {
-    /// Identity of this state, which keys its idle state.
+    /// Identity of this state, which keys its blobs and idle state.
     id: u64,
-    /// Generation of its page keys; a new one drops every page.
-    generation: u64,
-    /// Version of each page replaced or invalidated in this generation.
-    versions: HashMap<u64, u32>,
-    /// The commit record as last read or written by this owner; `None` when
-    /// unknown, which matches no record.
-    commit: Option<Page>,
-    /// The checkpoint epoch the cached pages belong to; `None` when unknown.
-    epoch: Option<u64>,
-    /// The version of this owner's last durable commit.
+    /// The root as last read or written by this owner; `None` when unknown,
+    /// which matches no root.
+    root: Option<Bytes>,
+    /// The version of this owner's last durable flush.
     committed: Option<u64>,
-    /// Pages this owner's sessions read, for the working-set hint.
-    usage: Usage,
-    /// The hint this owner last wrote, to skip rewriting an unchanged one.
-    hint: Option<Vec<u8>>,
-    /// Versions of open sessions (as a multiset): each reads pages outside its
-    /// log from the page keys and this cache, so a checkpoint waits until no
-    /// other session is open.
-    readers: BTreeMap<u64, usize>,
-    /// Stored log values a durable record named, by number: a number is never
-    /// reused once named, so they stay valid while a record names them.
-    values: crate::log::Values,
-    /// Commits with an unknown outcome so far, and how many of them a sync
+    /// Flushes with an unknown outcome so far, and how many of them a sync
     /// has settled since.
     unknown: u64,
     settled: u64,
@@ -262,72 +218,33 @@ impl NamespaceCache {
         self.owner.lock().unwrap()
     }
 
-    pub(crate) fn is_decoded(&self) -> bool {
-        self.shared.decoded
-    }
-
-    /// Compare the commit record that open read (`bytes`, in epoch `epoch`)
-    /// to what this owner last saw: whether it is the same. Another epoch
-    /// drops every cached page.
-    pub(crate) fn validate(&self, bytes: Option<&[u8]>, epoch: u64) -> bool {
+    /// Compare the root that open read (`bytes`) to what this owner last
+    /// saw: whether it is the same.
+    pub(crate) fn validate(&self, bytes: Option<&[u8]>) -> bool {
         let mut owner = self.owner();
-        // An absent record is an empty namespace; a real record is never empty.
-        if owner.commit.as_deref() == Some(bytes.unwrap_or_default()) {
+        // An absent root is an empty namespace; a real root is never empty.
+        if owner.root.as_deref() == Some(bytes.unwrap_or_default()) {
             return true;
         }
         let stale = self.forget_locked(&mut owner);
-        if owner.epoch != Some(epoch) {
-            owner.clear(&self.shared.ids);
-        }
         // Idle state may hold state handles, whose drop takes this lock.
         drop(owner);
         drop(stale);
         false
     }
 
-    /// Whether cached pages belong to some epoch: this owner has seen the
-    /// namespace.
-    pub(crate) fn knows_pages(&self) -> bool {
-        self.owner().epoch.is_some()
-    }
-
-    /// Whether cached pages belong to `epoch`.
-    pub(crate) fn knows_epoch(&self, epoch: u64) -> bool {
-        self.owner().epoch == Some(epoch)
-    }
-
-    /// Record the durable commit record `bytes`, in epoch `epoch`, and this
-    /// owner's durable commit, if any. Cached pages must be current as of
-    /// that epoch.
-    pub(crate) fn record(&self, bytes: Option<Page>, epoch: u64, committed: Option<u64>) {
+    /// Record the durable root `bytes`, and this owner's durable flush, if
+    /// any.
+    pub(crate) fn record(&self, bytes: Option<Bytes>, committed: Option<u64>) {
         let mut owner = self.owner();
-        if owner.epoch != Some(epoch) {
-            owner.clear(&self.shared.ids);
-            owner.epoch = Some(epoch);
-        }
-        // An absent record is a real state: an empty namespace.
-        owner.commit = Some(owned(&bytes.unwrap_or_default()));
+        // An absent root is a real state: an empty namespace.
+        owner.root = Some(owned(&bytes.unwrap_or_default()));
         if committed.is_some() {
             owner.committed = committed;
         }
     }
 
-    /// Record this owner's checkpoint: the durable record `bytes`, at the
-    /// next epoch after the one the cached pages belong to, which keep it.
-    /// Only the pages of the log it checkpointed changed, and the caller
-    /// replaces those; any other page is the same in both epochs.
-    pub(crate) fn checkpointed(&self, bytes: Page, epoch: u64, committed: u64) {
-        let mut owner = self.owner();
-        if owner.epoch.is_some_and(|known| known + 1 == epoch) {
-            owner.epoch = Some(epoch);
-        }
-        drop(owner);
-        self.record(Some(bytes), epoch, Some(committed));
-    }
-
-    /// Forget the commit record after a commit or checkpoint whose outcome is
-    /// unknown. Cached pages stay: a checkpoint that landed moved the epoch,
-    /// which the next open sees.
+    /// Forget the root after a flush whose outcome is unknown.
     pub(crate) fn forget(&self) {
         let mut owner = self.owner();
         owner.unknown += 1;
@@ -336,92 +253,33 @@ impl NamespaceCache {
         drop(stale);
     }
 
-    /// The commits with an unknown outcome so far, if a sync has not settled
+    /// The flushes with an unknown outcome so far, if a sync has not settled
     /// them all: their writes may be visible and yet not durable, so an open
-    /// syncs before the cache keeps what it reads.
+    /// syncs before it reads.
     pub(crate) fn unsettled(&self) -> Option<u64> {
         let owner = self.owner();
         (owner.unknown != owner.settled).then_some(owner.unknown)
     }
 
-    /// A sync succeeded after the first `unknown` commits with an unknown
+    /// A sync succeeded after the first `unknown` flushes with an unknown
     /// outcome (see [`Self::unsettled`]).
     pub(crate) fn settled(&self, unknown: u64) {
         let mut owner = self.owner();
         owner.settled = owner.settled.max(unknown);
     }
 
-    /// The stored log values this owner holds, of those in `named`.
-    pub(crate) fn values(&self, named: &std::collections::BTreeSet<u64>) -> crate::log::Values {
-        let owner = self.owner();
-        (owner.values.iter())
-            .filter(|(n, _)| named.contains(n))
-            .map(|(&n, value)| (n, value.clone()))
-            .collect()
-    }
-
-    /// Keep the stored log values a durable record names, `named`: those held
-    /// already, and `values`.
-    pub(crate) fn keep_values(
-        &self,
-        named: &std::collections::BTreeSet<u64>,
-        values: crate::log::Values,
-    ) {
-        let mut owner = self.owner();
-        owner.values.retain(|n, _| named.contains(n));
-        let new = (values.into_iter())
-            .filter(|(n, _)| named.contains(n) && !owner.values.contains_key(n))
-            .map(|(n, value)| (n, owned(&value)))
-            .collect::<Vec<_>>();
-        owner.values.extend(new);
-    }
-
-    /// Register an open session at `version`; see [`Reader`].
-    pub(crate) fn reader(&self, version: u64) -> Reader {
-        *self.owner().readers.entry(version).or_default() += 1;
-        Reader {
-            cache: self.clone(),
-            version,
-        }
-    }
-
-    /// Whether a session is open other than one at version `own`: then a
-    /// checkpoint would overwrite pages it reads.
-    pub(crate) fn other_readers(&self, own: u64) -> bool {
-        let owner = self.owner();
-        let open: usize = owner.readers.values().sum();
-        open > usize::from(owner.readers.contains_key(&own))
-    }
-
-    /// Forget the commit record and what was idle at it, which the caller
-    /// drops once it holds no lock.
+    /// Forget the root and what was idle at it, which the caller drops once
+    /// it holds no lock.
     #[must_use]
     fn forget_locked(&self, owner: &mut Owner) -> HashMap<String, Idle> {
-        owner.commit = None;
+        owner.root = None;
         owner.committed = None;
         self.take_idle_of(owner.id)
     }
 
-    /// Record a page read by a session, for the working-set hint.
-    pub(crate) fn record_use(&self, page: u64, content: &[u8]) {
-        self.owner().usage.record(page, content);
-    }
-
-    /// The working-set hint to write, unless this owner already wrote it.
-    pub(crate) fn hint(&self, limit: usize) -> Option<Vec<u8>> {
-        let owner = self.owner();
-        let hint = crate::hint::encode(&owner.usage.top(limit));
-        (owner.hint.as_ref() != Some(&hint)).then_some(hint)
-    }
-
-    /// Remember the hint this owner wrote.
-    pub(crate) fn wrote_hint(&self, hint: Vec<u8>) {
-        self.owner().hint = Some(hint);
-    }
-
-    /// Take the right to commit on top of `version`, this owner's last
-    /// durable commit: refused if another state committed since, or is
-    /// committing. A commit that lands records its version again
+    /// Take the right to flush on top of `version`, this owner's last
+    /// durable flush: refused if another state flushed since, or is
+    /// flushing. A flush that lands records its version again
     /// ([`Self::record`]); one that fails leaves it unknown.
     pub(crate) fn claim(&self, version: u64) -> bool {
         let mut owner = self.owner();
@@ -432,7 +290,7 @@ impl NamespaceCache {
         claimed
     }
 
-    /// The version of this owner's last durable commit, if still known.
+    /// The version of this owner's last durable flush, if still known.
     pub(crate) fn committed(&self) -> Option<u64> {
         self.owner().committed
     }
@@ -460,73 +318,29 @@ impl NamespaceCache {
         parked.lock().unwrap().take_all(id)
     }
 
-    /// The key the page's value is cached under now: take it before reading
-    /// the backend, for [`Self::insert_read`].
-    pub(crate) fn key(&self, page: u64) -> PageKey {
-        let owner = self.owner();
-        PageKey {
-            generation: owner.generation,
-            page,
-            version: owner.versions.get(&page).copied().unwrap_or(0),
+    fn key(&self, blob: u64) -> BlobKey {
+        BlobKey {
+            namespace: self.owner().id,
+            blob,
         }
     }
 
-    /// The cached value of a page, from memory or disk. A disk error is a miss.
-    pub(crate) async fn get(&self, page: u64) -> Option<Page> {
-        let key = self.key(page);
-        match self.shared.pages.get(&key).await {
+    /// Blob `n`, from memory or disk. A disk error is a miss.
+    pub(crate) async fn get(&self, n: u64) -> Option<Bytes> {
+        let key = self.key(n);
+        // A hit in memory without a hop to the disk's threads.
+        if let Some(entry) = self.shared.blobs.memory().get(&key) {
+            return Some(entry.value().clone());
+        }
+        match self.shared.blobs.get(&key).await {
             Ok(entry) => entry.map(|entry| entry.value().clone()),
             Err(_) => None,
         }
     }
 
-    /// Cache a value read from the backend under `key`, taken before the
-    /// read, unless the page was replaced or invalidated meanwhile: the value
-    /// may predate that.
-    pub(crate) fn insert_read(&self, key: PageKey, value: Page) {
-        let owner = self.owner();
-        let current = owner.versions.get(&key.page).copied().unwrap_or(0);
-        if owner.generation == key.generation && current == key.version {
-            self.shared.pages.insert(key, owned(&value));
-        }
-    }
-
-    fn insert(&self, page: u64, value: Page) {
-        self.shared.pages.insert(self.key(page), value);
-    }
-
-    /// Cache a new value of a page, invalidating the old one.
-    pub(crate) fn replace(&self, page: u64, value: Page) {
-        let value = match self.is_decoded() {
-            true => match page_codec::decode_bytes(&value) {
-                Ok(page) => page,
-                Err(_) => return self.remove(page),
-            },
-            false => value,
-        };
-        self.bump(page);
-        self.insert(page, value);
-    }
-
-    /// Invalidate a page's cached value.
-    pub(crate) fn remove(&self, page: u64) {
-        let old = self.key(page);
-        self.bump(page);
-        self.shared.pages.remove(&old);
-    }
-
-    fn bump(&self, page: u64) {
-        let mut owner = self.owner();
-        if owner.versions.len() >= MAX_VERSIONED_PAGES {
-            owner.clear(&self.shared.ids);
-        }
-        *owner.versions.entry(page).or_default() += 1;
-    }
-
-    /// The generation of its page keys; it changes when every page is dropped.
-    #[cfg(all(test, feature = "simulation"))]
-    pub(crate) fn generation(&self) -> u64 {
-        self.owner().generation
+    /// Keep blob `n`, which a durable root names.
+    pub(crate) fn insert(&self, n: u64, value: Bytes) {
+        self.shared.blobs.insert(self.key(n), owned(&value));
     }
 }
 
@@ -534,25 +348,11 @@ impl Owner {
     fn new(ids: &AtomicU64) -> Self {
         Self {
             id: ids.fetch_add(1, Relaxed),
-            generation: ids.fetch_add(1, Relaxed),
-            versions: HashMap::new(),
-            commit: None,
-            epoch: None,
+            root: None,
             committed: None,
-            usage: Usage::default(),
-            hint: None,
-            readers: BTreeMap::new(),
-            values: crate::log::Values::new(),
             unknown: 0,
             settled: 0,
         }
-    }
-
-    /// Drop every page by starting a new generation.
-    fn clear(&mut self, ids: &AtomicU64) {
-        self.generation = ids.fetch_add(1, Relaxed);
-        self.versions.clear();
-        self.epoch = None;
     }
 }
 
@@ -560,8 +360,8 @@ impl Owner {
 /// a slice of a larger receive buffer (the Rust SDK's eager state is slices
 /// of the invocation's start message), which the cache would otherwise keep
 /// whole, uncounted, for as long as it keeps the value.
-fn owned(value: &Page) -> Page {
-    Page::copy_from_slice(value)
+fn owned(value: &Bytes) -> Bytes {
+    Bytes::copy_from_slice(value)
 }
 
 /// A random starting point for identities, leaving room to count up.
@@ -574,24 +374,6 @@ fn random_start() -> u64 {
             .map_or(0, |time| time.as_nanos()),
     );
     hasher.finish() >> 1
-}
-
-/// An open session's registration at its version; dropping it ends it.
-pub(crate) struct Reader {
-    cache: NamespaceCache,
-    version: u64,
-}
-
-impl Drop for Reader {
-    fn drop(&mut self) {
-        let mut owner = self.cache.owner();
-        if let Some(count) = owner.readers.get_mut(&self.version) {
-            *count -= 1;
-            if *count == 0 {
-                owner.readers.remove(&self.version);
-            }
-        }
-    }
 }
 
 /// What a participant left idle at a durable version, for its namespace's
@@ -670,31 +452,28 @@ impl Parked {
     }
 }
 
-/// A page value's key: never reused for a different value.
+/// A blob's key: its namespace's identity, and its number.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PageKey {
-    generation: u64,
-    page: u64,
-    version: u32,
+pub(crate) struct BlobKey {
+    namespace: u64,
+    blob: u64,
 }
 
-impl Code for PageKey {
+impl Code for BlobKey {
     fn encode(&self, writer: &mut impl std::io::Write) -> foyer::Result<()> {
-        self.generation.encode(writer)?;
-        self.page.encode(writer)?;
-        self.version.encode(writer)
+        self.namespace.encode(writer)?;
+        self.blob.encode(writer)
     }
 
     fn decode(reader: &mut impl std::io::Read) -> foyer::Result<Self> {
         Ok(Self {
-            generation: u64::decode(reader)?,
-            page: u64::decode(reader)?,
-            version: u32::decode(reader)?,
+            namespace: u64::decode(reader)?,
+            blob: u64::decode(reader)?,
         })
     }
 
     fn estimated_size(&self) -> usize {
-        20
+        16
     }
 }
 

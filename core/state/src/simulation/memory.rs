@@ -1,9 +1,9 @@
 //! In-memory model of a Restate object's state, as [`crate::kv`] describes
 //! it, with exact logical traffic counters.
 use crate::{
-    format::{COMMIT, HINT, LOG_PREFIX, PAGE_PREFIX},
     kv::KvStore,
     simulation::yield_now,
+    store::{BLOB_PREFIX, ROOT},
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -30,16 +30,12 @@ pub struct Traffic {
     pub delete_key_bytes: u64,
 }
 
-/// Class of a key, used to split traffic counters: `page`, `log`, `commit`, `hint` or `other`.
+/// Class of a key, used to split traffic counters: `root`, `blob` or `other`.
 pub fn object_kind(key: &str) -> &'static str {
-    if key.starts_with(PAGE_PREFIX) || key.starts_with("cow/blob/") {
-        "page"
-    } else if key.starts_with(LOG_PREFIX) {
-        "log"
-    } else if key == COMMIT || key == "cow/root" {
-        "commit"
-    } else if key == HINT {
-        "hint"
+    if key == ROOT {
+        "root"
+    } else if key.starts_with(BLOB_PREFIX) {
+        "blob"
     } else {
         "other"
     }
@@ -156,9 +152,9 @@ impl MemoryKv {
             .map(String::len)
             .sum()
     }
-    /// Number of checkpointed page objects.
-    pub fn page_count(&self) -> usize {
-        let prefix = PAGE_PREFIX;
+    /// Number of stored blobs.
+    pub fn blob_count(&self) -> usize {
+        let prefix = BLOB_PREFIX;
         self.inner
             .lock()
             .unwrap()

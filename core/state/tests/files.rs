@@ -61,23 +61,14 @@ impl state::Base for Zeros {
     }
 }
 
-/// A cold open fetches a small file's pages ahead, and a file with a base
-/// decodes its log only once opened with it. A session that then
-/// checkpoints reads the log's image, not the page key fetched before.
+/// A file with a base decodes its chunks only once opened with it, and
+/// reads what was flushed through later flushes of other files.
 #[test]
-fn a_checkpoint_never_exposes_a_page_fetched_under_a_based_log() -> Result<()> {
+fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let options = |checkpoint_after| state::StateOptions {
-            checkpoint_after,
-            inline_log_bytes: 0,
-            ..state::StateOptions::default()
-        };
-        // Page 1 checkpointed at its key, then changed in the log.
-        for (n, checkpoint_after) in [(1, 0), (2, 8)] {
-            let state = State::open(store.clone())
-                .options(options(checkpoint_after))
-                .await?;
+        for n in [1, 2] {
+            let state = State::open(store.clone()).await?;
             let mut wal = state.wal();
             wal.write(
                 &state.file_with_base("vm", Arc::new(Zeros))?,
@@ -86,13 +77,14 @@ fn a_checkpoint_never_exposes_a_page_fetched_under_a_based_log() -> Result<()> {
             )?;
             wal.flush().await?;
         }
-        let state = State::open(store).options(options(0)).await?;
+        let state = State::open(store).await?;
+        assert!(state.file("vm")?.read(1).await.is_err(), "without its base");
         let vm = state.file_with_base("vm", Arc::new(Zeros))?;
         assert_eq!(byte(&vm, 1).await?, Some(2));
         let mut wal = state.wal();
         wal.write(&state.file("db")?, 0, Some(page(9)))?;
-        assert!(wal.flush().await?.checkpointed_pages > 0);
-        assert_eq!(byte(&vm, 1).await?, Some(2), "after the checkpoint");
+        wal.flush().await?;
+        assert_eq!(byte(&vm, 1).await?, Some(2), "after another flush");
         Ok(())
     })
 }

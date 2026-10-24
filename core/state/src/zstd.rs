@@ -77,3 +77,22 @@ pub(crate) fn decompress(out: &mut Vec<u8>, input: &[u8], prefix: &[u8]) -> io::
         decompressed.map(drop).map_err(error)
     })
 }
+
+/// Decompress the frame `input`, made against `prefix`, to the size its
+/// header gives, of at most `max` bytes.
+pub(crate) fn decompress_sized(input: &[u8], prefix: &[u8], max: usize) -> io::Result<Vec<u8>> {
+    let size = zstd_safe::get_frame_content_size(input)
+        .ok()
+        .flatten()
+        .filter(|&size| size <= max as u64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid frame size"))?;
+    let mut out = Vec::with_capacity(size as usize);
+    decompress(&mut out, input, prefix)?;
+    match out.len() as u64 == size {
+        true => Ok(out),
+        false => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid frame size",
+        )),
+    }
+}

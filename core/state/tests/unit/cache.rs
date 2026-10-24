@@ -1,17 +1,17 @@
 use super::*;
 use crate::simulation::{fresh_namespace_cache, shared_cache};
 
-fn value(n: usize) -> Page {
-    Page::from(vec![n as u8; n])
+fn value(n: usize) -> Bytes {
+    Bytes::from(vec![n as u8; n])
 }
 
 #[test]
-fn namespaces_never_share_pages() {
+fn namespaces_never_share_blobs() {
     futures::executor::block_on(async {
         let (a, b) = (fresh_namespace_cache(), fresh_namespace_cache());
         a.insert(1, value(4));
         assert_eq!(a.get(1).await, Some(value(4)));
-        assert_eq!(b.get(1).await, None, "same page and meta, other namespace");
+        assert_eq!(b.get(1).await, None, "same number, other namespace");
         // A handle by the same key is the same namespace.
         shared_cache().namespace("by-key").insert(7, value(7));
         assert_eq!(
@@ -21,61 +21,35 @@ fn namespaces_never_share_pages() {
     })
 }
 
+/// The same root is known; another one forgets this owner's flush, and
+/// keeps the blobs, which never change.
 #[test]
-fn replaced_and_removed_pages_get_new_keys() {
+fn another_root_forgets_the_flush_not_the_blobs() {
     futures::executor::block_on(async {
+        let root = |n: u8| Bytes::from(vec![b'S', b'R', b'1', b'6', n]);
         let cache = fresh_namespace_cache();
+        assert!(!cache.validate(None), "a fresh owner knows nothing");
+        cache.record(None, Some(0));
+        assert!(cache.validate(None), "an absent root, as recorded");
+        assert!(!cache.validate(Some(&root(1))), "not after another");
+        cache.record(Some(root(1)), Some(3));
         cache.insert(1, value(4));
-        let old = cache.key(1);
-        cache.replace(1, value(5));
-        assert_ne!(cache.key(1), old);
-        assert_eq!(cache.get(1).await, Some(value(5)));
-        cache.remove(1);
-        assert_eq!(cache.get(1).await, None);
-        // Even if the old value were still served under its key, it is unreachable.
-        cache.shared.pages.insert(old, value(4));
-        assert_eq!(cache.get(1).await, None);
-    })
-}
-
-/// The same commit record is known; another one in the same epoch keeps the
-/// pages, and another epoch drops them.
-#[test]
-fn another_record_forgets_the_commit_and_another_epoch_the_pages() {
-    futures::executor::block_on(async {
-        let record = |n: u8| Page::from(vec![b'S', b'C', b'1', b'4', n]);
-        let cache = fresh_namespace_cache();
-        assert!(!cache.validate(None, 0), "a fresh owner knows nothing");
-        assert!(!cache.knows_pages());
-        cache.record(None, 0, Some(0));
-        assert!(cache.validate(None, 0), "an absent record, as recorded");
-        assert!(!cache.validate(Some(&record(1)), 0), "not after another");
-        cache.record(Some(record(1)), 0, Some(3));
-        cache.insert(1, value(4));
-        assert!(cache.validate(Some(&record(1)), 0));
+        assert!(cache.validate(Some(&root(1))));
         assert_eq!(cache.committed(), Some(3));
 
-        // Another writer committed in the same epoch: the pages stay.
-        let generation = cache.generation();
-        assert!(!cache.validate(Some(&record(2)), 0));
+        // Another writer flushed: the blobs stay.
+        assert!(!cache.validate(Some(&root(2))));
         assert_eq!(cache.committed(), None);
-        assert!(cache.knows_epoch(0));
         assert_eq!(cache.get(1).await, Some(value(4)));
-        assert_eq!(cache.generation(), generation);
 
-        // Or checkpointed: every page goes.
-        cache.record(Some(record(2)), 0, Some(4));
-        assert!(!cache.validate(Some(&record(3)), 1));
-        assert!(!cache.knows_pages());
-        assert_eq!(cache.get(1).await, None);
-        assert_ne!(cache.generation(), generation);
-
-        // A commit with an unknown outcome forgets the record, not the pages.
-        cache.record(Some(record(3)), 1, Some(5));
-        cache.insert(2, value(4));
+        // A flush with an unknown outcome forgets the root, and makes the
+        // next open sync.
+        cache.record(Some(root(3)), Some(5));
         cache.forget();
-        assert!(!cache.validate(Some(&record(3)), 1));
-        assert_eq!(cache.get(2).await, Some(value(4)));
+        assert!(!cache.validate(Some(&root(3))));
+        assert_eq!(cache.unsettled(), Some(1));
+        cache.settled(1);
+        assert_eq!(cache.unsettled(), None);
     })
 }
 
@@ -107,17 +81,14 @@ fn values_read_as_slices_of_a_larger_buffer_are_kept_alone() {
     futures::executor::block_on(async {
         let cache = fresh_namespace_cache();
         // A receive buffer holding much more than the one value.
-        let buffer = Page::from(vec![9; 1 << 20]);
-        let inside = |value: &Page| buffer.as_ptr_range().contains(&value.as_ptr());
+        let buffer = Bytes::from(vec![9; 1 << 20]);
+        let inside = |value: &Bytes| buffer.as_ptr_range().contains(&value.as_ptr());
         let slice = buffer.slice(4096..8192);
-        cache.insert_read(cache.key(1), slice.clone());
+        cache.insert(1, slice.clone());
         let cached = cache.get(1).await.expect("cached");
         assert_eq!(cached, slice);
         assert!(!inside(&cached));
-        cache.record(Some(slice.clone()), 0, None);
-        assert!(!inside(cache.owner().commit.as_ref().unwrap()));
-        let named = std::collections::BTreeSet::from([3]);
-        cache.keep_values(&named, crate::log::Values::from([(3, slice)]));
-        assert!(!inside(&cache.values(&named)[&3]));
+        cache.record(Some(slice.clone()), None);
+        assert!(!inside(cache.owner().root.as_ref().unwrap()));
     })
 }

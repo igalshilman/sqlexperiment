@@ -58,7 +58,11 @@ fn parse(bytes: &[u8]) -> Vec<Flush> {
                 let n = u32_(&mut at);
                 let image = bytes[at..at + n].to_vec();
                 at += n;
-                flushes.last_mut().unwrap().pages.insert((file, page), image);
+                flushes
+                    .last_mut()
+                    .unwrap()
+                    .pages
+                    .insert((file, page), image);
             }
             b'R' => {
                 let record = name(&mut at);
@@ -117,7 +121,12 @@ impl Image {
 
     /// Chunk `chunk` of `file`: `c` pages, cut at the file's end.
     fn chunk(&self, file: &str, chunk: u64, c: u64) -> Vec<u8> {
-        let pages = self.sizes.get(file).copied().unwrap_or(0).div_ceil(PAGE as u64);
+        let pages = self
+            .sizes
+            .get(file)
+            .copied()
+            .unwrap_or(0)
+            .div_ceil(PAGE as u64);
         let mut out = Vec::new();
         for page in chunk * c..((chunk + 1) * c).min(pages) {
             out.extend_from_slice(self.page(file, page));
@@ -208,12 +217,22 @@ fn chunk_delta(base: &Image, flushes: &[&Flush], c: u64, ratio: f64, joint: bool
     for (file, chunk) in image.chunks(c) {
         let bytes = image.chunk(&file, chunk, c);
         let base_len = zstd(&bytes, &[]);
-        chunks.insert((file, chunk), ChunkState { base: bytes, base_len, delta_len: 0 });
+        chunks.insert(
+            (file, chunk),
+            ChunkState {
+                base: bytes,
+                base_len,
+                delta_len: 0,
+            },
+        );
     }
     for flush in flushes {
         image.apply(flush);
-        let touched: BTreeSet<(String, u64)> =
-            flush.pages.keys().map(|(f, p)| (f.clone(), p / c)).collect();
+        let touched: BTreeSet<(String, u64)> = flush
+            .pages
+            .keys()
+            .map(|(f, p)| (f.clone(), p / c))
+            .collect();
         let (mut dict, mut input) = (Vec::new(), Vec::new());
         for (file, chunk) in touched {
             let now = image.chunk(&file, chunk, c);
@@ -313,7 +332,10 @@ fn page_over_base(base: &Image, flushes: &[&Flush], c: u64, ratio: f64, budget: 
         // most until half of it is left.
         let mut entries: usize = overrides.values().map(|o| o.len()).sum();
         if entries > budget {
-            let mut by_count: Vec<_> = overrides.iter().map(|(k, o)| (o.len(), k.clone())).collect();
+            let mut by_count: Vec<_> = overrides
+                .iter()
+                .map(|(k, o)| (o.len(), k.clone()))
+                .collect();
             by_count.sort();
             while entries > budget / 2 {
                 let (count, key) = by_count.pop().unwrap();
@@ -342,8 +364,14 @@ fn main() {
         .split(',')
         .map(String::from)
         .collect();
-    let want = |name: &str| specs.iter().any(|s| s == "all" || name.starts_with(s.as_str()));
-    println!("| Trace | Model | B/flush | Rebase B/flush | Rebases | Puts/flush | Map B | Stored KiB | Cold B/chunk |");
+    let want = |name: &str| {
+        specs
+            .iter()
+            .any(|s| s == "all" || name.starts_with(s.as_str()))
+    };
+    println!(
+        "| Trace | Model | B/flush | Rebase B/flush | Rebases | Puts/flush | Map B | Stored KiB | Cold B/chunk |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|");
     for path in std::env::args().skip(1) {
         let flushes = parse(&std::fs::read(&path).unwrap());
@@ -354,12 +382,21 @@ fn main() {
         }
         let measured: Vec<&Flush> = flushes[start..].iter().collect();
         let n = measured.len() as f64;
-        let name = std::path::Path::new(&path).file_stem().unwrap().to_string_lossy();
+        let name = std::path::Path::new(&path)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy();
         let mut models: Vec<(String, Box<dyn Fn() -> Cost>)> = vec![
             ("page-cow".into(), Box::new(|| page_cow(&base, &measured))),
-            ("delta-chain".into(), Box::new(|| delta_chain(&base, &measured))),
+            (
+                "delta-chain".into(),
+                Box::new(|| delta_chain(&base, &measured)),
+            ),
         ];
-        let budget: usize = std::env::var("BUDGET").ok().and_then(|b| b.parse().ok()).unwrap_or(usize::MAX);
+        let budget: usize = std::env::var("BUDGET")
+            .ok()
+            .and_then(|b| b.parse().ok())
+            .unwrap_or(usize::MAX);
         for c in [1u64, 2, 4, 8, 16, 64] {
             for ratio in [0.5, 1.0, 2.0] {
                 let (b, m) = (&base, &measured);

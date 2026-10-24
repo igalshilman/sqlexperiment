@@ -1,5 +1,6 @@
 //! The owner cache across owners, crashes and readers: no session reads a
-//! page a checkpoint replaced, and a reader knows when it might have.
+//! blob of a flush that was lost, and a reader reads the state it opened
+//! while the owner flushes.
 #![cfg(feature = "simulation")]
 mod support;
 
@@ -7,12 +8,13 @@ use state::{Result, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
-/// Options that checkpoint at every flush.
+/// Small chunks, rebased often, and large records in blobs.
 fn options(cache: Option<&Namespace>) -> Setup {
     Setup {
         options: StateOptions {
-            checkpoint_after: 0,
-            inline_log_bytes: 256,
+            chunk_pages: 2,
+            rebase_ratio: 0.1,
+            inline_record_bytes: 256,
             ..StateOptions::default()
         },
         cache: cache.cloned(),
@@ -44,10 +46,10 @@ async fn flush(
 }
 
 /// Owner A's flush fails at its sync; A reopens and reads what the failed
-/// checkpoint wrote (visible, not durable), caching its pages under the next
-/// epoch. A crash loses it all. Another process, B, takes over and
-/// checkpoints to that same epoch number with other pages. A, back with its
-/// cache, must read B's pages, not the ones it cached.
+/// flush wrote (visible, but synced by that open). A crash loses whatever is
+/// not durable. Another process, B, takes over and flushes, at blob numbers
+/// the lost flush may have used. A, back with its cache, must read B's
+/// pages, not blobs it cached.
 #[test]
 fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
     futures::executor::block_on(async {
@@ -64,14 +66,14 @@ fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
         )
         .await?;
 
-        // A's checkpointing flush fails at its sync: its writes are visible.
+        // A's flush fails at its sync: its writes are visible.
         let session = Session::open(store.clone(), options(Some(&a))).await?;
         let _gate = fault.arm(failing_sync());
         let write = [Op::Write("db", 0, Some(page(2)))];
         assert!(session.flush(&write).await.is_err());
         fault.disarm();
         drop(session);
-        // A reopens on them, and reads (and caches) the checkpointed page.
+        // A reopens on them, and reads (and caches) the page.
         let failed = model.applied(&write);
         let session = Session::open(store.clone(), options(Some(&a))).await?;
         assert_eq!(failed.differs(&session).await?, None);
@@ -84,7 +86,7 @@ fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
         }
         drop(session);
 
-        // B, another process, checkpoints to the same epoch with another page.
+        // B, another process, flushes another page.
         flush(
             &store,
             Some(&b),
@@ -99,63 +101,60 @@ fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
     })
 }
 
-/// A reader beside the owner, which flushes and checkpoints meanwhile:
-/// whatever the reader read that is not the state it opened on, it learns
-/// from `is_current`, and it never writes to the store.
+/// A reader beside the owner, which flushes meanwhile: it reads the state
+/// it opened, and never writes to the store; once the owner deleted a blob
+/// it needs, a read of it fails, never reads another state.
 #[test]
-fn a_reader_beside_a_checkpointing_owner_knows_when_it_is_stale() -> Result<()> {
+fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
     futures::executor::block_on(async {
         let mut rng = Rng::new(0x7ead);
         let memory = MemoryKv::default();
         let store: Arc<dyn KvStore> = Arc::new(memory.clone());
         let owner = fresh_namespace();
         let mut model = Model::default();
-        let (mut stale, mut current) = (0, 0);
+        let grace = StateOptions::default().garbage_after;
+        let (mut read, mut gone) = (0, 0);
         for round in 0..60 {
             let ops: Vec<Op> = (0..1 + rng.below(6))
                 .map(|_| Op::random(&mut rng))
                 .collect();
             flush(&store, Some(&owner), &mut model, &ops).await?;
-            let lazy = StateOptions {
-                prefetch_pages: rng.below(2) * 16,
-                ..StateOptions::default()
+            let lazy = Setup {
+                options: StateOptions {
+                    prefetch_pages: rng.below(2) * 16,
+                    ..StateOptions::default()
+                },
+                cache: rng.percent(50).then(|| owner.clone()),
             };
             let reader = Session::reader(store.clone(), lazy).await?;
             let opened = model.clone();
-            let mut differed = false;
-            let flushes = rng.below(3);
-            for step in 0..4 {
-                if step < flushes {
-                    // Pages the reader reads often, and anything else.
-                    let hot = Op::Write("db", rng.below(4), Some(varied(&mut rng)));
-                    let ops = [hot, Op::random(&mut rng)];
-                    flush(&store, Some(&owner), &mut model, &ops).await?;
-                }
-                for _ in 0..4 {
-                    let (name, index) = match rng.percent(50) {
-                        true => ("db", rng.below(4)),
-                        false => {
-                            let name = rng.pick(&FILES);
-                            (name, rng.below(opened.len(name).div_ceil(4096) + 1))
-                        }
-                    };
-                    let read = reader.file(name).read(index).await?;
-                    differed |= read != opened.page(name, index);
+            // Past the grace sometimes: then blobs it reads may be gone.
+            let flushes = rng.pick(&[0, 1, 3, grace - 1, grace + 4]);
+            for _ in 0..flushes {
+                // Pages the reader reads often, and anything else.
+                let hot = Op::Write("db", rng.below(4), Some(varied(&mut rng)));
+                let ops = [hot, Op::random(&mut rng)];
+                flush(&store, Some(&owner), &mut model, &ops).await?;
+            }
+            for _ in 0..16 {
+                let name = rng.pick(&FILES);
+                let index = rng.below(opened.len(name).div_ceil(4096) + 1);
+                match reader.file(name).read(index).await {
+                    Ok(page) => {
+                        assert_eq!(page, opened.page(name, index), "round {round}");
+                        read += 1;
+                    }
+                    Err(error) if flushes >= grace => {
+                        assert!(error.to_string().contains("is gone"), "{error}");
+                        gone += 1;
+                    }
+                    Err(error) => panic!("round {round}: {error}"),
                 }
             }
             for name in RECORDS {
                 assert_eq!(reader.state.record(name).get(), opened.record(name));
             }
-            let is_current = reader.state.is_current().await?;
-            assert!(
-                !differed || !is_current,
-                "round {round}: read a replaced page"
-            );
-            assert!(is_current || flushes > 0, "round {round}");
-            (stale, current) = match differed {
-                true => (stale + 1, current),
-                false => (stale, current + is_current as usize),
-            };
+            assert!(reader.state.is_current().await?);
             // Its WALs never flush.
             let keys = memory.keys();
             let error = reader.flush(&[Op::Set("progress", "reader".into())]).await;
@@ -163,19 +162,15 @@ fn a_reader_beside_a_checkpointing_owner_knows_when_it_is_stale() -> Result<()> 
             assert!(error.contains("a reader writes nothing"), "{error}");
             assert_eq!(memory.keys(), keys);
         }
-        assert!(
-            stale > 10 && current > 10,
-            "{stale} stale, {current} current"
-        );
+        assert!(read > 100 && gone > 0, "{read} read, {gone} gone");
         Ok(())
     })
 }
 
 /// Two sessions of one owner overlap: the open one reads the state it opened
-/// on while the other flushes, whose checkpoints wait until it ends; then it
-/// may not flush on top.
+/// on while the other flushes; then it may not flush on top.
 #[test]
-fn an_open_session_holds_back_checkpoints_and_reads_its_state() -> Result<()> {
+fn an_open_session_reads_its_state_while_another_flushes() -> Result<()> {
     futures::executor::block_on(async {
         let memory = MemoryKv::default();
         let store: Arc<dyn KvStore> = Arc::new(memory.clone());
@@ -194,8 +189,7 @@ fn an_open_session_holds_back_checkpoints_and_reads_its_state() -> Result<()> {
                 Op::Write("db", n, Some(page(100 + n))),
                 Op::random(&mut rng),
             ];
-            let report = writer.flush(&ops).await?;
-            assert_eq!(report.checkpointed_pages, 0, "waits for the open session");
+            writer.flush(&ops).await?;
             model = model.applied(&ops);
             assert_eq!(opened.differs(&open).await?, None);
         }
@@ -204,7 +198,7 @@ fn an_open_session_holds_back_checkpoints_and_reads_its_state() -> Result<()> {
         assert!(error.contains("another state flushed"), "{error}");
         drop(open);
         let ops = [Op::Write("db", 0, Some(page(7)))];
-        assert!(writer.flush(&ops).await?.checkpointed_pages > 0);
+        writer.flush(&ops).await?;
         model = model.applied(&ops);
         drop(writer);
         let session = Session::open(store, options(Some(&cache))).await?;
