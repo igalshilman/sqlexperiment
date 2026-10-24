@@ -7,7 +7,9 @@
 //! ```
 //!
 //! `CHUNK_PAGES`, `REBASE_RATIO`, `INLINE_BYTES` and `GARBAGE_AFTER` set the
-//! state's options; `LABEL` names the run in its rows. Prints Markdown rows.
+//! state's options; `WORKLOAD` runs only the workloads it names part of,
+//! `FLUSHES` that many flushes each (an aged database); `LABEL` names the run
+//! in its rows. Prints Markdown rows.
 use sql::{Sql, Value};
 use state::{
     Result, State, StateOptions,
@@ -110,7 +112,7 @@ struct Workload {
     flushes: u64,
 }
 
-const WORKLOADS: [Workload; 6] = [
+const WORKLOADS: [Workload; 8] = [
     // A restate-fns object: a message row, and its sends as effects.
     Workload {
         name: "chat+effects",
@@ -145,6 +147,19 @@ const WORKLOADS: [Workload; 6] = [
     Workload {
         name: "100k: update 1",
         rows: 100_000,
+        payload: 256,
+        flushes: 100,
+    },
+    // Near the largest file: the root maps every chunk.
+    Workload {
+        name: "200k: update 1",
+        rows: 200_000,
+        payload: 256,
+        flushes: 100,
+    },
+    Workload {
+        name: "200k: update 10",
+        rows: 200_000,
         payload: 256,
         flushes: 100,
     },
@@ -201,7 +216,7 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
             );
             Ok(Some(effects))
         }
-        "small: update 1" | "10k: update 1" | "100k: update 1" => {
+        "small: update 1" | "10k: update 1" | "100k: update 1" | "200k: update 1" => {
             db.execute_with(
                 "UPDATE t SET a = a + 1, payload = ? WHERE id = ?",
                 [
@@ -212,7 +227,7 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
             .await?;
             Ok(None)
         }
-        "10k: update 10" => {
+        "10k: update 10" | "200k: update 10" => {
             db.execute("BEGIN").await?;
             for n in 0..10 {
                 db.execute_with(
@@ -311,11 +326,16 @@ fn main() -> Result<()> {
     );
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let only = std::env::var("WORKLOAD").ok();
+    let flushes = std::env::var("FLUSHES").ok().and_then(|v| v.parse().ok());
     futures::executor::block_on(async {
         for w in WORKLOADS {
             if only.as_deref().is_some_and(|only| !w.name.contains(only)) {
                 continue;
             }
+            let w = Workload {
+                flushes: flushes.unwrap_or(w.flushes),
+                ..w
+            };
             for cached in [false, true] {
                 run(w, cached).await?;
             }

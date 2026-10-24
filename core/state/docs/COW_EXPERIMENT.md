@@ -196,9 +196,15 @@ SDKs) are gone.
 ## Trade-offs and open questions
 
 - **64 MiB per file.** The root names every chunk and is rewritten by every
-  flush: ~16 KiB of directory at the limit, before compression. Larger
-  databases would need the chunk map in chunks of its own, at a round trip
-  on a cold open.
+  flush. Near the limit (200k rows, 56 MB, `FLUSHES=3000 WORKLOAD=200k`) one
+  update costs 421 B a flush, but ten scattered ones cost 6.5 KB, 4.9 KB of
+  it the root, once the database has aged and its chunks' blob numbers no
+  longer run in sequence. Larger databases would need the chunk map in
+  chunks of its own, at a round trip on a cold open. A database that grows
+  past the limit loses nothing: its flush is refused ("a page past the
+  largest file"), the session ends, and the database reopens as last
+  flushed. The refusal comes late, though, at the flush, not at the
+  statement that grew the file.
 - **Zero pages are holes.** In a file without a base, a page of zeros reads
   as absent, which SQLite never relies on.
 - **Granularity.** A change rebuilds a 16 KiB chunk's delta; `CHUNK_PAGES=1`
