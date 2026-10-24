@@ -78,6 +78,7 @@
 //! support require the opt-in `simulation` feature.
 mod cache;
 pub mod kv;
+mod map;
 #[cfg(feature = "simulation")]
 pub mod simulation;
 mod store;
@@ -125,14 +126,21 @@ pub trait Base: Send + Sync {
 /// Default [`StateOptions::chunk_pages`].
 pub const CHUNK_PAGES: u64 = 4;
 
-/// How a state flushes and reads. Only [`Self::chunk_pages`] is stored, when
-/// the namespace is made; the others never change the stored format.
+/// How a state flushes and reads. Only [`Self::chunk_pages`] and
+/// [`Self::fanout`] are stored, when the namespace is made; the others never
+/// change the stored format.
 #[derive(Clone)]
 pub struct StateOptions {
     /// Pages per chunk, the unit a flush rewrites: smaller chunks cost less
     /// to rebase, larger ones compress better and make a smaller root. Set
     /// when the namespace is made; its root keeps it.
     pub chunk_pages: u64,
+    /// Entries per node of a file's chunk map, a radix tree whose top node
+    /// the root holds: a file of up to this many chunks is mapped in the
+    /// root alone; each level more multiplies that by it, and costs a cold
+    /// read a round trip and a flush a node per path it changes. Set when
+    /// the namespace is made; its root keeps it.
+    pub fanout: u64,
     /// A chunk's delta past this fraction of its base's stored bytes is
     /// written as a new base instead.
     pub rebase_ratio: f64,
@@ -152,6 +160,7 @@ impl Default for StateOptions {
     fn default() -> Self {
         Self {
             chunk_pages: CHUNK_PAGES,
+            fanout: map::FANOUT,
             rebase_ratio: 0.25,
             inline_record_bytes: 1024,
             prefetch_pages: 16,
@@ -587,7 +596,7 @@ impl Wal {
         let snapshot = shared.snapshot();
         // What the writes checked as they were made still holds, unless
         // another WAL flushed since: refused before anything is written.
-        snapshot.check(&self.files, &self.records)?;
+        snapshot.check(&self.files, &self.records).await?;
         if shared.flushing.swap(true, Ordering::SeqCst) {
             return Err("a flush of this state is running".into());
         }

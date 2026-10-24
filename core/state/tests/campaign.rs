@@ -161,6 +161,7 @@ impl World {
             options: StateOptions {
                 // Kept by the namespace's first root.
                 chunk_pages: rng.pick(&[1, 2, 4, 16]),
+                fanout: rng.pick(&[2, 3, 4, 64]),
                 rebase_ratio: rng.pick(&[0.0, 0.25, 1.0, 100.0]),
                 inline_record_bytes: rng.pick(&[0, 200, 1024, 8192]),
                 prefetch_pages: rng.pick(&[0, 4, 16]),

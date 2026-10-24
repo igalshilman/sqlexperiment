@@ -6,7 +6,7 @@
 //! CHUNK_PAGES=1 REBASE_RATIO=0.5 cargo bench --locked --features simulation --bench flush_costs
 //! ```
 //!
-//! `CHUNK_PAGES`, `REBASE_RATIO`, `INLINE_BYTES` and `GARBAGE_AFTER` set the
+//! `CHUNK_PAGES`, `FANOUT`, `REBASE_RATIO`, `INLINE_BYTES` and `GARBAGE_AFTER` set the
 //! state's options; `WORKLOAD` runs only the workloads it names part of,
 //! `FLUSHES` that many flushes each (an aged database); `LABEL` names the run
 //! in its rows. Prints Markdown rows.
@@ -75,6 +75,7 @@ fn options() -> StateOptions {
     let default = StateOptions::default();
     StateOptions {
         chunk_pages: var("CHUNK_PAGES").unwrap_or(default.chunk_pages),
+        fanout: var("FANOUT").unwrap_or(default.fanout),
         rebase_ratio: var("REBASE_RATIO").unwrap_or(default.rebase_ratio),
         inline_record_bytes: var("INLINE_BYTES").unwrap_or(default.inline_record_bytes),
         garbage_after: var("GARBAGE_AFTER").unwrap_or(default.garbage_after),

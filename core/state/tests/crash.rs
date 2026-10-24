@@ -16,6 +16,7 @@ fn options(cache: Option<Namespace>) -> Setup {
     Setup {
         options: StateOptions {
             chunk_pages: 2,
+            fanout: 2,
             rebase_ratio: 0.5,
             inline_record_bytes: 150,
             prefetch_pages: 0,

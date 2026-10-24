@@ -44,6 +44,7 @@ use crate::{
     Base, PAGE, Page, StateOptions,
     cache::{self, NamespaceCache},
     kv::KvStore,
+    map::{MAX_FANOUT, Map, Node, Nodes, Shape},
     zstd,
 };
 use bytes::Bytes;
@@ -61,9 +62,10 @@ const ROOT_MAGIC: &[u8; 4] = b"SR16";
 pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Bytes of a record's or file's name.
 pub const MAX_NAME_BYTES: usize = 255;
-/// Bytes of a paged file: 64 MiB, a VM's largest memory. The root maps every
-/// chunk of every file, so a flush rewrites a few bytes per stored chunk.
-pub const MAX_FILE_BYTES: u64 = 64 << 20;
+/// Bytes of a paged file: 10 GiB.
+pub const MAX_FILE_BYTES: u64 = 10 << 30;
+/// Most pages a chunk holds: 1 MiB.
+pub(crate) const MAX_CHUNK_PAGES: u64 = 256;
 /// Files and records a root may name.
 const MAX_FILES: u32 = 1 << 16;
 /// Largest version or blob number a root may hold, far from overflow.
@@ -72,6 +74,8 @@ const MAX_SEQUENCE: u64 = 1 << 62;
 const MAX_ROOT_BYTES: usize = 64 << 20;
 /// Chunk images a state keeps decoded before it drops them all.
 const KEPT_IMAGES: usize = 1024;
+/// Map nodes a state keeps decoded before it drops them all.
+const KEPT_NODES: usize = 1024;
 /// Consecutive chunk misses that start sequential readahead.
 const READAHEAD_AFTER: u32 = 2;
 /// Most chunks read ahead at once.
@@ -108,7 +112,7 @@ pub(crate) fn get_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
     None
 }
 
-fn invalid(what: &str) -> io::Error {
+pub(crate) fn invalid(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("invalid {what}"))
 }
 
@@ -188,12 +192,12 @@ pub(crate) enum Value {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Kind {
     Record(Value),
-    /// Its size, its base's id ([`Base::id`]), and its chunks: as many as
-    /// its size needs.
+    /// Its size, its base's id ([`Base::id`]), and the map of its chunks:
+    /// as many as its size needs.
     Paged {
         size: u64,
         base: Option<u64>,
-        chunks: Vec<Chunk>,
+        map: Map,
     },
 }
 
@@ -216,46 +220,67 @@ pub(crate) struct Root {
     pub next_blob: u64,
     /// Pages per chunk, set when the namespace was made.
     pub chunk_pages: u64,
+    /// Entries per node of a file's chunk map, set when the namespace was
+    /// made.
+    pub fanout: u64,
     /// Blobs no root names since the version given, to delete.
     pub garbage: BTreeMap<u64, u64>,
     pub next_file: u32,
     pub directory: BTreeMap<u32, Entry>,
 }
 
-/// Reads varints and byte strings from a decoded root, failing on any
-/// overrun.
-struct Reading<'a> {
+/// Reads varints and byte strings from a decoded root or map node, failing
+/// on any overrun.
+pub(crate) struct Reading<'a> {
     bytes: &'a [u8],
     at: usize,
+    /// What it reads, for errors.
+    what: &'static str,
 }
 
-impl Reading<'_> {
-    fn varint(&mut self) -> io::Result<u64> {
-        get_varint(self.bytes, &mut self.at).ok_or_else(|| invalid("root"))
+impl<'a> Reading<'a> {
+    pub fn new(bytes: &'a [u8], what: &'static str) -> Self {
+        Self { bytes, at: 0, what }
+    }
+
+    pub fn invalid(&self) -> io::Error {
+        invalid(self.what)
+    }
+
+    pub fn varint(&mut self) -> io::Result<u64> {
+        get_varint(self.bytes, &mut self.at).ok_or_else(|| self.invalid())
     }
 
     /// A varint of at most `max`.
     fn bounded(&mut self, max: u64) -> io::Result<u64> {
         Some(self.varint()?)
             .filter(|&n| n <= max)
-            .ok_or_else(|| invalid("root"))
+            .ok_or_else(|| self.invalid())
     }
 
-    fn bytes(&mut self) -> io::Result<&[u8]> {
+    fn bytes(&mut self) -> io::Result<&'a [u8]> {
         let len = self.varint()? as usize;
         let end = (self.at.checked_add(len))
             .filter(|&end| end <= self.bytes.len())
-            .ok_or_else(|| invalid("root"))?;
+            .ok_or_else(|| self.invalid())?;
         let bytes = &self.bytes[self.at..end];
         self.at = end;
         Ok(bytes)
+    }
+
+    /// Fail unless every byte was read.
+    pub fn end(&self) -> io::Result<()> {
+        match self.at == self.bytes.len() {
+            true => Ok(()),
+            false => Err(self.invalid()),
+        }
     }
 }
 
 /// Blob numbers as deltas from the previous one of their stream, zigzagged,
 /// plus one: 0 is none. A row of chunks written together costs a byte
 /// each, and zstd folds runs of them.
-fn put_ref(out: &mut Vec<u8>, previous: &mut u64, n: Option<u64>) {
+pub(crate) fn put_ref(out: &mut Vec<u8>, previous: &mut u64, n: Option<u64>) {
     let Some(n) = n else {
         return out.push(0);
     };
@@ -264,7 +289,7 @@ fn put_ref(out: &mut Vec<u8>, previous: &mut u64, n: Option<u64>) {
     *previous = n;
 }
 
-fn get_ref(r: &mut Reading, previous: &mut u64) -> io::Result<Option<u64>> {
+pub(crate) fn get_ref(r: &mut Reading, previous: &mut u64) -> io::Result<Option<u64>> {
     let z = r.varint()?;
     if z == 0 {
         return Ok(None);
@@ -275,12 +300,13 @@ fn get_ref(r: &mut Reading, previous: &mut u64) -> io::Result<Option<u64>> {
 }
 
 impl Root {
-    fn new(chunk_pages: u64) -> Self {
+    fn new(chunk_pages: u64, fanout: u64) -> Self {
         Self {
             id: cache::random(),
             version: 0,
             next_blob: 0,
             chunk_pages,
+            fanout,
             garbage: BTreeMap::new(),
             next_file: 0,
             directory: BTreeMap::new(),
@@ -297,25 +323,12 @@ impl Root {
         self.chunk_pages as usize * PAGE as usize
     }
 
-    /// Chunks of a file of `size` bytes.
-    fn chunks_of(&self, size: u64) -> usize {
-        size.div_ceil(self.chunk_pages * PAGE) as usize
-    }
-
-    /// Every blob it names.
-    #[cfg(feature = "simulation")]
-    pub fn named(&self) -> BTreeSet<u64> {
-        let mut named = BTreeSet::new();
-        for entry in self.directory.values() {
-            match &entry.kind {
-                Kind::Record(Value::Blob(n)) => {
-                    named.insert(*n);
-                }
-                Kind::Record(Value::Inline(_)) => {}
-                Kind::Paged { chunks, .. } => named.extend(chunks.iter().flat_map(|c| c.blobs())),
-            }
+    /// The shape of the map of a file of `size` bytes.
+    pub fn shape(&self, size: u64) -> Shape {
+        Shape {
+            fanout: self.fanout,
+            count: size.div_ceil(self.chunk_pages * PAGE),
         }
-        named
     }
 
     pub fn encode(&self) -> Bytes {
@@ -323,6 +336,7 @@ impl Root {
         put_varint(&mut body, self.version);
         put_varint(&mut body, self.next_blob);
         put_varint(&mut body, self.chunk_pages);
+        put_varint(&mut body, self.fanout);
         put_varint(&mut body, self.garbage.len() as u64);
         let mut previous = 0;
         for (&n, &since) in &self.garbage {
@@ -348,15 +362,11 @@ impl Root {
                     body.push(1);
                     put_varint(&mut body, *n);
                 }
-                Kind::Paged { size, base, chunks } => {
+                Kind::Paged { size, base, map } => {
                     body.push(2);
                     put_varint(&mut body, size / 512);
                     put_varint(&mut body, base.map_or(0, |id| id + 1));
-                    let (mut bases, mut deltas) = (0, 0);
-                    for chunk in chunks {
-                        put_ref(&mut body, &mut bases, chunk.base);
-                        put_ref(&mut body, &mut deltas, chunk.delta);
-                    }
+                    map.encode(&mut body);
                 }
             }
         }
@@ -371,18 +381,19 @@ impl Root {
         let body = zstd::decompress_sized(frame, &[], MAX_ROOT_BYTES)?;
         let (id, rest) = body.split_first_chunk().ok_or_else(|| invalid("root"))?;
         let id = u64::from_le_bytes(*id);
-        let mut r = Reading { bytes: rest, at: 0 };
+        let mut r = Reading::new(rest, "root");
         let version = r.bounded(MAX_SEQUENCE)?;
         let next_blob = r.bounded(MAX_SEQUENCE)?;
-        let chunk_pages = r.bounded(MAX_FILE_BYTES / PAGE)?;
-        if chunk_pages == 0 {
+        let chunk_pages = r.bounded(MAX_CHUNK_PAGES)?;
+        let fanout = r.bounded(MAX_FANOUT)?;
+        if chunk_pages == 0 || fanout < 2 {
             return Err(invalid("root"));
         }
         let mut root = Root {
             id,
             version,
             next_blob,
-            ..Root::new(chunk_pages)
+            ..Root::new(chunk_pages, fanout)
         };
         let blob = |n: u64| {
             Some(n)
@@ -419,23 +430,14 @@ impl Root {
                 2 => {
                     let size = r.bounded(MAX_FILE_BYTES / 512)? * 512;
                     let base = r.varint()?.checked_sub(1);
-                    let (mut bases, mut deltas) = (0, 0);
-                    let chunks = (0..root.chunks_of(size))
-                        .map(|_| {
-                            let base = get_ref(&mut r, &mut bases)?.map(blob).transpose()?;
-                            let delta = get_ref(&mut r, &mut deltas)?.map(blob).transpose()?;
-                            Ok(Chunk { base, delta })
-                        })
-                        .collect::<io::Result<_>>()?;
-                    Kind::Paged { size, base, chunks }
+                    let map = Map::decode(&mut r, root.shape(size), next_blob)?;
+                    Kind::Paged { size, base, map }
                 }
                 _ => return Err(invalid("root")),
             };
             root.directory.insert(id, Entry { name, kind });
         }
-        if r.at != r.bytes.len() {
-            return Err(invalid("root"));
-        }
+        r.end()?;
         Ok(root)
     }
 }
@@ -523,6 +525,8 @@ pub(crate) struct Snapshot {
     /// Chunk images decoded, by the blob that holds them: blobs never change,
     /// so every view of the state shares them.
     images: Arc<Mutex<HashMap<u64, Arc<Image>>>>,
+    /// Map nodes decoded, by blob, shared the same way.
+    nodes: Arc<Mutex<HashMap<u64, Arc<Node>>>>,
     fetching: Arc<Mutex<Fetching>>,
     readahead: Mutex<Readahead>,
 }
@@ -559,6 +563,8 @@ struct Flush {
     fresh: Vec<(u64, Bytes, Option<Arc<Image>>)>,
     /// Blobs the next root no longer names.
     dead: Vec<u64>,
+    /// The map nodes it puts, decoded.
+    nodes: Vec<(u64, Arc<Node>)>,
     /// Chunks given a new base in place of their old one.
     rebased: usize,
 }
@@ -571,6 +577,7 @@ impl Flush {
             root,
             fresh: Vec::new(),
             dead: Vec::new(),
+            nodes: Vec::new(),
             rebased: 0,
         }
     }
@@ -600,6 +607,15 @@ impl Flush {
         let image = pages.map(|pages| Arc::new(Image { pages, stored }));
         self.fresh.push((n, frame, image));
         n
+    }
+
+    /// Put map node `node`, which [`Map::update`] numbered `n`.
+    fn put_node(&mut self, n: u64, node: Arc<Node>) -> io::Result<()> {
+        assert_eq!(n, self.root.next_blob, "map nodes are numbered in order");
+        self.root.next_blob += 1;
+        self.fresh.push((n, node.frame()?, None));
+        self.nodes.push((n, node));
+        Ok(())
     }
 }
 
@@ -640,10 +656,13 @@ impl Snapshot {
         }
         let root = match &root_bytes {
             Some(bytes) => Root::decode(bytes)?,
-            None if (1..=MAX_FILE_BYTES / PAGE).contains(&options.chunk_pages) => {
-                Root::new(options.chunk_pages)
+            None if !(1..=MAX_CHUNK_PAGES).contains(&options.chunk_pages) => {
+                return refuse(format!("chunk_pages {} is invalid", options.chunk_pages));
             }
-            None => return refuse(format!("chunk_pages {} is invalid", options.chunk_pages)),
+            None if !(2..=MAX_FANOUT).contains(&options.fanout) => {
+                return refuse(format!("fanout {} is invalid", options.fanout));
+            }
+            None => Root::new(options.chunk_pages, options.fanout),
         };
         let mut snapshot = Self {
             store,
@@ -656,22 +675,29 @@ impl Snapshot {
             unchanged: false,
             reader,
             images: Arc::default(),
+            nodes: Arc::default(),
             fetching: Arc::default(),
             readahead: Mutex::default(),
         };
         // The large records' blobs, and every chunk of a small file, together.
         let mut wanted = BTreeSet::new();
-        for entry in snapshot.root.directory.values() {
+        let mut small = Vec::new();
+        for (&id, entry) in &snapshot.root.directory {
             match &entry.kind {
                 Kind::Record(Value::Blob(n)) => {
                     wanted.insert(*n);
                 }
                 Kind::Paged {
-                    size,
-                    base: None,
-                    chunks,
+                    size, base: None, ..
                 } if size.div_ceil(PAGE) <= options.prefetch_pages => {
-                    wanted.extend(chunks.iter().flat_map(|c| c.blobs()))
+                    let numbers: Vec<u64> = (0..snapshot.root.shape(*size).count).collect();
+                    let chunks = snapshot.chunks(id, &numbers).await?;
+                    for (chunk, stored) in numbers.into_iter().zip(chunks) {
+                        if stored.current().is_some() {
+                            wanted.extend(stored.blobs());
+                            small.push((id, chunk, stored));
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -682,20 +708,8 @@ impl Snapshot {
             .copied()
             .zip(snapshot.blobs(&wanted).await?)
             .collect();
-        for (&id, entry) in &snapshot.root.directory {
-            if let Kind::Paged {
-                size,
-                base: None,
-                chunks,
-            } = &entry.kind
-                && size.div_ceil(PAGE) <= options.prefetch_pages
-            {
-                for (chunk, stored) in chunks.iter().enumerate() {
-                    if stored.current().is_some() {
-                        snapshot.decode(id, chunk as u64, &fetched)?;
-                    }
-                }
-            }
+        for (id, chunk, stored) in small {
+            snapshot.decode(id, chunk, stored, &fetched)?;
         }
         for entry in snapshot.root.directory.values() {
             if let Kind::Record(value) = &entry.kind {
@@ -757,11 +771,47 @@ impl Snapshot {
         }
     }
 
-    fn chunks(&self, id: u32) -> &[Chunk] {
-        match &self.root.directory[&id].kind {
-            Kind::Paged { chunks, .. } => chunks,
-            Kind::Record(_) => &[],
+    /// The map of the paged file `id`, and its shape.
+    fn map(&self, id: u32) -> Option<(&Map, Shape)> {
+        match &self.root.directory.get(&id)?.kind {
+            Kind::Paged { size, map, .. } => Some((map, self.root.shape(*size))),
+            Kind::Record(_) => None,
         }
+    }
+
+    /// Run `walk` over the map nodes it needs: those decoded, and those it
+    /// lacked, fetched together (a level of the map a round trip), until it
+    /// lacks none.
+    async fn with_nodes<T>(&self, mut walk: impl FnMut(&Nodes) -> T) -> io::Result<T> {
+        let mut fetched: HashMap<u64, Arc<Node>> = HashMap::new();
+        loop {
+            let (out, missing) = {
+                let get = |n: u64| {
+                    let kept = || self.nodes.lock().unwrap().get(&n).cloned();
+                    fetched.get(&n).cloned().or_else(kept)
+                };
+                let nodes = Nodes::new(&get);
+                (walk(&nodes), nodes.missing())
+            };
+            if missing.is_empty() {
+                return Ok(out);
+            }
+            let blobs: Vec<u64> = missing.iter().map(|need| need.blob).collect();
+            for (need, frame) in missing.into_iter().zip(self.blobs(&blobs).await?) {
+                let node = Arc::new(Node::from_frame(&frame, need)?);
+                fetched.insert(need.blob, node.clone());
+                self.keep_nodes([(need.blob, node)]);
+            }
+        }
+    }
+
+    /// Chunks `chunks` of the file `id`, each below its count, as stored.
+    async fn chunks(&self, id: u32, chunks: &[u64]) -> io::Result<Vec<Chunk>> {
+        let Some((map, shape)) = self.map(id) else {
+            return Ok(vec![Chunk::default(); chunks.len()]);
+        };
+        let get = |nodes: &Nodes| (chunks.iter()).map(|&c| map.get(shape, c, nodes)).collect();
+        self.with_nodes(get).await
     }
 
     /// Page `page` of the file `name`; `None` for zeros (a hole of a file
@@ -772,54 +822,52 @@ impl Snapshot {
         };
         let (chunk, at) = (page / self.root.chunk_pages, page % self.root.chunk_pages);
         let at = at as usize * PAGE as usize;
-        match self.chunks(id).get(chunk as usize) {
-            Some(stored) if stored.current().is_some() => {
-                let image = self.image(id, chunk).await?;
-                let image = image.pages.slice(at..at + PAGE as usize);
-                // Zeros where the base has no page read as a hole.
-                let based = self
-                    .base_of(id)?
-                    .is_some_and(|base| base.page(page).is_some());
-                Ok((based || image.iter().any(|&byte| byte != 0)).then_some(image))
-            }
-            None => Ok(None),
-            Some(_) => Ok(self
+        if self.map(id).is_none_or(|(_, shape)| chunk >= shape.count) {
+            return Ok(None);
+        }
+        let stored = self.chunks(id, &[chunk]).await?[0];
+        if stored.current().is_none() {
+            return Ok(self
                 .base_of(id)?
                 .and_then(|base| base.page(page))
-                .map(Page::copy_from_slice)),
+                .map(Page::copy_from_slice));
         }
+        let image = self.image(id, chunk, stored).await?;
+        let image = image.pages.slice(at..at + PAGE as usize);
+        // Zeros where the base has no page read as a hole.
+        let based = self
+            .base_of(id)?
+            .is_some_and(|base| base.page(page).is_some());
+        Ok((based || image.iter().any(|&byte| byte != 0)).then_some(image))
     }
 
-    /// Chunk `chunk` of the file `id`, which a blob holds: decoded, or
+    /// Chunk `chunk` of the file `id`, `stored` in a blob: decoded, or
     /// fetched with its base, and with the chunks after it when reads are
     /// sequential, in one round trip.
-    async fn image(&self, id: u32, chunk: u64) -> io::Result<Arc<Image>> {
-        let chunks = self.chunks(id);
-        let current = chunks[chunk as usize].current().expect("a stored chunk");
+    async fn image(&self, id: u32, chunk: u64, stored: Chunk) -> io::Result<Arc<Image>> {
+        let current = stored.current().expect("a stored chunk");
         if let Some(image) = self.images.lock().unwrap().get(&current) {
             return Ok(image.clone());
         }
         let ahead = self.readahead.lock().unwrap().miss(id, chunk);
-        let after = (chunk + 1..(chunk + 1 + ahead).min(chunks.len() as u64))
-            .filter(|&c| !self.has(chunks[c as usize]));
-        let mut images = self.fetch(id, std::iter::once(chunk).chain(after)).await?;
+        let count = self.map(id).map_or(0, |(_, shape)| shape.count);
+        let after: Vec<u64> = (chunk + 1..(chunk + 1 + ahead).min(count)).collect();
+        let after = (after.iter().copied())
+            .zip(self.chunks(id, &after).await?)
+            .filter(|&(_, stored)| !self.has(stored));
+        let wanted = std::iter::once((chunk, stored)).chain(after).collect();
+        let mut images = self.fetch(id, wanted).await?;
         Ok(images.swap_remove(0))
     }
 
-    /// Chunks `wanted` of the file `id`, which blobs hold: their blobs
+    /// Chunks `wanted` of the file `id`, as stored in blobs: the blobs
     /// fetched together, in one round trip, and decoded (and kept).
-    async fn fetch(
-        &self,
-        id: u32,
-        wanted: impl IntoIterator<Item = u64>,
-    ) -> io::Result<Vec<Arc<Image>>> {
-        let wanted: Vec<u64> = wanted.into_iter().collect();
+    async fn fetch(&self, id: u32, wanted: Vec<(u64, Chunk)>) -> io::Result<Vec<Arc<Image>>> {
         if wanted.is_empty() {
             return Ok(Vec::new());
         }
-        let chunks = self.chunks(id);
         let blobs: Vec<u64> = (wanted.iter())
-            .flat_map(|&c| chunks[c as usize].blobs())
+            .flat_map(|(_, stored)| stored.blobs())
             .collect();
         let fetched: HashMap<u64, Bytes> = blobs
             .iter()
@@ -827,7 +875,7 @@ impl Snapshot {
             .zip(self.blobs(&blobs).await?)
             .collect();
         (wanted.into_iter())
-            .map(|c| self.decode(id, c, &fetched))
+            .map(|(chunk, stored)| self.decode(id, chunk, stored, &fetched))
             .collect()
     }
 
@@ -847,10 +895,16 @@ impl Snapshot {
             .is_none_or(|n| self.images.lock().unwrap().contains_key(&n))
     }
 
-    /// Decode chunk `chunk` of the file `id` from its blobs in `fetched`, and
-    /// keep its base and its pages now, which it returns.
-    fn decode(&self, id: u32, chunk: u64, fetched: &HashMap<u64, Bytes>) -> io::Result<Arc<Image>> {
-        let stored = self.chunks(id)[chunk as usize];
+    /// Decode chunk `chunk` of the file `id`, `stored` in blobs that
+    /// `fetched` holds, and keep its base and its pages now, which it
+    /// returns.
+    fn decode(
+        &self,
+        id: u32,
+        chunk: u64,
+        stored: Chunk,
+        fetched: &HashMap<u64, Bytes>,
+    ) -> io::Result<Arc<Image>> {
         let size = self.root.chunk_bytes();
         let decode = |n: u64, prefix: &[u8]| decode_chunk(&fetched[&n], prefix, size);
         let base = match stored.base {
@@ -884,6 +938,18 @@ impl Snapshot {
                 images.clear();
             }
             images.insert(n, image);
+        }
+    }
+
+    /// Keep decoded map nodes, dropping them all first once there are
+    /// [`KEPT_NODES`].
+    fn keep_nodes(&self, decoded: impl IntoIterator<Item = (u64, Arc<Node>)>) {
+        let mut nodes = self.nodes.lock().unwrap();
+        for (n, node) in decoded {
+            if nodes.len() >= KEPT_NODES {
+                nodes.clear();
+            }
+            nodes.insert(n, node);
         }
     }
 
@@ -943,7 +1009,7 @@ impl Snapshot {
     }
 
     /// Refuse what no flush could store, before anything is written.
-    pub(crate) fn check(&self, writes: &Writes, records: &Records) -> io::Result<()> {
+    pub(crate) async fn check(&self, writes: &Writes, records: &Records) -> io::Result<()> {
         let paged = |name: &str| self.is_paged(name);
         for (name, value) in records {
             if value.len() > MAX_RECORD_BYTES {
@@ -974,7 +1040,7 @@ impl Snapshot {
             {
                 return refuse(format!("{name:?}: a page past the largest file"));
             }
-            if self.lacks_its_base(name) && !self.drops_chunks_only(name, written) {
+            if self.lacks_its_base(name) && !self.drops_chunks_only(name, written).await? {
                 return refuse(format!("{name:?} has a base: open it with it"));
             }
         }
@@ -1001,20 +1067,28 @@ impl Snapshot {
 
     /// `written` only makes whole chunks holes, or cuts the file's length:
     /// all a file can do without its base, whose chunks it cannot decode.
-    fn drops_chunks_only(&self, name: &str, written: &Written) -> bool {
+    async fn drops_chunks_only(&self, name: &str, written: &Written) -> io::Result<bool> {
         let Some(id) = self.root.file_id(name) else {
-            return true;
+            return Ok(true);
         };
-        let size = written.size_after(self.file_size(name));
+        if !written.pages.values().all(Option::is_none) {
+            return Ok(false);
+        }
+        let current = self.file_size(name);
+        let size = written.size_after(current);
         let per = self.root.chunk_pages;
-        let stored = self.chunks(id);
-        written.pages.values().all(Option::is_none)
-            && touched(written, self.file_size(name), per).all(|chunk| {
-                let current = stored.get(chunk as usize).and_then(|c| c.current());
-                (chunk * per..(chunk + 1) * per)
-                    .all(|page| page * PAGE >= size || written.pages.contains_key(&page))
-                    || current.is_none()
-            })
+        let count = self.root.shape(current).count;
+        let touched: Vec<u64> = touched(written, current, per).collect();
+        let held: Vec<u64> = touched.iter().copied().filter(|&c| c < count).collect();
+        let stored: HashMap<u64, Chunk> = (held.iter().copied())
+            .zip(self.chunks(id, &held).await?)
+            .collect();
+        Ok(touched.into_iter().all(|chunk| {
+            let current = stored.get(&chunk).and_then(|c| c.current());
+            (chunk * per..(chunk + 1) * per)
+                .all(|page| page * PAGE >= size || written.pages.contains_key(&page))
+                || current.is_none()
+        }))
     }
 
     /// Flush `writes` and `records`, which [`Self::check`] passed: see the
@@ -1056,14 +1130,11 @@ impl Snapshot {
         let id = flush.file(name, || Kind::Paged {
             size: 0,
             base: base.map(|base| base.id()),
-            chunks: Vec::new(),
+            map: Map::empty(),
         });
-        let held = match self.root.directory.contains_key(&id) {
-            true => self.chunks(id),
-            false => &[],
-        };
         let current = self.file_size(name);
         let size = written.size_after(current);
+        let (old, new) = (flush.root.shape(current), flush.root.shape(size));
         let based = matches!(
             flush.root.directory[&id].kind,
             Kind::Paged { base: Some(_), .. }
@@ -1077,29 +1148,45 @@ impl Snapshot {
             written,
             size,
         };
-        let count = flush.root.chunks_of(size);
         let touched: Vec<u64> = touched(written, current, flush.root.chunk_pages).collect();
-        // The stored ones, together, in one round trip.
+        // The stored ones, and their pages, together.
+        let held: Vec<u64> = touched.iter().copied().filter(|&c| c < old.count).collect();
+        let stored: HashMap<u64, Chunk> = (held.iter().copied())
+            .zip(self.chunks(id, &held).await?)
+            .collect();
         if !file.missing {
-            let undecoded = (touched.iter().copied()).filter(|&c| {
-                held.get(c as usize)
-                    .is_some_and(|&stored| !self.has(stored))
-            });
-            self.fetch(id, undecoded.collect::<Vec<_>>()).await?;
+            let undecoded = (stored.iter())
+                .filter(|&(_, &chunk)| !self.has(chunk))
+                .map(|(&c, &chunk)| (c, chunk));
+            self.fetch(id, undecoded.collect()).await?;
         }
-        let mut chunks = held.to_vec();
-        let cut = chunks.drain(count.min(chunks.len())..);
-        flush.dead.extend(cut.flat_map(|chunk| chunk.blobs()));
-        chunks.resize(count, Chunk::default());
+        let mut changes = BTreeMap::new();
         for chunk in touched {
-            let stored = chunks[chunk as usize];
-            chunks[chunk as usize] = self.commit_chunk(flush, &file, chunk, stored).await?;
+            let held = stored.get(&chunk).copied().unwrap_or_default();
+            let now = self.commit_chunk(flush, &file, chunk, held).await?;
+            if now != held {
+                changes.insert(chunk, now);
+            }
         }
+        // The map, with the nodes on the changed paths put anew.
+        let Some(Entry {
+            kind: Kind::Paged { map, .. },
+            ..
+        }) = flush.root.directory.get(&id)
+        else {
+            unreachable!("checked: a paged file");
+        };
+        let (map, next) = (map.clone(), flush.root.next_blob);
+        let update = (self.with_nodes(|nodes| map.update(old, new, &changes, nodes, next))).await?;
+        for (n, node) in update.fresh {
+            flush.put_node(n, node)?;
+        }
+        flush.dead.extend(update.dead);
         let Some(Entry {
             kind:
                 Kind::Paged {
                     size: held_size,
-                    chunks: held_chunks,
+                    map: held_map,
                     ..
                 },
             ..
@@ -1108,7 +1195,7 @@ impl Snapshot {
             unreachable!("checked: a paged file");
         };
         *held_size = size;
-        *held_chunks = chunks;
+        *held_map = update.map;
         Ok(())
     }
 
@@ -1130,7 +1217,10 @@ impl Snapshot {
                     Some(n) => Some(self.base_image(file.id, chunk, n).await?),
                     None => None,
                 };
-                (base_image, self.image(file.id, chunk).await?.pages.to_vec())
+                (
+                    base_image,
+                    self.image(file.id, chunk, stored).await?.pages.to_vec(),
+                )
             }
             _ => (None, hole.clone()),
         };
@@ -1202,6 +1292,7 @@ impl Snapshot {
             mut root,
             fresh,
             dead,
+            nodes,
             rebased,
         } = flush;
         let cache = self.cache.as_ref();
@@ -1250,6 +1341,7 @@ impl Snapshot {
                 .into_iter()
                 .filter_map(|(n, _, image)| Some((n, image?))),
         );
+        after.keep_nodes(nodes);
         let report = FlushReport {
             blob_bytes,
             root_bytes,
@@ -1277,6 +1369,7 @@ impl Snapshot {
             unchanged: false,
             reader: self.reader,
             images: self.images.clone(),
+            nodes: self.nodes.clone(),
             fetching: self.fetching.clone(),
             readahead: Mutex::default(),
         }

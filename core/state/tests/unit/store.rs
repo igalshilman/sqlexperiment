@@ -1,7 +1,7 @@
 use super::*;
 
 fn root() -> Root {
-    let mut root = Root::new(4);
+    let mut root = Root::new(4, 64);
     root.version = 7;
     root.next_blob = 300;
     root.garbage = BTreeMap::from([(3, 7), (40, 5)]);
@@ -9,7 +9,10 @@ fn root() -> Root {
     let paged = |base, chunks| Kind::Paged {
         size: 3 * 4 * PAGE,
         base,
-        chunks,
+        map: Map {
+            height: 1,
+            node: Arc::new(Node::Leaf(chunks)),
+        },
     };
     let chunk = |base, delta| Chunk { base, delta };
     let entries = [
@@ -51,7 +54,7 @@ fn root() -> Root {
 fn a_root_decodes_as_encoded() {
     let root = root();
     assert_eq!(Root::decode(&root.encode()).unwrap(), root);
-    let empty = Root::new(1);
+    let empty = Root::new(1, 2);
     assert_eq!(Root::decode(&empty.encode()).unwrap(), empty);
 }
 

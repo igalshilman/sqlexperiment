@@ -263,6 +263,7 @@ impl Campaign {
         let options = StateSetup {
             options: StateOptions {
                 chunk_pages: rng.pick(&[1, 4, 16]),
+                fanout: rng.pick(&[2, 3, 64]),
                 rebase_ratio: rng.pick(&[0.0, 0.25, 4.0]),
                 garbage_after: 1 + rng.below(4),
                 inline_record_bytes: rng.pick(&[64, 1024]),
