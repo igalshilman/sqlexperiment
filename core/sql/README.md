@@ -34,8 +34,9 @@ mutation.set(&state.record("progress"), "shipped 7".into())?;
 mutation.flush().await?; // the rows and the record, durable together
 ```
 
-Nothing is durable before `Mutation::flush`, and every mutation of the state refuses to
-flush while SQL holds changes not moved into one. A mutation dropped unflushed
+Nothing is durable before `Mutation::flush`, and only what `db.flush` moved
+into the mutation: one flushed without it leaves SQL's changes private, for a
+later one. A mutation dropped unflushed
 discards its writes; SQL still holds the pages it moved there, and its next
 `flush` moves them again. The host chooses when to flush:
 after each SQL transaction, as the Node.js addon and the Python extension do,
