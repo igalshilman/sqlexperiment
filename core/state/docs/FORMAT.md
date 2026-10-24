@@ -8,7 +8,7 @@ carries a checksum, and decoding checks structure and the bounds below.
 | Key                          | Value                                                                                             |
 | ---------------------------- | ------------------------------------------------------------------------------------------------- |
 | `v16/root`                   | The root; absent until the first flush                                                            |
-| `v16/blob/<lowercase hex n>` | One zstd frame: a chunk's base or delta, a map node, or a large record or log entry; written once |
+| `v16/blob/<lowercase hex n>` | One zstd frame: a chunk's base or delta, a map node, or a large record, or a log entry; written once |
 
 The root is the only key whose write commits. Integers are LEB128 varints
 unless stated otherwise.

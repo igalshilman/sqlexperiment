@@ -37,7 +37,7 @@ A namespace holds two kinds of keys:
 | Key            | Holds                                                                                                                                        |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `v16/root`     | The root, the commit point: the version, the directory of records and paged files, the small records, and the top of every file's chunk map. |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record or log entry.                 |
+| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record, or a log entry.                 |
 
 **Chunks.** A paged file is a row of chunks of `chunk_pages` pages (4,
 16 KiB), as many as its size needs, at most `MAX_FILE_BYTES` (10 GiB). A

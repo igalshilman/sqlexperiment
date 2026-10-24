@@ -139,6 +139,11 @@ fn a_write_refuses_what_no_flush_could_store() -> Result<()> {
         let error = mutation.append(&log, vec![0; MAX_RECORD_BYTES + 1].into());
         assert!(error.unwrap_err().to_string().contains("exceeds"));
         assert!(mutation.truncate(&log, 1).is_err(), "past its end");
+        mutation.truncate(&log, 0)?;
+        assert!(
+            mutation.is_empty(),
+            "refused, or dropping nothing: no change"
+        );
         mutation.append(&log, "a".into())?;
         mutation.truncate(&log, 1)?;
         mutation.set(&state.record("progress"), "1".into())?;
@@ -202,6 +207,26 @@ fn a_reader_keeps_the_log_it_opened() -> Result<()> {
         assert_eq!((log.first(), log.entries()), (2, entries(&["c"])));
         let reopened = State::open(store).reader().await?;
         assert_eq!(reopened.log("turns").entries(), entries(&["c"]));
+        Ok(())
+    })
+}
+
+/// A mutation kept while another flush appends to its log: its flush is
+/// refused, since the indexes its appends returned no longer hold.
+#[test]
+fn a_flush_refuses_appends_to_a_log_appended_to_since() -> Result<()> {
+    futures::executor::block_on(async {
+        let state = State::open(Arc::new(MemoryKv::default())).await?;
+        let log = state.log("turns");
+        let mut kept = state.mutation();
+        assert_eq!(kept.append(&log, "kept".into())?, 0);
+        let mut other = state.mutation();
+        other.append(&log, "other".into())?;
+        other.flush().await?;
+        let error = kept.flush().await.unwrap_err();
+        assert!(error.to_string().contains("appended to since"), "{error}");
+        assert!(state.is_usable());
+        assert_eq!(log.entries(), entries(&["other"]));
         Ok(())
     })
 }
