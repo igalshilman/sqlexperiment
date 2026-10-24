@@ -518,11 +518,13 @@ capture. A page written and restored to its original value needs no new
 payload. Reset the tracker on restore before rebinding pointers/limits, and
 after each commit is stored. A failed commit ends the attempt with its VM.
 
-Since 21 October 2026 the runtime keeps no encoding of its own: a turn writes
-its changed pages into the memory file (§5.1), and the state compresses each
-against what it replaces (its previous image, or golden's), whole pages with
-Zstd. The block encoding below, and its measurements, are the history that
-design came from.
+Since 24 October 2026 a turn appends its changed pages to the log
+`memory/turns` (§5.1), as one Zstd frame with their previous images as its
+prefix, and every 16 turns folds them into the memory file, whose chunks
+the state compresses against what they replace. From 21 October, a turn
+wrote its pages into the file itself: a delta per changed chunk, against
+everything since the chunk's base (§10.1). The block encoding below, and its
+measurements, are the history both came from.
 
 Selected encoding: **the changed 64-byte blocks of the changed pages,
 compressed as one Zstd frame (level 2, long-distance matching) with the
@@ -619,13 +621,14 @@ Zeroing free chunks (§5.6) already makes what it allocates and frees free.
 A scope's store holds one state, a `state` namespace
 ([its format](../../../core/state/docs/FORMAT.md)): the root at `v16/root`,
 which names the blobs at `v16/blob/<n>`, written once each: chunks of a
-file's pages and large records. Its files:
+file's pages, large records and log entries. Its files:
 
 | File              | Kind                    | Holds                                                                   |
 | ----------------- | ----------------------- | ----------------------------------------------------------------------- |
 | `run`             | Record                  | The scope's current run as of its last turn: JSON, below                |
 | `memory`          | Record                  | Its memory: JSON, below                                                 |
-| `memory/<golden>` | Paged file over golden  | The pages of the run's memory that differ from its program's golden one |
+| `memory/<golden>` | Paged file over golden  | The run's memory as of the last fold: its pages that differ from golden |
+| `memory/turns`    | Log                     | The turns since the last fold: each one's changed pages (§5.3)          |
 | `db`              | Paged file              | SQL: the scope's KV, a table `kv(key TEXT PRIMARY KEY, value TEXT)`     |
 | `<extension>/…`   | Records and paged files | Each extension's part of the state (`fs/manifest`, say)                 |
 
@@ -641,18 +644,29 @@ Run = {
 Memory = {
     meta: VmMeta, memoryLen: byte_count,
     file: "memory/<golden fingerprint, 16 hex digits>",
-    pages: [[first, count], ...]
+    pages: [[first, count], ...],
+    folded: [[first, count], ...]
 }
 ```
 
-The image is golden (zeros beyond its length) with the pages `pages` lists
-read from `file`. The file is over golden (a `state` base): a chunk the run
+The image is golden (zeros beyond its length) with the pages `folded` lists
+read from `file`, then each entry of `memory/turns` replayed over it, in
+order. An entry is the count of pages a turn changed, their indexes (each a
+little-endian `u32`), and one Zstd frame of their new images with their
+previous images as its prefix: a page costs about what changed in it,
+wherever it moved. A turn appends its entry, a blob of its own, and the
+root holds only its number; every 16th turn, or one that would take the
+log past 4 MiB of pages, instead writes every page the log's turns and its
+own changed into the file and truncates the log, in the same flush. A
+turn thus writes about what it changed, and the file's chunks change only
+at a fold. The file is over golden (a `state` base): a chunk the run
 never changed reads as golden's, a chunk's base is compressed against
 golden's pages, and each later change as a delta against that base, so a
 page costs about what changed in it.
-`pages` lists the pages that differ from golden, run-length encoded,
-because the store cannot list a file's pages: a restore reads exactly
-those. A settled run's list is empty, and its pages are holes. `runtime` is
+`folded` lists the file's pages that differ from golden, run-length
+encoded, because the store cannot list a file's pages: a restore reads
+exactly those. `pages` lists the image's, its size in memory. A settled
+run's lists and log are empty, and its pages are holes. `runtime` is
 the runtime's version, a constant bumped by hand with anything an image
 depends on: the Wasm, the bridge, the limits, the imports' behavior. A run
 restores only on the program version and runtime it started on: a changed
@@ -697,12 +711,17 @@ capture(G, P, VM):
 
 prepare(changed, mutation):                       // the memory's part of the seal,
                                                   // written into the turn's mutation
-    if the scope's previous run left pages: write each as a hole, in its file
-    if the run settled: write every page of P that differs from G as a hole
-                        pages = []                // no image is kept
-    else: write P.page(i) for each i in changed   // the state makes one equal
+    if the scope's previous run left pages: write each as a hole, in its file,
+                                            and truncate its turns
+    if the run settled: write every folded page as a hole, truncate the log
+                        pages = folded = []       // no image is kept
+    else if the log holds 15 turns, or 4 MiB of pages with these:
+          write P.page(i) for each i the log's turns or changed name
+                                                  // the state makes one equal
                                                   // to G's a hole
-          pages = the pages of P that differ from G
+          truncate the log; folded = the pages of P that differ from G
+    else: append (changed, Zstd(P's changed pages, prefix: their images before))
+    pages = the pages of P that differ from G
     set the record "memory"
 ```
 
@@ -713,7 +732,8 @@ compared stay as they were, in the VM and in P alike. Updating P with each
 changed page keeps it equal to the VM's memory as of the commit: the
 `verify-dirty` build checks that every page that differs from it was
 written (marked or listed), in either mechanism. A turn writes the pages it
-changed, as a delta per changed chunk: it never rewrites the whole image.
+changed, compressed against what they were: it never rewrites the whole
+image.
 
 ### 5.4. Reconstruction algorithm
 
@@ -722,10 +742,13 @@ reconstruct(run, memory):
     require the program's version and the runtime's match the run's
     require golden_length <= memoryLen <= limit, 64-KiB aligned
     memory = golden bytes, extended with zeros to memoryLen
-    read the pages memory.pages lists from memory.file, together
+    read the pages memory.folded lists from memory.file, together
         (each from the state's decoded chunks, the process's page cache,
         or the store)
     write them into memory
+    for each entry of memory/turns, in order:     // read with the root
+        decompress its frame with the pages it names, as they are, as prefix
+        write the pages it names
     return Image(memory, memory.meta)
 ```
 
@@ -867,13 +890,14 @@ A turn is one flush of the scope's state (`Mutation::flush`): its blobs, then it
 root, and one sync. Every participant writes into one mutation:
 
 1. its KV writes, the SQL transaction its first KV request began;
-2. its memory's pages that changed, into the file over golden (§5.3);
+2. its memory's pages that changed, as an entry of the log `memory/turns`,
+   or every 16 turns folded into the file over golden (§5.3);
 3. the run's progress, as the record `run`, with the pending requests; the
    memory's, as the record `memory`; and what each extension changed in
    its part of the state (its records and files under `<name>/`).
 
-The flush puts each changed chunk (SQL and memory pages alike) as a new
-blob, then the root that names them, and syncs once: writes are kept in
+The flush puts each changed chunk (SQL's pages, the memory's at a fold) and
+the turn's log entry as new blobs, then the root that names them, and syncs once: writes are kept in
 issue order (§1), so a stored root names only stored blobs. A crash before
 the root is stored loses the whole turn, which the next
 attempt runs again from the previous flush: the requests it issued were
@@ -1051,35 +1075,48 @@ file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
 (~3 KiB). The model is a conversation of the host's gateway
 ([LLM.md](LLM.md)): the program sends each step's new messages, which go
 into the scope's database, and the host reads the whole conversation from
-there for each request. Measured on 24 October 2026 (4 vCPUs), on
-copy-on-write storage:
+there for each request. Measured on 24 October 2026 (4 vCPUs), with the
+memory's turns logged (§5.3):
 
 | Step | Request to the model | Reading it | Stored by the step | Model turn | Tool turn |
 | ---: | -------------------: | ---------: | -----------------: | ---------: | --------: |
-|    1 |              1.7 KiB |    0.54 ms |              22 KB |    2.23 ms |   2.47 ms |
-|   10 |               31 KiB |    0.43 ms |              19 KB |    2.13 ms |   1.81 ms |
-|   41 |              136 KiB |    0.80 ms |              22 KB |    1.96 ms |   2.29 ms |
-|   98 |              327 KiB |    2.34 ms |              18 KB |    2.42 ms |   2.10 ms |
-|  190 |              636 KiB |    2.27 ms |              18 KB |    2.13 ms |   1.86 ms |
+|    1 |              1.7 KiB |    0.63 ms |             9.4 KB |    3.87 ms |   2.03 ms |
+|   10 |               31 KiB |    0.48 ms |             8.0 KB |    1.25 ms |   1.53 ms |
+|   41 |              136 KiB |    0.78 ms |              12 KB |    1.74 ms |   1.52 ms |
+|   98 |              327 KiB |    1.23 ms |             8.2 KB |    1.34 ms |   1.36 ms |
+|  190 |              636 KiB |    2.34 ms |             8.8 KB |    1.49 ms |   1.39 ms |
 
-- **Per step:** 21 KB at the median, 18–25 KB for nine steps in ten,
+- **Per step:** 11 KB at the median, 7.8–22 KB for nine steps in ten,
   whatever the conversation's length: the rows of its new messages, the
-  heap's changed chunks (the loop, the latest response) and two roots of
-  420–720 B.
-- **The session:** 4.0 MiB stored over 200 steps. Neither the heap nor
+  heap's changed pages as one log entry, and a root of 390–610 B. A step
+  that folds the log into the memory's file stores up to 24 KB.
+- **The session:** 2.25 MiB stored over 200 steps. Neither the heap nor
   Restate's journal holds the requests.
-- **Restores:** a new attempt, every 25 steps, restores the run in 1–10 ms,
-  reopening the database.
-- **Against the log** (the same bench, the same day, on main before
-  copy-on-write): a step stored 8.8 KB at the median, plus 31–41 KB of
-  checkpoint every 16 steps or so, 2.5 MiB in all; restores took 1–12 ms,
-  and turns 1.3–1.5 ms against 2.1–2.3. Copy-on-write stores about 1.6× as
-  much here. A delta holds every change since its chunk's base, so a chunk that
-  each turn changes (the heap's hot pages, the table's last pages) is
-  written whole again each turn, up to a quarter of the base, until it
-  rebases; the log wrote what changed since the turn before. A lower rebase
-  ratio, or a delta against the previous delta, would trade that against
-  reads of more blobs.
+- **Restores:** a new attempt, every 25 steps, restores the run in
+  1.1–1.4 ms, reading the file's pages and replaying up to 15 turns.
+- **Against the alternatives** (the same bench, the same day): writing the
+  heap's pages into the file each turn (copy-on-write, from 21 October)
+  stored 21 KB a step and 4.0 MiB in all, in 2.1–2.3 ms turns: a chunk's
+  delta holds every change since its base, so a chunk each turn changes is
+  written whole again each turn, up to a quarter of the base, and each
+  changed chunk is a blob and a put. The state's log before copy-on-write
+  stored 8.8 KB a step plus a 31–41 KB checkpoint every 16 steps or so,
+  2.5 MiB in all, with restores of 1–12 ms.
+
+`cargo bench --bench checkpoints`, medians of a turn, the same day:
+
+| Workload    | Turn, copy-on-write | Turn, logged | Bytes a turn, copy-on-write | Bytes a turn, logged | Puts a turn, copy-on-write | Puts a turn, logged |
+| ----------- | ------------------: | -----------: | --------------------------: | -------------------: | -------------------------: | ------------------: |
+| scalar      |             1.08 ms |      0.49 ms |                       3,576 |                1,318 |                         18 |                   2 |
+| sparse-8m   |             1.16 ms |      0.53 ms |                       3,834 |                1,483 |                         20 |                   2 |
+| growth-3m   |             2.20 ms |      1.29 ms |                       3,228 |                2,326 |                         18 |                   2 |
+| heap-churn  |             5.45 ms |      5.69 ms |                      56,272 |               52,015 |                         38 |                   2 |
+| write-heavy |             3.91 ms |      3.26 ms |                      10,664 |                3,611 |                         26 |                   2 |
+
+Restored turns (a new VM each turn) are 1.1–1.3 ms on the small workloads,
+against 1.6–1.8 ms. An entry XORing each page with its previous image,
+instead of a Zstd frame against it, took 0.33 ms a scalar turn, but stored
+1.5 times as much on heap-churn, whose changes move.
 
 ## 11. Scope limits, provenance and references
 

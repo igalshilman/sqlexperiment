@@ -81,6 +81,12 @@ impl Store {
             .sum()
     }
 
+    /// Turns the memory's log holds: those since the last fold.
+    pub fn logged_turns(&self) -> usize {
+        let state = block(State::open(self.kv.clone())).unwrap();
+        state.log("memory/turns").entries().len()
+    }
+
     /// Blobs in the store: chunks of pages, and large records.
     pub fn blobs(&self) -> usize {
         self.kv.blob_count()
