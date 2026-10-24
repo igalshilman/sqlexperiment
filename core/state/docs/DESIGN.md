@@ -294,7 +294,7 @@ Measurements: [the experiment](COW_EXPERIMENT.md),
 
 - **Size.** A paged file holds at most 64 MiB, and the root maps every
   chunk, a few bytes each, rewritten by every flush: about 16 KiB of
-  directory at the limit (16,384 chunks), before compression. A larger
+  directory at the limit (4,096 chunks), before compression. A larger
   database would need the map itself in chunks.
 - **Keys.** Every flush that changes pages puts at least two keys (a blob and
   the root), and a namespace holds a key per live blob, about two per

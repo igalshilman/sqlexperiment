@@ -180,14 +180,15 @@ SDKs) are gone.
 
 ## Validation
 
-- State campaign, 2,000 seeds: 78,650 flushes, 20,720 crashes, 185,152 blobs,
-  39,364 rebases, 121,411 consistent reads beside the owner, no monitor
+- State campaign, 2,000 seeds: 78,641 flushes, 20,713 crashes, 185,144 blobs,
+  39,442 rebases, 121,494 consistent reads beside the owner, no monitor
   violations.
 - SQL campaign, 300 seeds: 36,000 calls, 1,642 faults, 2,605 crashes, 1,371
   unknown outcomes.
 - Every state, SQL and functions test (the functions in each page-tracking
   mode), the Node.js addon's and the TypeScript tests, and the Python
-  packages' tests. The Node.js addon's test store kept a random subset of a
+  packages' tests. (The three TypeScript files that load OpenCode need
+  Node.js 24; on 22 they fail to load, on main as well.) The Node.js addon's test store kept a random subset of a
   failed request's writes, "worse than the contract": it now keeps a
   prefix, the contract, which copy-on-write relies on (a root kept without
   a blob it names would be lost).
