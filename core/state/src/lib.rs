@@ -12,10 +12,10 @@
 //! records set, pages written and entries appended there become durable
 //! together at [`Mutation::flush`], and a mutation dropped discards them.
 //!
-//! What writes a mutation is a [`Participant`]: it keeps changes of its own, moves
-//! them into the mutation before the flush, and may leave state idle for the
-//! namespace's next [`State`]. The `sql` crate's database is one, on the
-//! file `db`.
+//! The state knows nothing of what writes it: the `sql` crate keeps its
+//! database in the file `db`, moving what it committed into a mutation
+//! before the host flushes it; the durable functions runtime adds a
+//! program's memory and its run. Coordinating them is theirs.
 //!
 //! # Copy on write
 //!
@@ -50,9 +50,9 @@
 //! local disk tier under one budget for every namespace it opens, under
 //! their numbers, for as long as it likes: a blob never changes. It
 //! remembers the root this owner made durable, so a steady-state open and
-//! flush are each one round trip. A participant may leave idle state there
-//! ([`Participant::park`]); the next state hands it back when nothing
-//! changed. The disk tier's I/O runs on tokio.
+//! flush are each one round trip. A value may be parked there for the next
+//! state of the namespace ([`State::park`]), such as an SQL engine, which
+//! takes it back when nothing changed. The disk tier's I/O runs on tokio.
 //!
 //! # Example
 //!
@@ -92,7 +92,7 @@ pub use store::{
     FlushReport, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES, ROOT_KEY,
 };
 
-use crate::cache::{Idle, NamespaceCache};
+use crate::cache::{NamespaceCache, ParkedValue};
 use crate::kv::KvStore;
 use crate::store::Snapshot;
 use bytes::Bytes;
@@ -195,12 +195,9 @@ struct Shared {
     snapshot: Mutex<Arc<Snapshot>>,
     options: StateOptions,
     cache: Option<NamespaceCache>,
-    /// The participants that joined, by name: whether each holds changes not
-    /// yet in a mutation.
-    participants: Mutex<HashMap<String, bool>>,
-    /// What participants left idle at the state this one opened on, by
-    /// participant, until they take it.
-    idle: Mutex<HashMap<String, Idle>>,
+    /// What was parked at the state this one opened on, by key, until
+    /// taken ([`State::take_parked`]).
+    parked: Mutex<HashMap<String, ParkedValue>>,
     /// A reader's ([`Open::reader`]): it never flushes.
     reader: AtomicBool,
     /// A flush failed or was cancelled: its outcome is unknown.
@@ -212,13 +209,6 @@ struct Shared {
 impl Shared {
     fn snapshot(&self) -> Arc<Snapshot> {
         self.snapshot.lock().unwrap().clone()
-    }
-
-    /// A participant holding changes not yet in a mutation.
-    fn unflushed(&self) -> Option<String> {
-        let joined = self.participants.lock().unwrap();
-        let mut unflushed = joined.iter().filter(|(_, unflushed)| **unflushed);
-        unflushed.next().map(|(name, _)| name.clone())
     }
 }
 
@@ -250,14 +240,14 @@ impl Drop for Flushing<'_> {
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        // Idle state no participant took goes back, if nothing changed.
+        // What was parked and not taken goes back, if nothing changed.
         let Some(cache) = self.cache.as_ref().filter(|_| !*self.reader.get_mut()) else {
             return;
         };
         let version = self.snapshot().version();
-        for (name, idle) in self.idle.get_mut().unwrap().drain() {
-            if idle.version == version && cache.committed() == Some(version) {
-                cache.park(&name, idle);
+        for (name, value) in self.parked.get_mut().unwrap().drain() {
+            if value.version == version && cache.committed() == Some(version) {
+                cache.park(&name, value);
             }
         }
     }
@@ -299,18 +289,17 @@ impl State {
         reader: bool,
     ) -> Result<Self> {
         let snapshot = Snapshot::open(store, options.clone(), cache.clone(), reader).await?;
-        let mut idle = match &cache {
-            Some(cache) if snapshot.unchanged => cache.take_idle(),
+        let mut parked = match &cache {
+            Some(cache) if snapshot.unchanged => cache.take_parked(),
             _ => HashMap::new(),
         };
-        idle.retain(|_, idle| idle.version == snapshot.version());
+        parked.retain(|_, value| value.version == snapshot.version());
         Ok(Self {
             shared: Arc::new(Shared {
                 snapshot: Mutex::new(Arc::new(snapshot)),
                 options,
                 cache,
-                participants: Mutex::default(),
-                idle: Mutex::new(idle),
+                parked: Mutex::new(parked),
                 reader: AtomicBool::new(reader),
                 poisoned: AtomicBool::new(false),
                 flushing: AtomicBool::new(false),
@@ -374,19 +363,50 @@ impl State {
         }
     }
 
-    /// Take part in the state as `name`, one at a time per name (see
-    /// [`Participant`]).
-    pub fn join(&self, name: &str) -> Result<Participant> {
-        let name = format!("{}{name}", self.prefix);
-        let mut joined = self.shared.participants.lock().unwrap();
-        if joined.contains_key(&name) {
-            return Err(format!("{name:?} already takes part in this state").into());
+    /// What was parked under `key` ([`Self::park`]) at the end of the
+    /// owner's previous state, if nothing changed since and it is a `T`.
+    pub fn take_parked<T: Any + Send>(&self, key: &str) -> Option<T> {
+        let key = format!("{}{key}", self.prefix);
+        let value = self.shared.parked.lock().unwrap().remove(&key)?;
+        value.value.downcast().ok().map(|value| *value)
+    }
+
+    /// Whether [`Self::park`] would keep a value now: the state has a
+    /// [`PageCache`] and is at the owner's last durable flush.
+    pub fn can_park(&self) -> bool {
+        let Some(cache) = &self.shared.cache else {
+            return false;
+        };
+        !self.is_reader() && self.is_usable() && cache.committed() == Some(self.version())
+    }
+
+    /// Leave `value`, which corresponds to the state as last flushed, for
+    /// the namespace's next state under `key` ([`Self::take_parked`]),
+    /// weighing `weight` bytes against [`PageCacheConfig::parked_bytes`]:
+    /// an SQL engine, say, which the next state then need not open. `Err`
+    /// gives it back if it cannot be kept (see [`Self::can_park`]). The
+    /// cache drops it when anything changes, or under its budget; one
+    /// heavier than the whole budget is not kept. `value` must hold no
+    /// handle of this state (a [`File`], a [`Record`], the [`State`]), which
+    /// would keep it open meanwhile, on a root whose blobs later flushes
+    /// delete.
+    pub fn park<T: Any + Send>(
+        &self,
+        key: &str,
+        value: T,
+        weight: usize,
+    ) -> std::result::Result<(), T> {
+        if !self.can_park() {
+            return Err(value);
         }
-        joined.insert(name.clone(), false);
-        Ok(Participant {
-            name: name.into(),
-            state: self.clone(),
-        })
+        let cache = self.shared.cache.as_ref().unwrap();
+        let parked = ParkedValue {
+            value: Box::new(value),
+            version: self.version(),
+            weight,
+        };
+        cache.park(&format!("{}{key}", self.prefix), parked);
+        Ok(())
     }
 
     /// A new, empty mutation on this state: the records set and pages written in
@@ -444,7 +464,7 @@ impl Open {
     /// key of what the store holds, which no other state of this cache
     /// uses for another (an object's key, say). With nothing changed since
     /// this process last flushed it, the next open reads no pages and gets
-    /// back what participants left idle ([`Participant::park`]).
+    /// back what was parked there ([`State::park`]).
     pub fn cached(self, cache: &PageCache, namespace: &str) -> Self {
         Self {
             cache: Some(cache.namespace(namespace)),
@@ -484,8 +504,8 @@ impl IntoFuture for Open {
 /// A change to a [`State`]: the records set, pages written and log entries
 /// appended and truncated since [`State::mutation`] made it, in memory, which
 /// [`Self::flush`] makes durable together, atomically. There is no other way to change the state. A mutation
-/// dropped discards its writes; a participant that moved changes into it
-/// learns which happened from its [`Receipt`].
+/// dropped discards its writes; whoever moved changes into it learns which
+/// happened from its [`Receipt`].
 pub struct Mutation {
     shared: Arc<Shared>,
     records: store::Records,
@@ -648,9 +668,8 @@ impl Mutation {
     /// Make every record set, page written and entry appended durable: the
     /// blobs of the chunks, records and entries it changes, then the root
     /// that names them, then one sync, in one round trip. Nothing changed:
-    /// nothing is written. It is refused while a participant holds changes
-    /// not yet in a mutation, while another flush of the state runs, and for writes the state cannot
-    /// store; a refused flush writes nothing, and the state goes on. `Ok`
+    /// nothing is written. It is refused while another flush of the state
+    /// runs, and for writes the state cannot store; a refused flush writes nothing, and the state goes on. `Ok`
     /// holds what it wrote; any other error (one refused because another
     /// state flushed since included), or dropping the future, ends the
     /// state: open it again.
@@ -661,11 +680,6 @@ impl Mutation {
         }
         if shared.reader.load(Ordering::SeqCst) {
             return Err("a reader writes nothing".into());
-        }
-        if let Some(name) = shared.unflushed() {
-            return Err(
-                format!("{name:?} has changes not yet in a mutation: flush it first").into(),
-            );
         }
         let snapshot = shared.snapshot();
         // What the writes checked as they were made still holds, unless
@@ -715,7 +729,7 @@ impl Drop for Mutation {
     }
 }
 
-/// What became of a [`Mutation`], for a participant that moved changes into it
+/// What became of a [`Mutation`], for whoever moved changes into it
 /// ([`Mutation::receipt`]): nothing yet, flushed (the changes are durable), or
 /// discarded (the mutation was dropped, and the changes with it). A flush whose
 /// outcome is unknown settles neither, and ends the state.
@@ -735,82 +749,6 @@ impl Receipt {
     /// The mutation was dropped without a flush.
     pub fn is_discarded(&self) -> bool {
         self.0.load(Ordering::SeqCst) == DISCARDED
-    }
-}
-
-/// Something that takes part in a state under a name ([`State::join`]): it
-/// keeps changes of its own (an SQL engine's pages, say), and moves them
-/// into a mutation before the flush. While it says it holds changes not yet
-/// moved ([`Self::set_unflushed`]), every mutation of the state refuses to flush.
-/// Dropping it leaves the name free, and its unmoved changes out.
-///
-/// With a [`PageCache`], it may leave state idle for the namespace's next
-/// [`State`] ([`Self::park`]), which that state's participant of the same
-/// name takes back ([`Self::take_idle`]) when nothing changed since.
-pub struct Participant {
-    name: Arc<str>,
-    state: State,
-}
-
-impl Participant {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// The state it takes part in.
-    pub fn state(&self) -> &State {
-        &self.state
-    }
-
-    /// Say whether it holds changes not yet in a mutation.
-    pub fn set_unflushed(&self, unflushed: bool) {
-        let mut joined = self.state.shared.participants.lock().unwrap();
-        joined.insert(self.name.to_string(), unflushed);
-    }
-
-    /// What this participant left idle at the end of the owner's previous
-    /// state, if nothing changed since and it is a `T`.
-    pub fn take_idle<T: Any + Send>(&self) -> Option<T> {
-        let idle = self.state.shared.idle.lock().unwrap().remove(&*self.name)?;
-        idle.value.downcast().ok().map(|value| *value)
-    }
-
-    /// Whether [`Self::park`] would keep state now: the state has a
-    /// [`PageCache`] and is at the owner's last durable flush.
-    pub fn can_park(&self) -> bool {
-        let state = &self.state;
-        let Some(cache) = &state.shared.cache else {
-            return false;
-        };
-        !state.is_reader() && state.is_usable() && cache.committed() == Some(state.version())
-    }
-
-    /// Leave `value`, which corresponds to the state as last flushed, for
-    /// the namespace's next state, weighing `weight` bytes against
-    /// [`PageCacheConfig::idle_bytes`]. `Err` gives it back if it cannot be
-    /// kept (see [`Self::can_park`]). The cache drops it when anything
-    /// changes, or under its budget; one heavier than the whole budget is
-    /// not kept. `value` must hold no handle of this state (a [`File`], a
-    /// [`Record`], the [`State`]), which would keep it open meanwhile, on a
-    /// root whose blobs later flushes delete.
-    pub fn park<T: Any + Send>(&self, value: T, weight: usize) -> std::result::Result<(), T> {
-        if !self.can_park() {
-            return Err(value);
-        }
-        let cache = self.state.shared.cache.as_ref().unwrap();
-        let idle = Idle {
-            value: Box::new(value),
-            version: self.state.version(),
-            weight,
-        };
-        cache.park(&self.name, idle);
-        Ok(())
-    }
-}
-
-impl Drop for Participant {
-    fn drop(&mut self) {
-        (self.state.shared.participants.lock().unwrap()).remove(&*self.name);
     }
 }
 
@@ -892,11 +830,21 @@ impl Log {
 ///
 /// Stored as chunks of [`StateOptions::chunk_pages`] pages, each a base and
 /// maybe a delta against it, which the [`PageCache`] keeps across states.
+///
+/// Two handles are equal when they name the same file of the same state.
 #[derive(Clone)]
 pub struct File {
     name: Arc<str>,
     shared: Arc<Shared>,
 }
+
+impl PartialEq for File {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared) && self.name == other.name
+    }
+}
+
+impl Eq for File {}
 
 impl File {
     pub fn name(&self) -> &str {

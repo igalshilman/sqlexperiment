@@ -20,9 +20,9 @@ A state is one Restate object's state, in two kinds of key. Restate's own
 invocation journal is not used: these handlers run with `journalReplay: false`,
 and the root plays that role.
 
-| Key            | What it holds                                                                                                                                          |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `v16/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.                           |
+| Key            | What it holds                                                                                                                                             |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v16/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.                              |
 | `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record, or a log entry |
 
 Transactions change two kinds of state:
@@ -83,12 +83,11 @@ that are there. There is nothing to replay, checkpoint or repair.
 
 ## Who writes the state
 
-The state never flushes on its own. A host opens it, makes a mutation, lets
-participants move their changes into it, and decides when to flush. A
-participant joins the state under a name (`state::Participant`): it moves its
-pending changes into the mutation, as records and pages, before the flush.
+The state never flushes on its own, nor knows what writes it. A host opens it,
+makes a mutation, has each writer move its pending changes into it, as
+records, pages and log entries, and decides when to flush.
 
-| Host                                                                                           | Participants                                                 | When it flushes                             |
+| Host                                                                                           | Writers                                                      | When it flushes                             |
 | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------- |
 | The Node.js addon `restate-sql` and Python extension `restate_sql` (`core/sql/src/binding.rs`) | `Sql`, on the file `db`                                      | After every SQL transaction, as SQLite does |
 | The durable functions runtime (`rust/functions`)                                               | Run state, VM memory, the scope's tables, and each extension | Once per turn: the seal                     |
@@ -102,8 +101,8 @@ layers:
    in the private view until the mutation's receipt says the state flushed it; a
    mutation dropped unflushed leaves it for the next flush.
 3. `mutation.flush()` makes it durable with the mutation's other files and records.
-   Every mutation of the state refuses to flush while SQL holds changes it has not
-   moved into one.
+   A mutation flushed without `Sql::flush` leaves SQL's changes private; the
+   host pairs the two.
 
 An SQL error (syntax, a constraint) undoes only that statement. A storage
 error, a cancelled call or a failed flush ends the session, which the owner

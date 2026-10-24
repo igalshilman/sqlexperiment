@@ -2,9 +2,9 @@
 
 Transactional state over a Restate virtual object's state (a key/value
 namespace with one owner at a time): records and paged files, changed through
-a mutation, which a flush makes durable together, atomically. Its participants keep
-changes of their own and move them into the mutation before the flush; the main one
-is SQLite-compatible SQL (the [`sql`](../../sql/README.md) crate: Turso's
+a mutation, which a flush makes durable together, atomically. What writes it
+keeps changes of its own and moves them into the mutation before the flush; the
+main writer is SQLite-compatible SQL (the [`sql`](../../sql/README.md) crate: Turso's
 `turso_core` engine, unmodified) on the file `db`.
 
 Its host is an object without Restate's journal: a key, its own database,
@@ -37,7 +37,7 @@ A namespace holds two kinds of keys:
 | Key            | Holds                                                                                                                                        |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `v16/root`     | The root, the commit point: the version, the directory of records and paged files, the small records, and the top of every file's chunk map. |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record, or a log entry.                 |
+| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record, or a log entry.              |
 
 **Chunks.** A paged file is a row of chunks of `chunk_pages` pages (4,
 16 KiB), as many as its size needs, at most `MAX_FILE_BYTES` (10 GiB). A
@@ -277,11 +277,11 @@ concurrent reads of one blob share one get, held weakly, so a cancelled
 read cancels the get.
 
 **Per-namespace state:** the root bytes this owner last read or wrote, the
-version of its last durable flush, and what participants left idle there (a
-parked engine). Open compares the root it reads with the one it remembers:
+version of its last durable flush, and the values parked there (`State::park`:
+an engine, say). Open compares the root it reads with the one it remembers:
 the same bytes, and this owner continues as it left, with its parked engine;
 any other root, and it reads on from the cache by blob number, which is
-still right, and drops only the idle state. A flush whose outcome is unknown
+still right, and drops only the parked values. A flush whose outcome is unknown
 forgets the root, and the next open syncs first.
 
 **States of one owner.** States may overlap, such as a writer and readers
@@ -297,7 +297,7 @@ Only the database is kept: the next session connects afresh, so connection
 counters (`last_insert_rowid()`, `changes()`) and settings never carry over.
 This keeps the parsed schema warm, which cuts CPU per session several-fold
 ([cache results](../../sql/benches/CACHE_RESULTS.md)). Parked engines share
-a byte budget (`PageCacheConfig::idle_bytes`, 64 MiB), each weighed as 4 MiB
+a byte budget (`PageCacheConfig::parked_bytes`, 64 MiB), each weighed as 4 MiB
 (turso's buffer pool) plus 16 bytes per byte of schema SQL. Namespace states
 are capped by count. Least recently used go first; dropping either only makes
 a namespace cold.

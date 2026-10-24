@@ -9,11 +9,11 @@ changes only through a **mutation**, an owned value that collects the records
 set, pages written and entries appended, and a **flush** makes everything in the mutation durable at
 once, in one round trip. It needs only `get`, `put` and `delete` from the backend.
 
-What writes a mutation is a **participant**: it keeps changes of its own, moves
-them into a mutation before the flush, and may leave state idle for the
-namespace's next state. [SQL](../sql/README.md) is one, on the file `db`; the
-durable functions runtime adds a program's memory (a file) and its run's
-state (a record).
+The state knows nothing of what writes it. [SQL](../sql/README.md) keeps its
+database in the file `db` and moves what it committed into a mutation before
+the host flushes it; the durable functions runtime adds a program's memory (a
+file and a log) and its run's state (a record). Coordinating them is the
+host's.
 
 ## Use
 
@@ -41,13 +41,12 @@ The host must guarantee one owner per namespace. A failed or cancelled flush
 ends the state (`is_usable()` returns false): its outcome is unknown, so
 settle outstanding requests and open a new one.
 
-A participant joins under a name (`state.join("sql")`), one at a time per
-name. While it says it holds changes not yet in a mutation (`set_unflushed(true)`),
-every mutation of the state refuses to flush. Once it has moved them into one, a
-receipt (`mutation.receipt()`) tells it whether that mutation was flushed or discarded.
-With a page cache, it may `park` state for the next state of the namespace,
-which takes it back (`take_idle`) when nothing changed since: the SQL crate
-keeps its engine warm this way.
+Whoever moves its changes into a mutation keeps a receipt
+(`mutation.receipt()`), which tells it whether that mutation was flushed or
+discarded. With a page cache, a value can be parked for the namespace's next
+state (`state.park(key, value, weight)`), which takes it back
+(`state.take_parked(key)`) when nothing changed since: the SQL crate keeps its
+engine warm this way.
 
 ## How durability and recovery work
 
