@@ -26,7 +26,7 @@ impl KvStore for GatedReads {
                 let _active = Active(&self.active);
                 self.maximum.fetch_max(n, Ordering::SeqCst);
                 gate.await.map_err(io::Error::other)?;
-                if self.fail_first && key == state::simulation::page_key(0, 0) {
+                if self.fail_first && key == state::simulation::blob_key(0) {
                     return Err(io::Error::other("injected read error"));
                 }
                 return self.inner.get(key).await;
@@ -50,35 +50,25 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
     futures::executor::block_on(async {
         for mode in ["success", "error", "cancel"] {
             let base = Arc::new(MemoryKv::default());
-            // Flush two pages, then checkpoint them so reads reach the backend.
-            // No prefetch or hint at open: the reads under test reach the backend.
+            // Two pages in a blob each, and no prefetch at open: the reads
+            // under test reach the backend.
             let all = state::StateOptions {
-                checkpoint_after: 0,
+                chunk_pages: 1,
                 prefetch_pages: 0,
-                hint_pages: 0,
                 ..Default::default()
             };
-            for _ in 0..2 {
-                let initial = KvIo::mount_with_options(base.clone(), all.clone()).await?;
-                initial
-                    .write(0, 0, &buffers(&vec![7; 2 * BLOCK_SIZE]))
-                    .await?;
-                initial.publish().await?;
-            }
-            // A third save checkpoints the second and empties the replayed log.
             let initial = KvIo::mount_with_options(base.clone(), all.clone()).await?;
             initial
-                .write(0, 2 * BLOCK_SIZE as u64, &buffers(&vec![1; BLOCK_SIZE]))
+                .write(0, 0, &buffers(&vec![7; 2 * BLOCK_SIZE]))
                 .await?;
-            initial.truncate_file(0, 2 * BLOCK_SIZE as u64).await?;
             initial.publish().await?;
             let (send_a, recv_a) = oneshot::channel();
             let (send_b, recv_b) = oneshot::channel();
             let store = Arc::new(GatedReads {
                 inner: base.fork(),
                 gates: Mutex::new(BTreeMap::from([
-                    (state::simulation::page_key(0, 0), recv_a),
-                    (state::simulation::page_key(0, 1), recv_b),
+                    (state::simulation::blob_key(0), recv_a),
+                    (state::simulation::blob_key(1), recv_b),
                 ])),
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),

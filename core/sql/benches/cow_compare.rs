@@ -1,14 +1,13 @@
-//! Experiment: the log (default) against copy-on-write pages (`state/cow`),
-//! on the same SQL workloads, one flush per session.
+//! Copy-on-write blobs on SQL workloads, one flush per session: the requests,
+//! bytes and round trips a flush costs, what is stored, and a cold read.
 //!
 //! ```sh
-//! cargo bench --locked --features simulation --bench cow_compare                    # the log
-//! cargo bench --locked --features simulation,state/cow --bench cow_compare          # copy-on-write
-//! INLINE_BYTES=0 cargo bench --locked --features simulation,state/cow --bench cow_compare
+//! cargo bench --locked --features simulation --bench cow_compare
+//! CHUNK_PAGES=1 REBASE_RATIO=0.5 cargo bench --locked --features simulation --bench cow_compare
 //! ```
 //!
-//! `INLINE_BYTES=0` puts every record (the effects) in the flush's blob, compressed
-//! with its pages. Prints Markdown rows.
+//! `CHUNK_PAGES`, `REBASE_RATIO`, `INLINE_BYTES` and `GARBAGE_AFTER` set the
+//! state's options; `LABEL` names the run in its rows. Prints Markdown rows.
 use sql::{Sql, Value};
 use state::{
     Result, State, StateOptions,
@@ -68,14 +67,17 @@ impl Words {
 }
 
 fn options() -> StateOptions {
-    let mut options = StateOptions::default();
-    if let Some(bytes) = std::env::var("INLINE_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        options.inline_log_bytes = bytes;
+    fn var<T: std::str::FromStr>(name: &str) -> Option<T> {
+        std::env::var(name).ok().and_then(|v| v.parse().ok())
     }
-    options
+    let default = StateOptions::default();
+    StateOptions {
+        chunk_pages: var("CHUNK_PAGES").unwrap_or(default.chunk_pages),
+        rebase_ratio: var("REBASE_RATIO").unwrap_or(default.rebase_ratio),
+        inline_record_bytes: var("INLINE_BYTES").unwrap_or(default.inline_record_bytes),
+        garbage_after: var("GARBAGE_AFTER").unwrap_or(default.garbage_after),
+        ..default
+    }
 }
 
 async fn open(store: &Store, cache: &Option<Namespace>) -> Result<Sql> {
@@ -254,7 +256,7 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
     load(&store, w, &mut words).await?;
     let cache =
         cached.then(|| Namespace::new(&open_cache(cache_config(256 << 20, 1 << 30)), "bench"));
-    // Warm the owner, and its cache with every page, outside the measurement.
+    // Warm the owner, and its cache with every blob, outside the measurement.
     let mut db = open(&store, &cache).await?;
     if !w.name.starts_with("chat") {
         db.query("SELECT count(*), sum(length(payload)) FROM t")
@@ -295,17 +297,16 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
         .as_int()
         .unwrap_or(0);
     drop(db);
-    let format = std::env::var("FORMAT").unwrap_or_else(|_| "log".into());
+    let label = std::env::var("LABEL").unwrap_or_else(|_| "cow".into());
     println!(
-        "| {} | {format} | {} | {:.2} | {:.2} | {:.0} | {:.0} | {:.0} | {:.0} | {:.2} | {:.1} | {:.0} | {keys} | {} | {} | {} | {:.0} |",
+        "| {} | {label} | {} | {:.2} | {:.2} | {:.0} | {:.0} | {:.0} | {:.2} | {:.1} | {:.0} | {keys} | {} | {} | {} | {:.0} |",
         w.name,
         if cached { "yes" } else { "no" },
         rts as f64 / n,
         s.puts as f64 / n,
         s.bytes_written as f64 / n,
-        s.kind("commit").bytes_written as f64 / n,
-        s.kind("page").bytes_written as f64 / n,
-        s.kind("log").bytes_written as f64 / n,
+        s.kind("root").bytes_written as f64 / n,
+        s.kind("blob").bytes_written as f64 / n,
         s.deletes as f64 / n,
         s.gets as f64 / n,
         stored as f64 / 1024.0,
@@ -319,9 +320,9 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
 
 fn main() -> Result<()> {
     println!(
-        "| Workload | Format | Cache | RT/flush | Puts/flush | Put B/flush | Root/record B | Page/blob B | Log B | Deletes/flush | Gets/flush | Stored KiB | Keys | DB KiB | Cold RT | Cold gets | Cold read KiB |"
+        "| Workload | Run | Cache | RT/flush | Puts/flush | Put B/flush | Root B | Blob B | Deletes/flush | Gets/flush | Stored KiB | Keys | DB KiB | Cold RT | Cold gets | Cold read KiB |"
     );
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let only = std::env::var("WORKLOAD").ok();
     futures::executor::block_on(async {
         for w in WORKLOADS {

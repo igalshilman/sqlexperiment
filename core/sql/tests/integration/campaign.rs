@@ -262,28 +262,28 @@ impl Campaign {
         let cached = seed % 4 >= 2;
         let options = StateSetup {
             options: StateOptions {
-                checkpoint_after: 1 + rng.below(4) as u32,
-                checkpoint_log_bytes: rng.pick(&[4 << 10, 16 << 10, 64 << 10]),
-                inline_log_bytes: rng.pick(&[64, 1024]),
+                chunk_pages: rng.pick(&[1, 4, 16]),
+                rebase_ratio: rng.pick(&[0.0, 0.25, 4.0]),
+                garbage_after: 1 + rng.below(4),
+                inline_record_bytes: rng.pick(&[64, 1024]),
                 prefetch_pages: rng.pick(&[0, 16]),
-                hint_pages: rng.pick(&[0, 32]),
                 ..StateOptions::default()
             },
             cache: cached.then(fresh_namespace),
         };
         let session = seed.is_multiple_of(2);
         let summary = format!(
-            "{}, cached: {cached}, checkpoint after {} transactions or {} bytes, inline log {} bytes, prefetch {}, hint {}",
+            "{}, cached: {cached}, chunks of {} pages, rebase over {}, garbage after {} flushes, inline records to {} bytes, prefetch {}",
             if session {
                 "binding session"
             } else {
                 "Sql turns"
             },
-            options.options.checkpoint_after,
-            options.options.checkpoint_log_bytes,
-            options.options.inline_log_bytes,
+            options.options.chunk_pages,
+            options.options.rebase_ratio,
+            options.options.garbage_after,
+            options.options.inline_record_bytes,
             options.options.prefetch_pages,
-            options.options.hint_pages,
         );
         let config = Config {
             session,
@@ -393,8 +393,8 @@ impl Campaign {
         }
         let operation = self.rng.pick(operations);
         let prefixes: &[&str] = match operation {
-            Operation::Put => &["", "", "", "v15/commit", "v15/page/", "v15/log/"],
-            Operation::Get => &["", "v15/page/", "v15/log/"],
+            Operation::Put => &["", "", "", "root", "blob/"],
+            Operation::Get => &["", "root", "blob/"],
             _ => &[""],
         };
         Some(Failpoint {

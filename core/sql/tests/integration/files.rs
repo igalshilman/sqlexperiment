@@ -63,7 +63,7 @@ fn options(cache: Option<Namespace>) -> Setup {
         StateSetup {
             options: StateOptions {
                 // Checkpoints happen within a run of turns.
-                checkpoint_after: 4,
+                garbage_after: 4,
                 ..StateOptions::default()
             },
             cache,
@@ -72,25 +72,26 @@ fn options(cache: Option<Namespace>) -> Setup {
     )
 }
 
-/// Turn `i`: a row, page `i % 5` of `a` and page `i % 3` of `b` hold `i`,
-/// every seventh turn empties `b`, and page `i % 4` of `c` (over the golden
-/// image) is its golden page with the first byte `i`.
+/// Turn `i`: a row, page `i % 5` of `a` and page `i % 3` of `b` hold `i + 1`
+/// (never zeros, which read as a hole), every seventh turn empties `b`, and
+/// page `i % 4` of `c` (over the golden image) is its golden page with the
+/// first byte `i + 1`.
 async fn turn(db: &mut Db, i: usize) -> Result<()> {
     db.execute("BEGIN").await?;
     db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     let state = db.state();
     let wal = db.wal();
-    wal.write(&state.file("a")?, (i % 5) as u64, Some(page(i as u8)))?;
+    wal.write(&state.file("a")?, (i % 5) as u64, Some(page(i as u8 + 1)))?;
     let c = state.file_with_base("c", golden())?;
     wal.write(
         &c,
         (i % 4) as u64,
-        Some(golden().changed((i % 4) as u64, i as u8)),
+        Some(golden().changed((i % 4) as u64, i as u8 + 1)),
     )?;
     let b = state.file("b")?;
     match i % 7 {
         6 => wal.set_len(&b, 0)?,
-        _ => wal.write(&b, (i % 3) as u64, Some(page(i as u8)))?,
+        _ => wal.write(&b, (i % 3) as u64, Some(page(i as u8 + 1)))?,
     }
     db.flush().await.map(drop)
 }
@@ -112,7 +113,7 @@ fn expected(name: &str, turns: usize) -> Vec<Option<u8>> {
         if pages.len() <= at {
             pages.resize(at + 1, None);
         }
-        pages[at] = Some(i as u8);
+        pages[at] = Some(i as u8 + 1);
     }
     pages
 }
@@ -212,19 +213,11 @@ async fn crash_case(cached: bool, nth: usize) -> Result<Option<usize>> {
     Ok(Some(writes + 1))
 }
 
-/// The page keys of the first file a namespace made (id 0).
-fn first_file_pages(store: &MemoryKv) -> usize {
-    let keys = store.keys();
-    keys.iter()
-        .filter(|key| key.starts_with("v15/page/00000000/"))
-        .count()
-}
-
-/// Every save checkpoints.
-fn checkpointing(cache: Option<Namespace>) -> StateSetup {
+/// Garbage goes at the next save.
+fn collecting(cache: Option<Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
-            checkpoint_after: 0,
+            garbage_after: 1,
             ..StateOptions::default()
         },
         cache,
@@ -232,33 +225,34 @@ fn checkpointing(cache: Option<Namespace>) -> StateSetup {
 }
 
 #[test]
-fn an_emptied_file_loses_its_page_keys_at_the_next_checkpoint() -> Result<()> {
+fn an_emptied_file_frees_its_blobs_a_save_later() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MonitorKv::new(MemoryKv::default()));
-        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
+        let mut db = Db::open(store.clone(), collecting(None)).await?;
         let file = db.state().file("m")?;
         for n in 0..6 {
             db.wal().write(&file, n, Some(page(n as u8 + 1)))?;
         }
         assert!(file.is_empty(), "unchanged until the flush");
         db.save().await?;
-        assert_eq!(first_file_pages(&store.inner), 6);
+        assert_eq!(store.inner.blob_count(), 2, "two chunks of four pages");
 
-        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
+        let mut db = Db::open(store.clone(), collecting(None)).await?;
         let file = db.state().file("m")?;
         assert_eq!(file.len(), 6 * 4096);
         assert_eq!(file.read(5).await?, Some(page(6)));
         db.wal().set_len(&file, 0)?;
         assert_eq!(file.read(5).await?, Some(page(6)), "until the flush");
         db.save().await?;
-        assert_eq!(first_file_pages(&store.inner), 0);
+        assert_eq!(store.inner.blob_count(), 2, "garbage, kept for readers");
 
         // Regrown, it reads zeros where it held pages.
-        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
+        let mut db = Db::open(store.clone(), collecting(None)).await?;
         let file = db.state().file("m")?;
         assert!(file.is_empty());
         db.wal().write(&file, 7, Some(page(9)))?;
         db.save().await?;
+        assert_eq!(store.inner.blob_count(), 1, "the garbage went");
         let db = Db::open(store.clone(), StateOptions::default()).await?;
         let file = db.state().file("m")?;
         assert_eq!(file.len(), 8 * 4096);
@@ -270,39 +264,39 @@ fn an_emptied_file_loses_its_page_keys_at_the_next_checkpoint() -> Result<()> {
 }
 
 #[test]
-fn a_files_pages_are_cached_until_another_epoch() -> Result<()> {
+fn a_files_blobs_stay_cached_across_other_writers() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let cache = fresh_namespace();
-        let mut db = Db::open(store.clone(), checkpointing(Some(cache.clone()))).await?;
+        let mut db = Db::open(store.clone(), collecting(Some(cache.clone()))).await?;
         let file = db.state().file("m")?;
         for n in 0..40 {
-            db.wal().write(&file, n, Some(page(n as u8)))?;
+            db.wal().write(&file, n, Some(page(n as u8 + 1)))?;
         }
         db.save().await?;
 
         // The owner reads them back from the cache.
         store.reset_stats();
-        let db = Db::open(store.clone(), checkpointing(Some(cache.clone()))).await?;
+        let db = Db::open(store.clone(), collecting(Some(cache.clone()))).await?;
         let file = db.state().file("m")?;
         for n in 0..40 {
-            assert_eq!(file.read(n).await?, Some(page(n as u8)));
+            assert_eq!(file.read(n).await?, Some(page(n as u8 + 1)));
         }
-        assert_eq!(store.stats().kind("page").gets, 0);
+        assert_eq!(store.stats().kind("blob").gets, 0);
         drop(db);
 
-        // Another writer checkpoints: the owner's cached pages are of another
-        // epoch, and it reads them from the store.
-        let mut other = Db::open(store.clone(), checkpointing(None)).await?;
+        // Another writer changes one chunk: the owner reads only its new
+        // blob from the store, as blobs never change.
+        let mut other = Db::open(store.clone(), collecting(None)).await?;
         let m = other.state().file("m")?;
         other.wal().write(&m, 3, Some(page(99)))?;
         other.save().await?;
         store.reset_stats();
-        let db = Db::open(store.clone(), checkpointing(Some(cache.clone()))).await?;
+        let db = Db::open(store.clone(), collecting(Some(cache.clone()))).await?;
         let file = db.state().file("m")?;
         assert_eq!(file.read(3).await?, Some(page(99)));
-        assert_eq!(file.read(4).await?, Some(page(4)));
-        assert!(store.stats().kind("page").gets > 0);
+        assert_eq!(file.read(4).await?, Some(page(5)));
+        assert_eq!(store.stats().kind("blob").gets, 1);
         Ok(())
     })
 }
@@ -311,7 +305,7 @@ fn a_files_pages_are_cached_until_another_epoch() -> Result<()> {
 fn a_file_over_a_base_reads_it_where_it_has_no_page() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MonitorKv::new(MemoryKv::default()).with_base("m", golden()));
-        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
+        let mut db = Db::open(store.clone(), collecting(None)).await?;
         let file = db.state().file_with_base("m", golden())?;
         db.wal().set_len(&file, 8 * 4096)?;
         assert_eq!(file.read(3).await?, None, "empty until the flush");
@@ -331,36 +325,27 @@ fn a_file_over_a_base_reads_it_where_it_has_no_page() -> Result<()> {
         assert_eq!(file.read(3).await?.as_deref(), golden().page(3));
         assert_eq!(file.read(5).await?, Some(page(9)));
         assert_eq!(file.read(6).await?.as_deref(), golden().page(6));
-        // Two pages differ from the base: two page keys.
-        assert_eq!(first_file_pages(&store.inner), 2);
+        // Two chunks differ from the base: a delta each.
+        assert_eq!(store.inner.blob_count(), 2);
         assert_eq!(store.violations(), Vec::<String>::new());
         Ok(())
     })
 }
 
 #[test]
-fn a_small_change_to_a_base_page_costs_little_in_the_log_and_in_place() -> Result<()> {
+fn a_small_change_to_a_base_page_costs_little() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        // Logged, without checkpointing.
-        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
-        let file = db.state().file_with_base("m", golden())?;
-        db.wal().write(&file, 4, Some(golden().changed(4, 1)))?;
-        store.reset_stats();
-        db.save().await?;
-        let logged = store.stats().bytes_written;
-        assert!(logged < 300, "{logged} bytes logged");
-
-        // In place, after a checkpoint.
-        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
-        let file = db.state().file_with_base("m", golden())?;
-        db.wal().write(&file, 4, Some(golden().changed(4, 2)))?;
-        db.save().await?;
-        let values = store.values();
-        let (_, value) = (values.iter())
-            .find(|(key, _)| key.starts_with("v15/page/00000000/"))
-            .expect("the page in place");
-        assert!(value.len() < 100, "{} bytes in place", value.len());
+        for n in 1..=2 {
+            let mut db = Db::open(store.clone(), collecting(None)).await?;
+            let file = db.state().file_with_base("m", golden())?;
+            db.wal().write(&file, 4, Some(golden().changed(4, n)))?;
+            store.reset_stats();
+            db.save().await?;
+            // A delta against the base, and the root.
+            let written = store.stats().bytes_written;
+            assert!(written < 300, "{written} bytes written");
+        }
         let db = Db::open(store.clone(), StateOptions::default()).await?;
         let file = db.state().file_with_base("m", golden())?;
         assert_eq!(file.read(4).await?, Some(golden().changed(4, 2)));
@@ -372,7 +357,7 @@ fn a_small_change_to_a_base_page_costs_little_in_the_log_and_in_place() -> Resul
 fn a_file_opens_only_with_its_base_and_empties_without_it() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
+        let mut db = Db::open(store.clone(), collecting(None)).await?;
         let file = db.state().file_with_base("m", golden())?;
         db.wal().write(&file, 1, Some(golden().changed(1, 1)))?;
         db.save().await?;
@@ -385,36 +370,35 @@ fn a_file_opens_only_with_its_base_and_empties_without_it() -> Result<()> {
         let refused = db.wal().write(&file, 1, Some(page(1))).is_err();
         assert!(refused || db.save().await.is_err());
 
-        // Emptied without its base: no page keys are left.
-        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
+        // Emptied without its base: no blobs are left.
+        let mut db = Db::open(store.clone(), collecting(None)).await?;
         let file = db.state().file("m")?;
         db.wal().write(&file, 1, None)?;
         db.wal().set_len(&file, 0)?;
         db.save().await?;
-        assert_eq!(first_file_pages(&store), 0);
+        let mut db = Db::open(store.clone(), collecting(None)).await?;
+        let next = db.state().record("next");
+        db.wal().set(&next, Bytes::from_static(b"save"))?;
+        db.save().await?;
+        assert_eq!(store.blob_count(), 0, "its blobs went a save later");
         Ok(())
     })
 }
 
 #[test]
-fn a_checkpoint_waits_for_a_based_file_to_be_opened() -> Result<()> {
+fn a_based_file_keeps_its_deltas_while_others_save_without_its_base() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MonitorKv::new(MemoryKv::default()).with_base("m", golden()));
         let mut db = Db::open(store.clone(), StateOptions::default()).await?;
         let m = db.state().file_with_base("m", golden())?;
         db.wal().write(&m, 1, Some(golden().changed(1, 5)))?;
         db.save().await?;
-        // Its log decodes only with its base: without it, no checkpoint.
-        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
-        db.execute("CREATE TABLE t(n)").await?;
-        db.save().await?;
-        assert_eq!(store.inner.page_count(), 0, "no checkpoint");
-        // Opened with it, the next save checkpoints the whole log.
-        let mut db = Db::open(store.clone(), checkpointing(None)).await?;
-        db.state().file_with_base("m", golden())?;
-        db.execute("INSERT INTO t VALUES(1)").await?;
-        db.save().await?;
-        assert!(first_file_pages(&store.inner) == 1 && store.inner.page_count() > 1);
+        // Saves that never open it leave its delta as it is.
+        for n in 0..3 {
+            let mut db = Db::open(store.clone(), collecting(None)).await?;
+            db.execute(&format!("CREATE TABLE t{n}(n)")).await?;
+            db.save().await?;
+        }
         let db = Db::open(store.clone(), StateOptions::default()).await?;
         let file = db.state().file_with_base("m", golden())?;
         assert_eq!(file.read(1).await?, Some(golden().changed(1, 5)));

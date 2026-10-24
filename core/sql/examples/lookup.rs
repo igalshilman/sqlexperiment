@@ -23,7 +23,7 @@ fn main() -> Result<()> {
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < 12000) INSERT INTO accounts SELECT x, printf('user%05d@example.com', x), printf('%0500d', x) FROM n").await?;
         let local = db.io_stats();
         assert_eq!(store.stats().puts, 0);
-        // A large save: the log in the commit record, then a checkpoint into page keys.
+        // A large save: a blob per chunk of pages, then the root naming them.
         save(db).await?;
         let saved = store.stats();
         store.crash();
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
         println!("Backend bytes written by save: {}", saved.bytes_written);
         println!("Backend puts by save: {}", saved.puts);
 
-        let pages = store.page_count();
+        let blobs = store.blob_count();
         let stored_bytes = store.stored_bytes();
         store.reset_stats();
         // New engine, pager, file handles and I/O adapter; only KV bytes survive.
@@ -48,14 +48,14 @@ fn main() -> Result<()> {
         assert_eq!(rows[0][0].to_string(), "7321");
         assert_eq!(rows[0][1].to_string(), "500");
         let stats = store.stats();
-        let pages_read = stats
+        let blobs_read = stats
             .read_keys
             .iter()
-            .filter(|k| k.contains("/page/"))
+            .filter(|k| k.starts_with("blob/"))
             .count();
-        assert!(pages > 100);
+        assert!(blobs > 100);
         assert!(
-            pages_read * 10 < pages,
+            blobs_read * 10 < blobs,
             "cold lookup fetched too much of the database"
         );
         assert!(stats.bytes_read < stored_bytes as u64 / 10);
@@ -63,9 +63,12 @@ fn main() -> Result<()> {
         println!("SQLite over an asynchronous in-memory KV store, without a cache");
         println!("Rows: 12000");
         println!("Stored bytes (including metadata): {stored_bytes}");
-        println!("Checkpointed pages: {pages} (4096 bytes each before compression)");
+        println!(
+            "Stored blobs: {blobs} (chunks of {} pages)",
+            state::CHUNK_PAGES
+        );
         println!("Cold open + query KV gets: {}", stats.gets);
-        println!("Distinct pages fetched: {pages_read}");
+        println!("Distinct blobs fetched: {blobs_read}");
         println!("KV bytes fetched: {}", stats.bytes_read);
         println!("Result: id={}, payload length={}", rows[0][0], rows[0][1]);
         for row in plan {

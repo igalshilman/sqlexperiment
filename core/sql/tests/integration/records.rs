@@ -179,7 +179,7 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
     let options = |cache| {
         options(cache)
             .with(|o| StateOptions {
-                checkpoint_after: 4,
+                garbage_after: 4,
                 ..o
             })
             .mode(durability)

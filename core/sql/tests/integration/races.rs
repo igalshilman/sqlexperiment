@@ -21,7 +21,6 @@ fn opts(cache: &Namespace, durability: Durability) -> Setup {
     Setup(
         StateSetup {
             options: StateOptions {
-                hint_pages: 0,
                 ..StateOptions::default()
             },
             cache: Some(cache.clone()),
@@ -40,7 +39,7 @@ impl KvStore for GateKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             let value = self.inner.get(key).await?;
-            let gate = match key.starts_with("v15/page/") {
+            let gate = match key.starts_with("blob/") {
                 true => self.release.lock().unwrap().clone(),
                 false => None,
             };
@@ -102,7 +101,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         let mut writer = Db::open(
             plain.clone(),
             opts(&ns, Durability::Commit).with(|o| StateOptions {
-                checkpoint_after: 0,
+                garbage_after: 1,
                 ..o
             }),
         )

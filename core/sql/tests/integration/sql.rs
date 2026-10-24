@@ -15,7 +15,12 @@ fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {
         assert!(db.io_stats().private_wal_bytes_written > 0);
         assert_eq!(store.stats().puts, 0, "local WAL must not reach backend");
         db.save().await?;
-        assert_eq!(store.stats().puts, 1, "a save is one log append");
+        // A blob for the database's one chunk, then the root.
+        assert_eq!(
+            store.stats().puts,
+            2,
+            "a save is a blob per chunk and the root"
+        );
         store.crash(); // every acknowledged put survives
 
         let mut reopened = Db::open(store.clone(), StateOptions::default()).await?;
@@ -101,11 +106,7 @@ fn cold_indexed_lookup_is_lazy() -> Result<()> {
         let rows = db.query(sql).await?;
         assert_eq!(rows[0][0].to_string(), "2341");
         let stats = store.stats();
-        assert!(
-            store.page_count() * 4096 > 1_000_000,
-            "a large save checkpoints itself"
-        );
-        assert!(stats.by_kind["page"].gets < store.page_count() as u64 / 10);
+        assert!(stats.by_kind["blob"].gets < store.blob_count() as u64 / 10);
         assert!(stats.bytes_read < total as u64 / 10, "{stats:?}");
         assert!(stats.gets > 0);
         store.reset_stats();
@@ -145,8 +146,9 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
         let database_len = db.io_stats().database_len;
         db.save().await?;
         let stats = store.stats();
-        // One log segment carrying each final page once.
-        assert_eq!(stats.puts, 1);
+        // A blob per chunk of the final pages, then the root.
+        let chunks = database_len.div_ceil(4096 * state::CHUNK_PAGES);
+        assert_eq!(stats.puts, chunks + 1);
         assert!(database_len.div_ceil(4096) >= 2);
         assert!(stats.bytes_written < wal / 10);
         store.crash();

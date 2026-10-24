@@ -41,7 +41,7 @@
 //! durable root names it.)
 use crate::{Base, PAGE, Page, StateOptions, cache::NamespaceCache, kv::KvStore, zstd};
 use bytes::Bytes;
-use futures::future::{BoxFuture, FutureExt, Shared, try_join_all};
+use futures::future::{BoxFuture, FutureExt, Shared, WeakShared, try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io,
@@ -471,6 +471,9 @@ pub(crate) struct Image {
 
 /// A blob being fetched, which concurrent reads of it share.
 type Fetch = Shared<BoxFuture<'static, Result<Bytes, Arc<io::Error>>>>;
+/// A fetch held only by its readers: when all of them are dropped, so is
+/// the request.
+type Fetching = HashMap<u64, WeakShared<BoxFuture<'static, Result<Bytes, Arc<io::Error>>>>>;
 
 /// The committed view a session reads and extends.
 pub(crate) struct Snapshot {
@@ -489,7 +492,7 @@ pub(crate) struct Snapshot {
     /// Chunk images decoded, by the blob that holds them: blobs never change,
     /// so every view of the state shares them.
     images: Arc<Mutex<HashMap<u64, Arc<Image>>>>,
-    fetching: Arc<Mutex<HashMap<u64, Fetch>>>,
+    fetching: Arc<Mutex<Fetching>>,
     readahead: Mutex<Readahead>,
 }
 
@@ -799,9 +802,11 @@ impl Snapshot {
         let cache = cache.filter(|_| !self.reader);
         let fetch = {
             let mut fetching = self.fetching.lock().unwrap();
-            let fetch = fetching.entry(n).or_insert_with(|| {
+            if let Some(fetch) = fetching.get(&n).and_then(WeakShared::upgrade) {
+                fetch
+            } else {
                 let store = self.store.clone();
-                async move {
+                let fetch: Fetch = async move {
                     let value = store.get(&blob_key(n)).await.map_err(Arc::new)?;
                     let value = value.ok_or_else(|| {
                         Arc::new(io::Error::other(format!(
@@ -815,9 +820,10 @@ impl Snapshot {
                     Ok(value)
                 }
                 .boxed()
-                .shared()
-            });
-            fetch.clone()
+                .shared();
+                fetching.insert(n, fetch.downgrade().expect("not polled yet"));
+                fetch
+            }
         };
         let value = fetch.await;
         self.fetching.lock().unwrap().remove(&n);

@@ -20,9 +20,8 @@ use std::sync::Arc;
 fn options(cache: Option<Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
-            checkpoint_after: 2,
+            garbage_after: 2,
             prefetch_pages: 0,
-            hint_pages: 0,
             ..StateOptions::default()
         },
         cache,

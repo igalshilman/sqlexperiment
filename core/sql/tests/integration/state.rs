@@ -19,7 +19,7 @@ async fn rows(sql: &mut Sql) -> Result<i64> {
 }
 
 /// Nothing a participant changes is durable until the WAL flushes, and then
-/// all of it is, in one put; the state reads as last flushed meanwhile.
+/// all of it is, under one root; the state reads as last flushed meanwhile.
 #[test]
 fn a_flush_makes_every_participant_durable_together() -> Result<()> {
     futures::executor::block_on(async {
@@ -40,7 +40,9 @@ fn a_flush_makes_every_participant_durable_together() -> Result<()> {
         let puts = store.stats().puts;
         wal.flush().await?;
         assert_eq!(state.version(), 1);
-        assert_eq!(store.stats().puts - puts, 1, "one put");
+        // A blob for each file's chunk (the record is inline), then the root.
+        assert_eq!(store.stats().puts - puts, 3);
+        assert_eq!(store.stats().kind("root").puts, 1);
         assert_eq!(state.record("progress").get(), &b"one"[..]);
         drop(sql);
         drop(state);
