@@ -13,7 +13,7 @@ The state knows nothing of what writes it. [SQL](../sql/README.md) keeps its
 database in the file `db` and moves what it committed into a mutation before
 the host flushes it; the durable functions runtime adds a program's memory (a
 file and a log) and its run's state (a record). Coordinating them is the
-host's.
+host's: see [the layers](../README.md#layers).
 
 ## Use
 
