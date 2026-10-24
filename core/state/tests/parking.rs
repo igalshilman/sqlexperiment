@@ -42,8 +42,8 @@ fn a_parked_value_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
     })
 }
 
-/// A scoped view parks under its prefix, and a value of another type is not
-/// taken.
+/// A scoped view parks under its prefix, and a value of another type stays
+/// parked.
 #[test]
 fn a_parked_value_is_taken_by_key_and_type() -> Result<()> {
     futures::executor::block_on(async {
@@ -54,7 +54,8 @@ fn a_parked_value_is_taken_by_key_and_type() -> Result<()> {
         state.park("engine", 2u32, 1).unwrap();
         drop(state);
         let state = open().await?;
-        assert_eq!(state.take_parked::<u64>("engine"), None);
+        assert_eq!(state.take_parked::<u64>("engine"), None, "another type");
+        assert_eq!(state.take_parked::<u32>("engine"), Some(2), "still parked");
         assert_eq!(state.scoped("ext/").take_parked::<u32>("engine"), Some(1));
         Ok(())
     })

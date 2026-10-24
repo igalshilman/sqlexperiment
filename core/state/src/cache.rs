@@ -23,8 +23,9 @@
 //!
 //! The namespace remembers the root it last read or wrote, its last durable
 //! flush (so a state can tell another flushed since it opened), and the values
-//! parked at that flush (SQL's engine, say), for the next state. A flush whose outcome is unknown leaves writes this owner can read
-//! but a crash can still lose, so the next open syncs first
+//! parked at that flush (SQL's engine, say), for the next state. A flush
+//! whose outcome is unknown leaves writes this owner can read but a crash
+//! can still lose, so the next open syncs first
 //! ([`NamespaceCache::unsettled`]): what it reads, and caches, is durable.
 //!
 //! Namespace states are kept for a bounded number of namespaces, and parked
@@ -85,7 +86,7 @@ impl PageCacheConfig {
 
 /// Process-wide blob cache; clones share it.
 ///
-/// ParkedValue state lives here and may refer back to its namespace's handle, so
+/// Parked values live here and may refer back to its namespace's handle, so
 /// handles only reach it weakly: dropping the last `PageCache` drops it.
 #[derive(Clone)]
 pub struct PageCache {
@@ -240,7 +241,7 @@ impl NamespaceCache {
             return true;
         }
         let stale = self.forget_locked(&mut owner);
-        // ParkedValue state may hold state handles, whose drop takes this lock.
+        // Parked values may hold state handles, whose drop takes this lock.
         drop(owner);
         drop(stale);
         false

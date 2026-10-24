@@ -245,9 +245,9 @@ impl Drop for Shared {
             return;
         };
         let version = self.snapshot().version();
-        for (name, value) in self.parked.get_mut().unwrap().drain() {
+        for (key, value) in self.parked.get_mut().unwrap().drain() {
             if value.version == version && cache.committed() == Some(version) {
-                cache.park(&name, value);
+                cache.park(&key, value);
             }
         }
     }
@@ -364,11 +364,16 @@ impl State {
     }
 
     /// What was parked under `key` ([`Self::park`]) at the end of the
-    /// owner's previous state, if nothing changed since and it is a `T`.
+    /// owner's previous state, if nothing changed since and it is a `T`;
+    /// one of another type stays parked.
     pub fn take_parked<T: Any + Send>(&self, key: &str) -> Option<T> {
         let key = format!("{}{key}", self.prefix);
-        let value = self.shared.parked.lock().unwrap().remove(&key)?;
-        value.value.downcast().ok().map(|value| *value)
+        let mut parked = self.shared.parked.lock().unwrap();
+        if !parked.get(&key)?.value.is::<T>() {
+            return None;
+        }
+        let value = parked.remove(&key)?.value.downcast().ok()?;
+        Some(*value)
     }
 
     /// Whether [`Self::park`] would keep a value now: the state has a
@@ -669,7 +674,8 @@ impl Mutation {
     /// blobs of the chunks, records and entries it changes, then the root
     /// that names them, then one sync, in one round trip. Nothing changed:
     /// nothing is written. It is refused while another flush of the state
-    /// runs, and for writes the state cannot store; a refused flush writes nothing, and the state goes on. `Ok`
+    /// runs, and for writes the state cannot store; a refused flush writes
+    /// nothing, and the state goes on. `Ok`
     /// holds what it wrote; any other error (one refused because another
     /// state flushed since included), or dropping the future, ends the
     /// state: open it again.
@@ -831,7 +837,8 @@ impl Log {
 /// Stored as chunks of [`StateOptions::chunk_pages`] pages, each a base and
 /// maybe a delta against it, which the [`PageCache`] keeps across states.
 ///
-/// Two handles are equal when they name the same file of the same state.
+/// Two handles are equal (and hash alike) when they name the same file of
+/// the same state.
 #[derive(Clone)]
 pub struct File {
     name: Arc<str>,
@@ -845,6 +852,13 @@ impl PartialEq for File {
 }
 
 impl Eq for File {}
+
+impl std::hash::Hash for File {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.shared).hash(state);
+        self.name.hash(state);
+    }
+}
 
 impl File {
     pub fn name(&self) -> &str {

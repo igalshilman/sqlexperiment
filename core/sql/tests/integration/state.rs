@@ -108,8 +108,10 @@ fn a_state_needs_no_sql_and_takes_one() -> Result<()> {
         mutation.set(&state.record("only"), Bytes::from_static(b"records"))?;
         mutation.flush().await?;
         let sql = Sql::open(&state).await?;
-        assert!(Sql::open(&state).await.is_err());
+        let error = Sql::open(&state).await.err().unwrap().to_string();
+        assert!(error.contains("already runs on this state"), "{error}");
         drop(sql);
+        drop(Sql::open(&state).await?);
         let state = State::open(store).await?;
         assert_eq!(state.record("only").get(), &b"records"[..]);
         assert_eq!(state.version(), 1);
