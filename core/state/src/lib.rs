@@ -78,6 +78,7 @@
 //! blobs' zstd frames carry a checksum. Use a fresh, dedicated namespace; no
 //! migration or format discovery is implemented. Simulation and benchmark
 //! support require the opt-in `simulation` feature.
+pub mod blobs;
 mod cache;
 pub mod kv;
 mod map;

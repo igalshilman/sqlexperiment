@@ -119,6 +119,8 @@ with the log it replaced.
 - [Storage format](docs/FORMAT.md): exact encodings
 - [Copy-on-write](docs/COW_EXPERIMENT.md): how it replaced the log, with
   measurements, the chunk map's fanout and what it simplified
+- [Blobs in S3](docs/S3_EXPERIMENT.md): the root in Restate, the blobs in an
+  object store, kept safe from earlier attempts (an experiment)
 - [SQL](../sql/README.md): SQLite-compatible SQL on the state, with the
   storage tests and benchmarks that run SQL workloads
 

@@ -14,6 +14,12 @@
 //! So a write needs no acknowledgement for a later one to rely on it: if the
 //! later one survives, so does it. A value is atomic: no partial value is ever
 //! visible.
+//!
+//! A store may keep blobs where an earlier attempt of the owner, still
+//! running, can write too: S3 beside Restate, say ([`crate::blobs`]), where
+//! Restate fences the root but nothing fences the blobs. It says so
+//! ([`KvStore::write_once_blobs`]), and the state then never writes a blob
+//! key twice.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::io;
@@ -30,4 +36,13 @@ pub trait KvStore: Send + Sync {
     fn delete(&self, key: &str) -> io::Result<()>;
     /// Wait until every write issued so far is durable.
     fn sync(&self) -> BoxFuture<'_, io::Result<()>>;
+    /// Whether the store refuses to write a blob key that holds a value. The
+    /// state then numbers the blobs of each writer's first flush from a
+    /// random jump past the root's next blob, so that another writer of the
+    /// same root (an attempt fenced from the root, or one whose flush failed)
+    /// is unlikely to have used the numbers; if one did, the store refuses,
+    /// the flush fails, and the next open jumps again. A wrapper forwards it.
+    fn write_once_blobs(&self) -> bool {
+        false
+    }
 }

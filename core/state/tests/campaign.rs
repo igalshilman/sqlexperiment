@@ -505,7 +505,12 @@ fn text<T>(result: Result<T>) -> std::result::Result<T, String> {
 
 async fn run(seed: u64) -> std::result::Result<Totals, String> {
     let mut rng = Rng::new(seed);
-    let memory = MemoryKv::default();
+    // Odd seeds keep blobs write-once, as in S3 beside Restate: no reopen
+    // after a crash or a fault may put a blob number twice.
+    let memory = match seed % 2 {
+        1 => MemoryKv::write_once(),
+        _ => MemoryKv::default(),
+    };
     let fault = FaultKv::new(memory.clone(), rng.below(3));
     let store = Arc::new(MonitorKv::new(fault).with_base("vm", golden()));
     let caches = [new_owner(&mut rng), new_owner(&mut rng)];

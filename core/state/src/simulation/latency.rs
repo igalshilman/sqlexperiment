@@ -60,6 +60,9 @@ impl<S: KvStore> KvStore for LatencyKv<S> {
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         self.timed(self.inner.sync())
     }
+    fn write_once_blobs(&self) -> bool {
+        self.inner.write_once_blobs()
+    }
 }
 
 #[cfg(test)]

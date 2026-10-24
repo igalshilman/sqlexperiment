@@ -8,6 +8,9 @@ description = "Transactional state over an asynchronous key/value store: records
 [features]
 default = []
 simulation = []
+# Blobs in an object store (S3, GCS, Azure, a directory): `blobs::ObjectStoreBlobs`.
+# Enable the backend on `object_store` itself (its feature `aws` for S3).
+object-store = ["dep:object_store"]
 
 [lib]
 bench = false
@@ -22,6 +25,7 @@ zstd-safe = { version = "7.2", default-features = false, features = ["std"] }
 foyer = "=0.22.3"
 # foyer's disk tier runs on tokio; the cache starts a small runtime when the host has none.
 tokio = { version = "1", features = ["rt-multi-thread"] }
+object_store = { version = "0.14", optional = true, default-features = false }
 
 [profile.dev]
 debug = 0

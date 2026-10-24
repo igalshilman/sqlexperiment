@@ -191,4 +191,7 @@ impl KvStore for FaultKv {
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(self.run(Operation::Sync, "", self.inner.sync()))
     }
+    fn write_once_blobs(&self) -> bool {
+        self.inner.write_once_blobs()
+    }
 }

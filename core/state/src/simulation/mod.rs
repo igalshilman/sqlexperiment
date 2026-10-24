@@ -1,9 +1,11 @@
 //! Opt-in in-memory simulation, fault injection and measurement support.
 //! Enabled by the `simulation` Cargo feature; excluded from the default library.
+mod blobs;
 mod fault;
 mod latency;
 mod memory;
 mod monitor;
+pub use blobs::MemoryBlobs;
 pub use fault::{Effect, Event, Failpoint, FaultKv, Operation};
 pub use latency::LatencyKv;
 pub use memory::{MemoryKv, Stats, Traffic, object_kind};
@@ -15,6 +17,13 @@ use std::sync::{
     OnceLock,
     atomic::{AtomicU64, Ordering::Relaxed},
 };
+
+/// Number this thread's next flushes on a store with
+/// [`KvStore::write_once_blobs`] from `jump` past the root's next blob, as
+/// if two writers drew the same; `None` draws at random again.
+pub fn fix_blob_jump(jump: Option<u64>) {
+    crate::store::FIXED_JUMP.with(|fixed| fixed.set(jump));
+}
 
 /// Cache settings for tests: a temporary file, and 1 MiB disk blocks.
 pub fn cache_config(memory: usize, disk: usize) -> PageCacheConfig {

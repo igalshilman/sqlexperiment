@@ -98,7 +98,6 @@ pub(crate) fn blob_key(n: u64) -> String {
 }
 
 /// The blob number a key names.
-#[cfg(feature = "simulation")]
 pub(crate) fn parse_blob_key(key: &str) -> Option<u64> {
     u64::from_str_radix(key.strip_prefix(BLOB_PREFIX)?, 16).ok()
 }
@@ -132,6 +131,27 @@ pub(crate) fn invalid(what: &str) -> io::Error {
 fn put_value(flush: &mut Flush, value: &[u8]) -> io::Result<u64> {
     let frame = zstd::compress(value, &[], Bytes::copy_from_slice)?;
     Ok(flush.put(frame, None))
+}
+
+/// The largest jump [`blob_jump`] makes: 2^24 numbers, so an open costs a
+/// few bytes of the root and the maps, and 2^38 opens fit under
+/// [`MAX_SEQUENCE`].
+const MAX_JUMP: u64 = 1 << 24;
+
+#[cfg(feature = "simulation")]
+thread_local! {
+    /// A jump tests fix: see [`crate::simulation::fix_blob_jump`].
+    pub(crate) static FIXED_JUMP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// How far past the root's next blob a writer of a store with
+/// [`KvStore::write_once_blobs`] starts numbering: 1 to [`MAX_JUMP`].
+fn blob_jump() -> u64 {
+    #[cfg(feature = "simulation")]
+    if let Some(jump) = FIXED_JUMP.with(|fixed| fixed.get()) {
+        return jump;
+    }
+    1 + crate::cache::random() % MAX_JUMP
 }
 
 fn refuse<T>(message: String) -> io::Result<T> {
@@ -628,6 +648,10 @@ pub(crate) struct Snapshot {
     pub(crate) unchanged: bool,
     /// A reader's: it changes nothing in the cache.
     reader: bool,
+    /// The next flush numbers its blobs from a random jump past the root's
+    /// next blob ([`KvStore::write_once_blobs`]): this writer has not
+    /// flushed yet.
+    jump: bool,
     /// Chunk images decoded, by the blob that holds them: blobs never change,
     /// so every view of the state shares them.
     images: Arc<Mutex<HashMap<u64, Arc<Image>>>>,
@@ -770,6 +794,7 @@ impl Snapshot {
             }
             None => Root::new(options.chunk_pages, options.fanout),
         };
+        let write_once = store.write_once_blobs();
         let mut snapshot = Self {
             store,
             options: options.clone(),
@@ -781,6 +806,7 @@ impl Snapshot {
             bases: BTreeMap::new(),
             unchanged: false,
             reader,
+            jump: !reader && write_once,
             images: Arc::default(),
             nodes: Arc::default(),
             fetching: Arc::default(),
@@ -1294,6 +1320,11 @@ impl Snapshot {
             ));
         }
         let mut flush = Flush::new(&self.root);
+        if self.jump {
+            flush.root.next_blob = (flush.root.next_blob.checked_add(blob_jump()))
+                .filter(|&next| next < MAX_SEQUENCE - MAX_JUMP)
+                .ok_or_else(|| io::Error::other("the blob numbers are spent"))?;
+        }
         for (name, written) in &writes {
             self.commit_file(&mut flush, name, written).await?;
         }
@@ -1562,6 +1593,7 @@ impl Snapshot {
             cache.flushed(bytes.clone(), version);
         }
         let mut after = self.continued(Arc::new(root), Some(bytes));
+        after.jump = false;
         after.records = records;
         after.logs = logs;
         after.keep(
@@ -1597,6 +1629,7 @@ impl Snapshot {
             bases: self.bases.clone(),
             unchanged: false,
             reader: self.reader,
+            jump: self.jump,
             images: self.images.clone(),
             nodes: self.nodes.clone(),
             fetching: self.fetching.clone(),

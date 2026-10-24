@@ -71,6 +71,8 @@ struct Inner {
     /// The writes issued since the last sync, in order.
     unsynced: Vec<(String, Option<Bytes>)>,
     stats: Stats,
+    /// Blob keys ever put, when the store is write-once ([`MemoryKv::write_once`]).
+    written_once: Option<BTreeSet<String>>,
 }
 
 /// Memory simulator of a store that keeps writes in issue order: reads see
@@ -82,6 +84,14 @@ pub struct MemoryKv {
 }
 
 impl MemoryKv {
+    /// A store whose blobs are write-once ([`KvStore::write_once_blobs`]),
+    /// like blobs in S3: a put of a blob key ever put before panics.
+    pub fn write_once() -> Self {
+        let store = Self::default();
+        store.inner.lock().unwrap().written_once = Some(BTreeSet::new());
+        store
+    }
+
     /// Independent byte-for-byte copy for deterministic crash simulations.
     pub fn fork(&self) -> Self {
         let inner = self.inner.lock().unwrap();
@@ -91,6 +101,7 @@ impl MemoryKv {
                 durable: inner.durable.clone(),
                 unsynced: inner.unsynced.clone(),
                 stats: Stats::default(),
+                written_once: inner.written_once.clone(),
             })),
         }
     }
@@ -205,6 +216,12 @@ impl KvStore for MemoryKv {
     }
     fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
         let mut inner = self.inner.lock().unwrap();
+        if let Some(written) = &mut inner.written_once
+            && key.starts_with(crate::store::BLOB_PREFIX)
+            && !written.insert(key.to_owned())
+        {
+            panic!("{key} put twice in a write-once store");
+        }
         let bytes = value.len() as u64;
         inner.stats.puts += 1;
         inner.stats.bytes_written += bytes;
@@ -239,6 +256,9 @@ impl KvStore for MemoryKv {
             }
             Ok(())
         })
+    }
+    fn write_once_blobs(&self) -> bool {
+        self.inner.lock().unwrap().written_once.is_some()
     }
 }
 
