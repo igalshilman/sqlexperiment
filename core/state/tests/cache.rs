@@ -154,7 +154,6 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
             for name in RECORDS {
                 assert_eq!(reader.state.record(name).get(), opened.record(name));
             }
-            assert!(reader.state.is_current().await?);
             // Its WALs never flush.
             let keys = memory.keys();
             let error = reader.flush(&[Op::Set("progress", "reader".into())]).await;

@@ -39,7 +39,7 @@ impl KvStore for GateKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             let value = self.inner.get(key).await?;
-            let gate = match key.starts_with("blob/") {
+            let gate = match key.starts_with("v16/blob/") {
                 true => self.release.lock().unwrap().clone(),
                 false => None,
             };

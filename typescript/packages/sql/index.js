@@ -123,14 +123,6 @@ class Database {
     return new Uint8Array(await this.#native.effects());
   }
 
-  /**
-   * A reader's: whether the store still holds the state it opened on, so that
-   * what it read is. If not, read again, in a new session.
-   */
-  isCurrent() {
-    return this.#serial(() => this.#native.isCurrent());
-  }
-
   /** Whether SQL can still run: an SQL error leaves the session usable. */
   isUsable() {
     return this.#native.isUsable();

@@ -90,7 +90,7 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
     futures::executor::block_on(async {
         let (memory, model) = flushed().await?;
         let keys = memory.keys();
-        for prefix in ["root", "blob/"] {
+        for prefix in ["v16/root", "v16/blob/"] {
             assert!(
                 keys.iter().any(|key| key.starts_with(prefix)),
                 "{prefix}: {keys:?}"

@@ -790,14 +790,8 @@ class SqlAttempt:
             return
         self._cancel()
         if self._reader():
-            # What it read is the stored state only if no commit came since.
-            try:
-                current = await db.is_current()
-            except Exception:  # pylint: disable=broad-exception-caught
-                current = False
+            # It read one stored state throughout, whatever committed since.
             await db.close()
-            if not current and not failed:
-                raise RuntimeError("the object's database changed while this shared handler read it: retrying")
             return
         try:
             if db.is_usable():

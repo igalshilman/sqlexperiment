@@ -617,11 +617,9 @@ export class SqlAttempt {
     }
     this.#cancel();
     if (this.#ctx.shared) {
-      // What it read is the stored state only if no commit came since.
-      const current = await db.isCurrent().catch(() => false);
+      // It read one stored state throughout, whatever committed since.
       const usable = db.isUsable();
       await db.close();
-      if (!current) throw new Error("the object's database changed while this shared handler read it: retrying");
       if ('error' in outcome) throw this.#errors.classify(outcome.error, usable);
       return outcome.value;
     }

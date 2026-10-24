@@ -23,7 +23,7 @@ struct ControlledKv {
 impl KvStore for ControlledKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
-            if key.starts_with("blob/") {
+            if key.starts_with("v16/blob/") {
                 if self.fail_reads.load(Ordering::SeqCst) {
                     return Err(io::Error::other("injected blob-read failure"));
                 }

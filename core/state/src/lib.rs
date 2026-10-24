@@ -29,8 +29,8 @@
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
 //! | A WAL | Records set and pages written in it, in memory | No: dropping it discards them |
-//! | Root | `root`: the directory, small records, and the blobs of each file's chunks | Yes, after an acknowledged flush |
-//! | Blobs | `blob/<n>`: a chunk's base or delta, or a large record; written once | Yes, until no root a reader may hold names it |
+//! | Root | `v16/root`: the directory, small records, and the blobs of each file's chunks | Yes, after an acknowledged flush |
+//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, or a large record; written once | Yes, until no root a reader may hold names it |
 //!
 //! # Ownership and concurrency
 //!
@@ -380,14 +380,6 @@ impl State {
     /// it (opened on, or flushed itself).
     pub fn version(&self) -> u64 {
         self.shared.snapshot().version()
-    }
-
-    /// Whether what this state read is one consistent state: always, as a
-    /// state reads the root it opened, whose blobs never change. (A read of a
-    /// blob the owner deleted since, [`StateOptions::garbage_after`] of its
-    /// flushes later, fails instead.)
-    pub async fn is_current(&self) -> Result<bool> {
-        Ok(self.shared.snapshot().is_current())
     }
 
     /// Whether the state opened in a [`PageCache`] ([`Open::cached`]).

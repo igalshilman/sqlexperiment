@@ -105,12 +105,12 @@ export const sqlOptions = { enableLazyState: true, journalRetention: 0 } satisfi
 
 /**
  * The metadata `object` sets: Restate's UI hides the database from the
- * journal view (its commit record, log, pages and hint in the object's
- * state, `v15/...`; and the `sync` runs after its writes).
+ * journal view (its root and blobs in the object's state, `v16/...`; and
+ * the `sync` runs after its writes).
  */
 export const sqlMetadata = {
   'dev.restate.tooling.journal.hidden.names': 'sync',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v15/',
+  'dev.restate.tooling.journal.hidden.name.prefix': 'v16/',
 };
 
 // Marks the handlers made here.

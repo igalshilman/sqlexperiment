@@ -14,7 +14,7 @@
 //! truncation and sync serialize the queue into ordered phases. Within a read batch,
 //! completion order may differ from submission order. A single multi-page file read
 //! fetches its pages sequentially. This layer does not prefetch: the state does
-//! (a small database whole, or the working-set hint, at open; readahead after
+//! (a small database whole at open; whole chunks; readahead after
 //! consecutive misses), and cross-session reuse comes from the optional
 //! [`state::PageCache`].
 //!

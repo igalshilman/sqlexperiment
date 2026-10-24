@@ -239,14 +239,6 @@ impl Database {
         })
     }
 
-    /// See [`Session::is_current`].
-    fn is_current<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let session = self.0.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            session.is_current().await.map_err(error)
-        })
-    }
-
     /// See [`Session::save`].
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let session = self.0.clone();

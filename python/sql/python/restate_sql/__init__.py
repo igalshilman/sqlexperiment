@@ -60,8 +60,8 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Databas
 
     A ``reader`` reads the database beside the session that writes it (a
     shared handler's, beside the exclusive one's): it writes nothing to the
-    store, and ``is_current`` says whether what it read is still the stored
-    state.
+    store, and reads the state it opened on throughout, whatever the writer
+    commits meanwhile.
     """
     loop = asyncio.get_running_loop()
     # A failed write cannot fail its caller, which has moved on: the next sync
@@ -196,11 +196,6 @@ class Database:
     def is_usable(self) -> bool:
         """Whether SQL can still run: an SQL error leaves the session usable, a storage error ends it."""
         return self._native.is_usable()
-
-    async def is_current(self) -> bool:
-        """Whether the store still holds the state this reader opened on: if not, read again in a new session."""
-        async with self._serial():
-            return await self._native.is_current()
 
     async def save(self) -> None:
         """End the session after the calls before it, leaving its engine to the next one.

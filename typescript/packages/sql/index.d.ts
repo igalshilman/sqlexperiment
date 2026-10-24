@@ -64,12 +64,6 @@ export declare class Database implements Transaction {
    */
   isUsable(): boolean;
   /**
-   * A reader's: whether the store still holds the state it opened on (no
-   * commit since), so that what it read is. If not, read again, in a new
-   * session.
-   */
-  isCurrent(): Promise<boolean>;
-  /**
    * End the session after the calls before it, leaving its engine to the
    * next one. It rejects if they left a transaction open, whose changes are
    * lost, or a failure ended the session.
@@ -89,9 +83,10 @@ export declare function open(namespace: string, store: Store, options?: OpenOpti
 export interface OpenOptions {
   /**
    * Read the namespace beside its owner, which writes meanwhile (a virtual
-   * object's shared handler): without the page cache, and without writing to
-   * the store; SQL changes stay in the session. What it reads is the state
-   * as of open while `isCurrent()` says so.
+   * object's shared handler): from the blobs the owner cached, writing
+   * nothing to the store or the cache; SQL changes stay in the session. It
+   * reads the state as of open throughout, whatever the owner commits
+   * meanwhile.
    */
   reader?: boolean;
 }

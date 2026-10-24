@@ -185,12 +185,6 @@ impl Database {
         Ok(Buffer::from(effects.to_vec()))
     }
 
-    /// See [`Session::is_current`].
-    #[napi]
-    pub async fn is_current(&self) -> Result<bool> {
-        self.0.is_current().await.map_err(error)
-    }
-
     /// See [`Session::save`].
     #[napi]
     pub async fn save(&self) -> Result<()> {

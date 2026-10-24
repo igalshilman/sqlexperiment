@@ -570,15 +570,6 @@ impl Sql {
         self.participant.state().version()
     }
 
-    /// Whether the store still holds the state this session opened on (see
-    /// [`state::Open::reader`]): if it does not, what the session read may mix
-    /// that state with a later checkpoint's pages, so read again in a new
-    /// session. A session's own flushes change the state, so this is for a
-    /// session that has not flushed.
-    pub async fn is_current(&self) -> Result<bool> {
-        self.participant.state().is_current().await
-    }
-
     /// Whether the session can run more SQL. An SQL error (a syntax error, a
     /// constraint, a missing table) leaves it usable: the failed statement had
     /// no effect, and an open transaction continues. A storage error, a

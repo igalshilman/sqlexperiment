@@ -437,7 +437,7 @@ impl World {
         ]);
         let key_prefix = match operation {
             Operation::Sync => "",
-            _ => rng.pick(&["", "", "root", "blob/"]),
+            _ => rng.pick(&["", "", "v16/root", "v16/blob/"]),
         };
         Failpoint {
             operation,

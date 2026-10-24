@@ -48,8 +48,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub(crate) const ROOT: &str = "root";
-pub(crate) const BLOB_PREFIX: &str = "blob/";
+pub(crate) const ROOT: &str = "v16/root";
+pub(crate) const BLOB_PREFIX: &str = "v16/blob/";
 const ROOT_MAGIC: &[u8; 4] = b"SR16";
 /// Bytes of a record's value.
 pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
@@ -306,6 +306,7 @@ impl Root {
     }
 
     /// Every blob it names.
+    #[cfg(feature = "simulation")]
     pub fn named(&self) -> BTreeSet<u64> {
         let mut named = BTreeSet::new();
         for entry in self.directory.values() {
@@ -627,12 +628,6 @@ impl Snapshot {
             );
         }
         Ok(snapshot)
-    }
-
-    /// Always: a state reads the root it opened, whose blobs never change. A
-    /// read of one the owner deleted since fails instead.
-    pub(crate) fn is_current(&self) -> bool {
-        true
     }
 
     pub fn version(&self) -> u64 {

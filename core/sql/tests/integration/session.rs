@@ -313,7 +313,8 @@ async fn expected(store: MemoryKv, sql: &str) -> Result<String> {
 /// A reader beside its owner, who flushes meanwhile, some flushes failing,
 /// while some of the reader's reads fail too. What a reader reads is the
 /// state it opened on, however the owner flushes: the blobs its root names
-/// stay for `garbage_after` flushes.
+/// stay for `garbage_after` flushes. Every other reader reads through the
+/// owner's cache, which it changes nothing in.
 #[test]
 fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
     futures::executor::block_on(async {
@@ -343,13 +344,14 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
         for round in 0..24u64 {
             let snapshot = memory.fork();
             let reader_store = Arc::new(FaultKv::new(memory.clone(), round));
+            let shared = (round % 2 == 1 && round % 5 != 0).then(|| cache.clone());
             let reader =
-                Session::new(options(None).open(reader_store.clone()).reader().await?).await?;
+                Session::new(options(shared).open(reader_store.clone()).reader().await?).await?;
             // Now and then its first read fails, which ends it.
             if round % 5 == 0 {
                 let plan = failpoint(
                     Operation::Get,
-                    "blob/",
+                    "v16/blob/",
                     1 + round as usize % 3,
                     Effect::None,
                     round % 2 == 0,
@@ -379,7 +381,7 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
                 if k == 1 {
                     let plan = failpoint(
                         Operation::Put,
-                        "root",
+                        "v16/root",
                         1,
                         [Effect::None, Effect::After][round as usize % 2],
                         false,
@@ -399,7 +401,6 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
                 let (_, rows) = reader.query(sql, None).await?;
                 let opened = expected(snapshot.fork(), sql).await?;
                 assert_eq!(format!("{rows:?}"), opened, "round {round}, {sql}");
-                assert!(reader.is_current().await?);
                 match flushed {
                     true => after += 1,
                     false => before += 1,
