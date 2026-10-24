@@ -85,7 +85,8 @@ that are there. There is nothing to replay, checkpoint or repair.
 
 The state never flushes on its own, nor knows what writes it. A host opens it,
 makes a mutation, has each writer move its pending changes into it, as
-records, pages and log entries, and decides when to flush.
+records, pages and log entries, and decides when to flush (the
+[layers](../../README.md#layers), from the store up to the hosts).
 
 | Host                                                                                           | Writers                                                      | When it flushes                             |
 | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------- |

@@ -8,7 +8,8 @@ files and records, durable together in one flush.
 
 One `Sql` runs on a state at a time. Its statements change a private view; `Sql::flush(&mut mutation)` moves what SQL committed into a mutation; the
 mutation's `flush` makes it durable. With a page cache, a session that ends cleanly
-leaves its engine warm for the namespace's next one.
+leaves its engine warm for the namespace's next one. Where it sits between
+the state and the hosts: [the layers](../README.md#layers).
 
 ## Use
 
