@@ -96,9 +96,10 @@ pub use turso_core::{Numeric, Value};
 use crate::io::{DB_PATH, KvIo, MountedIo};
 use state::{File, Mutation, Receipt, State};
 use std::{
+    collections::HashSet,
     future::poll_fn,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::Poll,
@@ -199,25 +200,23 @@ pub struct Sql {
 
 /// Every state's file `db` an [`Sql`] runs on, so a second one is refused:
 /// two would each keep a private view of the same file.
-static OPENED: Mutex<Vec<File>> = Mutex::new(Vec::new());
+static OPENED: LazyLock<Mutex<HashSet<File>>> = LazyLock::new(Mutex::default);
 
 /// A file in [`OPENED`], until dropped.
 struct Opened(File);
 
 impl Opened {
     fn new(file: File) -> Result<Self> {
-        let mut opened = OPENED.lock().unwrap();
-        if opened.contains(&file) {
+        if !OPENED.lock().unwrap().insert(file.clone()) {
             return Err("an Sql already runs on this state; drop it first".into());
         }
-        opened.push(file.clone());
         Ok(Self(file))
     }
 }
 
 impl Drop for Opened {
     fn drop(&mut self) {
-        OPENED.lock().unwrap().retain(|file| *file != self.0);
+        OPENED.lock().unwrap().remove(&self.0);
     }
 }
 
