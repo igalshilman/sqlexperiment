@@ -1,6 +1,6 @@
 //! The scope's database, as a turn sees it: one SQL transaction, begun at the
 //! turn's first statement and committed with the turn (its records and pages,
-//! one put). `ctx.kv` is a table in it, and `ctx.db.sql` runs in it.
+//! one flush). `ctx.kv` is a table in it, and `ctx.db.sql` runs in it.
 //!
 //! The guest reaches it synchronously, through the VM's host call (see
 //! [`crate::vm`]), with one JSON request and one JSON answer. A statement

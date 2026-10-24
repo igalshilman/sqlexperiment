@@ -1,7 +1,7 @@
 // `ctx.db` in a shared handler, without a Restate server: it reads the
-// object's database beside the exclusive handler, which commits meanwhile;
-// what it writes stays in it; and if the exclusive handler commits while it
-// reads, its attempt fails when it ends, for Restate to retry.
+// object's database beside the exclusive handler, which commits meanwhile,
+// as a snapshot: the state it opened on, whatever the exclusive handler
+// commits; and what it writes stays in it.
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from '../testing.ts';
 
@@ -32,17 +32,17 @@ describe("a shared handler's ctx.db", () => {
     expect(await second.end(() => second.db.query('SELECT n FROM numbers'))).toEqual([[1]]);
   });
 
-  it('fails its attempt, to be retried, if the exclusive handler commits while it reads', async () => {
+  it('reads the state it opened on, whatever the exclusive handler commits meanwhile', async () => {
     const { owner, reader } = await object();
     const shared = reader();
-    const read = shared.end(async () => {
-      const rows = await shared.db.query('SELECT n FROM numbers');
+    const reads = shared.end(async () => {
+      const before = await shared.db.query('SELECT n FROM numbers');
       await owner.db.execute('INSERT INTO numbers VALUES (2)');
-      return rows;
+      return [before, await shared.db.query('SELECT n FROM numbers ORDER BY n')];
     });
-    await expect(read).rejects.toThrow("the object's database changed while this shared handler read it");
-    const retried = reader('retried');
-    expect(await retried.end(() => retried.db.query('SELECT n FROM numbers ORDER BY n'))).toEqual([[1], [2]]);
+    expect(await reads).toEqual([[[1]], [[1]]]);
+    const later = reader('later');
+    expect(await later.end(() => later.db.query('SELECT n FROM numbers ORDER BY n'))).toEqual([[1], [2]]);
   });
 
   it('has no transaction of its own', async () => {

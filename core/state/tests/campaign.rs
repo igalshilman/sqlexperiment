@@ -1,10 +1,11 @@
 //! A seeded random campaign over the public API: WALs of changes to several
-//! files (one with a base) and records, flushed with tiny thresholds so that
-//! seals, checkpoints, garbage deletion and the working-set hint all happen,
+//! files (one with a base) and records, flushed with small chunks and random
+//! rebase ratios so that deltas, rebases and garbage deletion all happen,
 //! and random faults, cancellations, crashes and reopens by owners with and
 //! without a cache, every request checked by the protocol monitor. After
 //! each reopen the state reads as the model: every acknowledged flush, and
-//! an unacknowledged one wholly or not at all.
+//! an unacknowledged one wholly or not at all. Readers opened beside the
+//! owner read the state they opened while it flushes.
 //!
 //! ```sh
 //! cargo test --features simulation --test campaign                  # a few seeds
@@ -15,10 +16,7 @@
 mod support;
 
 use futures::task::noop_waker_ref;
-use state::{
-    FlushReport, PageCache, PageCacheConfig, PageCompression, Result, StateOptions, Wal,
-    kv::KvStore, simulation::*,
-};
+use state::{FlushReport, PageCache, Result, StateOptions, Wal, kv::KvStore, simulation::*};
 use std::{
     sync::{
         Arc, OnceLock,
@@ -69,7 +67,7 @@ fn random_faults_never_lose_an_acknowledged_flush_or_split_one() {
     if seeds().len() as u64 >= SEEDS {
         let t = &totals;
         assert!(
-            t.sealed > 0 && t.collected > 0 && t.checkpointed > 0 && t.hints > 0,
+            t.blobs > 0 && t.collected > 0 && t.rebased > 0 && t.reads_beside > 0,
             "{t:?}"
         );
         assert!(
@@ -90,12 +88,12 @@ struct Totals {
     cancelled: usize,
     handovers: usize,
     requests_checked: usize,
-    /// Stored values put (seals, large transactions and records), deleted
-    /// as garbage, checkpointed page writes, and working-set hints.
-    sealed: u64,
+    /// Blobs put, and deleted as garbage; chunks rebased.
+    blobs: u64,
     collected: u64,
-    checkpointed: u64,
-    hints: u64,
+    rebased: usize,
+    /// Reads by readers beside the owner, after it flushed.
+    reads_beside: usize,
 }
 
 impl Totals {
@@ -107,22 +105,17 @@ impl Totals {
         self.cancelled += run.cancelled;
         self.handovers += run.handovers;
         self.requests_checked += run.requests_checked;
-        self.sealed += run.sealed;
+        self.blobs += run.blobs;
         self.collected += run.collected;
-        self.checkpointed += run.checkpointed;
-        self.hints += run.hints;
+        self.rebased += run.rebased;
+        self.reads_beside += run.reads_beside;
     }
 }
 
-/// A cache that keeps decoded pages, for some owners.
-fn decoded_cache() -> &'static PageCache {
+/// A cache too small to keep much, for some owners.
+fn small_cache() -> &'static PageCache {
     static CACHE: OnceLock<PageCache> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        open_cache(PageCacheConfig {
-            decoded: true,
-            ..cache_config(4 << 20, 16 << 20)
-        })
-    })
+    CACHE.get_or_init(|| open_cache(cache_config(64 << 10, 1 << 20)))
 }
 
 /// A new owner process's cache: its first look at the namespace.
@@ -130,7 +123,7 @@ fn new_owner(rng: &mut Rng) -> Namespace {
     static KEYS: AtomicU64 = AtomicU64::new(0);
     match rng.percent(30) {
         true => Namespace::new(
-            decoded_cache(),
+            small_cache(),
             &format!("campaign-{}", KEYS.fetch_add(1, Relaxed)),
         ),
         false => fresh_namespace(),
@@ -151,6 +144,11 @@ struct World {
     /// The states a crash may go back to: the durable one, then each one
     /// read or flushed since the last sync.
     since_sync: Vec<Model>,
+    /// Flushes after the last root that named a blob before it goes: the
+    /// world's, as readers rely on it.
+    garbage_after: u64,
+    /// Readers beside the owner, and what they opened.
+    readers: Vec<(Session, Model)>,
     totals: Totals,
 }
 
@@ -161,16 +159,13 @@ impl World {
         let rng = &mut self.rng;
         Setup {
             options: StateOptions {
-                page_compression: rng.pick(&[
-                    PageCompression::Raw,
-                    PageCompression::Lz4,
-                    PageCompression::Zstd,
-                ]),
-                checkpoint_after: rng.below(4) as u32,
-                checkpoint_log_bytes: rng.pick(&[4 << 10, 32 << 10, state::CHECKPOINT_LOG_BYTES]),
-                inline_log_bytes: rng.pick(&[0, 200, 1024, 8192]),
+                // Kept by the namespace's first root.
+                chunk_pages: rng.pick(&[1, 2, 4, 16]),
+                fanout: rng.pick(&[2, 3, 4, 64]),
+                rebase_ratio: rng.pick(&[0.0, 0.25, 1.0, 100.0]),
+                inline_record_bytes: rng.pick(&[0, 200, 1024, 8192]),
                 prefetch_pages: rng.pick(&[0, 4, 16]),
-                hint_pages: rng.pick(&[0, 8, 32]),
+                garbage_after: self.garbage_after,
             },
             cache,
         }
@@ -234,14 +229,13 @@ impl World {
             trace(|| {
                 let o = &options.options;
                 format!(
-                    "open by {:?}{}: checkpoint after {} or {} bytes, inline {}, prefetch {}, hint {}",
+                    "open by {:?}{}: chunks of {}, rebase past {}, inline {}, prefetch {}",
                     self.owner,
                     if faulty { ", faulty" } else { "" },
-                    o.checkpoint_after,
-                    o.checkpoint_log_bytes,
-                    o.inline_log_bytes,
+                    o.chunk_pages,
+                    o.rebase_ratio,
+                    o.inline_record_bytes,
                     o.prefetch_pages,
-                    o.hint_pages
                 )
             });
             let found = async {
@@ -350,6 +344,9 @@ impl World {
             };
             format!("flush: {outcome}")
         });
+        if let Ok(report) = &outcome {
+            self.totals.rebased += report.rebased;
+        }
         if outcome.is_ok() {
             // One that wrote syncs; an unchanged one writes nothing, and
             // needs no sync: its session's open synced what it read.
@@ -357,6 +354,7 @@ impl World {
                 return Err("an acknowledged flush left writes unsynced".into());
             }
             self.observed(pending);
+            text(self.read_beside(session.state.version()).await)?;
             // The session goes on, or a new one (after a crash, perhaps)
             // reads exactly what was acknowledged.
             if self.rng.percent(60) {
@@ -392,6 +390,43 @@ impl World {
         Ok(session)
     }
 
+    /// After a flush by the owner, at `version`: each reader beside it reads
+    /// what it opened, until the owner's flushes may have deleted its blobs
+    /// (`garbage_after` versions on). Sometimes a new reader opens, on what
+    /// is durable: a reader sees only what the store holds.
+    async fn read_beside(&mut self, version: u64) -> Result<()> {
+        let grace = self.garbage_after;
+        let mut kept = Vec::new();
+        for (reader, model) in std::mem::take(&mut self.readers) {
+            // A flush at the next version, or one at this version that did
+            // not land, deletes what died `grace` versions before it.
+            let opened = reader.state.version();
+            let may_be_gone = version >= opened + grace;
+            match model.differs(&reader).await {
+                Ok(None) => self.totals.reads_beside += 1,
+                Ok(Some(differs)) => {
+                    return Err(format!("a reader beside the owner: {differs}").into());
+                }
+                Err(error) if may_be_gone && error.to_string().contains("is gone") => continue,
+                Err(error) => return Err(format!("a reader beside the owner: {error}").into()),
+            }
+            if version < opened + 2 * grace + 4 {
+                kept.push((reader, model));
+            }
+        }
+        self.readers = kept;
+        if self.readers.len() < 3 && self.rng.percent(30) && self.memory.unsynced().is_empty() {
+            let cache = self.rng.pick(&[None, Some(0), Some(1)]);
+            let setup = Setup {
+                options: StateOptions::default(),
+                cache: cache.map(|owner| self.caches[owner].clone()),
+            };
+            let reader = Session::reader(self.store.clone(), setup).await?;
+            self.readers.push((reader, self.model.clone()));
+        }
+        Ok(())
+    }
+
     /// A random failpoint; it may match nothing the flush does.
     fn failpoint(&mut self) -> Failpoint {
         let rng = &mut self.rng;
@@ -403,7 +438,7 @@ impl World {
         ]);
         let key_prefix = match operation {
             Operation::Sync => "",
-            _ => rng.pick(&["", "", "v15/commit", "v15/log/", "v15/page/", "v15/hint"]),
+            _ => rng.pick(&["", "", "v16/root", "v16/blob/"]),
         };
         Failpoint {
             operation,
@@ -477,8 +512,11 @@ async fn run(seed: u64) -> std::result::Result<Totals, String> {
         owner: Some(0),
         model: Model::default(),
         since_sync: vec![Model::default()],
+        garbage_after: 0,
+        readers: Vec::new(),
         totals: Totals::default(),
     };
+    world.garbage_after = world.rng.pick(&[1, 2, 4, 16]);
     let mut session = world.reopen(&[Model::default()]).await?;
     for step in 0..STEPS {
         session = (world.step(session).await).map_err(|e| format!("step {step}: {e}"))?;
@@ -496,9 +534,7 @@ async fn run(seed: u64) -> std::result::Result<Totals, String> {
     world.violations()?;
     let stats = world.memory.stats();
     world.totals.requests_checked = world.store.checked();
-    world.totals.sealed = stats.kind("log").puts;
-    world.totals.collected = stats.kind("log").deletes;
-    world.totals.checkpointed = stats.kind("page").puts;
-    world.totals.hints = stats.kind("hint").puts;
+    world.totals.blobs = stats.kind("blob").puts;
+    world.totals.collected = stats.kind("blob").deletes;
     Ok(world.totals)
 }

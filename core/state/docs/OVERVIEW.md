@@ -2,10 +2,10 @@
 
 A state is one Restate object's transactional state: paged files and small
 records. It is read; it changes only through a WAL, an owned value that
-collects records set and pages written, in memory. A flush consumes the WAL and
-appends its writes to the log in the commit record as one transaction, in a
-single put; a WAL dropped instead discards them. Every few flushes a checkpoint
-applies the log to the pages. SQL runs on the state, and the durable functions
+collects records set and pages written, in memory. A flush consumes the WAL,
+writes the chunks of pages it changed as new blobs, and puts the root that
+names them, the commit point; a WAL dropped instead discards them. SQL runs on
+the state, and the durable functions
 runtime flushes one WAL per turn, with each extension keeping its own state
 there.
 
@@ -16,25 +16,23 @@ hash.
 
 ## What Restate stores
 
-A state is one Restate object's state, in four kinds of key. Restate's own
+A state is one Restate object's state, in two kinds of key. Restate's own
 invocation journal is not used: these handlers run with `journalReplay: false`,
-and the commit record plays that role.
+and the root plays that role.
 
-| Key                   | What it holds                                                                                                                     |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `v15/commit`          | The commit record: the directory of files, every record, and the log since the last checkpoint. The only key whose write commits. |
-| `v15/log/<n>`         | Log segments too large to keep inline in the record                                                                               |
-| `v15/page/<file>/<n>` | 4 KiB pages of any file, overwritten in place by checkpoints                                                                      |
-| `v15/hint`            | An advisory list of pages to prefetch on a cold open                                                                              |
+| Key            | What it holds                                                                                                         |
+| -------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `v16/root`     | The root: the directory of files, the small records, and the blobs of every chunk. The only key whose write commits.  |
+| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), or a large record |
 
 Transactions change two kinds of state:
 
 - **Files** are page-addressed: the engine above reads and writes 4 KiB pages at
-  random, and a flush logs the pages that changed. SQL keeps its database in
+  random, and a flush writes the chunks that changed, as new blobs. SQL keeps its database in
   the file `db`. The functions runtime keeps a Wasm VM's memory in a file opened
   over the program's golden image, so only pages that differ from it are
   stored.
-- **Records** are small named values inside the commit record, such as `run`,
+- **Records** are small named values inside the root, such as `run`,
   `memory` or an extension's `notary/count`.
 
 The contract it needs from Restate is small ([`kv.rs`](../src/kv.rs)): writes
@@ -50,27 +48,27 @@ the WAL becomes durable at once, and dropping the WAL discards them. The state
 itself shows only what was flushed. A flush queues its writes in this order,
 then syncs once:
 
-1. **Garbage:** deletes of stored values the durable record no longer names.
-2. **Stored values:** log segments too large for the record's inline budget.
-3. **The commit record:** the log so far plus this transaction, and the
-   records. If this put is stored, the transaction happened.
-4. **Checkpoint (every few flushes):** the latest image of each logged page to
-   `page/<file>/<n>`, then a record with an empty log.
+1. **Garbage:** deletes of blobs that no root names for the last 16 flushes.
+2. **Blobs:** each changed chunk's pages, compressed against the chunk's base
+   (a delta), or, once the delta grows, a new base; and large records.
+3. **The root:** naming them, with the small records. If this put is stored,
+   the transaction happened.
 
-The order makes a crash at any point safe. Restate keeps a prefix of the queued
-writes, and pages are overwritten only after a record whose log covers them, so
-whatever survives, open finds a record whose log replays correctly over the
-pages that are there. It is SQLite's WAL design on KV keys: no page map, no
-allocation, no orphans to collect.
+The order makes a crash at any point safe. Restate keeps a prefix of the
+queued writes, and a blob is put before any root names it and never
+overwritten, so whatever survives, open finds a root that names only blobs
+that are there. There is nothing to replay, checkpoint or repair.
 
-- **Cost:** usually one put and one sync. A logged page is compressed against
-  its previous image, so it costs about what changed in it. A WAL that changes
-  nothing writes nothing.
-- **The cache:** an optional process-wide `PageCache` keeps pages in memory and
-  on local disk, and remembers which record this owner made durable. With it,
-  open and flush in steady state are one round trip each. An owner without a
-  cache, or whose last flush's outcome is unknown, syncs at open, so that
-  everything it reads is durable.
+- **Cost:** one sync, and a few puts: the root and a blob per changed chunk.
+  A delta is compressed against its chunk's base, so it costs about what
+  changed. A WAL that changes nothing writes nothing.
+- **The cache:** an optional process-wide `PageCache` keeps blobs in memory and
+  on local disk, by number: a blob never changes, so nothing is invalidated.
+  With it, open and flush in steady state are one round trip each. An owner
+  without a cache, or whose last flush's outcome is unknown, syncs at open, so
+  that everything it reads is durable.
+- **Readers:** a shared handler reads the root it opened, a consistent
+  snapshot, beside the owner's flushes.
 - **Errors:** a failed or cancelled flush has an unknown outcome, and ends the
   state. The owner settles outstanding requests and reopens, then looks at
   what landed before retrying.
@@ -146,7 +144,7 @@ struct Notary;
 
 /// Its part of one attempt at a run.
 struct Notarized {
-    record: Record, // stored as "notary/count" in the commit record
+    record: Record, // stored as "notary/count" in the root
     count: u64,     // as this turn sees it
     sealed: u64,    // as the last seal holds it
 }
@@ -165,7 +163,7 @@ impl Extension for Notary {
 impl Participant for Notarized {
     /// Before the seal: set what changed in the WAL. Its flush makes it
     /// durable with the run's memory, its SQL and every other participant,
-    /// in one put.
+    /// in one root.
     async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         if self.count != self.sealed {
             wal.set(&self.record, self.count.to_string().into())?;
@@ -233,7 +231,7 @@ Not covered by the toy:
   built-ins have one today (`ctx.fs`, `ctx.llm`); a third-party extension is
   reachable only through `ctx.call`, as an operation.
 - **SQL in an extension:** `Tables` lets an extension read and write the
-  scope's SQL inside the turn's transaction, sealed in the same put. `llm` keeps
+  scope's SQL inside the turn's transaction, sealed in the same root. `llm` keeps
   its conversations this way.
 - **Large state:** an extension writes big bytes to the scope's blobs before the
   seal and names them in a record, as `fs` does with its manifest.

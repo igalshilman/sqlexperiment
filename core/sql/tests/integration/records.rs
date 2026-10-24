@@ -1,5 +1,5 @@
 //! The host's records: named values a turn flushes with its SQL, in one
-//! commit record.
+//! root.
 use crate::host::StateSetup;
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
@@ -24,8 +24,8 @@ fn options(cache: Option<Namespace>) -> Setup {
     )
 }
 
-/// Turn `i`'s value: small, past the inline budget so that flushes seal, or
-/// past it alone, so that it is stored first.
+/// Turn `i`'s value: small, held in the root, or past the inline budget, a
+/// blob of its own, just past it or far past it.
 fn value(i: usize) -> Bytes {
     let len = [100, 1500, 9000][i % 3];
     Bytes::from((0..len).map(|n| (n * 31 + i) as u8).collect::<Vec<_>>())
@@ -37,8 +37,8 @@ fn expected(turns: usize) -> Bytes {
 }
 
 /// A turn: a row (every other turn, in a transaction; the others open none),
-/// its number as the record `effects`, its value as the record `turn` (small,
-/// sealed, or stored), and every eleventh empties the record `state`, every
+/// its number as the record `effects`, its value as the record `turn` (in the
+/// root or a blob), and every eleventh empties the record `progress`, every
 /// third sets it to its value.
 async fn turn(db: &mut Db, i: usize) -> Result<()> {
     if i.is_multiple_of(2) {
@@ -57,7 +57,7 @@ async fn turn(db: &mut Db, i: usize) -> Result<()> {
     db.flush().await.map(drop)
 }
 
-/// The record `state` after turns `0..turns`.
+/// The record `progress` after turns `0..turns`.
 fn progress(turns: usize) -> Bytes {
     (0..turns)
         .rev()
@@ -84,8 +84,8 @@ fn a_turn_flushes_its_records_with_its_sql() -> Result<()> {
                 turn(&mut db, i).await?;
                 assert_eq!(db.state().record("turn").get(), expected(i + 1), "turn {i}");
                 if i % 7 == 6 {
-                    // Another session reads the same turn: the record, and the
-                    // stored values it names.
+                    // Another session reads the same turn: the records, and the
+                    // blobs the root names.
                     drop(db);
                     let mut other = Db::open(store.clone(), options(None)).await?;
                     assert_eq!(
@@ -100,34 +100,39 @@ fn a_turn_flushes_its_records_with_its_sql() -> Result<()> {
                     db = Db::open(store.clone(), options(cache.clone())).await?;
                 }
             }
-            // A turn without SQL changes adds no log transaction: checkpoints
-            // stay with the SQL.
             assert_eq!(store.violations(), Vec::<String>::new());
-            // What no record names is garbage, and the next flush deletes it:
-            // a few stored values stay, not one per turn.
             db.execute("BEGIN").await?;
             db.commit_with(Bytes::from_static(b"done")).await?;
-            let stored = store
-                .inner
-                .keys()
-                .iter()
-                .filter(|k| k.contains("/log/"))
-                .count();
-            assert!(stored <= 6, "cached={cached}: {stored} stored values");
+            // A blob per large `turn` value, and a chunk per turn with a row
+            // (the table is one chunk) besides the `CREATE TABLE`: a turn
+            // without SQL changes writes no chunk.
+            let large = (0..60).filter(|i| value(*i).len() > 1024).count() as u64;
+            let put = store.inner.stats().kind("blob").puts;
+            assert_eq!(put, large + 30 + 1, "cached={cached}");
+            // What no root names is garbage, deleted `garbage_after` (16)
+            // flushes later: the live blobs (the `turn` value, the chunk's
+            // base and delta) and what the last 16 flushes left, at most two
+            // each (the old `turn` value, the chunk's old delta).
+            let stored = store.inner.blob_count();
+            assert!(
+                stored <= 3 + 2 * 16,
+                "cached={cached}: {stored} of {put} blobs stored"
+            );
         }
         Ok(())
     })
 }
 
-/// A turn of no SQL, in a transaction or without one, is one flush, and adds
-/// nothing to the log.
+/// A turn of no SQL, in a transaction or without one, is one flush, and puts
+/// only the root.
 #[test]
-fn turns_without_sql_leave_the_log_alone() -> Result<()> {
+fn turns_without_sql_put_only_the_root() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let mut db = Db::open(store.clone(), options(Some(fresh_namespace()))).await?;
         db.execute("CREATE TABLE t(n INTEGER)").await?;
         let version = db.version();
+        store.reset_stats();
         for i in 0..100 {
             if i % 3 == 0 {
                 db.execute("BEGIN").await?;
@@ -137,10 +142,9 @@ fn turns_without_sql_leave_the_log_alone() -> Result<()> {
             db.flush().await?;
         }
         assert_eq!(db.version(), version + 100);
-        // Without SQL nothing checkpointed: no page keys beyond the first
-        // flush's.
-        let pages = |store: &MemoryKv| store.keys().iter().filter(|k| k.contains("/page/")).count();
-        assert_eq!(pages(&store), 0);
+        // A record of 64 bytes stays in the root, and no chunk changed.
+        let stats = store.stats();
+        assert_eq!((stats.kind("root").puts, stats.kind("blob").puts), (100, 0));
         drop(db);
         let db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(db.state().record("turn").get(), vec![99u8; 64]);
@@ -175,11 +179,11 @@ fn every_acknowledged_turn_survives_a_crash_at_any_write() -> Result<()> {
 /// number of prefixes, or `None` if the run made fewer syncs.
 async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Option<usize>> {
     let cache = cached.then(fresh_namespace);
-    // Checkpoints happen within the run.
+    // Garbage is deleted within the run.
     let options = |cache| {
         options(cache)
             .with(|o| StateOptions {
-                checkpoint_after: 4,
+                garbage_after: 4,
                 ..o
             })
             .mode(durability)

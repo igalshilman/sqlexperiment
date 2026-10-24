@@ -9,8 +9,8 @@ import { memoryStore, sqlAttempt } from '../testing.ts';
 
 type Send = restate.GenericSend<Uint8Array>;
 
-/** The database's commit record, whose effects hold the outbox. */
-const COMMIT = 'v15/commit';
+/** The database's root, whose effects hold the outbox. */
+const ROOT = 'v16/root';
 let namespaces = 0;
 
 const store = restate.object({
@@ -169,12 +169,12 @@ describe('the sends of ctx.transaction', () => {
   });
 
   it('drops the sends of a commit that a crash lost', async () => {
-    // The commit record that holds the sends is not stored, nor anything after.
+    // The root that holds the sends is not stored, nor anything after.
     const o = object();
     const crashed = o.attempt();
     const set = o.map.set.bind(o.map);
     o.map.set = (key, value) => {
-      if (key === COMMIT) crashed.fence.closed = true;
+      if (key === ROOT) crashed.fence.closed = true;
       else set(key, value);
       return o.map;
     };
@@ -202,14 +202,15 @@ describe('the sends of ctx.transaction', () => {
     expect(await o.outbox()).toEqual([]);
   });
 
-  it('writes one commit record for a transaction without sends', async () => {
+  it('writes one root for a transaction without sends, after its blobs', async () => {
     const o = object();
     const a = o.attempt();
     const sets: string[] = [];
     const set = o.map.set.bind(o.map);
     o.map.set = (key, value) => (sets.push(key), set(key, value));
     await a.end(() => a.transaction(({ db }) => db.execute('CREATE TABLE t (v INTEGER)')));
-    expect(sets).toEqual([COMMIT]);
+    expect(sets.filter((key) => key === ROOT)).toEqual([ROOT]);
+    expect(sets.at(-1)).toBe(ROOT);
   });
 
   it('leaves out of the outbox the sends made before a commit', async () => {

@@ -1,9 +1,9 @@
 //! In-memory model of a Restate object's state, as [`crate::kv`] describes
 //! it, with exact logical traffic counters.
 use crate::{
-    format::{COMMIT, HINT, LOG_PREFIX, PAGE_PREFIX},
     kv::KvStore,
     simulation::yield_now,
+    store::{BLOB_PREFIX, ROOT_KEY, Root},
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -30,16 +30,12 @@ pub struct Traffic {
     pub delete_key_bytes: u64,
 }
 
-/// Class of a key, used to split traffic counters: `page`, `log`, `commit`, `hint` or `other`.
+/// Class of a key, used to split traffic counters: `root`, `blob` or `other`.
 pub fn object_kind(key: &str) -> &'static str {
-    if key.starts_with(PAGE_PREFIX) {
-        "page"
-    } else if key.starts_with(LOG_PREFIX) {
-        "log"
-    } else if key == COMMIT {
-        "commit"
-    } else if key == HINT {
-        "hint"
+    if key == ROOT_KEY {
+        "root"
+    } else if key.starts_with(BLOB_PREFIX) {
+        "blob"
     } else {
         "other"
     }
@@ -135,6 +131,17 @@ impl MemoryKv {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
+    /// Every key and its value, with the root's random database identity
+    /// zeroed: two stores that hold the same state compare equal.
+    pub fn contents(&self) -> BTreeMap<String, Bytes> {
+        let mut contents: BTreeMap<String, Bytes> = self.values().into_iter().collect();
+        if let Some(root) = contents.get_mut(ROOT_KEY) {
+            let mut decoded = Root::decode(root).expect("a stored root decodes");
+            decoded.id = 0;
+            *root = decoded.encode();
+        }
+        contents
+    }
     pub fn keys(&self) -> BTreeSet<String> {
         self.inner.lock().unwrap().values.keys().cloned().collect()
     }
@@ -156,9 +163,9 @@ impl MemoryKv {
             .map(String::len)
             .sum()
     }
-    /// Number of checkpointed page objects.
-    pub fn page_count(&self) -> usize {
-        let prefix = PAGE_PREFIX;
+    /// Number of stored blobs.
+    pub fn blob_count(&self) -> usize {
+        let prefix = BLOB_PREFIX;
         self.inner
             .lock()
             .unwrap()

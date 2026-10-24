@@ -1,108 +1,86 @@
-# Current storage format
+# Storage format
 
-Only this format (v15) is implemented. Use a dedicated namespace. Constants and
-key construction live in `src/format.rs`; there is no migration or format
-discovery. Storage is assumed reliable (a value reads back as written), so
-pages have no checksums; decoding checks structure and the bounds below. A log
-segment's zstd frame carries one.
+Only this format (v16) is implemented. Use a dedicated namespace. Constants
+and keys live in `src/store.rs`; there is no migration or format discovery.
+Storage is assumed reliable (a value reads back as written); every zstd frame
+carries a checksum, and decoding checks structure and the bounds below.
 
-| Key                                                         | Value                                                                                                            |
-| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `v15/commit`                                                | Commit record, with the log; absent until the first                                                              |
-| `v15/log/<16-digit hex number>`                             | Stored log value: segments, sealed or of a large transaction; immutable, written before the record that names it |
-| `v15/page/<8-digit hex file id>/<16-digit hex page number>` | Checkpointed page of a paged file, overwritten in place                                                          |
-| `v15/hint`                                                  | Working-set hint; advisory, may be absent or stale                                                               |
+| Key                          | Value                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------ |
+| `v16/root`                   | The root; absent until the first flush                                               |
+| `v16/blob/<lowercase hex n>` | One zstd frame: a chunk's base or delta, a map node, or a large record; written once |
 
-The commit record is the only key whose write commits. Integers are LEB128
-varints unless stated otherwise.
+The root is the only key whose write commits. Integers are LEB128 varints
+unless stated otherwise.
 
-## Commit record
+## Root
 
-| Field             | Encoding                                                                                                                                                                                                                                                                                                                                           |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Magic             | `SC15`                                                                                                                                                                                                                                                                                                                                             |
-| Version           | Flushes ever made; at most 2^62                                                                                                                                                                                                                                                                                                                    |
-| Epoch             | Checkpoints ever recorded; at most 2^62                                                                                                                                                                                                                                                                                                            |
-| Next segment      | The number the next stored value gets; at most 2^62                                                                                                                                                                                                                                                                                                |
-| Garbage           | Count, then ascending numbers, each from the one before: stored values the record does not name, to delete; below the next                                                                                                                                                                                                                         |
-| Next file         | The id the next new file gets; at most 2^16; ids are never reused                                                                                                                                                                                                                                                                                  |
-| Directory         | Count, then per file: its id (ascending, as the gap after the previous id, less one), its name's length (at most 255) and UTF-8 bytes, then `0` and its value as a part (a record), `1` and its length in 512-byte units, at most 2^44 bytes (a paged file), or `2`, its length so, and its base's id (a paged file with a base); names are unique |
-| Transaction count | At most the version, and 2^20                                                                                                                                                                                                                                                                                                                      |
-| Transactions      | Each: its change count, then per paged file it changed (ascending ids, each once): the file's id, its length after the transaction in 512-byte units, its part count and its parts (segments of that file's pages)                                                                                                                                 |
+`SR16`, then one zstd frame of the body, which carries its size (at most
+64 MiB) and a checksum:
 
-A part is `0`, a length and inline bytes (a segment of at most 1 MiB, or a
-record of at most 16 MiB), or `1`, the number of a stored value
-(below the next segment, not in the garbage) and the bytes' index in it. A
-paged file's length in the directory is its length after the last
-transaction that changed it. Nothing may follow. A missing record means
-version 0, epoch 0 and no files.
+| Field       | Encoding                                                                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Id          | 8 bytes, little-endian: the database's random identity, drawn when its first root was made; the cache keys blobs by it                                  |
+| Version     | Flushes that changed something, ever; at most 2^62                                                                                                      |
+| Next blob   | The number the next blob gets; at most 2^62. Every blob named is below it                                                                               |
+| Chunk pages | Pages per chunk (1 to 256), set when the namespace was made                                                                                             |
+| Fanout      | Entries per map node (2 to 4096), set when the namespace was made                                                                                       |
+| Garbage     | Count, then ascending blob numbers, each as the gap from the one before, with the version it died at, as the gap below the root's: blobs to delete      |
+| Next file   | The id the next new file gets; at most 2^16; ids are never reused                                                                                       |
+| Directory   | Count, then per file: its id (ascending, as the gap after the previous id, less one), its name's length (at most 255) and UTF-8 bytes, its kind (below) |
+
+A file's kind is one of:
+
+- `0`, a length and bytes: a record held inline.
+- `1` and a blob number: a record in a blob of its own.
+- `2`: a paged file. Its length in 512-byte units (at most 10 GiB), its
+  base's id plus one (`0` for none), then its chunk map (below).
+
+Names are unique. Nothing may follow. A missing root means version 0 and no
+files.
+
+## Chunk maps
+
+A paged file's chunks, as many as its length needs, are named by a radix
+tree of `fanout`-entry nodes: its height is the fewest levels that hold
+them (`fanout^height ≥ chunks`, at least 1). Level 0 nodes are leaves; the
+node at level `k`, index `i` covers chunks `i × fanout^(k+1)` onward. A
+node has as many entries as the chunks below the file's length need, at
+most `fanout`.
+
+| Node  | Entries                                                                                                           |
+| ----- | ----------------------------------------------------------------------------------------------------------------- |
+| Leaf  | Per chunk, its base and its delta                                                                                 |
+| Inner | Per child, the blob of the node below, or none: every chunk under it a hole (a chunk with neither base nor delta) |
+
+Each entry is `0` for none, or else a blob number as the zigzag gap from
+the previous one of its kind in the node (bases, deltas or children; the
+first from 0), plus one. A delta without a base is invalid.
+
+The root holds the height, then the top node (level `height − 1`, index 0).
+Every other node is a blob: its entries in one zstd frame. A node names
+only blobs below its own number, and a stored node is never all holes.
+
+## Blobs
+
+A chunk is `chunk_pages` pages of 4096 bytes, its file's pages
+`chunk × chunk_pages` onward; pages past the file's end are zeros.
+
+| Blob          | Frame                                                                                                              |
+| ------------- | ------------------------------------------------------------------------------------------------------------------ |
+| A chunk base  | The chunk's pages, compressed with its file's base pages as a raw-prefix reference (zeros past them), or with none |
+| A chunk delta | The chunk's pages, compressed with the chunk's base (decoded) as a raw-prefix reference                            |
+| A map node    | The node's entries, as above                                                                                       |
+| A record      | The record's bytes (at most 16 MiB)                                                                                |
+
+A chunk decodes to exactly `chunk_pages × 4096` bytes. A chunk with neither
+base nor delta is its file's base pages, or zeros. In a file without a base,
+a page of zeros reads as a hole.
 
 The files are records and paged files. The SQL database is the paged file
 `db`; others are the host's (`State::file`). A file is never deleted, only
-emptied, and its id is never reused.
+emptied, and its id is never reused. A paged file with a base
+(`State::file_with_base`) is over a golden image the host holds, named by the
+base's id: its chunks decode only with that base.
 
-A paged file with a base (`State::file_with_base`) is over a golden image
-the host holds, named by the base's id: a hole, or a page absent from the
-store, reads as the base's page (zeros past its end); a page equal to its
-base's page is written as a hole; and a page's first image in the log is
-compressed against its base's page, as is its value in place (tag 3). Its
-segments therefore decode only with its base: a reader without it may read
-the record and other files, and write the file's holes and length, but not
-its images; a checkpoint waits until every such file's logged images are
-decoded, or replaced by holes.
-
-The transactions are the log since the last checkpoint, in flush order.
-Pages they change are authoritative from the log; any other page of a file is
-read at `page/<file>/<n>`, and is a hole (zeros) if absent. A flush without
-page changes adds none.
-
-The records are the host's (`State::record`): named whole values, each
-replaced whole by a flush that sets it. One of at most the inline budget
-(1 KiB by default) is inline; a larger one is a stored value of its own,
-written by the flush that sets it. Checkpoints keep them. A record never
-set reads as empty.
-
-A flush (`Wal::flush`) sets the WAL's records and writes its paged files, the
-SQL's among them, in the same put. A stored value holds a large transaction's
-segment, a large record, or the record's inline log sealed into one (a seal).
-
-## Log segments
-
-A transaction's changed pages, in segments of at most 240 entries. A stored
-value at `log/<n>` is `SL15`, the segment count, then each segment's length
-and bytes: one segment of a large transaction, or the segments a flush
-sealed (the record's inline log, in order).
-
-| Field       | Encoding                                                                                                                                                           |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Entry count | At most 240                                                                                                                                                        |
-| Entries     | Ascending pages of one file (below 2^32): the gap after the previous entry's page (for the first, the page) shifted left once, plus 1 for an image or 0 for a hole |
-| Images      | One zstd frame with a checksum, of the entries' images (4096 bytes each) in order; absent when all are holes                                                       |
-
-The frame's dictionary is a raw prefix: the previous image of each entry with
-an image, in entry order, where it has one. A page's previous image is its
-latest in the log before this segment (since the last checkpoint), in the
-same file: replay rebuilds them from the checkpoint on. A segment is at most 1 MiB.
-
-## Pages
-
-Tag u8 (0 raw, 1 LZ4 block, 2 zstd frame, 3 zstd frame against the page of
-its file's base, as a raw-prefix dictionary), logical length u16 LE (4096),
-then payload. Raw payloads are exactly 4096 bytes. Compressed payloads must be
-nonempty and smaller than 4096 bytes; decoding must produce exactly 4096 bytes.
-The encoder (zstd level 3 by default) uses raw storage when compression does
-not shrink the payload. Maximum value: 4099 bytes.
-
-An absent `page/<n>` is a zero-filled hole.
-
-## Working-set hint
-
-| Field       | Encoding                                                     |
-| ----------- | ------------------------------------------------------------ |
-| Magic       | `SH15`                                                       |
-| Entry count | u16 LE; at most 256                                          |
-| Pages       | Ascending page numbers as LEB128 deltas, the first from zero |
-
-Readers ignore a malformed hint.
-
-See [DESIGN.md](DESIGN.md) for flush, replay, checkpoint and recovery rules.
+See [DESIGN.md](DESIGN.md) for the flush, open and garbage rules.

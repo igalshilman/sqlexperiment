@@ -6,7 +6,7 @@
 //! ([`state::Participant`]): its statements change a private view,
 //! [`Sql::flush`] moves what SQL committed into a [`Wal`], and the WAL's
 //! [`Wal::flush`] makes it durable, together with the WAL's other files and
-//! records, in one put.
+//! records, atomically.
 //!
 //! # When SQL changes become durable
 //!
@@ -24,7 +24,7 @@
 //! |---|---|---|
 //! | SQL working state | Dirty 4096-byte pages and the private engine WAL | No |
 //! | A WAL of the state | The pages SQL flushed into it, and its records | No |
-//! | The state | Its commit record and pages (see [`state`]) | Yes, after an acknowledged flush |
+//! | The state | Its root and blobs (see [`state`]) | Yes, after an acknowledged flush |
 //!
 //! An SQL error (syntax, a constraint, a missing table) undoes just that
 //! statement, as in SQLite, and the session goes on. A storage error, a
@@ -300,6 +300,12 @@ impl Sql {
         sql.connection = Some(connect(&sql.io, &database).await?);
         sql.database = Some(database);
         sql.poisoned = false;
+        // A statement that would grow the database past the state's file cap
+        // fails with SQLITE_FULL, and the session goes on.
+        let page_size = sql.connection.as_ref().unwrap().get_page_size().get();
+        let max_pages = state::MAX_FILE_BYTES / u64::from(page_size);
+        sql.internal(&format!("PRAGMA max_page_count = {max_pages}"))
+            .await?;
         if !sql.reused && state.is_cached() {
             sql.schema_bytes = Some(sql.measure_schema().await?);
         }
@@ -341,8 +347,8 @@ impl Sql {
             return;
         }
         if let Some(database) = self.database.take() {
-            // An idle engine reads nothing: it holds back no checkpoint, and the
-            // next open gives it the next state's file.
+            // An idle engine reads nothing until the next open gives it the
+            // next state's file.
             self.io.release();
             let warm = WarmEngine {
                 database,
@@ -568,15 +574,6 @@ impl Sql {
     /// does not change it.
     pub fn version(&self) -> u64 {
         self.participant.state().version()
-    }
-
-    /// Whether the store still holds the state this session opened on (see
-    /// [`state::Open::reader`]): if it does not, what the session read may mix
-    /// that state with a later checkpoint's pages, so read again in a new
-    /// session. A session's own flushes change the state, so this is for a
-    /// session that has not flushed.
-    pub async fn is_current(&self) -> Result<bool> {
-        self.participant.state().is_current().await
     }
 
     /// Whether the session can run more SQL. An SQL error (a syntax error, a

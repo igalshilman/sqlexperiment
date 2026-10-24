@@ -77,6 +77,6 @@ microseconds. Our runtime's whole cost for a one-turn run is ~0.8 ms of CPU
 (start the VM, run, capture, encode; DESIGN §3.2). On the benchmark's 4 vCPUs,
 which the server shares, 473 runs/s is ~8.5 ms of CPU per run and 362/s is
 ~11 ms. Most of the ~2.6 ms difference is the server's: besides the KV write
-itself, each turn stores a batch of pages and a commit record. A faster
-engine would not move these rows. Writing less per turn, or fewer records,
-would.
+itself, each turn stores the blobs of the pages it changed and the root. A
+faster engine would not move these rows. Writing less per turn, or fewer
+records, would.

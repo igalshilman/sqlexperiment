@@ -3,7 +3,7 @@ name = "state"
 version = "0.11.0"
 edition = "2024"
 publish = false
-description = "Transactional state over an asynchronous key/value store: records and paged files, changed through a WAL that a flush makes durable in one put, with a log and checkpoints"
+description = "Transactional state over an asynchronous key/value store: records and paged files, changed through a WAL that a flush makes durable atomically, copy-on-write in immutable zstd blobs"
 
 [features]
 default = []
@@ -15,9 +15,8 @@ bench = false
 [dependencies]
 futures = "0.3"
 bytes = "1.10"
-# Log segments: zstd frames against the previous images of their pages.
+# Blobs: zstd frames, a delta against its chunk's base as the reference prefix.
 zstd-safe = { version = "7.2", default-features = false, features = ["std"] }
-lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 # Pinned with its subcrates in Cargo.lock: 0.22.4 to 0.22.6 print a debug line
 # to stdout whenever a file device opens.
 foyer = "=0.22.3"

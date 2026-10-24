@@ -88,9 +88,9 @@ export interface ObjectContext extends Omit<restate.ObjectContext, 'awakeable'> 
 /**
  * The context of an object's shared handler with SQL: it reads the object's
  * database while an exclusive handler runs (or not), as of its first call to
- * it. What it writes stays in its session, and is never stored. If an
- * exclusive handler commits while it reads, the attempt fails when it ends,
- * and Restate retries it: what it returns was the stored state.
+ * it. What it writes stays in its session, and is never stored. It reads
+ * that snapshot throughout, whatever an exclusive handler commits meanwhile;
+ * only one that outlives 16 of its commits fails, and Restate retries it.
  */
 export interface ObjectSharedContext extends Omit<restate.ObjectSharedContext, 'awakeable'> {
   readonly db: SqlSession;
@@ -100,17 +100,19 @@ export interface ObjectSharedContext extends Omit<restate.ObjectSharedContext, '
  * The options `object` sets: lazy state, so an invocation does not start by
  * loading every page; and no journal kept after an invocation completes,
  * since it holds every page it read.
+ *
+ * TODO: preload the root eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
  */
 export const sqlOptions = { enableLazyState: true, journalRetention: 0 } satisfies restate.ObjectOptions;
 
 /**
  * The metadata `object` sets: Restate's UI hides the database from the
- * journal view (its commit record, log, pages and hint in the object's
- * state, `v15/...`; and the `sync` runs after its writes).
+ * journal view (its root and blobs in the object's state, `v16/...`; and
+ * the `sync` runs after its writes).
  */
 export const sqlMetadata = {
   'dev.restate.tooling.journal.hidden.names': 'sync',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v15/',
+  'dev.restate.tooling.journal.hidden.name.prefix': 'v16/',
 };
 
 // Marks the handlers made here.

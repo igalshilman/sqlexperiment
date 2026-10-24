@@ -48,19 +48,16 @@ pub struct Session {
 impl Session {
     /// Open the database of `namespace` over `store`, kept warm in the
     /// process-wide page cache. A `reader` reads the namespace beside its
-    /// owner (see [`state::Open::reader`]): without the cache, writing
-    /// nothing to the store, and [`Self::is_current`] says whether what it
-    /// read is still the stored state.
+    /// owner (see [`state::Open::reader`]): from the blobs the owner cached,
+    /// writing nothing to the store or the cache, it reads the state it
+    /// opened on throughout.
     pub async fn open(store: Arc<dyn KvStore>, namespace: &str, reader: bool) -> Result<Self> {
-        let state = match reader {
-            true => State::open(store).reader().await?,
-            false => {
-                State::open(store)
-                    .cached(&page_cache().await?, namespace)
-                    .await?
-            }
-        };
-        Self::new(state).await
+        let open = State::open(store).cached(&page_cache().await?, namespace);
+        Self::new(match reader {
+            true => open.reader().await?,
+            false => open.await?,
+        })
+        .await
     }
 
     /// A session of the database in `state`, however it was opened.
@@ -151,14 +148,6 @@ impl Session {
         let sql = self.sql.lock().await;
         let session = sql.as_ref().ok_or(CLOSED)?;
         Ok(session.state().record(EFFECTS).get())
-    }
-
-    /// Whether the store still holds the state this reader opened on, so
-    /// that what it read is: if not, read again in a new session (see
-    /// [`State::is_current`]).
-    pub async fn is_current(&self) -> Result<bool> {
-        let sql = self.sql.lock().await;
-        sql.as_ref().ok_or(CLOSED)?.is_current().await
     }
 
     /// End the session, leaving its engine to the next one. It fails if a

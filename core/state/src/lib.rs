@@ -1,78 +1,57 @@
 //! Transactional state over an asynchronous key/value store: paged files and
-//! records, changed through a write-ahead log, which a flush makes durable
-//! in one put.
+//! records, changed through a write-ahead log in memory, which a flush makes
+//! durable at once.
 //!
 //! A [`State`] is one namespace in a KV store: the state of a Restate object
 //! without Restate's journal, which keeps writes in issue order and makes
 //! them durable at a sync (see [`kv`]). It needs no multi-key transaction,
-//! compare-and-swap, listing operation or backend WAL API. Its [`File`]s are
-//! 4 KiB pages read and written at random, and its [`Record`]s whole values
-//! in the commit record. The state is read; it changes only through a
-//! [`Wal`] ([`State::wal`]): the records set and pages written there become
-//! durable together at [`Wal::flush`], and a WAL dropped discards them.
+//! compare-and-swap or listing operation. Its [`File`]s are 4 KiB pages read
+//! and written at random, and its [`Record`]s whole values. The state is
+//! read; it changes only through a [`Wal`] ([`State::wal`]): the records set
+//! and pages written there become durable together at [`Wal::flush`], and a
+//! WAL dropped discards them.
 //!
 //! What writes a WAL is a [`Participant`]: it keeps changes of its own, moves
 //! them into the WAL before the flush, and may leave state idle for the
 //! namespace's next [`State`]. The `sql` crate's database is one, on the
 //! file `db`.
 //!
-//! # When changes become durable
+//! # Copy on write
 //!
-//! At [`Wal::flush`], and only then: one put makes every record set and page
-//! written in the WAL durable together. The host decides when to flush: after
-//! each SQL transaction (as SQLite does), or once per turn of everything that
-//! took part.
+//! Nothing stored is ever changed: a flush writes what changed as new,
+//! immutable blobs, then the root, the one key it overwrites, which names
+//! them; then it syncs once. A file is stored as chunks of a few pages, each
+//! a zstd frame compressed against the chunk's base, so a flush costs about
+//! what it changed. A crash keeps a prefix of a flush's writes, so the root
+//! stored names only blobs that are there: there is no log to replay, and
+//! nothing to repair. See the private `store` module, and `docs/DESIGN.md`.
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
 //! | A WAL | Records set and pages written in it, in memory | No: dropping it discards them |
-//! | Commit record | `commit`: the log since the last checkpoint, one transaction per flush, compressed against the previous images; a large one's segments at `log/<n>` | Yes, after an acknowledged flush |
-//! | Pages | `page/<file>/<n>`, overwritten in place by checkpoints | Yes |
-//!
-//! A flush puts the record with one more transaction, usually a single put,
-//! then one sync. A WAL that changes nothing writes nothing. An error or
-//! cancellation can have an unknown outcome. Settle outstanding backend
-//! requests and reopen before deciding whether to retry application work.
-//!
-//! # Why a log and pages in place?
-//!
-//! One put is the only atomic operation the backend offers: a crash may keep
-//! some of a flush's writes and lose the ones after them. The record turns one
-//! put into a multi-page flush: a transaction is visible once a record
-//! holding it is. Because the log holds every page a checkpoint has not yet
-//! recorded, checkpoints may overwrite `page/<n>` in place, after the record:
-//! replay applies the log over whatever they left. This is SQLite's own WAL
-//! design, applied to KV keys. There is no page map, no object allocation, no
-//! intent and no orphan collection. See `docs/DESIGN.md` and the private
-//! `snapshot` and `log` modules.
-//!
-//! The costs are writing each page twice (log, then checkpoint) and replaying
-//! the log on open. A logged page costs about what changed in it since its
-//! previous image, so checkpoints can be rare. This is not MVCC: one owner
-//! reads and writes the namespace.
+//! | Root | `v16/root`: the directory, small records, and the blobs of each file's chunks | Yes, after an acknowledged flush |
+//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, or a large record; written once | Yes, until no root a reader may hold names it |
 //!
 //! # Ownership and concurrency
 //!
 //! The host grants one owner exclusive use of a namespace, including
 //! settlement of cancelled requests before reopening or handing ownership to
-//! another session. There is no distributed lock or fence here. A flush
-//! queues its record, then, when the log is long, its checkpoint, and syncs
-//! once. Open reads the record, and the stored segments its log names, if
-//! any.
+//! another session. There is no distributed lock or fence here.
 //!
-//! States of one owner may overlap when they open on the same namespace of a
-//! [`PageCache`] ([`Open::cached`]): each reads the state it opened at (a
-//! checkpoint waits while another state holds an older version), and a flush
-//! is refused if another state flushed since this one opened. Without a
-//! cache they must not overlap.
+//! Any number of states may read beside the owner ([`Open::reader`], or
+//! states of the owner that overlap in a [`PageCache`]): each reads the root
+//! it opened, a consistent snapshot, while the owner flushes, because blobs
+//! never change and are deleted only [`StateOptions::garbage_after`] flushes
+//! after the last root that named them. Only one flushes: a flush is refused
+//! if another state of the owner flushed since this one opened.
 //!
-//! The [`PageCache`] is the process's: it keeps pages in memory and on a
-//! local disk tier under one budget for every namespace it opens. It keeps
-//! them while the record's epoch (its checkpoint count) is the one they
-//! belong to, and remembers the record this owner made durable, so a
-//! steady-state open and flush are each one round trip. A participant may
-//! leave idle state there ([`Participant::park`]); the next state hands it
-//! back when nothing changed. The disk tier's I/O runs on tokio.
+//! The [`PageCache`] is the process's: it keeps blobs in memory and on a
+//! local disk tier under one budget for every namespace it opens, under
+//! their numbers, for as long as it likes: a blob never changes. It
+//! remembers the root this owner made durable, so a steady-state open and
+//! flush are each one round trip. A participant may leave idle state there
+//! ([`Participant::park`]); the next state hands it back when nothing
+//! changed. The disk tier's I/O runs on tokio.
 //!
 //! # Example
 //!
@@ -91,36 +70,26 @@
 //!
 //! # Limits
 //!
-//! Log segments are capped at [`MAX_SEGMENT_BYTES`]; larger flushes span
-//! several. A record's value is capped at [`MAX_RECORD_BYTES`], its name at
-//! [`MAX_NAME_BYTES`]. The backend is assumed to return what was stored;
-//! decoding checks structure and bounds, not checksums. Use a fresh,
-//! dedicated namespace; no migration or format discovery is implemented.
-//! Simulation and benchmark support require the opt-in `simulation` feature.
+//! A file holds at most [`MAX_FILE_BYTES`], a record's value
+//! [`MAX_RECORD_BYTES`], a name [`MAX_NAME_BYTES`]. The backend is assumed
+//! to return what was stored; decoding checks structure and bounds, and
+//! blobs' zstd frames carry a checksum. Use a fresh, dedicated namespace; no
+//! migration or format discovery is implemented. Simulation and benchmark
+//! support require the opt-in `simulation` feature.
 mod cache;
-mod format;
-mod hint;
 pub mod kv;
-mod log;
-pub mod page_codec;
+mod map;
 #[cfg(feature = "simulation")]
 pub mod simulation;
-mod snapshot;
+mod store;
 mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
+pub use store::{FlushReport, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES, ROOT_KEY};
 
-use crate::cache::NamespaceCache;
-pub use hint::MAX_HINT_PAGES;
-pub use log::{Base, MAX_NAME_BYTES, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES};
-pub use page_codec::{Page, PageCompression};
-pub use snapshot::{
-    CHECKPOINT_AFTER, CHECKPOINT_LOG_BYTES, FlushReport, INLINE_LOG_BYTES, StateOptions,
-};
-
-use crate::cache::Idle;
+use crate::cache::{Idle, NamespaceCache};
 use crate::kv::KvStore;
-use crate::snapshot::{Settings, Snapshot};
+use crate::store::Snapshot;
 use bytes::Bytes;
 use std::{
     any::Any,
@@ -139,9 +108,70 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 /// Bytes of a page of a [`File`].
 pub const PAGE_SIZE: usize = 4096;
 
+/// A page's 4096 bytes.
+pub type Page = Bytes;
+
+/// What a paged file's absent pages hold: a golden image it diverges from (a
+/// VM's memory, say). An absent page, or a hole, of a file with a base reads
+/// as the base's page (zeros past it), and its chunks are compressed against
+/// it until they have a base of their own.
+pub trait Base: Send + Sync {
+    /// Names the base: a file made with one is opened only with it again.
+    /// Below `u64::MAX`.
+    fn id(&self) -> u64;
+    /// Page `index` (4096 bytes); `None` past the base's end.
+    fn page(&self, index: u64) -> Option<&[u8]>;
+}
+
+/// Default [`StateOptions::chunk_pages`].
+pub const CHUNK_PAGES: u64 = 4;
+
+/// How a state flushes and reads. Only [`Self::chunk_pages`] and
+/// [`Self::fanout`] are stored, when the namespace is made; the others never
+/// change the stored format.
+#[derive(Clone)]
+pub struct StateOptions {
+    /// Pages per chunk, the unit a flush rewrites: smaller chunks cost less
+    /// to rebase, larger ones compress better and make a smaller root. Set
+    /// when the namespace is made; its root keeps it.
+    pub chunk_pages: u64,
+    /// Entries per node of a file's chunk map, a radix tree whose top node
+    /// the root holds: a file of up to this many chunks is mapped in the
+    /// root alone; each level more multiplies that by it, and costs a cold
+    /// read a round trip and a flush a node per path it changes. Set when
+    /// the namespace is made; its root keeps it.
+    pub fanout: u64,
+    /// A chunk's delta past this fraction of its base's stored bytes is
+    /// written as a new base instead.
+    pub rebase_ratio: f64,
+    /// Bytes of a record the root holds; a larger one is a blob of its own,
+    /// written when it changes.
+    pub inline_record_bytes: usize,
+    /// Every chunk of a file of at most this many pages is fetched at open,
+    /// alongside the root's other blobs.
+    pub prefetch_pages: u64,
+    /// Flushes after the last root that named a blob before a flush deletes
+    /// it (at least 1): a reader that opened before reads its root for as
+    /// long.
+    pub garbage_after: u64,
+}
+
+impl Default for StateOptions {
+    fn default() -> Self {
+        Self {
+            chunk_pages: CHUNK_PAGES,
+            fanout: map::FANOUT,
+            rebase_ratio: 0.25,
+            inline_record_bytes: 1024,
+            prefetch_pages: 16,
+            garbage_after: 16,
+        }
+    }
+}
+
 /// One namespace's state: its paged files and its records, as last flushed.
 /// It is read here, and changed through a [`Wal`] ([`Self::wal`]), which
-/// [`Wal::flush`] makes durable in one put. A cheap handle; clones, and the
+/// [`Wal::flush`] makes durable at once. A cheap handle; clones, and the
 /// views of [`Self::scoped`], share it.
 ///
 /// Acquire exclusive ownership of the namespace and settle the preceding
@@ -158,7 +188,8 @@ pub struct State {
 struct Shared {
     /// The durable state: as opened, then as the WALs flushed it.
     snapshot: Mutex<Arc<Snapshot>>,
-    options: Settings,
+    options: StateOptions,
+    cache: Option<NamespaceCache>,
     /// The participants that joined, by name: whether each holds changes not
     /// yet in a WAL.
     participants: Mutex<HashMap<String, bool>>,
@@ -205,7 +236,7 @@ impl Drop for Flushing<'_> {
             self.shared.poisoned.store(true, Ordering::SeqCst);
         }
         if !self.returned
-            && let Some(cache) = &self.shared.options.cache
+            && let Some(cache) = &self.shared.cache
         {
             cache.forget();
         }
@@ -215,7 +246,7 @@ impl Drop for Flushing<'_> {
 impl Drop for Shared {
     fn drop(&mut self) {
         // Idle state no participant took goes back, if nothing changed.
-        let Some(cache) = &self.options.cache else {
+        let Some(cache) = self.cache.as_ref().filter(|_| !*self.reader.get_mut()) else {
             return;
         };
         let version = self.snapshot().version();
@@ -231,9 +262,9 @@ impl Drop for Shared {
 const ENDED: &str = "the state ended after a failed or cancelled flush; open a new one";
 
 impl State {
-    /// Open the namespace over `store`: read its commit record (and the
-    /// stored values it names), recovering what a crash left, before
-    /// anything reads. Await it as it is, or set how first:
+    /// Open the namespace over `store`: read its root (and the blobs of its
+    /// large records and small files) before anything reads; a crash leaves
+    /// nothing to recover. Await it as it is, or set how first:
     ///
     /// ```no_run
     /// # use std::sync::Arc;
@@ -242,7 +273,7 @@ impl State {
     /// let state = State::open(store.clone()).await?;
     /// let state = State::open(store.clone()).cached(&cache, "object-42").await?;
     /// let state = State::open(store)
-    ///     .options(StateOptions { checkpoint_after: 8, ..StateOptions::default() })
+    ///     .options(StateOptions { garbage_after: 4, ..StateOptions::default() })
     ///     .await?;
     /// # Ok(())
     /// # }
@@ -256,9 +287,14 @@ impl State {
         }
     }
 
-    async fn open_as(store: Arc<dyn KvStore>, options: Settings, reader: bool) -> Result<Self> {
-        let snapshot = Snapshot::open(store, options.clone(), reader).await?;
-        let mut idle = match &options.cache {
+    async fn open_as(
+        store: Arc<dyn KvStore>,
+        options: StateOptions,
+        cache: Option<NamespaceCache>,
+        reader: bool,
+    ) -> Result<Self> {
+        let snapshot = Snapshot::open(store, options.clone(), cache.clone(), reader).await?;
+        let mut idle = match &cache {
             Some(cache) if snapshot.unchanged => cache.take_idle(),
             _ => HashMap::new(),
         };
@@ -267,6 +303,7 @@ impl State {
             shared: Arc::new(Shared {
                 snapshot: Mutex::new(Arc::new(snapshot)),
                 options,
+                cache,
                 participants: Mutex::default(),
                 idle: Mutex::new(idle),
                 reader: AtomicBool::new(reader),
@@ -279,10 +316,10 @@ impl State {
 
     /// The options this state opened with.
     pub fn options(&self) -> &StateOptions {
-        &self.shared.options.options
+        &self.shared.options
     }
 
-    /// The record named `name`: a whole value the commit record holds, read
+    /// The record named `name`: a whole value the root keeps, read
     /// here and set in a WAL (see [`Record`]).
     pub fn record(&self, name: &str) -> Record {
         Record {
@@ -303,9 +340,9 @@ impl State {
     /// The paged file named `name`, over `base` (see [`Base`]): an absent
     /// page, or a hole, reads as the base's page, and pages are compressed
     /// against it. A file made with a base opens only with that one again
-    /// (by [`Base::id`]); its log since the last checkpoint decodes now.
-    /// [`Self::file`] opens it without its base, to write holes and set its
-    /// length only: emptying it for another base, say.
+    /// (by [`Base::id`]). [`Self::file`] opens it without its base: it then
+    /// reads nothing, and a flush may only make whole chunks of it holes,
+    /// or cut its length.
     pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
         let file = self.file(name)?;
         let mut snapshot = self.shared.snapshot.lock().unwrap();
@@ -357,18 +394,9 @@ impl State {
         self.shared.snapshot().version()
     }
 
-    /// Whether the store still holds the state this one opened on (see
-    /// [`Open::reader`]): if it does not, what was read may mix that
-    /// state with a later checkpoint's pages, so read again in a new one. A
-    /// state's own flushes change it, so this is for one that has not
-    /// flushed.
-    pub async fn is_current(&self) -> Result<bool> {
-        Ok(self.shared.snapshot().is_current().await?)
-    }
-
     /// Whether the state opened in a [`PageCache`] ([`Open::cached`]).
     pub fn is_cached(&self) -> bool {
-        self.shared.options.cache.is_some()
+        self.shared.cache.is_some()
     }
 
     /// Whether this is a reader ([`Open::reader`]): its WALs never flush.
@@ -410,14 +438,14 @@ impl Open {
     }
 
     /// Open a reader of a namespace that another owns, alongside it: a
-    /// state that writes nothing to the store (its WALs refuse to flush)
-    /// and keeps no cache. It reads the state as of open, unless the owner
-    /// checkpoints meanwhile: [`State::is_current`], once it has read, says
-    /// whether it did.
+    /// state that writes nothing to the store (its WALs refuse to flush). It
+    /// reads the state as of open, whatever the owner flushes meanwhile, for
+    /// [`StateOptions::garbage_after`] of its flushes. With a cache
+    /// ([`Self::cached`]), it reads the blobs the owner cached, and changes
+    /// nothing there.
     pub fn reader(self) -> Self {
         Self {
             reader: true,
-            cache: None,
             ..self
         }
     }
@@ -434,20 +462,19 @@ impl IntoFuture for Open {
             cache,
             reader,
         } = self;
-        let cache = cache.filter(|_| !reader);
-        Box::pin(State::open_as(store, Settings { options, cache }, reader))
+        Box::pin(State::open_as(store, options, cache, reader))
     }
 }
 
 /// The writes ahead of a [`State`]: the records set and pages written since
 /// [`State::wal`] made it, in memory, which [`Self::flush`] makes durable
-/// together, in one put. There is no other way to change the state. A WAL
+/// together, atomically. There is no other way to change the state. A WAL
 /// dropped discards its writes; a participant that moved changes into it
 /// learns which happened from its [`Receipt`].
 pub struct Wal {
     shared: Arc<Shared>,
-    records: log::Records,
-    files: snapshot::Writes,
+    records: store::Records,
+    files: store::Writes,
     receipts: Vec<Receipt>,
     /// [`Self::flush`] took its writes: dropping discards nothing.
     taken: bool,
@@ -495,7 +522,7 @@ impl Wal {
             return Err("a page is 4096 bytes".into());
         }
         let end = page.saturating_add(1).saturating_mul(PAGE);
-        if end > log::MAX_DATABASE_BYTES {
+        if end > MAX_FILE_BYTES {
             return Err("a page past the largest file".into());
         }
         self.change(file, |written| {
@@ -509,7 +536,7 @@ impl Wal {
     /// regrowing it reads zeros (or its base's pages). Bytes of a last,
     /// partial page past `len` stay as written.
     pub fn set_len(&mut self, file: &File, len: u64) -> Result<()> {
-        if !len.is_multiple_of(512) || len > log::MAX_DATABASE_BYTES {
+        if !len.is_multiple_of(512) || len > MAX_FILE_BYTES {
             return Err(format!("invalid file length {len}").into());
         }
         self.change(file, |written| {
@@ -529,7 +556,7 @@ impl Wal {
 
     /// Change `file`'s writes with `f`, starting from none at its length as
     /// last flushed.
-    fn change(&mut self, file: &File, f: impl FnOnce(&mut snapshot::Written)) -> Result<()> {
+    fn change(&mut self, file: &File, f: impl FnOnce(&mut store::Written)) -> Result<()> {
         self.of(&file.shared)?;
         check_name(&file.name)?;
         let paged = file.shared.snapshot().is_paged(&file.name);
@@ -537,23 +564,24 @@ impl Wal {
             return Err(format!("{:?} is a record, not a paged file", file.name).into());
         }
         let size = file.len();
-        let written =
-            (self.files.entry(file.name.to_string())).or_insert_with(|| snapshot::Written {
-                size,
-                pages: Default::default(),
-                sized: false,
-            });
+        let written = (self.files.entry(file.name.to_string())).or_insert_with(|| store::Written {
+            size,
+            pages: Default::default(),
+            sized: false,
+        });
         f(written);
         Ok(())
     }
 
-    /// Make every record set and page written durable, in one put (and a
-    /// checkpoint, when the log is long), then one sync. Nothing changed:
-    /// nothing is written. It is refused while a participant holds changes
-    /// not yet in a WAL, and while another flush of the state runs; a
-    /// refused flush writes nothing, and the state goes on. `Ok` holds what
-    /// it wrote; any other error, or dropping the future, leaves the outcome
-    /// unknown and ends the state: open it again.
+    /// Make every record set and page written durable: the blobs of the
+    /// chunks and records it changes, then the root that names them, then
+    /// one sync, in one round trip. Nothing changed: nothing is written. It
+    /// is refused while a participant holds changes not yet in a WAL, while
+    /// another flush of the state runs, and for writes the state cannot
+    /// store; a refused flush writes nothing, and the state goes on. `Ok`
+    /// holds what it wrote; any other error (one refused because another
+    /// state flushed since included), or dropping the future, ends the
+    /// state: open it again.
     pub async fn flush(mut self) -> Result<FlushReport> {
         let shared = self.shared.clone();
         if shared.poisoned.load(Ordering::SeqCst) {
@@ -568,7 +596,7 @@ impl Wal {
         let snapshot = shared.snapshot();
         // What the writes checked as they were made still holds, unless
         // another WAL flushed since: refused before anything is written.
-        snapshot.check(&self.files, &self.records)?;
+        snapshot.check(&self.files, &self.records).await?;
         if shared.flushing.swap(true, Ordering::SeqCst) {
             return Err("a flush of this state is running".into());
         }
@@ -674,10 +702,10 @@ impl Participant {
     /// [`PageCache`] and is at the owner's last durable flush.
     pub fn can_park(&self) -> bool {
         let state = &self.state;
-        let Some(cache) = &state.shared.options.cache else {
+        let Some(cache) = &state.shared.cache else {
             return false;
         };
-        state.is_usable() && cache.committed() == Some(state.version())
+        !state.is_reader() && state.is_usable() && cache.committed() == Some(state.version())
     }
 
     /// Leave `value`, which corresponds to the state as last flushed, for
@@ -686,13 +714,13 @@ impl Participant {
     /// kept (see [`Self::can_park`]). The cache drops it when anything
     /// changes, or under its budget; one heavier than the whole budget is
     /// not kept. `value` must hold no handle of this state (a [`File`], a
-    /// [`Record`], the [`State`]), which would keep it open meanwhile and
-    /// hold back the namespace's checkpoints.
+    /// [`Record`], the [`State`]), which would keep it open meanwhile, on a
+    /// root whose blobs later flushes delete.
     pub fn park<T: Any + Send>(&self, value: T, weight: usize) -> std::result::Result<(), T> {
         if !self.can_park() {
             return Err(value);
         }
-        let cache = self.state.shared.options.cache.as_ref().unwrap();
+        let cache = self.state.shared.cache.as_ref().unwrap();
         let idle = Idle {
             value: Box::new(value),
             version: self.state.version(),
@@ -709,14 +737,14 @@ impl Drop for Participant {
     }
 }
 
-/// A named whole value the commit record holds, replaced whole: the host's
-/// state beside its files (a run's progress, an outbox), flushed with them
-/// in the same put. Read from the state ([`Self::get`]), set in a WAL
+/// A named whole value the root keeps, replaced whole: the host's state
+/// beside its files (a run's progress, an outbox), flushed with them in the
+/// same root. Read from the state ([`Self::get`]), set in a WAL
 /// ([`Wal::set`]). A cheap handle.
 ///
-/// A value of up to [`StateOptions::inline_log_bytes`] is in the record,
-/// which every flush rewrites; a larger one is a stored value of its own,
-/// written when it changes. Either way, opening the state reads it.
+/// A value of up to [`StateOptions::inline_record_bytes`] is in the root,
+/// which every flush rewrites; a larger one is a blob of its own, written
+/// when it changes. Either way, opening the state reads it.
 #[derive(Clone)]
 pub struct Record {
     name: Arc<str>,
@@ -744,8 +772,8 @@ impl Record {
 /// records. An absent page, never written or past the end, reads as `None`
 /// (zeros). A cheap handle.
 ///
-/// The commit record's log holds the changed pages until a checkpoint writes
-/// them in place, and the [`PageCache`] keeps them across states.
+/// Stored as chunks of [`StateOptions::chunk_pages`] pages, each a base and
+/// maybe a delta against it, which the [`PageCache`] keeps across states.
 #[derive(Clone)]
 pub struct File {
     name: Arc<str>,

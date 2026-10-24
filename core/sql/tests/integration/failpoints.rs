@@ -12,21 +12,22 @@ use std::sync::Arc;
 
 async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Db::open(Arc::new(store.clone()), StateOptions::default()).await?;
+    // A page per blob: each query reads blobs of its own.
+    let options = StateOptions {
+        chunk_pages: 1,
+        ..StateOptions::default()
+    };
+    let mut db = Db::open(Arc::new(store.clone()), options).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
     db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30) INSERT INTO t SELECT x,x,printf('%09000d',x) FROM n").await?;
     db.save().await?;
-    // Checkpoint `t` so that queries read its pages from the backend.
-    let mut db = Db::open(Arc::new(store.clone()), all()).await?;
-    db.execute("CREATE TABLE other(x)").await?;
-    assert!(db.save().await?.checkpointed_pages > 0);
     Ok(store)
 }
-fn all() -> StateOptions {
+fn collecting() -> StateOptions {
     StateOptions {
-        checkpoint_after: 0,
+        garbage_after: 1,
         ..StateOptions::default()
     }
 }
@@ -159,18 +160,18 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
     })
 }
 
-/// A flush that fails, at a write of its checkpoint or at its sync, has an
+/// A flush that fails, at a write of a blob or at its sync, has an
 /// unknown outcome: after a crash it is there only if the sync stored it.
 #[test]
 fn a_failed_flush_is_there_only_if_its_sync_stored_it() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
-        for (operation, prefix) in [(Operation::Put, "v15/page/"), (Operation::Sync, "")] {
+        for (operation, prefix) in [(Operation::Put, "v16/blob/"), (Operation::Sync, "")] {
             for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
-                // The save checkpoints the log once it has put the record.
-                let mut db = Db::open(store.clone(), all()).await?;
+                // The save puts its blobs, then its root.
+                let mut db = Db::open(store.clone(), collecting()).await?;
                 db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
                     .await?;
                 let _gate = store.arm(plan(operation, prefix, 1, effect, false));
@@ -202,10 +203,10 @@ fn open_read_failures_are_retryable() -> Result<()> {
             probe
                 .events()
                 .iter()
-                .take_while(|e| e.operation == Operation::Get)
+                .filter(|e| e.operation == Operation::Get)
                 .count()
         };
-        assert!(reads >= 2, "the record and the hint, then pages");
+        assert!(reads >= 2, "the root, then blobs");
         for nth in 1..=reads {
             for effect in [Effect::None, Effect::After] {
                 for cancel in [false, true] {
@@ -243,7 +244,7 @@ fn open_read_failures_are_retryable() -> Result<()> {
 fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let key = "v15/page/0000000000000001";
+        let key = "v16/blob/1";
         assert!(store.get(key).await?.is_none());
         store.put(key, vec![1; 4096].into())?;
         store.get(key).await?;
@@ -251,7 +252,7 @@ fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<(
         store.delete(key)?;
         store.delete(key)?;
         let s = store.stats();
-        let t = &s.by_kind["page"];
+        let t = &s.by_kind["blob"];
         assert_eq!((t.gets, t.misses, t.puts, t.deletes), (3, 1, 1, 2));
         assert_eq!(
             (t.bytes_read, t.bytes_written, t.bytes_deleted),

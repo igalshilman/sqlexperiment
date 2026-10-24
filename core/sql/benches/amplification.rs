@@ -1,7 +1,7 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
 use sql::Sql;
 use state::{
-    Result, State, StateOptions,
+    Result, State,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
 };
 use std::sync::Arc;
@@ -33,7 +33,7 @@ struct Sample {
 impl Sample {
     fn emit(&self, phase: &str, store: &MemoryKv, local_db: u64, local_wal: u64) {
         let s = store.stats();
-        for kind in ["all", "page", "log", "commit", "hint", "other"] {
+        for kind in ["all", "blob", "root", "other"] {
             let t = if kind == "all" {
                 sum(&s)
             } else {
@@ -111,23 +111,16 @@ async fn baseline(case: Case) -> Result<MemoryKv> {
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x%10, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
     save(db).await?;
-    // Steady state: a later save checkpoints the bulk load into page keys.
-    let mut db = Sql::open(
-        &State::open(Arc::new(store.clone()))
-            .options(checkpoint_all())
-            .await?,
-    )
-    .await?;
-    db.execute("CREATE TABLE other(x)").await?;
-    save(db).await?;
     store.crash();
     Ok(store)
 }
-fn checkpoint_all() -> StateOptions {
-    StateOptions {
-        checkpoint_after: 0,
-        ..StateOptions::default()
-    }
+
+/// The database's pages in `base`.
+async fn db_pages(base: &MemoryKv) -> Result<usize> {
+    let mut db = Sql::open(&State::open(Arc::new(base.fork())).await?).await?;
+    Ok(db.query("PRAGMA page_count").await?[0][0]
+        .as_int()
+        .unwrap_or(0) as usize)
 }
 
 fn read_query(op: &str, case: Case) -> String {
@@ -173,7 +166,7 @@ async fn reads(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_read: 0,
             logical_write: 0,
             logical_delete: 0,
-            db_pages: base.page_count(),
+            db_pages: db_pages(base).await?,
         };
         let mut db = Sql::open(&State::open(store.clone()).await?).await?;
         sample.emit("open", &store, 0, 0);
@@ -233,7 +226,7 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_read: 0,
             logical_write: 0,
             logical_delete: 0,
-            db_pages: base.page_count(),
+            db_pages: db_pages(base).await?,
         };
         let mut db = Sql::open(&State::open(store.clone()).await?).await?;
         sample.emit("open", &store, 0, 0);
@@ -354,22 +347,20 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     Ok(())
 }
 
-/// Crash a save, then measure the open that follows. A save opened with
-/// `checkpoint_after = 0` checkpoints the logged transaction with its commit:
-/// the record, the pages, and the record again, in one sync.
+/// Crash a save, then measure the open that follows. A save puts its blobs,
+/// then its root, in one sync.
 async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     // (operation, effect of the failed sync, writes lost, committed)
     for (op, effect, lost, committed) in [
         // Every write of the save.
         ("commit_lost", Effect::None, usize::MAX, false),
-        // The checkpoint's record: the commit and the pages are stored.
-        ("checkpoint_record_lost", Effect::None, 1, true),
+        // The root: the blobs are stored, but nothing names them.
+        ("root_lost", Effect::None, 1, false),
         // Nothing: stored, then the sync failed.
         ("sync_ack_lost", Effect::After, 0, true),
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
-        let mut db =
-            Sql::open(&State::open(store.clone()).options(checkpoint_all()).await?).await?;
+        let mut db = Sql::open(&State::open(store.clone()).await?).await?;
         db.execute(&format!(
             "UPDATE t SET payload=printf('%0{}d',0) WHERE id={}",
             case.payload,
@@ -400,7 +391,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_read: 0,
             logical_write: 0,
             logical_delete: 0,
-            db_pages: base.page_count(),
+            db_pages: db_pages(base).await?,
         };
         let mut db = Sql::open(&State::open(store.clone()).await?).await?;
         sample.emit("recovery_open", &store.inner, 0, 0);

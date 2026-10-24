@@ -212,7 +212,7 @@ Each part is a directory with its README, a workspace of its own; the
 
 - [`core/`](core): the storage every SDK builds on: the
   [`state`](core/state/README.md) (records and paged files, changed through
-  a WAL and flushed in one put) and [`sql`](core/sql/README.md) on it.
+  a WAL and flushed atomically, in one round trip) and [`sql`](core/sql/README.md) on it.
 - [`typescript/`](typescript/README.md): the Node.js addon,
   [`restate-fns`](typescript/packages/fns/README.md) (SQL in virtual objects, on the
   published SDK) and the [`restate-agents`](typescript/packages/integrations/README.md) integrations.

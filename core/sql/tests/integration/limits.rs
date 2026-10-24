@@ -84,3 +84,33 @@ fn a_transaction_within_the_limit_flushes() -> Result<()> {
         Ok(())
     })
 }
+
+/// A database is capped at the state's largest file: a statement that would
+/// grow it past the cap fails with SQLITE_FULL, and the session goes on. A
+/// lower cap stands in for 10 GiB here.
+#[test]
+fn a_statement_past_the_largest_file_fails_alone() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let largest = Some((state::MAX_FILE_BYTES / 4096) as i64);
+        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
+        let pages = db.query("PRAGMA max_page_count").await?;
+        assert_eq!(pages[0][0].as_int(), largest);
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB)")
+            .await?;
+        db.execute("PRAGMA max_page_count = 10").await?;
+        let error = db
+            .execute("INSERT INTO t VALUES(1, zeroblob(100000))")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("full"), "{error}");
+        db.execute("INSERT INTO t VALUES(2, zeroblob(1000))")
+            .await?;
+        db.save().await?;
+        let mut db = Db::open(store, StateOptions::default()).await?;
+        let pages = db.query("PRAGMA max_page_count").await?;
+        assert_eq!(pages[0][0].as_int(), largest, "a session's own cap");
+        assert_eq!(db.query("SELECT id FROM t").await?.len(), 1);
+        Ok(())
+    })
+}

@@ -43,17 +43,12 @@ harness = false
 required-features = ["simulation"]
 
 [[bench]]
-name = "page_compression"
-harness = false
-required-features = ["simulation"]
-
-[[bench]]
 name = "small_databases"
 harness = false
 required-features = ["simulation"]
 
 [[bench]]
-name = "log_shipping"
+name = "flush_costs"
 harness = false
 required-features = ["simulation"]
 

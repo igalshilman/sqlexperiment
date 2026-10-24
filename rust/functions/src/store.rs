@@ -1,12 +1,13 @@
 //! Where a scope's runs and KV live: a state (the `state` crate) in a key/value
 //! store (in Restate, the object's state; in tests, a `MemoryKv`). A turn is
 //! one flush of it: the run's progress and each participant's in records, the
-//! pages the turn changed in the memory file, and the KV writes as SQL, in
-//! one put.
-//! Writes may land in any order; a write counts once it is acknowledged.
+//! pages the turn changed in the memory file, and the KV writes as SQL: their
+//! blobs, then the root that names them, then one sync.
+//! The store keeps writes in issue order, so a crash keeps a prefix of them:
+//! a root is never stored without the blobs it names.
 use crate::extension::Extensions;
 use anyhow::Result;
-use state::{PageCache, State, StateOptions, kv::KvStore};
+use state::{PageCache, State, kv::KvStore};
 use std::sync::Arc;
 
 /// A scope's storage: the store its database lives in, and, for a process
@@ -46,13 +47,7 @@ impl Scope {
     /// Open the scope's state: its SQL, memory and records durable together
     /// at each turn's flush.
     pub(crate) async fn open(&self) -> Result<State> {
-        let options = StateOptions {
-            // A turn changes a few pages: a small inline log keeps the record
-            // each turn rewrites small.
-            inline_log_bytes: 1024,
-            ..StateOptions::default()
-        };
-        let open = State::open(self.store.clone()).options(options);
+        let open = State::open(self.store.clone());
         let open = match &self.cache {
             Some((cache, namespace)) => open.cached(cache, namespace),
             None => open,

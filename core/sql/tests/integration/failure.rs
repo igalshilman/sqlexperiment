@@ -23,9 +23,9 @@ struct ControlledKv {
 impl KvStore for ControlledKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
-            if key.contains("/page/") {
+            if key.starts_with("v16/blob/") {
                 if self.fail_reads.load(Ordering::SeqCst) {
-                    return Err(io::Error::other("injected page-read failure"));
+                    return Err(io::Error::other("injected blob-read failure"));
                 }
                 let signal = self.gate.lock().unwrap().take();
                 if let Some(signal) = signal {
@@ -53,32 +53,24 @@ async fn populated() -> Result<Arc<ControlledKv>> {
         fail_reads: AtomicBool::new(false),
         gate: Mutex::new(None),
     });
-    let mut db = Db::open(store.clone(), StateOptions::default()).await?;
+    // A page per blob, so reading `t` reads a blob of its own.
+    let options = StateOptions {
+        chunk_pages: 1,
+        ..StateOptions::default()
+    };
+    let mut db = Db::open(store.clone(), options).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
         .await?;
     db.execute("INSERT INTO t VALUES(1,10)").await?;
     db.checkpoint().await?;
     db.save().await?;
-    // A save that checkpoints the log, so reading `t` goes to the backend,
-    // then one that leaves the schema page in the log, for open to read.
-    let all = StateOptions {
-        checkpoint_after: 0,
-        ..StateOptions::default()
-    };
-    let mut db = Db::open(store.clone(), all).await?;
-    db.execute("CREATE TABLE other(x)").await?;
-    db.save().await?;
-    let mut db = Db::open(store.clone(), StateOptions::default()).await?;
-    db.execute("CREATE TABLE another(x)").await?;
-    db.save().await?;
     Ok(store)
 }
 
-/// Page reads happen during the query, not at open.
+/// Blob reads happen during the query, not at open.
 fn no_prefetch() -> StateOptions {
     StateOptions {
         prefetch_pages: 0,
-        hint_pages: 0,
         ..StateOptions::default()
     }
 }
@@ -87,11 +79,12 @@ fn no_prefetch() -> StateOptions {
 fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
     futures::executor::block_on(async {
         let store = populated().await?;
-        store.fail_reads.store(true, Ordering::SeqCst);
+        // Open reads the schema page; the query reads the table's.
         let mut db = Db::open(store.clone(), no_prefetch()).await?;
+        store.fail_reads.store(true, Ordering::SeqCst);
         match db.query("SELECT n FROM t").await {
             Ok(_) => panic!("expected injected failure"),
-            Err(e) => assert!(e.to_string().contains("injected page-read failure")),
+            Err(e) => assert!(e.to_string().contains("injected blob-read failure")),
         }
         drop(db);
         store.fail_reads.store(false, Ordering::SeqCst);

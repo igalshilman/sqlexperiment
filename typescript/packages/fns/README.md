@@ -53,10 +53,10 @@ below). It commits when `body` resolves and rolls back when it rejects. A
 library that brings its own transactions uses `ctx.db.transaction`.
 
 An attempt has one session. It opens on the first call to `ctx.db` or
-`ctx.transaction` (a read of the commit record, with the log inline), stays
-open while the handler runs, however many calls it makes, and is saved when
-the handler ends. A transaction commits with one state write, of the commit
-record, and is durable when the statement or `ctx.transaction` that commits
+`ctx.transaction` (a read of the database's root), stays open while the
+handler runs, however many calls it makes, and is saved when the handler
+ends. A transaction commits with one write of the root, after the blobs it
+names, and is durable when the statement or `ctx.transaction` that commits
 it resolves: the SDK waits for an empty `ctx.run` after the write. A library
 that wants a database for the handler's work gets `ctx.db`: the
 [pi integration](../integrations/src/pi/README.md) runs pi-durable's storage
@@ -91,8 +91,8 @@ ctx.transaction(async ({ db, tx }) => {
 });
 ```
 
-The sends commit with the transaction, in the same write: the commit record
-holds them (its _effects_, opaque to the storage), as the database's outbox.
+The sends commit with the transaction, in the same write: the root holds
+them (its _effects_, opaque to the storage), as the database's outbox.
 Once the commit is done the SDK makes them, each with an idempotency key of
 the transaction, `transaction/<id>/<index>` (or the send's own key), with a
 random id of the transaction. Restate keeps an attempt's commands in the
@@ -156,21 +156,21 @@ The store is the object's state: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear` (each named after its key), and `sync` is an empty
 `ctx.run`.
 
-**The database is the object's state.** Its keys (`v15/commit`, `v15/log/…`,
-`v15/page/…`, `v15/hint`) sit next to the object's other state keys, so
-`ctx.clearAll()` in any handler of the object deletes the database, a handler's
-own key starting with `v15/` corrupts it, and `ctx.stateKeys()` lists its
-pages. Keep other state out of `v15/`, and do not clear all of an object that
-uses `ctx.db`. (Reserving these keys in the SDK is future work.)
+**The database is the object's state.** Its keys (`v16/root`, `v16/blob/…`)
+sit next to the object's other state keys, so `ctx.clearAll()` in any handler
+of the object deletes the database, a handler's own key starting with `v16/`
+corrupts it, and `ctx.stateKeys()` lists its blobs. Keep other state out of
+`v16/`, and do not clear all of an object that uses `ctx.db`. (Reserving
+these keys in the SDK is future work.)
 
 **One cluster per process.** The page cache knows a database by its namespace,
-`service/key`, and trusts what it cached while the database's commit record
-is the one it left; nothing identifies the database itself. A process
+`service/key`, and trusts a blob it cached under its number, which never
+changes in one database; nothing identifies the database itself. A process
 registered with two Restate clusters (staging and production, or a dev
 cluster wiped and recreated) could take one cluster's `Ledger/bank` for the
 other's and serve its cached pages. Run one process per cluster, or give each
 its own `RESTATE_SQL_CACHE_FILE` and restart it after recreating a cluster.
-(A database id in the commit record is future work.)
+(A database id in the root is future work.)
 
 ## How it works
 
@@ -180,29 +180,27 @@ the invocation started with it (lazy state, so an invocation does not start
 by loading every page). A set or clear is a state write, and returns at once.
 Restate keeps an attempt's writes, and its sends, in the order they were
 made: a crash loses a suffix of them, never a write without the ones before
-it. Each transaction is one write, of the commit record, which holds the log
-since the last checkpoint (a large transaction's log also goes to segments,
-written before the record). A checkpoint writes the pages after that record,
-then the record that no longer needs the log. Then one empty `ctx.run` waits
-until all of it is stored: a commit is one round trip. Whatever prefix a crash
-keeps, the stored record names only what is stored, and its log covers the
-pages a checkpoint rewrote.
+it. A transaction writes the chunks of pages it changed as new blobs, which
+are never overwritten, then the root, which names them: the commit point.
+Then one empty `ctx.run` waits until all of it is stored: a commit is one
+round trip. Whatever prefix a crash keeps, the stored root names only blobs
+that are stored.
 
 **The page cache.** The process's page cache keeps the pages it read and
-wrote, with the commit record they belong to, for the object's next
-invocation. A session opens on them only when the stored record is the one
-the cache saw last; any other record, such as one a crashed attempt in
-another process wrote, makes it read the pages again.
+wrote, as the blobs that hold them, for the object's next invocation. A blob
+never changes once a root names it, so the cache keeps it under its number
+and never invalidates it: a session reads the stored root, then the blobs it
+names that the cache lacks.
 
 **No journal replay.** On a retry or a resume, the SDK normally replays the
 journal: each operation returns its recorded result and must match it. That
-cannot work here, since a later attempt makes different reads (the page cache,
-the log length and the other owners' checkpoints all differ). With explicit
+cannot work here: a later attempt makes different reads, since what it
+fetches depends on what the page cache holds. With explicit
 recovery (`restate.internal.explicitRecovery()`, which the handlers here
 have) the SDK skips the recorded journal: the handler runs again from the
 start against the state as it is. Recovery is then the storage
-protocol's: open reads the commit record, so a lost commit or checkpoint from
-the crashed attempt is as if it never started.
+protocol's: open reads the root, so a lost commit from the crashed attempt is
+as if it never started.
 
 **One owner.** The protocol needs one writer per namespace. Restate runs one
 exclusive invocation per object key at a time, and one attempt of it at a
@@ -345,9 +343,10 @@ A shared handler's `ctx.db` is the object's database as stored, read beside
 the exclusive handler, which may commit meanwhile (a chat UI's read of a
 conversation while the agent works, say). It opens as of its first call, and
 writes nothing: what the handler writes stays in its session, and is never
-stored. If the exclusive handler commits while it reads, the attempt fails
-when the handler ends, and Restate retries it, so what a shared handler
-returns was the stored state ([the reader](../../../core/state/docs/DESIGN.md#readers)).
+stored. It reads the state as of that call, a snapshot, whatever the
+exclusive handler commits meanwhile; only a shared handler that outlives 16
+of the exclusive handler's commits fails, and Restate retries it
+([the reader](../../../core/state/docs/DESIGN.md#readers)).
 `ctx.transaction` is the exclusive handlers'.
 
 ```ts

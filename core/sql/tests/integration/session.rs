@@ -13,13 +13,12 @@ use state::{
 };
 use std::sync::Arc;
 
-/// Pages read from the store as queries need them; the log checkpointed often.
+/// Pages read from the store as queries need them; garbage deleted soon.
 fn options(cache: Option<Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
-            checkpoint_after: 3,
+            garbage_after: 3,
             prefetch_pages: 0,
-            hint_pages: 0,
             ..StateOptions::default()
         },
         cache,
@@ -70,7 +69,7 @@ async fn baseline() -> Result<MemoryKv> {
         insert_pair(&session, i).await?;
     }
     session.commit(Some(effects(20))).await?;
-    // Checkpoints write the pages in place, where queries read them.
+    // More flushes: deltas over the chunks' bases, read from the store.
     session.query("CREATE TABLE a(x)", None).await?;
     for k in 0..4 {
         session
@@ -311,10 +310,11 @@ async fn expected(store: MemoryKv, sql: &str) -> Result<String> {
     Ok(format!("{:?}", session.query(sql).await?))
 }
 
-/// A reader beside its owner, who flushes and checkpoints meanwhile, some
-/// flushes failing, while some of the reader's reads fail too. What a reader
-/// reads is the state it opened on, as long as `is_current` says so; once
-/// the owner flushes, it no longer does.
+/// A reader beside its owner, who flushes meanwhile, some flushes failing,
+/// while some of the reader's reads fail too. What a reader reads is the
+/// state it opened on, however the owner flushes: the blobs its root names
+/// stay for `garbage_after` flushes. Every other reader reads through the
+/// owner's cache, which it changes nothing in.
 #[test]
 fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
     futures::executor::block_on(async {
@@ -329,7 +329,6 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
             insert_pair(&owner, i).await?;
         }
         owner.commit(None).await?;
-        // Checkpoints write the pages in place, where readers read them.
         owner.query("CREATE TABLE a(x)", None).await?;
         for k in 0..4 {
             owner
@@ -341,17 +340,18 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
             "SELECT id, n, substr(body, -3) FROM t WHERE id BETWEEN 30 AND 50 ORDER BY id",
             "SELECT id, n FROM t WHERE id >= 100 ORDER BY id",
         ];
-        let (mut stale, mut current, mut faults) = (0, 0, 0);
+        let (mut before, mut after, mut faults) = (0, 0, 0);
         for round in 0..24u64 {
             let snapshot = memory.fork();
             let reader_store = Arc::new(FaultKv::new(memory.clone(), round));
+            let shared = (round % 2 == 1 && round % 5 != 0).then(|| cache.clone());
             let reader =
-                Session::new(options(None).open(reader_store.clone()).reader().await?).await?;
+                Session::new(options(shared).open(reader_store.clone()).reader().await?).await?;
             // Now and then its first read fails, which ends it.
             if round % 5 == 0 {
                 let plan = failpoint(
                     Operation::Get,
-                    "v15/page/",
+                    "v16/blob/",
                     1 + round as usize % 3,
                     Effect::None,
                     round % 2 == 0,
@@ -372,7 +372,6 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
                 format!("{:?}", first.1),
                 expected(snapshot.fork(), queries[0]).await?
             );
-            assert!(reader.is_current().await?, "round {round}: nobody flushed");
             // The owner flushes `round % 4` times, one flush failing.
             let mut flushed = false;
             for k in 0..round % 4 {
@@ -382,7 +381,7 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
                 if k == 1 {
                     let plan = failpoint(
                         Operation::Put,
-                        "v15/commit",
+                        "v16/root",
                         1,
                         [Effect::None, Effect::After][round as usize % 2],
                         false,
@@ -397,36 +396,20 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
                     flushed = true;
                 }
             }
-            if flushed {
-                assert!(
-                    !reader.is_current().await?,
-                    "round {round}: the owner flushed"
-                );
-            }
-            // The reader reads on.
+            // The reader reads on, the state it opened on.
             for sql in queries {
-                let read = reader.query(sql, None).await;
-                let same = match &read {
-                    Ok((_, rows)) => format!("{rows:?}") == expected(snapshot.fork(), sql).await?,
-                    Err(_) => false,
-                };
-                let is_current = reader.is_current().await?;
-                assert!(
-                    same || !is_current,
-                    "round {round}, {sql}: {read:?} while current"
-                );
-                if is_current {
-                    current += 1;
-                } else {
-                    stale += 1;
+                let (_, rows) = reader.query(sql, None).await?;
+                let opened = expected(snapshot.fork(), sql).await?;
+                assert_eq!(format!("{rows:?}"), opened, "round {round}, {sql}");
+                match flushed {
+                    true => after += 1,
+                    false => before += 1,
                 }
             }
             reader.close().await;
         }
-        println!(
-            "reader: {current} current reads, {stale} after the owner flushed, {faults} faults"
-        );
-        assert!(current > 0 && stale > 0 && faults > 0);
+        println!("reader: {before} reads, {after} after the owner flushed, {faults} faults");
+        assert!(before > 0 && after > 0 && faults > 0);
         Ok(())
     })
 }

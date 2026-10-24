@@ -14,7 +14,7 @@ class Backend:
     def __init__(self, seed=None):
         self.stored = {}
         self.unconfirmed = []
-        # Which unsynced writes a failure keeps: none, or a random subset.
+        # Which unsynced writes a failure keeps: none, or a random prefix.
         self.random = None if seed is None else random.Random(seed)
 
     def confirm(self):
@@ -26,9 +26,9 @@ class Backend:
         self.unconfirmed.clear()
 
     def lose(self):
-        """A failure: the store keeps some of the unsynced writes, in no order (worse than the contract)."""
-        kept = [write for write in self.unconfirmed if self.random is not None and self.random.random() < 0.5]
-        self.unconfirmed = kept
+        """A failure: the store keeps a prefix of the unsynced writes, as Restate does."""
+        kept = 0 if self.random is None else self.random.randint(0, len(self.unconfirmed))
+        del self.unconfirmed[kept:]
         self.confirm()
 
     def request(self, fails=False):
@@ -118,7 +118,7 @@ async def test_an_sql_error_leaves_the_session_usable_and_a_transaction_rolls_ba
 
 async def consistent_after_loss(lost, seed):
     """Requests insert a row each; request ``lost`` fails, its sync losing some
-    of its writes (none kept, or a subset by ``seed``). The owner and a process
+    of its writes (none kept, or a prefix by ``seed``). The owner and a process
     without cached state must then read the rows of the other requests, and the
     lost one's only if both do."""
     backend = Backend(seed)
@@ -361,13 +361,13 @@ async def test_a_statement_that_commits_completes_once_its_writes_are_stored_how
     backend = Backend()
     db = await restate_sql.open(fresh(), backend.request())
     await db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)")
-    # Thousands of page writes, each scheduled on the loop.
+    # Thousands of page writes, hundreds of blobs, each scheduled on the loop.
     await db.execute(
         "INSERT INTO t(b) SELECT randomblob(3000) FROM "
         "(WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c)"
     )
     assert backend.unconfirmed == []
-    assert len(backend.stored) > 1000
+    assert len(backend.stored) > 500
     await db.save()
 
 
@@ -403,7 +403,7 @@ class ReadOnly(Request):
         raise AssertionError("a reader writes nothing")
 
 
-async def test_a_reader_reads_beside_the_writer_and_knows_when_it_is_stale():
+async def test_a_reader_reads_the_state_it_opened_on_beside_the_writer():
     backend = Backend()
     ns = fresh()
     writer = await restate_sql.open(ns, backend.request())
@@ -412,19 +412,17 @@ async def test_a_reader_reads_beside_the_writer_and_knows_when_it_is_stale():
 
     reader = await restate_sql.open(ns, ReadOnly(backend, False), reader=True)
     assert await reader.query("SELECT n FROM t") == [[1]]
-    assert await reader.is_current()
     # It commits no effects.
     with pytest.raises(RuntimeError, match="a reader commits no effects"):
         async with reader.transaction() as tx:
             tx.commit_effects(b"sends")
     assert await reader.effects() == b""
-    # The writer commits again: what the reader read is no longer the stored state.
+    # The writer commits again: the reader reads on, the state it opened on.
     await writer.execute("INSERT INTO t VALUES (2)")
-    assert not await reader.is_current()
+    assert await reader.query("SELECT n FROM t") == [[1]]
     await reader.close()
 
     again = await restate_sql.open(ns, ReadOnly(backend, False), reader=True)
     assert await again.query("SELECT n FROM t ORDER BY n") == [[1], [2]]
-    assert await again.is_current()
     await again.close()
     await writer.save()

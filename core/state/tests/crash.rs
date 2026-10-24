@@ -1,7 +1,7 @@
 //! A crash at every write of every flush of a sequence that sets records
-//! (inline and stored), writes several files (one with a base), shrinks one,
-//! seals the log, checkpoints and deletes garbage: each flush is atomic,
-//! durable once its commit record is, and the state goes on.
+//! (inline and in blobs), writes several files (one with a base), shrinks
+//! one, rebases chunks and deletes garbage: each flush is atomic, durable
+//! once its root is, and the state goes on.
 #![cfg(feature = "simulation")]
 mod support;
 
@@ -9,26 +9,26 @@ use state::{Base, Result, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
-const COMMIT: &str = "v15/commit";
 /// Flushes in the sequence.
 const STEPS: u64 = 10;
 
 fn options(cache: Option<Namespace>) -> Setup {
     Setup {
         options: StateOptions {
-            checkpoint_after: 3,
-            inline_log_bytes: 150,
+            chunk_pages: 2,
+            fanout: 2,
+            rebase_ratio: 0.5,
+            inline_record_bytes: 150,
             prefetch_pages: 0,
-            hint_pages: 8,
-            ..StateOptions::default()
+            garbage_after: 1,
         },
         cache,
     }
 }
 
-/// The changes of flush `step`: small ones (an inline log, which seals once
-/// it outgrows the budget), large ones (stored values), records over the
-/// budget, holes, a shrink, and a page equal to its base's.
+/// The changes of flush `step`: small ones (deltas), large ones (rebases),
+/// records over the inline budget, holes, a shrink, and a page equal to its
+/// base's.
 fn changes(step: u64) -> Vec<Op> {
     let mut rng = Rng::new(step);
     let image = |rng: &mut Rng| match step % 3 {
@@ -55,7 +55,8 @@ fn changes(step: u64) -> Vec<Op> {
     ops
 }
 
-/// Open a session and read a few pages, for the working-set hint.
+/// Open a session and read a few pages, so that a flush finds their chunks
+/// decoded.
 async fn session(store: Arc<dyn KvStore>, cache: Option<Namespace>) -> Result<Session> {
     let session = Session::open(store, options(cache)).await?;
     for name in FILES {
@@ -89,9 +90,9 @@ fn a_flush_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
                 fault.disarm();
                 drop(failing);
                 let writes = fault.inner.unsynced();
-                let record = writes.iter().position(|(key, _)| key == COMMIT).unwrap();
+                let record = writes.iter().position(|(key, _)| key == ROOT_KEY).unwrap();
                 for (key, value) in &writes {
-                    let kind = key.split('/').nth(1).unwrap_or_default();
+                    let kind = object_kind(key);
                     kinds.insert(format!(
                         "{kind} {}",
                         if value.is_some() { "put" } else { "delete" }
@@ -141,14 +142,7 @@ fn a_flush_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
         }
         // The sequence covers every kind of write a flush makes.
         let kinds: Vec<_> = kinds.into_iter().collect();
-        let expected = [
-            "commit put",
-            "hint put",
-            "log delete",
-            "log put",
-            "page delete",
-            "page put",
-        ];
+        let expected = ["blob delete", "blob put", "root put"];
         assert_eq!(kinds, expected);
         println!("crashed flushes: {cases} cases");
         Ok(())

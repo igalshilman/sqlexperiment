@@ -21,7 +21,7 @@ async fn create(store: Arc<dyn KvStore>, options: StateSetup) -> Result<()> {
     let mut db = Db::open(store, options).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT)")
         .await?;
-    // Incompressible: a large save that checkpoints itself through the cache.
+    // Incompressible: a large save, of more blobs than a small cache holds.
     db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<400) INSERT INTO t SELECT x,randomblob(900) FROM n").await?;
     db.save().await?;
     Ok(())
@@ -46,20 +46,20 @@ fn an_owner_cache_serves_reopened_sessions_in_one_round_trip() -> Result<()> {
         assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
         let stats = store.inner.stats();
         assert_eq!(store.round_trips(), 1, "meta and probe together: {stats:?}");
-        assert_eq!((stats.kind("page").gets, stats.puts), (0, 0));
+        assert_eq!((stats.kind("blob").gets, stats.puts), (0, 0));
 
         store.inner.reset_stats();
         assert_eq!(
             payload_sum(store.clone(), StateOptions::default().into()).await?,
             expected
         );
-        assert!(store.inner.stats().kind("page").gets > 0);
+        assert!(store.inner.stats().kind("blob").gets > 0);
         Ok(())
     })
 }
 
-/// Another writer that checkpoints changes `meta`, and the owner refreshes or
-/// drops its cache; one that only appends is overridden by the log.
+/// Writers without the cache, deleting garbage at once or late, never leave
+/// the owner's cache stale: it keeps blobs by number, which never change.
 #[test]
 fn other_writers_never_leave_the_cache_stale() -> Result<()> {
     futures::executor::block_on(async {
@@ -68,9 +68,9 @@ fn other_writers_never_leave_the_cache_stale() -> Result<()> {
         create(store.clone(), cached(&cache)).await?;
         let mut expected = 400 * 900 + 400 * 401 / 2;
         assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
-        for (round, checkpoint_after) in [(0, 0), (1, 100), (2, 100), (3, 0)] {
+        for (round, garbage_after) in [(0, 1), (1, 16), (2, 16), (3, 1)] {
             let other = StateOptions {
-                checkpoint_after,
+                garbage_after,
                 ..StateOptions::default()
             };
             let mut db = Db::open(store.clone(), other).await?;
@@ -144,10 +144,11 @@ fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
         assert_eq!(count(&mut db).await?, 1);
         drop(db);
 
-        // Another writer appends, then checkpoints: both force a fresh engine.
-        for checkpoint_after in [100, 0] {
+        // Another writer's flush forces a fresh engine, whenever its garbage
+        // goes.
+        for (expected, garbage_after) in [(2, 16), (3, 1)] {
             let other = StateOptions {
-                checkpoint_after,
+                garbage_after,
                 ..StateOptions::default()
             };
             let mut db = Db::open(store.clone(), other).await?;
@@ -156,7 +157,6 @@ fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
             db.save().await?;
             let mut db = Db::open(store.clone(), owner(&cache)).await?;
             assert!(!db.reused_engine(), "another writer");
-            let expected = if checkpoint_after == 0 { 3 } else { 2 };
             assert_eq!(count(&mut db).await?, expected);
             drop(db);
             let db = Db::open(store.clone(), owner(&cache)).await?;
@@ -168,7 +168,7 @@ fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v15/commit".into(),
+            key_prefix: "v16/root".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,
@@ -182,27 +182,19 @@ fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
     })
 }
 
-/// A brief other owner that does not checkpoint leaves this owner's cache
-/// warm: the log it appended overrides the cached pages. Once it checkpoints
-/// (and deletes the log), the cache drops its pages.
+/// Another owner's saves cost this owner's cache only the blobs they wrote:
+/// every other blob is unchanged, so still cached.
 #[test]
-fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
+fn another_owner_costs_the_cache_only_what_it_wrote() -> Result<()> {
     futures::executor::block_on(async {
-        for (saves, warm) in [(3, true), (6, false)] {
+        for saves in [1, 6] {
             let store = Arc::new(LatencyKv::new(MemoryKv::default()));
             let cache = fresh_namespace();
             create(store.clone(), cached(&cache)).await?;
             let other = fresh_namespace();
+            store.inner.reset_stats();
             for n in 0..saves {
-                // Its fifth save checkpoints.
-                let options = StateSetup {
-                    options: StateOptions {
-                        checkpoint_after: 4,
-                        ..StateOptions::default()
-                    },
-                    ..cached(&other)
-                };
-                let mut db = Db::open(store.clone(), options).await?;
+                let mut db = Db::open(store.clone(), cached(&other)).await?;
                 db.execute(&format!(
                     "UPDATE t SET payload = printf('%0800d', id) WHERE id = {}",
                     n * 31 + 1
@@ -210,11 +202,15 @@ fn a_brief_other_owner_leaves_the_cache_warm() -> Result<()> {
                 .await?;
                 db.save().await?;
             }
+            let written = store.inner.stats().kind("blob").puts;
             store.inner.reset_stats();
             let expected = 400 * 900 + 400 * 401 / 2 - 100 * saves;
             assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
-            let page_gets = store.inner.stats().kind("page").gets;
-            assert_eq!(page_gets == 0, warm, "{saves} saves: {page_gets} page gets");
+            let fetched = store.inner.stats().kind("blob").gets;
+            assert!(
+                0 < fetched && fetched <= written,
+                "{saves} saves: {fetched} blobs fetched of {written} written"
+            );
         }
         Ok(())
     })
@@ -231,7 +227,7 @@ fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
             .collect();
         let options = |n: usize| StateSetup {
             options: StateOptions {
-                checkpoint_after: 0,
+                garbage_after: 1,
                 ..StateOptions::default()
             },
             cache: Some(Namespace::new(cache, &format!("shared-{n}"))),
@@ -262,23 +258,28 @@ fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
     })
 }
 
-/// Pages evicted from memory are served from disk.
+/// Blobs evicted from memory are served from disk.
 #[test]
-fn evicted_pages_are_read_from_disk() -> Result<()> {
+fn evicted_blobs_are_read_from_disk() -> Result<()> {
     use state::simulation::{cache_config, open_cache};
     futures::executor::block_on(async {
-        let cache = open_cache(cache_config(64 << 10, 64 << 20));
+        // Room for a few blobs (of a chunk each) per shard, not the table.
+        let cache = open_cache(cache_config(256 << 10, 64 << 20));
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
         let namespace = Namespace::new(&cache, "spilled");
         create(store.clone(), cached(&namespace)).await?;
-        assert!(cache.memory_bytes() <= 64 << 10);
+        assert!(
+            cache.memory_bytes() <= 256 << 10,
+            "{}",
+            cache.memory_bytes()
+        );
         store.inner.reset_stats();
         let expected = 400 * 900 + 400 * 401 / 2;
         assert_eq!(
             payload_sum(store.clone(), cached(&namespace)).await?,
             expected
         );
-        assert_eq!(store.inner.stats().kind("page").gets, 0);
+        assert_eq!(store.inner.stats().kind("blob").gets, 0);
         Ok(())
     })
 }

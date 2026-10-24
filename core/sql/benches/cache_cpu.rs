@@ -1,7 +1,6 @@
 //! CPU time, allocations and cache misses of a long-lived owner, by cache size.
 //!
-//! A 10,000-row table with JSON payloads (half random hex) is bulk loaded and
-//! checkpointed.
+//! A 10,000-row table with JSON payloads (half random hex) is bulk loaded.
 //! Each measured session opens, runs four skewed point lookups (90% within a
 //! hot tenth of the rows) and a 50-row range scan; every tenth session also
 //! updates a row and saves. All sessions share one `PageCache`, whose memory is
@@ -11,7 +10,7 @@
 //! median of the repeats.
 use sql::Sql;
 use state::{
-    PageCache, PageCacheConfig, Result, State, StateOptions,
+    PageCache, Result, State,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
 };
@@ -74,14 +73,6 @@ async fn baseline() -> Result<(MemoryKv, u64)> {
     ))
     .await?;
     save(db).await?;
-    // Checkpoint the bulk load into page keys, as a steady state would.
-    let all = StateOptions {
-        checkpoint_after: 0,
-        ..StateOptions::default()
-    };
-    let mut db = Sql::open(&State::open(kv.clone()).options(all).await?).await?;
-    db.execute("CREATE TABLE other(x)").await?;
-    save(db).await?;
     let pages = Sql::open(&State::open(kv).await?)
         .await?
         .io_stats()
@@ -131,7 +122,7 @@ async fn session(store: &Store, cache: &PageCache, n: u64, state: &mut u64) -> R
 }
 
 struct Sample {
-    page_gets: u64,
+    blob_gets: u64,
     round_trips: u64,
     allocations: u64,
     allocated: u64,
@@ -139,12 +130,9 @@ struct Sample {
     micros: u128,
 }
 
-async fn run(base: &MemoryKv, mode: &str, capacity: usize) -> Result<Sample> {
+async fn run(base: &MemoryKv, capacity: usize) -> Result<Sample> {
     let store: Store = Arc::new(LatencyKv::new(base.fork()));
-    let cache = open_cache(PageCacheConfig {
-        decoded: mode == "decoded",
-        ..cache_config(capacity, 1 << 30)
-    });
+    let cache = open_cache(cache_config(capacity, 1 << 30));
     let mut state = 7;
     for n in 0..WARMUP {
         session(&store, &cache, n + 1, &mut state).await?;
@@ -158,7 +146,7 @@ async fn run(base: &MemoryKv, mode: &str, capacity: usize) -> Result<Sample> {
     }
     let micros = started.elapsed().as_micros();
     Ok(Sample {
-        page_gets: store.inner.stats().kind("page").gets,
+        blob_gets: store.inner.stats().kind("blob").gets,
         round_trips: store.round_trips(),
         allocations: ALLOCATIONS.load(Relaxed) - allocations,
         allocated: ALLOCATED.load(Relaxed) - allocated,
@@ -172,45 +160,38 @@ fn main() -> Result<()> {
         .skip(1)
         .find(|arg| !arg.starts_with('-'))
         .map_or(Ok(3), |arg| arg.parse())?;
-    let modes: Vec<String> = std::env::var("CACHE_MODES")
-        .unwrap_or_else(|_| "encoded,decoded".into())
-        .split(',')
-        .map(str::to_owned)
-        .collect();
     futures::executor::block_on(async {
         let (base, pages) = baseline().await?;
         let logical = pages as usize * 4096;
         println!(
-            "mode,capacity_fraction,capacity_bytes,db_pages,sessions,page_gets,round_trips,allocations,allocated_bytes,cache_bytes,median_micros"
+            "capacity_fraction,capacity_bytes,db_pages,sessions,blob_gets,round_trips,allocations,allocated_bytes,cache_bytes,median_micros"
         );
-        for mode in &modes {
-            for fraction in FRACTIONS {
-                let capacity = (logical as f64 * fraction) as usize;
-                let mut samples = Vec::new();
-                for _ in 0..repeats {
-                    samples.push(run(&base, mode, capacity).await?);
-                }
-                let first = &samples[0];
-                for s in &samples[1..] {
-                    // Memory use depends on the disk tier's timing; traffic does not.
-                    assert_eq!(
-                        (s.page_gets, s.round_trips),
-                        (first.page_gets, first.round_trips),
-                        "counters must not vary"
-                    );
-                }
-                let mut micros: Vec<_> = samples.iter().map(|s| s.micros).collect();
-                micros.sort();
-                println!(
-                    "{mode},{fraction},{capacity},{pages},{SESSIONS},{},{},{},{},{},{}",
-                    first.page_gets,
-                    first.round_trips,
-                    first.allocations,
-                    first.allocated,
-                    first.cache_bytes,
-                    micros[micros.len() / 2]
+        for fraction in FRACTIONS {
+            let capacity = (logical as f64 * fraction) as usize;
+            let mut samples = Vec::new();
+            for _ in 0..repeats {
+                samples.push(run(&base, capacity).await?);
+            }
+            let first = &samples[0];
+            for s in &samples[1..] {
+                // Memory use depends on the disk tier's timing; traffic does not.
+                assert_eq!(
+                    (s.blob_gets, s.round_trips),
+                    (first.blob_gets, first.round_trips),
+                    "counters must not vary"
                 );
             }
+            let mut micros: Vec<_> = samples.iter().map(|s| s.micros).collect();
+            micros.sort();
+            println!(
+                "{fraction},{capacity},{pages},{SESSIONS},{},{},{},{},{},{}",
+                first.blob_gets,
+                first.round_trips,
+                first.allocations,
+                first.allocated,
+                first.cache_bytes,
+                micros[micros.len() / 2]
+            );
         }
         Ok(())
     })

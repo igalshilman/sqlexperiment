@@ -132,7 +132,7 @@ class AttemptEnd {
 }
 
 // A state command is named after its key, so that tooling can hide the
-// database's pages and log by name (`dev.restate.tooling.journal.hidden.name.prefix`).
+// database's root and blobs by name (`dev.restate.tooling.journal.hidden.name.prefix`).
 const named = (key: string): restate.EntryOptions => ({ name: key });
 
 // A shared handler's reader writes nothing.
@@ -142,7 +142,7 @@ const refusedWrite = () => {
 
 /**
  * The keys of the database `name`, beside the object's own: each of the
- * format's keys (`v15/commit`, `v15/page/...`) as `v15/<name>/commit`, under
+ * format's keys (`v16/root`, `v16/blob/...`) as `v16/<name>/root`, under
  * the format's prefix still, which tooling hides.
  */
 const beside = (name: string) => (key: string) => {
@@ -248,7 +248,7 @@ class SqlErrors {
   }
 }
 
-// A transaction's sends commit with it, in the database's commit record (its
+// A transaction's sends commit with it, in the database's root (its
 // effects): the outbox, which holds each committed transaction's sends until
 // they are stored. They are made once the transaction commits; a later open
 // makes again those still in the outbox, with the same idempotency keys
@@ -617,11 +617,10 @@ export class SqlAttempt {
     }
     this.#cancel();
     if (this.#ctx.shared) {
-      // What it read is the stored state only if no commit came since.
-      const current = await db.isCurrent().catch(() => false);
+      // It read the snapshot it opened on, whatever committed since; one that
+      // outlived 16 commits failed its read ("is gone"), and is retried.
       const usable = db.isUsable();
       await db.close();
-      if (!current) throw new Error("the object's database changed while this shared handler read it: retrying");
       if ('error' in outcome) throw this.#errors.classify(outcome.error, usable);
       return outcome.value;
     }

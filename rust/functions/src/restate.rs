@@ -7,7 +7,7 @@
 //! `<program>/<key>/<export>` calls `export(input, ctx)` in its handler,
 //! exclusive and without journal replay, and returns its outcome. The
 //! program runs until it waits; the handler flushes the changed pages, the
-//! SQL and the call's requests (a turn) to the object's state, in one put,
+//! SQL and the call's requests (a turn) to the object's state, in one flush,
 //! then waits on Restate itself for the first request to complete,
 //! and delivers it in the next turn, to the same live VM:
 //!
@@ -622,6 +622,7 @@ pub fn bind(
         };
         let mut options = ServiceOptions::new()
             .journal_replay(false)
+            // TODO: preload the root eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
             .enable_lazy_state(true)
             .journal_retention(Duration::ZERO)
             .inactivity_timeout(programs.runtime().limits().turn);

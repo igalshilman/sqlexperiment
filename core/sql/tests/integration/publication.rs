@@ -13,14 +13,14 @@ use std::sync::Arc;
 fn options(cache: Option<&Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
-            checkpoint_after: 0,
+            garbage_after: 1,
             ..StateOptions::default()
         },
         cache: cache.cloned(),
     }
 }
 
-/// Every save checkpoints the log.
+/// Two saves: the second leaves garbage for the next to delete.
 async fn baseline(cache: Option<&Namespace>) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
@@ -103,7 +103,8 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                 }
             }
         }
-        assert!(cases > 40, "{cases}");
+        // Blob puts, a root put and garbage deletes, cached or not.
+        assert!(cases >= 40, "{cases}");
         println!("SQL save failpoints: {cases} cases");
         Ok(())
     })

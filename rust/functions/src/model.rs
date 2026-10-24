@@ -383,11 +383,11 @@ pub struct View {
     /// Pages the last turn compared: those it wrote to by default, all pages
     /// in the benchmark-only full-scan build.
     pub examined_pages: usize,
-    /// Bytes the last turn's seal logged: the pages it changed (memory and
-    /// tables), compressed against what they replace.
-    pub logged_bytes: usize,
-    /// Bytes of the commit record it put.
-    pub commit_bytes: usize,
+    /// Bytes of the blobs the last turn's flush put: the chunks of pages it
+    /// changed (memory and tables), compressed against what they replace.
+    pub blob_bytes: usize,
+    /// Bytes of the root it put.
+    pub root_bytes: usize,
 }
 
 /// FNV-1a: a stable 64-bit fingerprint, to tell versions and runs apart. Not

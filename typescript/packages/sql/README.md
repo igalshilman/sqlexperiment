@@ -27,13 +27,14 @@ which builds the store inside the SDK.
 ## The store
 
 `set` and `clear` return at once, and `sync` resolves once every write before
-it is stored. Writes are stored in the order they were made: until a sync
-resolves, a crash may lose the last of them, never one without the ones after
-it (as a Restate object's state does). A `set` or `clear` that
-throws fails the next `sync`. A database's writes are its commit record and
-pages (see the crate's [format](../../../core/state/docs/FORMAT.md)): a
-transaction commits with one put of the record, so a commit is durable once a
-sync after it resolves.
+it is stored. Writes are stored in the order they were made: a crash keeps a
+prefix of the writes since the last sync and loses the rest, never a write
+without the ones before it (as a Restate object's state does). A `set` or
+`clear` that throws fails the next `sync`. A database's writes are immutable
+blobs and the root that names them (see the crate's
+[format](../../../core/state/docs/FORMAT.md)): a transaction commits with the
+root, written after its blobs, so a commit is durable once a sync after it
+resolves.
 
 ## Sessions and the page cache
 
@@ -47,16 +48,17 @@ the body. A COMMIT that fails rolls back. An SQL error leaves the session
 usable (`isUsable()`); a storage error ends it.
 
 A body may commit _effects_ with its transaction: `tx.commitEffects(bytes)`
-puts them in the same commit record, so they are stored exactly when the
+puts them in the same root, so they are stored exactly when the
 transaction is, even if it changes nothing, and stay until a later
 transaction commits others. `effects()` returns them. The SDK keeps a
 transaction's sends there, its outbox, and makes them once it commits.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, unlinked once open so that it goes away
-with the process, or the file `RESTATE_SQL_CACHE_FILE` names. It knows a
-database by its commit record: a session opens on the cached pages when the
-record is the one the cache saw last. `save()` (or `close()`) ends a session,
+with the process, or the file `RESTATE_SQL_CACHE_FILE` names. It keeps a
+database's blobs, which never change, and its last root: a session reads the
+blobs it has from the cache, and reuses the idle engine when the root is the
+one the cache saw last. `save()` (or `close()`) ends a session,
 leaving its engine to the next one when it is idle. The cache knows a
 database only by its namespace: two stores holding different databases under
 one namespace (two Restate clusters, say) must not share a process.

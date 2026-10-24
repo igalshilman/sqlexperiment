@@ -56,10 +56,6 @@
               git
               curl
               gnumake
-
-              # The TLA+ check (core/state/spec/check.sh); the benchmark scripts
-              # run on the Python above.
-              jdk_headless
             ]
             ++ lib.optionals stdenv.hostPlatform.isDarwin [
               libiconv

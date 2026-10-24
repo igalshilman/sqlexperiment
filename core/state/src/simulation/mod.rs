@@ -9,23 +9,12 @@ pub use latency::LatencyKv;
 pub use memory::{MemoryKv, Stats, Traffic, object_kind};
 pub use monitor::MonitorKv;
 
-use crate::{
-    Open, PageCache, PageCacheConfig, State, StateOptions, format::COMMIT, kv::KvStore, log::Commit,
-};
+use crate::{Open, PageCache, PageCacheConfig, State, StateOptions, kv::KvStore};
 use std::sync::Arc;
 use std::sync::{
     OnceLock,
     atomic::{AtomicU64, Ordering::Relaxed},
 };
-
-/// The transactions in the durable commit record's log: those committed since
-/// the last checkpoint.
-pub async fn logged_transactions(store: &dyn KvStore) -> std::io::Result<usize> {
-    Ok(match store.get(COMMIT).await? {
-        Some(bytes) => Commit::decode(&bytes)?.log.len(),
-        None => 0,
-    })
-}
 
 /// Cache settings for tests: a temporary file, and 1 MiB disk blocks.
 pub fn cache_config(memory: usize, disk: usize) -> PageCacheConfig {
@@ -122,8 +111,7 @@ pub(crate) async fn yield_now() {
     .await
 }
 
-/// The key of page `page` of the paged file numbered `file` (the first file
-/// a namespace's commits wrote is 0).
-pub fn page_key(file: u32, page: u64) -> String {
-    crate::format::page_key(crate::log::page_id(file, page))
+/// The key of blob `n`.
+pub fn blob_key(n: u64) -> String {
+    crate::store::blob_key(n)
 }

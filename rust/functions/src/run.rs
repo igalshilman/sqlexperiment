@@ -8,7 +8,7 @@
 //! ([`Memory`], the record "memory" and the pages the turn changed, in the
 //! scope's file over the program's golden memory), the scope's tables (the
 //! turn's SQL, KV included), and each extension. Each writes into one WAL
-//! of the scope's state, which the host flushes in one put. The image is
+//! of the scope's state, which the host flushes at once. The image is
 //! the program's golden image with the file's pages that differ from it;
 //! the state compresses each against what it replaces (golden's, at first),
 //! so a turn writes little more than what it changed. Nothing is applied
@@ -172,8 +172,14 @@ impl Participant for Memory {
     async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         let Turn { changed, settled } = self.turn.take().context("No turn to seal")?;
         if let Some((file, pages)) = self.stale.take() {
-            for page in pages {
-                wal.write(&file, page.into(), None).map_err(storage_error)?;
+            // This image's file keeps its length, its old pages holes again;
+            // another image's goes whole (which needs no base).
+            if file.name() == self.file.name() {
+                for page in pages {
+                    wal.write(&file, page.into(), None).map_err(storage_error)?;
+                }
+            } else {
+                wal.set_len(&file, 0).map_err(storage_error)?;
             }
         }
         match (&self.live, settled) {
@@ -210,8 +216,8 @@ impl Participant for Memory {
 struct Written {
     changed_pages: usize,
     examined_pages: usize,
-    logged_bytes: usize,
-    commit_bytes: usize,
+    blob_bytes: usize,
+    root_bytes: usize,
 }
 
 enum Delivery {
@@ -435,8 +441,8 @@ impl Run {
         memory.memory_len
             + memory.live_pages().max(last.changed_pages) * PAGE
             + 3 * last.changed_pages * PAGE
-            + last.logged_bytes
-            + last.commit_bytes
+            + last.blob_bytes
+            + last.root_bytes
     }
 
     /// Let go of the VM and its image: the next delivery restores them from
@@ -544,8 +550,8 @@ impl Run {
             live_pages: memory.live_pages(),
             changed_pages: self.last.changed_pages,
             examined_pages: self.last.examined_pages,
-            logged_bytes: self.last.logged_bytes,
-            commit_bytes: self.last.commit_bytes,
+            blob_bytes: self.last.blob_bytes,
+            root_bytes: self.last.root_bytes,
         }
     }
 
@@ -578,8 +584,8 @@ impl Run {
         );
         base.meta = memory.meta.clone();
         base.grow(memory.memory_len);
-        // The pages that differ from golden, read together: from the log,
-        // the cache, or the store.
+        // The pages that differ from golden, read together: from the state's
+        // decoded chunks, the cache, or the store.
         let indexes: Vec<u32> = memory.pages().collect();
         ensure!(
             (indexes.last()).is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
@@ -652,13 +658,13 @@ impl Run {
 
     /// The turn's transaction. Each participant prepares its part into one
     /// WAL of the scope's state (the extensions first, then the run's
-    /// progress, its memory and its tables); the flush puts the seal, one
-    /// record, once the pages it names are stored; then each participant
+    /// progress, its memory and its tables); the flush puts the seal, the
+    /// state's root, after the blobs it names; then each participant
     /// hears whether it committed. A participant that fails, or a failed
     /// flush, drops the WAL with everything prepared. Only after a flush are
     /// the blobs no seal names collected, and the VM's write tracking reset:
-    /// a crash anywhere before the put loses the whole turn, which runs
-    /// again.
+    /// a crash anywhere before the root is stored loses the whole turn,
+    /// which runs again.
     async fn seal(&mut self, mut written: Written) -> Result<()> {
         let mut extensions = self.extensions.lock().await;
         let mut db = self.db.lock().await;
@@ -675,8 +681,8 @@ impl Run {
         let sealed = match prepared {
             Ok(()) => (wal.flush().await)
                 .map(|report| {
-                    written.logged_bytes = report.logged_bytes;
-                    written.commit_bytes = report.record_bytes;
+                    written.blob_bytes = report.blob_bytes;
+                    written.root_bytes = report.root_bytes;
                 })
                 .map_err(storage_error),
             Err(error) => Err(error),

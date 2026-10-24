@@ -113,7 +113,7 @@ impl Db {
     }
 
     /// Flush the SQL into the turn's WAL, and the WAL: what the SQL committed
-    /// and what the host set, durable in one put. The next turn starts a new
+    /// and what the host set, durable together. The next turn starts a new
     /// WAL; one whose SQL flush fails keeps this one.
     pub async fn flush(&mut self) -> Result<FlushReport> {
         self.sql.flush(&mut self.wal).await?;

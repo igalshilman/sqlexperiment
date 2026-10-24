@@ -4,14 +4,14 @@
 //! image, 19 µs against 1 µs to decompress it).
 //!
 //! A frame's dictionary is a raw prefix: content the frame refers back to,
-//! such as a page's previous image. (zstd's dictionary calls would read one
+//! such as a delta's base. (zstd's dictionary calls would read one
 //! that starts with its dictionary magic as a trained dictionary.)
 use std::{cell::RefCell, io};
 use zstd_safe::{CCtx, CParameter, DCtx, ResetDirective};
 
-/// The level of every frame: pages and log segments.
+/// The level of every frame: chunks, records and the root.
 const LEVEL: i32 = 3;
-/// A scratch buffer kept past a call: larger ones, of a large segment, are
+/// A scratch buffer kept past a call: larger ones, of a large record, are
 /// freed after it.
 const KEPT_SCRATCH: usize = 64 * 1024;
 
@@ -36,12 +36,11 @@ fn referenced(prefix: &[u8]) -> &'static [u8] {
     unsafe { std::mem::transmute::<&[u8], &'static [u8]>(prefix) }
 }
 
-/// `input` as one frame against `prefix` (empty for none), with a checksum
-/// if `checksum`: `f` gets the frame.
+/// `input` as one frame against `prefix` (empty for none), with a
+/// checksum: `f` gets the frame.
 pub(crate) fn compress<T>(
     input: &[u8],
     prefix: &[u8],
-    checksum: bool,
     f: impl FnOnce(&[u8]) -> T,
 ) -> io::Result<T> {
     COMPRESS.with_borrow_mut(|cctx| {
@@ -49,7 +48,7 @@ pub(crate) fn compress<T>(
             frame.clear();
             frame.reserve(zstd_safe::compress_bound(input.len()));
             let compressed = (cctx.set_parameter(CParameter::CompressionLevel(LEVEL)))
-                .and_then(|_| cctx.set_parameter(CParameter::ChecksumFlag(checksum)))
+                .and_then(|_| cctx.set_parameter(CParameter::ChecksumFlag(true)))
                 .and_then(|_| cctx.ref_prefix(referenced(prefix)))
                 .and_then(|_| cctx.compress2(frame, input));
             if cctx.reset(ResetDirective::SessionAndParameters).is_err() {
@@ -76,4 +75,23 @@ pub(crate) fn decompress(out: &mut Vec<u8>, input: &[u8], prefix: &[u8]) -> io::
         }
         decompressed.map(drop).map_err(error)
     })
+}
+
+/// Decompress the frame `input`, made against `prefix`, to the size its
+/// header gives, of at most `max` bytes.
+pub(crate) fn decompress_sized(input: &[u8], prefix: &[u8], max: usize) -> io::Result<Vec<u8>> {
+    let size = zstd_safe::get_frame_content_size(input)
+        .ok()
+        .flatten()
+        .filter(|&size| size <= max as u64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid frame size"))?;
+    let mut out = Vec::with_capacity(size as usize);
+    decompress(&mut out, input, prefix)?;
+    match out.len() as u64 == size {
+        true => Ok(out),
+        false => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid frame size",
+        )),
+    }
 }

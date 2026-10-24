@@ -99,8 +99,9 @@ class ObjectSharedContext(restate.ObjectSharedContext):
     def db(self) -> SqlSession:
         """
         The object's database as stored, read beside the exclusive handler that
-        writes it: a write statement raises. If a commit came while it read,
-        the attempt fails, and Restate retries it.
+        writes it: a write statement raises. It reads a snapshot, whatever the
+        exclusive handler commits meanwhile; only one that outlives 16 of its
+        commits fails, and Restate retries it.
         """
 
 
@@ -217,7 +218,7 @@ class _ContextHost:
 
     def sql_get(self, key: str) -> Awaitable[bytes | None]:
         # Each entry is named after its key, so that tooling can hide a
-        # database's pages and log by name.
+        # database's root and blobs by name.
         # TODO: read with protocol v8's ephemeral get, left out of the journal,
         # once a Restate release ships v8 and the SDK exposes the get (FUTURE.md
         # at the repository's root). Restate 1.8 negotiates v7 at most.

@@ -1,8 +1,8 @@
 """ctx.db and ctx.transaction, over the SQL extension and a fake object state."""
 
 import asyncio
-import itertools
 import json
+import uuid
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -20,8 +20,6 @@ def anyio_backend():
 
 
 pytestmark = [pytest.mark.anyio]
-
-_objects = itertools.count()
 
 shop = VirtualObject("shop")
 
@@ -115,7 +113,7 @@ class FakeHost:
 
 def fresh() -> str:
     """A namespace no session of this process has used: as another process sees the state."""
-    return f"object-{next(_objects)}"
+    return f"object-{uuid.uuid4().hex}"
 
 
 class _Stored:
@@ -316,7 +314,7 @@ async def test_a_shared_handler_reads_the_stored_database_and_writes_nothing():
         await run(FakeHost(writer.store(), fresh(), kind="shared"), lambda a: a.db.execute("INSERT INTO t VALUES (2)"))
 
 
-async def test_a_shared_handler_that_read_beside_a_commit_is_retried():
+async def test_a_shared_handler_reads_the_state_it_opened_on_beside_a_commit():
     writer = FakeHost({}, fresh())
     await run(writer, lambda a: a.db.execute("CREATE TABLE t(n INTEGER)"))
     state = writer.store()
@@ -327,8 +325,9 @@ async def test_a_shared_handler_that_read_beside_a_commit_is_retried():
     again = FakeHost(state, fresh())
     await run(again, lambda a: a.db.execute("INSERT INTO t VALUES (1)"))
     state.update(again.store())
-    with pytest.raises(RuntimeError, match="changed while this shared handler read it"):
-        await attempt.end(None)
+    # The shared handler reads on, the state it opened on, and ends without a retry.
+    assert await attempt.db.query("SELECT count(*) FROM t") == [[0]]
+    await attempt.end(None)
 
 
 async def test_the_session_is_closed_once_the_handler_ends():

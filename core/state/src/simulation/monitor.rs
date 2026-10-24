@@ -1,41 +1,44 @@
 //! A protocol monitor: checks every request the code issues against the
-//! invariants of `docs/DESIGN.md`, as `spec/Protocol.tla` states them.
+//! rule of [`crate::store`]: a blob is written before the first root that
+//! names it, and deleted only once no root names it.
 //!
 //! The store keeps writes in issue order, and a crash keeps a prefix of them,
 //! so a write may rely on every write issued before it. The monitor wraps a
 //! store and keeps the state those writes make: each write applied as it is
 //! issued, and values it read (after a crash, a read learns what was kept).
-//! A write that fails makes its key unknown, and adds its value to a page
-//! key's possible values. Each write is checked against that state when it is
-//! issued (a page is a page of a paged file: its file's id and its number):
+//! A write that fails makes its key unknown until a read learns it; a read
+//! of the root forgets the blobs at or past its next blob, which a crash may
+//! have lost (a flush issues its blobs and root with nothing between). Each
+//! write is checked when it is issued:
 //!
-//! 1. **Name only what is written**: a commit record names only stored
-//!    segments written before it.
-//! 2. **Build on the record**: a commit record holds the record's log plus
-//!    one transaction, at the next version (its earlier transactions decode to
-//!    the same images, inline or sealed), and every record the record holds,
-//!    under the same id and name (a value may change); or is that record
-//!    again.
-//! 3. **Checkpoint before recording**: a record that empties the log (the next
-//!    epoch) comes only once every page the log changed is at its page key,
-//!    with the log's latest image of it; its files are the record's.
-//! 4. **Overwrite only what the log covers**: a page key gets only an image of
-//!    a transaction in the record's log.
-//! 5. **Fresh segments, deleted unnamed**: a stored segment is put only at a
-//!    number the record has not allocated, and deleted only if it names it no
-//!    more; the record lists as garbage only values the record before named.
-//! 6. **Decodable**: every record put decodes, its log against the segments
-//!    it names, and its records' values are known.
+//! 1. **Name only what is written**: a root names only blobs that are there.
+//! 2. **Build on the root**: a root is the next version of the root, with
+//!    the same identity and chunk size, and a next blob never lower.
+//! 3. **Never overwrite**: a blob is put only at a number the root has not
+//!    allocated.
+//! 4. **Delete only garbage**: a blob is deleted only if the root lists it
+//!    as garbage, and names it no more.
+//! 5. **Leak nothing**: a blob the root named and the next one does not is
+//!    its garbage, and stays garbage until deleted.
+//! 6. **Decodable**: every root decodes, and every map node, chunk and
+//!    record blob it names decodes: a chunk's base against its file's golden
+//!    pages, its delta against its base.
+//!
+//! What a root names it learns by walking each file's map through the node
+//! blobs it knows; a node a failed write left unknown is not walked.
 use crate::{
-    format::{COMMIT, LOG_PREFIX, parse_page_key},
+    Base, PAGE,
     kv::KvStore,
-    log::{self, Base, Commit, Images, Kind, Part},
-    page_codec,
+    map::{Map, Node, Nodes, Shape, Visit},
+    store::{
+        Chunk, Kind, MAX_RECORD_BYTES, ROOT_KEY, Root, Value, decode_chunk, parse_blob_key, reference,
+    },
+    zstd,
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     io,
     ops::Deref,
     sync::{Arc, Mutex},
@@ -57,273 +60,224 @@ impl<S> Deref for MonitorKv<S> {
 /// The state the writes issued so far make.
 #[derive(Default)]
 struct Known {
-    /// Stored segments, by number.
-    segments: BTreeMap<u64, Bytes>,
-    /// The values each page key may hold durably, by page id; `None` is a
-    /// hole.
-    pages: HashMap<u64, Vec<Option<Bytes>>>,
-    commit: Option<Commit>,
+    blobs: BTreeMap<u64, Bytes>,
+    /// Blobs a failed write may or may not have changed.
+    unknown: BTreeSet<u64>,
+    /// The root, unless a failed write left it unknown.
+    root: Option<Root>,
+    root_unknown: bool,
     violations: Vec<String>,
-    /// The bases of files made with one, by name: their pages decode
-    /// against them.
+    /// The bases of files made with one, by name.
     bases: BTreeMap<String, Arc<dyn Base>>,
     checked: usize,
 }
 
 impl Known {
-    fn commit(&self) -> Commit {
-        self.commit.clone().unwrap_or_default()
-    }
-
-    /// The base of `commit`'s file `file`: `Err` for a file made with one the
-    /// monitor was not given.
-    fn base(&self, commit: &Commit, file: u32) -> Result<Option<&dyn Base>, ()> {
-        let Some(entry) = commit.directory.get(&file) else {
-            return Ok(None);
-        };
-        match (&entry.kind, self.bases.get(&entry.name)) {
-            (Kind::Paged { base: Some(_), .. }, None) => Err(()),
-            (_, base) => Ok(base.map(|base| &**base)),
-        }
-    }
-
-    /// Each transaction's images in `commit`'s log, as replay decodes them;
-    /// `None` when a segment it names is unknown or undecodable.
-    fn transactions(&self, commit: &Commit) -> Option<Vec<Images>> {
-        let mut chain = log::Chain::default();
-        let mut transactions = Vec::new();
-        for transaction in &commit.log {
-            let mut images = Images::new();
-            for change in &transaction.changes {
-                for part in &change.parts {
-                    let segment = self.value(part)?;
-                    let base = self.base(commit, change.file).ok()?;
-                    let decoded = log::decode_segment(&segment, &chain, change.file, base);
-                    images.extend(decoded.ok()?);
-                }
-            }
-            chain.extend(images.clone());
-            transactions.push(images);
-        }
-        Some(transactions)
-    }
-
-    /// The value of a record's part; `None` when unknown.
-    fn value(&self, part: &Part) -> Option<Bytes> {
-        match part {
-            Part::Inline(bytes) => Some(bytes.clone()),
-            Part::Stored(n, index) => log::stored_segments(self.segments.get(n)?)
-                .ok()?
-                .get(*index as usize)
-                .cloned(),
-        }
-    }
-
-    /// `commit`'s files by id, with their names, and a record's value or a
-    /// paged file's size; `None` when a record's value is unknown.
-    fn files(&self, commit: &Commit) -> Option<BTreeMap<u32, (String, Held)>> {
-        (commit.directory.iter())
-            .map(|(&id, entry)| {
-                let held = match &entry.kind {
-                    Kind::Record(part) => Held::Record(self.value(part)?),
-                    Kind::Paged { size, base } => Held::Paged(*size, *base),
-                };
-                Some((id, (entry.name.clone(), held)))
-            })
-            .collect()
-    }
-
-    /// The logical image the key of the page `page` holds as `value`; `None`
-    /// for a hole.
-    fn image(&self, page: u64, value: &Option<Bytes>) -> Option<Option<Bytes>> {
-        let commit = self.commit();
-        let base = self.base(&commit, log::file_of(page)).ok()?;
-        let base_page = base.and_then(|base| base.page(log::page_of(page)));
-        match value {
-            Some(value) => page_codec::decode_against(value, base_page).ok().map(Some),
-            None => Some(None),
-        }
-    }
-
     fn violation(&mut self, message: String) {
         self.violations.push(message);
     }
 
-    /// Check a put before it is issued.
+    fn learn(&mut self, key: &str, value: Option<Bytes>) {
+        if key == ROOT_KEY {
+            self.root = value.and_then(|bytes| Root::decode(&bytes).ok());
+            self.root_unknown = false;
+            let next = self.root.as_ref().map_or(0, |root| root.next_blob);
+            self.blobs.retain(|&n, _| n < next);
+            self.unknown.retain(|&n| n < next);
+        } else if let Some(n) = parse_blob_key(key) {
+            self.unknown.remove(&n);
+            match value {
+                Some(value) => self.blobs.insert(n, value),
+                None => self.blobs.remove(&n),
+            };
+        }
+    }
+
+    fn forget(&mut self, key: &str) {
+        if key == ROOT_KEY {
+            self.root_unknown = true;
+        } else if let Some(n) = parse_blob_key(key) {
+            self.unknown.insert(n);
+        }
+    }
+
     fn check_put(&mut self, key: &str, value: &Bytes) {
         self.checked += 1;
-        if let Some(n) = parse(key, LOG_PREFIX) {
-            // 5: at a number not yet allocated
-            if n < self.commit().next_segment {
-                self.violation(format!("{key}: a segment number already allocated"));
+        if let Some(n) = parse_blob_key(key) {
+            if let Some(root) = self.root.as_ref().filter(|_| !self.root_unknown)
+                && n < root.next_blob
+            {
+                self.violation(format!("blob {n} put, below the root's next blob"));
             }
-        } else if let Some(page) = parse_page_key(key) {
-            self.check_image(key, page, Some(value));
-        } else if key == COMMIT {
-            self.check_commit(value);
-        }
-    }
-
-    fn check_commit(&mut self, value: &Bytes) {
-        let Ok(commit) = Commit::decode(value) else {
-            return self.violation("commit: undecodable".into());
-        };
-        let known = self.commit();
-        // 1, 6: it names known segments, and its log decodes
-        if self.transactions(&commit).is_none() || self.files(&commit).is_none() {
-            return self.violation(format!(
-                "commit {}: names an unknown segment, or does not decode",
-                commit.version
-            ));
-        }
-        if commit == known {
             return;
         }
-        let same =
-            |a: &Commit, b: &Commit| (a.next_segment, a.next_file) == (b.next_segment, b.next_file);
-        if commit.version == known.version + 1 {
-            // 2: the known log plus one transaction (or none, for a commit
-            // without SQL changes), whether its earlier transactions stay
-            // inline or are sealed into a stored value
-            let sizes = |c: &Commit| {
-                let sizes = |t: &log::Logged| t.changes.iter().map(|c| (c.file, c.size)).collect();
-                c.log.iter().map(sizes).collect::<Vec<Vec<_>>>()
-            };
-            let paged = |c: &Commit| c.paged().collect::<Vec<_>>();
-            let earlier = self.transactions(&commit).map(|mut t| {
-                t.truncate(known.log.len());
-                t
-            });
-            let added = commit.log.len().checked_sub(known.log.len());
-            // every known file, under its id and name, of its kind
-            let kind = |entry: &log::Entry| matches!(entry.kind, Kind::Record(_));
-            let keeps_records = commit.next_file >= known.next_file
-                && known.directory.iter().all(|(id, entry)| {
-                    (commit.directory.get(id))
-                        .is_some_and(|e| e.name == entry.name && kind(e) == kind(entry))
-                });
-            let (named, known_named) = (commit.stored_values(), known.stored_values());
-            let extends = commit.epoch == known.epoch
-                && (added == Some(1) || (added == Some(0) && paged(&commit) == paged(&known)))
-                && sizes(&commit)[..known.log.len()] == sizes(&known)[..]
-                && earlier.is_some()
-                && earlier == self.transactions(&known)
-                && keeps_records
-                // garbage: values the known record named, and this one no more
-                && commit
-                    .garbage
-                    .iter()
-                    .all(|n| known_named.contains(n) && !named.contains(n));
-            if !extends {
-                self.violation(format!(
-                    "commit {}: does not extend the known record",
-                    commit.version
-                ));
-            }
-        } else if commit.version == known.version
-            && commit.epoch == known.epoch + 1
-            && commit.log.is_empty()
-            && same(&commit, &known)
-            && self.files(&commit) == self.files(&known)
-        {
-            // 3: every page of the known log is known at its key
-            let Some(known_log) = self.transactions(&known) else {
-                return self.violation("checkpoint: the known log does not decode".into());
-            };
-            let mut latest = Images::new();
-            for images in known_log {
-                latest.extend(images);
-            }
-            for (page, image) in latest {
-                let held = self.pages.get(&page).map_or(&[][..], Vec::as_slice);
-                let ok = !held.is_empty()
-                    && held
-                        .iter()
-                        .all(|value| self.image(page, value) == Some(image.clone()));
-                if !ok {
-                    self.violation(format!(
-                        "checkpoint to epoch {}: page {page} not known at its key",
-                        commit.epoch
-                    ));
-                }
-            }
-        } else {
-            self.violation(format!(
-                "commit {} (epoch {}): neither a commit nor a checkpoint after {} (epoch {})",
-                commit.version, commit.epoch, known.version, known.epoch
-            ));
+        if key != ROOT_KEY {
+            return self.violation(format!("a put of {key:?}, neither root nor blob"));
         }
-    }
-
-    /// 4: a page key gets an image of a transaction in the known log.
-    fn check_image(&mut self, key: &str, page: u64, value: Option<&Bytes>) {
-        let Some(value) = self.image(page, &value.cloned()) else {
-            return self.violation(format!("{key}: undecodable page"));
+        let root = match Root::decode(value) {
+            Ok(root) => root,
+            Err(error) => return self.violation(format!("a root that does not decode: {error}")),
         };
-        let known = self.commit();
-        let covered = self
-            .transactions(&known)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|images| images.get(&page))
-            .any(|image| *image == value);
-        if !covered {
-            self.violation(format!("{key}: image of no transaction in the known log"));
+        let named = self.named(&root);
+        if let Some(held) = self.root.clone().filter(|_| !self.root_unknown) {
+            if root.version != held.version + 1
+                || root.id != held.id
+                || root.chunk_pages != held.chunk_pages
+                || root.fanout != held.fanout
+                || root.next_blob < held.next_blob
+            {
+                let (v, held_v) = (root.version, held.version);
+                self.violation(format!("root {v} does not build on root {held_v}"));
+            }
+            let dropped = (self.named(&held).into_iter()).filter(|n| !named.contains(n));
+            let kept = held
+                .garbage
+                .keys()
+                .copied()
+                .filter(|n| self.blobs.contains_key(n));
+            let leaked: Vec<u64> = dropped
+                .chain(kept)
+                .filter(|n| !root.garbage.contains_key(n))
+                .collect();
+            for n in leaked {
+                self.violation(format!("root {} leaks blob {n}", root.version));
+            }
+        }
+        for n in named {
+            if !self.blobs.contains_key(&n) && !self.unknown.contains(&n) {
+                self.violation(format!("root {} names blob {n}, not written", root.version));
+            }
+        }
+        if let Err(error) = self.decode(&root) {
+            self.violation(format!("root {}: {error}", root.version));
         }
     }
 
     fn check_delete(&mut self, key: &str) {
         self.checked += 1;
-        if let Some(n) = parse(key, LOG_PREFIX) {
-            // 5: only a segment the known record does not name
-            if self.commit().stored_values().contains(&n) {
-                self.violation(format!("{key}: deleted while the known record names it"));
-            }
-        } else if let Some(page) = parse_page_key(key) {
-            self.check_image(key, page, None);
-        } else if key == COMMIT {
-            self.violation("commit: deleted".into());
-        }
-    }
-
-    /// Record a value written or read; `None`: absent.
-    fn learn(&mut self, key: &str, value: Option<Bytes>) {
-        if let Some(n) = parse(key, LOG_PREFIX) {
-            match value {
-                Some(value) => self.segments.insert(n, value),
-                None => self.segments.remove(&n),
-            };
-        } else if let Some(page) = parse_page_key(key) {
-            self.pages.insert(page, vec![value]);
-        } else if key == COMMIT {
-            self.commit = value.and_then(|bytes| Commit::decode(&bytes).ok());
-        }
-    }
-
-    /// A request with an unknown outcome: its key may hold either value.
-    fn forget(&mut self, key: &str, value: Option<&Bytes>) {
-        if let Some(n) = parse(key, LOG_PREFIX) {
-            self.segments.remove(&n);
-        } else if let Some(page) = parse_page_key(key)
-            && let Some(held) = self.pages.get_mut(&page)
+        let Some(n) = parse_blob_key(key) else {
+            return self.violation(format!("a delete of {key:?}, not a blob"));
+        };
+        if let Some(root) = self.root.as_ref().filter(|_| !self.root_unknown)
+            && (self.named(root).contains(&n) || !root.garbage.contains_key(&n))
         {
-            held.push(value.cloned());
+            self.violation(format!("blob {n} deleted, not the root's garbage"));
         }
-        // A record may have moved forward or not: the known one is the older,
-        // so checks against it stay conservative until a read learns which.
-        // (A write fails only as its session ends.)
     }
-}
 
-/// What a file of the directory holds, as the monitor compares it.
-#[derive(Debug, PartialEq)]
-enum Held {
-    Record(Bytes),
-    Paged(u64, Option<u64>),
-}
+    /// Walk `map`, of `shape`, through the node blobs known, decoding them
+    /// as the walk needs them: what it meets, and the nodes that do not
+    /// decode.
+    fn walk(&self, map: &Map, shape: Shape) -> (Vec<Visit>, Vec<String>) {
+        let mut decoded: HashMap<u64, Arc<Node>> = HashMap::new();
+        let mut lacking = BTreeSet::new();
+        let mut errors = Vec::new();
+        loop {
+            let mut met = Vec::new();
+            let missing = {
+                let get = |n: u64| decoded.get(&n).cloned();
+                let nodes = Nodes::new(&get);
+                map.walk(shape, &nodes, &mut |visit| met.push(visit));
+                nodes.missing()
+            };
+            let missing: Vec<_> = (missing.into_iter())
+                .filter(|need| !lacking.contains(&need.blob))
+                .collect();
+            if missing.is_empty() {
+                return (met, errors);
+            }
+            for need in missing {
+                let node = self
+                    .blobs
+                    .get(&need.blob)
+                    .map(|f| Node::from_frame(f, need));
+                match node {
+                    Some(Ok(node)) => {
+                        decoded.insert(need.blob, Arc::new(node));
+                    }
+                    Some(Err(error)) => {
+                        errors.push(format!("map node {}: {error}", need.blob));
+                        lacking.insert(need.blob);
+                    }
+                    None => {
+                        lacking.insert(need.blob);
+                    }
+                }
+            }
+        }
+    }
 
-fn parse(key: &str, prefix: &str) -> Option<u64> {
-    u64::from_str_radix(key.strip_prefix(prefix)?, 16).ok()
+    /// Every blob `root` names, through the map nodes known.
+    fn named(&self, root: &Root) -> BTreeSet<u64> {
+        let mut named = BTreeSet::new();
+        for entry in root.directory.values() {
+            match &entry.kind {
+                Kind::Record(Value::Blob(n)) => {
+                    named.insert(*n);
+                }
+                Kind::Record(Value::Inline(_)) => {}
+                Kind::Paged { size, map, .. } => {
+                    for visit in self.walk(map, root.shape(*size)).0 {
+                        match visit {
+                            Visit::Node(n) => {
+                                named.insert(n);
+                            }
+                            Visit::Chunk(_, chunk) => named.extend(chunk.blobs()),
+                        }
+                    }
+                }
+            }
+        }
+        named
+    }
+
+    /// Decode every chunk and record blob `root` names (those a failed write
+    /// left unknown aside).
+    fn decode(&self, root: &Root) -> io::Result<()> {
+        let size = (root.chunk_pages * PAGE) as usize;
+        let blob = |n: u64| self.blobs.get(&n);
+        for entry in root.directory.values() {
+            let (bytes, map, base) = match &entry.kind {
+                Kind::Paged { size, map, base } => (*size, map, base),
+                Kind::Record(Value::Blob(n)) => {
+                    if let Some(frame) = blob(*n) {
+                        zstd::decompress_sized(frame, &[], MAX_RECORD_BYTES)?;
+                    }
+                    continue;
+                }
+                Kind::Record(Value::Inline(_)) => continue,
+            };
+            let (met, errors) = self.walk(map, root.shape(bytes));
+            if let Some(error) = errors.into_iter().next() {
+                return Err(io::Error::other(error));
+            }
+            let golden = self.bases.get(&entry.name);
+            if base.is_some() && golden.is_none() {
+                continue;
+            }
+            let chunks = met.into_iter().filter_map(|visit| match visit {
+                Visit::Chunk(chunk, stored) => Some((chunk, stored)),
+                Visit::Node(_) => None,
+            });
+            for (chunk, stored) in chunks {
+                let stored: Chunk = stored;
+                if stored.base.is_none() && stored.delta.is_some() {
+                    return Err(io::Error::other(format!(
+                        "chunk {chunk}: a delta without a base"
+                    )));
+                }
+                let Some(frame) = stored.base.and_then(blob) else {
+                    continue;
+                };
+                let prefix = reference(golden, root.chunk_pages, chunk);
+                let base = decode_chunk(frame, &prefix, size)?;
+                if let Some(frame) = stored.delta.and_then(blob) {
+                    decode_chunk(frame, &base.pages, size)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<S: KvStore> MonitorKv<S> {
@@ -347,7 +301,7 @@ impl<S: KvStore> MonitorKv<S> {
         monitor
     }
 
-    /// Check the pages of the file `name` against `base`, the one it is
+    /// Decode the chunks of the file `name` against `base`, the one it is
     /// made with (see [`crate::Base`]).
     pub fn with_base(self, name: &str, base: Arc<dyn Base>) -> Self {
         self.known.lock().unwrap().bases.insert(name.into(), base);
@@ -380,7 +334,7 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
         let result = self.inner.put(key, value.clone());
         match &result {
             Ok(()) => known.learn(key, Some(value)),
-            Err(_) => known.forget(key, Some(&value)),
+            Err(_) => known.forget(key),
         }
         result
     }
@@ -391,7 +345,7 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
         let result = self.inner.delete(key);
         match &result {
             Ok(()) => known.learn(key, None),
-            Err(_) => known.forget(key, None),
+            Err(_) => known.forget(key),
         }
         result
     }

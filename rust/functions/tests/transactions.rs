@@ -1,5 +1,5 @@
 //! A turn's transaction: participants set their records in one WAL, the
-//! host flushes it in one put, and tells them; a participant that fails to
+//! host flushes it at once, and tells them; a participant that fails to
 //! prepare abandons the turn, which runs again from the last seal.
 mod common;
 
@@ -60,7 +60,7 @@ impl Extension for Counter {
 impl Participant for Counting {
     /// Before the seal: one more, set in the WAL. Its flush makes the count
     /// durable with the run's memory, its tables and every other
-    /// participant, in one put.
+    /// participant, at once.
     async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         if self.counter.fail.swap(false, Ordering::SeqCst) {
             bail!("Injected prepare failure");

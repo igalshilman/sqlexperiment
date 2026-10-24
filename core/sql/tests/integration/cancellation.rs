@@ -16,20 +16,19 @@ use state::{
 };
 use std::sync::Arc;
 
-/// Pages read from the store as queries need them; the log checkpointed often.
+/// Pages read from the store as queries need them; garbage deleted soon.
 fn options(cache: Option<Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
-            checkpoint_after: 2,
+            garbage_after: 2,
             prefetch_pages: 0,
-            hint_pages: 0,
             ..StateOptions::default()
         },
         cache,
     }
 }
 
-/// A store with a table of 20 rows, some past a page, its pages checkpointed.
+/// A store with a table of 20 rows, some past a page, after a few flushes.
 async fn baseline() -> Result<MemoryKv> {
     let memory = MemoryKv::default();
     let mut db = Db::open(
@@ -48,8 +47,7 @@ async fn baseline() -> Result<MemoryKv> {
     for k in 0..3 {
         db.execute(&format!("CREATE TABLE a{k}(x)")).await?;
     }
-    // Flushes that leave the first page alone, so that the log no longer
-    // holds it: it is read from the store.
+    // Small flushes: deltas over their chunks' bases, and garbage.
     for k in 0..6 {
         db.execute(&format!("UPDATE t SET n = {k} WHERE id = 1"))
             .await?;

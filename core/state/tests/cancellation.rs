@@ -14,12 +14,14 @@ use std::{
 };
 use support::*;
 
-/// Every flush checkpoints, and large transactions go to stored values.
+/// Chunks rebase often, garbage goes at once, and large records go to blobs.
 fn options(cache: Option<Namespace>) -> Setup {
     Setup {
         options: StateOptions {
-            checkpoint_after: 0,
-            inline_log_bytes: 200,
+            chunk_pages: 2,
+            rebase_ratio: 0.2,
+            garbage_after: 1,
+            inline_record_bytes: 200,
             ..StateOptions::default()
         },
         cache,
@@ -64,9 +66,15 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 // Slow requests: a flush takes several polls.
                 let memory = prepared.fork();
                 let fault = FaultKv::new(memory.clone(), 5);
-                let store = Arc::new(MonitorKv::new(fault).with_base("vm", golden()));
+                let store =
+                    Arc::new(MonitorKv::seeded(fault, memory.values()).with_base("vm", golden()));
                 let cache = cached.then(fresh_namespace);
                 let session = Session::open(store.clone(), options(cache.clone())).await?;
+                if cached {
+                    // Read in full, so the flush fetches nothing: a miss
+                    // waits on the cache's disk threads, not on polls.
+                    assert_eq!(old.differs(&session).await?, None);
+                }
                 let mut wal = session.state.wal();
                 for op in &ops {
                     session.apply(&mut wal, op)?;
@@ -99,12 +107,16 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 let error = state.wal().flush().await.unwrap_err().to_string();
                 assert!(error.contains("ended"), "{case}: {error}");
                 drop(session);
+                // The flush lands with its root; a crash takes it back, as
+                // no sync completed.
+                let rooted = memory.unsynced().iter().any(|(key, _)| key == ROOT_KEY);
                 if crash {
                     memory.crash();
                 }
                 let reopened = Session::open(store.clone(), options(cache)).await?;
                 let whole = new.matches(&reopened).await?;
                 assert!(whole || old.matches(&reopened).await?, "{case}");
+                assert_eq!(whole, rooted && !crash, "{case}");
                 landed[usize::from(whole)] += 1;
                 // It goes on, durably.
                 let after = [Op::Set("state", "after".into())];
@@ -120,14 +132,14 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 );
                 assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
             }
-            // Without a crash the owner reads its writes; after one they
-            // are gone, as no sync completed.
-            let expected = if crash {
-                [landed[0], 0]
-            } else {
-                [0, landed[1]]
-            };
-            assert_eq!(landed, expected, "cached {cached}, crash {crash}");
+            // Some drops came after the root went out (and, uncached, some
+            // while the flush still fetched what it builds on).
+            if !crash {
+                assert!(
+                    landed[1] > 0 && (cached || landed[0] > 0),
+                    "cached {cached}: {landed:?}"
+                );
+            }
         }
         Ok(())
     })
@@ -139,8 +151,10 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
 fn an_open_cancelled_at_any_poll_leaves_the_cache_usable() -> Result<()> {
     futures::executor::block_on(async {
         let (memory, mut model) = prepared().await?;
+        let seed = memory.values();
         let fault = FaultKv::new(memory, 3);
-        let store: Arc<dyn KvStore> = Arc::new(MonitorKv::new(fault).with_base("vm", golden()));
+        let store: Arc<dyn KvStore> =
+            Arc::new(MonitorKv::seeded(fault, seed).with_base("vm", golden()));
         let cache = fresh_namespace();
         let mut rng = Rng::new(0x09e2);
         for polls in 0.. {

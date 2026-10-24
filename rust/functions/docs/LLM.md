@@ -66,8 +66,8 @@ messages. The question is in the table once, and so is the answer.
 
 So the conversation is in neither the program's memory nor Restate's
 journal. The program holds its loop and the latest response. The coding
-session of DESIGN.md §10.1 (200 steps, 636 KiB of conversation at the end)
-compares like this:
+session of DESIGN.md §10.1 (200 steps, 636 KiB of conversation at the end,
+measured on the state's log) compares like this:
 
 | Where the conversation is                                           | Program memory | Stored over 200 steps | Biggest writes                       |
 | ------------------------------------------------------------------- | -------------: | --------------------: | ------------------------------------ |

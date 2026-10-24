@@ -1,7 +1,5 @@
-//! Corrupted stored values: truncated, bit-flipped or garbage, at the
-//! commit record, a stored log value, a page or the working-set hint. Open
-//! and reads fail or read what was flushed, never panic; the hint is only
-//! advice, so whatever it holds, the state reads as flushed.
+//! Corrupted stored values: truncated, bit-flipped or garbage, at the root
+//! or a blob. Open and reads fail or read what was flushed, never panic.
 #![cfg(feature = "simulation")]
 mod support;
 
@@ -12,16 +10,16 @@ use support::*;
 
 fn options() -> StateOptions {
     StateOptions {
-        checkpoint_after: 2,
-        inline_log_bytes: 200,
+        chunk_pages: 2,
+        rebase_ratio: 0.5,
+        inline_record_bytes: 200,
         prefetch_pages: 2,
-        hint_pages: 8,
         ..StateOptions::default()
     }
 }
 
-/// A namespace with every kind of key: checkpointed pages, a hint, stored
-/// log values and records, and a log the commit record holds.
+/// A namespace with every kind of key: the root, and blobs of chunks (bases
+/// and deltas) and of records.
 async fn flushed() -> Result<(MemoryKv, Model)> {
     let memory = MemoryKv::default();
     let mut model = Model::default();
@@ -92,7 +90,7 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
     futures::executor::block_on(async {
         let (memory, model) = flushed().await?;
         let keys = memory.keys();
-        for prefix in ["v15/commit", "v15/log/", "v15/page/", "v15/hint"] {
+        for prefix in ["v16/root", "v16/blob/"] {
             assert!(
                 keys.iter().any(|key| key.starts_with(prefix)),
                 "{prefix}: {keys:?}"
@@ -112,15 +110,13 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
                     let Ok(read) = read.await else {
                         panic!("{case}: panicked");
                     };
-                    // A bit flip may stay undetected: only the log's frames
-                    // of images have a checksum, not a record's value, a
-                    // page or a segment's entries.
+                    // A bit flip may stay undetected: frames have a
+                    // checksum, but not their headers.
                     let flipped = corruption.starts_with("bit");
                     let kind = key.split('/').nth(1).unwrap();
-                    match (&read, kind) {
-                        (Read::AsFlushed, _) => {}
-                        (Read::Failed, "commit" | "log" | "page") => {}
-                        (Read::Otherwise, "commit" | "log" | "page") if flipped => {}
+                    match &read {
+                        Read::AsFlushed | Read::Failed => {}
+                        Read::Otherwise if flipped => {}
                         _ => panic!("{case}: {read:?}"),
                     }
                     *outcomes.entry((kind, flipped, read)).or_default() += 1;

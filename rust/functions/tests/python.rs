@@ -229,10 +229,10 @@ async def main(input, ctx):
     let call = run.view().state.pending[0].clone();
     assert!(matches!(&call, functions::Operation::Call { name, .. } if name == "model"));
     assert_eq!(call.idempotency_key(), "mine");
-    // The commit record holds the run's state, its memory's and the inline
-    // log: the input is in the heap, not in it.
-    let commit = run.view().commit_bytes;
-    assert!(commit < 2048, "{commit} bytes");
+    // The root holds the run's state, its memory's and the directory: the
+    // input is in the heap, not in it.
+    let root = run.view().root_bytes;
+    assert!(root < 2048, "{root} bytes");
     // Another attempt restores the heap to read it.
     let mut run = start_python(&store, source, Value::Null, 2)?;
     let input = block(run.input(call.id()))?.unwrap();
