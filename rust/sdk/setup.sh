@@ -28,7 +28,7 @@ unsaved() { # dir patch paths...
   git -C "$dir" add -N -- "$@" 2> /dev/null
   ! git -C "$dir" diff HEAD -- "$@" | cmp -s - "$patch"
 }
-if unsaved "$build/sdk-rust" patches/sdk-rust.patch src macros tests examples Cargo.toml rust-toolchain.toml endpoint_manifest_schema.json; then
+if unsaved "$build/sdk-rust" patches/sdk-rust.patch src tests examples Cargo.toml rust-toolchain.toml; then
   echo "$build has edits that the patches do not: run patches/regenerate.sh first, or remove .build/ to drop them" >&2
   exit 1
 fi

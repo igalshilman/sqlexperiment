@@ -11,78 +11,6 @@ index f210e03..07c96e8 100644
  rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
  rustls-native-certs = { version = "0.8", optional = true }
  schemars = { version = "1.2", optional = true }
-diff --git a/endpoint_manifest_schema.json b/endpoint_manifest_schema.json
-index e45699b..f30e4b7 100644
---- a/endpoint_manifest_schema.json
-+++ b/endpoint_manifest_schema.json
-@@ -174,7 +174,12 @@
-                 },
-                 "enableLazyState":  {
-                   "type": "boolean",
--                  "description": "If true, lazy state is enabled."
-+                  "description": "If true, lazy state is enabled. To still load some keys eagerly, check eagerStateKeysWhitelist."
-+                },
-+                "eagerStateKeysWhitelist":  {
-+                  "type": "array",
-+                  "items": { "type": "string" },
-+                  "description": "When enableLazyState is true, a whitelist of state keys to still preload eagerly into the invocation. Best-effort: bounded by the server eager state size limit, so an entry that doesn't fit is served lazily instead. Ignored when enableLazyState is false (all state is already preloaded)."
-                 },
-                 "ingressPrivate":  {
-                   "type": "boolean",
-@@ -243,7 +248,12 @@
-           },
-           "enableLazyState":  {
-             "type": "boolean",
--            "description": "If true, lazy state is enabled."
-+            "description": "If true, lazy state is enabled. To still load some keys eagerly, check eagerStateKeysWhitelist."
-+          },
-+          "eagerStateKeysWhitelist":  {
-+            "type": "array",
-+            "items": { "type": "string" },
-+            "description": "When enableLazyState is true, a whitelist of state keys to still preload eagerly into the invocation. Best-effort: bounded by the server eager state size limit, so an entry that doesn't fit is served lazily instead. Ignored when enableLazyState is false (all state is already preloaded)."
-           },
-           "ingressPrivate":  {
-             "type": "boolean",
-diff --git a/macros/src/generator.rs b/macros/src/generator.rs
-index 9215a9b..af8832e 100644
---- a/macros/src/generator.rs
-+++ b/macros/src/generator.rs
-@@ -270,6 +270,7 @@ impl<'a> ServiceGenerator<'a> {
-                     idempotency_retention: None,
-                     workflow_completion_retention: None,
-                     enable_lazy_state: #lazy_state,
-+                    eager_state_keys_whitelist: Default::default(),
-                     ingress_private: None,
-                     retry_policy_initial_interval: None,
-                     retry_policy_max_interval: None,
-@@ -297,6 +298,7 @@ impl<'a> ServiceGenerator<'a> {
-                         journal_retention: None,
-                         idempotency_retention: None,
-                         enable_lazy_state: None,
-+                        eager_state_keys_whitelist: Default::default(),
-                         ingress_private: None,
-                         retry_policy_initial_interval: None,
-                         retry_policy_max_interval: None,
-diff --git a/macros/src/struct_generator.rs b/macros/src/struct_generator.rs
-index 76d7dad..9034e71 100644
---- a/macros/src/struct_generator.rs
-+++ b/macros/src/struct_generator.rs
-@@ -238,6 +238,7 @@ fn discovery(svc: &StructService) -> TokenStream2 {
-                 idempotency_retention: #idempotency_retention,
-                 workflow_completion_retention: #workflow_completion_retention,
-                 enable_lazy_state: #enable_lazy_state,
-+                eager_state_keys_whitelist: Default::default(),
-                 ingress_private: #ingress_private,
-                 retry_policy_initial_interval: #initial_interval,
-                 retry_policy_max_interval: #max_interval,
-@@ -279,6 +280,7 @@ fn discovery(svc: &StructService) -> TokenStream2 {
-                     journal_retention: #journal_retention,
-                     idempotency_retention: #idempotency_retention,
-                     enable_lazy_state: #enable_lazy_state,
-+                    eager_state_keys_whitelist: Default::default(),
-                     ingress_private: #ingress_private,
-                     retry_policy_initial_interval: #initial_interval,
-                     retry_policy_max_interval: #max_interval,
 diff --git a/rust-toolchain.toml b/rust-toolchain.toml
 deleted file mode 100644
 index 5dcf242..0000000
@@ -152,45 +80,19 @@ index dd43c1c..5986780 100644
  }
  
  impl<'ctx> From<(&'ctx ContextInternal, InputMetadata)> for ObjectContext<'ctx> {
-diff --git a/src/discovery.rs b/src/discovery.rs
-index 0ed402f..37aeb4d 100644
---- a/src/discovery.rs
-+++ b/src/discovery.rs
-@@ -71,6 +71,9 @@ impl Service {
-         if let Some(v) = options.enable_lazy_state {
-             self.enable_lazy_state = Some(v);
-         }
-+        if let Some(keys) = options.eager_state_keys {
-+            self.eager_state_keys_whitelist = keys;
-+        }
-         if let Some(v) = options.ingress_private {
-             self.ingress_private = Some(v);
-         }
-@@ -123,6 +126,9 @@ impl Handler {
-         if let Some(v) = options.enable_lazy_state {
-             self.enable_lazy_state = Some(v);
-         }
-+        if let Some(keys) = options.eager_state_keys {
-+            self.eager_state_keys_whitelist = keys;
-+        }
-         if let Some(v) = options.ingress_private {
-             self.ingress_private = Some(v);
-         }
 diff --git a/src/endpoint/builder.rs b/src/endpoint/builder.rs
-index 1995d07..feb3713 100644
+index 1995d07..32a54f9 100644
 --- a/src/endpoint/builder.rs
 +++ b/src/endpoint/builder.rs
-@@ -16,7 +16,9 @@ pub struct ServiceOptions {
-     pub(crate) idempotency_retention: Option<Duration>,
+@@ -17,6 +17,7 @@ pub struct ServiceOptions {
      pub(crate) journal_retention: Option<Duration>,
      pub(crate) enable_lazy_state: Option<bool>,
-+    pub(crate) eager_state_keys: Option<Vec<String>>,
      pub(crate) ingress_private: Option<bool>,
 +    pub(crate) journal_replay: Option<bool>,
      // Retry policy options
      pub(crate) retry_policy_initial_interval: Option<Duration>,
      pub(crate) retry_policy_exponentiation_factor: Option<f64>,
-@@ -33,6 +35,13 @@ impl ServiceOptions {
+@@ -33,6 +34,13 @@ impl ServiceOptions {
          Self::default()
      }
  
@@ -204,18 +106,10 @@ index 1995d07..feb3713 100644
      /// This timer guards against stalled invocations. Once it expires, Restate triggers a graceful
      /// termination by asking the invocation to suspend (which preserves intermediate progress).
      ///
-@@ -83,6 +92,24 @@ impl ServiceOptions {
+@@ -83,6 +91,16 @@ impl ServiceOptions {
          self
      }
  
-+    /// With lazy state, the state keys that Restate still sends with each
-+    /// invocation to this service, so that reading them costs no round trip:
-+    /// best effort, within the server's eager state size limit.
-+    pub fn eager_state_keys<K: Into<String>>(mut self, keys: impl IntoIterator<Item = K>) -> Self {
-+        self.eager_state_keys = Some(keys.into_iter().map(Into::into).collect());
-+        self
-+    }
-+
 +    /// When set to `false`, a retried attempt runs the handler again against the
 +    /// state as stored, instead of replaying the journal of the attempts before
 +    /// it. Its earlier commands are skipped, never matched, so the handler may
@@ -229,16 +123,15 @@ index 1995d07..feb3713 100644
      /// When set to `true` this service, with all its handlers, cannot be invoked from the restate-server
      /// HTTP and Kafka ingress, but only from other services.
      pub fn ingress_private(mut self, private: bool) -> Self {
-@@ -163,6 +190,8 @@ pub struct HandlerOptions {
+@@ -163,6 +181,7 @@ pub struct HandlerOptions {
      pub(crate) journal_retention: Option<Duration>,
      pub(crate) ingress_private: Option<bool>,
      pub(crate) enable_lazy_state: Option<bool>,
-+    pub(crate) eager_state_keys: Option<Vec<String>>,
 +    pub(crate) journal_replay: Option<bool>,
      // Retry policy options
      pub(crate) retry_policy_initial_interval: Option<Duration>,
      pub(crate) retry_policy_exponentiation_factor: Option<f64>,
-@@ -237,6 +266,16 @@ impl HandlerOptions {
+@@ -237,6 +256,16 @@ impl HandlerOptions {
          self
      }
  
@@ -255,22 +148,7 @@ index 1995d07..feb3713 100644
      /// When set to `true`, lazy state will be enabled for all invocations to this handler. This is
      /// relevant only for workflows and virtual objects.
      pub fn enable_lazy_state(mut self, enable: bool) -> Self {
-@@ -244,6 +283,14 @@ impl HandlerOptions {
-         self
-     }
- 
-+    /// With lazy state, the state keys that Restate still sends with each
-+    /// invocation to this handler, so that reading them costs no round trip:
-+    /// best effort, within the server's eager state size limit. Replaces the service's.
-+    pub fn eager_state_keys<K: Into<String>>(mut self, keys: impl IntoIterator<Item = K>) -> Self {
-+        self.eager_state_keys = Some(keys.into_iter().map(Into::into).collect());
-+        self
-+    }
-+
-     /// Initial delay before the first retry attempt.
-     ///
-     /// If unset, the server default is used.
-@@ -297,6 +344,7 @@ impl HandlerOptions {
+@@ -297,6 +326,7 @@ impl HandlerOptions {
  pub struct Builder {
      svcs: HashMap<String, BoxedService>,
      discovery_services: Vec<crate::discovery::Service>,
@@ -278,7 +156,7 @@ index 1995d07..feb3713 100644
      identity_verifier: IdentityVerifier,
  }
  
-@@ -335,9 +383,13 @@ impl Builder {
+@@ -335,9 +365,13 @@ impl Builder {
          let ServiceDefinition {
              mut discovery,
              dispatcher,
@@ -292,7 +170,7 @@ index 1995d07..feb3713 100644
          self.svcs.insert(discovery.name.to_string(), dispatcher);
          self.discovery_services.push(discovery);
          self
-@@ -354,7 +406,55 @@ impl Builder {
+@@ -354,7 +388,55 @@ impl Builder {
          Endpoint(Arc::new(EndpointInner {
              svcs: self.svcs,
              discovery_services: self.discovery_services,
