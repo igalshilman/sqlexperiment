@@ -59,17 +59,23 @@ but one key, the root, which names everything else: copy-on-write.
 A namespace holds:
 
 - **The root** (`v16/root`): the version, the directory of files (paged
-  files, such as the SQL database's, and records), the small records, and,
-  for each chunk of 4 pages of each paged file, the blobs that hold it.
+  files, such as the SQL database's, and records), the small records, and
+  the top of each paged file's chunk map.
 - **Blobs** (`v16/blob/<n>`): one zstd frame each, written once and never
-  changed: a chunk's _base_ (its pages), maybe a _delta_ (its pages now,
-  compressed against the base, so it costs about what changed), or a large
-  record.
+  changed: a chunk's _base_ (its 4 pages), maybe a _delta_ (its pages now,
+  compressed against the base, so it costs about what changed), a node of a
+  chunk map, or a large record.
+
+**Chunk maps.** A paged file's chunks are named by a copy-on-write radix
+tree of 64-entry nodes, its top node in the root. A file of up to 1 MiB is
+a single node in the root; 64 MiB takes two levels, 10 GiB (the most a file
+holds) four.
 
 **Flush.** A flush puts a new delta for each chunk it changed (or a new base,
-once the delta grows past a quarter of the base), then the root that names
-them, and syncs once: one round trip. Once the root is stored, the
-transaction is durable; before, it doesn't exist.
+once the delta grows past a quarter of the base), a new map node on each path
+to a changed chunk, then the root that names them, and syncs once: one round
+trip. Once the root is stored, the transaction is durable; before, it
+doesn't exist.
 
 **One rule.** A blob is put before the first root that names it, and deleted
 only once no root a reader may still hold names it: 16 flushes after the
@@ -89,7 +95,7 @@ root names, and the next flush overwrites them.
 **Why it is simple.** Blobs never change, so a cache keeps them by number and
 never invalidates them, and a reader (a shared handler beside the exclusive
 one) reads the root it opened, a consistent snapshot, while the owner
-flushes. A paged file holds at most 10 GiB.
+flushes.
 
 **What it relies on.**
 
@@ -97,12 +103,12 @@ flushes. A paged file holds at most 10 GiB.
   fences a former attempt's writes.
 - **Writes in issue order.** A crash keeps a prefix of the writes since the
   last sync, never a write without the ones before it.
-- **Reliable storage.** Restate returns what was stored. Values are checked
-  for structure and bounds, and zstd's frame checksums.
+- **Reliable storage.** Restate returns what was stored. Decoding checks
+  structure and bounds, and every zstd frame carries a checksum.
 
 [The design](docs/DESIGN.md) has the exact rules, the failure table and the
-owner cache; [the experiment](docs/COW_EXPERIMENT.md) compares it with the log
-it replaced.
+owner cache; [the copy-on-write report](docs/COW_EXPERIMENT.md) compares it
+with the log it replaced.
 
 ## Docs
 
@@ -111,17 +117,17 @@ it replaced.
 - [Design](docs/DESIGN.md): the model, invariants, flush, open, failures,
   cache and costs
 - [Storage format](docs/FORMAT.md): exact encodings
-- [Copy-on-write](docs/COW_EXPERIMENT.md): the experiment that replaced the
-  log, with measurements and what it simplified
+- [Copy-on-write](docs/COW_EXPERIMENT.md): how it replaced the log, with
+  measurements, the chunk map's fanout and what it simplified
 - [SQL](../sql/README.md): SQLite-compatible SQL on the state, with the
   storage tests and benchmarks that run SQL workloads
 
 ## Layout
 
-| Path             | What                                   |
-| ---------------- | -------------------------------------- |
-| `src/`, `tests/` | The crate and its tests                |
-| [`docs/`](docs)  | Design, storage format, the experiment |
+| Path             | What                                                       |
+| ---------------- | ---------------------------------------------------------- |
+| `src/`, `tests/` | The crate and its tests                                    |
+| [`docs/`](docs)  | Overview, design, storage format, the copy-on-write report |
 
 ## Build and test
 

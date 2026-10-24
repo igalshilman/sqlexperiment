@@ -1,11 +1,10 @@
-# Experiment: copy-on-write blobs replace the log
+# Copy-on-write blobs replace the log
 
-An experiment, in review as
-[PR #246](https://github.com/igalshilman/sqlexperiment/pull/246) (branch
-`claude/focused-cori-nw68l4`). The state crate's log, checkpoints, page keys
-and working-set hint are gone: a flush writes immutable zstd blobs and one
-root that names them ([DESIGN.md](DESIGN.md), [FORMAT.md](FORMAT.md)). It
-asks four questions: does it simplify the code, does it make correctness and
+Merged in [PR #246](https://github.com/igalshilman/sqlexperiment/pull/246),
+as an experiment first. The state crate's log, checkpoints, page keys and
+working-set hint are gone: a flush writes immutable zstd blobs and one root
+that names them ([DESIGN.md](DESIGN.md), [FORMAT.md](FORMAT.md)). This report
+asked four questions: does it simplify the code, does it make correctness and
 caching easier to reason about, do shared handlers work, and what does it
 cost.
 
@@ -145,7 +144,7 @@ Restate retries the handler.
 
 ### Is the log gone?
 
-Completely, on this branch: format v16 (`v16/root`, `v16/blob/<n>`), with no
+Completely: format v16 (`v16/root`, `v16/blob/<n>`), with no
 migration. The benches, analyzers and results that measured the log
 (`log_shipping`, `page_compression`, their scripts and CSVs, the TLA+
 specification and its review) are deleted; `CACHE_RESULTS.md` and
@@ -153,7 +152,7 @@ specification and its review) are deleted; `CACHE_RESULTS.md` and
 
 ## What the self-review found
 
-A review of the whole branch, before asking for one, found three real bugs,
+A review of the whole change, before merging, found three real bugs,
 all in caching, none of which the campaign had caught:
 
 - **Two databases, one cache key.** A namespace whose state is cleared and
@@ -228,7 +227,8 @@ SDKs) are gone.
 - **Zero pages are holes.** In a file without a base, a page of zeros reads
   as absent, which SQLite never relies on.
 - **Granularity.** A change rebuilds a 16 KiB chunk's delta; `CHUNK_PAGES=1`
-  costs less per change but compresses worse and makes the root 4× longer.
+  costs less per change but compresses worse and makes the chunk maps 4×
+  larger.
 - **Uncached flushes fetch bases** before they write deltas (above).
 - **Restate's state grows a key per blob**, about two per chunk, which its
   UI lists unless hidden by the `v16/` prefix (the SDKs set it).

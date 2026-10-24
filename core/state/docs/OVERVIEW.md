@@ -20,20 +20,22 @@ A state is one Restate object's state, in two kinds of key. Restate's own
 invocation journal is not used: these handlers run with `journalReplay: false`,
 and the root plays that role.
 
-| Key            | What it holds                                                                                                         |
-| -------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `v16/root`     | The root: the directory of files, the small records, and the blobs of every chunk. The only key whose write commits.  |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), or a large record |
+| Key            | What it holds                                                                                                                             |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `v16/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.              |
+| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record |
 
 Transactions change two kinds of state:
 
 - **Files** are page-addressed: the engine above reads and writes 4 KiB pages at
-  random, and a flush writes the chunks that changed, as new blobs. SQL keeps its database in
+  random, and a flush writes the chunks that changed, as new blobs. A
+  copy-on-write radix tree, the file's chunk map, names them: up to 1 MiB it
+  fits in the root, and a file holds at most 10 GiB. SQL keeps its database in
   the file `db`. The functions runtime keeps a Wasm VM's memory in a file opened
   over the program's golden image, so only pages that differ from it are
   stored.
-- **Records** are small named values inside the root, such as `run`,
-  `memory` or an extension's `notary/count`.
+- **Records** are named values, such as `run`, `memory` or an extension's
+  `notary/count`: inside the root up to 1 KiB, a blob of their own past it.
 
 The contract it needs from Restate is small ([`kv.rs`](../src/kv.rs)): writes
 return at once and are kept in issue order, `sync()` waits until they are
@@ -50,7 +52,8 @@ then syncs once:
 
 1. **Garbage:** deletes of blobs that no root names for the last 16 flushes.
 2. **Blobs:** each changed chunk's pages, compressed against the chunk's base
-   (a delta), or, once the delta grows, a new base; and large records.
+   (a delta), or, once the delta grows, a new base; a new node on each path
+   of a chunk map to a changed chunk, below its top; and large records.
 3. **The root:** naming them, with the small records. If this put is stored,
    the transaction happened.
 
@@ -59,7 +62,8 @@ queued writes, and a blob is put before any root names it and never
 overwritten, so whatever survives, open finds a root that names only blobs
 that are there. There is nothing to replay, checkpoint or repair.
 
-- **Cost:** one sync, and a few puts: the root and a blob per changed chunk.
+- **Cost:** one sync, and a few puts: the root, a blob per changed chunk,
+  and, in a file past 1 MiB, a map node per level on each changed path.
   A delta is compressed against its chunk's base, so it costs about what
   changed. A WAL that changes nothing writes nothing.
 - **The cache:** an optional process-wide `PageCache` keeps blobs in memory and
