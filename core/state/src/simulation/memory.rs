@@ -3,7 +3,7 @@
 use crate::{
     kv::KvStore,
     simulation::yield_now,
-    store::{BLOB_PREFIX, ROOT},
+    store::{BLOB_PREFIX, ROOT, Root},
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -130,6 +130,17 @@ impl MemoryKv {
         (inner.values.iter())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
+    }
+    /// Every key and its value, with the root's random database identity
+    /// zeroed: two stores that hold the same state compare equal.
+    pub fn contents(&self) -> BTreeMap<String, Bytes> {
+        let mut contents: BTreeMap<String, Bytes> = self.values().into_iter().collect();
+        if let Some(root) = contents.get_mut(ROOT) {
+            let mut decoded = Root::decode(root).expect("a stored root decodes");
+            decoded.id = 0;
+            *root = decoded.encode();
+        }
+        contents
     }
     pub fn keys(&self) -> BTreeSet<String> {
         self.inner.lock().unwrap().values.keys().cloned().collect()

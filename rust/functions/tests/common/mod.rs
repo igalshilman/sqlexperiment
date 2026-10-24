@@ -26,13 +26,11 @@ impl Store {
         Scope::new(self.kv.clone() as Arc<dyn KvStore>)
     }
 
-    /// Every key and its value.
+    /// Every key and its value, but the database's random identity: what
+    /// two runs that end alike store alike.
     pub fn values(&self) -> BTreeMap<String, Vec<u8>> {
-        (self.kv.keys().into_iter())
-            .map(|key| {
-                let value = block(self.kv.get(&key)).unwrap().unwrap();
-                (key, value.to_vec())
-            })
+        (self.kv.contents().into_iter())
+            .map(|(key, value)| (key, value.to_vec()))
             .collect()
     }
 
