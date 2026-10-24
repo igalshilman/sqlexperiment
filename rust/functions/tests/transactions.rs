@@ -1,4 +1,4 @@
-//! A turn's transaction: participants set their records in one WAL, the
+//! A turn's transaction: participants set their records in one mutation, the
 //! host flushes it at once, and tells them; a participant that fails to
 //! prepare abandons the turn, which runs again from the last seal.
 mod common;
@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use common::{Store, attempt, programs, settle};
 use functions::{
-    Attached, Extension, Extensions, Outcome, Participant, Record, Run, ScopeBlobs, State, Wal,
+    Attached, Extension, Extensions, Mutation, Outcome, Participant, Record, Run, ScopeBlobs, State,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -58,16 +58,16 @@ impl Extension for Counter {
 
 #[async_trait]
 impl Participant for Counting {
-    /// Before the seal: one more, set in the WAL. Its flush makes the count
+    /// Before the seal: one more, set in the mutation. Its flush makes the count
     /// durable with the run's memory, its tables and every other
     /// participant, at once.
-    async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
+    async fn prepare(&mut self, mutation: &mut Mutation) -> Result<()> {
         if self.counter.fail.swap(false, Ordering::SeqCst) {
             bail!("Injected prepare failure");
         }
         self.count += 1;
         let bytes = serde_json::to_vec(&json!({"count": self.count}))?;
-        (wal.set(&self.record, bytes.into())).map_err(anyhow::Error::from_boxed)?;
+        (mutation.set(&self.record, bytes.into())).map_err(anyhow::Error::from_boxed)?;
         Ok(())
     }
 

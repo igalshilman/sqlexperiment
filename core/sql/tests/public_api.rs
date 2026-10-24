@@ -10,12 +10,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Flush `db`'s SQL in a WAL of its state, and the WAL, ending the session.
+/// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
 async fn save(mut db: Sql) -> state::Result<state::FlushReport> {
     let state = db.state();
-    let mut wal = state.wal();
-    db.flush(&mut wal).await?;
-    wal.flush().await
+    let mut mutation = state.mutation();
+    db.flush(&mut mutation).await?;
+    mutation.flush().await
 }
 
 #[derive(Default)]
@@ -70,9 +70,9 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
     })
 }
 
-/// A transaction and a record, durable together at the WAL's flush.
+/// A transaction and a record, durable together at the mutation's flush.
 #[test]
-fn a_wal_flush_with_an_immediately_ready_backend() -> Result<()> {
+fn a_mutation_flush_with_an_immediately_ready_backend() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(Store::default());
         fn require_send<T: Send>(value: T) -> T {
@@ -87,10 +87,10 @@ fn a_wal_flush_with_an_immediately_ready_backend() -> Result<()> {
             db.execute("INSERT INTO t VALUES (2, 'world')").await
         }))
         .await?;
-        let mut wal = state.wal();
-        db.flush(&mut wal).await?;
-        wal.set(&state.record("note"), Bytes::from_static(b"two rows"))?;
-        require_send(wal.flush()).await?;
+        let mut mutation = state.mutation();
+        db.flush(&mut mutation).await?;
+        mutation.set(&state.record("note"), Bytes::from_static(b"two rows"))?;
+        require_send(mutation.flush()).await?;
         drop(db);
         let state = State::open(store).await?;
         assert_eq!(state.record("note").get(), &b"two rows"[..]);

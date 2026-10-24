@@ -687,10 +687,10 @@ impl Campaign {
                 let effects = Bytes::from(format!("turn {}", self.turn));
                 self.model.pending_effects = Some(effects.clone());
                 let flush = async {
-                    let mut wal = state.wal();
-                    sql.flush(&mut wal).await?;
-                    wal.set(&state.record("effects"), effects)?;
-                    wal.flush().await.map(drop)
+                    let mut mutation = state.mutation();
+                    sql.flush(&mut mutation).await?;
+                    mutation.set(&state.record("effects"), effects)?;
+                    mutation.flush().await.map(drop)
                 };
                 let (hit, ended) = self.call(2, "flush the turn", flush).await;
                 if matches!(ended, Ended::Returned(Ok(()))) {

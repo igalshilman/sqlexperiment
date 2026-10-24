@@ -80,7 +80,7 @@ deliver one result ─▶ run until the JavaScript waits ─▶ flush ─▶ wai
 - **One flush**: a turn is one flush of the scope's
   [state](../../core/state): its memory pages, its SQL (`ctx.kv` is a table
   too) and the run's progress with its pending requests, written into one
-  WAL. The state puts the blobs of what changed before the root that names
+  mutation. The state puts the blobs of what changed before the root that names
   them, so a crash never leaves a root naming blobs that are not stored.
 - **No replay**: a retry restores the VM from the last flush and waits
   again on its requests under the same idempotency keys, attaching to calls

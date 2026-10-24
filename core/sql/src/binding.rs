@@ -2,7 +2,7 @@
 //! extension), over a key/value store the host implements in its language.
 //!
 //! Unlike [`Sql`], a [`Session`] flushes the state itself: a call that
-//! leaves no SQL transaction open moves the SQL into a WAL and flushes it
+//! leaves no SQL transaction open moves the SQL into a mutation and flushes it
 //! before it returns, so every SQL commit is durable when its call resolves.
 //! The host's `transaction()` runs its body between [`Session::begin`] and
 //! [`Session::commit`] or [`Session::rollback`]; meanwhile a statement that
@@ -41,7 +41,7 @@ pub struct Session {
     /// read without the lock, which a running call holds.
     usable: AtomicBool,
     /// The effects [`Self::commit`] set, for the call's flush to put in the
-    /// same WAL as the SQL.
+    /// same mutation as the SQL.
     effects: std::sync::Mutex<Option<Bytes>>,
 }
 
@@ -176,7 +176,7 @@ impl Session {
     /// ended the transaction of a `transaction()` body ends the session.
     /// Otherwise a call that leaves no SQL transaction open flushes the
     /// state, even after an SQL error (the statements before it stand): what
-    /// the SQL committed, with the effects set, in one WAL, durable before
+    /// the SQL committed, with the effects set, in one mutation, durable before
     /// the call returns. A reader flushes nothing, and a session that a
     /// failure ended cannot. A call dropped before it returns ends the
     /// session.
@@ -231,15 +231,15 @@ const CLOSED: &str = "the database is closed";
 /// The error of a call that would commit after a failure ended the session.
 const ENDED: &str = "a failure ended the session";
 
-/// What the SQL committed, and `effects` if any, durable in one WAL.
+/// What the SQL committed, and `effects` if any, durable in one mutation.
 async fn flush(session: &mut Sql, effects: Option<Bytes>) -> Result<()> {
     let state = session.state();
-    let mut wal = state.wal();
-    session.flush(&mut wal).await?;
+    let mut mutation = state.mutation();
+    session.flush(&mut mutation).await?;
     if let Some(effects) = effects {
-        wal.set(&state.record(EFFECTS), effects)?;
+        mutation.set(&state.record(EFFECTS), effects)?;
     }
-    wal.flush().await?;
+    mutation.flush().await?;
     Ok(())
 }
 

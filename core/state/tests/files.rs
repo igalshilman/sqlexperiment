@@ -12,30 +12,30 @@ async fn byte(file: &state::File, n: u64) -> Result<Option<u8>> {
     Ok(file.read(n).await?.map(|page| page[0]))
 }
 
-/// A file shrunk twice in one WAL, then grown back: once flushed, every
+/// A file shrunk twice in one mutation, then grown back: once flushed, every
 /// page past the shorter length reads as zeros, also those only the first
 /// shrink cut.
 #[test]
-fn shrinking_twice_in_a_wal_leaves_no_page_behind() -> Result<()> {
+fn shrinking_twice_in_a_mutation_leaves_no_page_behind() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let state = State::open(store.clone()).await?;
         let file = state.file("db")?;
-        let mut wal = state.wal();
+        let mut mutation = state.mutation();
         for n in 0..8 {
-            wal.write(&file, n, Some(page(n as u8 + 1)))?;
+            mutation.write(&file, n, Some(page(n as u8 + 1)))?;
         }
-        wal.flush().await?;
-        let mut wal = state.wal();
-        wal.set_len(&file, 6 * 4096)?;
-        wal.set_len(&file, 2 * 4096)?;
-        wal.set_len(&file, 8 * 4096)?;
+        mutation.flush().await?;
+        let mut mutation = state.mutation();
+        mutation.set_len(&file, 6 * 4096)?;
+        mutation.set_len(&file, 2 * 4096)?;
+        mutation.set_len(&file, 8 * 4096)?;
         assert_eq!(
             byte(&file, 7).await?,
             Some(8),
-            "as flushed, until the WAL is"
+            "as flushed, until the mutation is"
         );
-        wal.flush().await?;
+        mutation.flush().await?;
         for n in 2..8 {
             assert_eq!(byte(&file, n).await?, None, "page {n}");
         }
@@ -70,31 +70,31 @@ fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         for n in [1, 2] {
             let state = State::open(store.clone()).await?;
-            let mut wal = state.wal();
-            wal.write(
+            let mut mutation = state.mutation();
+            mutation.write(
                 &state.file_with_base("vm", Arc::new(Zeros))?,
                 1,
                 Some(page(n)),
             )?;
-            wal.flush().await?;
+            mutation.flush().await?;
         }
         let state = State::open(store.clone()).await?;
         assert!(state.file("vm")?.read(1).await.is_err(), "without its base");
         let vm = state.file_with_base("vm", Arc::new(Zeros))?;
         assert_eq!(byte(&vm, 1).await?, Some(2));
-        let mut wal = state.wal();
-        wal.write(&state.file("db")?, 0, Some(page(9)))?;
-        wal.flush().await?;
+        let mut mutation = state.mutation();
+        mutation.write(&state.file("db")?, 0, Some(page(9)))?;
+        mutation.flush().await?;
         assert_eq!(byte(&vm, 1).await?, Some(2), "after another flush");
 
         // Without its base, a whole chunk of it can still be made holes:
         // its base pages again.
         let state = State::open(store.clone()).await?;
-        let mut wal = state.wal();
+        let mut mutation = state.mutation();
         for n in 0..4 {
-            wal.write(&state.file("vm")?, n, None)?;
+            mutation.write(&state.file("vm")?, n, None)?;
         }
-        wal.flush().await?;
+        mutation.flush().await?;
         let state = State::open(store).await?;
         let vm = state.file_with_base("vm", Arc::new(Zeros))?;
         assert_eq!(byte(&vm, 1).await?, Some(0), "its base page");
@@ -117,11 +117,11 @@ fn a_long_sequential_read_returns_every_chunk() -> Result<()> {
             .options(options())
             .await?;
         let file = state.file("db")?;
-        let mut wal = state.wal();
+        let mut mutation = state.mutation();
         for n in 0..1500 {
-            wal.write(&file, n, Some(page(n as u8 | 1)))?;
+            mutation.write(&file, n, Some(page(n as u8 | 1)))?;
         }
-        wal.flush().await?;
+        mutation.flush().await?;
         let store = Arc::new(LatencyKv::new(memory));
         let state = State::open(store.clone()).options(options()).await?;
         let file = state.file("db")?;
@@ -141,22 +141,22 @@ fn a_refused_flush_leaves_the_state_usable() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let state = State::open(store.clone()).await?;
-        let mut wal = state.wal();
-        wal.write(
+        let mut mutation = state.mutation();
+        mutation.write(
             &state.file_with_base("vm", Arc::new(Zeros))?,
             0,
             Some(page(1)),
         )?;
-        wal.flush().await?;
+        mutation.flush().await?;
         let state = State::open(store).await?;
-        let mut wal = state.wal();
-        wal.write(&state.file("vm")?, 1, None)?;
-        let error = wal.flush().await.unwrap_err().to_string();
+        let mut mutation = state.mutation();
+        mutation.write(&state.file("vm")?, 1, None)?;
+        let error = mutation.flush().await.unwrap_err().to_string();
         assert!(error.contains("open it with it"), "{error}");
         assert!(state.is_usable());
-        let mut wal = state.wal();
-        wal.write(&state.file("db")?, 0, Some(page(2)))?;
-        wal.flush().await?;
+        let mut mutation = state.mutation();
+        mutation.write(&state.file("db")?, 0, Some(page(2)))?;
+        mutation.flush().await?;
         Ok(())
     })
 }
@@ -170,21 +170,21 @@ fn a_cold_flush_gets_the_chunks_it_changes_together() -> Result<()> {
         let memory = MemoryKv::default();
         let state = State::open(Arc::new(memory.clone())).await?;
         let file = state.file("db")?;
-        let mut wal = state.wal();
+        let mut mutation = state.mutation();
         for n in 0..400 {
-            wal.write(&file, n, Some(page(n as u8 | 1)))?;
+            mutation.write(&file, n, Some(page(n as u8 | 1)))?;
         }
-        wal.flush().await?;
+        mutation.flush().await?;
         let store = Arc::new(LatencyKv::new(memory));
         let state = State::open(store.clone()).await?;
         assert_eq!(store.round_trips(), 2);
         let file = state.file("db")?;
         store.reset();
-        let mut wal = state.wal();
+        let mut mutation = state.mutation();
         for n in (0..400).step_by(37) {
-            wal.write(&file, n, Some(page(2)))?;
+            mutation.write(&file, n, Some(page(2)))?;
         }
-        wal.flush().await?;
+        mutation.flush().await?;
         assert_eq!(store.round_trips(), 2);
         assert_eq!(byte(&file, 37).await?, Some(2));
         Ok(())

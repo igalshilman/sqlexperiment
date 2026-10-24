@@ -5,12 +5,12 @@ use sql::Sql;
 use state::{Result, State, simulation::MemoryKv};
 use std::sync::Arc;
 
-/// Flush `db`'s SQL in a WAL of its state, and the WAL, ending the session.
+/// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
 async fn save(mut db: Sql) -> state::Result<state::FlushReport> {
     let state = db.state();
-    let mut wal = state.wal();
-    db.flush(&mut wal).await?;
-    wal.flush().await
+    let mut mutation = state.mutation();
+    db.flush(&mut mutation).await?;
+    mutation.flush().await
 }
 
 fn main() -> Result<()> {

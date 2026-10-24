@@ -17,7 +17,7 @@
 use crate::{
     model::MAX_INPUT,
     store::storage_error,
-    transaction::{Participant, State, Wal},
+    transaction::{Mutation, Participant, State},
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Number, Value, json};
@@ -294,12 +294,12 @@ fn unhex(hex: &str) -> Result<Vec<u8>, String> {
 /// SQL transaction, which the seal's flush makes durable.
 #[async_trait::async_trait]
 impl Participant for Db {
-    /// The turn's transaction, committed and moved into `wal`, as pages of
+    /// The turn's transaction, committed and moved into `mutation`, as pages of
     /// the state's file `db`; the next statement begins the next turn's.
-    async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
+    async fn prepare(&mut self, mutation: &mut Mutation) -> Result<()> {
         ensure!(self.savepoints == 0, "A transaction is still open");
         self.began = false;
-        self.sql.flush(wal).await.map_err(storage_error)
+        self.sql.flush(mutation).await.map_err(storage_error)
     }
 }
 

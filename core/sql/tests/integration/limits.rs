@@ -59,7 +59,7 @@ fn result_rows_are_bounded() -> Result<()> {
 }
 
 /// The limit is on private changes, not on moving committed ones into a
-/// WAL: a flush, which copies the engine WAL into the database's pages, passes.
+/// mutation: a flush, which copies the engine WAL into the database's pages, passes.
 #[test]
 fn a_transaction_within_the_limit_flushes() -> Result<()> {
     futures::executor::block_on(async {
@@ -71,7 +71,7 @@ fn a_transaction_within_the_limit_flushes() -> Result<()> {
         let mut db = Db::open_with(store.clone(), StateOptions::default(), limits).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB)")
             .await?;
-        // About 600 KiB: over half the limit, which the WAL and the
+        // About 600 KiB: over half the limit, which the mutation and the
         // checkpoint's pages together would exceed.
         db.execute("INSERT INTO t SELECT value, randomblob(100000) FROM (WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 6) SELECT value FROM n)")
             .await?;

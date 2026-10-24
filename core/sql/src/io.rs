@@ -3,8 +3,8 @@
 //! The engine sees two virtual files: [`DB_PATH`] and its private engine WAL.
 //! The database reads through the state's file; its dirty pages and the
 //! entire engine WAL live in `Private` until `KvIo::flush_into` copies the
-//! pages into a [`Wal`] of the state, where they stay, read ahead of the
-//! file, until the state flushes that WAL. Full-page writes avoid a backing
+//! pages into a [`Mutation`] of the state, where they stay, read ahead of the
+//! file, until the state flushes that mutation. Full-page writes avoid a backing
 //! read; partial writes merge with the visible page. Truncation records
 //! explicit holes and clears a partial tail so regrowing a file never
 //! exposes bytes from before.
@@ -35,12 +35,12 @@
 //! or spinning. Normal engine I/O is driven by the asynchronous pump.
 //!
 //! File sync is only a private-overlay ordering barrier. After a complete
-//! private checkpoint, `flush_into` copies the database's pages into a WAL,
+//! private checkpoint, `flush_into` copies the database's pages into a mutation,
 //! which the state's flush makes durable. The engine WAL never becomes a
 //! durable KV object.
 use bytes::BytesMut;
 use futures::future::join_all;
-use state::{File as StateFile, Page, Wal};
+use state::{File as StateFile, Mutation, Page};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
@@ -139,7 +139,7 @@ struct Private {
     /// Pages are shared with readers; a partial write updates a page in place
     /// when nothing else holds it.
     dirty: BTreeMap<(usize, u64), Option<Page>>,
-    /// Database pages copied into a WAL ([`KvIo::flush_into`]) that the state
+    /// Database pages copied into a mutation ([`KvIo::flush_into`]) that the state
     /// has not flushed yet: read after the dirty ones, ahead of the file,
     /// which does not hold them until then.
     flushed: BTreeMap<u64, Option<Page>>,
@@ -261,14 +261,14 @@ impl KvIo {
         Ok(io)
     }
 
-    /// Flush the private pages, in one WAL of the state of [`Self::mount`].
+    /// Flush the private pages, in one mutation of the state of [`Self::mount`].
     #[cfg(feature = "simulation")]
     pub async fn publish(&self) -> io::Result<state::FlushReport> {
         let state = self.state.lock().unwrap().clone();
         let state = state.ok_or_else(|| invalid("not mounted"))?;
-        let mut wal = state.wal();
-        self.flush_into(&mut wal)?;
-        let report = wal.flush().await.map_err(io::Error::other)?;
+        let mut mutation = state.mutation();
+        self.flush_into(&mut mutation)?;
+        let report = mutation.flush().await.map_err(io::Error::other)?;
         self.settle_flushed();
         Ok(report)
     }
@@ -284,7 +284,7 @@ impl KvIo {
         file.ok_or_else(|| invalid("the engine is parked"))
     }
 
-    /// No private changes, none in a WAL the state has not flushed, no
+    /// No private changes, none in a mutation the state has not flushed, no
     /// engine WAL and no outstanding I/O: the engine's view equals the state
     /// it was opened or last flushed at.
     pub(crate) fn is_clean(&self) -> bool {
@@ -640,27 +640,27 @@ impl KvIo {
     }
 
     /// Whether the engine changed the database since the last flush into a
-    /// WAL, or holds engine WAL a checkpoint has not moved into it.
+    /// mutation, or holds engine WAL a checkpoint has not moved into it.
     pub(crate) fn has_changes(&self) -> bool {
         let private = self.private.lock().unwrap();
         private.sizes[WAL] != 0 || private.dirty.keys().any(|(file, _)| *file == DB)
     }
 
-    /// Whether pages copied into a WAL wait for the state to flush or drop
+    /// Whether pages copied into a mutation wait for the state to flush or drop
     /// it ([`Self::flush_into`]).
     pub(crate) fn has_pending(&self) -> bool {
         !self.private.lock().unwrap().flushed.is_empty()
     }
 
     /// Copy the database's private pages into the state's file `db`, in
-    /// `wal`, once no SQL transaction remains and the engine WAL is
+    /// `mutation`, once no SQL transaction remains and the engine WAL is
     /// truncated. They stay in the private view, read ahead of the file,
-    /// until the state flushes the WAL ([`Self::settle_flushed`]) or drops
+    /// until the state flushes the mutation ([`Self::settle_flushed`]) or drops
     /// it ([`Self::settle_discarded`]): the file does not hold them before.
-    /// Pages a pending WAL already holds go in again, so that whichever WAL
-    /// the state flushes carries them all. After an error the WAL may hold
+    /// Pages a pending mutation already holds go in again, so that whichever
+    /// mutation the state flushes carries them all. After an error the mutation may hold
     /// part of the copy: drop it.
-    pub(crate) fn flush_into(&self, wal: &mut Wal) -> io::Result<()> {
+    pub(crate) fn flush_into(&self, mutation: &mut Mutation) -> io::Result<()> {
         if self.pending_count() != 0 {
             return Err(invalid("cannot flush pages with pending I/O"));
         }
@@ -677,14 +677,16 @@ impl KvIo {
             private.flushed.insert(block, page);
         }
         for (block, page) in &private.flushed {
-            wal.write(&file, *block, page.clone())
+            mutation
+                .write(&file, *block, page.clone())
                 .map_err(io::Error::other)?;
         }
-        wal.set_len(&file, private.sizes[DB])
+        mutation
+            .set_len(&file, private.sizes[DB])
             .map_err(io::Error::other)
     }
 
-    /// The state flushed the WAL the pages were copied into: the file holds
+    /// The state flushed the mutation the pages were copied into: the file holds
     /// them, and the engine reads them from it.
     pub(crate) fn settle_flushed(&self) {
         let mut private = self.private.lock().unwrap();
@@ -703,7 +705,7 @@ impl KvIo {
         }
     }
 
-    /// The WAL the pages were copied into was dropped: they are private
+    /// The mutation the pages were copied into was dropped: they are private
     /// changes again, for the next flush (a page changed since stands).
     pub(crate) fn settle_discarded(&self) {
         let mut private = self.private.lock().unwrap();

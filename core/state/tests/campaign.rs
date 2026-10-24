@@ -1,4 +1,4 @@
-//! A seeded random campaign over the public API: WALs of changes to several
+//! A seeded random campaign over the public API: mutations of changes to several
 //! files (one with a base) and records, flushed with small chunks and random
 //! rebase ratios so that deltas, rebases and garbage deletion all happen,
 //! and random faults, cancellations, crashes and reopens by owners with and
@@ -16,7 +16,7 @@
 mod support;
 
 use futures::task::noop_waker_ref;
-use state::{FlushReport, PageCache, Result, StateOptions, Wal, kv::KvStore, simulation::*};
+use state::{FlushReport, Mutation, PageCache, Result, StateOptions, kv::KvStore, simulation::*};
 use std::{
     sync::{
         Arc, OnceLock,
@@ -281,7 +281,7 @@ impl World {
         self.model = state;
     }
 
-    /// One flush of a WAL of random changes, perhaps with a fault, a
+    /// One flush of a mutation of random changes, perhaps with a fault, a
     /// cancellation, a crash or a reopen. Returns the session that goes on.
     async fn step(&mut self, mut session: Session) -> std::result::Result<Session, String> {
         // The backend may crash at any time, and with it the owner's session:
@@ -292,15 +292,15 @@ impl World {
             let candidates = self.since_sync.clone();
             session = self.reopen(&candidates).await?;
         }
-        let mut wal = session.state.wal();
+        let mut mutation = session.state.mutation();
         let mut pending = self.model.clone();
         for _ in 0..1 + self.rng.below(8) {
             let op = Op::random(&mut self.rng);
             trace(|| format!("  {}", describe(&op)));
-            text(session.apply(&mut wal, &op))?;
+            text(session.apply(&mut mutation, &op))?;
             pending.apply(&op);
             if self.rng.percent(30) {
-                // The state reads as last flushed, whatever the WAL holds.
+                // The state reads as last flushed, whatever the mutation holds.
                 let name = self.rng.pick(&FILES);
                 let index = self.rng.below(self.model.len(name).div_ceil(4096) + 2);
                 let read = text(session.file(name).read(index).await)?;
@@ -311,21 +311,21 @@ impl World {
         }
         if self.rng.percent(5) {
             trace(|| "discard".into());
-            wal = session.state.wal();
+            mutation = session.state.mutation();
             pending = self.model.clone();
         }
         let outcome = match self.rng.below(10) {
-            0..=5 => wal.flush().await,
+            0..=5 => mutation.flush().await,
             6..=7 => {
                 let failpoint = self.failpoint();
                 let _signal = self.store.arm(failpoint);
-                let outcome = wal.flush().await;
+                let outcome = mutation.flush().await;
                 self.store.disarm();
                 outcome
             }
-            _ => match self.cancelled(wal) {
+            _ => match self.cancelled(mutation) {
                 Some(outcome) => outcome,
-                // Never polled: nothing happened, and the WAL went with the
+                // Never polled: nothing happened, and the mutation went with the
                 // future.
                 None => {
                     if !session.state.is_usable() {
@@ -371,7 +371,7 @@ impl World {
             return self.reopen(&candidates).await;
         }
         // The outcome is unknown: the state ended.
-        if session.state.is_usable() || session.state.wal().flush().await.is_ok() {
+        if session.state.is_usable() || session.state.mutation().flush().await.is_ok() {
             return Err("a failed flush left the state usable".into());
         }
         drop(session);
@@ -449,11 +449,11 @@ impl World {
         }
     }
 
-    /// Poll the flush of `wal` a random number of times, then drop it:
+    /// Poll the flush of `mutation` a random number of times, then drop it:
     /// `None` if it was never polled.
-    fn cancelled(&mut self, wal: Wal) -> Option<Result<FlushReport>> {
+    fn cancelled(&mut self, mutation: Mutation) -> Option<Result<FlushReport>> {
         let polls = self.rng.below(12);
-        let mut flush = Box::pin(wal.flush());
+        let mut flush = Box::pin(mutation.flush());
         let mut cx = Context::from_waker(noop_waker_ref());
         for _ in 0..polls {
             if let Poll::Ready(outcome) = flush.as_mut().poll(&mut cx) {

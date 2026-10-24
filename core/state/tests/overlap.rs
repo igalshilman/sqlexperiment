@@ -53,13 +53,13 @@ fn a_flush_on_top_of_a_running_one_is_refused() -> Result<()> {
         let second = open().await?;
         let (release, gate) = futures::channel::oneshot::channel();
         *gated.gate.lock().unwrap() = Some(gate);
-        let mut wal = first.wal();
-        wal.set(&first.record("who"), "first".into())?;
-        let mut running = Box::pin(wal.flush());
+        let mut mutation = first.mutation();
+        mutation.set(&first.record("who"), "first".into())?;
+        let mut running = Box::pin(mutation.flush());
         assert!((&mut running).now_or_never().is_none(), "waits on its sync");
-        let mut wal = second.wal();
-        wal.set(&second.record("who"), "second".into())?;
-        let refused = wal.flush().await;
+        let mut mutation = second.mutation();
+        mutation.set(&second.record("who"), "second".into())?;
+        let refused = mutation.flush().await;
         release.send(()).unwrap();
         running.await?;
         assert!(

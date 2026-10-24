@@ -4,12 +4,12 @@ Transactional state over an asynchronous key/value store, for namespaces with
 one owner at a time: the state of a Restate object without Restate's journal
 (`journalReplay: false`). It keeps named **records** (small whole values) and
 paged **files** (4 KiB pages, read and written at random). The state is read;
-it changes only through a **WAL**, an owned value that collects the records set
-and pages written, and a **flush** makes everything in the WAL durable at
+it changes only through a **mutation**, an owned value that collects the records set
+and pages written, and a **flush** makes everything in the mutation durable at
 once, in one round trip. It needs only `get`, `put` and `delete` from the backend.
 
-What writes a WAL is a **participant**: it keeps changes of its own, moves
-them into a WAL before the flush, and may leave state idle for the
+What writes a mutation is a **participant**: it keeps changes of its own, moves
+them into a mutation before the flush, and may leave state idle for the
 namespace's next state. [SQL](../sql/README.md) is one, on the file `db`; the
 durable functions runtime adds a program's memory (a file) and its run's
 state (a record).
@@ -26,24 +26,24 @@ let cache = PageCache::open(PageCacheConfig::new(256 << 20, 8 << 30)).await?;
 
 // Per session, kept warm in the cache under the namespace's stable key.
 let state = State::open(store).cached(&cache, "object-42").await?;
-let mut wal = state.wal();
-wal.set(&state.record("progress"), "step 7".into())?;
-wal.write(&state.file("image")?, 0, Some(page))?;
-wal.flush().await?; // the record and the page, durable together
+let mut mutation = state.mutation();
+mutation.set(&state.record("progress"), "step 7".into())?;
+mutation.write(&state.file("image")?, 0, Some(page))?;
+mutation.flush().await?; // the record and the page, durable together
 ```
 
-Nothing is durable before `Wal::flush`, and then everything in that WAL is, at
+Nothing is durable before `Mutation::flush`, and then everything in that mutation is, at
 once: its blobs, then the root that names them, in one round trip. A flush
-consumes the WAL; a WAL dropped instead discards its writes. The state shows
-what was flushed (`record.get()`, `file.read(page)`), never what a WAL holds.
+consumes the mutation; a mutation dropped instead discards its writes. The state shows
+what was flushed (`record.get()`, `file.read(page)`), never what a mutation holds.
 The host must guarantee one owner per namespace. A failed or cancelled flush
 ends the state (`is_usable()` returns false): its outcome is unknown, so
 settle outstanding requests and open a new one.
 
 A participant joins under a name (`state.join("sql")`), one at a time per
-name. While it says it holds changes not yet in a WAL (`set_unflushed(true)`),
-every WAL of the state refuses to flush. Once it has moved them into one, a
-receipt (`wal.receipt()`) tells it whether that WAL was flushed or discarded.
+name. While it says it holds changes not yet in a mutation (`set_unflushed(true)`),
+every mutation of the state refuses to flush. Once it has moved them into one, a
+receipt (`mutation.receipt()`) tells it whether that mutation was flushed or discarded.
 With a page cache, it may `park` state for the next state of the namespace,
 which takes it back (`take_idle`) when nothing changed since: the SQL crate
 keeps its engine warm this way.
@@ -113,7 +113,7 @@ with the log it replaced.
 ## Docs
 
 - [Overview](docs/OVERVIEW.md): the state as files and records changed
-  through a WAL, who writes it, and a toy durable functions extension on it
+  through a mutation, who writes it, and a toy durable functions extension on it
 - [Design](docs/DESIGN.md): the model, invariants, flush, open, failures,
   cache and costs
 - [Storage format](docs/FORMAT.md): exact encodings

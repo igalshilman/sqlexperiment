@@ -695,8 +695,8 @@ capture(G, P, VM):
         P.page(i) = current
     return changed
 
-prepare(changed, wal):                            // the memory's part of the seal,
-                                                  // written into the turn's WAL
+prepare(changed, mutation):                       // the memory's part of the seal,
+                                                  // written into the turn's mutation
     if the scope's previous run left pages: write each as a hole, in its file
     if the run settled: write every page of P that differs from G as a hole
                         pages = []                // no image is kept
@@ -863,8 +863,8 @@ Resume can coexist. Once the root settles, the run is final.
 
 ## 7. Storage: one commit per turn
 
-A turn is one flush of the scope's state (`Wal::flush`): its blobs, then its
-root, and one sync. Every participant writes into one WAL:
+A turn is one flush of the scope's state (`Mutation::flush`): its blobs, then its
+root, and one sync. Every participant writes into one mutation:
 
 1. its KV writes, the SQL transaction its first KV request began;
 2. its memory's pages that changed, into the file over golden (§5.3);
@@ -877,7 +877,7 @@ blob, then the root that names them, and syncs once: writes are kept in
 issue order (§1), so a stored root names only stored blobs. A crash before
 the root is stored loses the whole turn, which the next
 attempt runs again from the previous flush: the requests it issued were
-never dispatched (§1). Nothing is applied after a flush; a WAL that is not
+never dispatched (§1). Nothing is applied after a flush; a mutation that is not
 flushed is dropped, and its writes with it.
 
 **SQL again.** Until 18 October 2026 the scope's records lived in SQL tables

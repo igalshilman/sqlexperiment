@@ -43,7 +43,7 @@ async fn baseline() -> Result<MemoryKv> {
     db.execute("WITH RECURSIVE x(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM x WHERE i < 19) INSERT INTO t SELECT i, i, substr(printf('%07000d', i), 1, 100 + (i % 5) * 1500) FROM x")
         .await?;
     let effects = db.state().record("effects");
-    db.wal().set(&effects, Bytes::from("before"))?;
+    db.mutation().set(&effects, Bytes::from("before"))?;
     for k in 0..3 {
         db.execute(&format!("CREATE TABLE a{k}(x)")).await?;
     }
@@ -69,8 +69,8 @@ async fn observe(store: MemoryKv) -> Result<(String, Bytes)> {
 enum Call {
     /// A statement through [`Sql`], flushed after it (`Durability::Commit`).
     Statement,
-    /// A turn's flush: [`Sql::flush`] into a WAL, a record set in it, and
-    /// [`state::Wal::flush`].
+    /// A turn's flush: [`Sql::flush`] into a mutation, a record set in it, and
+    /// [`state::Mutation::flush`].
     Turn,
     /// [`Session::query`] of a write, which commits before it returns.
     SessionWrite,
@@ -141,7 +141,7 @@ impl Call {
             (Call::Statement, Open::Sql(db)) => db.execute(UPDATE).await,
             (Call::Turn, Open::Sql(db)) => {
                 let effects = db.state().record("effects");
-                db.wal().set(&effects, Bytes::from("after"))?;
+                db.mutation().set(&effects, Bytes::from("after"))?;
                 db.flush().await.map(drop)
             }
             (Call::SessionWrite, Open::Session(session)) => {

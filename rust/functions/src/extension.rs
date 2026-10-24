@@ -15,7 +15,7 @@
 //! - **State kept by the turn's transaction**: an attached extension is a
 //!   [`Participant`]: it keeps its state in its part of the scope's
 //!   [`State`] (records and files named under `<name>/`), written through
-//!   the seal's [`Wal`], and its large state in the scope's blobs, which its
+//!   the seal's [`Mutation`], and its large state in the scope's blobs, which its
 //!   records name. The next attempt, on any machine, reads them back from
 //!   [`Extension::attach`].
 //!
@@ -24,7 +24,7 @@
 use crate::{
     GuestError, Operation, Outcome,
     db::Db,
-    transaction::{Blobs, Participant, ScopeBlobs, State, Wal},
+    transaction::{Blobs, Mutation, Participant, ScopeBlobs, State},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -80,8 +80,8 @@ pub trait Extension: Send + Sync + 'static {
 /// its turns' transactions.
 ///
 /// Its records and files are in the state it was attached with, and it
-/// changes them in the WAL its `prepare` is given; an [`Sql`](sql::Sql) it
-/// opens there flushes into that WAL, as the run's own tables do.
+/// changes them in the mutation its `prepare` is given; an [`Sql`](sql::Sql) it
+/// opens there flushes into that mutation, as the run's own tables do.
 #[async_trait]
 pub trait Attached: Participant {
     /// In the turn: the host call `op`, `<name>.<op>`.
@@ -194,10 +194,10 @@ impl Attachments {
         self.0.get_mut(name)
     }
 
-    /// Each extension's part of the seal, into `wal`.
-    pub async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
+    /// Each extension's part of the seal, into `mutation`.
+    pub async fn prepare(&mut self, mutation: &mut Mutation) -> Result<()> {
         for part in self.0.values_mut() {
-            part.prepare(wal).await?;
+            part.prepare(mutation).await?;
         }
         Ok(())
     }

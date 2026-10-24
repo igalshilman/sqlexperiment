@@ -65,10 +65,10 @@ impl Store {
     /// Seal `value` as the record `name`, as if a turn did.
     pub fn set_record(&self, name: &str, value: &Value) {
         let state = block(State::open(self.kv.clone())).unwrap();
-        let mut wal = state.wal();
+        let mut mutation = state.mutation();
         let bytes = serde_json::to_vec(value).unwrap();
-        wal.set(&state.record(name), bytes.into()).unwrap();
-        block(wal.flush()).unwrap();
+        mutation.set(&state.record(name), bytes.into()).unwrap();
+        block(mutation.flush()).unwrap();
     }
 
     /// Pages of the run's memory that differ from golden, as the memory

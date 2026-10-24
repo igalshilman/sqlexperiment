@@ -171,7 +171,7 @@ export async function order({ sku, qty }, ctx) {
 ## 4. One root commits a turn
 
 Built in #142 and #143. A turn is one flush of the scope's state: the run's
-progress, the VM's page batch and the turn's SQL go into one WAL, flushed as
+progress, the VM's page batch and the turn's SQL go into one mutation, flushed as
 one root, in one round trip.
 Before, a turn put `batch/<n>`, then `commit` (naming the batch), then the KV
 writes the commit listed. That was correct, since Restate keeps writes in
@@ -195,7 +195,7 @@ v16/blob/<n>:  one zstd frame, written once
 ```
 
 - **A turn is one root.** Its SQL pages and its memory's changed pages, from
-  its WAL, become a delta per changed chunk, compressed against the chunk's
+  its mutation, become a delta per changed chunk, compressed against the chunk's
   base (a memory chunk's base against golden's pages), and the records it
   set replace theirs (a record past 1 KiB is a blob of its own). The blobs
   are put first, then the root, in the same round trip.
@@ -215,8 +215,8 @@ v16/blob/<n>:  one zstd frame, written once
 
 The API is `State::open`, whose `record(name)`, `file(name)` and
 `file_with_base(name, base)` are handles each participant writes through
-the turn's `Wal` (`state.wal()`) in its prepare (the SQL, `Sql::open(&state)`,
-flushes into it), then `Wal::flush`, one round trip.
+the turn's `Mutation` (`state.mutation()`) in its prepare (the SQL, `Sql::open(&state)`,
+flushes into it), then `Mutation::flush`, one round trip.
 
 ## 5. Plan
 
@@ -225,7 +225,7 @@ On branches, a PR each:
 1. **sqlite-kv (now `state`): the host's page chain in the record** (§4), with tests.
    Done in #142.
 2. **The functions runtime on the state:** a turn is one commit of the
-   scope's state (`commit_turn` then, `Wal::flush` now); `batch/<n>`,
+   scope's state (`commit_turn` then, `Mutation::flush` now); `batch/<n>`,
    `commit` and `kv/<key>` are gone, and `ctx.kv` is a table. Done in #143,
    measured in DESIGN.md §7.
 3. **`ctx.db.sql` and `ctx.db.transaction`**, as Calls over `host_call`

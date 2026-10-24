@@ -133,9 +133,9 @@ pub(crate) type Records = BTreeMap<String, Bytes>;
 /// Logical page replacements of one file, by page number; `None` is a hole.
 pub(crate) type Changes = BTreeMap<u64, Option<Page>>;
 
-/// What a WAL writes to one paged file: the pages it changed, and its size:
-/// set ([`crate::Wal::set_len`]), or else only what the pages written need
-/// (the file's length when the WAL first wrote it, grown by its writes),
+/// What a mutation writes to one paged file: the pages it changed, and its size:
+/// set ([`crate::Mutation::set_len`]), or else only what the pages written need
+/// (the file's length when the mutation first wrote it, grown by its writes),
 /// which a flush keeps a longer file past.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Written {
@@ -701,8 +701,7 @@ impl Snapshot {
                         Kind::Paged {
                             size, base: None, ..
                         } if size.div_ceil(PAGE) <= options.prefetch_pages => {
-                            let numbers: Vec<u64> =
-                                (0..snapshot.root.shape(*size).count).collect();
+                            let numbers: Vec<u64> = (0..snapshot.root.shape(*size).count).collect();
                             let chunks = snapshot.chunks(id, &numbers).await?;
                             for (chunk, stored) in numbers.into_iter().zip(chunks) {
                                 if stored.current().is_some() {

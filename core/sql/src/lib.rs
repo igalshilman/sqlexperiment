@@ -4,16 +4,16 @@
 //! For a Restate object without Restate's journal (`journalReplay: false`),
 //! whose state is the namespace. [`Sql`] takes part in the state
 //! ([`state::Participant`]): its statements change a private view,
-//! [`Sql::flush`] moves what SQL committed into a [`Wal`], and the WAL's
-//! [`Wal::flush`] makes it durable, together with the WAL's other files and
+//! [`Sql::flush`] moves what SQL committed into a [`Mutation`], and the mutation's
+//! [`Mutation::flush`] makes it durable, together with the mutation's other files and
 //! records, atomically.
 //!
 //! # When SQL changes become durable
 //!
-//! At [`Wal::flush`], and only then. SQL statements, SQL `COMMIT` and
+//! At [`Mutation::flush`], and only then. SQL statements, SQL `COMMIT` and
 //! [`Sql::checkpoint`] change a private view; [`Sql::flush`] moves what SQL
-//! committed into a WAL, still private; every WAL of the state refuses to
-//! flush while SQL holds changes not moved. A WAL dropped discards what it
+//! committed into a mutation, still private; every mutation of the state refuses to
+//! flush while SQL holds changes not moved. A mutation dropped discards what it
 //! holds, and SQL keeps its pages for the next flush. The host decides when
 //! to flush: after each SQL transaction (as SQLite does, and as the Node.js
 //! addon and the Python extension do, through [`binding::Session`]), or once
@@ -23,7 +23,7 @@
 //! | Layer | Representation | Survives dropping it? |
 //! |---|---|---|
 //! | SQL working state | Dirty 4096-byte pages and the private engine WAL | No |
-//! | A WAL of the state | The pages SQL flushed into it, and its records | No |
+//! | A mutation of the state | The pages SQL flushed into it, and its records | No |
 //! | The state | Its root and blobs (see [`state`]) | Yes, after an acknowledged flush |
 //!
 //! An SQL error (syntax, a constraint, a missing table) undoes just that
@@ -69,10 +69,10 @@
 //! let mut sql = Sql::open(&state).await?;
 //! sql.execute("CREATE TABLE messages(body TEXT)").await?;
 //! sql.execute("INSERT INTO messages VALUES('hello')").await?;
-//! let mut wal = state.wal();
-//! sql.flush(&mut wal).await?;
-//! wal.set(&state.record("seen"), "1 message".into())?;
-//! wal.flush().await?; // the table and the record, durable together
+//! let mut mutation = state.mutation();
+//! sql.flush(&mut mutation).await?;
+//! mutation.set(&state.record("seen"), "1 message".into())?;
+//! mutation.flush().await?; // the table and the record, durable together
 //! # Ok(())
 //! # }
 //! ```
@@ -94,7 +94,7 @@ pub mod io;
 pub use turso_core::{Numeric, Value};
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
-use state::{Participant, Receipt, State, Wal};
+use state::{Mutation, Participant, Receipt, State};
 use std::{
     future::poll_fn,
     sync::{
@@ -160,14 +160,14 @@ pub type Rows = Vec<Vec<Value>>;
 /// Queries require exclusive access to this handle. An SQL error leaves the
 /// session usable; a storage error, a cancelled call or a failed flush ends
 /// it (see [`Self::is_usable`]): open a new one after settling backend requests.
-/// Its changes become durable only with a WAL's [`Wal::flush`], after
+/// Its changes become durable only with a mutation's [`Mutation::flush`], after
 /// [`Self::flush`] into it; dropping it leaves its engine to the next one.
 pub struct Sql {
     participant: Participant,
     database: Option<Arc<Database>>,
     connection: Option<Arc<Connection>>,
     io: Arc<KvIo>,
-    /// For the WAL the pages were last flushed into, until the state flushes
+    /// For the mutation the pages were last flushed into, until the state flushes
     /// or drops it (see [`Self::settle`]).
     receipt: Option<Receipt>,
     /// See [`SqlOptions::max_result_bytes`].
@@ -366,7 +366,7 @@ impl Sql {
     ///
     /// There is no streaming cursor: the rows are limited to
     /// [`SqlOptions::max_result_bytes`]. SQL writes remain private until
-    /// [`Self::flush`] and the WAL's flush. An SQL error (syntax, a constraint, a
+    /// [`Self::flush`] and the mutation's flush. An SQL error (syntax, a constraint, a
     /// missing table) undoes that statement and leaves the session usable;
     /// earlier statements of `sql`, and an open transaction, stand. Any other
     /// error or a cancellation ends the session, and a failed flush's outcome
@@ -414,24 +414,26 @@ impl Sql {
     }
 
     /// `COMMIT` the open transaction, if any, and move what the SQL committed
-    /// into the state's file `db`, in `wal`, for the WAL's flush to make
+    /// into the state's file `db`, in `mutation`, for the mutation's flush to make
     /// durable. SQL goes on reading the moved pages from its private view
-    /// until the state flushes the WAL (its [`Receipt`] tells); a WAL dropped
+    /// until the state flushes the mutation (its [`Receipt`] tells); a mutation dropped
     /// instead leaves them for the next flush.
     ///
     /// A `COMMIT` that fails with an SQL error (a deferred constraint) changes
     /// nothing: the transaction stays open, for the caller to roll back. Any
     /// other failure ends the session, and may leave part of the move in the
-    /// WAL: drop it.
-    pub async fn flush(&mut self, wal: &mut Wal) -> Result<()> {
+    /// mutation: drop it.
+    pub async fn flush(&mut self, mutation: &mut Mutation) -> Result<()> {
         self.settle();
         let result = match self.in_transaction() {
             true => self.execute("COMMIT").await,
             false => Ok(()),
         };
         let result = match result {
-            // Pages a pending WAL holds go in too: it may be dropped.
-            Ok(()) if self.io.has_changes() || self.io.has_pending() => self.move_pages(wal).await,
+            // Pages a pending mutation holds go in too: it may be dropped.
+            Ok(()) if self.io.has_changes() || self.io.has_pending() => {
+                self.move_pages(mutation).await
+            }
             Ok(()) => self.measure_changed_schema().await,
             result => result,
         };
@@ -441,7 +443,7 @@ impl Sql {
         result
     }
 
-    /// Act on what became of the WAL the pages were last moved into: flushed
+    /// Act on what became of the mutation the pages were last moved into: flushed
     /// by the state, the file holds them now; dropped, they are private
     /// changes again.
     fn settle(&mut self) {
@@ -465,7 +467,7 @@ impl Sql {
 
     /// Run `body` as one SQL transaction: `BEGIN`, then `COMMIT` when it returns
     /// `Ok`, or `ROLLBACK` when it returns `Err`: committed in the SQL, for
-    /// a [`Self::flush`] and the WAL's flush to make durable.
+    /// a [`Self::flush`] and the mutation's flush to make durable.
     ///
     /// The body may run any statements except ones that end the transaction
     /// (`COMMIT`, `END`, `ROLLBACK`): those fail and poison the session before
@@ -545,15 +547,15 @@ impl Sql {
         Ok(bytes.unwrap_or(0).max(0) as usize)
     }
 
-    /// Move the committed SQL state into the state's file `db`, in `wal`:
+    /// Move the committed SQL state into the state's file `db`, in `mutation`:
     /// its engine WAL into the file's pages. Nothing is durable yet.
-    async fn move_pages(&mut self, wal: &mut Wal) -> Result<()> {
+    async fn move_pages(&mut self, mutation: &mut Mutation) -> Result<()> {
         self.checkpoint().await?;
-        // Failing, the move leaves the WAL and the engine apart: the session
+        // Failing, the move leaves the mutation and the engine apart: the session
         // ends.
         self.poisoned = true;
-        self.io.flush_into(wal)?;
-        self.receipt = Some(wal.receipt());
+        self.io.flush_into(mutation)?;
+        self.receipt = Some(mutation.receipt());
         self.poisoned = false;
         self.measure_changed_schema().await
     }
