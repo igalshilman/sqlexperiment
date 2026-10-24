@@ -37,12 +37,12 @@ class Store(Protocol):
 
     ``set`` and ``clear`` return at once, and ``sync`` completes once every
     write before it is stored. Writes are stored in the order they were made:
-    until a sync completes, a crash may lose the last of them, never one
-    without the ones after it. ``get`` issues its read when
-    called, and returns the stored value
-    or this request's own latest write (``None`` when absent), or an awaitable
-    of it: so a plain ``async def get`` does not do, as its read would be
-    issued only when it first runs.
+    a crash keeps a prefix of the writes since the last sync and loses the
+    rest, never a write without the ones before it. ``get`` issues its read
+    when called, and returns the stored value or this request's own latest
+    write (``None`` when absent), or an awaitable of it: so a plain
+    ``async def get`` does not do, as its read would be issued only when it
+    first runs.
     """
 
     def get(self, key: str) -> bytes | None | Awaitable[bytes | None]: ...
@@ -60,8 +60,10 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Databas
 
     A ``reader`` reads the database beside the session that writes it (a
     shared handler's, beside the exclusive one's): it writes nothing to the
-    store, and reads the state it opened on throughout, whatever the writer
-    commits meanwhile.
+    store, and reads the state it opened on throughout, a snapshot, whatever
+    the writer commits meanwhile. The writer deletes what it no longer needs
+    16 commits later, so a reader still reading after 16 of them may fail
+    ("is gone"): open it again (a shared handler is retried).
     """
     loop = asyncio.get_running_loop()
     # A failed write cannot fail its caller, which has moved on: the next sync

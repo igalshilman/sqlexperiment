@@ -4,7 +4,7 @@ SQLite-compatible SQL on the [state](../state/README.md), for a Restate object
 without Restate's journal (`journalReplay: false`), whose state the namespace
 is. It runs Turso's Rust engine (`turso_core` 0.8.2) unmodified, over the
 state's file `db`, and flushes with the state: the rows, and the state's other
-files and records, durable together in one put.
+files and records, durable together in one flush.
 
 SQL takes part in the state as the participant `sql`. Its statements change a
 private view; `Sql::flush(&mut wal)` moves what SQL committed into a WAL; the

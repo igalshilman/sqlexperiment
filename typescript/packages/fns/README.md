@@ -194,8 +194,8 @@ names that the cache lacks.
 
 **No journal replay.** On a retry or a resume, the SDK normally replays the
 journal: each operation returns its recorded result and must match it. That
-cannot work here, since a later attempt makes different reads (the page cache,
-and the blobs each attempt fetches differ). With explicit
+cannot work here: a later attempt makes different reads, since what it
+fetches depends on what the page cache holds. With explicit
 recovery (`restate.internal.explicitRecovery()`, which the handlers here
 have) the SDK skips the recorded journal: the handler runs again from the
 start against the state as it is. Recovery is then the storage
@@ -343,9 +343,10 @@ A shared handler's `ctx.db` is the object's database as stored, read beside
 the exclusive handler, which may commit meanwhile (a chat UI's read of a
 conversation while the agent works, say). It opens as of its first call, and
 writes nothing: what the handler writes stays in its session, and is never
-stored. If the exclusive handler commits while it reads, the attempt fails
-when the handler ends, and Restate retries it, so what a shared handler
-returns was the stored state ([the reader](../../../core/state/docs/DESIGN.md#readers)).
+stored. It reads the state as of that call, a snapshot, whatever the
+exclusive handler commits meanwhile; only a shared handler that outlives 16
+of the exclusive handler's commits fails, and Restate retries it
+([the reader](../../../core/state/docs/DESIGN.md#readers)).
 `ctx.transaction` is the exclusive handlers'.
 
 ```ts

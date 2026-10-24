@@ -7,8 +7,8 @@ export type SqlParam = SqlValue | boolean;
 /**
  * A key/value store: `set` and `clear` return at once, and `sync` resolves
  * once every write before it is stored. Writes are stored in the order they
- * were made: until a sync resolves, a crash may lose the last of them, never
- * one without the ones after it. `get` returns the stored value, or this
+ * were made: a crash keeps a prefix of the writes since the last sync and
+ * loses the rest, never a write without the ones before it. `get` returns the stored value, or this
  * request's own latest write; `undefined` or `null` when absent.
  */
 export interface Store {
@@ -85,8 +85,10 @@ export interface OpenOptions {
    * Read the namespace beside its owner, which writes meanwhile (a virtual
    * object's shared handler): from the blobs the owner cached, writing
    * nothing to the store or the cache; SQL changes stay in the session. It
-   * reads the state as of open throughout, whatever the owner commits
-   * meanwhile.
+   * reads the state as of open throughout, a snapshot, whatever the owner
+   * commits meanwhile. The owner deletes what it no longer needs 16 commits
+   * later, so a reader still reading after 16 of them may fail ("is gone"):
+   * open it again (a shared handler is retried).
    */
   reader?: boolean;
 }

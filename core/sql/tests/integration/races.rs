@@ -29,7 +29,7 @@ fn opts(cache: &Namespace, durability: Durability) -> Setup {
     )
 }
 
-/// Reads the value of a page key, then holds it until released.
+/// Reads the value of a blob, then holds it until released.
 struct GateKv {
     inner: MemoryKv,
     started: Mutex<Option<oneshot::Sender<()>>>,
@@ -70,9 +70,10 @@ async fn value(db: &mut Db, id: i64) -> Result<String> {
         .to_string())
 }
 
-/// A page get issued before another session's checkpoint replaced that page in
-/// the cache must not land under the new version: the cache would serve the
-/// old image to every later session, which would then save on top of it.
+/// A chunk's get issued before another session's flushes replaced that chunk
+/// must not serve the old image to later sessions, which would then save on
+/// top of it: the cache keeps it under its blob's number, which no later root
+/// names.
 #[test]
 fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
     futures::executor::block_on(async {
@@ -83,7 +84,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
             release: Mutex::new(None),
         });
         let plain: Arc<dyn KvStore> = Arc::new(memory.clone());
-        // Setup without a cache: a large save checkpoints every page in place.
+        // Setup without a cache: one large save, every chunk a base.
         let mut db = Db::open(plain.clone(), StateOptions::default()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)")
             .await?;
@@ -113,7 +114,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
             writer
                 .execute("UPDATE t SET v = 'new250' WHERE id = 250")
                 .await?;
-            // Checkpoints the previous flush: page/<leaf of 250> and the cache.
+            // A second flush, which deletes what the first left as garbage.
             writer
                 .execute("UPDATE t SET v = 'new1' WHERE id = 1")
                 .await?;

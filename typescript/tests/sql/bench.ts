@@ -279,7 +279,7 @@ async function drive(out?: string) {
   phases.push(await phase('insert, new key, 32 at once', 'insert', 512, 2000, 32, (i) => `${run}-new-${i}`));
   // One database, one call at a time: the owner's warm path.
   phases.push(await phase('count, one key, sequential', 'count', null, 500, 1, () => `${run}-hot`));
-  // 16 databases growing: their logs checkpoint as they go.
+  // 16 databases growing: new chunks, and deltas that rebase as they go.
   phases.push(
     await phase('insert 2 KiB, 16 keys, 16 at once', 'insert', 2048, 4000, 16, (i) => `${run}-grow-${i % 16}`),
   );

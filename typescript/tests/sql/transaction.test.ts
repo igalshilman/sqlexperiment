@@ -9,7 +9,7 @@ import { memoryStore, sqlAttempt } from '../testing.ts';
 
 type Send = restate.GenericSend<Uint8Array>;
 
-/** The database's commit record, whose effects hold the outbox. */
+/** The database's root, whose effects hold the outbox. */
 const ROOT = 'v16/root';
 let namespaces = 0;
 

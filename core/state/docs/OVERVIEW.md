@@ -163,7 +163,7 @@ impl Extension for Notary {
 impl Participant for Notarized {
     /// Before the seal: set what changed in the WAL. Its flush makes it
     /// durable with the run's memory, its SQL and every other participant,
-    /// in one put.
+    /// in one root.
     async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         if self.count != self.sealed {
             wal.set(&self.record, self.count.to_string().into())?;
@@ -231,7 +231,7 @@ Not covered by the toy:
   built-ins have one today (`ctx.fs`, `ctx.llm`); a third-party extension is
   reachable only through `ctx.call`, as an operation.
 - **SQL in an extension:** `Tables` lets an extension read and write the
-  scope's SQL inside the turn's transaction, sealed in the same put. `llm` keeps
+  scope's SQL inside the turn's transaction, sealed in the same root. `llm` keeps
   its conversations this way.
 - **Large state:** an extension writes big bytes to the scope's blobs before the
   seal and names them in a record, as `fs` does with its manifest.

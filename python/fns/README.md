@@ -59,8 +59,10 @@ with the same storage, page cache and pending sends:
   exclusive handler that writes it (a chat page reads the conversation while
   an agent answers), and writes nothing: a write statement raises. The
   schema steps its key lacks are applied in its own session, which stores
-  nothing: a key never written reads as empty tables. If a
-  commit came while it read, the attempt fails, and Restate retries it.
+  nothing: a key never written reads as empty tables. It reads the state as
+  of its first call, a snapshot, whatever the exclusive handler commits
+  meanwhile; only a shared handler that outlives 16 of the exclusive
+  handler's commits fails, and Restate retries it.
 - `async with ctx.transaction() as t` is one transaction, `t.db`, with its
   sends, `t.tx` (`service_send`, `object_send`, `workflow_send`,
   `generic_send`): they are made once it commits, exactly once, even if the

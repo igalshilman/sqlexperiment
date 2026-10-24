@@ -54,7 +54,8 @@ fn changes(step: u64) -> Vec<Op> {
     ops
 }
 
-/// Open a session and read a few pages, for the working-set hint.
+/// Open a session and read a few pages, so that a flush finds their chunks
+/// decoded.
 async fn session(store: Arc<dyn KvStore>, cache: Option<Namespace>) -> Result<Session> {
     let session = Session::open(store, options(cache)).await?;
     for name in FILES {

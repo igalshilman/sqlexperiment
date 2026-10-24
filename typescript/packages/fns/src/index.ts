@@ -88,9 +88,9 @@ export interface ObjectContext extends Omit<restate.ObjectContext, 'awakeable'> 
 /**
  * The context of an object's shared handler with SQL: it reads the object's
  * database while an exclusive handler runs (or not), as of its first call to
- * it. What it writes stays in its session, and is never stored. If an
- * exclusive handler commits while it reads, the attempt fails when it ends,
- * and Restate retries it: what it returns was the stored state.
+ * it. What it writes stays in its session, and is never stored. It reads
+ * that snapshot throughout, whatever an exclusive handler commits meanwhile;
+ * only one that outlives 16 of its commits fails, and Restate retries it.
  */
 export interface ObjectSharedContext extends Omit<restate.ObjectSharedContext, 'awakeable'> {
   readonly db: SqlSession;

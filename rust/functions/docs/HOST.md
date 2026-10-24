@@ -253,8 +253,9 @@ On branches, a PR each:
   any provider's models in one format, with a conversation's messages in the
   scope's database. Whether the gateway belongs on the host, or in a service
   of its own, is open.
-- **Size of a turn record.** Sealing bounds the inline part at about 1 KiB;
-  how large a stored value Restate handles well is to be measured.
+- **Size of a turn's writes.** A record past 1 KiB leaves the root for a
+  blob of its own; how large a stored value Restate handles well is to be
+  measured.
 
 ## 6. Bindings the host makes
 
@@ -296,7 +297,7 @@ Restate journals their input as well, since it delivers the call.
 | A request's bytes        | RPC                 | Binding             |
 | ------------------------ | ------------------- | ------------------- |
 | The guest's heap (pages) | Kept until answered | Kept until answered |
-| The turn's commit record | ID, target, key     | ID, name, key       |
+| The turn's root          | ID, target, key     | ID, name, key       |
 | Restate's journal        | The input           | Nothing             |
 
 **Keys.** A call's idempotency key is the program's own, if it set one

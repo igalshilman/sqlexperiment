@@ -32,12 +32,13 @@ wal.write(&state.file("image")?, 0, Some(page))?;
 wal.flush().await?; // the record and the page, durable together
 ```
 
-Nothing is durable before `Wal::flush`, and then everything in that WAL is, in
-one put. A flush consumes the WAL; a WAL dropped instead discards its writes.
-The state shows what was flushed (`record.get()`, `file.read(page)`), never
-what a WAL holds. The host must guarantee one owner per namespace. A failed or
-cancelled flush ends the state (`is_usable()` returns false): its outcome is
-unknown, so settle outstanding requests and open a new one.
+Nothing is durable before `Wal::flush`, and then everything in that WAL is, at
+once: its blobs, then the root that names them, in one round trip. A flush
+consumes the WAL; a WAL dropped instead discards its writes. The state shows
+what was flushed (`record.get()`, `file.read(page)`), never what a WAL holds.
+The host must guarantee one owner per namespace. A failed or cancelled flush
+ends the state (`is_usable()` returns false): its outcome is unknown, so
+settle outstanding requests and open a new one.
 
 A participant joins under a name (`state.join("sql")`), one at a time per
 name. While it says it holds changes not yet in a WAL (`set_unflushed(true)`),
@@ -117,10 +118,10 @@ it replaced.
 
 ## Layout
 
-| Path             | What                           |
-| ---------------- | ------------------------------ |
-| `src/`, `tests/` | The crate and its tests        |
-| [`docs/`](docs)  | Design, storage format, review |
+| Path             | What                                   |
+| ---------------- | -------------------------------------- |
+| `src/`, `tests/` | The crate and its tests                |
+| [`docs/`](docs)  | Design, storage format, the experiment |
 
 ## Build and test
 

@@ -13,7 +13,7 @@ use state::{
 };
 use std::sync::Arc;
 
-/// Pages read from the store as queries need them; the log checkpointed often.
+/// Pages read from the store as queries need them; garbage deleted soon.
 fn options(cache: Option<Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
@@ -69,7 +69,7 @@ async fn baseline() -> Result<MemoryKv> {
         insert_pair(&session, i).await?;
     }
     session.commit(Some(effects(20))).await?;
-    // Checkpoints write the pages in place, where queries read them.
+    // More flushes: deltas over the chunks' bases, read from the store.
     session.query("CREATE TABLE a(x)", None).await?;
     for k in 0..4 {
         session

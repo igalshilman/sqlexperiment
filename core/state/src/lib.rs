@@ -162,7 +162,7 @@ impl Default for StateOptions {
 
 /// One namespace's state: its paged files and its records, as last flushed.
 /// It is read here, and changed through a [`Wal`] ([`Self::wal`]), which
-/// [`Wal::flush`] makes durable in one put. A cheap handle; clones, and the
+/// [`Wal::flush`] makes durable at once. A cheap handle; clones, and the
 /// views of [`Self::scoped`], share it.
 ///
 /// Acquire exclusive ownership of the namespace and settle the preceding
@@ -257,9 +257,9 @@ impl Drop for Shared {
 const ENDED: &str = "the state ended after a failed or cancelled flush; open a new one";
 
 impl State {
-    /// Open the namespace over `store`: read its commit record (and the
-    /// stored values it names), recovering what a crash left, before
-    /// anything reads. Await it as it is, or set how first:
+    /// Open the namespace over `store`: read its root (and the blobs of its
+    /// large records and small files) before anything reads; a crash leaves
+    /// nothing to recover. Await it as it is, or set how first:
     ///
     /// ```no_run
     /// # use std::sync::Arc;
@@ -308,7 +308,7 @@ impl State {
         &self.shared.options.options
     }
 
-    /// The record named `name`: a whole value the commit record holds, read
+    /// The record named `name`: a whole value the root keeps, read
     /// here and set in a WAL (see [`Record`]).
     pub fn record(&self, name: &str) -> Record {
         Record {
@@ -457,7 +457,7 @@ impl IntoFuture for Open {
 
 /// The writes ahead of a [`State`]: the records set and pages written since
 /// [`State::wal`] made it, in memory, which [`Self::flush`] makes durable
-/// together, in one put. There is no other way to change the state. A WAL
+/// together, atomically. There is no other way to change the state. A WAL
 /// dropped discards its writes; a participant that moved changes into it
 /// learns which happened from its [`Receipt`].
 pub struct Wal {
@@ -703,8 +703,8 @@ impl Participant {
     /// kept (see [`Self::can_park`]). The cache drops it when anything
     /// changes, or under its budget; one heavier than the whole budget is
     /// not kept. `value` must hold no handle of this state (a [`File`], a
-    /// [`Record`], the [`State`]), which would keep it open meanwhile and
-    /// hold back the namespace's checkpoints.
+    /// [`Record`], the [`State`]), which would keep it open meanwhile, on a
+    /// root whose blobs later flushes delete.
     pub fn park<T: Any + Send>(&self, value: T, weight: usize) -> std::result::Result<(), T> {
         if !self.can_park() {
             return Err(value);
@@ -726,14 +726,14 @@ impl Drop for Participant {
     }
 }
 
-/// A named whole value the commit record holds, replaced whole: the host's
-/// state beside its files (a run's progress, an outbox), flushed with them
-/// in the same put. Read from the state ([`Self::get`]), set in a WAL
+/// A named whole value the root keeps, replaced whole: the host's state
+/// beside its files (a run's progress, an outbox), flushed with them in the
+/// same root. Read from the state ([`Self::get`]), set in a WAL
 /// ([`Wal::set`]). A cheap handle.
 ///
-/// A value of up to [`StateOptions::inline_log_bytes`] is in the record,
-/// which every flush rewrites; a larger one is a stored value of its own,
-/// written when it changes. Either way, opening the state reads it.
+/// A value of up to [`StateOptions::inline_record_bytes`] is in the root,
+/// which every flush rewrites; a larger one is a blob of its own, written
+/// when it changes. Either way, opening the state reads it.
 #[derive(Clone)]
 pub struct Record {
     name: Arc<str>,
@@ -761,8 +761,8 @@ impl Record {
 /// records. An absent page, never written or past the end, reads as `None`
 /// (zeros). A cheap handle.
 ///
-/// The commit record's log holds the changed pages until a checkpoint writes
-/// them in place, and the [`PageCache`] keeps them across states.
+/// Stored as chunks of [`StateOptions::chunk_pages`] pages, each a base and
+/// maybe a delta against it, which the [`PageCache`] keeps across states.
 #[derive(Clone)]
 pub struct File {
     name: Arc<str>,

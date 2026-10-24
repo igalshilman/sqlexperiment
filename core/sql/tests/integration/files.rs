@@ -1,5 +1,5 @@
 //! Paged files beside the SQL database (`State::file`): written with the
-//! tables, in one commit record, and kept like the database's own pages.
+//! tables, in one root, and kept like the database's own pages.
 use crate::host::StateSetup;
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
@@ -62,7 +62,7 @@ fn options(cache: Option<Namespace>) -> Setup {
     Setup(
         StateSetup {
             options: StateOptions {
-                // Checkpoints happen within a run of turns.
+                // Garbage is deleted within a run of turns.
                 garbage_after: 4,
                 ..StateOptions::default()
             },

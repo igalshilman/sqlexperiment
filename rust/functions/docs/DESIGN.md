@@ -49,8 +49,8 @@ Assumptions and invariants:
 3. Writes are kept in issue order: a sync makes every write before it
    durable, and a crash keeps a prefix of those not yet synced. Reads within
    an attempt see its own writes.
-4. A turn happened once its commit, one put of the scope's root, is
-   stored, with its pages and its KV writes (§7). Effects are dispatched
+4. A turn happened once its commit, the scope's root, is stored, after the
+   blobs of its pages and its KV writes (§7). Effects are dispatched
    only after the commit that issued them, in issue order, so a crash that
    loses the commit loses them too.
 5. Snapshot only after returning completely from Wasm. The image contains
@@ -428,7 +428,7 @@ Reference limits, not a general resource-management API:
 | Tracker memory                                            |    64 KiB, excluded from images |
 | Application source, input, host outcome                   |                      1 MiB each |
 | VM string extraction, including aggregate inspected state |                           1 MiB |
-| Commit record                                             |                          16 MiB |
+| A record of the scope's state (the run, its memory)       |                          16 MiB |
 | Run ID                                                    |     1–1,024 UTF-8 bytes, no `/` |
 | Program name                                              | 1–128 letters, digits, `-`, `_` |
 
@@ -723,7 +723,8 @@ reconstruct(run, memory):
     require golden_length <= memoryLen <= limit, 64-KiB aligned
     memory = golden bytes, extended with zeros to memoryLen
     read the pages memory.pages lists from memory.file, together
-        (each from the log, the process's page cache, or its page key)
+        (each from the state's decoded chunks, the process's page cache,
+        or the store)
     write them into memory
     return Image(memory, memory.meta)
 ```
@@ -862,8 +863,8 @@ Resume can coexist. Once the root settles, the run is final.
 
 ## 7. Storage: one commit per turn
 
-A turn is one flush of the scope's state (`Wal::flush`), one put of its
-root. Every participant writes into one WAL:
+A turn is one flush of the scope's state (`Wal::flush`): its blobs, then its
+root, and one sync. Every participant writes into one WAL:
 
 1. its KV writes, the SQL transaction its first KV request began;
 2. its memory's pages that changed, into the file over golden (§5.3);
@@ -880,13 +881,13 @@ never dispatched (§1). Nothing is applied after a flush; a WAL that is not
 flushed is dropped, and its writes with it.
 
 **SQL again.** Until 18 October 2026 the scope's records lived in SQL tables
-through an earlier version of the state crate; it cost a turn about 2 ms of CPU and wrote
-every log segment twice, so it gave way to one commit record of its own
-(with `batch/<n>` and `kv/<key>` keys) that relied on ordered writes. With
-Restate's journal off, writes are not ordered, and the state's one record per
-flush, with the host's records in it, is that record. Measured on
-18 October 2026 (`cargo bench --bench checkpoints`, medians), against that
-record of its own:
+through an earlier version of the state crate, a log; it cost a turn about
+2 ms of CPU and wrote every log segment twice, so it gave way to one commit
+record of its own (with `batch/<n>` and `kv/<key>` keys). The state's own
+commit point, with the host's records in it, then took that record's place,
+as its root does now. Measured on 18 October 2026, on that log
+(`cargo bench --bench checkpoints`, medians), against that record of its
+own:
 
 | Workload    | Live turn, before | Live turn | Restored turn, before | Restored turn | Bytes a turn, before | Bytes a turn |
 | ----------- | ----------------: | --------: | --------------------: | ------------: | -------------------: | -----------: |
@@ -896,10 +897,10 @@ record of its own:
 | heap-churn  |           8.03 ms |   7.58 ms |               9.81 ms |      11.37 ms |               53,358 |       53,319 |
 | write-heavy |           5.52 ms |   5.31 ms |               6.92 ms |       7.47 ms |                2,342 |        2,301 |
 
-A turn is one or two writes instead of two to four. A restored turn opens
+A turn was one or two writes instead of two to four. A restored turn opens
 the SQL engine (0.4-1.5 ms; an owner cache keeps it between attempts of one
-process), and a small batch is written twice, inline and then sealed. A turn
-without KV runs no SQL.
+process), and on the log a small batch was written twice, inline and then
+in a segment. A turn without KV runs no SQL.
 
 ## 8. Worked execution and failure examples
 
@@ -1034,8 +1035,8 @@ the same rows were 220/s, 64 ms, 1.36 s, 40/s, 8.3/s, 1.8 s and 1.1 MiB;
 before the chain of batches, the run of 20 waits wrote 137 KiB, and ~70
 KiB before compressing pages against their previous contents (§4) and
 zeroing dead bytes; the throughput rows did not move with those (an A/B of
-both binaries on one server). Most of what is left is Restate's: a commit
-record and its sync per turn. The Rust
+both binaries on one server). Most of what is left is Restate's: a turn's
+writes and their sync. The Rust
 SDK's server now sets `TCP_NODELAY`, which saved ~40 ms per round trip. One
 synchronous JavaScript job is capped by time (10 minutes by default), and the
 interpreter runs compute-bound code ~10x slower than V8.
@@ -1049,7 +1050,8 @@ file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
 (~3 KiB). The model is a conversation of the host's gateway
 ([LLM.md](LLM.md)): the program sends each step's new messages, which go
 into the scope's database, and the host reads the whole conversation from
-there for each request. Measured on 20 October 2026 (4 vCPUs):
+there for each request. Measured on 20 October 2026 (4 vCPUs), on the
+state's log, before copy-on-write:
 
 | Step | Request to the model | Reading it | Stored by the step | Model turn | Tool turn |
 | ---: | -------------------: | ---------: | -----------------: | ---------: | --------: |
@@ -1061,9 +1063,10 @@ there for each request. Measured on 20 October 2026 (4 vCPUs):
 
 - **Per step:** 10 KB at the median, 9–33 KB for nine steps in ten, whatever
   the conversation's length: the rows of its new messages, a heap batch of
-  2–4 KB (the loop, the latest response) and a commit record of ~365 B.
-- **Checkpoints:** every 16 steps or so, the database writes its pages in
-  place: 31–41 KB, flat. The heap, 1.5 MiB, needs no new base.
+  2–4 KB (the loop, the latest response) and the log's commit record of
+  ~365 B.
+- **Checkpoints:** every 16 steps or so, the log wrote the database's pages
+  in place: 31–41 KB, flat. The heap, 1.5 MiB, needed no new base.
 - **The session:** 2.5 MiB stored over 200 steps. Neither the heap nor
   Restate's journal holds the requests.
 - **Restores:** a new attempt, every 25 steps, restores the run in 1–19 ms,

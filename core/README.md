@@ -5,7 +5,7 @@ which runs a handler without journal replay since 8.1.0, is used as released.)
 
 | Path                        | What                                                                                                                                                                                                          |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`state/`](state/README.md) | **The state.** Records and paged files over an asynchronous key/value store, changed through a WAL that a flush makes durable in one put, for namespaces with one owner at a time: a Rust crate.              |
+| [`state/`](state/README.md) | **The state.** Records and paged files over an asynchronous key/value store, changed through a WAL that a flush makes durable atomically, in one round trip, for namespaces with one owner at a time: a Rust crate.|
 | [`sql/`](sql/README.md)     | **SQL on the state**: SQLite-compatible SQL in the state's file `db`, flushed with it. The [Node.js addon](../typescript/packages/sql/README.md) and the [Python extension](../python/sql/README.md) wrap it. |
 
 ## Build and test

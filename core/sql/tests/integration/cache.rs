@@ -58,8 +58,8 @@ fn an_owner_cache_serves_reopened_sessions_in_one_round_trip() -> Result<()> {
     })
 }
 
-/// Another writer that checkpoints changes `meta`, and the owner refreshes or
-/// drops its cache; one that only appends is overridden by the log.
+/// Writers without the cache, deleting garbage at once or late, never leave
+/// the owner's cache stale: it keeps blobs by number, which never change.
 #[test]
 fn other_writers_never_leave_the_cache_stale() -> Result<()> {
     futures::executor::block_on(async {

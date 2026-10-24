@@ -278,7 +278,7 @@ class _ReaderStore:
         pass
 
 
-# A transaction's sends commit with it, in the database's commit record (its
+# A transaction's sends commit with it, in the database's root (its
 # effects): the outbox, which holds each committed transaction's sends until
 # they are stored. They are made once the transaction commits; a later open
 # makes again those still in the outbox, with the same idempotency keys
@@ -790,7 +790,8 @@ class SqlAttempt:
             return
         self._cancel()
         if self._reader():
-            # It read one stored state throughout, whatever committed since.
+            # It read the snapshot it opened on, whatever committed since; one
+            # that outlived 16 commits failed its read ("is gone"), and is retried.
             await db.close()
             return
         try:

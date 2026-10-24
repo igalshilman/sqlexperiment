@@ -1,11 +1,13 @@
 # Experiment: copy-on-write blobs replace the log
 
-A local experiment (branch `experiment/cow-zstd`, not merged). The state
-crate's log, checkpoints, page keys and working-set hint are gone: a flush
-writes immutable zstd blobs and one root that names them
-([DESIGN.md](DESIGN.md), [FORMAT.md](FORMAT.md)). It asks four questions:
-does it simplify the code, does it make correctness and caching easier to
-reason about, do shared handlers work, and what does it cost.
+An experiment, in review as
+[PR #246](https://github.com/igalshilman/sqlexperiment/pull/246) (branch
+`claude/focused-cori-nw68l4`). The state crate's log, checkpoints, page keys
+and working-set hint are gone: a flush writes immutable zstd blobs and one
+root that names them ([DESIGN.md](DESIGN.md), [FORMAT.md](FORMAT.md)). It
+asks four questions: does it simplify the code, does it make correctness and
+caching easier to reason about, do shared handlers work, and what does it
+cost.
 
 ## The design in one paragraph
 
@@ -155,7 +157,8 @@ specification and its review) are deleted; `CACHE_RESULTS.md` and
 - SQL campaign, 300 seeds: 36,000 calls, 1,642 faults, 2,605 crashes, 1,371
   unknown outcomes.
 - Every state, SQL and functions test (the functions in each page-tracking
-  mode), and the Python packages' tests. One Python test's store kept a
+  mode), the Node.js addon's and the TypeScript tests, and the Python
+  packages' tests. One Python test's store kept a
   random subset of a failed request's writes, "worse than the contract": it
   now keeps a prefix, the contract, which copy-on-write relies on (a root
   kept without a blob it names would be lost).

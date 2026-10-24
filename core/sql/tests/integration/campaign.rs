@@ -4,7 +4,7 @@
 //! `Sql` with a flush per turn, with random storage faults (an error
 //! before or after a request, a cancellation, a crash keeping any prefix of
 //! the writes) and reopens, over the protocol monitor, with and without the
-//! page cache, and with tiny checkpoint thresholds.
+//! page cache, and with random chunk sizes, rebase ratios and garbage grace.
 //!
 //! After every reopen the store must hold what a reference engine holds that
 //! replays only acknowledged transactions: every acknowledged commit, and an

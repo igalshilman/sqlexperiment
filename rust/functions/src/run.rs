@@ -8,7 +8,7 @@
 //! ([`Memory`], the record "memory" and the pages the turn changed, in the
 //! scope's file over the program's golden memory), the scope's tables (the
 //! turn's SQL, KV included), and each extension. Each writes into one WAL
-//! of the scope's state, which the host flushes in one put. The image is
+//! of the scope's state, which the host flushes at once. The image is
 //! the program's golden image with the file's pages that differ from it;
 //! the state compresses each against what it replaces (golden's, at first),
 //! so a turn writes little more than what it changed. Nothing is applied
@@ -584,8 +584,8 @@ impl Run {
         );
         base.meta = memory.meta.clone();
         base.grow(memory.memory_len);
-        // The pages that differ from golden, read together: from the log,
-        // the cache, or the store.
+        // The pages that differ from golden, read together: from the state's
+        // decoded chunks, the cache, or the store.
         let indexes: Vec<u32> = memory.pages().collect();
         ensure!(
             (indexes.last()).is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
@@ -658,13 +658,13 @@ impl Run {
 
     /// The turn's transaction. Each participant prepares its part into one
     /// WAL of the scope's state (the extensions first, then the run's
-    /// progress, its memory and its tables); the flush puts the seal, one
-    /// record, once the pages it names are stored; then each participant
+    /// progress, its memory and its tables); the flush puts the seal, the
+    /// state's root, after the blobs it names; then each participant
     /// hears whether it committed. A participant that fails, or a failed
     /// flush, drops the WAL with everything prepared. Only after a flush are
     /// the blobs no seal names collected, and the VM's write tracking reset:
-    /// a crash anywhere before the put loses the whole turn, which runs
-    /// again.
+    /// a crash anywhere before the root is stored loses the whole turn,
+    /// which runs again.
     async fn seal(&mut self, mut written: Written) -> Result<()> {
         let mut extensions = self.extensions.lock().await;
         let mut db = self.db.lock().await;

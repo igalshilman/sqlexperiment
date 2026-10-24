@@ -132,7 +132,7 @@ class AttemptEnd {
 }
 
 // A state command is named after its key, so that tooling can hide the
-// database's pages and log by name (`dev.restate.tooling.journal.hidden.name.prefix`).
+// database's root and blobs by name (`dev.restate.tooling.journal.hidden.name.prefix`).
 const named = (key: string): restate.EntryOptions => ({ name: key });
 
 // A shared handler's reader writes nothing.
@@ -248,7 +248,7 @@ class SqlErrors {
   }
 }
 
-// A transaction's sends commit with it, in the database's commit record (its
+// A transaction's sends commit with it, in the database's root (its
 // effects): the outbox, which holds each committed transaction's sends until
 // they are stored. They are made once the transaction commits; a later open
 // makes again those still in the outbox, with the same idempotency keys
@@ -617,7 +617,8 @@ export class SqlAttempt {
     }
     this.#cancel();
     if (this.#ctx.shared) {
-      // It read one stored state throughout, whatever committed since.
+      // It read the snapshot it opened on, whatever committed since; one that
+      // outlived 16 commits failed its read ("is gone"), and is retried.
       const usable = db.isUsable();
       await db.close();
       if ('error' in outcome) throw this.#errors.classify(outcome.error, usable);

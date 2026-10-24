@@ -2,13 +2,13 @@
 //! takes part in it.
 //!
 //! The seal is one [`Wal`] of the scope's [`State`], which every participant
-//! writes into and the host flushes in one put: whether the turn happened is
+//! writes into and the host flushes at once: whether the turn happened is
 //! whether its seal was flushed. Each [`Participant`] (the run's progress,
 //! its memory, its tables, each extension) keeps its part in one of three
 //! places around it:
 //!
-//! - **In the seal**: a [`Record`], a named whole value the commit record
-//!   holds, which the next transaction starts from (or a file of the scope's
+//! - **In the seal**: a [`Record`], a named whole value the state's root
+//!   keeps, which the next transaction starts from (or a file of the scope's
 //!   [`State`]).
 //! - **Before it, named by it**: bytes too large for a record go to the
 //!   scope's [`ScopeBlobs`] first; the record names them. A blob no record

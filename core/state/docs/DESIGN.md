@@ -2,7 +2,7 @@
 
 Transactional state over a Restate virtual object's state (a key/value
 namespace with one owner at a time): records and paged files, changed through
-a WAL, which a flush makes durable together in one put. Its participants keep
+a WAL, which a flush makes durable together, atomically. Its participants keep
 changes of their own and move them into the WAL before the flush; the main one
 is SQLite-compatible SQL (the [`sql`](../../sql/README.md) crate: Turso's
 `turso_core` engine, unmodified) on the file `db`.
@@ -111,7 +111,7 @@ At `Wal::flush`, and only then. SQL statements and SQL `COMMIT` change the
 engine's private view; `Sql::flush(&mut wal)` commits an open SQL transaction
 and copies what the SQL committed into the WAL, as writes to the file `db`;
 the WAL's flush makes it durable with every record and file in the WAL, in
-one put, and consumes the WAL. SQL keeps the copied pages in its view until
+one root, and consumes the WAL. SQL keeps the copied pages in its view until
 the WAL's receipt says the state flushed it: a WAL dropped unflushed discards
 its writes, and SQL's go into the next one. A flush is refused while SQL
 holds changes committed but not yet moved into a WAL.

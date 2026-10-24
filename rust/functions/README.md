@@ -78,11 +78,10 @@ deliver one result ─▶ run until the JavaScript waits ─▶ flush ─▶ wai
   time, then against its previous image. Dead bytes (the stack between
   calls, freed heap memory) are zeroed first, so garbage is not saved.
 - **One flush**: a turn is one flush of the scope's
-  [state](../../core/state), one put of its commit record: its memory pages,
-  its SQL (`ctx.kv` is a table too) and the run's progress with its pending
-  requests, written into one WAL. The state stores the values the record
-  names before it puts the record, so a crash never leaves a record naming
-  values that are not stored.
+  [state](../../core/state): its memory pages, its SQL (`ctx.kv` is a table
+  too) and the run's progress with its pending requests, written into one
+  WAL. The state puts the blobs of what changed before the root that names
+  them, so a crash never leaves a root naming blobs that are not stored.
 - **No replay**: a retry restores the VM from the last flush and waits
   again on its requests under the same idempotency keys, attaching to calls
   already made.

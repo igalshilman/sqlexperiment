@@ -159,7 +159,7 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
             "ok"
         );
         println!(
-            "100 updates: {wal} local WAL bytes, {} backend bytes in one segment",
+            "100 updates: {wal} local WAL bytes, {} backend bytes in one flush",
             stats.bytes_written
         );
         Ok(())
