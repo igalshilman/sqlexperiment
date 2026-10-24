@@ -85,7 +85,7 @@ mod store;
 mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
-pub use store::{FlushReport, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES};
+pub use store::{FlushReport, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES, ROOT_KEY};
 
 use crate::cache::{Idle, NamespaceCache};
 use crate::kv::KvStore;

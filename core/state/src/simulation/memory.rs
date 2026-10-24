@@ -3,7 +3,7 @@
 use crate::{
     kv::KvStore,
     simulation::yield_now,
-    store::{BLOB_PREFIX, ROOT, Root},
+    store::{BLOB_PREFIX, ROOT_KEY, Root},
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -32,7 +32,7 @@ pub struct Traffic {
 
 /// Class of a key, used to split traffic counters: `root`, `blob` or `other`.
 pub fn object_kind(key: &str) -> &'static str {
-    if key == ROOT {
+    if key == ROOT_KEY {
         "root"
     } else if key.starts_with(BLOB_PREFIX) {
         "blob"
@@ -135,7 +135,7 @@ impl MemoryKv {
     /// zeroed: two stores that hold the same state compare equal.
     pub fn contents(&self) -> BTreeMap<String, Bytes> {
         let mut contents: BTreeMap<String, Bytes> = self.values().into_iter().collect();
-        if let Some(root) = contents.get_mut(ROOT) {
+        if let Some(root) = contents.get_mut(ROOT_KEY) {
             let mut decoded = Root::decode(root).expect("a stored root decodes");
             decoded.id = 0;
             *root = decoded.encode();

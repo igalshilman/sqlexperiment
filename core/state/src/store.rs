@@ -55,7 +55,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub(crate) const ROOT: &str = "v16/root";
+/// The root's key: the one key a flush overwrites, and its commit. An open
+/// reads it first, so a host whose store can send keys ahead of the first
+/// read (Restate's eager state) should send this one.
+pub const ROOT_KEY: &str = "v16/root";
 pub(crate) const BLOB_PREFIX: &str = "v16/blob/";
 const ROOT_MAGIC: &[u8; 4] = b"SR16";
 /// Bytes of a record's value.
@@ -654,7 +657,7 @@ impl Snapshot {
                 false => Ok(()),
             }
         };
-        let (root_bytes, ()) = futures::try_join!(store.get(ROOT), settle)?;
+        let (root_bytes, ()) = futures::try_join!(store.get(ROOT_KEY), settle)?;
         if let (Some(owner), Some(unknown)) = (owner, unsettled) {
             owner.settled(unknown);
         }
@@ -1349,7 +1352,7 @@ impl Snapshot {
         }
         let bytes = root.encode();
         let root_bytes = bytes.len();
-        write(ROOT, Some(bytes.clone()))?;
+        write(ROOT_KEY, Some(bytes.clone()))?;
         if let Err(error) = self.store.sync().await {
             return Err(self.failed(error));
         }

@@ -111,9 +111,6 @@ pub(crate) async fn yield_now() {
     .await
 }
 
-/// The key of the root, the commit point.
-pub const ROOT_KEY: &str = crate::store::ROOT;
-
 /// The key of blob `n`.
 pub fn blob_key(n: u64) -> String {
     crate::store::blob_key(n)

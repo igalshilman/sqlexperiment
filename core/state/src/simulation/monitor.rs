@@ -31,7 +31,7 @@ use crate::{
     kv::KvStore,
     map::{Map, Node, Nodes, Shape, Visit},
     store::{
-        Chunk, Kind, MAX_RECORD_BYTES, ROOT, Root, Value, decode_chunk, parse_blob_key, reference,
+        Chunk, Kind, MAX_RECORD_BYTES, ROOT_KEY, Root, Value, decode_chunk, parse_blob_key, reference,
     },
     zstd,
 };
@@ -78,7 +78,7 @@ impl Known {
     }
 
     fn learn(&mut self, key: &str, value: Option<Bytes>) {
-        if key == ROOT {
+        if key == ROOT_KEY {
             self.root = value.and_then(|bytes| Root::decode(&bytes).ok());
             self.root_unknown = false;
             let next = self.root.as_ref().map_or(0, |root| root.next_blob);
@@ -94,7 +94,7 @@ impl Known {
     }
 
     fn forget(&mut self, key: &str) {
-        if key == ROOT {
+        if key == ROOT_KEY {
             self.root_unknown = true;
         } else if let Some(n) = parse_blob_key(key) {
             self.unknown.insert(n);
@@ -111,7 +111,7 @@ impl Known {
             }
             return;
         }
-        if key != ROOT {
+        if key != ROOT_KEY {
             return self.violation(format!("a put of {key:?}, neither root nor blob"));
         }
         let root = match Root::decode(value) {
