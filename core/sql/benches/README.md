@@ -1,52 +1,46 @@
 # Benchmarks
 
-These are standalone Cargo bench targets (`harness = false`), separate from tests
-and examples. All use the current (v15) storage format and require the opt-in `simulation` feature. They count logical KV
-operations and bytes in MemoryKv; they do not model a real remote backend.
+These are standalone Cargo bench targets (`harness = false`), separate from
+tests and examples. All use the current (v16) storage format and require the
+opt-in `simulation` feature. They count logical KV operations and bytes in
+MemoryKv; they do not model a real remote backend.
 
 Against a real Restate server, `make sql-bench` from the repository's root runs
 [the end-to-end benchmark](../../../typescript/tests/sql/bench.ts): see
-[RESTATE_RESULTS.md](RESTATE_RESULTS.md).
+[RESTATE_RESULTS.md](RESTATE_RESULTS.md) (measured on the log format, v15,
+before copy-on-write).
 
 Run from `core/sql`:
 
 ```sh
+cargo bench --locked --features simulation --bench cow_compare
 cargo bench --locked --features simulation --bench amplification -- 3 > benches/results/amplification.csv
-cargo bench --locked --features simulation --bench page_compression -- 3 > benches/results/page-compression.csv
 cargo bench --locked --features simulation --bench small_databases -- 3 > benches/results/small_databases.csv
-cargo bench --locked --features simulation --bench log_shipping -- 2 > benches/results/log-shipping.csv
 cargo bench --locked --features simulation --bench cache_cpu -- 3 > benches/results/cache-cpu.csv
-python3 benches/scripts/analyze_amplification.py
-python3 benches/scripts/analyze_compression.py
-python3 benches/scripts/analyze_log.py
 ```
 
-The positional argument is the repeat count; the default is three. The paired
-compression analyzer expects all three repeats. Cargo's `--bench` argument is
-filtered by each custom entry point. The page compression target also writes
-`benches/results/page-codec.csv`; an optional second argument overrides that path.
+The positional argument is the repeat count; the default is three. Cargo's
+`--bench` argument is filtered by each custom entry point.
 
 ## Targets
 
-| Target             | Coverage                                                                                                                                               | Evidence                                             |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
-| `amplification`    | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                          | [AMPLIFICATION_RESULTS.md](AMPLIFICATION_RESULTS.md) |
-| `page_compression` | Paired Raw/LZ4 on repetitive, JSON and random payloads; isolated codec timing                                                                          | [COMPRESSION_RESULTS.md](COMPRESSION_RESULTS.md)     |
-| `small_databases`  | Tiny databases, index counts, save grouping and a larger control                                                                                       | `results/small_databases.csv`                        |
-| `cache_cpu`        | Process-wide memory and disk cache by memory size, encoded versus decoded: misses, round trips, allocations and CPU time                               | [CACHE_RESULTS.md](CACHE_RESULTS.md)                 |
-| `log_shipping`     | The commit record by checkpoint policy and owner cache, in critical-path round trips, against the recorded v13 format (`results/log-shipping-v13.csv`) | [LOG_RESULTS.md](LOG_RESULTS.md)                     |
+| Target            | Coverage                                                                                                                                                            | Evidence                                                |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `cow_compare`     | Bytes, keys and round trips per flush, stored size and cold reads, by workload; `CHUNK_PAGES`, `REBASE_RATIO`, `INLINE_BYTES`, `GARBAGE_AFTER` override the options | [COW_EXPERIMENT.md](../../state/docs/COW_EXPERIMENT.md) |
+| `amplification`   | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                                       | `results/amplification.csv`                             |
+| `small_databases` | Tiny databases, index counts, save grouping and a larger control                                                                                                    | `results/small_databases.csv`                           |
+| `cache_cpu`       | Process-wide memory and disk cache by memory size: misses, round trips, allocations and CPU time                                                                    | [CACHE_RESULTS.md](CACHE_RESULTS.md) (log format, v15)  |
 
 All SQL result checks remain active in release builds. Successful writes are
-reopened and verified. The analyzers check repeat agreement, complete workload
-coverage and traffic accounting. They understand only the current page format.
+reopened and verified.
 
 ## Measurements
 
-`amplification` resets counters between open, SQL/query, checkpoint, save and
-recovery-open phases. Each phase has a total row plus page, log (stored
-segments), commit (the record), hint and other-key rows. Do not add totals to their components. Warm query observations
-reuse one session; cold totals include initialization. Unique keys are per-phase
-counts and are not summed across phases.
+`amplification` resets counters between open, SQL/query, save and
+recovery-open phases. Each phase has a total row plus blob, root and
+other-key rows. Do not add totals to their components. Warm query
+observations reuse one session; cold totals include initialization. Unique
+keys are per-phase counts and are not summed across phases.
 
 | Metric                          | Numerator                               | Denominator                        |
 | ------------------------------- | --------------------------------------- | ---------------------------------- |
@@ -55,19 +49,11 @@ counts and are not summed across phases.
 | Storage/database ratio          | Live encoded values                     | Logical database bytes             |
 
 Undefined denominators (misses, no-op writes, deletes) remain blank. Delete
-traffic contains key bytes; reclaimed value bytes are a separate measure. Private
-WAL/database writes are local I/O, not durable KV traffic. Failed-operation costs
-are not inferred from successful-operation counters.
-
-Baselines are bulk loads followed by a save that checkpoints them, so cold reads
-reach page keys. Open writes nothing.
-
-The compression target includes open in every SQL observation. Repetitions use
-independent forks of the same baseline, with no owner cache. Raw and LZ4
-policies are compared on identical decoded SQL pages. Codec timing samples up to
-64 actual pages per dataset, with five warm-up passes and 200 measured passes;
-policy order alternates between repeats.
+traffic contains key bytes; reclaimed value bytes are a separate measure.
+Private WAL/database writes are local I/O, not durable KV traffic.
+Failed-operation costs are not inferred from successful-operation counters.
 
 Elapsed timings include simulator scheduling and, for SQL, host-driven engine
-execution and parsing costs. Three observations do not establish a latency distribution. Wire framing,
-replication, disk writes, backend compression and compaction are not measured.
+execution and parsing costs. Three observations do not establish a latency
+distribution. Wire framing, replication, disk writes, backend compression and
+compaction are not measured.

@@ -1,5 +1,8 @@
 # Owner cache: memory and disk, encoded or decoded, and engine reuse — 2026-10-11
 
+> Measured on the log format (v15), before copy-on-write: its encoded and
+> decoded modes are gone, and blobs are now cached whole.
+
 `benches/cache_cpu.rs` measures a long-lived owner: 300 sessions over a
 10,000-row table of JSON documents (half random hex; 493 pages, 2 MB
 logical, about 0.8 MB encoded). Each session opens, runs four skewed point

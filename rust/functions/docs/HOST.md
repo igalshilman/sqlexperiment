@@ -7,7 +7,7 @@ five things:
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
 - one flush that makes a turn's SQL, pages and records durable together:
-  the state's (v15) commit record, the memory's pages a file beside the SQL's;
+  the state's (v16) root, the memory's pages a file beside the SQL's;
 - host bindings: operations the host makes itself, such as a model call,
   whose input nothing but the guest's heap keeps (§6).
 
@@ -168,11 +168,11 @@ export async function order({ sku, qty }, ctx) {
 - **`ctx.kv`** is already a table in this database, so one store holds a
   scope's data.
 
-## 4. One record commits a turn
+## 4. One root commits a turn
 
 Built in #142 and #143. A turn is one flush of the scope's state: the run's
 progress, the VM's page batch and the turn's SQL go into one WAL, flushed as
-one record, in one put.
+one root, in one round trip.
 Before, a turn put `batch/<n>`, then `commit` (naming the batch), then the KV
 writes the commit listed. That was correct, since Restate keeps writes in
 issue order and a crash keeps a prefix, but it was three kinds of keys and
@@ -181,8 +181,8 @@ two commit points once SQL joined.
 ### The record
 
 ```text
-v15/commit = SC15
-  version, epoch, next_segment, garbage
+v16/root = SR16
+  version, next_blob, chunk_pages, garbage
   directory: files by id and name
     run:               record: the run's progress as JSON // run, program, pending
                                                          // (the outbox), status, outcome
@@ -190,37 +190,33 @@ v15/commit = SC15
     memory/<golden>:   paged file over the golden image  // the pages that differ from it
     db:                paged file                        // SQL
     <name>/…:          each extension's records and files
-  log:     each transaction's changed pages since the checkpoint, per file,
-           inline or stored
+  each paged file: per chunk of 4 pages, its base blob and delta blob
+v16/blob/<n>:  one zstd frame, written once
 ```
 
-- **A turn is one put.** Its SQL pages and its memory's changed pages, from
-  its WAL, join `log` as one transaction, and the records it set replace
-  theirs (a record past 1 KiB is a stored value of its own, written first).
-- **Sealing covers it.** Past `inline_log_bytes` (1 KiB), the inline
-  segments move into one stored value, written before the record that names
-  it, in the same round trip.
-- **One checkpoint for all.** A checkpoint writes every file's logged pages
-  in place (`page/<file>/<n>`) and empties `log`; a memory page equal to
-  golden's is a hole, and one that differs is compressed against it.
+- **A turn is one root.** Its SQL pages and its memory's changed pages, from
+  its WAL, become a delta per changed chunk, compressed against the chunk's
+  base (a memory chunk's base against golden's pages), and the records it
+  set replace theirs (a record past 1 KiB is a blob of its own). The blobs
+  are put first, then the root, in the same round trip.
 - **`ctx.kv` is a table** in the database, so its writes commit with the
   turn.
 
 ### Flush, recover
 
-- **Flush.** Garbage deletes, a seal if one is due, the record, and a
-  checkpoint if one is due: queued in that order, then one sync. Then the
+- **Flush.** Garbage deletes, the blobs, the root: queued in that order,
+  then one sync. Then the
   outbox: its Waits are made after the flush, and the next flush drops
   the ones already made.
-- **Recover.** Open reads the record and the stored values it names: each
-  file's log replays over its pages in place, and the VM is the golden image
-  with the pages the memory record lists, read together. The record's
+- **Recover.** Open reads the root and the large records' blobs, and the VM
+  is the golden image with the pages the memory record lists, read together
+  by chunk. The record's
   pending Waits are made again, under their IDs.
 
 The API is `State::open`, whose `record(name)`, `file(name)` and
 `file_with_base(name, base)` are handles each participant writes through
 the turn's `Wal` (`state.wal()`) in its prepare (the SQL, `Sql::open(&state)`,
-flushes into it), then `Wal::flush`, the one put.
+flushes into it), then `Wal::flush`, one round trip.
 
 ## 5. Plan
 

@@ -9,7 +9,7 @@ substitutes for protocol steps. Last consolidated: 18 October 2026.
 The implementation in this crate uses QuickJS compiled to WebAssembly, Wasmtime,
 4 KiB page write tracking (by the kernel where it can, else by instrumented
 stores), and Zstd batches of the changed 64-byte blocks, each compressed
-against the blocks it replaces, over a shared golden image. A turn ends in one commit record per scope (§7), in a Restate object's
+against the blocks it replaces, over a shared golden image. A turn ends in one root per scope (§7), in a Restate object's
 state, which the `restate` module drives from each program's `run` handler
 (§9.1). The VM stays live from turn to turn of one attempt.
 
@@ -49,8 +49,8 @@ Assumptions and invariants:
 3. Writes are kept in issue order: a sync makes every write before it
    durable, and a crash keeps a prefix of those not yet synced. Reads within
    an attempt see its own writes.
-4. A turn happened once its commit, one put of the scope's commit record,
-   is stored, with its pages and its KV writes (§7). Effects are dispatched
+4. A turn happened once its commit, one put of the scope's root, is
+   stored, with its pages and its KV writes (§7). Effects are dispatched
    only after the commit that issued them, in issue order, so a crash that
    loses the commit loses them too.
 5. Snapshot only after returning completely from Wasm. The image contains
@@ -617,9 +617,9 @@ Zeroing free chunks (§5.6) already makes what it allocates and frees free.
 ### 5.1. Record identities and layouts
 
 A scope's store holds one state, a `state` namespace
-([its format](../../../core/state/docs/FORMAT.md)): the commit record at
-`v15/commit`, the values it outgrew at `v15/log/<n>`, and pages in place at
-`v15/page/<file>/<n>`. Its files:
+([its format](../../../core/state/docs/FORMAT.md)): the root at `v16/root`,
+which names the blobs at `v16/blob/<n>`, written once each: chunks of a
+file's pages and large records. Its files:
 
 | File              | Kind                    | Holds                                                                   |
 | ----------------- | ----------------------- | ----------------------------------------------------------------------- |
@@ -646,10 +646,10 @@ Memory = {
 ```
 
 The image is golden (zeros beyond its length) with the pages `pages` lists
-read from `file`. The file is over golden (a `state` base): a page the run
-never changed, or changed back, is a hole that reads as golden's, and the
-state compresses each page against what it replaces (golden's, the first
-time it is logged, and in place), so a page costs about what changed in it.
+read from `file`. The file is over golden (a `state` base): a chunk the run
+never changed reads as golden's, a chunk's base is compressed against
+golden's pages, and each later change as a delta against that base, so a
+page costs about what changed in it.
 `pages` lists the pages that differ from golden, run-length encoded,
 because the store cannot list a file's pages: a restore reads exactly
 those. A settled run's list is empty, and its pages are holes. `runtime` is
@@ -661,16 +661,15 @@ migration.
 
 The returned View holds the run, program, turns, Progress, memory length, live
 pages, and what the last turn wrote: changed and examined pages, the bytes
-its seal logged (memory and tables) and the commit record's.
+its seal wrote (memory and tables) and the root's.
 
 ### 5.2. One file per golden image
 
 The memory file is named after its golden image, and opens only with it
-(the state refuses another base): its log since the last checkpoint, and its
-pages in place, decode only against that image. A new run in the scope
-writes holes for the previous run's pages in its first seal, in the
-previous run's file (without its golden image: a hole needs none), then its
-own pages in its own file. A scope that runs one program reuses one file; a
+(the state refuses another base): its chunks decode only against that
+image. A new run in the scope empties the previous run's file in its first
+seal (without its golden image: emptying needs none), then writes its own
+pages in its own file. A scope that runs one program reuses one file; a
 new program version adds a file, which the previous one's emptied file stays
 beside, at no cost but its directory entry.
 
@@ -714,8 +713,7 @@ compared stay as they were, in the VM and in P alike. Updating P with each
 changed page keeps it equal to the VM's memory as of the commit: the
 `verify-dirty` build checks that every page that differs from it was
 written (marked or listed), in either mechanism. A turn writes the pages it
-changed, once into the log and once in place at a checkpoint: it never
-rewrites the whole image.
+changed, as a delta per changed chunk: it never rewrites the whole image.
 
 ### 5.4. Reconstruction algorithm
 
@@ -865,7 +863,7 @@ Resume can coexist. Once the root settles, the run is final.
 ## 7. Storage: one commit per turn
 
 A turn is one flush of the scope's state (`Wal::flush`), one put of its
-commit record. Every participant writes into one WAL:
+root. Every participant writes into one WAL:
 
 1. its KV writes, the SQL transaction its first KV request began;
 2. its memory's pages that changed, into the file over golden (§5.3);
@@ -873,14 +871,10 @@ commit record. Every participant writes into one WAL:
    memory's, as the record `memory`; and what each extension changed in
    its part of the state (its records and files under `<name>/`).
 
-Writes land in any order (§1), so nothing may be its own put: a turn's pages
-and a commit record that names them could not be ordered. The record carries
-the turn's log segments (SQL and memory pages alike) inline, or names them
-as a stored value it waits for first (a transaction larger than the inline
-budget, 1 KiB here). Past the budget, the record's earlier inline parts are
-sealed into one stored value, which the next flush names. A checkpoint
-writes every file's logged pages in place, the memory's with the SQL's. A
-crash before the record is stored loses the whole turn, which the next
+The flush puts each changed chunk (SQL and memory pages alike) as a new
+blob, then the root that names them, and syncs once: writes are kept in
+issue order (§1), so a stored root names only stored blobs. A crash before
+the root is stored loses the whole turn, which the next
 attempt runs again from the previous flush: the requests it issued were
 never dispatched (§1). Nothing is applied after a flush; a WAL that is not
 flushed is dropped, and its writes with it.
