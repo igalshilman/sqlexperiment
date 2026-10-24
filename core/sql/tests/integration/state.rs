@@ -1,5 +1,5 @@
-//! A state and its participants: the SQL as one of them, its records and
-//! files beside it, made durable together by a mutation's flush.
+//! A state and SQL on it: SQL's file, records and other files beside it,
+//! made durable together by a mutation's flush.
 use crate::host::StateSetup;
 use bytes::Bytes;
 use sql::Sql;
@@ -18,10 +18,10 @@ async fn rows(sql: &mut Sql) -> Result<i64> {
     Ok(rows[0][0].as_int().unwrap())
 }
 
-/// Nothing a participant changes is durable until the mutation flushes, and then
+/// Nothing SQL or a mutation changes is durable until the mutation flushes, and then
 /// all of it is, under one root; the state reads as last flushed meanwhile.
 #[test]
-fn a_flush_makes_every_participant_durable_together() -> Result<()> {
+fn a_flush_makes_sql_and_the_rest_durable_together() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let state = StateSetup::from(options()).open(store.clone()).await?;
@@ -68,21 +68,32 @@ fn a_flush_makes_every_participant_durable_together() -> Result<()> {
     })
 }
 
-/// SQL commits stay in the engine until a flush moves them into a mutation: a
-/// mutation's flush without one refuses, rather than leave them out.
+/// SQL commits stay in the engine until [`Sql::flush`] moves them into a
+/// mutation: one flushed without it leaves them private, for a later one.
 #[test]
-fn a_flush_refuses_sql_not_flushed() -> Result<()> {
+fn a_flush_without_sql_leaves_its_changes_private() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let state = StateSetup::from(options()).open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
         sql.execute("CREATE TABLE t(n INTEGER)").await?;
-        let refused = state.mutation().flush().await.unwrap_err().to_string();
+        sql.execute("INSERT INTO t VALUES(1)").await?;
+        let mut mutation = state.mutation();
+        mutation.set(&state.record("progress"), Bytes::from_static(b"one"))?;
+        mutation.flush().await?;
         assert!(
-            refused.contains("\"sql\" has changes not yet in a mutation"),
-            "{refused}"
+            state.file(sql::DB_FILE)?.is_empty(),
+            "SQL's changes are private"
         );
-        assert!(store.keys().is_empty());
+        let mut mutation = state.mutation();
+        sql.flush(&mut mutation).await?;
+        mutation.flush().await?;
+        drop(sql);
+        drop(state);
+        let state = StateSetup::from(options()).open(store).await?;
+        let mut sql = Sql::open(&state).await?;
+        assert_eq!(rows(&mut sql).await?, 1);
+        assert_eq!(state.version(), 2);
         Ok(())
     })
 }
@@ -106,10 +117,10 @@ fn a_state_needs_no_sql_and_takes_one() -> Result<()> {
     })
 }
 
-/// With an owner cache, the engine a session leaves idle waits for the next
+/// With an owner cache, the engine a session parks waits for the next
 /// state's SQL, past a state that opened no SQL.
 #[test]
-fn the_idle_engine_waits_for_the_next_sql() -> Result<()> {
+fn a_parked_engine_waits_for_the_next_sql() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let cache = fresh_namespace();
@@ -141,10 +152,10 @@ fn the_idle_engine_waits_for_the_next_sql() -> Result<()> {
     })
 }
 
-/// An open SQL transaction holds changes too, though the engine keeps them to
-/// itself until `COMMIT`: a mutation refuses to flush around it.
+/// An open SQL transaction stays open across a flush without SQL; the
+/// next [`Sql::flush`] commits it.
 #[test]
-fn a_flush_refuses_an_open_sql_transaction() -> Result<()> {
+fn an_open_sql_transaction_outlives_a_flush_without_sql() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let state = StateSetup::from(options()).open(store.clone()).await?;
@@ -155,11 +166,14 @@ fn a_flush_refuses_an_open_sql_transaction() -> Result<()> {
         mutation.flush().await?;
         sql.execute("BEGIN").await?;
         sql.execute("INSERT INTO t VALUES(1)").await?;
-        let refused = state.mutation().flush().await.unwrap_err().to_string();
-        assert!(refused.contains("not yet in a mutation"), "{refused}");
+        let mut mutation = state.mutation();
+        mutation.set(&state.record("progress"), Bytes::from_static(b"one"))?;
+        mutation.flush().await?;
+        assert!(sql.in_transaction());
         let mut mutation = state.mutation();
         sql.flush(&mut mutation).await?;
         mutation.flush().await?;
+        assert!(!sql.in_transaction());
         assert_eq!(rows(&mut sql).await?, 1);
         Ok(())
     })

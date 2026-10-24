@@ -2,8 +2,8 @@
 //! unmodified) over the state's file `db`.
 //!
 //! For a Restate object without Restate's journal (`journalReplay: false`),
-//! whose state is the namespace. [`Sql`] takes part in the state
-//! ([`state::Participant`]): its statements change a private view,
+//! whose state is the namespace. [`Sql`] keeps its database in the state's
+//! file `db`: its statements change a private view,
 //! [`Sql::flush`] moves what SQL committed into a [`Mutation`], and the mutation's
 //! [`Mutation::flush`] makes it durable, together with the mutation's other files and
 //! records, atomically.
@@ -12,8 +12,8 @@
 //!
 //! At [`Mutation::flush`], and only then. SQL statements, SQL `COMMIT` and
 //! [`Sql::checkpoint`] change a private view; [`Sql::flush`] moves what SQL
-//! committed into a mutation, still private; every mutation of the state refuses to
-//! flush while SQL holds changes not moved. A mutation dropped discards what it
+//! committed into a mutation, still private; a mutation flushed without it
+//! leaves SQL's changes private. A mutation dropped discards what it
 //! holds, and SQL keeps its pages for the next flush. The host decides when
 //! to flush: after each SQL transaction (as SQLite does, and as the Node.js
 //! addon and the Python extension do, through [`binding::Session`]), or once
@@ -34,7 +34,7 @@
 //! # Engine reuse
 //!
 //! With a [`state::PageCache`], a session that ends cleanly leaves its idle
-//! engine there ([`state::Participant::park`]); the next session of the
+//! engine there ([`State::park`]); the next session of the
 //! namespace reuses it when nothing changed, keeping the parsed schema and the
 //! engine's page cache.
 //!
@@ -94,11 +94,11 @@ pub mod io;
 pub use turso_core::{Numeric, Value};
 
 use crate::io::{DB_PATH, KvIo, MountedIo};
-use state::{Mutation, Participant, Receipt, State};
+use state::{File, Mutation, Receipt, State};
 use std::{
     future::poll_fn,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::Poll,
@@ -111,6 +111,9 @@ use turso_core::{
 
 /// The state's file SQL keeps its database in.
 pub const DB_FILE: &str = "db";
+
+/// The key SQL parks its engine under ([`State::park`]).
+const ENGINE_KEY: &str = "sql";
 
 /// Default [`SqlOptions::max_private_bytes`].
 pub const MAX_PRIVATE_BYTES: usize = 256 << 20;
@@ -163,7 +166,7 @@ pub type Rows = Vec<Vec<Value>>;
 /// Its changes become durable only with a mutation's [`Mutation::flush`], after
 /// [`Self::flush`] into it; dropping it leaves its engine to the next one.
 pub struct Sql {
-    participant: Participant,
+    state: State,
     database: Option<Arc<Database>>,
     connection: Option<Arc<Connection>>,
     io: Arc<KvIo>,
@@ -190,6 +193,32 @@ pub struct Sql {
     schema_bytes: Option<usize>,
     /// SQL since the last commit may have changed the schema.
     schema_changed: bool,
+    /// Holds the state's file `db` for this session, dropped last.
+    _open: Opened,
+}
+
+/// Every state's file `db` an [`Sql`] runs on, so a second one is refused:
+/// two would each keep a private view of the same file.
+static OPENED: Mutex<Vec<File>> = Mutex::new(Vec::new());
+
+/// A file in [`OPENED`], until dropped.
+struct Opened(File);
+
+impl Opened {
+    fn new(file: File) -> Result<Self> {
+        let mut opened = OPENED.lock().unwrap();
+        if opened.contains(&file) {
+            return Err("an Sql already runs on this state; drop it first".into());
+        }
+        opened.push(file.clone());
+        Ok(Self(file))
+    }
+}
+
+impl Drop for Opened {
+    fn drop(&mut self) {
+        OPENED.lock().unwrap().retain(|file| *file != self.0);
+    }
 }
 
 /// The error of a session that a failure ended.
@@ -256,17 +285,18 @@ impl Sql {
     }
 
     /// Open the SQL database of `state`, its file `db`, with default
-    /// [`SqlOptions`]: an engine left idle by this owner's previous session
-    /// if the state found one, or a new one. One `Sql` runs on a state.
+    /// [`SqlOptions`]: an engine parked by this owner's previous session
+    /// if the state found one, or a new one. One `Sql` runs on a state at a
+    /// time.
     pub async fn open(state: &State) -> Result<Self> {
         Self::open_with_options(state, SqlOptions::default()).await
     }
 
     /// [`Self::open`] with explicit [`SqlOptions`].
     pub async fn open_with_options(state: &State, options: SqlOptions) -> Result<Self> {
-        let participant = state.join("sql")?;
         let file = state.file(DB_FILE)?;
-        let warm = participant.take_idle::<WarmEngine>();
+        let opened = Opened::new(file.clone())?;
+        let warm = state.take_parked::<WarmEngine>(ENGINE_KEY);
         let io = match &warm {
             Some(warm) => {
                 warm.io.resume(file, options.max_private_bytes).await?;
@@ -275,7 +305,7 @@ impl Sql {
             None => KvIo::new(file, options.max_private_bytes),
         };
         let mut sql = Self {
-            participant,
+            state: state.clone(),
             database: None,
             connection: None,
             io,
@@ -289,6 +319,7 @@ impl Sql {
             abandoned: Arc::default(),
             schema_bytes: warm.as_ref().map(|warm| warm.schema_bytes),
             schema_changed: false,
+            _open: opened,
         };
         let database = match warm {
             Some(warm) => warm.database,
@@ -314,7 +345,7 @@ impl Sql {
 
     /// The state this SQL flushes with.
     pub fn state(&self) -> State {
-        self.participant.state().clone()
+        self.state.clone()
     }
 
     /// Whether this session continued a previous session's engine.
@@ -328,7 +359,7 @@ impl Sql {
     /// overlapping session left behind holds an older state.
     fn park(&mut self) {
         self.settle();
-        if !self.participant.can_park() || !self.reusable || self.schema_changed {
+        if !self.state.can_park() || !self.reusable || self.schema_changed {
             return;
         }
         let Some(schema_bytes) = self.schema_bytes else {
@@ -356,7 +387,7 @@ impl Sql {
                 schema_bytes,
             };
             let weight = warm.weight();
-            self.parked = self.participant.park(warm, weight).is_ok();
+            self.parked = self.state.park(ENGINE_KEY, warm, weight).is_ok();
         }
     }
 
@@ -429,18 +460,14 @@ impl Sql {
             true => self.execute("COMMIT").await,
             false => Ok(()),
         };
-        let result = match result {
+        match result {
             // Pages a pending mutation holds go in too: it may be dropped.
             Ok(()) if self.io.has_changes() || self.io.has_pending() => {
                 self.move_pages(mutation).await
             }
             Ok(()) => self.measure_changed_schema().await,
             result => result,
-        };
-        if result.is_ok() {
-            self.participant.set_unflushed(false);
         }
-        result
     }
 
     /// Act on what became of the mutation the pages were last moved into: flushed
@@ -563,7 +590,7 @@ impl Sql {
     /// Weigh the schema again after a statement that may have changed it,
     /// for parking the engine; even one rolled back, which moved no pages.
     async fn measure_changed_schema(&mut self) -> Result<()> {
-        if self.schema_changed && self.participant.state().is_cached() {
+        if self.schema_changed && self.state.is_cached() {
             // Without a size the engine is just not parked.
             self.schema_bytes = self.measure_schema().await.ok();
             self.schema_changed = false;
@@ -575,7 +602,7 @@ impl Sql {
     /// state (opened on, or flushed itself); SQL not yet flushed by the state
     /// does not change it.
     pub fn version(&self) -> u64 {
-        self.participant.state().version()
+        self.state.version()
     }
 
     /// Whether the session can run more SQL. An SQL error (a syntax error, a
@@ -588,23 +615,15 @@ impl Sql {
     }
 
     fn is_poisoned(&self) -> bool {
-        self.poisoned
-            || self.abandoned.load(Ordering::SeqCst)
-            || !self.participant.state().is_usable()
+        self.poisoned || self.abandoned.load(Ordering::SeqCst) || !self.state.is_usable()
     }
 
     /// Run the caller's `sql` (see [`Self::run_statements`]), returning the
-    /// column names and rows of its last statement. Until it returns, the
-    /// state counts SQL as holding changes not flushed.
+    /// column names and rows of its last statement.
     async fn run(&mut self, sql: &str, params: Option<Vec<Value>>) -> Result<(Vec<String>, Rows)> {
         self.settle();
         self.screen(sql);
-        self.participant.set_unflushed(true);
-        let result = self.run_statements(sql, params).await;
-        // The engine keeps an open transaction's pages to itself until
-        // `COMMIT`: it holds changes all the same.
-        (self.participant).set_unflushed(self.io.has_changes() || self.in_transaction());
-        result
+        self.run_statements(sql, params).await
     }
 
     /// Run each statement of `sql`, applying the transaction rules after each:

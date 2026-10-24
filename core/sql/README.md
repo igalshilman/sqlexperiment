@@ -6,8 +6,7 @@ is. It runs Turso's Rust engine (`turso_core` 0.8.2) unmodified, over the
 state's file `db`, and flushes with the state: the rows, and the state's other
 files and records, durable together in one flush.
 
-SQL takes part in the state as the participant `sql`. Its statements change a
-private view; `Sql::flush(&mut mutation)` moves what SQL committed into a mutation; the
+One `Sql` runs on a state at a time. Its statements change a private view; `Sql::flush(&mut mutation)` moves what SQL committed into a mutation; the
 mutation's `flush` makes it durable. With a page cache, a session that ends cleanly
 leaves its engine warm for the namespace's next one.
 
