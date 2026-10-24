@@ -49,6 +49,7 @@ class SqlOptions(typing.TypedDict):
     journal_retention: timedelta
 
 
+# TODO: preload the root eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
 sql_options: SqlOptions = {
     "enable_lazy_state": True,
     "journal_retention": timedelta(0),
