@@ -11,13 +11,14 @@ cost.
 
 ## The design in one paragraph
 
-A paged file is a row of chunks of 4 pages, at most 64 MiB. A chunk is a
+A paged file is a row of chunks of 4 pages, at most 10 GiB. A chunk is a
 **base** blob (its pages, one zstd frame) and maybe a **delta** blob: its
 pages now, compressed with the base as zstd's reference prefix, so it costs
 about what changed since the base. A flush writes a new delta for each
 changed chunk, or a new base once the delta passes a quarter of the base;
-then the root, which names every chunk's two blobs and holds the small
-records; then syncs once. **One rule:** a blob is put before any root names
+then a new node on each changed path of the file's chunk map (a radix tree
+of 64-entry nodes, its top in the root); then the root, which holds the
+maps' tops and the small records; then syncs once. **One rule:** a blob is put before any root names
 it, and deleted only `garbage_after` (16) flushes after the last root that
 named it. A file over a base (a VM's memory over its golden image) compresses
 its chunks' bases against the golden pages.
@@ -89,25 +90,27 @@ first indexed lookup, without a cache.)
 
 ### Does it simplify the code?
 
-Yes, by about a quarter, and more in concepts than in lines.
+Yes, more in concepts than in lines: by a quarter with files of at most
+64 MiB, by 8% once the chunk map (384 lines) took them to 10 GiB.
 
 | Non-comment lines (`grep -vE '^\s*(//\|$)'`) | Log (main) |   CoW |
 | -------------------------------------------- | ---------: | ----: |
-| `core/state/src`, without the simulator      |      2,646 | 1,969 |
-| The simulator's monitor                      |        308 |   218 |
-| `core/state` and `core/sql` tests            |      9,131 | 7,911 |
+| `core/state/src`, without the simulator      |      2,646 | 2,445 |
+| The simulator's monitor                      |        308 |   291 |
+| `core/state` and `core/sql` tests            |      9,131 | 8,143 |
 | TLA+ specification                           |    9 files |  none |
 
 `log.rs`, `snapshot.rs`, `hint.rs`, `page_codec.rs` and `format.rs` (2,147
-lines) became `store.rs` (1,062); the cache went from 475 to 362. The SDKs
+lines) became `store.rs` (1,151) and `map.rs` (384); the cache went from
+475 to 362. The SDKs
 lost their shared-handler retry loops, and the bindings `is_current`.
 
 Gone as concepts: the log and its segments, seals, checkpoints and their
 thresholds, epochs, page keys overwritten in place, the working-set hint,
 page codecs (raw, LZ4, zstd, zstd against base), the cache's generations and
 page versions, readers' version marks that held back checkpoints, and
-`is_current`. Added: chunks, a base and a delta, the rebase ratio, and the
-garbage grace.
+`is_current`. Added: chunks, a base and a delta, the rebase ratio, the
+garbage grace, and the chunk map.
 
 ### Is correctness easier to reason about?
 
@@ -195,16 +198,33 @@ SDKs) are gone.
 
 ## Trade-offs and open questions
 
-- **64 MiB per file.** The root names every chunk and is rewritten by every
-  flush. Near the limit (200k rows, 56 MB, `FLUSHES=3000 WORKLOAD=200k`) one
-  update costs 421 B a flush, but ten scattered ones cost 6.5 KB, 4.9 KB of
-  it the root, once the database has aged and its chunks' blob numbers no
-  longer run in sequence. Larger databases would need the chunk map in
-  chunks of its own, at a round trip on a cold open. A database that grows
-  past the limit loses nothing: its flush is refused ("a page past the
-  largest file"), the session ends, and the database reopens as last
-  flushed. The refusal comes late, though, at the flush, not at the
-  statement that grew the file.
+- **10 GiB per file, through a chunk map.** The root first named every
+  chunk, which capped a file at 64 MiB: there (200k rows, 56 MB, aged by
+  `FLUSHES=3000 WORKLOAD=200k`) ten scattered updates cost 6.5 KB a flush,
+  4.9 KB of it the root. Now a radix tree names them, as ZFS's indirect
+  blocks do, its top node in the root, so a flush writes a node per level
+  on each path it changes. A database that grows past 10 GiB fails at the
+  statement (SQLITE_FULL, `PRAGMA max_page_count`), and the session goes on.
+  The fanout, set per namespace, trades a flush's bytes against a cold
+  open's gets; 64 is the default:
+
+  | Aged 56 MB (`FANOUT=… FLUSHES=3000 WORKLOAD=200k`) | Update 1, B/flush | Update 10, B/flush | Cold open: round trips / gets |
+  | -------------------------------------------------- | ----------------: | -----------------: | ----------------------------: |
+  | The root names every chunk (before)                |               421 |              6,500 |                             – |
+  | Fanout 16                                          |               506 |              3,375 |                       6 / 240 |
+  | Fanout 32                                          |               531 |              3,556 |                       6 / 120 |
+  | **Fanout 64**                                      |           **544** |          **3,943** |                    **5 / 61** |
+  | Fanout 128                                         |               560 |              5,028 |                        5 / 34 |
+  | Fanout 256                                         |               636 |              5,576 |                        5 / 20 |
+
+  A 280 MB database (1M rows, three levels) costs 520 B a flush for one
+  update and 2.0 KB for ten, about what 56 MB does. A cold open gets the
+  map whole (up to 512 nodes, 512 MiB at the default), a level a round
+  trip: 285 small gets there, in 6 round trips, so that no read after
+  misses it; an uncached owner pays that every session. The fresh
+  databases of the table above cost the same or less than without a map
+  (100k rows, update 1: 342 B, from 426).
+
 - **Zero pages are holes.** In a file without a base, a page of zeros reads
   as absent, which SQLite never relies on.
 - **Granularity.** A change rebuilds a 16 KiB chunk's delta; `CHUNK_PAGES=1`
