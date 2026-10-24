@@ -113,7 +113,7 @@ struct Workload {
     flushes: u64,
 }
 
-const WORKLOADS: [Workload; 8] = [
+const WORKLOADS: [Workload; 10] = [
     // A restate-fns object: a message row, and its sends as effects.
     Workload {
         name: "chat+effects",
@@ -151,7 +151,7 @@ const WORKLOADS: [Workload; 8] = [
         payload: 256,
         flushes: 100,
     },
-    // Near the largest file: the root maps every chunk.
+    // 56 MB: the chunk map is two levels deep.
     Workload {
         name: "200k: update 1",
         rows: 200_000,
@@ -163,6 +163,19 @@ const WORKLOADS: [Workload; 8] = [
         rows: 200_000,
         payload: 256,
         flushes: 100,
+    },
+    // 280 MB: three levels.
+    Workload {
+        name: "1M: update 1",
+        rows: 1_000_000,
+        payload: 256,
+        flushes: 50,
+    },
+    Workload {
+        name: "1M: update 10",
+        rows: 1_000_000,
+        payload: 256,
+        flushes: 50,
     },
 ];
 
@@ -217,7 +230,7 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
             );
             Ok(Some(effects))
         }
-        "small: update 1" | "10k: update 1" | "100k: update 1" | "200k: update 1" => {
+        name if name.ends_with("update 1") => {
             db.execute_with(
                 "UPDATE t SET a = a + 1, payload = ? WHERE id = ?",
                 [
@@ -228,7 +241,7 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
             .await?;
             Ok(None)
         }
-        "10k: update 10" | "200k: update 10" => {
+        name if name.ends_with("update 10") => {
             db.execute("BEGIN").await?;
             for n in 0..10 {
                 db.execute_with(
