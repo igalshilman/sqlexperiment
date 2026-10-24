@@ -1068,12 +1068,13 @@ copy-on-write storage:
   420–720 B.
 - **The session:** 4.0 MiB stored over 200 steps. Neither the heap nor
   Restate's journal holds the requests.
-- **Restores:** a new attempt, every 25 steps, restores the run in 0.8–1.4
-  ms, reopening the database.
-- **Against the log** (20 October 2026, the same bench): a step stored 10 KB
-  at the median, plus 31–41 KB of checkpoint every 16 steps or so, 2.5 MiB
-  in all; restores took 1–19 ms. Copy-on-write stores about 1.6× as much
-  here. A delta holds every change since its chunk's base, so a chunk that
+- **Restores:** a new attempt, every 25 steps, restores the run in 1–10 ms,
+  reopening the database.
+- **Against the log** (the same bench, the same day, on main before
+  copy-on-write): a step stored 8.8 KB at the median, plus 31–41 KB of
+  checkpoint every 16 steps or so, 2.5 MiB in all; restores took 1–12 ms,
+  and turns 1.3–1.5 ms against 2.1–2.3. Copy-on-write stores about 1.6× as
+  much here. A delta holds every change since its chunk's base, so a chunk that
   each turn changes (the heap's hot pages, the table's last pages) is
   written whole again each turn, up to a quarter of the base, until it
   rebases; the log wrote what changed since the turn before. A lower rebase
