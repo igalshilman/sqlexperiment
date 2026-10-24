@@ -1,15 +1,16 @@
-//! Transactional state over an asynchronous key/value store: paged files and
-//! records, changed through a write-ahead log in memory, which a flush makes
-//! durable at once.
+//! Transactional state over an asynchronous key/value store: paged files,
+//! records and logs, changed through a mutation in memory, which a flush
+//! makes durable at once.
 //!
 //! A [`State`] is one namespace in a KV store: the state of a Restate object
 //! without Restate's journal, which keeps writes in issue order and makes
 //! them durable at a sync (see [`kv`]). It needs no multi-key transaction,
 //! compare-and-swap or listing operation. Its [`File`]s are 4 KiB pages read
-//! and written at random, and its [`Record`]s whole values. The state is
-//! read; it changes only through a [`Mutation`] ([`State::mutation`]): the records set
-//! and pages written there become durable together at [`Mutation::flush`], and a
-//! mutation dropped discards them.
+//! and written at random, its [`Record`]s whole values, and its [`Log`]s
+//! entries appended and truncated from the start. The state is
+//! read; it changes only through a [`Mutation`] ([`State::mutation`]): the
+//! records set, pages written and entries appended there become durable
+//! together at [`Mutation::flush`], and a mutation dropped discards them.
 //!
 //! What writes a mutation is a [`Participant`]: it keeps changes of its own, moves
 //! them into the mutation before the flush, and may leave state idle for the
@@ -28,9 +29,9 @@
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
-//! | A mutation | Records set and pages written in it, in memory | No: dropping it discards them |
-//! | Root | `v16/root`: the directory, small records, and the blobs of each file's chunks | Yes, after an acknowledged flush |
-//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, or a large record; written once | Yes, until no root a reader may hold names it |
+//! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
+//! | Root | `v16/root`: the directory, small records and log entries, and the top of each file's chunk map | Yes, after an acknowledged flush |
+//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, a map node, or a large record or log entry; written once | Yes, until no root a reader may hold names it |
 //!
 //! # Ownership and concurrency
 //!
@@ -71,7 +72,8 @@
 //! # Limits
 //!
 //! A file holds at most [`MAX_FILE_BYTES`], a record's value
-//! [`MAX_RECORD_BYTES`], a name [`MAX_NAME_BYTES`]. The backend is assumed
+//! [`MAX_RECORD_BYTES`] (a log entry too), a log [`MAX_LOG_ENTRIES`], a name
+//! [`MAX_NAME_BYTES`]. The backend is assumed
 //! to return what was stored; decoding checks structure and bounds, and
 //! blobs' zstd frames carry a checksum. Use a fresh, dedicated namespace; no
 //! migration or format discovery is implemented. Simulation and benchmark
@@ -479,9 +481,9 @@ impl IntoFuture for Open {
     }
 }
 
-/// The writes ahead of a [`State`]: the records set and pages written since
-/// [`State::mutation`] made it, in memory, which [`Self::flush`] makes durable
-/// together, atomically. There is no other way to change the state. A mutation
+/// A change to a [`State`]: the records set, pages written and log entries
+/// appended and truncated since [`State::mutation`] made it, in memory, which
+/// [`Self::flush`] makes durable together, atomically. There is no other way to change the state. A mutation
 /// dropped discards its writes; a participant that moved changes into it
 /// learns which happened from its [`Receipt`].
 pub struct Mutation {
@@ -631,11 +633,11 @@ impl Mutation {
         }
     }
 
-    /// Make every record set and page written durable: the blobs of the
-    /// chunks and records it changes, then the root that names them, then
-    /// one sync, in one round trip. Nothing changed: nothing is written. It
-    /// is refused while a participant holds changes not yet in a mutation, while
-    /// another flush of the state runs, and for writes the state cannot
+    /// Make every record set, page written and entry appended durable: the
+    /// blobs of the chunks, records and entries it changes, then the root
+    /// that names them, then one sync, in one round trip. Nothing changed:
+    /// nothing is written. It is refused while a participant holds changes
+    /// not yet in a mutation, while another flush of the state runs, and for writes the state cannot
     /// store; a refused flush writes nothing, and the state goes on. `Ok`
     /// holds what it wrote; any other error (one refused because another
     /// state flushed since included), or dropping the future, ends the

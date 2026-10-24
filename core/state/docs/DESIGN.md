@@ -37,7 +37,7 @@ A namespace holds two kinds of keys:
 | Key            | Holds                                                                                                                                        |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `v16/root`     | The root, the commit point: the version, the directory of records and paged files, the small records, and the top of every file's chunk map. |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record.                              |
+| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record or log entry.                 |
 
 **Chunks.** A paged file is a row of chunks of `chunk_pages` pages (4,
 16 KiB), as many as its size needs, at most `MAX_FILE_BYTES` (10 GiB). A
@@ -61,6 +61,16 @@ nodes on its path. A subtree of holes is not stored.
 **Records** are whole named values: in the root up to `inline_record_bytes`
 (1 KiB), and a blob of their own when larger, written when they change.
 
+**Logs** are named sequences of entries, each stored as a record's value
+is, at the next index: a mutation appends to a log and truncates it from
+its start (`Mutation::append`, `Mutation::truncate`), at most 4096 entries
+held. A flush writes what it appends, not the log: a log is for changes too
+small to rewrite their whole each time, folded into a record or a file
+now and then and truncated. A truncation applies to the log as the flush
+leaves it, whatever its order among the mutation's appends; an entry
+appended and dropped by one flush is never stored, and a dropped entry's
+blob is garbage.
+
 **One rule.** A blob is put before the first root that names it, and deleted
 only once no root that a reader may still hold names it. The store keeps a
 prefix of the writes, so whatever a crash keeps, the root stored names only
@@ -81,7 +91,8 @@ writes every file and record in it, and syncs once:
    store) and the chunk's pages compressed with it as the reference. Once
    the delta would pass `rebase_ratio` (0.25) of the base's stored bytes,
    the chunk is written as a new base instead, and its old base and delta
-   die. A record past the inline budget is compressed into a blob.
+   die. A record or log entry past the inline budget is compressed into
+   a blob.
 2. **Map.** Each map node on a path to a changed chunk is written anew
    (below the root's top node, a blob), and the old one dies; so does a
    node a shrinking file no longer needs.
@@ -93,7 +104,7 @@ writes every file and record in it, and syncs once:
    none at or past it is named, so a crashed flush's leftovers are simply
    overwritten.
 5. **Root.** Put the root, at the next version, naming them, with the
-   records, and listing the blobs it names no more as garbage.
+   records and logs, and listing the blobs it names no more as garbage.
 6. **Sync.** One sync stores all of it: one round trip, whatever the flush
    wrote.
 
@@ -168,7 +179,7 @@ does not lose acknowledged work when a later step fails.
    unknown outcome, syncs in the same round trip, so that what it reads is
    durable.
 2. **Get what it needs at once,** in one more round trip: the blobs of the
-   large records, and every chunk of a file of at most `prefetch_pages`
+   large records and log entries, and every chunk of a file of at most `prefetch_pages`
    (16) pages, such as a small database whole (its map is in the root). A
    cached owner gets only those the cache lacks.
 3. **Get the maps**, beside step 2: of every file of at most 512 map nodes
