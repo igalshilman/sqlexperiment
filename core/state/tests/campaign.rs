@@ -1,5 +1,5 @@
 //! A seeded random campaign over the public API: mutations of changes to several
-//! files (one with a base) and records, flushed with small chunks and random
+//! files (one with a base), records and logs, flushed with small chunks and random
 //! rebase ratios so that deltas, rebases and garbage deletion all happen,
 //! and random faults, cancellations, crashes and reopens by owners with and
 //! without a cache, every request checked by the protocol monitor. After
@@ -295,7 +295,10 @@ impl World {
         let mut mutation = session.state.mutation();
         let mut pending = self.model.clone();
         for _ in 0..1 + self.rng.below(8) {
-            let op = Op::random(&mut self.rng);
+            let op = match self.rng.percent(10) {
+                true => self.model.truncation(&mut self.rng),
+                false => Op::random(&mut self.rng),
+            };
             trace(|| format!("  {}", describe(&op)));
             text(session.apply(&mut mutation, &op))?;
             pending.apply(&op);
@@ -490,6 +493,8 @@ fn describe(op: &Op) -> String {
         }
         Op::Write(name, index, None) => format!("hole {name} page {index}"),
         Op::SetLen(name, len) => format!("set_len {name} {len}"),
+        Op::Append(name, entry) => format!("append {name} {} bytes", entry.len()),
+        Op::Truncate(name, before) => format!("truncate {name} before {before}"),
     }
 }
 

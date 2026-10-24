@@ -93,6 +93,8 @@ pub fn golden() -> Arc<Golden> {
 pub const FILES: [&str; 3] = ["db", "aux", "vm"];
 /// The records.
 pub const RECORDS: [&str; 3] = ["progress", "outbox", "state"];
+/// The logs.
+pub const LOGS: [&str; 2] = ["turns", "events"];
 
 /// A change to a state (in a mutation) and to its model alike.
 #[derive(Clone, Debug)]
@@ -100,22 +102,32 @@ pub enum Op {
     Set(&'static str, Bytes),
     Write(&'static str, u64, Option<Page>),
     SetLen(&'static str, u64),
+    Append(&'static str, Bytes),
+    /// Drop the log's entries before an index, at most its end as flushed
+    /// (see [`Model::truncation`]).
+    Truncate(&'static str, u64),
 }
 
 impl Op {
-    /// A random change: records small and over an inline budget of a few
-    /// hundred bytes, pages written, holes, and lengths shrunk and grown.
+    /// A random change: records and log entries small and over an inline
+    /// budget of a few hundred bytes, pages written, holes, and lengths
+    /// shrunk and grown.
     pub fn random(rng: &mut Rng) -> Self {
         let file = rng.pick(&FILES);
-        match rng.below(10) {
+        let len = |rng: &mut Rng| match rng.below(4) {
+            0 => 0,
+            1 => rng.below(40) as usize,
+            2 => 100 + rng.below(400) as usize,
+            _ => 1000 + rng.below(3000) as usize,
+        };
+        match rng.below(12) {
             0..=1 => {
-                let len = match rng.below(4) {
-                    0 => 0,
-                    1 => rng.below(40) as usize,
-                    2 => 100 + rng.below(400) as usize,
-                    _ => 1000 + rng.below(3000) as usize,
-                };
+                let len = len(rng);
                 Self::Set(rng.pick(&RECORDS), rng.bytes(len).into())
+            }
+            10..=11 => {
+                let len = len(rng);
+                Self::Append(rng.pick(&LOGS), rng.bytes(len).into())
             }
             2 => Self::SetLen(file, 512 * rng.below(8 * 20)),
             3 => Self::Write(file, rng.below(20), None),
@@ -169,6 +181,11 @@ impl Session {
             Op::Set(name, value) => mutation.set(&self.state.record(name), value.clone()),
             Op::Write(name, index, image) => mutation.write(self.file(name), *index, image.clone()),
             Op::SetLen(name, len) => mutation.set_len(self.file(name), *len),
+            Op::Append(name, entry) => {
+                mutation.append(&self.state.log(name), entry.clone())?;
+                Ok(())
+            }
+            Op::Truncate(name, before) => mutation.truncate(&self.state.log(name), *before),
         }
     }
 
@@ -182,12 +199,20 @@ impl Session {
     }
 }
 
-/// What a state should hold, as last flushed: its records and its files'
-/// pages.
+/// What a state should hold, as last flushed: its records, its files'
+/// pages, and its logs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Model {
     records: BTreeMap<String, Bytes>,
     files: BTreeMap<String, FileModel>,
+    logs: BTreeMap<String, LogModel>,
+}
+
+/// A log's first index and its entries from there.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct LogModel {
+    first: u64,
+    entries: Vec<Bytes>,
 }
 
 /// A file's length and pages; an absent page is a hole.
@@ -219,7 +244,32 @@ impl Model {
                 file.pages.retain(|&index, _| index < kept);
                 file.len = *len;
             }
+            Op::Append(name, entry) => {
+                let log = self.logs.entry(name.to_string()).or_default();
+                log.entries.push(entry.clone());
+            }
+            Op::Truncate(name, before) => {
+                let log = self.logs.entry(name.to_string()).or_default();
+                let dropped = before.saturating_sub(log.first) as usize;
+                log.entries.drain(..dropped.min(log.entries.len()));
+                log.first = log.first.max(*before);
+            }
         }
+    }
+
+    /// A truncation of a random log valid in any mutation of the state
+    /// this model holds: of the log as flushed, up to its end.
+    pub fn truncation(&self, rng: &mut Rng) -> Op {
+        let name = rng.pick(&LOGS);
+        let (first, next) = self.log(name);
+        Op::Truncate(name, first + rng.below(next - first + 1))
+    }
+
+    /// The first index and the next of the log `name`.
+    pub fn log(&self, name: &str) -> (u64, u64) {
+        self.logs.get(name).map_or((0, 0), |log| {
+            (log.first, log.first + log.entries.len() as u64)
+        })
     }
 
     pub fn applied(&self, ops: &[Op]) -> Self {
@@ -258,6 +308,17 @@ impl Model {
             let held = session.state.record(name).get();
             if held != self.record(name) {
                 return Ok(Some(format!("record {name}: {} bytes", held.len())));
+            }
+        }
+        for name in LOGS {
+            let log = session.state.log(name);
+            let model = self.logs.get(name).cloned().unwrap_or_default();
+            if (log.first(), log.entries()) != (model.first, model.entries) {
+                let (first, next) = (log.first(), log.next());
+                return Ok(Some(format!(
+                    "log {name}: {first}..{next}, not {:?}",
+                    self.log(name)
+                )));
             }
         }
         for name in FILES {

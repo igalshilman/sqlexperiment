@@ -5,7 +5,7 @@ fn root() -> Root {
     root.version = 7;
     root.next_blob = 300;
     root.garbage = BTreeMap::from([(3, 7), (40, 5)]);
-    root.next_file = 4;
+    root.next_file = 5;
     let paged = |base, chunks| Kind::Paged {
         size: 3 * 4 * PAGE,
         base,
@@ -35,6 +35,14 @@ fn root() -> Root {
             Kind::Record(Value::Inline(Bytes::from_static(b"hi"))),
         ),
         (3, "large", Kind::Record(Value::Blob(250))),
+        (
+            4,
+            "turns",
+            Kind::Log {
+                first: 12,
+                entries: vec![Value::Inline(Bytes::from_static(b"turn")), Value::Blob(260)],
+            },
+        ),
     ];
     root.directory = (entries.into_iter())
         .map(|(id, name, kind)| {
