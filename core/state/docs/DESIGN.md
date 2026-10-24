@@ -61,8 +61,8 @@ nodes on its path. A subtree of holes is not stored.
 **Records** are whole named values: in the root up to `inline_record_bytes`
 (1 KiB), and a blob of their own when larger, written when they change.
 
-**Logs** are named sequences of entries, each stored as a record's value
-is, at the next index: a mutation appends to a log and truncates it from
+**Logs** are named sequences of entries, each a blob of its own, written
+once (the root holds only its number), at the next index: a mutation appends to a log and truncates it from
 its start (`Mutation::append`, `Mutation::truncate`), at most 4096 entries
 held. A flush writes what it appends, not the log: a log is for changes too
 small to rewrite their whole each time, folded into a record or a file
@@ -91,8 +91,8 @@ writes every file and record in it, and syncs once:
    store) and the chunk's pages compressed with it as the reference. Once
    the delta would pass `rebase_ratio` (0.25) of the base's stored bytes,
    the chunk is written as a new base instead, and its old base and delta
-   die. A record or log entry past the inline budget is compressed into
-   a blob.
+   die. A record past the inline budget, and every log entry, is
+   compressed into a blob.
 2. **Map.** Each map node on a path to a changed chunk is written anew
    (below the root's top node, a blob), and the old one dies; so does a
    node a shrinking file no longer needs.

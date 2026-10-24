@@ -36,7 +36,7 @@ Transactions change two kinds of state:
   stored.
 - **Records** are named values, such as `run`, `memory` or an extension's
   `notary/count`: inside the root up to 1 KiB, a blob of their own past it.
-- **Logs** are named sequences of entries, each stored as a record's value:
+- **Logs** are named sequences of entries, each a blob of its own:
   a mutation appends entries and truncates the log from its start, so a
   flush writes what it appends, not what came before.
 
@@ -58,7 +58,7 @@ then syncs once:
    (a delta), or, once the delta grows, a new base; a new node on each path
    of a chunk map to a changed chunk, below its top; and large records and
    log entries.
-3. **The root:** naming them, with the small records and log entries. If this put is stored,
+3. **The root:** naming them, with the small records. If this put is stored,
    the transaction happened.
 
 The order makes a crash at any point safe. Restate keeps a prefix of the

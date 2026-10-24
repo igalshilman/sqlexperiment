@@ -217,12 +217,7 @@ impl Known {
                     named.insert(*n);
                 }
                 Kind::Record(Value::Inline(_)) => {}
-                Kind::Log { entries, .. } => {
-                    named.extend(entries.iter().filter_map(|entry| match entry {
-                        Value::Blob(n) => Some(*n),
-                        Value::Inline(_) => None,
-                    }));
-                }
+                Kind::Log { entries, .. } => named.extend(entries),
                 Kind::Paged { size, map, .. } => {
                     for visit in self.walk(map, root.shape(*size)).0 {
                         match visit {
@@ -254,10 +249,7 @@ impl Known {
                 }
                 Kind::Record(Value::Inline(_)) => continue,
                 Kind::Log { entries, .. } => {
-                    for n in entries.iter().filter_map(|entry| match entry {
-                        Value::Blob(n) => Some(*n),
-                        Value::Inline(_) => None,
-                    }) {
+                    for &n in entries {
                         if let Some(frame) = blob(n) {
                             zstd::decompress_sized(frame, &[], MAX_RECORD_BYTES)?;
                         }
