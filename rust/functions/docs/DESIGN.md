@@ -918,17 +918,18 @@ export async function main(input, ctx) {
 
 With count=41:
 
-| Turn                                | The record's put                                             | Effect R                    |
+| Turn                                | The turn's flush                                             | Effect R                    |
 | ----------------------------------- | ------------------------------------------------------------ | --------------------------- |
 | T1: execute until the RPC wait      | count=42 in SQL, the changed pages, the run (R pending)      | Dispatched after the commit |
 | T2: deliver R's result 84, continue | lastAnswer=84 in SQL, the changed pages, the run (completed) | Done                        |
 
-A crash before T1's record is stored leaves nothing: the next attempt starts
+A crash before T1's root is stored leaves nothing: the next attempt starts
 the run again, and R was never dispatched. After it, count=42 is stored with
 it. After dispatch, the next attempt waits on R again under its stable ID:
-Restate attaches to the call already made. After T2's record, a repeated
-delivery is a no-op and another attempt returns the outcome. Log values a
-crashed flush wrote before its record are garbage the state deletes.
+Restate attaches to the call already made. After T2's root, a repeated
+delivery is a no-op and another attempt returns the outcome. Blobs a crashed
+flush wrote before its root are named by no root, and the next flush
+overwrites them.
 
 ### 8.2. Fan-out
 
@@ -1050,27 +1051,34 @@ file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
 (~3 KiB). The model is a conversation of the host's gateway
 ([LLM.md](LLM.md)): the program sends each step's new messages, which go
 into the scope's database, and the host reads the whole conversation from
-there for each request. Measured on 20 October 2026 (4 vCPUs), on the
-state's log, before copy-on-write:
+there for each request. Measured on 24 October 2026 (4 vCPUs), on
+copy-on-write storage:
 
 | Step | Request to the model | Reading it | Stored by the step | Model turn | Tool turn |
 | ---: | -------------------: | ---------: | -----------------: | ---------: | --------: |
-|    1 |              1.7 KiB |    0.57 ms |             9.3 KB |    1.59 ms |   1.33 ms |
-|   10 |               31 KiB |    0.53 ms |              16 KB |    1.50 ms |   1.22 ms |
-|   41 |              136 KiB |    1.02 ms |             9.7 KB |    1.02 ms |   1.37 ms |
-|   98 |              327 KiB |    1.91 ms |              16 KB |    1.61 ms |   1.03 ms |
-|  190 |              636 KiB |    3.56 ms |              16 KB |    1.76 ms |   1.09 ms |
+|    1 |              1.7 KiB |    0.54 ms |              22 KB |    2.23 ms |   2.47 ms |
+|   10 |               31 KiB |    0.43 ms |              19 KB |    2.13 ms |   1.81 ms |
+|   41 |              136 KiB |    0.80 ms |              22 KB |    1.96 ms |   2.29 ms |
+|   98 |              327 KiB |    2.34 ms |              18 KB |    2.42 ms |   2.10 ms |
+|  190 |              636 KiB |    2.27 ms |              18 KB |    2.13 ms |   1.86 ms |
 
-- **Per step:** 10 KB at the median, 9–33 KB for nine steps in ten, whatever
-  the conversation's length: the rows of its new messages, a heap batch of
-  2–4 KB (the loop, the latest response) and the log's commit record of
-  ~365 B.
-- **Checkpoints:** every 16 steps or so, the log wrote the database's pages
-  in place: 31–41 KB, flat. The heap, 1.5 MiB, needed no new base.
-- **The session:** 2.5 MiB stored over 200 steps. Neither the heap nor
+- **Per step:** 21 KB at the median, 18–25 KB for nine steps in ten,
+  whatever the conversation's length: the rows of its new messages, the
+  heap's changed chunks (the loop, the latest response) and two roots of
+  420–720 B.
+- **The session:** 4.0 MiB stored over 200 steps. Neither the heap nor
   Restate's journal holds the requests.
-- **Restores:** a new attempt, every 25 steps, restores the run in 1–19 ms,
-  reopening the database.
+- **Restores:** a new attempt, every 25 steps, restores the run in 0.8–1.4
+  ms, reopening the database.
+- **Against the log** (20 October 2026, the same bench): a step stored 10 KB
+  at the median, plus 31–41 KB of checkpoint every 16 steps or so, 2.5 MiB
+  in all; restores took 1–19 ms. Copy-on-write stores about 1.6× as much
+  here. A delta holds every change since its chunk's base, so a chunk that
+  each turn changes (the heap's hot pages, the table's last pages) is
+  written whole again each turn, up to a quarter of the base, until it
+  rebases; the log wrote what changed since the turn before. A lower rebase
+  ratio, or a delta against the previous delta, would trade that against
+  reads of more blobs.
 
 ## 11. Scope limits, provenance and references
 

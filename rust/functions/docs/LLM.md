@@ -79,6 +79,12 @@ Reading the conversation back for a call takes 0.5 ms at the start and 3.6 ms
 at 636 KiB. Turns take 1–2 ms, a little more than with the conversation in
 the heap, for the rows they write.
 
+On copy-on-write storage (24 October 2026), the database's row stores
+4.0 MiB over the 200 steps, at most 26 KB a step and never a checkpoint;
+reading the conversation takes 0.4–2.3 ms, and a turn about 2 ms. The rows
+in the heap were not measured again. DESIGN.md §10.1 has the numbers, and
+why copy-on-write stores more here.
+
 One conversation has one call at a time: a second `send` before the first is
 answered fails.
 
