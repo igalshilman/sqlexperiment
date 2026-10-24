@@ -6,23 +6,27 @@
 //! so a write may rely on every write issued before it. The monitor wraps a
 //! store and keeps the state those writes make: each write applied as it is
 //! issued, and values it read (after a crash, a read learns what was kept).
-//! A write that fails makes its key unknown until a read learns it. Each
+//! A write that fails makes its key unknown until a read learns it; a read
+//! of the root forgets the blobs at or past its next blob, which a crash may
+//! have lost (a flush issues its blobs and root with nothing between). Each
 //! write is checked when it is issued:
 //!
 //! 1. **Name only what is written**: a root names only blobs that are there.
 //! 2. **Build on the root**: a root is the next version of the root, with
-//!    the same chunk size and no blob number reused.
+//!    the same identity and chunk size, and a next blob never lower.
 //! 3. **Never overwrite**: a blob is put only at a number the root has not
 //!    allocated.
 //! 4. **Delete only garbage**: a blob is deleted only if the root lists it
 //!    as garbage, and names it no more.
-//! 5. **Decodable**: every root decodes, and every chunk it names decodes to
-//!    its pages: a base against its file's golden pages, a delta against its
-//!    base.
+//! 5. **Leak nothing**: a blob the root named and the next one does not is
+//!    its garbage, and stays garbage until deleted.
+//! 6. **Decodable**: every root decodes, and every chunk and record blob it
+//!    names decodes: a chunk's base against its file's golden pages, its
+//!    delta against its base.
 use crate::{
     Base, PAGE,
     kv::KvStore,
-    store::{Kind, ROOT, Root, parse_blob_key},
+    store::{Kind, MAX_RECORD_BYTES, ROOT, Root, Value, decode_chunk, parse_blob_key, reference},
     zstd,
 };
 use bytes::Bytes;
@@ -71,6 +75,9 @@ impl Known {
         if key == ROOT {
             self.root = value.and_then(|bytes| Root::decode(&bytes).ok());
             self.root_unknown = false;
+            let next = self.root.as_ref().map_or(0, |root| root.next_blob);
+            self.blobs.retain(|&n, _| n < next);
+            self.unknown.retain(|&n| n < next);
         } else if let Some(n) = parse_blob_key(key) {
             self.unknown.remove(&n);
             match value {
@@ -105,13 +112,29 @@ impl Known {
             Ok(root) => root,
             Err(error) => return self.violation(format!("a root that does not decode: {error}")),
         };
-        if let Some(held) = self.root.as_ref().filter(|_| !self.root_unknown)
-            && (root.version != held.version + 1
+        if let Some(held) = self.root.clone().filter(|_| !self.root_unknown) {
+            if root.version != held.version + 1
+                || root.id != held.id
                 || root.chunk_pages != held.chunk_pages
-                || root.next_blob < held.next_blob)
-        {
-            let (v, held_v) = (root.version, held.version);
-            self.violation(format!("root {v} does not build on root {held_v}"));
+                || root.next_blob < held.next_blob
+            {
+                let (v, held_v) = (root.version, held.version);
+                self.violation(format!("root {v} does not build on root {held_v}"));
+            }
+            let named = root.named();
+            let dropped = held.named().into_iter().filter(|n| !named.contains(n));
+            let kept = held
+                .garbage
+                .keys()
+                .copied()
+                .filter(|n| self.blobs.contains_key(n));
+            let leaked: Vec<u64> = dropped
+                .chain(kept)
+                .filter(|n| !root.garbage.contains_key(n))
+                .collect();
+            for n in leaked {
+                self.violation(format!("root {} leaks blob {n}", root.version));
+            }
         }
         for n in root.named() {
             if !self.blobs.contains_key(&n) && !self.unknown.contains(&n) {
@@ -135,50 +158,39 @@ impl Known {
         }
     }
 
-    /// Decode every chunk and record blob `root` names.
+    /// Decode every chunk and record blob `root` names (those a failed write
+    /// left unknown aside).
     fn decode(&self, root: &Root) -> io::Result<()> {
         let size = (root.chunk_pages * PAGE) as usize;
         let blob = |n: u64| self.blobs.get(&n);
         for entry in root.directory.values() {
-            let Kind::Paged { chunks, base, .. } = &entry.kind else {
-                continue;
+            let (chunks, base) = match &entry.kind {
+                Kind::Paged { chunks, base, .. } => (chunks, base),
+                Kind::Record(Value::Blob(n)) => {
+                    if let Some(frame) = blob(*n) {
+                        zstd::decompress_sized(frame, &[], MAX_RECORD_BYTES)?;
+                    }
+                    continue;
+                }
+                Kind::Record(Value::Inline(_)) => continue,
             };
             let golden = self.bases.get(&entry.name);
             if base.is_some() && golden.is_none() {
                 continue;
             }
             for (chunk, stored) in chunks.iter().enumerate() {
-                let mut prefix = vec![0; size];
-                if let Some(golden) = golden {
-                    for (i, page) in prefix.chunks_mut(PAGE as usize).enumerate() {
-                        if let Some(image) = golden.page(chunk as u64 * root.chunk_pages + i as u64)
-                        {
-                            page.copy_from_slice(image);
-                        }
-                    }
-                }
                 if stored.base.is_none() && stored.delta.is_some() {
                     return Err(io::Error::other(format!(
                         "chunk {chunk}: a delta without a base"
                     )));
                 }
-                if let Some(frame) = stored.base.and_then(blob) {
-                    // Against the golden pages, if the file has them.
-                    let reference = if golden.is_some() { &prefix[..] } else { &[] };
-                    let mut pages = Vec::with_capacity(size);
-                    zstd::decompress(&mut pages, frame, reference)?;
-                    prefix = pages;
-                }
+                let Some(frame) = stored.base.and_then(blob) else {
+                    continue;
+                };
+                let prefix = reference(golden, root.chunk_pages, chunk as u64);
+                let base = decode_chunk(frame, &prefix, size)?;
                 if let Some(frame) = stored.delta.and_then(blob) {
-                    let mut pages = Vec::with_capacity(size);
-                    zstd::decompress(&mut pages, frame, &prefix)?;
-                    prefix = pages;
-                }
-                if prefix.len() != size {
-                    return Err(io::Error::other(format!(
-                        "chunk {chunk} of {} bytes",
-                        prefix.len()
-                    )));
+                    decode_chunk(frame, &base.pages, size)?;
                 }
             }
         }

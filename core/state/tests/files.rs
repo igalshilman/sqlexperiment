@@ -133,3 +133,58 @@ fn a_long_sequential_read_returns_every_chunk() -> Result<()> {
         Ok(())
     })
 }
+
+/// A flush refused for a write the state cannot store writes nothing, and
+/// the state goes on.
+#[test]
+fn a_refused_flush_leaves_the_state_usable() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let state = State::open(store.clone()).await?;
+        let mut wal = state.wal();
+        wal.write(
+            &state.file_with_base("vm", Arc::new(Zeros))?,
+            0,
+            Some(page(1)),
+        )?;
+        wal.flush().await?;
+        let state = State::open(store).await?;
+        let mut wal = state.wal();
+        wal.write(&state.file("vm")?, 1, None)?;
+        let error = wal.flush().await.unwrap_err().to_string();
+        assert!(error.contains("open it with it"), "{error}");
+        assert!(state.is_usable());
+        let mut wal = state.wal();
+        wal.write(&state.file("db")?, 0, Some(page(2)))?;
+        wal.flush().await?;
+        Ok(())
+    })
+}
+
+/// A flush without a cache gets the stored chunks it changes together: one
+/// round trip for them, however many, then one for the flush.
+#[test]
+fn a_cold_flush_gets_the_chunks_it_changes_together() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = MemoryKv::default();
+        let state = State::open(Arc::new(memory.clone())).await?;
+        let file = state.file("db")?;
+        let mut wal = state.wal();
+        for n in 0..400 {
+            wal.write(&file, n, Some(page(n as u8 | 1)))?;
+        }
+        wal.flush().await?;
+        let store = Arc::new(LatencyKv::new(memory));
+        let state = State::open(store.clone()).await?;
+        let file = state.file("db")?;
+        store.reset();
+        let mut wal = state.wal();
+        for n in (0..400).step_by(37) {
+            wal.write(&file, n, Some(page(2)))?;
+        }
+        wal.flush().await?;
+        assert_eq!(store.round_trips(), 2);
+        assert_eq!(byte(&file, 37).await?, Some(2));
+        Ok(())
+    })
+}

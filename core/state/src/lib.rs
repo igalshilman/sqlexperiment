@@ -561,13 +561,15 @@ impl Wal {
         Ok(())
     }
 
-    /// Make every record set and page written durable, in one put (and a
-    /// checkpoint, when the log is long), then one sync. Nothing changed:
-    /// nothing is written. It is refused while a participant holds changes
-    /// not yet in a WAL, and while another flush of the state runs; a
-    /// refused flush writes nothing, and the state goes on. `Ok` holds what
-    /// it wrote; any other error, or dropping the future, leaves the outcome
-    /// unknown and ends the state: open it again.
+    /// Make every record set and page written durable: the blobs of the
+    /// chunks and records it changes, then the root that names them, then
+    /// one sync, in one round trip. Nothing changed: nothing is written. It
+    /// is refused while a participant holds changes not yet in a WAL, while
+    /// another flush of the state runs, and for writes the state cannot
+    /// store; a refused flush writes nothing, and the state goes on. `Ok`
+    /// holds what it wrote; any other error (one refused because another
+    /// state flushed since included), or dropping the future, ends the
+    /// state: open it again.
     pub async fn flush(mut self) -> Result<FlushReport> {
         let shared = self.shared.clone();
         if shared.poisoned.load(Ordering::SeqCst) {
