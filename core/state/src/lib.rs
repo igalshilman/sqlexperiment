@@ -88,7 +88,7 @@ pub use store::{FlushReport, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES};
 
 use crate::cache::{Idle, NamespaceCache};
 use crate::kv::KvStore;
-use crate::store::{Settings, Snapshot};
+use crate::store::Snapshot;
 use bytes::Bytes;
 use std::{
     any::Any,
@@ -179,7 +179,8 @@ pub struct State {
 struct Shared {
     /// The durable state: as opened, then as the WALs flushed it.
     snapshot: Mutex<Arc<Snapshot>>,
-    options: Settings,
+    options: StateOptions,
+    cache: Option<NamespaceCache>,
     /// The participants that joined, by name: whether each holds changes not
     /// yet in a WAL.
     participants: Mutex<HashMap<String, bool>>,
@@ -226,7 +227,7 @@ impl Drop for Flushing<'_> {
             self.shared.poisoned.store(true, Ordering::SeqCst);
         }
         if !self.returned
-            && let Some(cache) = &self.shared.options.cache
+            && let Some(cache) = &self.shared.cache
         {
             cache.forget();
         }
@@ -236,12 +237,7 @@ impl Drop for Flushing<'_> {
 impl Drop for Shared {
     fn drop(&mut self) {
         // Idle state no participant took goes back, if nothing changed.
-        let Some(cache) = self
-            .options
-            .cache
-            .as_ref()
-            .filter(|_| !*self.reader.get_mut())
-        else {
+        let Some(cache) = self.cache.as_ref().filter(|_| !*self.reader.get_mut()) else {
             return;
         };
         let version = self.snapshot().version();
@@ -282,9 +278,14 @@ impl State {
         }
     }
 
-    async fn open_as(store: Arc<dyn KvStore>, options: Settings, reader: bool) -> Result<Self> {
-        let snapshot = Snapshot::open(store, options.clone(), reader).await?;
-        let mut idle = match &options.cache {
+    async fn open_as(
+        store: Arc<dyn KvStore>,
+        options: StateOptions,
+        cache: Option<NamespaceCache>,
+        reader: bool,
+    ) -> Result<Self> {
+        let snapshot = Snapshot::open(store, options.clone(), cache.clone(), reader).await?;
+        let mut idle = match &cache {
             Some(cache) if snapshot.unchanged => cache.take_idle(),
             _ => HashMap::new(),
         };
@@ -293,6 +294,7 @@ impl State {
             shared: Arc::new(Shared {
                 snapshot: Mutex::new(Arc::new(snapshot)),
                 options,
+                cache,
                 participants: Mutex::default(),
                 idle: Mutex::new(idle),
                 reader: AtomicBool::new(reader),
@@ -305,7 +307,7 @@ impl State {
 
     /// The options this state opened with.
     pub fn options(&self) -> &StateOptions {
-        &self.shared.options.options
+        &self.shared.options
     }
 
     /// The record named `name`: a whole value the root keeps, read
@@ -385,7 +387,7 @@ impl State {
 
     /// Whether the state opened in a [`PageCache`] ([`Open::cached`]).
     pub fn is_cached(&self) -> bool {
-        self.shared.options.cache.is_some()
+        self.shared.cache.is_some()
     }
 
     /// Whether this is a reader ([`Open::reader`]): its WALs never flush.
@@ -451,7 +453,7 @@ impl IntoFuture for Open {
             cache,
             reader,
         } = self;
-        Box::pin(State::open_as(store, Settings { options, cache }, reader))
+        Box::pin(State::open_as(store, options, cache, reader))
     }
 }
 
@@ -691,7 +693,7 @@ impl Participant {
     /// [`PageCache`] and is at the owner's last durable flush.
     pub fn can_park(&self) -> bool {
         let state = &self.state;
-        let Some(cache) = &state.shared.options.cache else {
+        let Some(cache) = &state.shared.cache else {
             return false;
         };
         !state.is_reader() && state.is_usable() && cache.committed() == Some(state.version())
@@ -709,7 +711,7 @@ impl Participant {
         if !self.can_park() {
             return Err(value);
         }
-        let cache = self.state.shared.options.cache.as_ref().unwrap();
+        let cache = self.state.shared.cache.as_ref().unwrap();
         let idle = Idle {
             value: Box::new(value),
             version: self.state.version(),

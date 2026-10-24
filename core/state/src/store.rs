@@ -160,21 +160,6 @@ pub struct FlushReport {
     pub rebased: usize,
 }
 
-/// What a state opened with: its options, and its namespace in the
-/// process's [`crate::PageCache`].
-#[derive(Clone)]
-pub(crate) struct Settings {
-    pub options: StateOptions,
-    pub cache: Option<NamespaceCache>,
-}
-
-impl std::ops::Deref for Settings {
-    type Target = StateOptions;
-    fn deref(&self) -> &StateOptions {
-        &self.options
-    }
-}
-
 /// Where a chunk is stored: its base, and its delta against that base; a
 /// chunk with neither is its file's base pages, or zeros.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -522,7 +507,9 @@ type Fetching = HashMap<u64, WeakShared<BoxFuture<'static, Result<Bytes, Arc<io:
 /// The committed view a session reads and extends.
 pub(crate) struct Snapshot {
     store: Arc<dyn KvStore>,
-    options: Settings,
+    options: StateOptions,
+    /// The namespace in the process's [`crate::PageCache`].
+    cache: Option<NamespaceCache>,
     root: Arc<Root>,
     /// The root's exact bytes (`None` when absent).
     root_bytes: Option<Bytes>,
@@ -634,12 +621,13 @@ impl Snapshot {
     /// that what it reads is durable; a `reader` reads what is stored.
     pub async fn open(
         store: Arc<dyn KvStore>,
-        options: Settings,
+        options: StateOptions,
+        cache: Option<NamespaceCache>,
         reader: bool,
     ) -> io::Result<Self> {
-        let cache = options.cache.as_ref().filter(|_| !reader);
-        let unsettled = cache.and_then(NamespaceCache::unsettled);
-        let settle = !reader && (cache.is_none() || unsettled.is_some());
+        let owner = cache.as_ref().filter(|_| !reader);
+        let unsettled = owner.and_then(NamespaceCache::unsettled);
+        let settle = !reader && (owner.is_none() || unsettled.is_some());
         let settle = async {
             match settle {
                 true => store.sync().await,
@@ -647,8 +635,8 @@ impl Snapshot {
             }
         };
         let (root_bytes, ()) = futures::try_join!(store.get(ROOT), settle)?;
-        if let (Some(cache), Some(unknown)) = (cache, unsettled) {
-            cache.settled(unknown);
+        if let (Some(owner), Some(unknown)) = (owner, unsettled) {
+            owner.settled(unknown);
         }
         let root = match &root_bytes {
             Some(bytes) => Root::decode(bytes)?,
@@ -660,6 +648,7 @@ impl Snapshot {
         let mut snapshot = Self {
             store,
             options: options.clone(),
+            cache: cache.clone(),
             root: Arc::new(root),
             root_bytes,
             records: Records::new(),
@@ -719,11 +708,11 @@ impl Snapshot {
                 snapshot.records.insert(entry.name.clone(), value);
             }
         }
-        if let Some(cache) = cache {
+        if let Some(owner) = owner {
             let root = &snapshot.root;
-            let known = cache.validate(snapshot.root_bytes.as_deref());
-            snapshot.unchanged = known && cache.committed() == Some(root.version);
-            cache.record(
+            let known = owner.validate(snapshot.root_bytes.as_deref());
+            snapshot.unchanged = known && owner.committed() == Some(root.version);
+            owner.record(
                 snapshot.root_bytes.clone(),
                 (!known).then_some(root.version),
             );
@@ -904,7 +893,7 @@ impl Snapshot {
     }
 
     async fn blob(&self, n: u64) -> io::Result<Bytes> {
-        let cache = self.options.cache.clone();
+        let cache = self.cache.clone();
         if let Some(cache) = &cache
             && let Some(value) = cache.get(self.root.id, n).await
         {
@@ -1215,7 +1204,7 @@ impl Snapshot {
             dead,
             rebased,
         } = flush;
-        let cache = self.options.cache.as_ref();
+        let cache = self.cache.as_ref();
         if cache.is_some_and(|cache| !cache.claim(self.version())) {
             return refuse("another state flushed since this one opened; reopen".into());
         }
@@ -1270,7 +1259,7 @@ impl Snapshot {
     }
 
     fn failed(&self, error: io::Error) -> io::Error {
-        if let Some(cache) = &self.options.cache {
+        if let Some(cache) = &self.cache {
             cache.forget();
         }
         error
@@ -1280,6 +1269,7 @@ impl Snapshot {
         Self {
             store: self.store.clone(),
             options: self.options.clone(),
+            cache: self.cache.clone(),
             root,
             root_bytes,
             records: self.records.clone(),
