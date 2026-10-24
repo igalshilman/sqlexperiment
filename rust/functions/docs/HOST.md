@@ -239,8 +239,9 @@ On branches, a PR each:
    DESIGN.md §10.1 now runs 200 steps instead of failing at 45.
 5. **A registry of the bindings the host makes itself** (§6). Done:
    a deployment offers `llm`, the model gateway ([LLM.md](LLM.md)), and
-   `fetch` ([FETCH.md](FETCH.md)); the coding session stores 2.5 MiB over
-   200 steps, and Restate journals none of its requests (DESIGN.md §10.1).
+   `fetch` ([FETCH.md](FETCH.md)); the coding session stores 4.0 MiB over
+   200 steps (2.5 MiB on the log), and Restate journals none of its
+   requests (DESIGN.md §10.1).
    The in-turn Calls are still `src/db.rs`'s, and the Restate Waits (RPCs,
    timers) a `match` in `restate.rs`.
 

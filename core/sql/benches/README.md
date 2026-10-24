@@ -24,12 +24,12 @@ The positional argument is the repeat count; the default is three. Cargo's
 
 ## Targets
 
-| Target            | Coverage                                                                                                                                                            | Evidence                                                |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `flush_costs`     | Bytes, keys and round trips per flush, stored size and cold reads, by workload; `CHUNK_PAGES`, `REBASE_RATIO`, `INLINE_BYTES`, `GARBAGE_AFTER` override the options | [COW_EXPERIMENT.md](../../state/docs/COW_EXPERIMENT.md) |
-| `amplification`   | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                                       | `results/amplification.csv`                             |
-| `small_databases` | Tiny databases, index counts, save grouping and a larger control                                                                                                    | `results/small_databases.csv`                           |
-| `cache_cpu`       | Process-wide memory and disk cache by memory size: misses, round trips, allocations and CPU time                                                                    | [CACHE_RESULTS.md](CACHE_RESULTS.md) (log format, v15)  |
+| Target            | Coverage                                                                                                                                                                                                                                     | Evidence                                                |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `flush_costs`     | Bytes, keys and round trips per flush, stored size and cold reads, by workload, up to 1M rows; `CHUNK_PAGES`, `FANOUT`, `REBASE_RATIO`, `INLINE_BYTES`, `GARBAGE_AFTER` set the options, `WORKLOAD` and `FLUSHES` pick and age the databases | [COW_EXPERIMENT.md](../../state/docs/COW_EXPERIMENT.md) |
+| `amplification`   | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                                                                                                                | `results/amplification.csv`                             |
+| `small_databases` | Tiny databases, index counts, save grouping and a larger control                                                                                                                                                                             | `results/small_databases.csv`                           |
+| `cache_cpu`       | Process-wide memory and disk cache by memory size: misses, round trips, allocations and CPU time                                                                                                                                             | [CACHE_RESULTS.md](CACHE_RESULTS.md) (log format, v15)  |
 
 All SQL result checks remain active in release builds. Successful writes are
 reopened and verified.

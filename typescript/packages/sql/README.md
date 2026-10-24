@@ -59,9 +59,10 @@ with the process, or the file `RESTATE_SQL_CACHE_FILE` names. It keeps a
 database's blobs, which never change, and its last root: a session reads the
 blobs it has from the cache, and reuses the idle engine when the root is the
 one the cache saw last. `save()` (or `close()`) ends a session,
-leaving its engine to the next one when it is idle. The cache knows a
-database only by its namespace: two stores holding different databases under
-one namespace (two Restate clusters, say) must not share a process.
+leaving its engine to the next one when it is idle. The cache keys blobs by
+the database's random id, from its root, as well as the namespace: two stores
+holding different databases under one namespace (two Restate clusters, say)
+may share a process.
 
 ## Values
 

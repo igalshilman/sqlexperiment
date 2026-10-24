@@ -16,8 +16,8 @@ Three layers, each on the one before:
 
 ## Objects with SQL
 
-Each key of a virtual object has a SQLite database of its own, kept in the
-object's state: no database to run. `restate-fns` is the Restate SDK with
+Each key of a virtual object has a SQLite database of its own, up to 10 GiB,
+kept in the object's state: no database to run. `restate-fns` is the Restate SDK with
 that in its objects ([`examples-typescript/basic/notes.ts`](examples-typescript/basic/notes.ts)):
 
 ```ts

@@ -304,7 +304,7 @@ one-thread runtime of its own. It is the only background work.
 | Cold open        | 2: the root, then a small database whole and the large records; 1 more per map level past the second                                 | None                                                                     |
 | Cold page read   | 1 get of the chunk's base and delta (past 512 MiB, after 1 per map level not yet read); sequential reads fetch up to 16 chunks ahead | None                                                                     |
 
-Measurements: [the experiment](COW_EXPERIMENT.md),
+Measurements: [copy-on-write](COW_EXPERIMENT.md),
 [cache](../../sql/benches/CACHE_RESULTS.md).
 
 ## Limits and open questions

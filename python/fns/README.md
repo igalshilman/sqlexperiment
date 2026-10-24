@@ -54,7 +54,10 @@ with the same storage, page cache and pending sends:
   those of the agents of restate_agents): name yours otherwise.
 - `ctx.db` is the object's database (namespace `service/key`). Each
   statement is its own transaction, and `async with ctx.db.transaction() as
-  db` groups several. Calls run one at a time, in the order they start.
+  db` groups several. Calls run one at a time, in the order they start. A
+  key's database holds at most 10 GiB: a statement that would grow it past
+  fails as an SQL error ("database or disk is full"), and the session goes
+  on.
 - In a shared handler, `ctx.db` reads the database as stored, beside the
   exclusive handler that writes it (a chat page reads the conversation while
   an agent answers), and writes nothing: a write statement raises. The

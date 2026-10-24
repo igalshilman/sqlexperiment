@@ -163,15 +163,6 @@ corrupts it, and `ctx.stateKeys()` lists its blobs. Keep other state out of
 `v16/`, and do not clear all of an object that uses `ctx.db`. (Reserving
 these keys in the SDK is future work.)
 
-**One cluster per process.** The page cache knows a database by its namespace,
-`service/key`, and trusts a blob it cached under its number, which never
-changes in one database; nothing identifies the database itself. A process
-registered with two Restate clusters (staging and production, or a dev
-cluster wiped and recreated) could take one cluster's `Ledger/bank` for the
-other's and serve its cached pages. Run one process per cluster, or give each
-its own `RESTATE_SQL_CACHE_FILE` and restart it after recreating a cluster.
-(A database id in the root is future work.)
-
 ## How it works
 
 **State access.** A get is a state read (journaled for now; left out of the
@@ -190,7 +181,9 @@ that are stored.
 wrote, as the blobs that hold them, for the object's next invocation. A blob
 never changes once a root names it, so the cache keeps it under its number
 and never invalidates it: a session reads the stored root, then the blobs it
-names that the cache lacks.
+names that the cache lacks. The root carries the database's random id, which
+the cache's keys include, so one process may serve several Restate clusters,
+or a cluster wiped and made again, without mixing their databases.
 
 **No journal replay.** On a retry or a resume, the SDK normally replays the
 journal: each operation returns its recorded result and must match it. That
@@ -328,8 +321,11 @@ transfers take 18.8 ms each on one local node.
 - **A suspension is a restart.** Resuming means running from the start, so
   long handlers that hit the inactivity timeout start over.
 - **A sync per commit.** Every transaction waits for an empty `ctx.run` after
-  its record: a round trip to the runtime, which statements that commit one
+  its root: a round trip to the runtime, which statements that commit one
   by one pay each time. Group them in a transaction.
+- **10 GiB a database.** A statement that would grow a key's database past it
+  fails with SQLite's "database or disk is full", as an SQL error (a
+  `TerminalError`), and the session goes on.
 - **Assumptions to confirm with the runtime:** an empty `ctx.run` is
   acknowledged only after the commands before it are stored (writes and
   sends: the sync); an abandoned attempt's commands are never applied after a
