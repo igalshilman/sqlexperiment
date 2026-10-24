@@ -3,7 +3,7 @@
 //! | Key            | Holds                                                                     |
 //! | -------------- | ------------------------------------------------------------------------- |
 //! | `v16/root`     | The commit point: the directory of files and records, and what each names |
-//! | `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk, or a record      |
+//! | `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk, a map node, or a record or log entry |
 //!
 //! A paged file is a row of *chunks* of [`StateOptions::chunk_pages`] pages
 //! each. A chunk is stored as a *base*, a frame of its pages compressed
@@ -14,7 +14,8 @@
 //! new delta against the chunk's base, or, once that delta passes
 //! [`StateOptions::rebase_ratio`] of the base's size, as a new base. A record of more than
 //! [`StateOptions::inline_record_bytes`] is a blob of its own; smaller ones
-//! are in the root.
+//! are in the root. A log's entries are stored the same way, one each, from
+//! the first not yet truncated.
 //!
 //! **One rule.** A blob is written before the first root that names it, and
 //! deleted only once no root a reader may hold names it. The store keeps
@@ -61,8 +62,11 @@ use std::{
 pub const ROOT_KEY: &str = "v16/root";
 pub(crate) const BLOB_PREFIX: &str = "v16/blob/";
 const ROOT_MAGIC: &[u8; 4] = b"SR16";
-/// Bytes of a record's value.
+/// Bytes of a record's value, or of a log entry.
 pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+/// Entries a log holds: appending past it is refused, until a truncation
+/// makes room.
+pub const MAX_LOG_ENTRIES: u64 = 4096;
 /// Bytes of a record's or file's name.
 pub const MAX_NAME_BYTES: usize = 255;
 /// Bytes of a paged file: 10 GiB.
@@ -158,6 +162,65 @@ impl Written {
 /// What a flush writes to paged files, by name.
 pub(crate) type Writes = BTreeMap<String, Written>;
 
+/// A log's entries: the index of the first, and each from there, in order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Entries {
+    pub first: u64,
+    pub values: Vec<Bytes>,
+}
+
+impl Entries {
+    /// The index the next entry appended gets.
+    pub fn next(&self) -> u64 {
+        self.first + self.values.len() as u64
+    }
+}
+
+/// The logs' entries, by name.
+pub(crate) type Logs = BTreeMap<String, Entries>;
+
+/// What a mutation does to one log: entries appended after its last, and
+/// the index below which entries are dropped (those appended included).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Appended {
+    pub values: Vec<Bytes>,
+    pub before: u64,
+}
+
+/// What a flush does to logs, by name.
+pub(crate) type Appends = BTreeMap<String, Appended>;
+
+/// What a name is: one kind, for good.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Is {
+    Record,
+    Paged,
+    Log,
+}
+
+impl Is {
+    fn of(kind: &Kind) -> Self {
+        match kind {
+            Kind::Record(_) => Is::Record,
+            Kind::Paged { .. } => Is::Paged,
+            Kind::Log { .. } => Is::Log,
+        }
+    }
+
+    /// Refuse the name `name`, held as `self`, as `wanted`.
+    pub fn refuse(self, name: &str, wanted: Is) -> String {
+        format!("{name:?} is {}, not {}", self.article(), wanted.article())
+    }
+
+    fn article(self) -> &'static str {
+        match self {
+            Is::Record => "a record",
+            Is::Paged => "a paged file",
+            Is::Log => "a log",
+        }
+    }
+}
+
 /// What a flush wrote.
 #[derive(Clone, Debug, Default)]
 pub struct FlushReport {
@@ -205,6 +268,11 @@ pub(crate) enum Kind {
         size: u64,
         base: Option<u64>,
         map: Map,
+    },
+    /// The index of its first entry, and its entries from there, in order.
+    Log {
+        first: u64,
+        entries: Vec<Value>,
     },
 }
 
@@ -375,6 +443,24 @@ impl Root {
                     put_varint(&mut body, base.map_or(0, |id| id + 1));
                     map.encode(&mut body);
                 }
+                Kind::Log { first, entries } => {
+                    body.push(3);
+                    put_varint(&mut body, *first);
+                    put_varint(&mut body, entries.len() as u64);
+                    for entry in entries {
+                        match entry {
+                            Value::Inline(bytes) => {
+                                body.push(0);
+                                put_varint(&mut body, bytes.len() as u64);
+                                body.extend_from_slice(bytes);
+                            }
+                            Value::Blob(n) => {
+                                body.push(1);
+                                put_varint(&mut body, *n);
+                            }
+                        }
+                    }
+                }
             }
         }
         let mut out = ROOT_MAGIC.to_vec();
@@ -431,14 +517,29 @@ impl Root {
             if name.len() > MAX_NAME_BYTES {
                 return Err(invalid("root"));
             }
+            // A record's value, or a log entry, after its tag.
+            let value = |r: &mut Reading, tag: u64| match tag {
+                0 => Ok(Value::Inline(Bytes::copy_from_slice(r.bytes()?))),
+                1 => Ok(Value::Blob(blob(r.varint()?)?)),
+                _ => Err(invalid("root")),
+            };
             let kind = match r.varint()? {
-                0 => Kind::Record(Value::Inline(Bytes::copy_from_slice(r.bytes()?))),
-                1 => Kind::Record(Value::Blob(blob(r.varint()?)?)),
+                tag @ (0 | 1) => Kind::Record(value(&mut r, tag)?),
                 2 => {
                     let size = r.bounded(MAX_FILE_BYTES / 512)? * 512;
                     let base = r.varint()?.checked_sub(1);
                     let map = Map::decode(&mut r, root.shape(size), next_blob)?;
                     Kind::Paged { size, base, map }
+                }
+                3 => {
+                    let first = r.bounded(MAX_SEQUENCE)?;
+                    let entries = (0..r.bounded(MAX_LOG_ENTRIES)?)
+                        .map(|_| {
+                            let tag = r.varint()?;
+                            value(&mut r, tag)
+                        })
+                        .collect::<io::Result<_>>()?;
+                    Kind::Log { first, entries }
                 }
                 _ => return Err(invalid("root")),
             };
@@ -523,6 +624,7 @@ pub(crate) struct Snapshot {
     /// The root's exact bytes (`None` when absent).
     root_bytes: Option<Bytes>,
     records: Records,
+    logs: Logs,
     /// The bases files were opened with, by name.
     bases: BTreeMap<String, Arc<dyn Base>>,
     /// Nothing changed since this owner last saw the namespace.
@@ -678,6 +780,7 @@ impl Snapshot {
             root: Arc::new(root),
             root_bytes,
             records: Records::new(),
+            logs: Logs::new(),
             bases: BTreeMap::new(),
             unchanged: false,
             reader,
@@ -686,8 +789,8 @@ impl Snapshot {
             fetching: Arc::default(),
             readahead: Mutex::default(),
         };
-        // The large records' blobs and every chunk of a small file, together,
-        // beside the maps of all but the largest files.
+        // The large records' and log entries' blobs and every chunk of a
+        // small file, together, beside the maps of all but the largest files.
         let (small, fetched) = {
             let snapshot = &snapshot;
             let small = async {
@@ -697,6 +800,12 @@ impl Snapshot {
                     match &entry.kind {
                         Kind::Record(Value::Blob(n)) => {
                             wanted.insert(*n);
+                        }
+                        Kind::Log { entries, .. } => {
+                            wanted.extend(entries.iter().filter_map(|entry| match entry {
+                                Value::Blob(n) => Some(*n),
+                                Value::Inline(_) => None,
+                            }));
                         }
                         Kind::Paged {
                             size, base: None, ..
@@ -723,15 +832,24 @@ impl Snapshot {
         for (id, chunk, stored) in small {
             snapshot.decode(id, chunk, stored, &fetched)?;
         }
+        let value = |value: &Value| match value {
+            Value::Inline(bytes) => Ok(bytes.clone()),
+            Value::Blob(n) => {
+                zstd::decompress_sized(&fetched[n], &[], MAX_RECORD_BYTES).map(Bytes::from)
+            }
+        };
         for entry in snapshot.root.directory.values() {
-            if let Kind::Record(value) = &entry.kind {
-                let value = match value {
-                    Value::Inline(bytes) => bytes.clone(),
-                    Value::Blob(n) => {
-                        Bytes::from(zstd::decompress_sized(&fetched[n], &[], MAX_RECORD_BYTES)?)
-                    }
-                };
-                snapshot.records.insert(entry.name.clone(), value);
+            let name = entry.name.clone();
+            match &entry.kind {
+                Kind::Record(stored) => {
+                    snapshot.records.insert(name, value(stored)?);
+                }
+                Kind::Log { first, entries } => {
+                    let values = entries.iter().map(value).collect::<io::Result<_>>()?;
+                    let first = *first;
+                    snapshot.logs.insert(name, Entries { first, values });
+                }
+                Kind::Paged { .. } => {}
             }
         }
         if let Some(owner) = owner {
@@ -754,6 +872,11 @@ impl Snapshot {
         &self.records
     }
 
+    /// The log `name`'s entries; none if it was never appended to.
+    pub fn log(&self, name: &str) -> Entries {
+        self.logs.get(name).cloned().unwrap_or_default()
+    }
+
     pub fn file_size(&self, name: &str) -> u64 {
         match self
             .root
@@ -765,9 +888,10 @@ impl Snapshot {
         }
     }
 
-    pub(crate) fn is_paged(&self, name: &str) -> Option<bool> {
+    /// What the name `name` is, if the state holds it.
+    pub(crate) fn is(&self, name: &str) -> Option<Is> {
         let id = self.root.file_id(name)?;
-        Some(matches!(self.root.directory[&id].kind, Kind::Paged { .. }))
+        Some(Is::of(&self.root.directory[&id].kind))
     }
 
     /// The base the file `id` was opened with: `Err` for a file made with one
@@ -787,7 +911,7 @@ impl Snapshot {
     fn map(&self, id: u32) -> Option<(&Map, Shape)> {
         match &self.root.directory.get(&id)?.kind {
             Kind::Paged { size, map, .. } => Some((map, self.root.shape(*size))),
-            Kind::Record(_) => None,
+            Kind::Record(_) | Kind::Log { .. } => None,
         }
     }
 
@@ -1036,26 +1160,48 @@ impl Snapshot {
     }
 
     /// Refuse what no flush could store, before anything is written.
-    pub(crate) async fn check(&self, writes: &Writes, records: &Records) -> io::Result<()> {
-        let paged = |name: &str| self.is_paged(name);
-        for (name, value) in records {
-            if value.len() > MAX_RECORD_BYTES {
-                let (len, max) = (value.len(), MAX_RECORD_BYTES);
-                return refuse(format!("record {name:?} of {len} bytes exceeds {max}"));
-            }
-            if paged(name) == Some(true) {
-                return refuse(format!("{name:?} is a paged file, not a record"));
-            }
-        }
-        for name in records.keys().chain(writes.keys()) {
+    pub(crate) async fn check(
+        &self,
+        writes: &Writes,
+        records: &Records,
+        logs: &Appends,
+    ) -> io::Result<()> {
+        // Each name is one kind: as stored, and in the mutation.
+        let names = (records.keys().map(|name| (name, Is::Record)))
+            .chain(writes.keys().map(|name| (name, Is::Paged)))
+            .chain(logs.keys().map(|name| (name, Is::Log)));
+        let mut seen: HashMap<&str, Is> = HashMap::new();
+        for (name, wanted) in names {
             if name.len() > MAX_NAME_BYTES {
                 return refuse(format!("name {name:?} exceeds {MAX_NAME_BYTES} bytes"));
             }
+            let held = seen.insert(name, wanted).or(self.is(name));
+            if let Some(held) = held.filter(|&held| held != wanted) {
+                return refuse(held.refuse(name, wanted));
+            }
+        }
+        for (name, value) in records.iter().chain(
+            logs.iter()
+                .flat_map(|(name, log)| log.values.iter().map(move |value| (name, value))),
+        ) {
+            if value.len() > MAX_RECORD_BYTES {
+                let (len, max) = (value.len(), MAX_RECORD_BYTES);
+                return refuse(format!("{name:?}: a value of {len} bytes exceeds {max}"));
+            }
+        }
+        for (name, appended) in logs {
+            let held = self.log(name);
+            let next = held.next() + appended.values.len() as u64;
+            if appended.before > next {
+                return refuse(format!("{name:?}: truncating past its end"));
+            }
+            if next - appended.before.max(held.first) > MAX_LOG_ENTRIES {
+                return refuse(format!(
+                    "{name:?} would hold more than {MAX_LOG_ENTRIES} entries"
+                ));
+            }
         }
         for (name, written) in writes {
-            if records.contains_key(name) || paged(name) == Some(false) {
-                return refuse(format!("{name:?} is a record, not a paged file"));
-            }
             let size = written.size_after(self.file_size(name));
             if !size.is_multiple_of(512) || size > MAX_FILE_BYTES {
                 return refuse(format!("{name:?}: invalid size {size}"));
@@ -1071,7 +1217,7 @@ impl Snapshot {
                 return refuse(format!("{name:?} has a base: open it with it"));
             }
         }
-        let new = (records.keys().chain(writes.keys()))
+        let new = (records.keys().chain(writes.keys()).chain(logs.keys()))
             .filter(|name| self.root.file_id(name).is_none())
             .count();
         if u64::from(self.root.next_file) + new as u64 > u64::from(MAX_FILES) {
@@ -1124,6 +1270,7 @@ impl Snapshot {
         &self,
         mut writes: Writes,
         mut records: Records,
+        mut logs: Appends,
     ) -> io::Result<(FlushReport, Self)> {
         records.retain(|name, value| {
             (self.records.get(name)).map_or(!value.is_empty(), |held| held != value)
@@ -1132,7 +1279,10 @@ impl Snapshot {
             let current = self.file_size(name);
             !written.pages.is_empty() || written.size_after(current) != current
         });
-        if writes.is_empty() && records.is_empty() {
+        logs.retain(|name, appended| {
+            !appended.values.is_empty() || appended.before > self.log(name).first
+        });
+        if writes.is_empty() && records.is_empty() && logs.is_empty() {
             return Ok((
                 FlushReport::default(),
                 self.continued(self.root.clone(), self.root_bytes.clone()),
@@ -1143,7 +1293,8 @@ impl Snapshot {
             self.commit_file(&mut flush, name, written).await?;
         }
         let records = self.commit_records(&mut flush, records)?;
-        self.write(flush, records).await
+        let logs = self.commit_logs(&mut flush, logs)?;
+        self.write(flush, records, logs).await
     }
 
     /// Write `written` into the file `name` of `flush`'s root.
@@ -1299,22 +1450,71 @@ impl Snapshot {
             if let Kind::Record(Value::Blob(n)) = flush.root.directory[&id].kind {
                 flush.dead.push(n);
             }
-            let stored = match value.len() <= self.options.inline_record_bytes {
-                true => Value::Inline(value.clone()),
-                false => {
-                    let frame = zstd::compress(&value, &[], Bytes::copy_from_slice)?;
-                    Value::Blob(flush.put(frame, None))
-                }
-            };
+            let stored = self.store_value(flush, &value)?;
             flush.root.directory.get_mut(&id).expect("allocated").kind = Kind::Record(stored);
             after.insert(name, value);
         }
         Ok(after)
     }
 
+    /// Append to and truncate `logs` in `flush`'s root: the logs after it.
+    /// An entry appended and truncated by the same flush is never stored.
+    fn commit_logs(&self, flush: &mut Flush, logs: Appends) -> io::Result<Logs> {
+        let mut after = self.logs.clone();
+        for (name, appended) in logs {
+            let id = flush.file(&name, || Kind::Log {
+                first: 0,
+                entries: Vec::new(),
+            });
+            let held = after.entry(name).or_default();
+            let mut fresh = Vec::new();
+            for (value, index) in appended.values.into_iter().zip(held.next()..) {
+                if index >= appended.before {
+                    fresh.push(self.store_value(flush, &value)?);
+                }
+                held.values.push(value);
+            }
+            let Kind::Log { first, entries } =
+                &mut flush.root.directory.get_mut(&id).expect("allocated").kind
+            else {
+                unreachable!("checked: a log");
+            };
+            let dropped = appended
+                .before
+                .saturating_sub(*first)
+                .min(held.values.len() as u64) as usize;
+            held.values.drain(..dropped);
+            held.first += dropped as u64;
+            // Those appended and dropped at once were never stored.
+            let stored_dropped = dropped.min(entries.len());
+            for entry in entries.drain(..stored_dropped) {
+                if let Value::Blob(n) = entry {
+                    flush.dead.push(n);
+                }
+            }
+            entries.extend(fresh);
+            *first = held.first;
+        }
+        Ok(after)
+    }
+
+    /// `value` as the root keeps it: inline, or in a blob of its own.
+    fn store_value(&self, flush: &mut Flush, value: &Bytes) -> io::Result<Value> {
+        if value.len() <= self.options.inline_record_bytes {
+            return Ok(Value::Inline(value.clone()));
+        }
+        let frame = zstd::compress(value, &[], Bytes::copy_from_slice)?;
+        Ok(Value::Blob(flush.put(frame, None)))
+    }
+
     /// Write `flush`: delete the garbage past its grace, put the blobs, then
     /// the root that names them; then one sync.
-    async fn write(&self, flush: Flush, records: Records) -> io::Result<(FlushReport, Self)> {
+    async fn write(
+        &self,
+        flush: Flush,
+        records: Records,
+        logs: Logs,
+    ) -> io::Result<(FlushReport, Self)> {
         let Flush {
             mut root,
             fresh,
@@ -1363,6 +1563,7 @@ impl Snapshot {
         }
         let mut after = self.continued(Arc::new(root), Some(bytes));
         after.records = records;
+        after.logs = logs;
         after.keep(
             fresh
                 .into_iter()
@@ -1392,6 +1593,7 @@ impl Snapshot {
             root,
             root_bytes,
             records: self.records.clone(),
+            logs: self.logs.clone(),
             bases: self.bases.clone(),
             unchanged: false,
             reader: self.reader,
