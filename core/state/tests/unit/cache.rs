@@ -51,6 +51,17 @@ fn another_root_forgets_the_flush_not_the_blobs() {
         assert_eq!(cache.unsettled(), Some(1));
         cache.settled(1);
         assert_eq!(cache.unsettled(), None);
+
+        // A flush runs: an open syncs, and does not let another flush build
+        // on the root it reads, until the flush ends.
+        cache.record(Some(root(4)), Some(6));
+        assert!(cache.claim(6));
+        assert_eq!(cache.unsettled(), Some(1));
+        cache.record(Some(root(5)), Some(7));
+        assert!(!cache.claim(7));
+        cache.flushed(root(5), 7);
+        assert_eq!(cache.unsettled(), None);
+        assert!(cache.claim(7));
     })
 }
 
@@ -92,4 +103,23 @@ fn values_read_as_slices_of_a_larger_buffer_are_kept_alone() {
         cache.record(Some(slice.clone()), None);
         assert!(!inside(cache.owner().root.as_ref().unwrap()));
     })
+}
+
+/// A namespace evicted with a flush whose outcome is unknown would forget
+/// that its next open must sync: it stays until a sync settles it.
+#[test]
+fn an_unsettled_namespace_is_never_evicted() {
+    let cache = crate::simulation::open_cache(PageCacheConfig {
+        namespaces: 4,
+        ..crate::simulation::cache_config(1 << 20, 4 << 20)
+    });
+    cache.namespace("failed").forget();
+    let others = |cache: &PageCache| (0..64).for_each(|n| drop(cache.namespace(&n.to_string())));
+    others(&cache);
+    let failed = cache.namespace("failed");
+    assert_eq!(failed.unsettled(), Some(1));
+    failed.settled(1);
+    drop(failed);
+    others(&cache);
+    assert_eq!(cache.namespace("failed").unsettled(), None);
 }

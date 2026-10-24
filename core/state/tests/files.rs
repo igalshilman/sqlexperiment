@@ -62,7 +62,8 @@ impl state::Base for Zeros {
 }
 
 /// A file with a base decodes its chunks only once opened with it, and
-/// reads what was flushed through later flushes of other files.
+/// reads what was flushed through later flushes of other files; without it,
+/// whole chunks of it can be made holes.
 #[test]
 fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
     futures::executor::block_on(async {
@@ -77,7 +78,7 @@ fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
             )?;
             wal.flush().await?;
         }
-        let state = State::open(store).await?;
+        let state = State::open(store.clone()).await?;
         assert!(state.file("vm")?.read(1).await.is_err(), "without its base");
         let vm = state.file_with_base("vm", Arc::new(Zeros))?;
         assert_eq!(byte(&vm, 1).await?, Some(2));
@@ -85,6 +86,50 @@ fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
         wal.write(&state.file("db")?, 0, Some(page(9)))?;
         wal.flush().await?;
         assert_eq!(byte(&vm, 1).await?, Some(2), "after another flush");
+
+        // Without its base, a whole chunk of it can still be made holes:
+        // its base pages again.
+        let state = State::open(store.clone()).await?;
+        let mut wal = state.wal();
+        for n in 0..4 {
+            wal.write(&state.file("vm")?, n, None)?;
+        }
+        wal.flush().await?;
+        let state = State::open(store).await?;
+        let vm = state.file_with_base("vm", Arc::new(Zeros))?;
+        assert_eq!(byte(&vm, 1).await?, Some(0), "its base page");
+        Ok(())
+    })
+}
+
+/// A cold sequential read of more chunks than a state keeps decoded: the
+/// chunk a read decoded is returned, even when its readahead dropped them
+/// all, and readahead grows to its widest.
+#[test]
+fn a_long_sequential_read_returns_every_chunk() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = MemoryKv::default();
+        let options = || state::StateOptions {
+            chunk_pages: 1,
+            ..state::StateOptions::default()
+        };
+        let state = State::open(Arc::new(memory.clone()))
+            .options(options())
+            .await?;
+        let file = state.file("db")?;
+        let mut wal = state.wal();
+        for n in 0..1500 {
+            wal.write(&file, n, Some(page(n as u8 | 1)))?;
+        }
+        wal.flush().await?;
+        let store = Arc::new(LatencyKv::new(memory));
+        let state = State::open(store.clone()).options(options()).await?;
+        let file = state.file("db")?;
+        for n in 0..1500 {
+            assert_eq!(byte(&file, n).await?, Some(n as u8 | 1), "page {n}");
+        }
+        // Readahead grows to 16 chunks a round trip.
+        assert!(store.round_trips() < 1500 / 12, "{}", store.round_trips());
         Ok(())
     })
 }

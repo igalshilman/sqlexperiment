@@ -4,6 +4,7 @@
 #![cfg(feature = "simulation")]
 mod support;
 
+use futures::future::Either;
 use state::{Result, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
@@ -95,6 +96,62 @@ fn a_cache_that_read_a_lost_flush_never_serves_it() -> Result<()> {
         )
         .await?;
         // A reads B's page.
+        let session = Session::open(store.clone(), options(Some(&a))).await?;
+        assert_eq!(model.differs(&session).await?, None);
+        Ok(())
+    })
+}
+
+/// State A's flush waits on its sync when a second owner state, B, opens:
+/// the store shows A's root, not yet durable. B must not cache the blobs it
+/// names: A's flush is lost, and another process flushes at those numbers.
+#[test]
+fn a_state_opened_beside_a_running_flush_caches_nothing_it_may_lose() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = MemoryKv::default();
+        let fault = Arc::new(FaultKv::new(memory.clone(), 0));
+        let store: Arc<dyn KvStore> = fault.clone();
+        let (a, b) = (fresh_namespace(), fresh_namespace());
+        let mut model = Model::default();
+        flush(
+            &store,
+            Some(&a),
+            &mut model,
+            &[Op::Write("db", 0, Some(page(1)))],
+        )
+        .await?;
+
+        let first = Session::open(store.clone(), options(Some(&a))).await?;
+        let stuck = fault.arm(Failpoint {
+            cancel: true,
+            ..failing_sync()
+        });
+        let write = [Op::Write("db", 0, Some(page(2)))];
+        let running = Box::pin(first.flush(&write));
+        let Either::Right((_, running)) = futures::future::select(running, stuck).await else {
+            panic!("the flush did not wait on its sync");
+        };
+        // B opens, and reads (and may cache) what A's flush wrote.
+        let second = Session::open(store.clone(), options(Some(&a))).await?;
+        drop(second);
+        drop(running);
+        fault.disarm();
+        memory.crash();
+        let failed = model.applied(&write);
+        let session = Session::open(store.clone(), options(None)).await?;
+        if failed.matches(&session).await? {
+            model = failed;
+        }
+        drop(session);
+
+        // Another process flushes, at the numbers the lost flush used.
+        flush(
+            &store,
+            Some(&b),
+            &mut model,
+            &[Op::Write("db", 0, Some(page(3)))],
+        )
+        .await?;
         let session = Session::open(store.clone(), options(Some(&a))).await?;
         assert_eq!(model.differs(&session).await?, None);
         Ok(())

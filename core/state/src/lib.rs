@@ -328,9 +328,9 @@ impl State {
     /// The paged file named `name`, over `base` (see [`Base`]): an absent
     /// page, or a hole, reads as the base's page, and pages are compressed
     /// against it. A file made with a base opens only with that one again
-    /// (by [`Base::id`]); its log since the last checkpoint decodes now.
-    /// [`Self::file`] opens it without its base, to write holes and set its
-    /// length only: emptying it for another base, say.
+    /// (by [`Base::id`]). [`Self::file`] opens it without its base: it then
+    /// reads nothing, and a flush may only make whole chunks of it holes,
+    /// or cut its length.
     pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
         let file = self.file(name)?;
         let mut snapshot = self.shared.snapshot.lock().unwrap();

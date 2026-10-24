@@ -100,6 +100,10 @@ struct Shared {
     /// Every namespace state a handle still holds, so that one namespace never
     /// has two states while a session uses it, even after LRU eviction.
     live: Mutex<HashMap<String, Weak<Mutex<Owner>>>>,
+    /// The namespace states with a flush whose outcome is unknown, kept until
+    /// a sync settles it: an evicted one would forget that its next open
+    /// must sync.
+    unsettled: Mutex<Vec<Arc<Mutex<Owner>>>>,
     /// Source of namespace state identities.
     ids: AtomicU64,
     /// Keeps the disk tier's own runtime alive when the host has none.
@@ -152,6 +156,7 @@ impl PageCache {
                 blobs,
                 namespaces: CacheBuilder::new(config.namespaces).build(),
                 live: Mutex::default(),
+                unsettled: Mutex::default(),
                 // Distinct per instance, so two caches sharing a disk file by
                 // mistake still never share keys.
                 ids: AtomicU64::new(random() >> 1),
@@ -209,6 +214,9 @@ struct Owner {
     root: Option<Bytes>,
     /// The version of this owner's last durable flush.
     committed: Option<u64>,
+    /// A state's flush took the right to flush ([`NamespaceCache::claim`])
+    /// and has not ended: its writes may be visible, and not durable yet.
+    flushing: bool,
     /// Flushes with an unknown outcome so far, and how many of them a sync
     /// has settled since.
     unknown: u64,
@@ -235,32 +243,50 @@ impl NamespaceCache {
         false
     }
 
-    /// Record the durable root `bytes`, and this owner's durable flush, if
-    /// any.
+    /// Record the durable root `bytes` an open read, and, if `committed`,
+    /// that a flush may build on it, unless a flush runs: that one's
+    /// outcome decides.
     pub(crate) fn record(&self, bytes: Option<Bytes>, committed: Option<u64>) {
         let mut owner = self.owner();
         // An absent root is a real state: an empty namespace.
         owner.root = Some(owned(&bytes.unwrap_or_default()));
-        if committed.is_some() {
+        if committed.is_some() && !owner.flushing {
             owner.committed = committed;
         }
+    }
+
+    /// The claimed flush (see [`Self::claim`]) made `bytes`, at `version`,
+    /// durable.
+    pub(crate) fn flushed(&self, bytes: Bytes, version: u64) {
+        let mut owner = self.owner();
+        owner.root = Some(bytes);
+        owner.committed = Some(version);
+        owner.flushing = false;
     }
 
     /// Forget the root after a flush whose outcome is unknown.
     pub(crate) fn forget(&self) {
         let mut owner = self.owner();
+        owner.flushing = false;
         owner.unknown += 1;
         let stale = self.forget_locked(&mut owner);
         drop(owner);
         drop(stale);
+        let mut unsettled = self.shared.unsettled.lock().unwrap();
+        if !unsettled
+            .iter()
+            .any(|owner| Arc::ptr_eq(owner, &self.owner))
+        {
+            unsettled.push(self.owner.clone());
+        }
     }
 
     /// The flushes with an unknown outcome so far, if a sync has not settled
-    /// them all: their writes may be visible and yet not durable, so an open
-    /// syncs before it reads.
+    /// them all, or a flush runs: their writes may be visible and yet not
+    /// durable, so an open syncs before it reads (and caches).
     pub(crate) fn unsettled(&self) -> Option<u64> {
         let owner = self.owner();
-        (owner.unknown != owner.settled).then_some(owner.unknown)
+        (owner.unknown != owner.settled || owner.flushing).then_some(owner.unknown)
     }
 
     /// A sync succeeded after the first `unknown` flushes with an unknown
@@ -268,6 +294,11 @@ impl NamespaceCache {
     pub(crate) fn settled(&self, unknown: u64) {
         let mut owner = self.owner();
         owner.settled = owner.settled.max(unknown);
+        if owner.settled == owner.unknown {
+            drop(owner);
+            let mut unsettled = self.shared.unsettled.lock().unwrap();
+            unsettled.retain(|owner| !Arc::ptr_eq(owner, &self.owner));
+        }
     }
 
     /// Forget the root and what was idle at it, which the caller drops once
@@ -281,13 +312,15 @@ impl NamespaceCache {
 
     /// Take the right to flush on top of `version`, this owner's last
     /// durable flush: refused if another state flushed since, or is
-    /// flushing. A flush that lands records its version again
-    /// ([`Self::record`]); one that fails leaves it unknown.
+    /// flushing. A flush that lands records its version
+    /// ([`Self::flushed`]); one that fails leaves it unknown
+    /// ([`Self::forget`]).
     pub(crate) fn claim(&self, version: u64) -> bool {
         let mut owner = self.owner();
         let claimed = owner.committed == Some(version);
         if claimed {
             owner.committed = None;
+            owner.flushing = true;
         }
         claimed
     }
@@ -355,6 +388,7 @@ impl Owner {
             id: ids.fetch_add(1, Relaxed),
             root: None,
             committed: None,
+            flushing: false,
             unknown: 0,
             settled: 0,
         }

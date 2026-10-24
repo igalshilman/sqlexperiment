@@ -461,6 +461,19 @@ impl Root {
     }
 }
 
+/// A chunk's frame, decoded against `prefix`: exactly `size` bytes.
+fn decode_chunk(frame: &[u8], prefix: &[u8], size: usize) -> io::Result<Arc<Image>> {
+    let mut pages = Vec::with_capacity(size);
+    zstd::decompress(&mut pages, frame, prefix)?;
+    if pages.len() != size {
+        return Err(invalid("chunk"));
+    }
+    Ok(Arc::new(Image {
+        pages: pages.into(),
+        stored: frame.len(),
+    }))
+}
+
 /// What chunk `chunk` holds without a stored base: its file's `base` pages,
 /// or zeros.
 fn implicit(base: Option<&Arc<dyn Base>>, chunk_pages: u64, chunk: u64) -> Vec<u8> {
@@ -520,6 +533,7 @@ pub(crate) struct Snapshot {
 /// Detects sequential chunk misses.
 #[derive(Default)]
 struct Readahead {
+    /// The file and last chunk the previous miss fetched.
     last: Option<(u32, u64)>,
     run: u32,
     window: u64,
@@ -532,11 +546,11 @@ impl Readahead {
             Some(last) if last == (file, chunk.wrapping_sub(1)) => self.run + 1,
             _ => 1,
         };
-        self.last = Some((file, chunk));
         self.window = match self.run >= READAHEAD_AFTER {
             true => (self.window * 2).clamp(2, MAX_READAHEAD),
             false => 0,
         };
+        self.last = Some((file, chunk + self.window));
         self.window
     }
 }
@@ -732,11 +746,12 @@ impl Snapshot {
             .copied()
             .zip(self.blobs(&blobs).await?)
             .collect();
-        for &c in &wanted {
+        // `wanted` starts with `chunk`; the ones after are readahead.
+        let image = self.decode(id, chunk, &fetched)?;
+        for &c in &wanted[1..] {
             self.decode(id, c, &fetched)?;
         }
-        let image = self.images.lock().unwrap().get(&current).cloned();
-        image.ok_or_else(|| io::Error::other("a decoded chunk was dropped"))
+        Ok(image)
     }
 
     /// The base blob `n` of a chunk, decoded.
@@ -746,15 +761,7 @@ impl Snapshot {
         }
         let frame = self.blob(n).await?;
         let prefix = reference(self.base_of(id)?, self.root.chunk_pages, chunk);
-        let mut pages = Vec::with_capacity(self.root.chunk_bytes());
-        zstd::decompress(&mut pages, &frame, &prefix)?;
-        if pages.len() != self.root.chunk_bytes() {
-            return Err(invalid("chunk"));
-        }
-        Ok(Arc::new(Image {
-            pages: pages.into(),
-            stored: frame.len(),
-        }))
+        decode_chunk(&frame, &prefix, self.root.chunk_bytes())
     }
 
     fn has(&self, chunk: Chunk) -> bool {
@@ -764,22 +771,11 @@ impl Snapshot {
     }
 
     /// Decode chunk `chunk` of the file `id` from its blobs in `fetched`, and
-    /// keep its base and its pages now.
-    fn decode(&self, id: u32, chunk: u64, fetched: &HashMap<u64, Bytes>) -> io::Result<()> {
+    /// keep its base and its pages now, which it returns.
+    fn decode(&self, id: u32, chunk: u64, fetched: &HashMap<u64, Bytes>) -> io::Result<Arc<Image>> {
         let stored = self.chunks(id)[chunk as usize];
         let size = self.root.chunk_bytes();
-        let decode = |n: u64, prefix: &[u8]| -> io::Result<Arc<Image>> {
-            let frame = &fetched[&n];
-            let mut pages = Vec::with_capacity(size);
-            zstd::decompress(&mut pages, frame, prefix)?;
-            if pages.len() != size {
-                return Err(invalid("chunk"));
-            }
-            Ok(Arc::new(Image {
-                pages: pages.into(),
-                stored: frame.len(),
-            }))
-        };
+        let decode = |n: u64, prefix: &[u8]| decode_chunk(&fetched[&n], prefix, size);
         let base = match stored.base {
             Some(n) => {
                 let prefix = reference(self.base_of(id)?, self.root.chunk_pages, chunk);
@@ -792,12 +788,26 @@ impl Snapshot {
             (Some(_), None) => return Err(invalid("chunk: a delta without a base")),
             (None, _) => None,
         };
+        let current = delta
+            .as_ref()
+            .or(base.as_ref())
+            .expect("a stored chunk")
+            .1
+            .clone();
+        self.keep(base.into_iter().chain(delta));
+        Ok(current)
+    }
+
+    /// Keep decoded images, dropping them all first once there are
+    /// [`KEPT_IMAGES`].
+    fn keep(&self, decoded: impl IntoIterator<Item = (u64, Arc<Image>)>) {
         let mut images = self.images.lock().unwrap();
-        if images.len() >= KEPT_IMAGES {
-            images.clear();
+        for (n, image) in decoded {
+            if images.len() >= KEPT_IMAGES {
+                images.clear();
+            }
+            images.insert(n, image);
         }
-        images.extend(base.into_iter().chain(delta));
-        Ok(())
     }
 
     /// Blobs `wanted`, in order: from the cache, or the store, together.
@@ -941,8 +951,11 @@ impl Snapshot {
                 .directory
                 .get(&id)
                 .map_or(&[][..], |_| self.chunks(id));
+            // Without its base, a file made with one can only drop chunks:
+            // refused if a page would stay.
             let based = matches!(&root.directory[&id].kind, Kind::Paged { base: Some(_), .. });
-            if based && base.is_none() && written.pages.values().any(Option::is_some) {
+            let missing = based && base.is_none();
+            if missing && written.pages.values().any(Option::is_some) {
                 return refuse(format!("{name:?} has a base: open it with it"));
             }
             // The chunks it changes: those it writes, and the last one kept
@@ -962,9 +975,6 @@ impl Snapshot {
             chunks.resize(count, Chunk::default());
             for chunk in touched {
                 let stored = chunks[chunk as usize];
-                // Without its base, a file made with one can only drop
-                // chunks: refused below if a page would stay.
-                let missing = based && base.is_none();
                 let hole = implicit(base, root.chunk_pages, chunk);
                 let (base_image, now) = match stored.current() {
                     Some(_) if !missing => {
@@ -991,7 +1001,7 @@ impl Snapshot {
                 if missing && kept {
                     return refuse(format!("{name:?} has a base: open it with it"));
                 }
-                if pages == now && stored.current().is_some() {
+                if pages == now && stored.current().is_some() && !missing {
                     continue;
                 }
                 dead.extend(stored.delta);
@@ -1118,17 +1128,15 @@ impl Snapshot {
             for (n, value, _) in &fresh {
                 cache.insert(root.id, *n, value.clone());
             }
-            cache.record(Some(bytes.clone()), Some(version));
+            cache.flushed(bytes.clone(), version);
         }
         let mut after = self.continued(Arc::new(root), Some(bytes));
         after.records = after_records;
-        let mut images = after.images.lock().unwrap();
-        for (n, _, image) in fresh {
-            if let Some(image) = image {
-                images.insert(n, image);
-            }
-        }
-        drop(images);
+        after.keep(
+            fresh
+                .into_iter()
+                .filter_map(|(n, _, image)| Some((n, image?))),
+        );
         let report = FlushReport {
             blob_bytes,
             root_bytes,
