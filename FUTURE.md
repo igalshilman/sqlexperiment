@@ -68,25 +68,23 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
    the Rust v7 fallback, and regenerate the Rust patch
    (`patches/regenerate.sh`).
 
-## The root with the invocation (eager state keys)
+## The root with the invocation (eager state keys), in TypeScript and Python
 
-**Waits on:** SDK releases whose service options set
-`eagerStateKeysWhitelist`, and a Restate release with it (the server's
-[restatedev/restate#5261](https://github.com/restatedev/restate/pull/5261),
-merged 18 September 2026; the TypeScript SDK 1.17.4 and the Rust SDK's
-`main` on 2 October 2026 have no such option).
+**Waits on:** TypeScript and Python SDK releases whose service options set
+`eagerStateKeysWhitelist` (the TypeScript SDK 1.17.4 and the Python SDK
+1.1.0 have no such option). Restate has it since 1.8.0
+([restatedev/restate#5261](https://github.com/restatedev/restate/pull/5261)).
 
-**Now:** SQL objects set lazy state, so an invocation does not start with
-every blob, and a session's first read is the root (`v16/root`): a round
-trip, cached or not.
+**Now:** the durable functions whitelist the root (`state::ROOT_KEY`,
+`v16/root`) through the patched Rust SDK (`ServiceOptions::eager_state_keys`),
+so a turn starts with it; `a_turn_starts_with_the_root`
+(`rust/functions/tests/restate.rs`) checks it. The SQL objects of
+`restate-fns` set lazy state alone, so their first read, the root, is a
+round trip, cached or not.
 
-**Then:** with lazy state still on, whitelist `v16/root`; the server ships
-it with the invocation (best effort, within its eager-state size limit),
-and the open starts with it. Blob names change with each flush, so only the
-root can be listed. The options are in `restate-fns` (`sqlOptions` in
-`typescript/packages/fns/src/index.ts`, `sql_options` in
-`python/fns/restate_fns/session.py`) and the durable functions'
-`ServiceOptions` (`rust/functions/src/restate.rs`); their `TODO:`s mark them.
+**Then:** whitelist `v16/root` in `sqlOptions`
+(`typescript/packages/fns/src/index.ts`) and `sql_options`
+(`python/fns/restate_fns/session.py`); their `TODO:`s mark them.
 
 ## Concurrent awaits in the TypeScript and Python SDKs
 

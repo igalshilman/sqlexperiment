@@ -442,6 +442,54 @@ async fn state_reads_are_unjournaled_on_protocol_v8() {
     );
 }
 
+/// The root comes with each invocation (its key is the services' eager
+/// state whitelist): a turn on an object with state reads it without a round
+/// trip. On protocol v7 the journal shows it: the root's read is an eager get.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs restate-server: make test-functions"]
+async fn a_turn_starts_with_the_root() {
+    let _server = server().await;
+    serve().await;
+    let service = reqwest::get(format!("{ADMIN}/services/approvals"))
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        service["state_preload_policy"],
+        json!({"Partial": [state::ROOT_KEY]}),
+        "{service}"
+    );
+    // A first run makes the object's state; the next one starts with its root.
+    assert_eq!(
+        call("approvals/dave/race", Value::Null).await,
+        (200, json!("timer"))
+    );
+    let refund = send("approvals/dave/refund", json!("106")).await;
+    let [wait] = &waits("approvals/dave", |w| !w.is_empty()).await[..] else {
+        unreachable!()
+    };
+    let journal = format!("SELECT entry_type, name FROM sys_journal WHERE id = '{refund}'");
+    let entries = query(&journal).await;
+    let root: Vec<&str> = (entries.iter())
+        .filter(|row| row["name"] == state::ROOT_KEY)
+        .map(|row| row["entry_type"].as_str().unwrap())
+        .collect();
+    assert!(
+        !root.is_empty() && root.iter().all(|e| e.contains("GetEagerState")),
+        "{entries:?}"
+    );
+    let approve = json!({"id": wait["id"], "value": "approved"});
+    call("approvals/dave/signal", approve).await;
+    let note = json!({"name": "note", "value": "none", "keep": true});
+    call("approvals/dave/signal", note).await;
+    assert_eq!(
+        attach(&refund).await,
+        (200, json!({"verdict": "approved", "note": "none"}))
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs restate-server: make test-functions"]
 async fn a_python_run_waits_for_a_signal() {

@@ -7,6 +7,6 @@ build=../.build
 
 sdk=$build/sdk-rust
 git -C "$sdk" add -N -- src tests examples
-git -C "$sdk" diff HEAD -- src tests examples Cargo.toml rust-toolchain.toml > sdk-rust.patch
+git -C "$sdk" diff HEAD -- src tests examples Cargo.toml rust-toolchain.toml endpoint_manifest_schema.json > sdk-rust.patch
 
 grep '^diff --git' sdk-rust.patch | awk '{print $3}'

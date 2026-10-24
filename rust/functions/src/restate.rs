@@ -622,8 +622,8 @@ pub fn bind(
         };
         let mut options = ServiceOptions::new()
             .journal_replay(false)
-            // TODO: preload the root eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
             .enable_lazy_state(true)
+            .eager_state_keys([state::ROOT_KEY])
             .journal_retention(Duration::ZERO)
             .inactivity_timeout(programs.runtime().limits().turn);
         // They call `function_signals`: a retried attempt replays its call.
