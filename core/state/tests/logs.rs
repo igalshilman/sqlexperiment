@@ -17,7 +17,7 @@ fn entries(values: &[&str]) -> Vec<Bytes> {
         .collect()
 }
 
-/// An entry over the inline budget: a blob of its own.
+/// An entry of a few KiB.
 fn large(n: u8) -> Bytes {
     vec![n; 2000].into()
 }
@@ -67,14 +67,19 @@ fn a_truncation_drops_a_prefix_the_mutations_appends_included() -> Result<()> {
         mutation.append(&log, "d".into())?;
         mutation.flush().await?;
         assert_eq!((log.first(), log.entries()), (1, entries(&["b", "c", "d"])));
-        // Appended, then truncated past: the entries never land.
+        // Appended, then truncated past: the entry never lands. Each entry
+        // is a blob of its own: one more, for "f".
         let mut mutation = state.mutation();
         mutation.append(&log, large(5))?;
         mutation.append(&log, "f".into())?;
         mutation.truncate(&log, 5)?;
         let blobs = store.blob_count();
         mutation.flush().await?;
-        assert_eq!(store.blob_count(), blobs, "the large entry, never stored");
+        assert_eq!(
+            store.blob_count(),
+            blobs + 1,
+            "the large entry, never stored"
+        );
         assert_eq!(
             (log.first(), log.next(), log.entries()),
             (5, 6, entries(&["f"]))

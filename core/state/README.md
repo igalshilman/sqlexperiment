@@ -60,8 +60,8 @@ but one key, the root, which names everything else: copy-on-write.
 A namespace holds:
 
 - **The root** (`v16/root`): the version, the directory of files (paged
-  files, such as the SQL database's, records and logs), the small records
-  and log entries, and
+  files, such as the SQL database's, records and logs), the small records,
+  and
   the top of each paged file's chunk map.
 - **Blobs** (`v16/blob/<n>`): one zstd frame each, written once and never
   changed: a chunk's _base_ (its 4 pages), maybe a _delta_ (its pages now,

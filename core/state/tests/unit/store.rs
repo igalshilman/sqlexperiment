@@ -40,7 +40,7 @@ fn root() -> Root {
             "turns",
             Kind::Log {
                 first: 12,
-                entries: vec![Value::Inline(Bytes::from_static(b"turn")), Value::Blob(260)],
+                entries: vec![260, 261],
             },
         ),
     ];

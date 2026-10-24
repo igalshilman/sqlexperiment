@@ -36,8 +36,7 @@ A file's kind is one of:
 - `2`: a paged file. Its length in 512-byte units (at most 10 GiB), its
   base's id plus one (`0` for none), then its chunk map (below).
 - `3`: a log. The index of its first entry (at most 2^62), a count (at most
-  4096), then each entry as a record's value: `0`, a length and bytes, or
-  `1` and a blob number.
+  4096), then the blob number of each entry.
 
 Names are unique. Nothing may follow. A missing root means version 0 and no
 files.

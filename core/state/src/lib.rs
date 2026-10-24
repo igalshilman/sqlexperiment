@@ -30,7 +30,7 @@
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
 //! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
-//! | Root | `v16/root`: the directory, small records and log entries, and the top of each file's chunk map | Yes, after an acknowledged flush |
+//! | Root | `v16/root`: the directory, small records, and the top of each file's chunk map | Yes, after an acknowledged flush |
 //! | Blobs | `v16/blob/<n>`: a chunk's base or delta, a map node, or a large record or log entry; written once | Yes, until no root a reader may hold names it |
 //!
 //! # Ownership and concurrency
@@ -836,12 +836,11 @@ impl Record {
 /// at the next index, and dropped from its start ([`Mutation::truncate`]),
 /// read from the state ([`Self::entries`]). A cheap handle.
 ///
-/// Like a record's value, an entry of up to
-/// [`StateOptions::inline_record_bytes`] is in the root, and a larger one a
-/// blob of its own, written once; opening the state reads every entry. A
-/// flush costs about what it appends: what a log is for is changes too small
-/// to rewrite their whole, folded into a record or a file now and then, and
-/// truncated.
+/// Each entry is a blob of its own, written once (the root, which every
+/// flush rewrites, holds only its number); opening the state reads every
+/// entry. A flush costs about what it appends: what a log is for is changes
+/// too small to rewrite their whole, folded into a record or a file now and
+/// then, and truncated. A value of a few bytes is better in a record.
 #[derive(Clone)]
 pub struct Log {
     name: Arc<str>,

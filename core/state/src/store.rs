@@ -14,8 +14,9 @@
 //! new delta against the chunk's base, or, once that delta passes
 //! [`StateOptions::rebase_ratio`] of the base's size, as a new base. A record of more than
 //! [`StateOptions::inline_record_bytes`] is a blob of its own; smaller ones
-//! are in the root. A log's entries are stored the same way, one each, from
-//! the first not yet truncated.
+//! are in the root. A log's entries are blobs of their own, one each, from
+//! the first not yet truncated, written once: the root, which every flush
+//! rewrites, holds only their numbers.
 //!
 //! **One rule.** A blob is written before the first root that names it, and
 //! deleted only once no root a reader may hold names it. The store keeps
@@ -125,6 +126,12 @@ pub(crate) fn get_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
 
 pub(crate) fn invalid(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("invalid {what}"))
+}
+
+/// Put `value` in `flush` as a blob of its own: its number.
+fn put_value(flush: &mut Flush, value: &[u8]) -> io::Result<u64> {
+    let frame = zstd::compress(value, &[], Bytes::copy_from_slice)?;
+    Ok(flush.put(frame, None))
 }
 
 fn refuse<T>(message: String) -> io::Result<T> {
@@ -269,10 +276,11 @@ pub(crate) enum Kind {
         base: Option<u64>,
         map: Map,
     },
-    /// The index of its first entry, and its entries from there, in order.
+    /// The index of its first entry, and the blobs of its entries from
+    /// there, in order.
     Log {
         first: u64,
-        entries: Vec<Value>,
+        entries: Vec<u64>,
     },
 }
 
@@ -447,18 +455,8 @@ impl Root {
                     body.push(3);
                     put_varint(&mut body, *first);
                     put_varint(&mut body, entries.len() as u64);
-                    for entry in entries {
-                        match entry {
-                            Value::Inline(bytes) => {
-                                body.push(0);
-                                put_varint(&mut body, bytes.len() as u64);
-                                body.extend_from_slice(bytes);
-                            }
-                            Value::Blob(n) => {
-                                body.push(1);
-                                put_varint(&mut body, *n);
-                            }
-                        }
+                    for n in entries {
+                        put_varint(&mut body, *n);
                     }
                 }
             }
@@ -517,7 +515,7 @@ impl Root {
             if name.len() > MAX_NAME_BYTES {
                 return Err(invalid("root"));
             }
-            // A record's value, or a log entry, after its tag.
+            // A record's value, after its tag.
             let value = |r: &mut Reading, tag: u64| match tag {
                 0 => Ok(Value::Inline(Bytes::copy_from_slice(r.bytes()?))),
                 1 => Ok(Value::Blob(blob(r.varint()?)?)),
@@ -534,10 +532,7 @@ impl Root {
                 3 => {
                     let first = r.bounded(MAX_SEQUENCE)?;
                     let entries = (0..r.bounded(MAX_LOG_ENTRIES)?)
-                        .map(|_| {
-                            let tag = r.varint()?;
-                            value(&mut r, tag)
-                        })
+                        .map(|_| blob(r.varint()?))
                         .collect::<io::Result<_>>()?;
                     Kind::Log { first, entries }
                 }
@@ -801,12 +796,7 @@ impl Snapshot {
                         Kind::Record(Value::Blob(n)) => {
                             wanted.insert(*n);
                         }
-                        Kind::Log { entries, .. } => {
-                            wanted.extend(entries.iter().filter_map(|entry| match entry {
-                                Value::Blob(n) => Some(*n),
-                                Value::Inline(_) => None,
-                            }));
-                        }
+                        Kind::Log { entries, .. } => wanted.extend(entries),
                         Kind::Paged {
                             size, base: None, ..
                         } if size.div_ceil(PAGE) <= options.prefetch_pages => {
@@ -845,7 +835,9 @@ impl Snapshot {
                     snapshot.records.insert(name, value(stored)?);
                 }
                 Kind::Log { first, entries } => {
-                    let values = entries.iter().map(value).collect::<io::Result<_>>()?;
+                    let values = (entries.iter())
+                        .map(|&n| value(&Value::Blob(n)))
+                        .collect::<io::Result<_>>()?;
                     let first = *first;
                     snapshot.logs.insert(name, Entries { first, values });
                 }
@@ -1470,7 +1462,7 @@ impl Snapshot {
             let mut fresh = Vec::new();
             for (value, index) in appended.values.into_iter().zip(held.next()..) {
                 if index >= appended.before {
-                    fresh.push(self.store_value(flush, &value)?);
+                    fresh.push(put_value(flush, &value)?);
                 }
                 held.values.push(value);
             }
@@ -1487,24 +1479,19 @@ impl Snapshot {
             held.first += dropped as u64;
             // Those appended and dropped at once were never stored.
             let stored_dropped = dropped.min(entries.len());
-            for entry in entries.drain(..stored_dropped) {
-                if let Value::Blob(n) = entry {
-                    flush.dead.push(n);
-                }
-            }
+            flush.dead.extend(entries.drain(..stored_dropped));
             entries.extend(fresh);
             *first = held.first;
         }
         Ok(after)
     }
 
-    /// `value` as the root keeps it: inline, or in a blob of its own.
+    /// `value` as the root keeps a record's: inline, or in a blob of its own.
     fn store_value(&self, flush: &mut Flush, value: &Bytes) -> io::Result<Value> {
-        if value.len() <= self.options.inline_record_bytes {
-            return Ok(Value::Inline(value.clone()));
+        match value.len() <= self.options.inline_record_bytes {
+            true => Ok(Value::Inline(value.clone())),
+            false => Ok(Value::Blob(put_value(flush, value)?)),
         }
-        let frame = zstd::compress(value, &[], Bytes::copy_from_slice)?;
-        Ok(Value::Blob(flush.put(frame, None)))
     }
 
     /// Write `flush`: delete the garbage past its grace, put the blobs, then
