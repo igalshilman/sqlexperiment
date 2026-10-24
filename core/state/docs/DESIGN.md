@@ -54,8 +54,9 @@ entries, a leaf naming chunks' blobs, an inner node the nodes below, as few
 levels as the file needs. The top node is in the root; the others are blobs.
 A file of at most 64 chunks (1 MiB) is a leaf in the root, a 64 MiB file
 two levels, 10 GiB four. A flush writes a new node on each path it changes
-and keeps every other subtree, and a cold read fetches a level per round
-trip. A subtree of holes is not stored.
+and keeps every other subtree. A cold open fetches the map whole, a level a
+round trip, up to 512 nodes (512 MiB); past that, a cold read fetches the
+nodes on its path. A subtree of holes is not stored.
 
 **Records** are whole named values: in the root up to `inline_record_bytes`
 (1 KiB), and a blob of their own when larger, written when they change.
@@ -170,6 +171,9 @@ does not lose acknowledged work when a later step fails.
    large records, and every chunk of a file of at most `prefetch_pages`
    (16) pages, such as a small database whole (its map is in the root). A
    cached owner gets only those the cache lacks.
+3. **Get the maps**, beside step 2: of every file of at most 512 map nodes
+   (512 MiB), a level of all of them a round trip. The first read would
+   descend the map in as many round trips; after this, no read misses it.
 
 There is nothing to confirm, replay or repair: the root read names only
 stored blobs, and whatever a crashed flush left (blobs no root names) is
@@ -292,13 +296,13 @@ one-thread runtime of its own. It is the only background work.
 
 ## Costs
 
-| Operation        | Round trips                                                                                                            | Mutations                                                                |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Flush, cached    | 1, the sync                                                                                                            | A delta (or base) per changed chunk, the root, the old garbage's deletes |
-| Flush, cold      | 1, plus 1 to get the bases of the chunks it changes, plus 1 per map level below the top                                | The same, plus a map node per changed path and level                     |
-| Open, with cache | 1, plus 1 for large records' blobs the cache lacks                                                                     | None                                                                     |
-| Cold open        | 2: the root, then a small database whole and the large records                                                         | None                                                                     |
-| Cold page read   | 1 get of the chunk's base and delta, after 1 per map level below the top; sequential reads fetch up to 16 chunks ahead | None                                                                     |
+| Operation        | Round trips                                                                                                                          | Mutations                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| Flush, cached    | 1, the sync                                                                                                                          | A delta (or base) per changed chunk, the root, the old garbage's deletes |
+| Flush, cold      | 1, plus 1 to get the bases of the chunks it changes                                                                                  | The same, plus a map node per changed path and level                     |
+| Open, with cache | 1, plus 1 for large records' blobs the cache lacks                                                                                   | None                                                                     |
+| Cold open        | 2: the root, then a small database whole and the large records; 1 more per map level past the second                                 | None                                                                     |
+| Cold page read   | 1 get of the chunk's base and delta (past 512 MiB, after 1 per map level not yet read); sequential reads fetch up to 16 chunks ahead | None                                                                     |
 
 Measurements: [the experiment](COW_EXPERIMENT.md),
 [cache](../../sql/benches/CACHE_RESULTS.md).
@@ -309,8 +313,9 @@ Measurements: [the experiment](COW_EXPERIMENT.md),
   levels); the SQL database is capped there too (`PRAGMA max_page_count`),
   so a statement that would grow it past fails with SQLITE_FULL and the
   session goes on. A flush costs a node per map level on each changed path,
-  so a large database pays a few hundred bytes more per flush, and a cold
-  read a round trip per level; a small one, a leaf in the root, neither.
+  and a cold open a round trip per level, so a large database pays a few
+  hundred bytes more per flush and a round trip or two more per cold open; a
+  small one, a leaf in the root, neither.
 - **Keys.** Every flush that changes pages puts at least two keys (a blob and
   the root), and a namespace holds a key per live blob, about two per
   chunk, plus `garbage_after` flushes' garbage.
