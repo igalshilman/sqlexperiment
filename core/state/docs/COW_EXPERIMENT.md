@@ -47,12 +47,12 @@ values put per flush.
 
 | Workload                        | Log B/flush |      CoW B/flush | Puts/flush log / CoW | Deletes/flush log / CoW | Stored KiB log / CoW | Keys log / CoW |
 | ------------------------------- | ----------: | ---------------: | -------------------: | ----------------------: | -------------------: | -------------: |
-| Chat row + effects (300)        |       1,870 | **1,563** (−16%) |          1.58 / 2.11 |             0.32 / 1.00 |              62 / 65 |        39 / 34 |
-| 100 rows, update 1              |         908 |    **860** (−5%) |          1.25 / 2.45 |             0.12 / 1.37 |              11 / 18 |         9 / 28 |
-| 10k rows, update 1              |       7,853 |    **499** (16×) |          4.06 / 2.92 |             0.97 / 0.91 |        1,307 / 1,150 |      710 / 377 |
-| 10k rows, update 10 (scattered) |      63,826 |  **2,721** (23×) |        20.85 / 19.68 |            1.00 / 16.30 |        1,338 / 1,184 |      704 / 650 |
-| 10k rows, insert 1              |       1,676 |  **1,648** (−2%) |          1.61 / 3.22 |             0.33 / 1.95 |        1,308 / 1,168 |      717 / 231 |
-| 100k rows, update 1 (100)       |       7,265 |    **416** (17×) |          3.80 / 2.91 |             1.15 / 0.00 |      12,729 / 11,142 |  7,022 / 1,944 |
+| Chat row + effects (300)        |       1,870 | **1,579** (−16%) |          1.58 / 2.11 |             0.32 / 1.00 |              62 / 65 |        39 / 34 |
+| 100 rows, update 1              |         908 |    **871** (−4%) |          1.25 / 2.45 |             0.12 / 1.37 |              11 / 18 |         9 / 28 |
+| 10k rows, update 1              |       7,853 |    **512** (15×) |          4.06 / 2.92 |             0.97 / 0.91 |        1,307 / 1,150 |      710 / 377 |
+| 10k rows, update 10 (scattered) |      63,826 |  **2,732** (23×) |        20.85 / 19.68 |            1.00 / 16.30 |        1,338 / 1,184 |      704 / 650 |
+| 10k rows, insert 1              |       1,676 |  **1,660** (−1%) |          1.61 / 3.22 |             0.33 / 1.95 |        1,308 / 1,168 |      717 / 231 |
+| 100k rows, update 1 (100)       |       7,265 |    **426** (17×) |          3.80 / 2.91 |             1.15 / 0.00 |      12,729 / 11,142 |  7,022 / 1,944 |
 
 | Workload            | Round trips/flush, cached log / CoW | Uncached log / CoW | Cold read gets log / CoW | Cold read KiB log / CoW |
 | ------------------- | ----------------------------------: | -----------------: | -----------------------: | ----------------------: |
@@ -66,7 +66,7 @@ values put per flush.
 (Round trips count the open and the flush. Cold reads are a fresh session's
 first indexed lookup, without a cache.)
 
-- **Updates in a larger database: 16–23× fewer bytes.** The log rewrote its
+- **Updates in a larger database: 15–23× fewer bytes.** The log rewrote its
   inline tail with every flush and wrote each page twice (logged, then
   checkpointed); a delta is written once and costs what changed.
 - **Small databases and appends: about even.** The log's inline record was
@@ -89,17 +89,17 @@ first indexed lookup, without a cache.)
 
 ### Does it simplify the code?
 
-Yes, by about a third, and more in concepts than in lines.
+Yes, by about a quarter, and more in concepts than in lines.
 
 | Non-comment lines (`grep -vE '^\s*(//\|$)'`) | Log (main) |   CoW |
 | -------------------------------------------- | ---------: | ----: |
-| `core/state/src`, without the simulator      |      2,646 | 1,886 |
-| The simulator's monitor                      |        308 |   210 |
-| `core/state` and `core/sql` tests            |      9,131 | 7,632 |
+| `core/state/src`, without the simulator      |      2,646 | 1,969 |
+| The simulator's monitor                      |        308 |   218 |
+| `core/state` and `core/sql` tests            |      9,131 | 7,911 |
 | TLA+ specification                           |    9 files |  none |
 
 `log.rs`, `snapshot.rs`, `hint.rs`, `page_codec.rs` and `format.rs` (2,147
-lines) became `store.rs` (972); the cache went from 475 to 330. The SDKs
+lines) became `store.rs` (1,062); the cache went from 475 to 362. The SDKs
 lost their shared-handler retry loops, and the bindings `is_current`.
 
 Gone as concepts: the log and its segments, seals, checkpoints and their
@@ -117,17 +117,16 @@ checkpoint record, fresh values deleted after their last record), and replay
 on every open. Copy-on-write has one rule, and no recovery: the root stored
 names only blobs that are stored, and nothing else is ever overwritten. The
 failure table went from five rows to three, and the monitor from six
-invariants, which needed the log replayed to check, to five checks on each
-write, none of which replays anything. The TLA+ specification modelled the log protocol; nothing here needs
-one as much, and none was written.
+invariants, which needed the log replayed to check, to six checks on each
+write, none of which replays anything. The TLA+ specification modelled the
+log protocol; nothing here needs one as much, and none was written.
 
 **Caching became trivial.** A blob never changes once a root names it, so
 the cache keeps it by (namespace, database, number), forever, with nothing
 to invalidate: no epochs, generations or versions, and a root that changed
 under the owner (another process wrote it) costs nothing but the parked
 engine. The database is a random identity in the root: an object's state
-cleared and made again numbers its blobs from 0 again, under another (the
-review found the cache serving the old database's blobs without it). One
+cleared and made again numbers its blobs from 0 again, under another. One
 care remains: a crashed flush's blob numbers are reused by the next flush,
 so a blob is cached only once a durable root names it.
 
@@ -149,6 +148,36 @@ migration. The benches, analyzers and results that measured the log
 specification and its review) are deleted; `CACHE_RESULTS.md` and
 `RESTATE_RESULTS.md` are marked as measured on the log.
 
+## What the self-review found
+
+A review of the whole branch, before asking for one, found three real bugs,
+all in caching, none of which the campaign had caught:
+
+- **Two databases, one cache key.** A namespace whose state is cleared and
+  made again (or the same object run by two copies of a module, as a Python
+  test did) numbers its blobs from 0 again, and the cache, keyed by
+  (namespace, number), served the old database's blobs. The root now
+  carries a random database id, and the cache key includes it.
+- **An open during a flush.** A state opened while the owner's flush ran
+  could read the flush's writes before they were durable, without the sync
+  an unknown outcome triggers. A flush in progress now counts as unsettled.
+- **An evicted unsettled owner.** The cache could evict an owner whose last
+  flush had an unknown outcome, and with it the mark that its next open
+  must sync. Unsettled owners are now pinned until a sync settles them.
+
+And smaller ones: readahead recorded the wrong chunk, so a sequential scan
+never grew its window (a test now counts the gets); a fetch for a file the
+root does not yet name panicked; a decoded root could name chunks of 0
+pages, a based file without its base, or `u64::MAX` as a base id. The
+monitor gained the leak-nothing rule, decodes record blobs, checks the
+database id, and forgets what a crash may have lost when it reads a root.
+
+For code quality: the 250-line `commit` became a `Flush` builder filled by
+`commit_file`, `commit_chunk` and `commit_records`, then `write`; a settings
+wrapper became plain fields; the log's leftovers (an LZ4 dependency, a JDK
+for the TLA+ tools, a tracing hook, log-era wording in the docs and the
+SDKs) are gone.
+
 ## Validation
 
 - State campaign, 2,000 seeds: 78,650 flushes, 20,720 crashes, 185,152 blobs,
@@ -158,10 +187,10 @@ specification and its review) are deleted; `CACHE_RESULTS.md` and
   unknown outcomes.
 - Every state, SQL and functions test (the functions in each page-tracking
   mode), the Node.js addon's and the TypeScript tests, and the Python
-  packages' tests. One Python test's store kept a
-  random subset of a failed request's writes, "worse than the contract": it
-  now keeps a prefix, the contract, which copy-on-write relies on (a root
-  kept without a blob it names would be lost).
+  packages' tests. The Node.js addon's test store kept a random subset of a
+  failed request's writes, "worse than the contract": it now keeps a
+  prefix, the contract, which copy-on-write relies on (a root kept without
+  a blob it names would be lost).
 
 ## Trade-offs and open questions
 
