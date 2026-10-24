@@ -189,19 +189,24 @@ async fn load(store: &Store, w: Workload, words: &mut Words) -> Result<()> {
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_a ON t(a)").await?;
-    db.execute("BEGIN").await?;
-    for id in 1..=w.rows {
-        db.execute_with(
-            "INSERT INTO t VALUES(?, ?, ?)",
-            [
-                Value::from_i64(id as i64),
-                Value::from_i64(id as i64),
-                Value::build_text(words.text(w.payload)),
-            ],
-        )
-        .await?;
+    // A session of 100k rows at a time, within its private changes' limit.
+    for batch in (1..=w.rows).collect::<Vec<_>>().chunks(100_000) {
+        db.execute("BEGIN").await?;
+        for &id in batch {
+            db.execute_with(
+                "INSERT INTO t VALUES(?, ?, ?)",
+                [
+                    Value::from_i64(id as i64),
+                    Value::from_i64(id as i64),
+                    Value::build_text(words.text(w.payload)),
+                ],
+            )
+            .await?;
+        }
+        db.execute("COMMIT").await?;
+        save(db, None).await?;
+        db = open(store, &None).await?;
     }
-    db.execute("COMMIT").await?;
     save(db, None).await
 }
 
