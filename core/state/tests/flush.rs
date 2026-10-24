@@ -333,10 +333,10 @@ fn a_cancelled_flush_ends_the_state_and_no_other_flushes_on_top() -> Result<()> 
 }
 
 #[test]
-fn idle_state_heavier_than_the_budget_is_not_kept_and_evicts_nothing() -> Result<()> {
+fn a_parked_value_heavier_than_the_budget_is_not_kept_and_evicts_nothing() -> Result<()> {
     futures::executor::block_on(async {
         let cache = open_cache(state::PageCacheConfig {
-            idle_bytes: 100,
+            parked_bytes: 100,
             ..cache_config(1 << 20, 4 << 20)
         });
         let stores: Vec<Arc<dyn KvStore>> =
@@ -349,19 +349,15 @@ fn idle_state_heavier_than_the_budget_is_not_kept_and_evicts_nothing() -> Result
             let mut mutation = state.mutation();
             mutation.set(&state.record("n"), "1".into())?;
             mutation.flush().await?;
-            state.join("engine")?.park(value, weight).unwrap();
+            state.park("engine", value, weight).unwrap();
         }
-        // The light one is still idle; the heavy one was never kept.
+        // The light one is still parked; the heavy one was never kept.
         for ((namespace, expected), store) in [("light", Some(1u32)), ("heavy", None)]
             .into_iter()
             .zip(&stores)
         {
             let state = State::open(store.clone()).cached(&cache, namespace).await?;
-            assert_eq!(
-                state.join("engine")?.take_idle::<u32>(),
-                expected,
-                "{namespace}"
-            );
+            assert_eq!(state.take_parked::<u32>("engine"), expected, "{namespace}");
         }
         Ok(())
     })

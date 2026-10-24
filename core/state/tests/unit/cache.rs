@@ -68,7 +68,7 @@ fn another_root_forgets_the_flush_not_the_blobs() {
 /// Idle state that refers back to its namespace's handle (as a parked SQL
 /// engine does); dropping the last `PageCache` still frees everything.
 #[test]
-fn dropping_the_cache_frees_idle_state() -> crate::Result<()> {
+fn dropping_the_cache_frees_parked_values() -> crate::Result<()> {
     use crate::{kv::KvStore, simulation::*};
     futures::executor::block_on(async {
         let cache = open_cache(cache_config(1 << 20, 16 << 20));
@@ -76,9 +76,9 @@ fn dropping_the_cache_frees_idle_state() -> crate::Result<()> {
         let namespace = cache.namespace("parked");
         let state = crate::State::open(store).cached(&cache, "parked").await?;
         let freed = Arc::new(());
-        let idle = (namespace, freed.clone());
-        assert!(state.join("engine")?.park(idle, 1).is_ok());
-        assert_eq!(cache.idle.lock().unwrap().parked.len(), 1);
+        let value = (namespace, freed.clone());
+        assert!(state.park("engine", value, 1).is_ok());
+        assert_eq!(cache.parked.lock().unwrap().parked.len(), 1);
         drop(state);
         let shared = Arc::downgrade(&cache.shared);
         drop(cache);

@@ -22,14 +22,13 @@
 //! # Durability knowledge
 //!
 //! The namespace remembers the root it last read or wrote, its last durable
-//! flush (so a state can tell another flushed since it opened), and what
-//! participants left idle at that flush (SQL's engine, say), for the next
-//! state. A flush whose outcome is unknown leaves writes this owner can read
+//! flush (so a state can tell another flushed since it opened), and the values
+//! parked at that flush (SQL's engine, say), for the next state. A flush whose outcome is unknown leaves writes this owner can read
 //! but a crash can still lose, so the next open syncs first
 //! ([`NamespaceCache::unsettled`]): what it reads, and caches, is durable.
 //!
-//! Namespace states are kept for a bounded number of namespaces, and idle
-//! state within a byte budget, least recently used first; forgetting either
+//! Namespace states are kept for a bounded number of namespaces, and parked
+//! values within a byte budget, least recently used first; forgetting either
 //! only makes a namespace cold.
 use bytes::Bytes;
 use foyer::{
@@ -64,10 +63,10 @@ pub struct PageCacheConfig {
     pub disk_block: usize,
     /// Namespaces whose durability knowledge is kept.
     pub namespaces: usize,
-    /// Bytes of what participants leave idle for the next session of their
-    /// namespace (see [`crate::Participant::park`]), as they weigh it: SQL's
+    /// Bytes of the values parked for the next session of their
+    /// namespace (see [`crate::State::park`]), as they weigh it: SQL's
     /// engine, say. Least recently parked go first.
-    pub idle_bytes: usize,
+    pub parked_bytes: usize,
 }
 
 impl PageCacheConfig {
@@ -79,19 +78,19 @@ impl PageCacheConfig {
             disk,
             disk_block: 4 << 20,
             namespaces: 1 << 16,
-            idle_bytes: 64 << 20,
+            parked_bytes: 64 << 20,
         }
     }
 }
 
 /// Process-wide blob cache; clones share it.
 ///
-/// Idle state lives here and may refer back to its namespace's handle, so
+/// ParkedValue state lives here and may refer back to its namespace's handle, so
 /// handles only reach it weakly: dropping the last `PageCache` drops it.
 #[derive(Clone)]
 pub struct PageCache {
     shared: Arc<Shared>,
-    idle: Arc<Mutex<Parked>>,
+    parked: Arc<Mutex<Parked>>,
 }
 
 struct Shared {
@@ -162,7 +161,7 @@ impl PageCache {
                 ids: AtomicU64::new(random() >> 1),
                 _runtime: matches!(spawner, Spawner::Runtime(_)).then_some(spawner),
             }),
-            idle: Arc::new(Mutex::new(Parked::new(config.idle_bytes))),
+            parked: Arc::new(Mutex::new(Parked::new(config.parked_bytes))),
         })
     }
 
@@ -187,7 +186,7 @@ impl PageCache {
         let id = owner.lock().unwrap().id;
         NamespaceCache {
             shared: self.shared.clone(),
-            idle: Arc::downgrade(&self.idle),
+            parked: Arc::downgrade(&self.parked),
             id,
             owner,
         }
@@ -203,15 +202,15 @@ impl PageCache {
 #[derive(Clone)]
 pub struct NamespaceCache {
     shared: Arc<Shared>,
-    idle: Weak<Mutex<Parked>>,
-    /// The owner's identity, which keys its blobs and idle state.
+    parked: Weak<Mutex<Parked>>,
+    /// The owner's identity, which keys its blobs and parked values.
     id: u64,
     owner: Arc<Mutex<Owner>>,
 }
 
 /// Per-namespace state.
 struct Owner {
-    /// Identity of this state, which keys its blobs and idle state.
+    /// Identity of this state, which keys its blobs and parked values.
     id: u64,
     /// The root as last read or written by this owner; `None` when unknown,
     /// which matches no root.
@@ -241,7 +240,7 @@ impl NamespaceCache {
             return true;
         }
         let stale = self.forget_locked(&mut owner);
-        // Idle state may hold state handles, whose drop takes this lock.
+        // ParkedValue state may hold state handles, whose drop takes this lock.
         drop(owner);
         drop(stale);
         false
@@ -305,13 +304,13 @@ impl NamespaceCache {
         }
     }
 
-    /// Forget the root and what was idle at it, which the caller drops once
+    /// Forget the root and what was parked at it, which the caller drops once
     /// it holds no lock.
     #[must_use]
-    fn forget_locked(&self, owner: &mut Owner) -> HashMap<String, Idle> {
+    fn forget_locked(&self, owner: &mut Owner) -> HashMap<String, ParkedValue> {
         owner.root = None;
         owner.committed = None;
-        self.take_idle()
+        self.take_parked()
     }
 
     /// Take the right to flush on top of `version`, this owner's last
@@ -334,22 +333,22 @@ impl NamespaceCache {
         self.owner().committed
     }
 
-    /// Keep a participant's idle state for the next session; it is dropped
+    /// Keep a parked value for the next session; it is dropped
     /// on any reset.
-    pub(crate) fn park(&self, name: &str, idle: Idle) {
-        if let Some(parked) = self.idle.upgrade() {
+    pub(crate) fn park(&self, name: &str, value: ParkedValue) {
+        if let Some(parked) = self.parked.upgrade() {
             // Dropped once the lock is released.
             let evicted = parked
                 .lock()
                 .unwrap()
-                .park((self.id, name.to_owned()), idle);
+                .park((self.id, name.to_owned()), value);
             drop(evicted);
         }
     }
 
-    /// Every participant's idle state, by participant.
-    pub(crate) fn take_idle(&self) -> HashMap<String, Idle> {
-        let Some(parked) = self.idle.upgrade() else {
+    /// Every value parked for this namespace, by key.
+    pub(crate) fn take_parked(&self) -> HashMap<String, ParkedValue> {
+        let Some(parked) = self.parked.upgrade() else {
             return HashMap::new();
         };
         parked.lock().unwrap().take_all(self.id)
@@ -417,23 +416,23 @@ pub(crate) fn random() -> u64 {
     hasher.finish()
 }
 
-/// What a participant left idle at a durable version, for its namespace's
-/// next session (see [`crate::Participant::park`]).
-pub(crate) struct Idle {
+/// A value parked at a durable version, for its namespace's
+/// next session (see [`crate::State::park`]).
+pub(crate) struct ParkedValue {
     pub value: Box<dyn Any + Send>,
     /// The version it corresponds to.
     pub version: u64,
-    /// Its bytes, as the participant weighs it.
+    /// Its bytes, as whoever parked it weighs it.
     pub weight: usize,
 }
 
-/// Idle state within a byte budget, by owner and participant, least recently
+/// Parked values within a byte budget, by owner and key, least recently
 /// parked dropped first.
 struct Parked {
     budget: usize,
     used: usize,
     clock: u64,
-    parked: HashMap<(u64, String), (Idle, u64)>,
+    parked: HashMap<(u64, String), (ParkedValue, u64)>,
     order: BTreeMap<u64, (u64, String)>,
 }
 
@@ -448,41 +447,41 @@ impl Parked {
         }
     }
 
-    /// Park `idle` under `key`, evicting the least recently parked to stay
+    /// Park `value` under `key`, evicting the least recently parked to stay
     /// in the budget; one heavier than the whole budget is refused rather
     /// than evict everything. What no longer fits is returned.
     #[must_use]
-    fn park(&mut self, key: (u64, String), idle: Idle) -> Vec<Idle> {
-        let mut out: Vec<Idle> = self.take(&key).into_iter().collect();
-        if idle.weight > self.budget {
-            out.push(idle);
+    fn park(&mut self, key: (u64, String), value: ParkedValue) -> Vec<ParkedValue> {
+        let mut out: Vec<ParkedValue> = self.take(&key).into_iter().collect();
+        if value.weight > self.budget {
+            out.push(value);
             return out;
         }
         self.clock += 1;
-        self.used += idle.weight;
-        self.parked.insert(key.clone(), (idle, self.clock));
+        self.used += value.weight;
+        self.parked.insert(key.clone(), (value, self.clock));
         self.order.insert(self.clock, key);
         while self.used > self.budget {
             let (_, oldest) = self.order.pop_first().expect("nonempty when over budget");
-            let (idle, _) = self
+            let (value, _) = self
                 .parked
                 .remove(&oldest)
                 .expect("ordered state is parked");
-            self.used -= idle.weight;
-            out.push(idle);
+            self.used -= value.weight;
+            out.push(value);
         }
         out
     }
 
-    fn take(&mut self, key: &(u64, String)) -> Option<Idle> {
-        let (idle, parked) = self.parked.remove(key)?;
+    fn take(&mut self, key: &(u64, String)) -> Option<ParkedValue> {
+        let (value, parked) = self.parked.remove(key)?;
         self.order.remove(&parked);
-        self.used -= idle.weight;
-        Some(idle)
+        self.used -= value.weight;
+        Some(value)
     }
 
-    /// Every participant's idle state of the owner `id`.
-    fn take_all(&mut self, id: u64) -> HashMap<String, Idle> {
+    /// Every value parked by the owner `id`.
+    fn take_all(&mut self, id: u64) -> HashMap<String, ParkedValue> {
         let keys: Vec<_> = (self.parked.keys())
             .filter(|(owner, _)| *owner == id)
             .cloned()
