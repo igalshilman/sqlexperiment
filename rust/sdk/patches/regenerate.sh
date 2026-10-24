@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 build=../.build
 
 sdk=$build/sdk-rust
-git -C "$sdk" add -N -- src tests examples
-git -C "$sdk" diff HEAD -- src tests examples Cargo.toml rust-toolchain.toml endpoint_manifest_schema.json > sdk-rust.patch
+git -C "$sdk" add -N -- src macros tests examples
+git -C "$sdk" diff HEAD -- src macros tests examples Cargo.toml rust-toolchain.toml endpoint_manifest_schema.json > sdk-rust.patch
 
 grep '^diff --git' sdk-rust.patch | awk '{print $3}'

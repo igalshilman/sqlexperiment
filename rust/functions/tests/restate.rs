@@ -472,14 +472,12 @@ async fn a_turn_starts_with_the_root() {
     };
     let journal = format!("SELECT entry_type, name FROM sys_journal WHERE id = '{refund}'");
     let entries = query(&journal).await;
-    let root: Vec<&str> = (entries.iter())
+    let reads: Vec<&str> = (entries.iter())
         .filter(|row| row["name"] == state::ROOT_KEY)
         .map(|row| row["entry_type"].as_str().unwrap())
+        .filter(|entry| entry.contains("Get"))
         .collect();
-    assert!(
-        !root.is_empty() && root.iter().all(|e| e.contains("GetEagerState")),
-        "{entries:?}"
-    );
+    assert_eq!(reads, ["Command: GetEagerState"], "{entries:?}");
     let approve = json!({"id": wait["id"], "value": "approved"});
     call("approvals/dave/signal", approve).await;
     let note = json!({"name": "note", "value": "none", "keep": true});

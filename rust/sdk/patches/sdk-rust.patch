@@ -43,6 +43,46 @@ index e45699b..f30e4b7 100644
            },
            "ingressPrivate":  {
              "type": "boolean",
+diff --git a/macros/src/generator.rs b/macros/src/generator.rs
+index 9215a9b..af8832e 100644
+--- a/macros/src/generator.rs
++++ b/macros/src/generator.rs
+@@ -270,6 +270,7 @@ impl<'a> ServiceGenerator<'a> {
+                     idempotency_retention: None,
+                     workflow_completion_retention: None,
+                     enable_lazy_state: #lazy_state,
++                    eager_state_keys_whitelist: Default::default(),
+                     ingress_private: None,
+                     retry_policy_initial_interval: None,
+                     retry_policy_max_interval: None,
+@@ -297,6 +298,7 @@ impl<'a> ServiceGenerator<'a> {
+                         journal_retention: None,
+                         idempotency_retention: None,
+                         enable_lazy_state: None,
++                        eager_state_keys_whitelist: Default::default(),
+                         ingress_private: None,
+                         retry_policy_initial_interval: None,
+                         retry_policy_max_interval: None,
+diff --git a/macros/src/struct_generator.rs b/macros/src/struct_generator.rs
+index 76d7dad..9034e71 100644
+--- a/macros/src/struct_generator.rs
++++ b/macros/src/struct_generator.rs
+@@ -238,6 +238,7 @@ fn discovery(svc: &StructService) -> TokenStream2 {
+                 idempotency_retention: #idempotency_retention,
+                 workflow_completion_retention: #workflow_completion_retention,
+                 enable_lazy_state: #enable_lazy_state,
++                eager_state_keys_whitelist: Default::default(),
+                 ingress_private: #ingress_private,
+                 retry_policy_initial_interval: #initial_interval,
+                 retry_policy_max_interval: #max_interval,
+@@ -279,6 +280,7 @@ fn discovery(svc: &StructService) -> TokenStream2 {
+                     journal_retention: #journal_retention,
+                     idempotency_retention: #idempotency_retention,
+                     enable_lazy_state: #enable_lazy_state,
++                    eager_state_keys_whitelist: Default::default(),
+                     ingress_private: #ingress_private,
+                     retry_policy_initial_interval: #initial_interval,
+                     retry_policy_max_interval: #max_interval,
 diff --git a/rust-toolchain.toml b/rust-toolchain.toml
 deleted file mode 100644
 index 5dcf242..0000000
