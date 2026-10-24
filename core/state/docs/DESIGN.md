@@ -138,8 +138,9 @@ and copies what the SQL committed into the mutation, as writes to the file `db`;
 the mutation's flush makes it durable with every record and file in the mutation, in
 one root, and consumes the mutation. SQL keeps the copied pages in its view until
 the mutation's receipt says the state flushed it: a mutation dropped unflushed discards
-its writes, and SQL's go into the next one. A flush is refused while SQL
-holds changes committed but not yet moved into a mutation.
+its writes, and SQL's go into the next one. A mutation flushed without
+`Sql::flush` leaves SQL's changes private, for a later one: pairing the two
+is the host's.
 `Sql::transaction(closure)` wraps `BEGIN`/`COMMIT`, and rolls back when the
 closure returns `Err`.
 
