@@ -365,7 +365,7 @@ impl Root {
                 Kind::Paged { size, base, chunks } => {
                     body.push(2);
                     put_varint(&mut body, size / 512);
-                    put_varint(&mut body, base.map_or(0, |id| id.saturating_add(1)));
+                    put_varint(&mut body, base.map_or(0, |id| id + 1));
                     let (mut bases, mut deltas) = (0, 0);
                     for chunk in chunks {
                         put_ref(&mut body, &mut bases, chunk.base);
@@ -1226,6 +1226,9 @@ impl Snapshot {
     }
 
     pub(crate) fn with_base(&self, name: &str, base: Arc<dyn Base>) -> io::Result<Self> {
+        if base.id() == u64::MAX {
+            return refuse("a base's id must be below u64::MAX".into());
+        }
         if let Some(id) = self.root.file_id(name) {
             match &self.root.directory[&id].kind {
                 Kind::Paged {

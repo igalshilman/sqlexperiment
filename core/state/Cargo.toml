@@ -15,9 +15,8 @@ bench = false
 [dependencies]
 futures = "0.3"
 bytes = "1.10"
-# Log segments: zstd frames against the previous images of their pages.
+# Blobs: zstd frames, a delta against its chunk's base as the reference prefix.
 zstd-safe = { version = "7.2", default-features = false, features = ["std"] }
-lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 # Pinned with its subcrates in Cargo.lock: 0.22.4 to 0.22.6 print a debug line
 # to stdout whenever a file device opens.
 foyer = "=0.22.3"

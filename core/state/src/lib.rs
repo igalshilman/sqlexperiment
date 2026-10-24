@@ -116,6 +116,7 @@ pub type Page = Bytes;
 /// it until they have a base of their own.
 pub trait Base: Send + Sync {
     /// Names the base: a file made with one is opened only with it again.
+    /// Below `u64::MAX`.
     fn id(&self) -> u64;
     /// Page `index` (4096 bytes); `None` past the base's end.
     fn page(&self, index: u64) -> Option<&[u8]>;
@@ -595,7 +596,6 @@ impl Wal {
         };
         let files = std::mem::take(&mut self.files);
         let records = std::mem::take(&mut self.records);
-        trace(&files, &records);
         self.taken = true;
         let result = snapshot.commit(files, records).await;
         running.returned = true;
@@ -615,46 +615,6 @@ impl Wal {
             false => Err("the WAL is of another state".into()),
         }
     }
-}
-
-/// Experiment: append each flush's writes to the file `STATE_TRACE`, for
-/// `examples/replay.rs`. Per flush: `F`, then `P` name page len image (len 0
-/// a hole), `S` name size, `R` name len value; lengths u32 LE, pages u64 LE.
-fn trace(files: &store::Writes, records: &store::Records) {
-    use std::io::Write;
-    let Ok(path) = std::env::var("STATE_TRACE") else {
-        return;
-    };
-    let mut out = vec![b'F'];
-    let name = |out: &mut Vec<u8>, name: &str| {
-        out.extend((name.len() as u32).to_le_bytes());
-        out.extend(name.as_bytes());
-    };
-    for (file, written) in files {
-        out.push(b'S');
-        name(&mut out, file);
-        out.extend(written.size.to_le_bytes());
-        for (page, image) in &written.pages {
-            out.push(b'P');
-            name(&mut out, file);
-            out.extend(page.to_le_bytes());
-            let image = image.as_deref().unwrap_or(&[]);
-            out.extend((image.len() as u32).to_le_bytes());
-            out.extend(image);
-        }
-    }
-    for (record, value) in records {
-        out.push(b'R');
-        name(&mut out, record);
-        out.extend((value.len() as u32).to_le_bytes());
-        out.extend(&value[..]);
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .unwrap();
-    file.write_all(&out).unwrap();
 }
 
 impl Drop for Wal {

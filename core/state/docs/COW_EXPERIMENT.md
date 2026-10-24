@@ -39,7 +39,7 @@ changes to the same pages, because it rewrote whole pages. What changed:
 
 ## Measurements
 
-`core/sql/benches/cow_compare.rs`, one flush per session, 100–300 flushes,
+`core/sql/benches/flush_costs.rs`, one flush per session, 100–300 flushes,
 against the log (main at `4cba925`, the same bench). Bytes are keys and
 values put per flush.
 

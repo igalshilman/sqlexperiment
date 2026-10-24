@@ -2,8 +2,8 @@
 //! bytes and round trips a flush costs, what is stored, and a cold read.
 //!
 //! ```sh
-//! cargo bench --locked --features simulation --bench cow_compare
-//! CHUNK_PAGES=1 REBASE_RATIO=0.5 cargo bench --locked --features simulation --bench cow_compare
+//! cargo bench --locked --features simulation --bench flush_costs
+//! CHUNK_PAGES=1 REBASE_RATIO=0.5 cargo bench --locked --features simulation --bench flush_costs
 //! ```
 //!
 //! `CHUNK_PAGES`, `REBASE_RATIO`, `INLINE_BYTES` and `GARBAGE_AFTER` set the
@@ -245,18 +245,6 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
     let memory = MemoryKv::default();
     let store: Store = Arc::new(LatencyKv::new(memory.clone()));
     let mut words = Words::new();
-    // TRACE_DIR: the cached run's flushes, for state's examples/replay.rs.
-    let trace = std::env::var("TRACE_DIR")
-        .ok()
-        .filter(|_| cached)
-        .map(|dir| format!("{dir}/{}.trace", w.name.replace([' ', ':', '+'], "_")));
-    match &trace {
-        Some(path) => {
-            let _ = std::fs::remove_file(path);
-            unsafe { std::env::set_var("STATE_TRACE", path) }
-        }
-        None => unsafe { std::env::remove_var("STATE_TRACE") },
-    }
     load(&store, w, &mut words).await?;
     let cache =
         cached.then(|| Namespace::new(&open_cache(cache_config(256 << 20, 1 << 30)), "bench"));
@@ -271,11 +259,6 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
     save(db, None).await?;
     store.reset();
     memory.reset_stats();
-    if let Some(path) = &trace {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
-        file.write_all(b"M").unwrap();
-    }
     for i in 0..w.flushes {
         let mut db = open(&store, &cache).await?;
         let effects = step(&mut db, w, i, &mut words).await?;

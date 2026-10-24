@@ -463,12 +463,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lz4_flex"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
-
-[[package]]
 name = "mea"
 version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -743,7 +737,6 @@ dependencies = [
  "bytes",
  "foyer",
  "futures",
- "lz4_flex",
  "tokio",
  "zstd-safe",
 ]

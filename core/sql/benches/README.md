@@ -13,7 +13,7 @@ before copy-on-write).
 Run from `core/sql`:
 
 ```sh
-cargo bench --locked --features simulation --bench cow_compare
+cargo bench --locked --features simulation --bench flush_costs
 cargo bench --locked --features simulation --bench amplification -- 3 > benches/results/amplification.csv
 cargo bench --locked --features simulation --bench small_databases -- 3 > benches/results/small_databases.csv
 cargo bench --locked --features simulation --bench cache_cpu -- 3 > benches/results/cache-cpu.csv
@@ -26,7 +26,7 @@ The positional argument is the repeat count; the default is three. Cargo's
 
 | Target            | Coverage                                                                                                                                                            | Evidence                                                |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `cow_compare`     | Bytes, keys and round trips per flush, stored size and cold reads, by workload; `CHUNK_PAGES`, `REBASE_RATIO`, `INLINE_BYTES`, `GARBAGE_AFTER` override the options | [COW_EXPERIMENT.md](../../state/docs/COW_EXPERIMENT.md) |
+| `flush_costs`     | Bytes, keys and round trips per flush, stored size and cold reads, by workload; `CHUNK_PAGES`, `REBASE_RATIO`, `INLINE_BYTES`, `GARBAGE_AFTER` override the options | [COW_EXPERIMENT.md](../../state/docs/COW_EXPERIMENT.md) |
 | `amplification`   | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                                       | `results/amplification.csv`                             |
 | `small_databases` | Tiny databases, index counts, save grouping and a larger control                                                                                                    | `results/small_databases.csv`                           |
 | `cache_cpu`       | Process-wide memory and disk cache by memory size: misses, round trips, allocations and CPU time                                                                    | [CACHE_RESULTS.md](CACHE_RESULTS.md) (log format, v15)  |

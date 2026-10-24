@@ -48,7 +48,7 @@ harness = false
 required-features = ["simulation"]
 
 [[bench]]
-name = "cow_compare"
+name = "flush_costs"
 harness = false
 required-features = ["simulation"]
 
