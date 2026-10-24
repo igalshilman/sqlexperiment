@@ -1,9 +1,9 @@
 //! The stored state: immutable blobs, and one root that names them.
 //!
-//! | Key        | Holds                                                                    |
-//! | ---------- | ------------------------------------------------------------------------ |
-//! | `root`     | The commit point: the directory of files and records, and what each names |
-//! | `blob/<n>` | One zstd frame, written once and never changed: a chunk, or a record     |
+//! | Key            | Holds                                                                     |
+//! | -------------- | ------------------------------------------------------------------------- |
+//! | `v16/root`     | The commit point: the directory of files and records, and what each names |
+//! | `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk, or a record      |
 //!
 //! A paged file is a row of *chunks* of [`StateOptions::chunk_pages`] pages
 //! each. A chunk is stored as a *base*, a frame of its pages compressed
@@ -33,13 +33,19 @@
 //! delta together, in one.
 //!
 //! **Readers and caching.** A blob's content never changes once a durable root
-//! names it, so any state may cache it under its number forever, and a
+//! names it, so any state may cache it under its number (and its database's
+//! random identity, which a namespace made again changes) forever, and a
 //! state reads the root it opened as a consistent snapshot while the owner
 //! flushes, for [`StateOptions::garbage_after`] of the owner's flushes. (A
 //! crashed flush's blobs, which no durable root names, are overwritten by
 //! the next flush: nothing caches them, since nothing caches a blob before a
 //! durable root names it.)
-use crate::{Base, PAGE, Page, StateOptions, cache::NamespaceCache, kv::KvStore, zstd};
+use crate::{
+    Base, PAGE, Page, StateOptions,
+    cache::{self, NamespaceCache},
+    kv::KvStore,
+    zstd,
+};
 use bytes::Bytes;
 use futures::future::{BoxFuture, FutureExt, Shared, WeakShared, try_join_all};
 use std::{
@@ -214,6 +220,10 @@ pub(crate) struct Entry {
 /// The root: the commit point.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Root {
+    /// The database's identity, drawn at random when its first root was
+    /// made: its blob numbers are unique under it, and the cache keys them
+    /// by both (a namespace emptied and made again counts from 0 again).
+    pub id: u64,
     /// The flushes that changed something, ever.
     pub version: u64,
     /// The next blob number: none at or past it is named.
@@ -281,6 +291,7 @@ fn get_ref(r: &mut Reading, previous: &mut u64) -> io::Result<Option<u64>> {
 impl Root {
     fn new(chunk_pages: u64) -> Self {
         Self {
+            id: cache::random(),
             version: 0,
             next_blob: 0,
             chunk_pages,
@@ -322,7 +333,7 @@ impl Root {
     }
 
     pub fn encode(&self) -> Bytes {
-        let mut body = Vec::new();
+        let mut body = self.id.to_le_bytes().to_vec();
         put_varint(&mut body, self.version);
         put_varint(&mut body, self.next_blob);
         put_varint(&mut body, self.chunk_pages);
@@ -365,7 +376,7 @@ impl Root {
         }
         let mut out = ROOT_MAGIC.to_vec();
         put_varint(&mut out, body.len() as u64);
-        zstd::compress(&body, &[], false, |frame| out.extend_from_slice(frame))
+        zstd::compress(&body, &[], true, |frame| out.extend_from_slice(frame))
             .expect("compressing in memory");
         Bytes::from(out)
     }
@@ -382,14 +393,14 @@ impl Root {
         if body.len() != len {
             return Err(invalid("root"));
         }
-        let mut r = Reading {
-            bytes: &body,
-            at: 0,
-        };
+        let (id, rest) = body.split_first_chunk().ok_or_else(|| invalid("root"))?;
+        let id = u64::from_le_bytes(*id);
+        let mut r = Reading { bytes: rest, at: 0 };
         let version = r.bounded(MAX_SEQUENCE)?;
         let next_blob = r.bounded(MAX_SEQUENCE)?;
         let chunk_pages = r.bounded(MAX_FILE_BYTES / PAGE)?.max(1);
         let mut root = Root {
+            id,
             version,
             next_blob,
             ..Root::new(chunk_pages)
@@ -443,7 +454,7 @@ impl Root {
             };
             root.directory.insert(id, Entry { name, kind });
         }
-        if r.at != body.len() {
+        if r.at != r.bytes.len() {
             return Err(invalid("root"));
         }
         Ok(root)
@@ -797,7 +808,7 @@ impl Snapshot {
     async fn blob(&self, n: u64) -> io::Result<Bytes> {
         let cache = self.options.cache.clone();
         if let Some(cache) = &cache
-            && let Some(value) = cache.get(n).await
+            && let Some(value) = cache.get(self.root.id, n).await
         {
             return Ok(value);
         }
@@ -805,6 +816,7 @@ impl Snapshot {
         // it), whose blobs a crash could lose and the next flush reuse: only
         // the owner, whose roots are durable, caches what it fetches.
         let cache = cache.filter(|_| !self.reader);
+        let database = self.root.id;
         let fetch = {
             let mut fetching = self.fetching.lock().unwrap();
             if let Some(fetch) = fetching.get(&n).and_then(WeakShared::upgrade) {
@@ -820,7 +832,7 @@ impl Snapshot {
                     })?;
                     // A durable root names it: it never changes now.
                     if let Some(cache) = cache {
-                        cache.insert(n, value.clone());
+                        cache.insert(database, n, value.clone());
                     }
                     Ok(value)
                 }
@@ -1104,7 +1116,7 @@ impl Snapshot {
         }
         if let Some(cache) = cache {
             for (n, value, _) in &fresh {
-                cache.insert(*n, value.clone());
+                cache.insert(root.id, *n, value.clone());
             }
             cache.record(Some(bytes.clone()), Some(version));
         }

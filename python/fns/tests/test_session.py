@@ -1,8 +1,8 @@
 """ctx.db and ctx.transaction, over the SQL extension and a fake object state."""
 
 import asyncio
-import itertools
 import json
+import uuid
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -20,8 +20,6 @@ def anyio_backend():
 
 
 pytestmark = [pytest.mark.anyio]
-
-_objects = itertools.count()
 
 shop = VirtualObject("shop")
 
@@ -115,7 +113,7 @@ class FakeHost:
 
 def fresh() -> str:
     """A namespace no session of this process has used: as another process sees the state."""
-    return f"object-{next(_objects)}"
+    return f"object-{uuid.uuid4().hex}"
 
 
 class _Stored:

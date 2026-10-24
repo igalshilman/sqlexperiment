@@ -110,10 +110,10 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
                     let Ok(read) = read.await else {
                         panic!("{case}: panicked");
                     };
-                    // A bit flip may stay undetected: blobs' frames have a
-                    // checksum, but not their headers, nor the root.
+                    // A bit flip may stay undetected: frames have a
+                    // checksum, but not their headers.
                     let flipped = corruption.starts_with("bit");
-                    let kind = key.split('/').next().unwrap();
+                    let kind = key.split('/').nth(1).unwrap();
                     match &read {
                         Read::AsFlushed | Read::Failed => {}
                         Read::Otherwise if flipped => {}

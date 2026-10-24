@@ -13,9 +13,11 @@
 //! there is nothing to invalidate. A blob is cached only once a durable root
 //! names it (after this owner's flush synced, or when a state read it as
 //! named by the root it opened), so a crashed flush's blobs, which the next
-//! flush overwrites, are never cached. Keys are the namespace's identity and
-//! the number; an identity comes from a process-wide counter, and the disk
-//! tier starts empty in every process.
+//! flush overwrites, are never cached. Keys are the namespace's identity, its
+//! database's (random, in the root: a namespace emptied and made again
+//! numbers its blobs from 0 again, under another) and the number; a
+//! namespace's identity comes from a process-wide counter, and the disk tier
+//! starts empty in every process.
 //!
 //! # Durability knowledge
 //!
@@ -152,7 +154,7 @@ impl PageCache {
                 live: Mutex::default(),
                 // Distinct per instance, so two caches sharing a disk file by
                 // mistake still never share keys.
-                ids: AtomicU64::new(random_start()),
+                ids: AtomicU64::new(random() >> 1),
                 _runtime: matches!(spawner, Spawner::Runtime(_)).then_some(spawner),
             }),
             idle: Arc::new(Mutex::new(Parked::new(config.idle_bytes))),
@@ -318,16 +320,17 @@ impl NamespaceCache {
         parked.lock().unwrap().take_all(id)
     }
 
-    fn key(&self, blob: u64) -> BlobKey {
+    fn key(&self, database: u64, blob: u64) -> BlobKey {
         BlobKey {
             namespace: self.owner().id,
+            database,
             blob,
         }
     }
 
-    /// Blob `n`, from memory or disk. A disk error is a miss.
-    pub(crate) async fn get(&self, n: u64) -> Option<Bytes> {
-        let key = self.key(n);
+    /// Blob `n` of `database`, from memory or disk. A disk error is a miss.
+    pub(crate) async fn get(&self, database: u64, n: u64) -> Option<Bytes> {
+        let key = self.key(database, n);
         // A hit in memory without a hop to the disk's threads.
         if let Some(entry) = self.shared.blobs.memory().get(&key) {
             return Some(entry.value().clone());
@@ -338,9 +341,11 @@ impl NamespaceCache {
         }
     }
 
-    /// Keep blob `n`, which a durable root names.
-    pub(crate) fn insert(&self, n: u64, value: Bytes) {
-        self.shared.blobs.insert(self.key(n), owned(&value));
+    /// Keep blob `n` of `database`, which a durable root names.
+    pub(crate) fn insert(&self, database: u64, n: u64, value: Bytes) {
+        self.shared
+            .blobs
+            .insert(self.key(database, n), owned(&value));
     }
 }
 
@@ -364,8 +369,8 @@ fn owned(value: &Bytes) -> Bytes {
     Bytes::copy_from_slice(value)
 }
 
-/// A random starting point for identities, leaving room to count up.
-fn random_start() -> u64 {
+/// A random number, for identities.
+pub(crate) fn random() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     hasher.write_u128(
@@ -373,7 +378,7 @@ fn random_start() -> u64 {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |time| time.as_nanos()),
     );
-    hasher.finish() >> 1
+    hasher.finish()
 }
 
 /// What a participant left idle at a durable version, for its namespace's
@@ -452,28 +457,31 @@ impl Parked {
     }
 }
 
-/// A blob's key: its namespace's identity, and its number.
+/// A blob's key: its namespace's identity, its database's, and its number.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BlobKey {
     namespace: u64,
+    database: u64,
     blob: u64,
 }
 
 impl Code for BlobKey {
     fn encode(&self, writer: &mut impl std::io::Write) -> foyer::Result<()> {
         self.namespace.encode(writer)?;
+        self.database.encode(writer)?;
         self.blob.encode(writer)
     }
 
     fn decode(reader: &mut impl std::io::Read) -> foyer::Result<Self> {
         Ok(Self {
             namespace: u64::decode(reader)?,
+            database: u64::decode(reader)?,
             blob: u64::decode(reader)?,
         })
     }
 
     fn estimated_size(&self) -> usize {
-        16
+        24
     }
 }
 

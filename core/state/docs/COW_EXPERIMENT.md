@@ -120,12 +120,14 @@ write, none of which replays anything. The TLA+ specification modelled the log p
 one as much, and none was written.
 
 **Caching became trivial.** A blob never changes once a root names it, so
-the cache keeps it by (namespace, number), forever, with nothing to
-invalidate: no epochs, generations or versions, and a root that changed
+the cache keeps it by (namespace, database, number), forever, with nothing
+to invalidate: no epochs, generations or versions, and a root that changed
 under the owner (another process wrote it) costs nothing but the parked
-engine. One care remains: a crashed flush's blob numbers are reused by the
-next flush, so a blob is cached only once a durable root names it. Random
-blob numbers would remove even that, at the cost of longer root entries.
+engine. The database is a random identity in the root: an object's state
+cleared and made again numbers its blobs from 0 again, under another (the
+review found the cache serving the old database's blobs without it). One
+care remains: a crashed flush's blob numbers are reused by the next flush,
+so a blob is cached only once a durable root names it.
 
 ### Do shared handlers work?
 

@@ -19,6 +19,7 @@ unless stated otherwise.
 
 | Field       | Encoding                                                                                                                                                |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Id          | 8 bytes, little-endian: the database's random identity, drawn when its first root was made; the cache keys blobs by it                                 |
 | Version     | Flushes that changed something, ever; at most 2^62                                                                                                      |
 | Next blob   | The number the next blob gets; at most 2^62. Every blob named is below it                                                                               |
 | Chunk pages | Pages per chunk, set when the namespace was made                                                                                                        |

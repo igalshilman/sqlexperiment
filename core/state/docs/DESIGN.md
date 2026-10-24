@@ -234,14 +234,17 @@ One `PageCache` per process. A state opens in it under its namespace's key
 it (a `NamespaceCache`, inside the crate).
 
 **Blobs.** A blob never changes once a durable root names it, so the cache
-keeps it under (namespace, number) in memory, spilling to a local disk file
+keeps it under (namespace, database, number) in memory, spilling to a local disk file
 ([foyer](https://github.com/foyer-rs/foyer)), one budget for all namespaces,
 for as long as it likes. There is nothing to invalidate: no versions, no
 generations, no epochs, no read marks. The one care is what goes in: a blob
 is cached only once a durable root names it (after this owner's flush
 synced, or when the owner read it as named by the root it opened), so a
 crashed flush's blobs, which the next flush overwrites, are never cached.
-Readers never insert. A memory hit is served without foyer's disk hop, and
+The database is the root's random identity, drawn when its first root was
+made: a namespace emptied (its object's state cleared) and made again
+numbers its blobs from 0 again, under another identity, so it never reads
+the old database's blobs. Readers never insert. A memory hit is served without foyer's disk hop, and
 concurrent reads of one blob share one get, held weakly, so a cancelled
 read cancels the get.
 

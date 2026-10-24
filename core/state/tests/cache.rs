@@ -51,7 +51,7 @@ async fn flush(
 /// the lost flush may have used. A, back with its cache, must read B's
 /// pages, not blobs it cached.
 #[test]
-fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
+fn a_cache_that_read_a_lost_flush_never_serves_it() -> Result<()> {
     futures::executor::block_on(async {
         let memory = MemoryKv::default();
         let fault = Arc::new(FaultKv::new(memory.clone(), 0));
@@ -96,6 +96,42 @@ fn a_cache_that_read_a_lost_checkpoint_never_serves_it() -> Result<()> {
         .await?;
         // A reads B's page.
         let session = Session::open(store.clone(), options(Some(&a))).await?;
+        assert_eq!(model.differs(&session).await?, None);
+        Ok(())
+    })
+}
+
+/// The object's state is cleared, and another process makes a new database
+/// in the same namespace, numbering its blobs from 0 again. The owner, back
+/// with its cache, must read the new database's pages, not the blobs it
+/// cached of the old one under the same numbers.
+#[test]
+fn a_namespace_made_again_never_reads_the_old_databases_blobs() -> Result<()> {
+    futures::executor::block_on(async {
+        let a = fresh_namespace();
+        let old: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
+        let mut model = Model::default();
+        flush(
+            &old,
+            Some(&a),
+            &mut model,
+            &[Op::Write("db", 0, Some(page(1)))],
+        )
+        .await?;
+        let session = Session::open(old, options(Some(&a))).await?;
+        assert_eq!(model.differs(&session).await?, None);
+        drop(session);
+
+        let cleared: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
+        let mut model = Model::default();
+        flush(
+            &cleared,
+            None,
+            &mut model,
+            &[Op::Write("db", 0, Some(page(2)))],
+        )
+        .await?;
+        let session = Session::open(cleared, options(Some(&a))).await?;
         assert_eq!(model.differs(&session).await?, None);
         Ok(())
     })
