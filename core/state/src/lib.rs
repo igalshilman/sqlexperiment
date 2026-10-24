@@ -7,12 +7,12 @@
 //! them durable at a sync (see [`kv`]). It needs no multi-key transaction,
 //! compare-and-swap or listing operation. Its [`File`]s are 4 KiB pages read
 //! and written at random, and its [`Record`]s whole values. The state is
-//! read; it changes only through a [`Wal`] ([`State::wal`]): the records set
-//! and pages written there become durable together at [`Wal::flush`], and a
-//! WAL dropped discards them.
+//! read; it changes only through a [`Mutation`] ([`State::mutation`]): the records set
+//! and pages written there become durable together at [`Mutation::flush`], and a
+//! mutation dropped discards them.
 //!
-//! What writes a WAL is a [`Participant`]: it keeps changes of its own, moves
-//! them into the WAL before the flush, and may leave state idle for the
+//! What writes a mutation is a [`Participant`]: it keeps changes of its own, moves
+//! them into the mutation before the flush, and may leave state idle for the
 //! namespace's next [`State`]. The `sql` crate's database is one, on the
 //! file `db`.
 //!
@@ -28,7 +28,7 @@
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
-//! | A WAL | Records set and pages written in it, in memory | No: dropping it discards them |
+//! | A mutation | Records set and pages written in it, in memory | No: dropping it discards them |
 //! | Root | `v16/root`: the directory, small records, and the blobs of each file's chunks | Yes, after an acknowledged flush |
 //! | Blobs | `v16/blob/<n>`: a chunk's base or delta, or a large record; written once | Yes, until no root a reader may hold names it |
 //!
@@ -60,10 +60,10 @@
 //! # use state::{State, kv::KvStore};
 //! # async fn example(store: Arc<dyn KvStore>) -> state::Result<()> {
 //! let state = State::open(store).await?;
-//! let mut wal = state.wal();
-//! wal.set(&state.record("progress"), "step 1".into())?;
-//! wal.write(&state.file("image")?, 0, Some(vec![7; 4096].into()))?;
-//! wal.flush().await?; // the record and the page, durable together
+//! let mut mutation = state.mutation();
+//! mutation.set(&state.record("progress"), "step 1".into())?;
+//! mutation.write(&state.file("image")?, 0, Some(vec![7; 4096].into()))?;
+//! mutation.flush().await?; // the record and the page, durable together
 //! # Ok(())
 //! # }
 //! ```
@@ -170,8 +170,8 @@ impl Default for StateOptions {
 }
 
 /// One namespace's state: its paged files and its records, as last flushed.
-/// It is read here, and changed through a [`Wal`] ([`Self::wal`]), which
-/// [`Wal::flush`] makes durable at once. A cheap handle; clones, and the
+/// It is read here, and changed through a [`Mutation`] ([`Self::mutation`]), which
+/// [`Mutation::flush`] makes durable at once. A cheap handle; clones, and the
 /// views of [`Self::scoped`], share it.
 ///
 /// Acquire exclusive ownership of the namespace and settle the preceding
@@ -186,12 +186,12 @@ pub struct State {
 
 /// What a state's handles share.
 struct Shared {
-    /// The durable state: as opened, then as the WALs flushed it.
+    /// The durable state: as opened, then as the mutations flushed it.
     snapshot: Mutex<Arc<Snapshot>>,
     options: StateOptions,
     cache: Option<NamespaceCache>,
     /// The participants that joined, by name: whether each holds changes not
-    /// yet in a WAL.
+    /// yet in a mutation.
     participants: Mutex<HashMap<String, bool>>,
     /// What participants left idle at the state this one opened on, by
     /// participant, until they take it.
@@ -209,7 +209,7 @@ impl Shared {
         self.snapshot.lock().unwrap().clone()
     }
 
-    /// A participant holding changes not yet in a WAL.
+    /// A participant holding changes not yet in a mutation.
     fn unflushed(&self) -> Option<String> {
         let joined = self.participants.lock().unwrap();
         let mut unflushed = joined.iter().filter(|(_, unflushed)| **unflushed);
@@ -320,7 +320,7 @@ impl State {
     }
 
     /// The record named `name`: a whole value the root keeps, read
-    /// here and set in a WAL (see [`Record`]).
+    /// here and set in a mutation (see [`Record`]).
     pub fn record(&self, name: &str) -> Record {
         Record {
             name: format!("{}{name}", self.prefix).into(),
@@ -329,7 +329,7 @@ impl State {
     }
 
     /// The paged file named `name`: 4 KiB pages, read here and written in a
-    /// WAL (see [`File`]).
+    /// mutation (see [`File`]).
     pub fn file(&self, name: &str) -> Result<File> {
         Ok(File {
             name: format!("{}{name}", self.prefix).into(),
@@ -375,11 +375,11 @@ impl State {
         })
     }
 
-    /// A new, empty WAL on this state: the records set and pages written in
-    /// it ([`Wal::set`], [`Wal::write`]) become durable together at
-    /// [`Wal::flush`]; dropping it discards them.
-    pub fn wal(&self) -> Wal {
-        Wal {
+    /// A new, empty mutation on this state: the records set and pages written in
+    /// it ([`Mutation::set`], [`Mutation::write`]) become durable together at
+    /// [`Mutation::flush`]; dropping it discards them.
+    pub fn mutation(&self) -> Mutation {
+        Mutation {
             shared: self.shared.clone(),
             records: Default::default(),
             files: Default::default(),
@@ -399,7 +399,7 @@ impl State {
         self.shared.cache.is_some()
     }
 
-    /// Whether this is a reader ([`Open::reader`]): its WALs never flush.
+    /// Whether this is a reader ([`Open::reader`]): its mutations never flush.
     pub fn is_reader(&self) -> bool {
         self.shared.reader.load(Ordering::SeqCst)
     }
@@ -438,7 +438,7 @@ impl Open {
     }
 
     /// Open a reader of a namespace that another owns, alongside it: a
-    /// state that writes nothing to the store (its WALs refuse to flush). It
+    /// state that writes nothing to the store (its mutations refuse to flush). It
     /// reads the state as of open, whatever the owner flushes meanwhile, for
     /// [`StateOptions::garbage_after`] of its flushes. With a cache
     /// ([`Self::cached`]), it reads the blobs the owner cached, and changes
@@ -467,11 +467,11 @@ impl IntoFuture for Open {
 }
 
 /// The writes ahead of a [`State`]: the records set and pages written since
-/// [`State::wal`] made it, in memory, which [`Self::flush`] makes durable
-/// together, atomically. There is no other way to change the state. A WAL
+/// [`State::mutation`] made it, in memory, which [`Self::flush`] makes durable
+/// together, atomically. There is no other way to change the state. A mutation
 /// dropped discards its writes; a participant that moved changes into it
 /// learns which happened from its [`Receipt`].
-pub struct Wal {
+pub struct Mutation {
     shared: Arc<Shared>,
     records: store::Records,
     files: store::Writes,
@@ -480,21 +480,21 @@ pub struct Wal {
     taken: bool,
 }
 
-impl Wal {
+impl Mutation {
     /// Whether nothing was set or written.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty() && self.files.is_empty()
     }
 
-    /// A receipt for what becomes of this WAL (see [`Receipt`]).
+    /// A receipt for what becomes of this mutation (see [`Receipt`]).
     pub fn receipt(&mut self) -> Receipt {
         let receipt = Receipt(Arc::new(AtomicU8::new(PENDING)));
         self.receipts.push(receipt.clone());
         receipt
     }
 
-    /// Replace `record`'s value with this WAL's flush. Refused, before the
-    /// WAL changes, is what no flush could store: a value past
+    /// Replace `record`'s value with this mutation's flush. Refused, before the
+    /// mutation changes, is what no flush could store: a value past
     /// [`MAX_RECORD_BYTES`], a name past [`MAX_NAME_BYTES`], or the name of
     /// a paged file.
     pub fn set(&mut self, record: &Record, value: Bytes) -> Result<()> {
@@ -513,8 +513,8 @@ impl Wal {
     }
 
     /// Write `image` (4096 bytes) at `file`'s `page`, or a hole with `None`,
-    /// with this WAL's flush, which grows the file to include it if it is
-    /// shorter then. Refused, before the WAL changes, is what no flush could
+    /// with this mutation's flush, which grows the file to include it if it is
+    /// shorter then. Refused, before the mutation changes, is what no flush could
     /// store: a page past the largest file, a name past [`MAX_NAME_BYTES`],
     /// or the name of a record.
     pub fn write(&mut self, file: &File, page: u64, image: Option<Page>) -> Result<()> {
@@ -531,7 +531,7 @@ impl Wal {
         })
     }
 
-    /// Make `file` `len` bytes, a multiple of 512, with this WAL's flush,
+    /// Make `file` `len` bytes, a multiple of 512, with this mutation's flush,
     /// whatever its length is then: pages wholly past it become holes, so
     /// regrowing it reads zeros (or its base's pages). Bytes of a last,
     /// partial page past `len` stay as written.
@@ -540,7 +540,7 @@ impl Wal {
             return Err(format!("invalid file length {len}").into());
         }
         self.change(file, |written| {
-            // Every page past it a hole: those written in the WAL too, as an
+            // Every page past it a hole: those written in the mutation too, as an
             // earlier shrink may have cut flushed pages there.
             let kept = len.div_ceil(PAGE);
             for (_, image) in written.pages.range_mut(kept..) {
@@ -576,7 +576,7 @@ impl Wal {
     /// Make every record set and page written durable: the blobs of the
     /// chunks and records it changes, then the root that names them, then
     /// one sync, in one round trip. Nothing changed: nothing is written. It
-    /// is refused while a participant holds changes not yet in a WAL, while
+    /// is refused while a participant holds changes not yet in a mutation, while
     /// another flush of the state runs, and for writes the state cannot
     /// store; a refused flush writes nothing, and the state goes on. `Ok`
     /// holds what it wrote; any other error (one refused because another
@@ -591,11 +591,13 @@ impl Wal {
             return Err("a reader writes nothing".into());
         }
         if let Some(name) = shared.unflushed() {
-            return Err(format!("{name:?} has changes not yet in a WAL: flush it first").into());
+            return Err(
+                format!("{name:?} has changes not yet in a mutation: flush it first").into(),
+            );
         }
         let snapshot = shared.snapshot();
         // What the writes checked as they were made still holds, unless
-        // another WAL flushed since: refused before anything is written.
+        // another mutation flushed since: refused before anything is written.
         snapshot.check(&self.files, &self.records).await?;
         if shared.flushing.swap(true, Ordering::SeqCst) {
             return Err("a flush of this state is running".into());
@@ -623,12 +625,12 @@ impl Wal {
     fn of(&self, shared: &Arc<Shared>) -> Result<()> {
         match Arc::ptr_eq(&self.shared, shared) {
             true => Ok(()),
-            false => Err("the WAL is of another state".into()),
+            false => Err("the mutation is of another state".into()),
         }
     }
 }
 
-impl Drop for Wal {
+impl Drop for Mutation {
     fn drop(&mut self) {
         if !self.taken {
             for receipt in &self.receipts {
@@ -638,9 +640,9 @@ impl Drop for Wal {
     }
 }
 
-/// What became of a [`Wal`], for a participant that moved changes into it
-/// ([`Wal::receipt`]): nothing yet, flushed (the changes are durable), or
-/// discarded (the WAL was dropped, and the changes with it). A flush whose
+/// What became of a [`Mutation`], for a participant that moved changes into it
+/// ([`Mutation::receipt`]): nothing yet, flushed (the changes are durable), or
+/// discarded (the mutation was dropped, and the changes with it). A flush whose
 /// outcome is unknown settles neither, and ends the state.
 #[derive(Clone)]
 pub struct Receipt(Arc<AtomicU8>);
@@ -650,12 +652,12 @@ const FLUSHED: u8 = 1;
 const DISCARDED: u8 = 2;
 
 impl Receipt {
-    /// The state flushed the WAL.
+    /// The state flushed the mutation.
     pub fn is_flushed(&self) -> bool {
         self.0.load(Ordering::SeqCst) == FLUSHED
     }
 
-    /// The WAL was dropped without a flush.
+    /// The mutation was dropped without a flush.
     pub fn is_discarded(&self) -> bool {
         self.0.load(Ordering::SeqCst) == DISCARDED
     }
@@ -663,8 +665,8 @@ impl Receipt {
 
 /// Something that takes part in a state under a name ([`State::join`]): it
 /// keeps changes of its own (an SQL engine's pages, say), and moves them
-/// into a WAL before the flush. While it says it holds changes not yet
-/// moved ([`Self::set_unflushed`]), every WAL of the state refuses to flush.
+/// into a mutation before the flush. While it says it holds changes not yet
+/// moved ([`Self::set_unflushed`]), every mutation of the state refuses to flush.
 /// Dropping it leaves the name free, and its unmoved changes out.
 ///
 /// With a [`PageCache`], it may leave state idle for the namespace's next
@@ -685,7 +687,7 @@ impl Participant {
         &self.state
     }
 
-    /// Say whether it holds changes not yet in a WAL.
+    /// Say whether it holds changes not yet in a mutation.
     pub fn set_unflushed(&self, unflushed: bool) {
         let mut joined = self.state.shared.participants.lock().unwrap();
         joined.insert(self.name.to_string(), unflushed);
@@ -739,8 +741,8 @@ impl Drop for Participant {
 
 /// A named whole value the root keeps, replaced whole: the host's state
 /// beside its files (a run's progress, an outbox), flushed with them in the
-/// same root. Read from the state ([`Self::get`]), set in a WAL
-/// ([`Wal::set`]). A cheap handle.
+/// same root. Read from the state ([`Self::get`]), set in a mutation
+/// ([`Mutation::set`]). A cheap handle.
 ///
 /// A value of up to [`StateOptions::inline_record_bytes`] is in the root,
 /// which every flush rewrites; a larger one is a blob of its own, written
@@ -768,7 +770,7 @@ impl Record {
 }
 
 /// A paged file: 4 KiB pages, read at random from the state and written at
-/// random in a WAL, made durable by its flush with its other files and its
+/// random in a mutation, made durable by its flush with its other files and its
 /// records. An absent page, never written or past the end, reads as `None`
 /// (zeros). A cheap handle.
 ///

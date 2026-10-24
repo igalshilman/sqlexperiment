@@ -513,7 +513,7 @@ fn effects_commit_with_their_transaction() -> Result<()> {
     })
 }
 
-/// Records under the default durability: set in the turn's WAL, unchanged
+/// Records under the default durability: set in the turn's mutation, unchanged
 /// until the save makes them durable, discarded with a dropped session. A
 /// large one is a blob of its own, which the flush that replaces it lists as
 /// garbage, for the next one to delete.
@@ -528,15 +528,15 @@ fn records_flush_at_save() -> Result<()> {
         let mut db = Db::open(store.clone(), options()).await?;
         let large = db.state().record("large");
         assert!(large.get().is_empty());
-        db.wal().set(&large, Bytes::from_static(b"one"))?;
+        db.mutation().set(&large, Bytes::from_static(b"one"))?;
         assert!(large.get().is_empty(), "unchanged until the flush");
-        drop(db); // discarded, with its WAL
+        drop(db); // discarded, with its mutation
         let mut db = Db::open(store.clone(), options()).await?;
         assert!(db.state().record("large").get().is_empty());
         db.execute("CREATE TABLE t(n)").await?;
         let (large, small) = (db.state().record("large"), db.state().record("small"));
-        db.wal().set(&large, Bytes::from(vec![7; 5000]))?;
-        db.wal().set(&small, Bytes::from_static(b"s"))?;
+        db.mutation().set(&large, Bytes::from(vec![7; 5000]))?;
+        db.mutation().set(&small, Bytes::from_static(b"s"))?;
         db.save().await?;
         let with_large = store.blob_count();
 
@@ -544,13 +544,13 @@ fn records_flush_at_save() -> Result<()> {
         assert_eq!(db.state().record("large").get(), vec![7; 5000]);
         assert_eq!(db.state().record("small").get(), &b"s"[..]);
         let large = db.state().record("large");
-        db.wal().set(&large, Bytes::from_static(b"two"))?;
+        db.mutation().set(&large, Bytes::from_static(b"two"))?;
         db.save().await?;
         // The replaced value is garbage, which the next flush deletes.
         let mut db = Db::open(store.clone(), options()).await?;
         assert_eq!(db.state().record("large").get(), &b"two"[..]);
         let small = db.state().record("small");
-        db.wal().set(&small, Bytes::new())?;
+        db.mutation().set(&small, Bytes::new())?;
         db.save().await?;
         assert_eq!(store.blob_count(), with_large - 1, "the large value went");
         let db = Db::open(store.clone(), options()).await?;

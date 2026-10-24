@@ -7,7 +7,7 @@
 //! are the run's progress ([`RunState`], the record "run"), its memory
 //! ([`Memory`], the record "memory" and the pages the turn changed, in the
 //! scope's file over the program's golden memory), the scope's tables (the
-//! turn's SQL, KV included), and each extension. Each writes into one WAL
+//! turn's SQL, KV included), and each extension. Each writes into one mutation
 //! of the scope's state, which the host flushes at once. The image is
 //! the program's golden image with the file's pages that differ from it;
 //! the state compresses each against what it replaces (golden's, at first),
@@ -26,7 +26,7 @@ use crate::{
     model::*,
     program::{Program, Programs},
     store::storage_error,
-    transaction::{Participant, Record, ScopeBlobs, State, Wal},
+    transaction::{Mutation, Participant, Record, ScopeBlobs, State},
     vm::{self, Vm},
 };
 use anyhow::{Context, Result, ensure};
@@ -92,9 +92,11 @@ impl RunState {
 
 #[async_trait]
 impl Participant for RunState {
-    async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
+    async fn prepare(&mut self, mutation: &mut Mutation) -> Result<()> {
         let bytes = json_bytes(&self.record)?;
-        wal.set(&self.stored, bytes.into()).map_err(storage_error)
+        mutation
+            .set(&self.stored, bytes.into())
+            .map_err(storage_error)
     }
 
     fn committed(&mut self) {
@@ -169,17 +171,19 @@ impl Memory {
 impl Participant for Memory {
     /// The pages the turn changed, into the file (the state makes one that
     /// is golden's again a hole); a settled run's, as holes.
-    async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
+    async fn prepare(&mut self, mutation: &mut Mutation) -> Result<()> {
         let Turn { changed, settled } = self.turn.take().context("No turn to seal")?;
         if let Some((file, pages)) = self.stale.take() {
             // This image's file keeps its length, its old pages holes again;
             // another image's goes whole (which needs no base).
             if file.name() == self.file.name() {
                 for page in pages {
-                    wal.write(&file, page.into(), None).map_err(storage_error)?;
+                    mutation
+                        .write(&file, page.into(), None)
+                        .map_err(storage_error)?;
                 }
             } else {
-                wal.set_len(&file, 0).map_err(storage_error)?;
+                mutation.set_len(&file, 0).map_err(storage_error)?;
             }
         }
         match (&self.live, settled) {
@@ -187,7 +191,7 @@ impl Participant for Memory {
             // its image.
             (_, true) => {
                 for page in self.record.pages().chain(changed) {
-                    (wal.write(&self.file, page.into(), None)).map_err(storage_error)?;
+                    (mutation.write(&self.file, page.into(), None)).map_err(storage_error)?;
                 }
                 self.record.pages.clear();
                 self.live = None;
@@ -195,14 +199,17 @@ impl Participant for Memory {
             (Some(live), false) => {
                 for page in changed {
                     let image = bytes::Bytes::copy_from_slice(live.base.page(page));
-                    (wal.write(&self.file, page.into(), Some(image))).map_err(storage_error)?;
+                    (mutation.write(&self.file, page.into(), Some(image)))
+                        .map_err(storage_error)?;
                 }
                 self.record.set_pages(live.base.changed());
             }
             (None, false) => anyhow::bail!("No live VM"),
         }
         let bytes = json_bytes(&self.record)?;
-        wal.set(&self.stored, bytes.into()).map_err(storage_error)
+        mutation
+            .set(&self.stored, bytes.into())
+            .map_err(storage_error)
     }
 
     /// The image no longer matches a seal: the attempt is over.
@@ -657,11 +664,11 @@ impl Run {
     }
 
     /// The turn's transaction. Each participant prepares its part into one
-    /// WAL of the scope's state (the extensions first, then the run's
+    /// mutation of the scope's state (the extensions first, then the run's
     /// progress, its memory and its tables); the flush puts the seal, the
     /// state's root, after the blobs it names; then each participant
     /// hears whether it committed. A participant that fails, or a failed
-    /// flush, drops the WAL with everything prepared. Only after a flush are
+    /// flush, drops the mutation with everything prepared. Only after a flush are
     /// the blobs no seal names collected, and the VM's write tracking reset:
     /// a crash anywhere before the root is stored loses the whole turn,
     /// which runs again.
@@ -670,16 +677,16 @@ impl Run {
         let mut db = self.db.lock().await;
         let mut participants: [&mut dyn Participant; 3] =
             [&mut self.run, &mut self.memory, &mut *db];
-        let mut wal = self.state.wal();
-        let mut prepared = extensions.prepare(&mut wal).await;
+        let mut mutation = self.state.mutation();
+        let mut prepared = extensions.prepare(&mut mutation).await;
         for participant in &mut participants {
             if prepared.is_err() {
                 break;
             }
-            prepared = participant.prepare(&mut wal).await;
+            prepared = participant.prepare(&mut mutation).await;
         }
         let sealed = match prepared {
-            Ok(()) => (wal.flush().await)
+            Ok(()) => (mutation.flush().await)
                 .map(|report| {
                     written.blob_bytes = report.blob_bytes;
                     written.root_bytes = report.root_bytes;

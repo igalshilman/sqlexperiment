@@ -1,12 +1,12 @@
 //! A host of the state, as the tests use it: SQL on a state of its own, and
-//! the turn's WAL, which the host sets records and writes files in. It
+//! the turn's mutation, which the host sets records and writes files in. It
 //! flushes when the host saves ([`Durability::Save`]) or after each SQL
 //! transaction ([`Durability::Commit`]), as the Node.js addon and the Python
 //! extension do.
 use bytes::Bytes;
 use sql::{Sql, SqlOptions, Value};
 pub use state::simulation::Setup as StateSetup;
-use state::{FlushReport, Result, StateOptions, Wal, kv::KvStore};
+use state::{FlushReport, Mutation, Result, StateOptions, kv::KvStore};
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -63,11 +63,11 @@ impl From<(StateOptions, Durability)> for Setup {
     }
 }
 
-/// SQL on a state of its own, and the WAL of its turn.
+/// SQL on a state of its own, and the mutation of its turn.
 pub struct Db {
     sql: Sql,
-    /// The turn's WAL: what the host sets beside the SQL, flushed with it.
-    wal: Wal,
+    /// The turn's mutation: what the host sets beside the SQL, flushed with it.
+    mutation: Mutation,
     durability: Durability,
 }
 
@@ -101,24 +101,24 @@ impl Db {
         let state = setup.open(store).await?;
         Ok(Self {
             sql: Sql::open_with_options(&state, limits).await?,
-            wal: state.wal(),
+            mutation: state.mutation(),
             durability,
         })
     }
 
-    /// The turn's WAL, to set records and write files in: [`Self::flush`]
+    /// The turn's mutation, to set records and write files in: [`Self::flush`]
     /// makes them durable with the SQL.
-    pub fn wal(&mut self) -> &mut Wal {
-        &mut self.wal
+    pub fn mutation(&mut self) -> &mut Mutation {
+        &mut self.mutation
     }
 
-    /// Flush the SQL into the turn's WAL, and the WAL: what the SQL committed
+    /// Flush the SQL into the turn's mutation, and the mutation: what the SQL committed
     /// and what the host set, durable together. The next turn starts a new
-    /// WAL; one whose SQL flush fails keeps this one.
+    /// mutation; one whose SQL flush fails keeps this one.
     pub async fn flush(&mut self) -> Result<FlushReport> {
-        self.sql.flush(&mut self.wal).await?;
-        let wal = std::mem::replace(&mut self.wal, self.sql.state().wal());
-        wal.flush().await
+        self.sql.flush(&mut self.mutation).await?;
+        let mutation = std::mem::replace(&mut self.mutation, self.sql.state().mutation());
+        mutation.flush().await
     }
 
     /// Flush, and end the session (leaving its engine).
@@ -167,9 +167,9 @@ impl Db {
     /// in one flush: what the addon's `commit(effects)` does.
     pub async fn commit_with(&mut self, effects: Bytes) -> Result<()> {
         // After the SQL flush: a `COMMIT` that fails sets no effects.
-        self.sql.flush(&mut self.wal).await?;
+        self.sql.flush(&mut self.mutation).await?;
         let record = self.sql.state().record("effects");
-        self.wal.set(&record, effects)?;
+        self.mutation.set(&record, effects)?;
         self.flush().await.map(drop)
     }
 

@@ -247,7 +247,7 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
             for name in RECORDS {
                 assert_eq!(reader.state.record(name).get(), opened.record(name));
             }
-            // Its WALs never flush.
+            // Its mutations never flush.
             let keys = memory.keys();
             let error = reader.flush(&[Op::Set("progress", "reader".into())]).await;
             let error = error.unwrap_err().to_string();

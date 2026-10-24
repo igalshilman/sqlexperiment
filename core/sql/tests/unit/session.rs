@@ -5,12 +5,12 @@ use futures::{
 };
 use state::simulation::MemoryKv;
 
-/// Flush `db`'s SQL in a WAL of its state, and the WAL, ending the session.
+/// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
 async fn save(mut db: Sql) -> crate::Result<state::FlushReport> {
     let state = db.state();
-    let mut wal = state.wal();
-    db.flush(&mut wal).await?;
-    wal.flush().await
+    let mut mutation = state.mutation();
+    db.flush(&mut mutation).await?;
+    mutation.flush().await
 }
 
 async fn baseline() -> Result<MemoryKv> {
@@ -86,21 +86,21 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
     })
 }
 
-/// The adapter moves pages into a WAL only once the engine WAL is
-/// checkpointed; refused, it leaves the WAL empty.
+/// The adapter moves pages into a mutation only once the engine WAL is
+/// checkpointed; refused, it leaves the mutation empty.
 #[test]
-fn a_flush_into_a_wal_rejects_an_engine_wal_not_checkpointed() -> Result<()> {
+fn a_flush_into_a_mutation_rejects_an_engine_wal_not_checkpointed() -> Result<()> {
     futures::executor::block_on(async {
         let store = baseline().await?;
         let db = changed(store.clone()).await?;
         store.reset_stats();
-        let mut wal = db.state().wal();
-        let error = db.io.flush_into(&mut wal).unwrap_err().to_string();
+        let mut mutation = db.state().mutation();
+        let error = db.io.flush_into(&mut mutation).unwrap_err().to_string();
         assert!(
             error.contains("the engine WAL is not checkpointed"),
             "{error}"
         );
-        assert!(wal.is_empty());
+        assert!(mutation.is_empty());
         assert_eq!(store.stats().puts, 0);
         Ok(())
     })

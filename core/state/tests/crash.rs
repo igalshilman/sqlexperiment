@@ -5,7 +5,7 @@
 #![cfg(feature = "simulation")]
 mod support;
 
-use state::{Base, Result, StateOptions, kv::KvStore, simulation::*};
+use state::{Base, ROOT_KEY, Result, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 

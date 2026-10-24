@@ -2,18 +2,18 @@
 
 Transactional state over a Restate virtual object's state (a key/value
 namespace with one owner at a time): records and paged files, changed through
-a WAL, which a flush makes durable together, atomically. Its participants keep
-changes of their own and move them into the WAL before the flush; the main one
+a mutation, which a flush makes durable together, atomically. Its participants keep
+changes of their own and move them into the mutation before the flush; the main one
 is SQLite-compatible SQL (the [`sql`](../../sql/README.md) crate: Turso's
 `turso_core` engine, unmodified) on the file `db`.
 
 Its host is an object without Restate's journal: a key, its own database,
 and calls to other objects or services, with at-least-once delivery. The
 namespace is all the object keeps, and the state is how it reaches the store:
-the host flushes a WAL (records, paged files and the SQL's file `db`, in one
+the host flushes a mutation (records, paged files and the SQL's file `db`, in one
 put) when it chooses, after each SQL transaction as SQLite does, or once per
 turn of everything that takes part. The sections on SQL describe the `sql`
-crate, which keeps its engine's state private until it flushes into a WAL.
+crate, which keeps its engine's state private until it flushes into a mutation.
 
 ## Constraints
 
@@ -72,8 +72,8 @@ Exact encodings are in [FORMAT.md](FORMAT.md).
 ## Flush
 
 SQL writes into a private view (dirty pages and the engine's own WAL file).
-`Sql::flush(&mut wal)` checkpoints that file inside the engine and copies the
-changed pages into the WAL, as writes to the file `db`; the WAL's flush then
+`Sql::flush(&mut mutation)` checkpoints that file inside the engine and copies the
+changed pages into the mutation, as writes to the file `db`; the mutation's flush then
 writes every file and record in it, and syncs once:
 
 1. **Encode.** Each chunk a write touched becomes a new delta against its
@@ -111,24 +111,24 @@ varint differences from the one before. `Ok(FlushReport)` means
 flushed; an error leaves the outcome unknown.
 
 **Effects.** A host may flush bytes of its own with a transaction, as a
-record (the SDKs' `effects`): set in the same WAL, they ride in the same
+record (the SDKs' `effects`): set in the same mutation, they ride in the same
 root put, so they are durable exactly when the transaction is, and stay
 until a later flush replaces them. The Restate SDKs keep a transaction's
 sends there, as its outbox, and make them once it is flushed. A host may set
 any record (`State::record`) and write paged files of its own
-(`State::file`) in a WAL, made durable by its flush. A WAL that changes
+(`State::file`) in a mutation, made durable by its flush. A mutation that changes
 nothing writes nothing.
 
 ## When a flush happens
 
-At `Wal::flush`, and only then. SQL statements and SQL `COMMIT` change the
-engine's private view; `Sql::flush(&mut wal)` commits an open SQL transaction
-and copies what the SQL committed into the WAL, as writes to the file `db`;
-the WAL's flush makes it durable with every record and file in the WAL, in
-one root, and consumes the WAL. SQL keeps the copied pages in its view until
-the WAL's receipt says the state flushed it: a WAL dropped unflushed discards
+At `Mutation::flush`, and only then. SQL statements and SQL `COMMIT` change the
+engine's private view; `Sql::flush(&mut mutation)` commits an open SQL transaction
+and copies what the SQL committed into the mutation, as writes to the file `db`;
+the mutation's flush makes it durable with every record and file in the mutation, in
+one root, and consumes the mutation. SQL keeps the copied pages in its view until
+the mutation's receipt says the state flushed it: a mutation dropped unflushed discards
 its writes, and SQL's go into the next one. A flush is refused while SQL
-holds changes committed but not yet moved into a WAL.
+holds changes committed but not yet moved into a mutation.
 `Sql::transaction(closure)` wraps `BEGIN`/`COMMIT`, and rolls back when the
 closure returns `Err`.
 
@@ -184,7 +184,7 @@ overwritten by the next flush.
 A reader (`State::open(store).reader()`) reads a namespace that another owns,
 alongside it, such as a virtual object's shared handler beside the exclusive
 one. It writes nothing to the store, nor to the cache: its SQL changes stay
-in the session, and its WALs refuse to flush. It reads the root it opened,
+in the session, and its mutations refuse to flush. It reads the root it opened,
 and the blobs that root names never change, so it reads one consistent
 state, however the owner flushes meanwhile: snapshot isolation, with no
 check and no retry. The owner deletes a blob `garbage_after` (16) of its
@@ -216,7 +216,7 @@ own), served by `KvIo`:
   one also fetches the following chunks, in a window that doubles up to 16,
   so a scan costs a few round trips rather than one per chunk.
 - **Writes, truncation and sync** stay in private memory. File sync is only an
-  ordering barrier. Nothing reaches KV before a WAL's flush, and the engine's
+  ordering barrier. Nothing reaches KV before a mutation's flush, and the engine's
   WAL file never does.
 - **Execution.** The caller's task drives the engine's state machines and
   awaits KV I/O. Queries yield every 64 engine steps; one engine call cannot be
@@ -235,11 +235,11 @@ own), served by `KvIo`:
   a limit, a cancelled call, an engine anomaly) ends the session, and an error
   from a flush leaves its outcome unknown.
   `Sql::is_usable` says which happened.
-- **Flush.** `Sql::flush(&mut wal)` commits an open SQL transaction and copies
-  the pages SQL committed into the WAL, as writes to the file `db`, and takes
-  the WAL's receipt. The pages stay in SQL's private view until the receipt
-  says the state flushed that WAL; a WAL dropped unflushed discards its copy,
-  and the next `flush` copies them again. Nothing is durable before a WAL's
+- **Flush.** `Sql::flush(&mut mutation)` commits an open SQL transaction and copies
+  the pages SQL committed into the mutation, as writes to the file `db`, and takes
+  the mutation's receipt. The pages stay in SQL's private view until the receipt
+  says the state flushed that mutation; a mutation dropped unflushed discards its copy,
+  and the next `flush` copies them again. Nothing is durable before a mutation's
   flush. Inside `Sql::transaction`, a statement that ends the transaction
   (`COMMIT`, `END`, `ROLLBACK`) fails and ends the session before anything is
   durable, and so does dropping or unwinding the transaction future.

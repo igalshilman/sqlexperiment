@@ -7,8 +7,8 @@ state's file `db`, and flushes with the state: the rows, and the state's other
 files and records, durable together in one flush.
 
 SQL takes part in the state as the participant `sql`. Its statements change a
-private view; `Sql::flush(&mut wal)` moves what SQL committed into a WAL; the
-WAL's `flush` makes it durable. With a page cache, a session that ends cleanly
+private view; `Sql::flush(&mut mutation)` moves what SQL committed into a mutation; the
+mutation's `flush` makes it durable. With a page cache, a session that ends cleanly
 leaves its engine warm for the namespace's next one.
 
 ## Use
@@ -29,14 +29,14 @@ db.transaction(async |db| {                    // one SQL transaction, or rolled
     db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?;
     db.execute("INSERT INTO shipments VALUES(7)").await
 }).await?;
-let mut wal = state.wal();
-db.flush(&mut wal).await?;                     // the rows, into the WAL
-wal.set(&state.record("progress"), "shipped 7".into())?;
-wal.flush().await?; // the rows and the record, durable together
+let mut mutation = state.mutation();
+db.flush(&mut mutation).await?;                     // the rows, into the mutation
+mutation.set(&state.record("progress"), "shipped 7".into())?;
+mutation.flush().await?; // the rows and the record, durable together
 ```
 
-Nothing is durable before `Wal::flush`, and every WAL of the state refuses to
-flush while SQL holds changes not moved into one. A WAL dropped unflushed
+Nothing is durable before `Mutation::flush`, and every mutation of the state refuses to
+flush while SQL holds changes not moved into one. A mutation dropped unflushed
 discards its writes; SQL still holds the pages it moved there, and its next
 `flush` moves them again. The host chooses when to flush:
 after each SQL transaction, as the Node.js addon and the Python extension do,
@@ -56,8 +56,8 @@ outstanding requests and open a new one; a failed flush's outcome is unknown.
 - [Python extension](../../python/sql/README.md): the same in Python, in
   `python/sql/`
 
-Both expose `binding::Session`: a session that flushes SQL into a WAL, with
-the `effects` record, and flushes the WAL after each call that leaves no SQL
+Both expose `binding::Session`: a session that flushes SQL into a mutation, with
+the `effects` record, and flushes the mutation after each call that leaves no SQL
 transaction open, with the transaction calls behind their `transaction()`.
 
 ## Layout

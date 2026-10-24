@@ -3,7 +3,8 @@
 #![allow(dead_code)]
 use bytes::Bytes;
 use state::{
-    Base, File, FlushReport, PAGE_SIZE, Page, Result, State, Wal, kv::KvStore, simulation::Setup,
+    Base, File, FlushReport, Mutation, PAGE_SIZE, Page, Result, State, kv::KvStore,
+    simulation::Setup,
 };
 use std::{
     collections::BTreeMap,
@@ -93,7 +94,7 @@ pub const FILES: [&str; 3] = ["db", "aux", "vm"];
 /// The records.
 pub const RECORDS: [&str; 3] = ["progress", "outbox", "state"];
 
-/// A change to a state (in a WAL) and to its model alike.
+/// A change to a state (in a mutation) and to its model alike.
 #[derive(Clone, Debug)]
 pub enum Op {
     Set(&'static str, Bytes),
@@ -162,22 +163,22 @@ impl Session {
         &self.files[name]
     }
 
-    /// Make the change `op` in `wal`, a WAL of this state.
-    pub fn apply(&self, wal: &mut Wal, op: &Op) -> Result<()> {
+    /// Make the change `op` in `mutation`, a mutation of this state.
+    pub fn apply(&self, mutation: &mut Mutation, op: &Op) -> Result<()> {
         match op {
-            Op::Set(name, value) => wal.set(&self.state.record(name), value.clone()),
-            Op::Write(name, index, image) => wal.write(self.file(name), *index, image.clone()),
-            Op::SetLen(name, len) => wal.set_len(self.file(name), *len),
+            Op::Set(name, value) => mutation.set(&self.state.record(name), value.clone()),
+            Op::Write(name, index, image) => mutation.write(self.file(name), *index, image.clone()),
+            Op::SetLen(name, len) => mutation.set_len(self.file(name), *len),
         }
     }
 
-    /// Flush `ops`, in a WAL of their own.
+    /// Flush `ops`, in a mutation of their own.
     pub async fn flush(&self, ops: &[Op]) -> Result<FlushReport> {
-        let mut wal = self.state.wal();
+        let mut mutation = self.state.mutation();
         for op in ops {
-            self.apply(&mut wal, op)?;
+            self.apply(&mut mutation, op)?;
         }
-        wal.flush().await
+        mutation.flush().await
     }
 }
 

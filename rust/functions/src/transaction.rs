@@ -1,7 +1,7 @@
 //! A turn's transaction: the host seals it, and everything the run keeps
 //! takes part in it.
 //!
-//! The seal is one [`Wal`] of the scope's [`State`], which every participant
+//! The seal is one [`Mutation`] of the scope's [`State`], which every participant
 //! writes into and the host flushes at once: whether the turn happened is
 //! whether its seal was flushed. Each [`Participant`] (the run's progress,
 //! its memory, its tables, each extension) keeps its part in one of three
@@ -19,22 +19,22 @@
 //!
 //! So no participant ever holds a vote it must keep across a crash: it can
 //! refuse only before the flush, by failing [`Participant::prepare`]; the
-//! WAL then drops, and its writes with it. And [`Participant::committed`]
+//! mutation then drops, and its writes with it. And [`Participant::committed`]
 //! and [`Participant::aborted`] are notices, which a crash may skip: what a
 //! participant is, it recovers from the seal.
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-pub use state::{Record, State, Wal};
+pub use state::{Mutation, Record, State};
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 /// Something a turn's transaction keeps.
 #[async_trait]
 pub trait Participant: Send {
     /// Before the seal: set the records that changed, and write the pages,
-    /// in `wal`. An error abandons the transaction (and the attempt, which
+    /// in `mutation`. An error abandons the transaction (and the attempt, which
     /// starts again from the last seal).
-    async fn prepare(&mut self, _wal: &mut Wal) -> Result<()> {
+    async fn prepare(&mut self, _mutation: &mut Mutation) -> Result<()> {
         Ok(())
     }
 

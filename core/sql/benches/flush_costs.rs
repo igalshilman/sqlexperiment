@@ -93,15 +93,15 @@ async fn open(store: &Store, cache: &Option<Namespace>) -> Result<Sql> {
     Sql::open(&state).await
 }
 
-/// Flush the SQL, and `effects` as the record `effects`, in one WAL.
+/// Flush the SQL, and `effects` as the record `effects`, in one mutation.
 async fn save(mut db: Sql, effects: Option<String>) -> Result<()> {
     let state = db.state();
-    let mut wal = state.wal();
-    db.flush(&mut wal).await?;
+    let mut mutation = state.mutation();
+    db.flush(&mut mutation).await?;
     if let Some(effects) = effects {
-        wal.set(&state.record("effects"), effects.into())?;
+        mutation.set(&state.record("effects"), effects.into())?;
     }
-    wal.flush().await?;
+    mutation.flush().await?;
     Ok(())
 }
 

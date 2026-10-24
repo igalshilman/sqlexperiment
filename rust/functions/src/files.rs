@@ -23,7 +23,7 @@ use crate::{
     GuestError, Operation, Outcome,
     extension::{Attached, Extension, HostCall, Making, Tables},
     store::storage_error,
-    transaction::{Participant, Record, ScopeBlobs, State, Wal, hash, random},
+    transaction::{Mutation, Participant, Record, ScopeBlobs, State, hash, random},
 };
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -266,7 +266,7 @@ impl Attached for Checkpointed {
 impl Participant for Checkpointed {
     /// The turn's changes, as a checkpoint: its blobs written, and its
     /// manifest in the seal.
-    async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
+    async fn prepare(&mut self, mutation: &mut Mutation) -> Result<()> {
         if self.changes.is_empty() && self.running == self.saved_running {
             return Ok(());
         }
@@ -286,12 +286,12 @@ impl Participant for Checkpointed {
         }
         if manifest != self.manifest {
             let bytes = serde_json::to_vec(&manifest)?;
-            (wal.set(&self.manifest_record, bytes.into())).map_err(storage_error)?;
+            (mutation.set(&self.manifest_record, bytes.into())).map_err(storage_error)?;
             self.manifest = manifest;
         }
         if self.running != self.saved_running {
             let running = self.running.clone().unwrap_or_default();
-            (wal.set(&self.running_record, running.into())).map_err(storage_error)?;
+            (mutation.set(&self.running_record, running.into())).map_err(storage_error)?;
             self.saved_running = self.running.clone();
         }
         Ok(())

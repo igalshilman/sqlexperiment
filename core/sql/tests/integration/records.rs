@@ -46,13 +46,13 @@ async fn turn(db: &mut Db, i: usize) -> Result<()> {
         db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     }
     let state = db.state();
-    let wal = db.wal();
-    wal.set(&state.record("effects"), Bytes::from(format!("turn {i}")))?;
-    wal.set(&state.record("turn"), value(i))?;
+    let mutation = db.mutation();
+    mutation.set(&state.record("effects"), Bytes::from(format!("turn {i}")))?;
+    mutation.set(&state.record("turn"), value(i))?;
     if i % 11 == 10 {
-        wal.set(&state.record("progress"), Bytes::new())?;
+        mutation.set(&state.record("progress"), Bytes::new())?;
     } else if i.is_multiple_of(3) {
-        wal.set(&state.record("progress"), value(i))?;
+        mutation.set(&state.record("progress"), value(i))?;
     }
     db.flush().await.map(drop)
 }
@@ -138,7 +138,7 @@ fn turns_without_sql_put_only_the_root() -> Result<()> {
                 db.execute("BEGIN").await?;
             }
             let turn = db.state().record("turn");
-            db.wal().set(&turn, Bytes::from(vec![i as u8; 64]))?;
+            db.mutation().set(&turn, Bytes::from(vec![i as u8; 64]))?;
             db.flush().await?;
         }
         assert_eq!(db.version(), version + 100);
@@ -274,9 +274,9 @@ fn a_scoped_state_is_part_of_the_session_s() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let mut db = Db::open(store.clone(), options(None)).await?;
         let fs = db.state().scoped("fs/");
-        db.wal()
+        db.mutation()
             .set(&fs.record("manifest"), Bytes::from_static(b"m"))?;
-        db.wal().write(
+        db.mutation().write(
             &fs.scoped("blobs/").file("a")?,
             0,
             Some(vec![7; 4096].into()),
@@ -294,10 +294,10 @@ fn a_scoped_state_is_part_of_the_session_s() -> Result<()> {
     })
 }
 
-/// SQL flushed into a WAL that is still pending, then into a second one:
+/// SQL flushed into a mutation that is still pending, then into a second one:
 /// the second carries its pages too, whichever of them the state flushes.
 #[test]
-fn a_second_wal_carries_what_a_pending_one_holds() -> Result<()> {
+fn a_second_mutation_carries_what_a_pending_one_holds() -> Result<()> {
     futures::executor::block_on(async {
         let memory = MemoryKv::default();
         let store: Arc<dyn KvStore> = Arc::new(memory.clone());
@@ -305,9 +305,9 @@ fn a_second_wal_carries_what_a_pending_one_holds() -> Result<()> {
         let mut sql = Sql::open(&state).await?;
         sql.execute("CREATE TABLE t(x); INSERT INTO t VALUES(1)")
             .await?;
-        let mut first = state.wal();
+        let mut first = state.mutation();
         sql.flush(&mut first).await?;
-        let mut second = state.wal();
+        let mut second = state.mutation();
         sql.flush(&mut second).await?;
         drop(first);
         second.flush().await?;

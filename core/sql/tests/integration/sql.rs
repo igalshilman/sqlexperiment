@@ -67,7 +67,7 @@ fn dropping_overlay_preserves_saved_state_and_sql_rollback_works() -> Result<()>
     })
 }
 
-/// A flush commits the open SQL transaction, for the WAL's flush to make
+/// A flush commits the open SQL transaction, for the mutation's flush to make
 /// durable.
 #[test]
 fn a_flush_commits_the_open_transaction() -> Result<()> {
@@ -137,8 +137,8 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
         db.execute("ROLLBACK TO s").await?;
         db.execute("RELEASE s").await?;
         db.execute("COMMIT").await?;
-        let wal = db.io_stats().private_wal_bytes_written;
-        assert!(wal > 100 * 4096);
+        let engine_wal = db.io_stats().private_wal_bytes_written;
+        assert!(engine_wal > 100 * 4096);
         assert_eq!(store.stats().puts, 0);
         db.checkpoint().await?;
         assert_eq!(db.io_stats().private_wal_len, 0);
@@ -150,7 +150,7 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
         let chunks = database_len.div_ceil(4096 * state::CHUNK_PAGES);
         assert_eq!(stats.puts, chunks + 1);
         assert!(database_len.div_ceil(4096) >= 2);
-        assert!(stats.bytes_written < wal / 10);
+        assert!(stats.bytes_written < engine_wal / 10);
         store.crash();
         let mut db = Db::open(store, StateOptions::default()).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "100");
@@ -159,7 +159,7 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
             "ok"
         );
         println!(
-            "100 updates: {wal} local WAL bytes, {} backend bytes in one flush",
+            "100 updates: {engine_wal} local WAL bytes, {} backend bytes in one flush",
             stats.bytes_written
         );
         Ok(())

@@ -1,12 +1,12 @@
 //! Futures dropped after every number of polls: a flush cancelled midway
 //! ends its state and lands wholly or not at all, and the state reopens
-//! and goes on; one never polled did nothing, and its WAL went with it; a
+//! and goes on; one never polled did nothing, and its mutation went with it; a
 //! cancelled open leaves the owner's cache usable.
 #![cfg(feature = "simulation")]
 mod support;
 
 use futures::task::noop_waker_ref;
-use state::{Result, StateOptions, kv::KvStore, simulation::*};
+use state::{ROOT_KEY, Result, StateOptions, kv::KvStore, simulation::*};
 use std::{
     pin::pin,
     sync::Arc,
@@ -75,19 +75,19 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                     // waits on the cache's disk threads, not on polls.
                     assert_eq!(old.differs(&session).await?, None);
                 }
-                let mut wal = session.state.wal();
+                let mut mutation = session.state.mutation();
                 for op in &ops {
-                    session.apply(&mut wal, op)?;
+                    session.apply(&mut mutation, op)?;
                 }
-                let receipt = wal.receipt();
+                let receipt = mutation.receipt();
                 let state = &session.state;
-                match poll_times(wal.flush(), polls) {
+                match poll_times(mutation.flush(), polls) {
                     Some(outcome) => {
                         outcome?;
                         assert!(polls > 2, "a flush takes several polls");
                         break;
                     }
-                    // Never polled: nothing happened, and the WAL went with
+                    // Never polled: nothing happened, and the mutation went with
                     // the future.
                     None if polls == 0 => {
                         assert!(state.is_usable());
@@ -104,7 +104,7 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                     !receipt.is_flushed() && !receipt.is_discarded(),
                     "{case}: an unknown outcome settles the receipt neither way"
                 );
-                let error = state.wal().flush().await.unwrap_err().to_string();
+                let error = state.mutation().flush().await.unwrap_err().to_string();
                 assert!(error.contains("ended"), "{case}: {error}");
                 drop(session);
                 // The flush lands with its root; a crash takes it back, as
