@@ -89,7 +89,7 @@ root names, and the next flush overwrites them.
 **Why it is simple.** Blobs never change, so a cache keeps them by number and
 never invalidates them, and a reader (a shared handler beside the exclusive
 one) reads the root it opened, a consistent snapshot, while the owner
-flushes. A paged file holds at most 64 MiB.
+flushes. A paged file holds at most 10 GiB.
 
 **What it relies on.**
 

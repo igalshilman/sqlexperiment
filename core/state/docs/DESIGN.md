@@ -34,19 +34,28 @@ crate, which keeps its engine's state private until it flushes into a WAL.
 
 A namespace holds two kinds of keys:
 
-| Key            | Holds                                                                                                                                       |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v16/root`     | The root, the commit point: the version, the directory of records and paged files, the small records, and the blobs of every file's chunks. |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, or a large record.                                                 |
+| Key            | Holds                                                                                                                                        |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v16/root`     | The root, the commit point: the version, the directory of records and paged files, the small records, and the top of every file's chunk map. |
+| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record.                              |
 
 **Chunks.** A paged file is a row of chunks of `chunk_pages` pages (4,
-16 KiB), as many as its size needs, at most `MAX_FILE_BYTES` (64 MiB). A
+16 KiB), as many as its size needs, at most `MAX_FILE_BYTES` (10 GiB). A
 chunk is stored as a _base_, its pages compressed against its file's base
 pages if it has one (a VM's memory over its golden image) or against nothing,
 and maybe a _delta_: its pages now, compressed with the base as zstd's
 reference prefix, so a delta costs about what changed since the base. A
 chunk with neither reads as its file's base pages, or zeros; a page of zeros
 in a file without a base reads as a hole. A delta without a base is invalid.
+
+**Chunk maps.** A file's chunks are named by a copy-on-write radix tree, as
+ZFS names a file's blocks with indirect blocks: nodes of up to `fanout` (64)
+entries, a leaf naming chunks' blobs, an inner node the nodes below, as few
+levels as the file needs. The top node is in the root; the others are blobs.
+A file of at most 64 chunks (1 MiB) is a leaf in the root, a 64 MiB file
+two levels, 10 GiB four. A flush writes a new node on each path it changes
+and keeps every other subtree, and a cold read fetches a level per round
+trip. A subtree of holes is not stored.
 
 **Records** are whole named values: in the root up to `inline_record_bytes`
 (1 KiB), and a blob of their own when larger, written when they change.
@@ -72,16 +81,19 @@ writes every file and record in it, and syncs once:
    the delta would pass `rebase_ratio` (0.25) of the base's stored bytes,
    the chunk is written as a new base instead, and its old base and delta
    die. A record past the inline budget is compressed into a blob.
-2. **Garbage.** Delete the blobs that died `garbage_after` (16) flushes ago
+2. **Map.** Each map node on a path to a changed chunk is written anew
+   (below the root's top node, a blob), and the old one dies; so does a
+   node a shrinking file no longer needs.
+3. **Garbage.** Delete the blobs that died `garbage_after` (16) flushes ago
    or earlier. The root lists each dead blob with the version it died at,
    so a crash between that root and the delete leaks nothing: the next flush
    deletes it.
-3. **Blobs.** Put the flush's blobs, at numbers from the root's `next_blob`:
+4. **Blobs.** Put the flush's blobs, at numbers from the root's `next_blob`:
    none at or past it is named, so a crashed flush's leftovers are simply
    overwritten.
-4. **Root.** Put the root, at the next version, naming them, with the
+5. **Root.** Put the root, at the next version, naming them, with the
    records, and listing the blobs it names no more as garbage.
-5. **Sync.** One sync stores all of it: one round trip, whatever the flush
+6. **Sync.** One sync stores all of it: one round trip, whatever the flush
    wrote.
 
 **Compression.** zstd does the work twice. A chunk compresses its 4 pages
@@ -91,9 +103,10 @@ a few bytes of a page writes about those bytes plus the frame's overhead, and
 a VM's memory is compressed against its golden image. The rebase bound keeps
 a read at two blobs: the base and one delta.
 
-**Bytes.** A flush writes the root (the directory and every chunk's two blob
-numbers, as varint deltas from the chunk before: a few bytes per stored
-chunk, compressed) and a delta per changed chunk. `Ok(FlushReport)` means
+**Bytes.** A flush writes the root (the directory and each file's top map
+node), a node per changed path and level below it, and a delta per changed
+chunk. A node is a few bytes per entry before compression: blob numbers as
+varint differences from the one before. `Ok(FlushReport)` means
 flushed; an error leaves the outcome unknown.
 
 **Effects.** A host may flush bytes of its own with a transaction, as a
@@ -155,8 +168,8 @@ does not lose acknowledged work when a later step fails.
    durable.
 2. **Get what it needs at once,** in one more round trip: the blobs of the
    large records, and every chunk of a file of at most `prefetch_pages`
-   (16) pages, such as a small database whole. A cached owner gets only
-   those the cache lacks.
+   (16) pages, such as a small database whole (its map is in the root). A
+   cached owner gets only those the cache lacks.
 
 There is nothing to confirm, replay or repair: the root read names only
 stored blobs, and whatever a crashed flush left (blobs no root names) is
@@ -279,23 +292,25 @@ one-thread runtime of its own. It is the only background work.
 
 ## Costs
 
-| Operation        | Round trips                                                                       | Mutations                                                                |
-| ---------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Flush, cached    | 1, the sync                                                                       | A delta (or base) per changed chunk, the root, the old garbage's deletes |
-| Flush, cold      | 1, plus 1 to get the bases of the chunks it changes                               | The same                                                                 |
-| Open, with cache | 1, plus 1 for large records' blobs the cache lacks                                | None                                                                     |
-| Cold open        | 2: the root, then a small database whole and the large records                    | None                                                                     |
-| Cold page read   | 1 get of the chunk's base and delta; sequential reads fetch up to 16 chunks ahead | None                                                                     |
+| Operation        | Round trips                                                                                                            | Mutations                                                                |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Flush, cached    | 1, the sync                                                                                                            | A delta (or base) per changed chunk, the root, the old garbage's deletes |
+| Flush, cold      | 1, plus 1 to get the bases of the chunks it changes, plus 1 per map level below the top                                | The same, plus a map node per changed path and level                     |
+| Open, with cache | 1, plus 1 for large records' blobs the cache lacks                                                                     | None                                                                     |
+| Cold open        | 2: the root, then a small database whole and the large records                                                         | None                                                                     |
+| Cold page read   | 1 get of the chunk's base and delta, after 1 per map level below the top; sequential reads fetch up to 16 chunks ahead | None                                                                     |
 
 Measurements: [the experiment](COW_EXPERIMENT.md),
 [cache](../../sql/benches/CACHE_RESULTS.md).
 
 ## Limits and open questions
 
-- **Size.** A paged file holds at most 64 MiB, and the root maps every
-  chunk, a few bytes each, rewritten by every flush: about 16 KiB of
-  directory at the limit (4,096 chunks), before compression. A larger
-  database would need the map itself in chunks.
+- **Size.** A paged file holds at most 10 GiB (655,360 chunks, four map
+  levels); the SQL database is capped there too (`PRAGMA max_page_count`),
+  so a statement that would grow it past fails with SQLITE_FULL and the
+  session goes on. A flush costs a node per map level on each changed path,
+  so a large database pays a few hundred bytes more per flush, and a cold
+  read a round trip per level; a small one, a leaf in the root, neither.
 - **Keys.** Every flush that changes pages puts at least two keys (a blob and
   the root), and a namespace holds a key per live blob, about two per
   chunk, plus `garbage_after` flushes' garbage.
